@@ -1,0 +1,53 @@
+#!/bin/sh
+# pre-commit hook: check C source formatting with gst-indent style
+# Skip with: git commit -n
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+TOOLS_DIR="$(cd "$SCRIPT_DIR/../../tools" 2>/dev/null && pwd)"
+
+if [ -z "$TOOLS_DIR" ] || [ ! -x "$TOOLS_DIR/gst-indent" ]; then
+  # Try from repo root
+  REPO_ROOT="$(git rev-parse --show-toplevel)"
+  TOOLS_DIR="$REPO_ROOT/tools"
+fi
+
+if [ ! -x "$TOOLS_DIR/gst-indent" ]; then
+  echo "gst-indent not found at $TOOLS_DIR/gst-indent" >&2
+  exit 1
+fi
+
+# Get staged C source files
+FILES=$(git diff --cached --name-only --diff-filter=ACM | grep '\.[ch]$')
+
+if [ -z "$FILES" ]; then
+  exit 0
+fi
+
+ERRORS=""
+
+for f in $FILES; do
+  # Get the staged version
+  TMP=$(mktemp)
+  git show ":$f" > "$TMP"
+
+  # Format a copy
+  TMP_FMT=$(mktemp)
+  cp "$TMP" "$TMP_FMT"
+  "$TOOLS_DIR/gst-indent" "$TMP_FMT"
+
+  # Compare
+  if ! diff -q "$TMP" "$TMP_FMT" > /dev/null 2>&1; then
+    ERRORS="$ERRORS\n  $f"
+  fi
+
+  rm -f "$TMP" "$TMP_FMT" "${TMP_FMT}~"
+done
+
+if [ -n "$ERRORS" ]; then
+  echo "Code style error in:$ERRORS"
+  echo ""
+  echo "Fix with: ./tools/gst-indent <file>"
+  exit 1
+fi
+
+exit 0

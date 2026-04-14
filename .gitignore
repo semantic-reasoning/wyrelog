@@ -1,0 +1,56 @@
+# Build directories
+builddir/
+build/
+dist/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Meson build artifacts
+meson-logs/
+meson-private/
+compile_commands.json
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.kate-swp
+.clangd/
+.cache/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.tox/
+
+# Temporary files
+*.tmp
+*.bak
+.#*
+
+# Documentation generated files
+docs/_build/
+docs/.doctrees/
+docs/_site/
+docs/.jekyll-cache/
+docs/Gemfile.lock
+
+# Test artifacts
+*.gcda
+*.gcno
+coverage.html
+
+# OMC and Claude Code specific
+.omc/
+.claude/
+
+# OS specific
+.DS_Store
+Thumbs.db
