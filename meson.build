@@ -9,6 +9,8 @@ project('wyrelog', 'c',
 )
 
 glib_dep = dependency('glib-2.0', required : true)
+gio_dep = dependency('gio-2.0', required : true)
+libsoup_dep = dependency('libsoup-3.0', version : '>= 3.0', required : true)
 duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])
 
 # Install git pre-commit hook for code style checking
