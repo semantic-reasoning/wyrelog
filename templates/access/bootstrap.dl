@@ -1,0 +1,209 @@
+% bootstrap.dl — Wyrelog Access Intelligence Bootstrap DL Template v0
+%
+% SPDX-License-Identifier: GPL-3.0-or-later
+% Copyright (C) 2026 wyrelog authors. Also available under a separate
+% commercial license; see LICENSE.md at the project root.
+%
+% Namespace:
+%   The `wr.` prefix is reserved for built-ins shipped with this template.
+%   Customer extensions MUST use a non-`wr.` prefix. Loader asserts this.
+%
+% Storage:
+%   Facts below are loaded into the policy store (SQLite, WAL mode,
+%   libsodium-encrypted columns, TPM-sealed DEK via KeyProvider — issue #1).
+%   Derived rules are evaluated by the engine's timely-differential runtime;
+%   see discussion #4 Round 9 for the arrangement model.
+%
+% Load order (see issue #5):
+%   1. /usr/share/wyrelog/access/bootstrap.dl     (this file, immutable)
+%   2. /etc/wyrelog/access/*.dl                   (site extensions)
+%   3. /var/lib/wyrelog/policy/rbac.sqlite        (mutable member_of facts)
+
+wr_template_version(0).
+
+% ---------------------------------------------------------------------------
+% EDB: built-in roles (system profile)
+% ---------------------------------------------------------------------------
+role("wr.system_admin").       % operates the daemon; cannot read audit
+role("wr.auditor").            % read-only over __wyrelog.audit.*
+role("wr.system_agent").       % internal service principal for Merkle work
+role("wr.break_glass").        % emergency override, self-disabling
+
+% EDB: built-in roles (service profile)
+role("wr.service_admin").      % manages service-profile roles and grants
+role("wr.operator").           % reload, flush, operational verbs
+role("wr.analyst").            % reads explanations including sensitive traces
+role("wr.viewer").             % reads decisions
+role("wr.svc_agent").          % service-side process identity
+role("wr.security_officer").   % freeze/unfreeze, SoD counterweight to admin
+
+% Mark built-ins so the load-time validator can check customer contributions.
+is_builtin_seed("wr.system_admin").
+is_builtin_seed("wr.auditor").
+is_builtin_seed("wr.system_agent").
+is_builtin_seed("wr.break_glass").
+is_builtin_seed("wr.service_admin").
+is_builtin_seed("wr.operator").
+is_builtin_seed("wr.analyst").
+is_builtin_seed("wr.viewer").
+is_builtin_seed("wr.svc_agent").
+is_builtin_seed("wr.security_officer").
+
+role_security_officer("wr.security_officer").
+
+% ---------------------------------------------------------------------------
+% EDB: built-in permissions, grouped by resource family
+% ---------------------------------------------------------------------------
+% system family
+permission("wr.sys.admin").
+permission("wr.sys.key_rotate").
+permission("wr.sys.merkle_seal").
+permission("wr.sys.reload_template").
+
+% policy family
+permission("wr.policy.read").
+permission("wr.policy.write").
+permission("wr.policy.grant_role").
+
+% stream family
+permission("wr.stream.read").
+permission("wr.stream.write_reserved").    % only system_agent
+permission("wr.stream.list").
+
+% service / decision / explain family
+permission("wr.svc.admin").
+permission("wr.svc.reload").
+permission("wr.svc.flush_cache").
+permission("wr.svc.grant_role").
+permission("wr.svc.freeze").
+permission("wr.svc.unfreeze").
+permission("wr.svc.read_decision").
+permission("wr.explain.read").
+permission("wr.explain.read_sensitive").
+
+% audit family
+permission("wr.audit.read").
+permission("wr.audit.explain").
+permission("wr.audit.write").              % only system_agent
+
+% ---------------------------------------------------------------------------
+% EDB: role_permission facts (seed)
+% ---------------------------------------------------------------------------
+% system profile
+role_permission("wr.system_admin", "wr.sys.admin").
+role_permission("wr.system_admin", "wr.sys.key_rotate").
+role_permission("wr.system_admin", "wr.sys.reload_template").
+role_permission("wr.system_admin", "wr.policy.read").
+role_permission("wr.system_admin", "wr.policy.write").
+role_permission("wr.system_admin", "wr.policy.grant_role").
+% NOTE: system_admin deliberately has no wr.audit.* — SoD with wr.auditor.
+
+role_permission("wr.auditor", "wr.audit.read").
+role_permission("wr.auditor", "wr.audit.explain").
+% NOTE: auditor has no grant_role — SoD with system_admin.
+
+role_permission("wr.system_agent", "wr.stream.write_reserved").
+role_permission("wr.system_agent", "wr.audit.write").
+role_permission("wr.system_agent", "wr.sys.merkle_seal").
+% NOTE: system_agent is a process principal, never assumed by humans.
+
+role_permission("wr.break_glass", "wr.sys.admin").
+role_permission("wr.break_glass", "wr.policy.write").
+role_permission("wr.break_glass", "wr.svc.unfreeze").
+% NOTE: break_glass cannot write audit — see constraint below.
+
+% service profile
+role_permission("wr.viewer", "wr.svc.read_decision").
+role_permission("wr.viewer", "wr.stream.list").
+
+role_permission("wr.analyst", "wr.explain.read").
+role_permission("wr.analyst", "wr.explain.read_sensitive").
+
+role_permission("wr.operator", "wr.svc.reload").
+role_permission("wr.operator", "wr.svc.flush_cache").
+
+role_permission("wr.service_admin", "wr.svc.admin").
+role_permission("wr.service_admin", "wr.svc.grant_role").
+role_permission("wr.service_admin", "wr.policy.read").
+role_permission("wr.service_admin", "wr.policy.write").
+
+role_permission("wr.security_officer", "wr.svc.freeze").
+role_permission("wr.security_officer", "wr.svc.unfreeze").
+% NOTE: security_officer has no grant_role — SoD with service_admin.
+
+role_permission("wr.svc_agent", "wr.stream.read").
+role_permission("wr.svc_agent", "wr.svc.read_decision").
+
+% ---------------------------------------------------------------------------
+% EDB: inheritance (service profile only; depth <= 3)
+% ---------------------------------------------------------------------------
+inherits("wr.operator", "wr.viewer").
+inherits("wr.service_admin", "wr.operator").
+% System roles are flat by design; no inherits/2 under wr.sys*.
+
+% ---------------------------------------------------------------------------
+% EDB: default tenant for single-tenant installs
+% ---------------------------------------------------------------------------
+tenant("__wr_default").
+
+% ---------------------------------------------------------------------------
+% EDB: break-glass TTL (seconds) and time source
+% ---------------------------------------------------------------------------
+ttl("break_glass", 900).
+% `now/1` and `break_glass_used/1` are injected by the engine/auth layer;
+% the template does not write them.
+
+% ---------------------------------------------------------------------------
+% IDB: derivations
+% ---------------------------------------------------------------------------
+effective_member(U, R, S) :- member_of(U, R, S), \+ disabled_role(R).
+
+effective_permission(R, P) :- role_permission(R, P).
+effective_permission(R, P) :- inherits(R, R2), effective_permission(R2, P).
+
+has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).
+
+is_admin(U) :- has_permission(U, "wr.sys.admin", _).
+is_admin(U) :- has_permission(U, "wr.svc.admin", _).
+
+can_read_audit(U) :- has_permission(U, "wr.audit.read", _).
+
+can_manage_role(U, R) :-
+    has_permission(U, "wr.svc.grant_role", _),
+    \+ role_security_officer(R).
+
+% ---------------------------------------------------------------------------
+% IDB: break-glass self-disable
+% ---------------------------------------------------------------------------
+disabled_role("wr.break_glass") :-
+    break_glass_used(Ts),
+    now(N),
+    ttl("break_glass", D),
+    N > Ts + D.
+
+% ---------------------------------------------------------------------------
+% Integrity constraints (load-time)
+% ---------------------------------------------------------------------------
+% SoD: no principal holds both audit-read and grant-role.
+:- has_permission(U, "wr.audit.read", _), has_permission(U, "wr.svc.grant_role", _).
+:- has_permission(U, "wr.audit.read", _), has_permission(U, "wr.policy.grant_role", _).
+
+% SoD: security_officer cannot hold grant verbs.
+:- role_permission("wr.security_officer", "wr.svc.grant_role").
+:- role_permission("wr.security_officer", "wr.policy.grant_role").
+
+% break_glass must never hold audit-write.
+:- role_permission("wr.break_glass", "wr.audit.write").
+
+% Reserved namespace: customers must not assert `wr.*` ids.
+builtin_violation(X) :- role(X), starts_with(X, "wr."), \+ is_builtin_seed(X).
+:- builtin_violation(_).
+
+% Cross-prefix inheritance is forbidden in both directions.
+:- inherits(R, R2), starts_with(R, "wr."), \+ starts_with(R2, "wr.").
+:- inherits(R, R2), \+ starts_with(R, "wr."), starts_with(R2, "wr.").
+
+% Inheritance depth cap (3).
+inh_depth(R, R2, 1) :- inherits(R, R2).
+inh_depth(R, R3, N) :- inherits(R, R2), inh_depth(R2, R3, M), N = M + 1.
+:- inh_depth(_, _, N), N > 3.

@@ -13,6 +13,11 @@ gio_dep = dependency('gio-2.0', required : true)
 libsoup_dep = dependency('libsoup-3.0', version : '>= 3.0', required : true)
 duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])
 
+install_data(
+  'templates/access/bootstrap.dl',
+  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access'),
+)
+
 # Install git pre-commit hook for code style checking
 git_hook_script = find_program('hooks/pre-commit.hook')
 git_dir = join_paths(meson.project_source_root(), '.git')
