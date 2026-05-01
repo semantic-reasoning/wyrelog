@@ -13,7 +13,7 @@ extern "C"
 /*
  * WylClient - HTTP client for talking to a remote wyrelog daemon.
  *
- * Owns a SoupSession (libsoup-3.0), the base URL, and the current
+ * Owns the HTTP transport, the base URL, and the current
  * authentication state (access token, refresh token, MFA bind).
  * Created with wyl_client_new, released with g_object_unref or
  * g_autoptr.
