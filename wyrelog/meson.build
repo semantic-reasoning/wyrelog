@@ -5,6 +5,7 @@ wyrelog_public_headers = files(
 )
 
 wyrelog_sources = files(
+  'wyl-boot.c',
   'wyl-error.c',
 )
 
