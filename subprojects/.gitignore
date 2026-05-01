@@ -1,0 +1,6 @@
+*
+!.gitignore
+!duckdb.wrap
+!wirelog.wrap
+!packagefiles
+!packagefiles/**
