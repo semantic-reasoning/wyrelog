@@ -58,13 +58,13 @@ jobs:
 
       - name: Build wyrelog targets
         run: |
-          ninja -C builddir \
-            wyrelog/libwyrelog.so.0 \
-            wyrelog/libwyrelog-client.so.0 \
-            tests/test-smoke \
-            tests/test-boot-smoke \
-            tests/test-client-smoke \
-            tests/test-traits-compile
+          meson compile -C builddir \
+            wyrelog \
+            wyrelog-client \
+            test-smoke \
+            test-boot-smoke \
+            test-client-smoke \
+            test-traits-compile
 
       - name: Test
         run: meson test -C builddir --print-errorlogs smoke boot-smoke client-smoke traits-compile
@@ -80,27 +80,23 @@ jobs:
   build-windows:
     name: build-windows
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: msys2 {0}
+    env:
+      VCPKG_INSTALLED_DIR: C:\vcpkg\installed\x64-windows
     steps:
       - name: Check out source
         uses: actions/checkout@v4
 
-      - name: Set up MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            git
-            mingw-w64-x86_64-meson
-            mingw-w64-x86_64-ninja
-            mingw-w64-x86_64-pkg-config
-            mingw-w64-x86_64-gcc
-            mingw-w64-x86_64-glib2
-            mingw-w64-x86_64-libsoup3
-            mingw-w64-x86_64-libsodium
+      - name: Install meson and ninja
+        shell: cmd
+        run: pip install meson ninja
+
+      - name: Install pkg-config (chocolatey)
+        shell: cmd
+        run: choco install pkgconfiglite -y --allow-empty-checksums
+
+      - name: Install C dependencies (vcpkg)
+        shell: cmd
+        run: vcpkg install glib:x64-windows libsodium:x64-windows
 
       - name: Cache meson packagecache
         uses: actions/cache@v4
@@ -110,21 +106,24 @@ jobs:
           restore-keys: |
             windows-packagecache-
 
-      - name: Configure
-        run: meson setup builddir -Denable_tpm=disabled
-
-      - name: Build wyrelog targets
+      - name: Configure (MSVC)
+        shell: cmd
         run: |
-          ninja -C builddir \
-            wyrelog/libwyrelog-0.dll \
-            wyrelog/libwyrelog-client-0.dll \
-            tests/test-smoke.exe \
-            tests/test-boot-smoke.exe \
-            tests/test-client-smoke.exe \
-            tests/test-traits-compile.exe
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
+          meson setup builddir -Denable_tpm=disabled -Denable_client=disabled
 
-      - name: Test
-        run: meson test -C builddir --print-errorlogs smoke boot-smoke client-smoke traits-compile
+      - name: Build wyrelog targets (MSVC)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          meson compile -C builddir wyrelog test-smoke test-boot-smoke test-traits-compile
+
+      - name: Test (MSVC)
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          meson test -C builddir --print-errorlogs smoke boot-smoke traits-compile
 
       - name: Upload meson logs on failure
         if: failure()
