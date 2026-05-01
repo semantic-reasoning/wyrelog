@@ -1,0 +1,135 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-posix:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            tpm: enabled
+          - os: macos-latest
+            tpm: disabled
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsoup-3.0-dev libsodium-dev \
+            libtss2-dev
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install meson ninja pkg-config glib libsoup libsodium
+
+      - name: Cache meson packagecache
+        uses: actions/cache@v4
+        with:
+          path: subprojects/packagecache
+          key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            ${{ runner.os }}-packagecache-
+
+      - name: Configure
+        run: meson setup builddir -Denable_tpm=${{ matrix.tpm }}
+
+      - name: Build wyrelog targets
+        run: |
+          ninja -C builddir \
+            wyrelog/libwyrelog.so.0 \
+            wyrelog/libwyrelog-client.so.0 \
+            tests/test-smoke \
+            tests/test-boot-smoke \
+            tests/test-client-smoke \
+            tests/test-traits-compile
+
+      - name: Test
+        run: meson test -C builddir --print-errorlogs smoke boot-smoke client-smoke traits-compile
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs-${{ matrix.os }}
+          path: builddir/meson-logs/
+          if-no-files-found: ignore
+
+  build-windows:
+    name: build-windows
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkg-config
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-glib2
+            mingw-w64-x86_64-libsoup3
+            mingw-w64-x86_64-libsodium
+
+      - name: Cache meson packagecache
+        uses: actions/cache@v4
+        with:
+          path: subprojects/packagecache
+          key: windows-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            windows-packagecache-
+
+      - name: Configure
+        run: meson setup builddir -Denable_tpm=disabled
+
+      - name: Build wyrelog targets
+        run: |
+          ninja -C builddir \
+            wyrelog/libwyrelog-0.dll \
+            wyrelog/libwyrelog-client-0.dll \
+            tests/test-smoke.exe \
+            tests/test-boot-smoke.exe \
+            tests/test-client-smoke.exe \
+            tests/test-traits-compile.exe
+
+      - name: Test
+        run: meson test -C builddir --print-errorlogs smoke boot-smoke client-smoke traits-compile
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-logs-windows
+          path: builddir/meson-logs/
+          if-no-files-found: ignore
