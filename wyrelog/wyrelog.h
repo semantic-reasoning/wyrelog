@@ -15,10 +15,10 @@ extern "C"
 /*
  * WylHandle - server-side embedding handle.
  *
- * Owns the policy database, audit log, TPM handles and worker threads
- * of an embedded wyrelog instance. Created with wyl_init, shut down
- * with wyl_shutdown, released with g_object_unref (or
- * g_autoptr(WylHandle) in scoped form).
+ * Owns the policy database, audit log, and worker threads of an
+ * embedded wyrelog instance. Created with wyl_init, shut down with
+ * wyl_shutdown, released with g_object_unref (or g_autoptr(WylHandle)
+ * in scoped form).
  */
   G_DECLARE_FINAL_TYPE (WylHandle, wyl_handle, WYL, HANDLE, GObject)
 #define WYL_TYPE_HANDLE (wyl_handle_get_type ())
