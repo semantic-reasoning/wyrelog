@@ -1,0 +1,11 @@
+option('enable_tpm',
+  type : 'feature',
+  value : 'auto',
+  description : 'Use the tss2-esys TPM 2.0 ESAPI library. When auto, '
+              + 'wyrelog detects tss2-esys at configure time and builds '
+              + 'the hardware-backed key provider if available; on hosts '
+              + 'without tss2-esys (notably non-Linux platforms) wyrelog '
+              + 'falls back to the development-stub key provider. Set to '
+              + 'enabled to require tss2-esys (Linux production builds) '
+              + 'or disabled to skip the dependency entirely.'
+)
