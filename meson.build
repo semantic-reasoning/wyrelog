@@ -36,6 +36,9 @@ libchronoid_dep = declare_dependency(
   include_directories : libchronoid_proj.get_variable('inc'),
 )
 
+subdir('wyrelog')
+subdir('tests')
+
 install_data(
   'templates/access/bootstrap.dl',
   install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access'),
