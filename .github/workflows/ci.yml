@@ -106,20 +106,21 @@ jobs:
           restore-keys: |
             windows-packagecache-
 
-      - name: Configure (MSVC)
+      - name: Configure (clang-cl)
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
+          set CC=clang-cl
           meson setup builddir -Denable_tpm=disabled -Denable_client=disabled
 
-      - name: Build wyrelog targets (MSVC)
+      - name: Build wyrelog targets (clang-cl)
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           meson compile -C builddir wyrelog test-smoke test-boot-smoke test-traits-compile
 
-      - name: Test (MSVC)
+      - name: Test (clang-cl)
         shell: cmd
         run: |
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
