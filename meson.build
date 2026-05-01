@@ -10,7 +10,10 @@ project('wyrelog', 'c',
 
 glib_dep = dependency('glib-2.0', required : true)
 gio_dep = dependency('gio-2.0', required : true)
-libsoup_dep = dependency('libsoup-3.0', version : '>= 3.0', required : true)
+libsoup_dep = dependency('libsoup-3.0',
+  version : '>= 3.0',
+  required : get_option('enable_client'),
+)
 sodium_dep = dependency('libsodium', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])

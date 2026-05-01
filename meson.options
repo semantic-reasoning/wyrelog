@@ -9,3 +9,14 @@ option('enable_tpm',
               + 'enabled to require tss2-esys (Linux production builds) '
               + 'or disabled to skip the dependency entirely.'
 )
+
+option('enable_client',
+  type : 'feature',
+  value : 'auto',
+  description : 'Build the libwyrelog-client HTTP client library. Pulls '
+              + 'in libsoup-3.0 as a hard dependency. Set to disabled to '
+              + 'skip the client library entirely on platforms where '
+              + 'libsoup-3.0 is unavailable (notably native Windows MSVC '
+              + 'builds without vcpkg-staged libsoup); the server library '
+              + '(libwyrelog) and its tests still build under disabled.'
+)
