@@ -31,3 +31,28 @@ wyrelog_dep = declare_dependency(
   include_directories : wyrelog_inc,
   dependencies : [glib_dep, gio_dep],
 )
+
+wyrelog_client_public_headers = files(
+  'client.h',
+)
+
+wyrelog_client_sources = files(
+  'wyl-audit-iter.c',
+  'wyl-client.c',
+)
+
+libwyrelog_client = library('wyrelog-client',
+  wyrelog_client_sources,
+  include_directories : wyrelog_inc,
+  dependencies : [glib_dep, gio_dep, libsoup_dep],
+  install : true,
+  soversion : '0',
+)
+
+install_headers(wyrelog_client_public_headers, subdir : 'wyrelog')
+
+wyrelog_client_dep = declare_dependency(
+  link_with : libwyrelog_client,
+  include_directories : wyrelog_inc,
+  dependencies : [glib_dep, gio_dep],
+)
