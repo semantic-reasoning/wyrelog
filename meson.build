@@ -13,6 +13,18 @@ gio_dep = dependency('gio-2.0', required : true)
 libsoup_dep = dependency('libsoup-3.0', version : '>= 3.0', required : true)
 duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])
 
+wirelog_proj = subproject(
+  'wirelog',
+  default_options : ['tests=false', 'documentation=false'],
+)
+wirelog_dep = declare_dependency(
+  link_with : wirelog_proj.get_variable('wirelog_lib'),
+  include_directories : [
+    wirelog_proj.get_variable('wirelog_inc'),
+    wirelog_proj.get_variable('wirelog_src_inc'),
+  ],
+)
+
 install_data(
   'templates/access/bootstrap.dl',
   install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access'),
