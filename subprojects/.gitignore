@@ -1,6 +1,7 @@
 *
 !.gitignore
 !duckdb.wrap
+!libchronoid.wrap
 !wirelog.wrap
 !packagefiles
 !packagefiles/**

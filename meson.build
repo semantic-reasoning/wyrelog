@@ -1,7 +1,7 @@
 project('wyrelog', 'c',
   version : '0.1.0',
   license : 'GPL-3.0-or-later',
-  meson_version : '>= 0.62.0',
+  meson_version : '>= 1.1.0',
   default_options : [
     'c_std=c17',
     'warning_level=2',
@@ -23,6 +23,15 @@ wirelog_dep = declare_dependency(
     wirelog_proj.get_variable('wirelog_inc'),
     wirelog_proj.get_variable('wirelog_src_inc'),
   ],
+)
+
+libchronoid_proj = subproject(
+  'libchronoid',
+  default_options : ['tests=false', 'cli=false'],
+)
+libchronoid_dep = declare_dependency(
+  link_with : libchronoid_proj.get_variable('chronoid_lib'),
+  include_directories : libchronoid_proj.get_variable('inc'),
 )
 
 install_data(
