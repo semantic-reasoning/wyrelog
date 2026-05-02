@@ -94,9 +94,23 @@ jobs:
         shell: cmd
         run: choco install pkgconfiglite -y --allow-empty-checksums
 
+      - name: Enable vcpkg GitHub Actions binary cache
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const token = process.env.ACTIONS_RUNTIME_TOKEN || '';
+            const url = process.env.ACTIONS_CACHE_URL || '';
+            if (token) core.setSecret(token);
+            core.exportVariable('ACTIONS_CACHE_URL', url);
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
+            core.exportVariable('VCPKG_BINARY_SOURCES', 'clear;x-gha,readwrite');
+
       - name: Install C dependencies (vcpkg)
         shell: cmd
-        run: vcpkg install glib:x64-windows libsodium:x64-windows
+        run: |
+          @echo off
+          vcpkg install glib:x64-windows libsodium:x64-windows
 
       - name: Cache meson packagecache
         uses: actions/cache@v4
@@ -109,6 +123,7 @@ jobs:
       - name: Configure (clang-cl)
         shell: cmd
         run: |
+          @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
           set CC=clang-cl
@@ -117,12 +132,14 @@ jobs:
       - name: Build wyrelog targets (clang-cl)
         shell: cmd
         run: |
+          @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           meson compile -C builddir wyrelog test-smoke test-boot-smoke test-traits-compile
 
       - name: Test (clang-cl)
         shell: cmd
         run: |
+          @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           meson test -C builddir --print-errorlogs smoke boot-smoke traits-compile
 
