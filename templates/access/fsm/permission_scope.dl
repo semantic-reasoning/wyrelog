@@ -1,0 +1,68 @@
+% permission_scope.dl — Wyrelog Access Intelligence Permission Scope v0
+%
+% SPDX-License-Identifier: GPL-3.0-or-later
+% Copyright (C) 2026 wyrelog authors. Also available under a separate
+% commercial license; see LICENSE.md at the project root.
+%
+% Stateless armed/3 derivation. The version-0 perm-scope is a pure
+% IDB rule set with no transition lifecycle: a permission is either
+% ungated (no perm_arm_rule entry, in which case it is always
+% armed when the principal holds it) or gated by a guard expression
+% evaluated against the request scope.
+%
+% EDB schemas (host-populated, no clauses below):
+%   perm_state(user, perm, scope, state)        -- v0 row count = 0
+%   has_permission(user, perm, scope)
+%   perm_arm_rule(perm, guard_expr_term)
+%   loc_class(loc_id, class)
+%   in_window(ts, window_name)
+%   context_now(user, scope, ctx_term)
+%   eval_guard(guard_expr_term, ctx_term)        -- host-bridged on
+%                                                   the C side; this
+%                                                   .dl declares the
+%                                                   predicate but
+%                                                   ships no clauses
+%                                                   for it. The
+%                                                   wyrelog engine
+%                                                   resolves
+%                                                   eval_guard via
+%                                                   wyl_eval_guard
+%                                                   in libwyrelog.
+%
+% Row order in the perm_arm_rule block is load-bearing: the test
+% harness compares the perm-id list line by line against the C
+% catalogue, so reordering one side without the other will fail
+% the build.
+
+% --- armed/3 (3-rule union) -----------------------------------------
+
+% rule-1: dead clause for v0; preserved so v0.x stateful lifecycle
+% can populate perm_state without a .dl change.
+armed(U, P, S) :- perm_state(U, P, S, "armed").
+
+% rule-2: ungated permission -- no perm_arm_rule entry means the
+% permission is always armed when held.
+armed(U, P, S) :-
+    has_permission(U, P, S),
+    \+ perm_arm_rule(P, _).
+
+% rule-3: gated permission -- evaluate the guard against the
+% current request context.
+armed(U, P, S) :-
+    has_permission(U, P, S),
+    context_now(U, S, Ctx),
+    perm_arm_rule(P, G),
+    eval_guard(G, Ctx).
+
+% --- perm_arm_rule baseline catalogue -------------------------------
+
+perm_arm_rule("wr.sys.admin",        and(cmp(risk,lt,30), cmp(loc_class,eq,"trusted"))).
+perm_arm_rule("wr.sys.key_rotate",   and(cmp(risk,lt,20), cmp(loc_class,eq,"trusted"))).
+perm_arm_rule("wr.sys.merkle_seal",  cmp(loc_class,eq,"trusted")).
+perm_arm_rule("wr.policy.write",     cmp(risk,lt,50)).
+perm_arm_rule("wr.policy.grant_role", cmp(risk,lt,30)).
+perm_arm_rule("wr.svc.freeze",       cmp(risk,lt,40)).
+perm_arm_rule("wr.svc.unfreeze",     and(cmp(risk,lt,30), cmp(loc_class,eq,"trusted"))).
+perm_arm_rule("wr.svc.grant_role",   cmp(risk,lt,30)).
+perm_arm_rule("wr.audit.read",       cmp(risk,lt,70)).
+perm_arm_rule("wr.audit.explain",    and(cmp(risk,lt,50), cmp(loc_class,eq,"trusted"))).

@@ -69,3 +69,18 @@ test_guard_expr = executable('test-guard-expr',
 )
 
 test('guard-expr', test_guard_expr)
+
+fsm_permission_scope_dl_path = join_paths(
+  meson.project_source_root(),
+  'templates', 'access', 'fsm', 'permission_scope.dl',
+)
+
+test_fsm_permission_scope = executable('test-fsm-permission-scope',
+  'test-fsm-permission-scope.c',
+  c_args : [
+    '-DWYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH="' + fsm_permission_scope_dl_path + '"',
+  ],
+  dependencies : [wyrelog_dep],
+)
+
+test('fsm-permission-scope', test_fsm_permission_scope)
