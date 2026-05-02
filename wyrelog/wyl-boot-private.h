@@ -6,10 +6,7 @@
 
 #include "wyrelog/error.h"
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
+G_BEGIN_DECLS;
 
 /*
  * boot_phase_id_t identifies a single phase in the daemon's
@@ -22,23 +19,23 @@ extern "C"
  * range so callers can size static arrays without tracking the
  * highest-numbered phase by hand.
  */
-  typedef enum boot_phase_id_t
-  {
-    BOOT_01_TPM_PROBE = 1,
-    BOOT_02_DEK_UNSEAL = 2,
-    /* BOOT_03 .. BOOT_20 reserved; added in subsequent commits. */
-    BOOT_LAST = 21,
-  } boot_phase_id_t;
+typedef enum boot_phase_id_t
+{
+  BOOT_01_TPM_PROBE = 1,
+  BOOT_02_DEK_UNSEAL = 2,
+  /* BOOT_03 .. BOOT_20 reserved; added in subsequent commits. */
+  BOOT_LAST = 21,
+} boot_phase_id_t;
 
-  typedef wyrelog_error_t (*boot_phase_fn_t) (void *ctx);
+typedef wyrelog_error_t (*boot_phase_fn_t) (void *ctx);
 
-  typedef struct boot_phase_t
-  {
-    boot_phase_id_t id;
-    const char *name;
-    boot_phase_fn_t fn;
-    bool fail_closed;
-  } boot_phase_t;
+typedef struct boot_phase_t
+{
+  boot_phase_id_t id;
+  const char *name;
+  boot_phase_fn_t fn;
+  bool fail_closed;
+} boot_phase_t;
 
 /*
  * wyl_boot_run runs the phases in seq[0..n) sequentially against
@@ -51,8 +48,6 @@ extern "C"
  * non-zero return code otherwise. WYRELOG_E_INVALID if seq is
  * NULL while n > 0.
  */
-  wyrelog_error_t wyl_boot_run (const boot_phase_t * seq, size_t n, void *ctx);
+wyrelog_error_t wyl_boot_run (const boot_phase_t * seq, size_t n, void *ctx);
 
-#ifdef __cplusplus
-}
-#endif
+G_END_DECLS;

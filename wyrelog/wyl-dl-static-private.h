@@ -6,10 +6,7 @@
 
 #include "wyrelog/error.h"
 
-#ifdef __cplusplus
-extern "C"
-{
-#endif
+G_BEGIN_DECLS;
 
 /*
  * Static stratification check for Datalog rule sets.
@@ -50,21 +47,19 @@ extern "C"
  * allocation failure by design.
  */
 
-  typedef struct wyl_dl_body_atom_t
-  {
-    const char *predicate;
-    bool negated;
-  } wyl_dl_body_atom_t;
+typedef struct wyl_dl_body_atom_t
+{
+  const char *predicate;
+  bool negated;
+} wyl_dl_body_atom_t;
 
-  typedef struct wyl_dl_rule_t
-  {
-    const char *head;
-    const wyl_dl_body_atom_t *body;
-    size_t body_len;
-  } wyl_dl_rule_t;
+typedef struct wyl_dl_rule_t
+{
+  const char *head;
+  const wyl_dl_body_atom_t *body;
+  size_t body_len;
+} wyl_dl_rule_t;
 
-  wyrelog_error_t wyl_dl_static_check (const wyl_dl_rule_t * rules, size_t n);
+wyrelog_error_t wyl_dl_static_check (const wyl_dl_rule_t * rules, size_t n);
 
-#ifdef __cplusplus
-}
-#endif
+G_END_DECLS;
