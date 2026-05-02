@@ -52,6 +52,11 @@ install_data(
   install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access', 'fsm'),
 )
 
+install_data(
+  'templates/access/fsm/session.dl',
+  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access', 'fsm'),
+)
+
 # Install git pre-commit hook for code style checking
 git_hook_script = find_program('hooks/pre-commit.hook')
 git_dir = join_paths(meson.project_source_root(), '.git')

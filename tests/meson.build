@@ -47,3 +47,18 @@ test_fsm_principal = executable('test-fsm-principal',
 )
 
 test('fsm-principal', test_fsm_principal)
+
+fsm_session_dl_path = join_paths(
+  meson.project_source_root(),
+  'templates', 'access', 'fsm', 'session.dl',
+)
+
+test_fsm_session = executable('test-fsm-session',
+  'test-fsm-session.c',
+  c_args : [
+    '-DWYL_TEST_FSM_SESSION_DL_PATH="' + fsm_session_dl_path + '"',
+  ],
+  dependencies : [wyrelog_dep],
+)
+
+test('fsm-session', test_fsm_session)
