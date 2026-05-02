@@ -11,6 +11,7 @@ wyrelog_sources = files(
   'wyl-decide.c',
   'wyl-dl-static.c',
   'wyl-error.c',
+  'wyl-fsm-principal.c',
   'wyl-handle.c',
   'wyl-perm.c',
   'wyl-session.c',

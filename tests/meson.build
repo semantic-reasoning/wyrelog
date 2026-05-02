@@ -32,3 +32,18 @@ test_dl_static = executable('test-dl-static',
 )
 
 test('dl-static', test_dl_static)
+
+fsm_principal_dl_path = join_paths(
+  meson.project_source_root(),
+  'templates', 'access', 'fsm', 'principal.dl',
+)
+
+test_fsm_principal = executable('test-fsm-principal',
+  'test-fsm-principal.c',
+  c_args : [
+    '-DWYL_TEST_FSM_PRINCIPAL_DL_PATH="' + fsm_principal_dl_path + '"',
+  ],
+  dependencies : [wyrelog_dep],
+)
+
+test('fsm-principal', test_fsm_principal)
