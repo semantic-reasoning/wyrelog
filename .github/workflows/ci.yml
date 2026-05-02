@@ -56,10 +56,7 @@ jobs:
       - name: Configure
         run: meson setup builddir -Denable_tpm=${{ matrix.tpm }}
 
-      - name: Build
-        run: meson compile -C builddir
-
-      - name: Test
+      - name: Build and test
         run: meson test -C builddir --print-errorlogs --suite wyrelog
 
       - name: Upload meson logs on failure
@@ -126,14 +123,7 @@ jobs:
           set CC=clang-cl
           meson setup builddir -Denable_tpm=disabled -Denable_client=disabled -Ddefault_library=static
 
-      - name: Build (clang-cl)
-        shell: cmd
-        run: |
-          @echo off
-          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          meson compile -C builddir
-
-      - name: Test (clang-cl)
+      - name: Build and test (clang-cl)
         shell: cmd
         run: |
           @echo off
