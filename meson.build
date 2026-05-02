@@ -32,7 +32,13 @@ wirelog_dep = declare_dependency(
 
 libchronoid_proj = subproject(
   'libchronoid',
-  default_options : ['tests=false', 'cli=false'],
+  default_options : [
+    'tests=false',
+    'cli=false',
+    'simd=none',
+    'ssse3=disabled',
+    'avx2_batch=disabled',
+  ],
 )
 libchronoid_dep = declare_dependency(
   link_with : libchronoid_proj.get_variable('chronoid_lib'),
