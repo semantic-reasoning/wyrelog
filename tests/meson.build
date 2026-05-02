@@ -110,3 +110,10 @@ test_fsm_bisim = executable('test-fsm-bisim',
 )
 
 test('fsm-bisim', test_fsm_bisim)
+
+test_events = executable('test-events',
+  'test-events.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('events', test_events)
