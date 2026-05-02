@@ -9,6 +9,7 @@ wyrelog_sources = files(
   'wyl-audit-event.c',
   'wyl-boot.c',
   'wyl-decide.c',
+  'wyl-dl-static.c',
   'wyl-error.c',
   'wyl-handle.c',
   'wyl-perm.c',
