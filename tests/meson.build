@@ -99,3 +99,14 @@ test_access_decision = executable('test-access-decision',
 )
 
 test('access-decision', test_access_decision)
+
+test_fsm_bisim = executable('test-fsm-bisim',
+  'test-fsm-bisim.c',
+  c_args : [
+    '-DWYL_TEST_FSM_PRINCIPAL_DL_PATH="' + fsm_principal_dl_path + '"',
+    '-DWYL_TEST_FSM_SESSION_DL_PATH="' + fsm_session_dl_path + '"',
+  ],
+  dependencies : [wyrelog_dep],
+)
+
+test('fsm-bisim', test_fsm_bisim)
