@@ -3,6 +3,7 @@
 #include "wyl-common-private.h"
 
 #include <glib.h>
+#include <string.h>
 
 /*
  * Implementation overview.
@@ -206,4 +207,115 @@ wyl_dl_static_check (const wyl_dl_rule_t *rules, gsize n)
 
   free_out_edges (s.out_edges, V);
   return rc;
+}
+
+/* --- Functional integrity constraint check ---------------------- */
+
+/*
+ * Build a length-prefixed concatenation of head + key args for use
+ * as the GHashTable key. Each segment is preceded by its size
+ * encoded as a base-10 string and a separator so that distinct
+ * argument tuples cannot alias under naive concatenation.
+ */
+static gchar *
+group_key_for (const wyl_dl_fact_row_t *row, gsize key_arity)
+{
+  GString *out = g_string_new (NULL);
+  g_string_append_printf (out, "%zu|", strlen (row->head));
+  g_string_append (out, row->head);
+  g_string_append_c (out, '|');
+  for (gsize i = 0; i < key_arity; i++) {
+    g_string_append_printf (out, "%zu|", strlen (row->args[i]));
+    g_string_append (out, row->args[i]);
+    g_string_append_c (out, '|');
+  }
+  return g_string_free (out, FALSE);
+}
+
+static wyrelog_error_t
+validate_row (const wyl_dl_fact_row_t *row, gsize key_arity)
+{
+  if (row->head == NULL)
+    return WYRELOG_E_INVALID;
+  if (row->arity <= key_arity)
+    return WYRELOG_E_INVALID;
+  if (row->args == NULL)
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < row->arity; i++) {
+    if (row->args[i] == NULL)
+      return WYRELOG_E_INVALID;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_dl_check_functional_ic (const wyl_dl_fact_row_t *rows, gsize n,
+    gsize key_arity, wyl_dl_ic_violation_t *out_witness)
+{
+  if (n == 0)
+    return WYRELOG_E_OK;
+  if (rows == NULL)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < n; i++) {
+    wyrelog_error_t rc = validate_row (&rows[i], key_arity);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
+  /* Map joined key string -> first row index that contributed it. */
+  g_autoptr (GHashTable) seen =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+
+  for (gsize i = 0; i < n; i++) {
+    g_autofree gchar *key = group_key_for (&rows[i], key_arity);
+    gpointer slot = NULL;
+    if (g_hash_table_lookup_extended (seen, key, NULL, &slot)) {
+      gsize first_index = (gsize) GPOINTER_TO_SIZE (slot);
+      const gchar *value_a = rows[first_index].args[key_arity];
+      const gchar *value_b = rows[i].args[key_arity];
+      if (g_strcmp0 (value_a, value_b) != 0) {
+        if (out_witness != NULL) {
+          out_witness->head = rows[first_index].head;
+          out_witness->key = rows[first_index].args;
+          out_witness->key_arity = key_arity;
+          out_witness->value_a = value_a;
+          out_witness->value_b = value_b;
+          out_witness->first_index = first_index;
+          out_witness->conflict_index = i;
+        }
+        return WYRELOG_E_POLICY;
+      }
+      /* Same key, same tail value: a literal duplicate row, which
+       * does not violate the functional constraint. */
+      continue;
+    }
+    g_hash_table_insert (seen, g_strdup (key), GSIZE_TO_POINTER (i));
+  }
+  return WYRELOG_E_OK;
+}
+
+/* --- Empty-extension assertion ---------------------------------- */
+
+wyrelog_error_t
+wyl_dl_assert_edb_empty (const wyl_dl_fact_row_t *rows, gsize n,
+    const gchar *expected_head, const wyl_dl_fact_row_t **out_witness_row)
+{
+  if (n == 0)
+    return WYRELOG_E_OK;
+  if (rows == NULL)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < n; i++) {
+    if (expected_head != NULL) {
+      if (rows[i].head == NULL)
+        return WYRELOG_E_INVALID;
+      if (g_strcmp0 (rows[i].head, expected_head) != 0)
+        continue;
+    }
+    if (out_witness_row != NULL)
+      *out_witness_row = &rows[i];
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
 }
