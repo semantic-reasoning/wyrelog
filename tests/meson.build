@@ -25,3 +25,10 @@ test_traits_compile = executable('test-traits-compile',
 )
 
 test('traits-compile', test_traits_compile)
+
+test_dl_static = executable('test-dl-static',
+  'test-dl-static.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('dl-static', test_dl_static)
