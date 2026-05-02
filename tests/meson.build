@@ -117,3 +117,10 @@ test_events = executable('test-events',
 )
 
 test('events', test_events)
+
+test_keyprovider_dev = executable('test-keyprovider-dev',
+  'test-keyprovider-dev.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('keyprovider-dev', test_keyprovider_dev)
