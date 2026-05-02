@@ -48,6 +48,11 @@ install_data(
 )
 
 install_data(
+  'templates/access/decision.dl',
+  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access'),
+)
+
+install_data(
   'templates/access/fsm/principal.dl',
   install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access', 'fsm'),
 )

@@ -1,0 +1,76 @@
+% decision.dl — Wyrelog Access Decision Rule Set v0
+%
+% SPDX-License-Identifier: GPL-3.0-or-later
+% Copyright (C) 2026 wyrelog authors. Also available under a separate
+% commercial license; see LICENSE.md at the project root.
+%
+% Conjunctive access decision plus a six-row deny-reason taxonomy.
+% The decision program produces a boolean projection (allow_bool/3)
+% from a conjunctive derivation (allow/3); when the conjunction
+% fails, deny_reason/5 emits one row per violated clause. The full
+% deny-reason set is recorded in the audit row; the engine selects
+% a single representative reason for the H1 result struct using a
+% fixed priority order documented in the C surface.
+%
+% EDB schemas (host-populated, no clauses below):
+%   has_permission(user, perm, scope)
+%   principal_state(user, state)
+%   session_state(scope, state)
+%   session_active(state)
+%   armed(user, perm, scope)            -- IDB defined in
+%                                          permission_scope.dl
+%   frozen(scope)
+%   disabled_role_for(user, perm)
+%   policy_violation(kind, user, perm, witness)
+%   now(timestamp)                      -- host-bridged context
+%   break_glass_used(user)              -- host-bridged context
+%
+% Row order in the deny_reason block is load-bearing: the test
+% harness compares the head signatures line by line against the
+% C catalogue, so reordering one side without the other will fail
+% the build.
+
+% --- allow / allow_bool ----------------------------------------------
+
+allow(U, P, S) :-
+    has_permission(U, P, S),
+    principal_state(U, "authenticated"),
+    session_state(S, ST),
+    session_active(ST),
+    armed(U, P, S),
+    \+ frozen(S),
+    \+ disabled_role_for(U, P),
+    \+ policy_violation("sod", U, P, _).
+
+allow_bool(U, P, S) :- allow(U, P, S).
+
+% --- deny_reason ----------------------------------------------------
+
+deny_reason(U, P, S, "frozen", "frozen") :-
+    has_permission(U, P, S),
+    frozen(S).
+
+deny_reason(U, P, S, "disabled_role", "disabled_role_for") :-
+    has_permission(U, P, S),
+    disabled_role_for(U, P).
+
+deny_reason(U, P, S, "sod", "policy_violation") :-
+    has_permission(U, P, S),
+    policy_violation("sod", U, P, _).
+
+deny_reason(U, P, S, "not_authenticated", "principal_state") :-
+    has_permission(U, P, S),
+    \+ principal_state(U, "authenticated").
+
+deny_reason(U, P, S, "session_inactive", "session_state") :-
+    has_permission(U, P, S),
+    principal_state(U, "authenticated"),
+    session_state(S, ST),
+    \+ session_active(ST).
+
+deny_reason(U, P, S, "not_armed", "perm_state") :-
+    has_permission(U, P, S),
+    principal_state(U, "authenticated"),
+    session_state(S, ST),
+    session_active(ST),
+    \+ armed(U, P, S).
