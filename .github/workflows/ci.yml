@@ -94,17 +94,21 @@ jobs:
         shell: cmd
         run: choco install pkgconfiglite -y --allow-empty-checksums
 
-      - name: Enable vcpkg GitHub Actions binary cache
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-        uses: actions/github-script@v7
+      - name: Prepare vcpkg binary cache directory
+        shell: cmd
+        run: |
+          @echo off
+          set "CACHE_DIR=%RUNNER_TEMP%\vcpkg-cache"
+          if not exist "%CACHE_DIR%" mkdir "%CACHE_DIR%"
+          echo VCPKG_DEFAULT_BINARY_CACHE=%CACHE_DIR%>> %GITHUB_ENV%
+
+      - name: Restore vcpkg binary cache
+        uses: actions/cache@v4
         with:
-          script: |
-            const token = process.env.ACTIONS_RUNTIME_TOKEN || '';
-            const url = process.env.ACTIONS_CACHE_URL || '';
-            if (token) core.setSecret(token);
-            core.exportVariable('ACTIONS_CACHE_URL', url);
-            core.exportVariable('ACTIONS_RUNTIME_TOKEN', token);
-            core.exportVariable('VCPKG_BINARY_SOURCES', 'clear;x-gha,readwrite');
+          path: ${{ runner.temp }}\vcpkg-cache
+          key: windows-vcpkg-${{ hashFiles('.github/workflows/ci.yml') }}-v1
+          restore-keys: |
+            windows-vcpkg-
 
       - name: Install C dependencies (vcpkg)
         shell: cmd
