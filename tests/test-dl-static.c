@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <stddef.h>
+#include <glib.h>
 
 #include "wyrelog/wyl-dl-static-private.h"
 
-static int
-check (const wyl_dl_rule_t *rules, size_t n)
+static gint
+check (const wyl_dl_rule_t *rules, gsize n)
 {
-  return (int) wyl_dl_static_check (rules, n);
+  return (gint) wyl_dl_static_check (rules, n);
 }
 
 int
@@ -30,7 +30,7 @@ main (void)
 
   /* Case 4: NULL body predicate -> INVALID. */
   {
-    wyl_dl_body_atom_t body[] = { {NULL, false}
+    wyl_dl_body_atom_t body[] = { {NULL, FALSE}
     };
     wyl_dl_rule_t rules[] = { {"p", body, 1}
     };
@@ -48,9 +48,9 @@ main (void)
 
   /* Case 6: linear chain r :- q. q :- p. -> OK. */
   {
-    wyl_dl_body_atom_t body_r[] = { {"q", false}
+    wyl_dl_body_atom_t body_r[] = { {"q", FALSE}
     };
-    wyl_dl_body_atom_t body_q[] = { {"p", false}
+    wyl_dl_body_atom_t body_q[] = { {"p", FALSE}
     };
     wyl_dl_rule_t rules[] = {
       {"r", body_r, 1},
@@ -62,7 +62,7 @@ main (void)
 
   /* Case 7: self-loop without negation p :- p. -> OK. */
   {
-    wyl_dl_body_atom_t body[] = { {"p", false}
+    wyl_dl_body_atom_t body[] = { {"p", FALSE}
     };
     wyl_dl_rule_t rules[] = { {"p", body, 1}
     };
@@ -72,7 +72,7 @@ main (void)
 
   /* Case 8: self-loop with negation p :- \+ p. -> POLICY. */
   {
-    wyl_dl_body_atom_t body[] = { {"p", true}
+    wyl_dl_body_atom_t body[] = { {"p", TRUE}
     };
     wyl_dl_rule_t rules[] = { {"p", body, 1}
     };
@@ -83,9 +83,9 @@ main (void)
   /* Case 9: mutual recursion without negation
    *   p :- q.  q :- p.  -> OK. */
   {
-    wyl_dl_body_atom_t body_p[] = { {"q", false}
+    wyl_dl_body_atom_t body_p[] = { {"q", FALSE}
     };
-    wyl_dl_body_atom_t body_q[] = { {"p", false}
+    wyl_dl_body_atom_t body_q[] = { {"p", FALSE}
     };
     wyl_dl_rule_t rules[] = {
       {"p", body_p, 1},
@@ -98,9 +98,9 @@ main (void)
   /* Case 10: mutual recursion with negation in cycle
    *   p :- \+ q.  q :- p.  -> POLICY. */
   {
-    wyl_dl_body_atom_t body_p[] = { {"q", true}
+    wyl_dl_body_atom_t body_p[] = { {"q", TRUE}
     };
-    wyl_dl_body_atom_t body_q[] = { {"p", false}
+    wyl_dl_body_atom_t body_q[] = { {"p", FALSE}
     };
     wyl_dl_rule_t rules[] = {
       {"p", body_p, 1},
@@ -113,9 +113,9 @@ main (void)
   /* Case 11: cross-stratum negation (no cycle through negation)
    *   p :- q.  r :- \+ p.   -> OK. */
   {
-    wyl_dl_body_atom_t body_p[] = { {"q", false}
+    wyl_dl_body_atom_t body_p[] = { {"q", FALSE}
     };
-    wyl_dl_body_atom_t body_r[] = { {"p", true}
+    wyl_dl_body_atom_t body_r[] = { {"p", TRUE}
     };
     wyl_dl_rule_t rules[] = {
       {"p", body_p, 1},
@@ -132,11 +132,11 @@ main (void)
    *   q :- \+ p.         (negation crosses SCC boundary)
    *  -> OK. */
   {
-    wyl_dl_body_atom_t body_p_self[] = { {"p", false}
+    wyl_dl_body_atom_t body_p_self[] = { {"p", FALSE}
     };
-    wyl_dl_body_atom_t body_q_self[] = { {"q", false}
+    wyl_dl_body_atom_t body_q_self[] = { {"q", FALSE}
     };
-    wyl_dl_body_atom_t body_q_not_p[] = { {"p", true}
+    wyl_dl_body_atom_t body_q_not_p[] = { {"p", TRUE}
     };
     wyl_dl_rule_t rules[] = {
       {"p", body_p_self, 1},
@@ -150,9 +150,9 @@ main (void)
   /* Case 13: multi-rule same head (no cycle)
    *   p :- q.  p :- r.  -> OK. */
   {
-    wyl_dl_body_atom_t body_a[] = { {"q", false}
+    wyl_dl_body_atom_t body_a[] = { {"q", FALSE}
     };
-    wyl_dl_body_atom_t body_b[] = { {"r", false}
+    wyl_dl_body_atom_t body_b[] = { {"r", FALSE}
     };
     wyl_dl_rule_t rules[] = {
       {"p", body_a, 1},

@@ -21,7 +21,7 @@ wyl_handle_init (WylHandle *self)
 }
 
 wyrelog_error_t
-wyl_init (const char *config_path, WylHandle **out_handle)
+wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
   (void) config_path;
 

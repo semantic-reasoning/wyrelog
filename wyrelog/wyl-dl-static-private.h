@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include <stdbool.h>
-#include <stddef.h>
+#include <glib.h>
 
 #include "wyrelog/error.h"
 
@@ -49,17 +48,17 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_dl_body_atom_t
 {
-  const char *predicate;
-  bool negated;
+  const gchar *predicate;
+  gboolean negated;
 } wyl_dl_body_atom_t;
 
 typedef struct wyl_dl_rule_t
 {
-  const char *head;
+  const gchar *head;
   const wyl_dl_body_atom_t *body;
-  size_t body_len;
+  gsize body_len;
 } wyl_dl_rule_t;
 
-wyrelog_error_t wyl_dl_static_check (const wyl_dl_rule_t * rules, size_t n);
+wyrelog_error_t wyl_dl_static_check (const wyl_dl_rule_t * rules, gsize n);
 
 G_END_DECLS;

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
+#include <glib.h>
 #include <glib-object.h>
 
 #include "wyrelog/error.h"
@@ -28,32 +29,33 @@ G_DECLARE_FINAL_TYPE (WylAuditIter, wyl_audit_iter, WYL, AUDIT_ITER, GObject);
 #define WYL_TYPE_AUDIT_ITER (wyl_audit_iter_get_type ())
 
 /* Lifecycle */
-wyrelog_error_t wyl_client_new (const char *base_url, WylClient ** out_client);
+wyrelog_error_t wyl_client_new (const gchar * base_url,
+    WylClient ** out_client);
 
 /* Authentication */
 wyrelog_error_t wyl_client_login (WylClient * client,
-    const char *username, const char *password);
+    const gchar * username, const gchar * password);
 wyrelog_error_t wyl_client_token_refresh (WylClient * client);
-wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const char *otp);
+wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const gchar * otp);
 
 /* Decide */
 wyrelog_error_t wyl_client_decide (WylClient * client,
-    const char *user,
-    const char *perm, const char *session_token, int *out_decision);
+    const gchar * user,
+    const gchar * perm, const gchar * session_token, gint * out_decision);
 
 /* Audit query (iterator) */
 wyrelog_error_t wyl_client_audit_query (WylClient * client,
-    const char *query_filter, WylAuditIter ** out_iter);
+    const gchar * query_filter, WylAuditIter ** out_iter);
 wyrelog_error_t wyl_audit_iter_next (WylAuditIter * iter,
     gboolean * out_has_next);
 
 /* Tenant / event */
 wyrelog_error_t wyl_client_tenant_select (WylClient * client,
-    const char *tenant);
+    const gchar * tenant);
 wyrelog_error_t wyl_client_event_emit (WylClient * client,
-    const char *event_kind, const char *event_payload_json);
+    const gchar * event_kind, const gchar * event_payload_json);
 
 /* Meta */
-const char *wyrelog_client_version_string (void);
+const gchar *wyrelog_client_version_string (void);
 
 G_END_DECLS;

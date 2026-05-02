@@ -17,6 +17,6 @@ typedef enum wyrelog_error_t
   WYRELOG_E_INTERNAL = -7,
 } wyrelog_error_t;
 
-const char *wyrelog_error_string (wyrelog_error_t err);
+const gchar *wyrelog_error_string (wyrelog_error_t err);
 
 G_END_DECLS;

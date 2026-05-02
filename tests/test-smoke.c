@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <stddef.h>
+#include <glib.h>
 
 #include "wyrelog/error.h"
 #include "wyrelog/wyrelog.h"
@@ -7,12 +7,12 @@
 int
 main (void)
 {
-  const char *msg = wyrelog_error_string (WYRELOG_E_OK);
+  const gchar *msg = wyrelog_error_string (WYRELOG_E_OK);
 
   if (msg == NULL || msg[0] == '\0')
     return 1;
 
-  const char *version = wyrelog_version_string ();
+  const gchar *version = wyrelog_version_string ();
   if (version == NULL || version[0] == '\0')
     return 2;
 

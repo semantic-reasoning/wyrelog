@@ -21,7 +21,7 @@ wyl_audit_iter_init (WylAuditIter *self)
 }
 
 wyrelog_error_t
-wyl_client_audit_query (WylClient *client, const char *query_filter,
+wyl_client_audit_query (WylClient *client, const gchar *query_filter,
     WylAuditIter **out_iter)
 {
   (void) client;

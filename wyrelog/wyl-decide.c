@@ -3,12 +3,12 @@
 
 struct _wyl_decide_req
 {
-  int placeholder;
+  gint placeholder;
 };
 
 struct _wyl_decide_resp
 {
-  int placeholder;
+  gint placeholder;
 };
 
 wyl_decide_req_t *

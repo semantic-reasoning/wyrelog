@@ -21,7 +21,7 @@ wyl_client_init (WylClient *self)
 }
 
 wyrelog_error_t
-wyl_client_new (const char *base_url, WylClient **out_client)
+wyl_client_new (const gchar *base_url, WylClient **out_client)
 {
   (void) base_url;
 
@@ -33,7 +33,8 @@ wyl_client_new (const char *base_url, WylClient **out_client)
 }
 
 wyrelog_error_t
-wyl_client_login (WylClient *client, const char *username, const char *password)
+wyl_client_login (WylClient *client, const gchar *username,
+    const gchar *password)
 {
   (void) client;
   (void) username;
@@ -49,7 +50,7 @@ wyl_client_token_refresh (WylClient *client)
 }
 
 wyrelog_error_t
-wyl_client_mfa_verify (WylClient *client, const char *otp)
+wyl_client_mfa_verify (WylClient *client, const gchar *otp)
 {
   (void) client;
   (void) otp;
@@ -57,8 +58,8 @@ wyl_client_mfa_verify (WylClient *client, const char *otp)
 }
 
 wyrelog_error_t
-wyl_client_decide (WylClient *client, const char *user, const char *perm,
-    const char *session_token, int *out_decision)
+wyl_client_decide (WylClient *client, const gchar *user, const gchar *perm,
+    const gchar *session_token, gint *out_decision)
 {
   (void) client;
   (void) user;
@@ -69,7 +70,7 @@ wyl_client_decide (WylClient *client, const char *user, const char *perm,
 }
 
 wyrelog_error_t
-wyl_client_tenant_select (WylClient *client, const char *tenant)
+wyl_client_tenant_select (WylClient *client, const gchar *tenant)
 {
   (void) client;
   (void) tenant;
@@ -77,8 +78,8 @@ wyl_client_tenant_select (WylClient *client, const char *tenant)
 }
 
 wyrelog_error_t
-wyl_client_event_emit (WylClient *client, const char *event_kind,
-    const char *event_payload_json)
+wyl_client_event_emit (WylClient *client, const gchar *event_kind,
+    const gchar *event_payload_json)
 {
   (void) client;
   (void) event_kind;
@@ -86,7 +87,7 @@ wyl_client_event_emit (WylClient *client, const char *event_kind,
   return WYRELOG_E_INTERNAL;
 }
 
-const char *
+const gchar *
 wyrelog_client_version_string (void)
 {
   return "0.1.0";

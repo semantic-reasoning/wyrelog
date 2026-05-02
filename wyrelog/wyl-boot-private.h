@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
-#include <stdbool.h>
-#include <stddef.h>
+#include <glib.h>
 
 #include "wyrelog/error.h"
 
@@ -27,14 +26,14 @@ typedef enum boot_phase_id_t
   BOOT_LAST = 21,
 } boot_phase_id_t;
 
-typedef wyrelog_error_t (*boot_phase_fn_t) (void *ctx);
+typedef wyrelog_error_t (*boot_phase_fn_t) (gpointer ctx);
 
 typedef struct boot_phase_t
 {
   boot_phase_id_t id;
-  const char *name;
+  const gchar *name;
   boot_phase_fn_t fn;
-  bool fail_closed;
+  gboolean fail_closed;
 } boot_phase_t;
 
 /*
@@ -48,6 +47,6 @@ typedef struct boot_phase_t
  * non-zero return code otherwise. WYRELOG_E_INVALID if seq is
  * NULL while n > 0.
  */
-wyrelog_error_t wyl_boot_run (const boot_phase_t * seq, size_t n, void *ctx);
+wyrelog_error_t wyl_boot_run (const boot_phase_t * seq, gsize n, gpointer ctx);
 
 G_END_DECLS;
