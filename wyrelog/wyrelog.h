@@ -1,9 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
+#include <glib.h>
 #include <glib-object.h>
-#include <stddef.h>
-#include <stdint.h>
 
 #include "wyrelog/error.h"
 
@@ -44,7 +43,7 @@ G_DECLARE_FINAL_TYPE (WylAuditEvent, wyl_audit_event,
  * Plain integer session identifier. Stable across the lifetime of a
  * WylHandle; not a GObject.
  */
-typedef uint64_t wyl_session_id_t;
+typedef guint64 wyl_session_id_t;
 
 /*
  * Opaque request/response carriers for decide / login / perm.
@@ -81,7 +80,7 @@ void wyl_revoke_req_free (wyl_revoke_req_t * req);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_revoke_req_t, wyl_revoke_req_free);
 
 /* Lifecycle */
-wyrelog_error_t wyl_init (const char *config_path, WylHandle ** out_handle);
+wyrelog_error_t wyl_init (const gchar * config_path, WylHandle ** out_handle);
 void wyl_shutdown (WylHandle * handle);
 
 /* Decide */
@@ -104,6 +103,6 @@ wyrelog_error_t wyl_audit_emit (WylHandle * handle,
     const WylAuditEvent * event);
 
 /* Meta */
-const char *wyrelog_version_string (void);
+const gchar *wyrelog_version_string (void);
 
 G_END_DECLS;

@@ -1,11 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <stddef.h>
-
 #include "wyl-boot-private.h"
 #include "wyl-common-private.h"
 
 wyrelog_error_t
-wyl_boot_run (const boot_phase_t *seq, size_t n, void *ctx)
+wyl_boot_run (const boot_phase_t *seq, gsize n, gpointer ctx)
 {
   if (n == 0)
     return WYRELOG_E_OK;
@@ -13,7 +11,7 @@ wyl_boot_run (const boot_phase_t *seq, size_t n, void *ctx)
   if (seq == NULL)
     return WYRELOG_E_INVALID;
 
-  for (size_t i = 0; i < n; i++) {
+  for (gsize i = 0; i < n; i++) {
     const boot_phase_t *phase = &seq[i];
     wyrelog_error_t rc;
 

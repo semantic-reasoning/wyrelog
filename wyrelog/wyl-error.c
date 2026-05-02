@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/error.h"
 
-const char *
+const gchar *
 wyrelog_error_string (wyrelog_error_t err)
 {
   switch (err) {

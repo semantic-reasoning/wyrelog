@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <stddef.h>
+#include <glib.h>
 
 #include "wyrelog/wyl-traits-private.h"
 

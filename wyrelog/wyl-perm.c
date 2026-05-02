@@ -3,17 +3,17 @@
 
 struct _wyl_login_req
 {
-  int placeholder;
+  gint placeholder;
 };
 
 struct _wyl_grant_req
 {
-  int placeholder;
+  gint placeholder;
 };
 
 struct _wyl_revoke_req
 {
-  int placeholder;
+  gint placeholder;
 };
 
 wyl_login_req_t *

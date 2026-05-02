@@ -1,12 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <stddef.h>
+#include <glib.h>
 
 #include "wyrelog/client.h"
 
 int
 main (void)
 {
-  const char *version = wyrelog_client_version_string ();
+  const gchar *version = wyrelog_client_version_string ();
   if (version == NULL || version[0] == '\0')
     return 1;
 
@@ -32,7 +32,7 @@ main (void)
   gboolean has_next = TRUE;
   if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
     return 7;
-  if (has_next != FALSE)
+  if (has_next)
     return 8;
 
   return 0;
