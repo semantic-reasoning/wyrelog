@@ -61,4 +61,100 @@ typedef struct wyl_dl_rule_t
 
 wyrelog_error_t wyl_dl_static_check (const wyl_dl_rule_t * rules, gsize n);
 
+
+/*
+ * Load-time integrity checks over flat fact rows.
+ *
+ * The checks below operate on caller-owned arrays of fact rows.
+ * A row carries the head predicate name plus a borrowed pointer
+ * vector of argument strings. The checkers borrow every pointer;
+ * the caller must keep the row backing storage alive across the
+ * call. No string is copied, no row is rewritten, and no memory
+ * is retained after the call returns.
+ */
+
+typedef struct wyl_dl_fact_row_t
+{
+  const gchar *head;
+  const gchar *const *args;
+  gsize arity;
+} wyl_dl_fact_row_t;
+
+/*
+ * Witness populated when wyl_dl_check_functional_ic refuses a
+ * program. All pointer fields borrow from the rows array passed
+ * in; callers must not free them and must not retain them past
+ * the lifetime of that array.
+ *
+ *   head            : the predicate that violated the constraint
+ *   key             : pointer to the first key_arity strings of
+ *                     the conflicting rows (the same key on both)
+ *   key_arity       : echoes the key_arity argument
+ *   value_a         : tail value of the first sighting
+ *   value_b         : tail value of the conflicting row
+ *   first_index     : index of the first sighting in rows[]
+ *   conflict_index  : index of the conflicting row in rows[]
+ *
+ * Multi-way conflicts (three or more distinct tails for the same
+ * key) surface only the first detected pair; existential witness
+ * is sufficient for the load-time refusal contract.
+ */
+typedef struct wyl_dl_ic_violation_t
+{
+  const gchar *head;
+  const gchar *const *key;
+  gsize key_arity;
+  const gchar *value_a;
+  const gchar *value_b;
+  gsize first_index;
+  gsize conflict_index;
+} wyl_dl_ic_violation_t;
+
+/*
+ * Functional integrity constraint: for every group of rows that
+ * share the same (head, args[0..key_arity-1]) the tail value at
+ * args[key_arity] must agree. Used to reject a non-functional
+ * FSM transition table at load time, where two rows for the same
+ * (from, event) point at distinct destinations.
+ *
+ * Each row must satisfy arity > key_arity; the tail comparison
+ * uses args[key_arity] only, additional tail columns are ignored
+ * (callers that need multi-column tail equality can encode the
+ * tuple into one string before calling).
+ *
+ * Return codes:
+ *   WYRELOG_E_OK       no group has conflicting tails (or trivially empty)
+ *   WYRELOG_E_POLICY   first conflict surfaces in *out_witness when non-NULL
+ *   WYRELOG_E_INVALID  rows == NULL with n > 0, any row.head is NULL, any
+ *                      args == NULL while arity > 0, any args[k] is NULL
+ *                      for k < arity, or any row.arity <= key_arity.
+ */
+wyrelog_error_t wyl_dl_check_functional_ic (const wyl_dl_fact_row_t * rows,
+    gsize n, gsize key_arity, wyl_dl_ic_violation_t * out_witness);
+
+/*
+ * Empty-extension assertion: refuse the program if any row in
+ * the input bears a head equal to expected_head. When
+ * expected_head is NULL every row counts as a violation, which
+ * is useful for a pre-filtered fact list.
+ *
+ *   *out_witness_row, when non-NULL, is set to the first matching
+ *   row pointer on policy refusal; left untouched on OK or INVALID.
+ *
+ * Used to implement the load-time SoD contract by passing a
+ * post-evaluation snapshot of the policy_violation EDB and
+ * expected_head = "policy_violation"; non-empty input refuses
+ * the load.
+ *
+ * Return codes:
+ *   WYRELOG_E_OK       no row matches expected_head (or rows is empty)
+ *   WYRELOG_E_POLICY   at least one row matches; first match in
+ *                      *out_witness_row when non-NULL
+ *   WYRELOG_E_INVALID  rows == NULL with n > 0, or any row.head is
+ *                      NULL when needed for the comparison.
+ */
+wyrelog_error_t wyl_dl_assert_edb_empty (const wyl_dl_fact_row_t * rows,
+    gsize n, const gchar * expected_head,
+    const wyl_dl_fact_row_t ** out_witness_row);
+
 G_END_DECLS;
