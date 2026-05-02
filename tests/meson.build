@@ -62,3 +62,10 @@ test_fsm_session = executable('test-fsm-session',
 )
 
 test('fsm-session', test_fsm_session)
+
+test_guard_expr = executable('test-guard-expr',
+  'test-guard-expr.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('guard-expr', test_guard_expr)
