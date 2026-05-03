@@ -67,9 +67,29 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 wyrelog_error_t
 wyl_session_logout (WylHandle *handle, wyl_session_id_t sid)
 {
-  (void) handle;
+  if (handle == NULL)
+    return WYRELOG_E_INVALID;
+
+#ifdef WYL_HAS_AUDIT
+  /* Mirror the logout in the audit log so session terminations are
+   * observable even before the session table that owns the sid is
+   * wired. The action column carries "logout" semantics; the
+   * subject_id column carries the integer session handle as text
+   * so log readers can tie the event back to the originating
+   * wyl_session_login. */
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  g_autofree gchar *sid_str = g_strdup_printf ("%" G_GUINT64_FORMAT, sid);
+  wyl_audit_event_set_subject_id (ev, sid_str);
+  wyl_audit_event_set_action (ev, "logout");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+#else
   (void) sid;
-  return WYRELOG_E_INTERNAL;
+#endif
+
+  /* Real session-table teardown lands in a follow-up; v0 returns
+   * E_OK after argument validation and audit recording. */
+  return WYRELOG_E_OK;
 }
 
 gchar *
