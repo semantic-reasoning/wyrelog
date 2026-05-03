@@ -175,18 +175,39 @@ G_GNUC_PRINTF (6, 7);
  *     held simultaneously.
  *   - NOT async-signal-safe: do NOT call from signal handlers. The
  *     function acquires mutexes and calls fopen/fclose.
- *   - NOT safe across fork(2). The FILE* sink is inherited along with
- *     its userspace stdio buffer, which is shared at the OS level with
- *     the parent. The child MUST NOT call fclose (flushes the shared
- *     buffer, corrupting parent's pending writes) and MUST NOT call
- *     freopen (which calls fclose internally — same hazard). The
- *     supported pattern is post-fork re-exec: the child re-executes
- *     itself so that inherited FILE* handles are closed by the C
- *     runtime before main() runs. If re-exec is not possible and the
- *     child must silence the inherited handle, call
- *     close(fileno(inherited_fp)) directly after ensuring no other
- *     code path in the child references it; do NOT call
- *     wyl_log_internal_reconfigure on a path that the parent also
- *     writes to, as this would open a shared output and interleave
- *     records. */
+ *   - NOT safe across fork(2) without exec. The FILE* sink is
+ *     inherited along with its userspace stdio buffer. At the OS level
+ *     both parent and child share the same open file description
+ *     (offset, flags). Hazards in the child after fork-without-exec:
+ *
+ *     (a) close(fileno(f)) caveat: if you want to silence the
+ *         inherited handle you may call close(fileno(log_file_sink))
+ *         directly, but ONLY before any other code in the child can
+ *         reach it. You MUST NOT subsequently call fclose() on the
+ *         same FILE* — fclose calls fflush which flushes the shared
+ *         userspace buffer back through the now-closed (or reassigned)
+ *         fd, causing EBADF or writing parent data to the wrong file.
+ *         Similarly, do NOT pass the inherited FILE* to
+ *         wyl_log_internal_reconfigure: the function calls
+ *         fclose(log_file_sink) internally before opening the new
+ *         path, so the same EBADF / UB hazard applies.
+ *
+ *     (b) Prefer _exit(2) over exit(3) after fork-without-exec. exit()
+ *         runs atexit handlers registered by the parent (including
+ *         stdio fflush of all open FILE* streams) and may corrupt the
+ *         parent's pending output. _exit() terminates immediately
+ *         without running those handlers.
+ *
+ *     (c) Multithreaded programs: fork-without-exec is inherently
+ *         unsafe when the parent has multiple threads. Only the calling
+ *         thread is duplicated in the child; any thread holding
+ *         log_mutex or sink_mutex at the moment of fork leaves those
+ *         mutexes permanently locked in the child. pthread_atfork
+ *         handlers can acquire and release known mutexes around the
+ *         fork, but this does not make arbitrary library state (e.g.
+ *         libsoup-3.0 worker pools, GLib thread pools) safe. The only
+ *         fully supported pattern in multithreaded code is
+ *         fork-then-exec; call execve(2) as soon as possible after
+ *         fork(2) and do not call wyl_log_internal_reconfigure or any
+ *         stdio function in the child before exec. */
      void wyl_log_internal_reconfigure (void);

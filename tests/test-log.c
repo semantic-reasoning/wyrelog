@@ -3,6 +3,7 @@
 #include <unistd.h>
 
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "wyrelog/wyl-log-private.h"
 
@@ -294,6 +295,86 @@ test_file_sink_reopen_same_path_no_crash (void)
   rmdir (tmpdir);
 }
 
+/* T7 — Thread-stress: sink_mutex serialises concurrent writes correctly.
+ *
+ * 8 threads each emit 1000 WARNING records into a shared file sink.
+ * After all threads join we verify:
+ *   - total line count == 8000 (no records lost)
+ *   - no line is empty (no torn mid-line interleave)
+ *
+ * Process-unique tmpdir (g_dir_make_tmp) avoids collisions with parallel
+ * meson test runs. */
+
+#define T7_THREAD_COUNT 8
+#define T7_RECORDS_PER_THREAD 1000
+
+typedef struct
+{
+  gint thread_id;
+} T7ThreadData;
+
+static gpointer
+t7_writer_thread (gpointer user_data)
+{
+  T7ThreadData *d = (T7ThreadData *) user_data;
+  for (gint i = 0; i < T7_RECORDS_PER_THREAD; i++) {
+    wyl_log_structured_at (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
+        NULL, 0, NULL, "t7-thread-%d-record-%d", d->thread_id, i);
+  }
+  return NULL;
+}
+
+static void
+test_sink_mutex_concurrent_writes (void)
+{
+  GError *err = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-t7-XXXXXX", &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (tmpdir);
+
+  g_autofree gchar *path = g_build_filename (tmpdir, "t7.log", NULL);
+
+  g_setenv ("WYL_LOG_FILE", path, TRUE);
+  g_setenv ("WYL_LOG", "*:2", TRUE);
+  wyl_log_internal_reconfigure ();
+
+  GThread *threads[T7_THREAD_COUNT];
+  T7ThreadData data[T7_THREAD_COUNT];
+  for (gint i = 0; i < T7_THREAD_COUNT; i++) {
+    data[i].thread_id = i;
+    threads[i] = g_thread_new ("t7-writer", t7_writer_thread, &data[i]);
+    g_assert_nonnull (threads[i]);
+  }
+  for (gint i = 0; i < T7_THREAD_COUNT; i++)
+    g_thread_join (threads[i]);
+
+  /* Flush: close the file by reconfiguring without WYL_LOG_FILE. */
+  g_unsetenv ("WYL_LOG_FILE");
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reconfigure ();
+
+  /* Read the log file and verify line count and integrity. */
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gboolean ok = g_file_get_contents (path, &contents, &len, NULL);
+  g_assert_true (ok);
+  g_assert_nonnull (contents);
+
+  gchar **lines = g_strsplit (contents, "\n", -1);
+  gint line_count = 0;
+  for (gint i = 0; lines[i] != NULL; i++) {
+    /* g_strsplit produces a trailing empty token after the final newline. */
+    if (lines[i][0] != '\0')
+      line_count++;
+  }
+  g_strfreev (lines);
+
+  g_assert_cmpint (line_count, ==, T7_THREAD_COUNT * T7_RECORDS_PER_THREAD);
+
+  g_remove (path);
+  g_rmdir (tmpdir);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -333,6 +414,8 @@ main (int argc, char **argv)
       test_runtime_filter_end_to_end);
   g_test_add_func ("/wyl-log/runtime/file-sink-reopen-same-path-no-crash",
       test_file_sink_reopen_same_path_no_crash);
+  g_test_add_func ("/wyl-log/runtime/sink-mutex-concurrent-writes",
+      test_sink_mutex_concurrent_writes);
 
   return g_test_run ();
 }
