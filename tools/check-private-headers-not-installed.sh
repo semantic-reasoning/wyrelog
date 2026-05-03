@@ -8,18 +8,23 @@
 #
 # Strategy (two-tier):
 #
-#   1. If a builddir exists alongside the project root, use
-#      `meson introspect --installed builddir` to query the actual
-#      post-build install manifest.  This catches private headers
-#      included via multi-line files(...) blocks that a line-grep
-#      cannot see because the filename and the install_headers()
-#      call are on different lines.
+#   Tier 1 (authoritative, post-configure / CI after meson setup):
+#     If a builddir exists alongside the project root AND meson is on PATH,
+#     use `meson introspect --installed builddir` to query the actual
+#     post-build install manifest.  This catches private headers included
+#     via multi-line files(...) blocks that a line-grep cannot see because
+#     the filename and the install_headers() call are on different lines.
+#     A meson introspect failure (corrupt builddir, version mismatch) is
+#     treated as a hard error — it exits 1 so CI catches the problem rather
+#     than silently falling back to the weaker tier-2 check.
 #
-#   2. If no builddir exists (e.g. CI lint pass before first build),
-#      fall back to a line-grep over all meson.build files in the
-#      tree — the original heuristic.
+#   Tier 2 (fresh-checkout linting, no builddir available):
+#     Fall back to a line-grep over all meson.build files in the tree —
+#     the original heuristic.  Only used when meson is absent from PATH or
+#     no builddir exists; not a substitute for tier-1 in CI.
 #
-# Exit codes: 0 = clean, 1 = private header found in install set.
+# Exit codes: 0 = clean, 1 = private header found in install set or
+#             meson introspect error when builddir is present.
 
 set -eu
 
@@ -30,28 +35,33 @@ BUILDDIR="$PROJECT_ROOT/builddir"
 FOUND=0
 
 # -----------------------------------------------------------------------
-# Tier 1: meson introspect (authoritative, requires a configured builddir)
+# Tier 1: meson introspect (authoritative, post-configure CI mode)
 # -----------------------------------------------------------------------
 if [ -d "$BUILDDIR" ] && command -v meson >/dev/null 2>&1; then
-  introspect_out=$(meson introspect --installed "$BUILDDIR" 2>/dev/null) || true
-  if [ -n "$introspect_out" ]; then
-    # introspect --installed emits JSON: {"dest": "src", ...}
-    # Both keys and values can be install-destination paths.
-    # A -private.h in any path (key or value) is a violation.
-    if printf '%s\n' "$introspect_out" | grep -q -- '-private\.h'; then
-      echo "ERROR (introspect): private header found in install manifest:" >&2
-      printf '%s\n' "$introspect_out" | grep -- '-private\.h' >&2
-      FOUND=1
-    fi
-
-    if [ "$FOUND" -eq 1 ]; then
-      echo "FAIL: private header(s) would be installed. Aborting." >&2
-      exit 1
-    fi
-
-    echo "OK: no private headers found in install paths (introspect)."
-    exit 0
+  # Capture output and exit code separately so a meson failure is not
+  # silently swallowed.  An empty result from a successful introspect is
+  # valid (no installed files at all); a non-zero exit is a real error.
+  introspect_out=$(meson introspect --installed "$BUILDDIR" 2>&1)
+  introspect_rc=$?
+  if [ "$introspect_rc" -ne 0 ]; then
+    echo "ERROR: meson introspect failed (exit $introspect_rc) — builddir may be corrupt or stale." >&2
+    echo "$introspect_out" >&2
+    echo "Re-run 'meson setup builddir' and retry." >&2
+    exit 1
   fi
+
+  # introspect --installed emits JSON: {"dest": "src", ...}
+  # Both keys and values can be install-destination paths.
+  # A -private.h in any path (key or value) is a violation.
+  if printf '%s\n' "$introspect_out" | grep -q -- '-private\.h'; then
+    echo "ERROR (introspect): private header found in install manifest:" >&2
+    printf '%s\n' "$introspect_out" | grep -- '-private\.h' >&2
+    echo "FAIL: private header(s) would be installed. Aborting." >&2
+    exit 1
+  fi
+
+  echo "OK: no private headers found in install paths (introspect)."
+  exit 0
 fi
 
 # -----------------------------------------------------------------------

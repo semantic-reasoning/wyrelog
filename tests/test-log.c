@@ -300,7 +300,10 @@ test_file_sink_reopen_same_path_no_crash (void)
  * 8 threads each emit 1000 WARNING records into a shared file sink.
  * After all threads join we verify:
  *   - total line count == 8000 (no records lost)
- *   - no line is empty (no torn mid-line interleave)
+ *   - every line matches the structured-record pattern exactly:
+ *       [wyrelog GENERAL] t7-thread-N-record-M
+ *     A torn write (partial line or interleaved prefix) would fail this
+ *     match, making torn-line detection explicit rather than implicit.
  *
  * Process-unique tmpdir (g_dir_make_tmp) avoids collisions with parallel
  * meson test runs. */
@@ -335,7 +338,7 @@ test_sink_mutex_concurrent_writes (void)
   g_autofree gchar *path = g_build_filename (tmpdir, "t7.log", NULL);
 
   g_setenv ("WYL_LOG_FILE", path, TRUE);
-  g_setenv ("WYL_LOG", "*:2", TRUE);
+  g_setenv ("WYL_LOG", "*:5", TRUE);
   wyl_log_internal_reconfigure ();
 
   GThread *threads[T7_THREAD_COUNT];
@@ -360,15 +363,36 @@ test_sink_mutex_concurrent_writes (void)
   g_assert_true (ok);
   g_assert_nonnull (contents);
 
+  /* Per-line structured-record pattern check.
+   * Each record must match: [wyrelog GENERAL] t7-thread-N-record-M
+   * A torn write (partial line or interleaved bytes) would produce a line
+   * that fails this pattern, making torn-line detection explicit. */
+  GError *re_err = NULL;
+  GRegex *record_re =
+      g_regex_new ("^\\[wyrelog GENERAL\\] t7-thread-[0-9]+-record-[0-9]+$",
+      G_REGEX_OPTIMIZE, 0, &re_err);
+  g_assert_no_error (re_err);
+  g_assert_nonnull (record_re);
+
   gchar **lines = g_strsplit (contents, "\n", -1);
   gint line_count = 0;
   for (gint i = 0; lines[i] != NULL; i++) {
     /* g_strsplit produces a trailing empty token after the final newline. */
-    if (lines[i][0] != '\0')
-      line_count++;
+    if (lines[i][0] == '\0')
+      continue;
+    line_count++;
+    gboolean matched = g_regex_match (record_re, lines[i], 0, NULL);
+    if (!matched) {
+      g_test_message
+          ("T7: line %d does not match structured-record pattern: %s", i,
+          lines[i]);
+    }
+    g_assert_true (matched);
   }
   g_strfreev (lines);
+  g_regex_unref (record_re);
 
+  /* Belt-and-suspenders: all 8000 records must be present. */
   g_assert_cmpint (line_count, ==, T7_THREAD_COUNT * T7_RECORDS_PER_THREAD);
 
   g_remove (path);
