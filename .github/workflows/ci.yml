@@ -28,7 +28,7 @@ jobs:
             tpm: disabled
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install build dependencies (Linux)
         if: runner.os == 'Linux'
@@ -74,7 +74,7 @@ jobs:
       VCPKG_INSTALLED_DIR: C:\vcpkg\installed\x64-windows
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install meson and ninja
         shell: cmd
