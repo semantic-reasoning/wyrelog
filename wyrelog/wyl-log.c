@@ -178,7 +178,10 @@ log_writer (GLogLevelFlags log_level,
   g_mutex_lock (&log_mutex);
   threshold = section_levels[section];
   g_mutex_unlock (&log_mutex);
-  if (wyl_level > threshold)
+  /* CRITICAL bypasses runtime threshold so that invariant
+   * violations are unconditionally visible, matching the
+   * compile-time bypass in WYL_LOG_CRITICAL. */
+  if (!(log_level & G_LOG_LEVEL_ERROR) && wyl_level > threshold)
     return G_LOG_WRITER_HANDLED;
 
   /* Route to WYL_LOG_FILE if open, else stderr. The mutex is

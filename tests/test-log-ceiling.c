@@ -16,6 +16,7 @@
  */
 
 #include <glib.h>
+#include <glib/gstdio.h>
 
 /* Override the ceiling before including the private header. */
 #ifdef WYL_LOG_MAX_LEVEL
@@ -70,19 +71,65 @@ test_error_evaluates_args (void)
   g_assert_cmpint (side_effect_counter, ==, 1);
 }
 
+/* Test that WYL_LOG_CRITICAL evaluates its arguments even when:
+ *   - WYL_LOG_MAX_LEVEL=2  (compile-time ceiling, set at build time)
+ *   - WYL_LOG=*:none       (runtime threshold suppresses all sections)
+ *
+ * Strategy: the child writes a sentinel file before the abort fires.
+ * If args are not evaluated the sentinel never appears.  The parent
+ * verifies the child aborted AND the sentinel exists. */
+static void
+test_critical_bypasses_ceiling (void)
+{
+  if (g_test_subprocess ()) {
+    /* Child path: silence the runtime threshold, then fire CRITICAL.
+     * The sentinel file is written first so we have proof of arg
+     * evaluation regardless of where the abort signal lands. */
+    g_autofree gchar *marker = g_build_filename (g_get_tmp_dir (),
+        "wyl-critical-bypass-marker", NULL);
+
+    g_unsetenv ("WYL_LOG_FILE");
+    g_setenv ("WYL_LOG", "*:none", TRUE);
+    wyl_log_internal_reconfigure ();
+
+    /* Write the sentinel before calling CRITICAL. */
+    g_file_set_contents (marker, "1", 1, NULL);
+
+    WYL_LOG_CRITICAL (WYL_LOG_SECTION_GENERAL, "bypass-test");
+    /* Unreachable: WYL_LOG_CRITICAL aborts. */
+    return;
+  }
+
+  g_autofree gchar *marker = g_build_filename (g_get_tmp_dir (),
+      "wyl-critical-bypass-marker", NULL);
+  g_unlink (marker);
+
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+
+  /* Verify the sentinel (side-effect) ran in the child. */
+  gchar *contents = NULL;
+  gboolean ok = g_file_get_contents (marker, &contents, NULL, NULL);
+  g_assert_true (ok);
+  g_free (contents);
+  g_unlink (marker);
+}
+
 int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
 
-  g_test_add_func ("/wyl-log-ceiling/debug-no-side-effect",
+  g_test_add_func ("/wyl-log/ceiling/debug-no-side-effect",
       test_debug_no_side_effect);
-  g_test_add_func ("/wyl-log-ceiling/info-no-side-effect",
+  g_test_add_func ("/wyl-log/ceiling/info-no-side-effect",
       test_info_no_side_effect);
-  g_test_add_func ("/wyl-log-ceiling/warn-evaluates-args",
+  g_test_add_func ("/wyl-log/ceiling/warn-evaluates-args",
       test_warn_evaluates_args);
-  g_test_add_func ("/wyl-log-ceiling/error-evaluates-args",
+  g_test_add_func ("/wyl-log/ceiling/error-evaluates-args",
       test_error_evaluates_args);
+  g_test_add_func ("/wyl-log/ceiling/critical-bypasses-ceiling",
+      test_critical_bypasses_ceiling);
 
   return g_test_run ();
 }
