@@ -16,7 +16,12 @@ libsoup_dep = dependency('libsoup-3.0',
 )
 sodium_dep = dependency('libsodium', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
-duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])
+enable_audit_opt = get_option('enable_audit')
+if enable_audit_opt.allowed()
+  duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])
+else
+  duckdb_dep = disabler()
+endif
 
 wirelog_proj = subproject(
   'wirelog',
