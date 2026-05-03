@@ -1,34 +1,37 @@
-% principal.dl — Wyrelog Access Intelligence Principal FSM v0
-%
-% SPDX-License-Identifier: GPL-3.0-or-later
-% Copyright (C) 2026 wyrelog authors. Also available under a separate
-% commercial license; see LICENSE.md at the project root.
-%
-% Principal authentication state machine. Five states, seven events,
-% eight transitions (functional integrity constraint: at most one
-% (from, event) -> to row). The terminal state `revoked` has no
-% outgoing edge.
-%
-% States  : unverified, mfa_required, authenticated, locked, revoked.
-% Events  : login_ok, login_skip_mfa, mfa_ok, failed_attempt,
-%           lock, unlock, revoke.
-%
-% MFA is mandatory on the production path. The `login_skip_mfa`
-% event is permitted by the FSM itself but must be gated upstream
-% on non-production deployment modes; see the host-side ingress
-% policy.
-%
-% Row order is load-bearing: the test harness compares the rows
-% below line-by-line against the C mirror table, so reordering
-% one side without the other will fail the build.
+// principal.dl — Wyrelog Access Intelligence Principal FSM v0
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 wyrelog authors. Also available under a separate
+// commercial license; see LICENSE.md at the project root.
+//
+// Principal authentication state machine. Five states, seven events,
+// eight transitions (functional integrity constraint: at most one
+// (from, event) -> to row). The terminal state `revoked` has no
+// outgoing edge.
+//
+// States  : unverified, mfa_required, authenticated, locked, revoked.
+// Events  : login_ok, login_skip_mfa, mfa_ok, failed_attempt,
+//           lock, unlock, revoke.
+//
+// MFA is mandatory on the production path. The `login_skip_mfa`
+// event is permitted by the FSM itself but must be gated upstream
+// on non-production deployment modes; see the host-side ingress
+// policy.
+//
+// Row order is load-bearing: the test harness compares the rows
+// below line-by-line against the C mirror table, so reordering one
+// side without the other will fail the build.
 
-principal_transition(unverified,    login_ok,         mfa_required).
-principal_transition(unverified,    login_skip_mfa,   authenticated).
-principal_transition(mfa_required,  mfa_ok,           authenticated).
-principal_transition(mfa_required,  failed_attempt,   mfa_required).
-principal_transition(mfa_required,  lock,             locked).
-principal_transition(authenticated, lock,             locked).
-principal_transition(authenticated, revoke,           revoked).
-principal_transition(locked,        unlock,           unverified).
+.decl principal_transition(from: symbol, event: symbol, to: symbol)
+.decl principal_step(from: symbol, event: symbol, to: symbol)
+
+principal_transition("unverified",    "login_ok",       "mfa_required").
+principal_transition("unverified",    "login_skip_mfa", "authenticated").
+principal_transition("mfa_required",  "mfa_ok",         "authenticated").
+principal_transition("mfa_required",  "failed_attempt", "mfa_required").
+principal_transition("mfa_required",  "lock",           "locked").
+principal_transition("authenticated", "lock",           "locked").
+principal_transition("authenticated", "revoke",         "revoked").
+principal_transition("locked",        "unlock",         "unverified").
 
 principal_step(From, Ev, To) :- principal_transition(From, Ev, To).
