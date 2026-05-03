@@ -25,6 +25,7 @@ wyrelog_sources = files(
   'wyl-handle.c',
   'wyl-id.c',
   'wyl-keyprovider-dev.c',
+  'wyl-log.c',
   'wyl-perm.c',
   'wyl-permission-scope.c',
   'wyl-session.c',
@@ -33,7 +34,19 @@ wyrelog_sources = files(
 
 wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep]
 
-wyrelog_c_args = []
+wyrelog_log_levels = {
+  'none' : 0,
+  'error' : 1,
+  'warn' : 2,
+  'info' : 3,
+  'debug' : 4,
+  'trace' : 5,
+}
+wyrelog_log_max = wyrelog_log_levels[get_option('wyrelog_log_max_level')]
+
+wyrelog_c_args = [
+  '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
+]
 
 if get_option('enable_audit').allowed()
   wyrelog_sources += files('audit/conn.c')
