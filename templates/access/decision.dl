@@ -1,36 +1,48 @@
-% decision.dl — Wyrelog Access Decision Rule Set v0
-%
-% SPDX-License-Identifier: GPL-3.0-or-later
-% Copyright (C) 2026 wyrelog authors. Also available under a separate
-% commercial license; see LICENSE.md at the project root.
-%
-% Conjunctive access decision plus a six-row deny-reason taxonomy.
-% The decision program produces a boolean projection (allow_bool/3)
-% from a conjunctive derivation (allow/3); when the conjunction
-% fails, deny_reason/5 emits one row per violated clause. The full
-% deny-reason set is recorded in the audit row; the engine selects
-% a single representative reason for the H1 result struct using a
-% fixed priority order documented in the C surface.
-%
-% EDB schemas (host-populated, no clauses below):
-%   has_permission(user, perm, scope)
-%   principal_state(user, state)
-%   session_state(scope, state)
-%   session_active(state)
-%   armed(user, perm, scope)            -- IDB defined in
-%                                          permission_scope.dl
-%   frozen(scope)
-%   disabled_role_for(user, perm)
-%   policy_violation(kind, user, perm, witness)
-%   now(timestamp)                      -- host-bridged context
-%   break_glass_used(user)              -- host-bridged context
-%
-% Row order in the deny_reason block is load-bearing: the test
-% harness compares the head signatures line by line against the
-% C catalogue, so reordering one side without the other will fail
-% the build.
+// decision.dl — Wyrelog Access Decision Rule Set v0
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 wyrelog authors. Also available under a separate
+// commercial license; see LICENSE.md at the project root.
+//
+// Conjunctive access decision plus a six-row deny-reason taxonomy.
+// The decision program produces a boolean projection (allow_bool/3)
+// from a conjunctive derivation (allow/3); when the conjunction
+// fails, deny_reason/5 emits one row per violated clause. The full
+// deny-reason set is recorded in the audit row; the host selects a
+// single representative reason for the public decision struct using
+// a fixed priority order documented in the C surface.
+//
+// EDB schemas (host-populated):
+//   principal_state(user, state)
+//   session_state(scope, state)
+//   session_active(state)
+//   frozen(scope)
+//   disabled_role_for(user, perm)
+//   policy_violation(kind, user, perm, witness)
+//
+// `has_permission/3` and `armed/3` are IDB rules defined elsewhere
+// (bootstrap.dl and permission_scope.dl respectively); both are
+// already declared in those files and need no second .decl here.
+//
+// Row order in the deny_reason block is load-bearing: the test
+// harness compares the head signatures line by line against the
+// C catalogue, so reordering one side without the other will fail
+// the build.
 
-% --- allow / allow_bool ----------------------------------------------
+.decl principal_state(user: symbol, state: symbol)
+.decl session_state(scope: symbol, state: symbol)
+.decl session_active(state: symbol)
+.decl frozen(scope: symbol)
+.decl disabled_role_for(user: symbol, perm: symbol)
+.decl policy_violation(kind: symbol, user: symbol, perm: symbol,
+    witness: symbol)
+
+.decl allow(user: symbol, perm: symbol, scope: symbol)
+.decl allow_bool(user: symbol, perm: symbol, scope: symbol)
+.decl deny_reason(user: symbol, perm: symbol, scope: symbol,
+    code: symbol, origin: symbol)
+
+// --- allow / allow_bool ----------------------------------------------
 
 allow(U, P, S) :-
     has_permission(U, P, S),
@@ -38,13 +50,13 @@ allow(U, P, S) :-
     session_state(S, ST),
     session_active(ST),
     armed(U, P, S),
-    \+ frozen(S),
-    \+ disabled_role_for(U, P),
-    \+ policy_violation("sod", U, P, _).
+    !frozen(S),
+    !disabled_role_for(U, P),
+    !policy_violation("sod", U, P, _).
 
 allow_bool(U, P, S) :- allow(U, P, S).
 
-% --- deny_reason ----------------------------------------------------
+// --- deny_reason ----------------------------------------------------
 
 deny_reason(U, P, S, "frozen", "frozen") :-
     has_permission(U, P, S),
@@ -60,17 +72,17 @@ deny_reason(U, P, S, "sod", "policy_violation") :-
 
 deny_reason(U, P, S, "not_authenticated", "principal_state") :-
     has_permission(U, P, S),
-    \+ principal_state(U, "authenticated").
+    !principal_state(U, "authenticated").
 
 deny_reason(U, P, S, "session_inactive", "session_state") :-
     has_permission(U, P, S),
     principal_state(U, "authenticated"),
     session_state(S, ST),
-    \+ session_active(ST).
+    !session_active(ST).
 
 deny_reason(U, P, S, "not_armed", "perm_state") :-
     has_permission(U, P, S),
     principal_state(U, "authenticated"),
     session_state(S, ST),
     session_active(ST),
-    \+ armed(U, P, S).
+    !armed(U, P, S).
