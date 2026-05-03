@@ -3,7 +3,7 @@
 #include <glib/gstdio.h>
 #include <stdio.h>
 
-#include "wyrelog/wyl-access-decision-private.h"
+#include "wyrelog/access/decision-private.h"
 #include "wyrelog/wyl-dl-static-private.h"
 
 #ifndef WYL_TEST_ACCESS_DECISION_DL_PATH

@@ -12,7 +12,7 @@ wyrelog_public_headers = files(
 )
 
 wyrelog_sources = files(
-  'wyl-access-decision.c',
+  'access/decision.c',
   'audit/event.c',
   'wyl-boot.c',
   'wyl-decide.c',
