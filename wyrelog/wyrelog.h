@@ -83,6 +83,22 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_revoke_req_t, wyl_revoke_req_free);
 wyrelog_error_t wyl_init (const gchar * config_path, WylHandle ** out_handle);
 void wyl_shutdown (WylHandle * handle);
 
+/*
+ * Returns the handle's construct-time identifier as a 36-character
+ * canonical string (caller frees with g_free or g_autofree). May
+ * return NULL only if the handle is NULL or not a WylHandle. The id
+ * is stable for the lifetime of the handle so log lines, audit
+ * events, and metrics emitted by the daemon can be correlated back
+ * to a specific embedding instance.
+ */
+gchar *wyl_handle_dup_id_string (const WylHandle * self);
+
+/*
+ * Returns the construct-time wall-clock stamp in microseconds since
+ * the Unix epoch (g_get_real_time). Returns -1 on a NULL argument.
+ */
+gint64 wyl_handle_get_created_at_us (const WylHandle * self);
+
 /* Decide */
 wyrelog_error_t wyl_decide (WylHandle * handle,
     const wyl_decide_req_t * req, wyl_decide_resp_t * resp);
