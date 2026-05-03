@@ -1,7 +1,13 @@
 wyrelog_inc = include_directories('..')
 
 wyrelog_public_headers = files(
+  'audit.h',
+  'decide.h',
   'error.h',
+  'handle.h',
+  'perm.h',
+  'session.h',
+  'version.h',
   'wyrelog.h',
 )
 
