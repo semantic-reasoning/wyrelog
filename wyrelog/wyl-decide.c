@@ -10,7 +10,7 @@ struct _wyl_decide_req
 
 struct _wyl_decide_resp
 {
-  gint placeholder;
+  wyl_decision_t decision;
 };
 
 wyl_decide_req_t *
@@ -85,6 +85,23 @@ void
 wyl_decide_resp_free (wyl_decide_resp_t *resp)
 {
   g_free (resp);
+}
+
+void
+wyl_decide_resp_set_decision (wyl_decide_resp_t *resp, wyl_decision_t decision)
+{
+  g_return_if_fail (resp != NULL);
+  resp->decision = decision;
+}
+
+wyl_decision_t
+wyl_decide_resp_get_decision (const wyl_decide_resp_t *resp)
+{
+  /* Fail-closed default for a NULL or unset response: a caller that
+   * forgets to inspect the error path or never populates the
+   * response must not silently observe an ALLOW. */
+  g_return_val_if_fail (resp != NULL, WYL_DECISION_DENY);
+  return resp->decision;
 }
 
 wyrelog_error_t

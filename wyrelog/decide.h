@@ -9,6 +9,18 @@
 G_BEGIN_DECLS;
 
 /*
+ * Decision verdict carried by a decide response. The numeric value
+ * of WYL_DECISION_DENY is deliberately zero so that g_new0-style
+ * zero-initialised responses default to fail-closed: a caller that
+ * forgets to populate the response must not silently observe ALLOW.
+ */
+typedef enum wyl_decision_t
+{
+  WYL_DECISION_DENY = 0,
+  WYL_DECISION_ALLOW = 1,
+} wyl_decision_t;
+
+/*
  * Opaque request/response carriers for decide.
  *
  * Constructed with the matching _new function, populated through
@@ -43,6 +55,20 @@ const gchar *wyl_decide_req_get_resource_id (const wyl_decide_req_t * req);
 wyl_decide_resp_t *wyl_decide_resp_new (void);
 void wyl_decide_resp_free (wyl_decide_resp_t * resp);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_decide_resp_t, wyl_decide_resp_free);
+
+/*
+ * Sets the decision carried by |resp|. Replaces any previously set
+ * verdict.
+ */
+void wyl_decide_resp_set_decision (wyl_decide_resp_t * resp,
+    wyl_decision_t decision);
+
+/*
+ * Returns the decision carried by |resp|. Returns WYL_DECISION_DENY
+ * on a NULL argument so callers that forget the error path see
+ * fail-closed semantics.
+ */
+wyl_decision_t wyl_decide_resp_get_decision (const wyl_decide_resp_t * resp);
 
 wyrelog_error_t wyl_decide (WylHandle * handle,
     const wyl_decide_req_t * req, wyl_decide_resp_t * resp);

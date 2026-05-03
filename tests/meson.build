@@ -173,3 +173,10 @@ test_decide_req = executable('test-decide-req',
 )
 
 test('decide-req', test_decide_req)
+
+test_decide_resp = executable('test-decide-resp',
+  'test-decide-resp.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('decide-resp', test_decide_resp)
