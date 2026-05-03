@@ -77,15 +77,23 @@ test_error_evaluates_args (void)
  *
  * Strategy: the child writes a sentinel file before the abort fires.
  * If args are not evaluated the sentinel never appears.  The parent
- * verifies the child aborted AND the sentinel exists. */
+ * verifies the child aborted AND the sentinel exists.
+ *
+ * Isolation: a process-unique tmpdir (via g_dir_make_tmp) is created by
+ * the parent and communicated to the child via WYL_TEST_CRITICAL_TMPDIR.
+ * This prevents collisions between concurrent test runs (CI matrix,
+ * meson test --repeat=N, parallel runners sharing /tmp). */
 static void
 test_critical_bypasses_ceiling (void)
 {
   if (g_test_subprocess ()) {
-    /* Child path: silence the runtime threshold, then fire CRITICAL.
-     * The sentinel file is written first so we have proof of arg
-     * evaluation regardless of where the abort signal lands. */
-    g_autofree gchar *marker = g_build_filename (g_get_tmp_dir (),
+    /* Child path: read unique tmpdir from env, silence the runtime
+     * threshold, then fire CRITICAL.  The sentinel file is written
+     * first so we have proof of arg evaluation regardless of where
+     * the abort signal lands. */
+    const gchar *tmpdir = g_getenv ("WYL_TEST_CRITICAL_TMPDIR");
+    g_autofree gchar *marker =
+        g_build_filename (tmpdir ? tmpdir : g_get_tmp_dir (),
         "wyl-critical-bypass-marker", NULL);
 
     g_unsetenv ("WYL_LOG_FILE");
@@ -100,9 +108,18 @@ test_critical_bypasses_ceiling (void)
     return;
   }
 
-  g_autofree gchar *marker = g_build_filename (g_get_tmp_dir (),
-      "wyl-critical-bypass-marker", NULL);
-  g_unlink (marker);
+  /* Parent path: create a process-unique tmpdir and pass its path to
+   * the subprocess via env var so parallel test runs cannot collide
+   * on the same sentinel filename. */
+  GError *err = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-critical-XXXXXX", &err);
+  g_assert_no_error (err);
+  g_assert_nonnull (tmpdir);
+
+  g_setenv ("WYL_TEST_CRITICAL_TMPDIR", tmpdir, TRUE);
+
+  g_autofree gchar *marker =
+      g_build_filename (tmpdir, "wyl-critical-bypass-marker", NULL);
 
   g_test_trap_subprocess (NULL, 0, 0);
   g_test_trap_assert_failed ();
@@ -112,7 +129,12 @@ test_critical_bypasses_ceiling (void)
   gboolean ok = g_file_get_contents (marker, &contents, NULL, NULL);
   g_assert_true (ok);
   g_free (contents);
-  g_unlink (marker);
+
+  /* Cleanup: remove sentinel then unique tmpdir. */
+  g_remove (marker);
+  g_rmdir (tmpdir);
+
+  g_unsetenv ("WYL_TEST_CRITICAL_TMPDIR");
 }
 
 int
