@@ -131,3 +131,10 @@ test_id = executable('test-id',
 )
 
 test('id', test_id)
+
+test_audit_event = executable('test-audit-event',
+  'test-audit-event.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('audit-event', test_audit_event)
