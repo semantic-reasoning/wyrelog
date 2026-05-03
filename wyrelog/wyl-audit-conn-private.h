@@ -66,4 +66,21 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_audit_conn_t, wyl_audit_conn_close);
  */
 duckdb_connection wyl_audit_conn_get_connection (wyl_audit_conn_t * conn);
 
+/*
+ * Ensures the audit_events table exists on the open connection.
+ * Idempotent: subsequent calls on the same connection are no-ops.
+ * The table mirrors the WylAuditEvent public surface:
+ *
+ *   id            VARCHAR PRIMARY KEY  -- canonical 36-char form
+ *   created_at_us BIGINT               -- g_get_real_time stamp
+ *   subject_id    VARCHAR
+ *   action        VARCHAR
+ *   resource_id   VARCHAR
+ *   decision      SMALLINT             -- 0 = DENY, 1 = ALLOW
+ *
+ * Returns WYRELOG_E_OK on success, WYRELOG_E_INVALID for a NULL
+ * argument, and WYRELOG_E_IO if DuckDB rejects the DDL.
+ */
+wyrelog_error_t wyl_audit_conn_create_schema (wyl_audit_conn_t * conn);
+
 G_END_DECLS;

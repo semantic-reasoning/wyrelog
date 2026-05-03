@@ -61,3 +61,26 @@ wyl_audit_conn_get_connection (wyl_audit_conn_t *conn)
   }
   return conn->conn;
 }
+
+wyrelog_error_t
+wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
+{
+  static const gchar *ddl =
+      "CREATE TABLE IF NOT EXISTS audit_events ("
+      "  id            VARCHAR PRIMARY KEY,"
+      "  created_at_us BIGINT  NOT NULL,"
+      "  subject_id    VARCHAR,"
+      "  action        VARCHAR,"
+      "  resource_id   VARCHAR," "  decision      SMALLINT NOT NULL" ");";
+
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+
+  duckdb_result result;
+  if (duckdb_query (conn->conn, ddl, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}

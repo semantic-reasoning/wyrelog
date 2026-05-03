@@ -130,6 +130,45 @@ check_get_connection_null (void)
   return 0;
 }
 
+/* --- DDL schema creation -------------------------------------- */
+
+static gint
+check_create_schema (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 70;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 71;
+  /* Idempotent: a second call must also succeed because the DDL
+   * uses CREATE TABLE IF NOT EXISTS. */
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 72;
+
+  /* The freshly created table must be queryable and empty. */
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  duckdb_result result;
+  if (duckdb_query (h, "SELECT COUNT(*) FROM audit_events;",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 73;
+  }
+  if (duckdb_value_int64 (&result, 0, 0) != 0) {
+    duckdb_destroy_result (&result);
+    return 74;
+  }
+  duckdb_destroy_result (&result);
+  return 0;
+}
+
+static gint
+check_create_schema_null_arg (void)
+{
+  if (wyl_audit_conn_create_schema (NULL) != WYRELOG_E_INVALID)
+    return 80;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -147,6 +186,10 @@ main (void)
   if ((rc = check_close_null_noop ()) != 0)
     return rc;
   if ((rc = check_get_connection_null ()) != 0)
+    return rc;
+  if ((rc = check_create_schema ()) != 0)
+    return rc;
+  if ((rc = check_create_schema_null_arg ()) != 0)
     return rc;
   return 0;
 }
