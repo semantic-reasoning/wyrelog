@@ -70,29 +70,13 @@ libchronoid_dep = declare_dependency(
 subdir('wyrelog')
 subdir('tests')
 
-install_data(
-  'templates/access/bootstrap.dl',
-  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access'),
-)
-
-install_data(
-  'templates/access/decision.dl',
-  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access'),
-)
-
-install_data(
-  'templates/access/fsm/principal.dl',
-  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access', 'fsm'),
-)
-
-install_data(
-  'templates/access/fsm/session.dl',
-  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access', 'fsm'),
-)
-
-install_data(
-  'templates/access/fsm/permission_scope.dl',
-  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'access', 'fsm'),
+# Install the access-control .dl template tree as a single subdir under
+# ${datadir}/wyrelog/access. install_subdir mirrors the source layout
+# (including the fsm/ subdirectory) and picks up future additions
+# without requiring a meson.build edit per template.
+install_subdir(
+  'templates/access',
+  install_dir : join_paths(get_option('datadir'), 'wyrelog'),
 )
 
 # Install git pre-commit hook for code style checking
