@@ -89,7 +89,7 @@ jobs:
         shell: cmd
         run: |
           @echo off
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
+          git clone --depth 1 --branch 2026.04.27 https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
           call "%VCPKG_ROOT%\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Register NuGet source
