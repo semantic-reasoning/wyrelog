@@ -166,3 +166,10 @@ test_session_username = executable('test-session-username',
 )
 
 test('session-username', test_session_username)
+
+test_decide_req = executable('test-decide-req',
+  'test-decide-req.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('decide-req', test_decide_req)
