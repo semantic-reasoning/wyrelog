@@ -180,16 +180,16 @@ test_file_sink_redirection (void)
 
   g_setenv ("WYL_LOG_FILE", path, TRUE);
   g_setenv ("WYL_LOG", "*:5", TRUE);
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 
   wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
       "redirect-test-marker %d", 42);
 
   /* Flush any pending writes. */
-  wyl_log_internal_reload_for_tests (); /* closes the file */
+  wyl_log_internal_reconfigure ();      /* closes the file */
   g_unsetenv ("WYL_LOG_FILE");
   g_unsetenv ("WYL_LOG");
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -210,13 +210,13 @@ test_file_sink_fallback_on_invalid_path (void)
   g_setenv ("WYL_LOG", "*:5", TRUE);
 
   /* Must not crash — stderr fallback applies (FC1: do not refuse to boot). */
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
   wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
       "fallback-test-marker");
 
   g_unsetenv ("WYL_LOG_FILE");
   g_unsetenv ("WYL_LOG");
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 }
 
 static void
@@ -229,7 +229,7 @@ test_runtime_filter_end_to_end (void)
   g_setenv ("WYL_LOG_FILE", path, TRUE);
   /* GENERAL threshold = ERROR (1); POLICY threshold = TRACE (5). */
   g_setenv ("WYL_LOG", "GENERAL:1,POLICY:5", TRUE);
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 
   /* DEBUG (wyl level 4) > GENERAL threshold (1) -> should be suppressed. */
   wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_DEBUG,
@@ -241,7 +241,7 @@ test_runtime_filter_end_to_end (void)
   /* Close the file by reloading with no WYL_LOG_FILE. */
   g_unsetenv ("WYL_LOG_FILE");
   g_unsetenv ("WYL_LOG");
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -259,7 +259,7 @@ test_runtime_filter_end_to_end (void)
 }
 
 static void
-test_same_path_coexistence_no_crash (void)
+test_file_sink_reopen_same_path_no_crash (void)
 {
   g_autofree gchar *tmpdir = g_dir_make_tmp ("wyrelog-test-XXXXXX", NULL);
   g_assert_nonnull (tmpdir);
@@ -272,7 +272,7 @@ test_same_path_coexistence_no_crash (void)
   g_setenv ("WL_LOG_FILE", path, TRUE);
   g_setenv ("WYL_LOG_FILE", path, TRUE);
   g_setenv ("WYL_LOG", "*:5", TRUE);
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 
   wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
       "coexistence-test-marker");
@@ -280,7 +280,7 @@ test_same_path_coexistence_no_crash (void)
   g_unsetenv ("WL_LOG_FILE");
   g_unsetenv ("WYL_LOG_FILE");
   g_unsetenv ("WYL_LOG");
-  wyl_log_internal_reload_for_tests ();
+  wyl_log_internal_reconfigure ();
 
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -331,8 +331,8 @@ main (int argc, char **argv)
       test_file_sink_fallback_on_invalid_path);
   g_test_add_func ("/wyl-log/runtime/filter-end-to-end",
       test_runtime_filter_end_to_end);
-  g_test_add_func ("/wyl-log/runtime/same-path-coexistence-no-crash",
-      test_same_path_coexistence_no_crash);
+  g_test_add_func ("/wyl-log/runtime/file-sink-reopen-same-path-no-crash",
+      test_file_sink_reopen_same_path_no_crash);
 
   return g_test_run ();
 }

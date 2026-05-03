@@ -198,7 +198,8 @@ ensure_init (void)
     if (path != NULL && path[0] != '\0') {
       FILE *f = fopen (path, "a");
       if (f != NULL) {
-        setvbuf (f, NULL, _IOLBF, 0);
+        /* fflush() per record in the writer handles ordering;
+         * setvbuf line-buffering is redundant and not used. */
         log_file_sink = f;
       } else {
         fprintf (stderr, "[wyrelog WARN] WYL_LOG_FILE=%s unwritable: %s\n",
@@ -215,7 +216,7 @@ ensure_init (void)
 }
 
 void
-wyl_log_internal_reload_for_tests (void)
+wyl_log_internal_reconfigure (void)
 {
   ensure_init ();
 
@@ -228,7 +229,9 @@ wyl_log_internal_reload_for_tests (void)
     section_levels[i] = new_levels[i];
   g_mutex_unlock (&log_mutex);
 
-  /* Re-open WYL_LOG_FILE under sink_mutex. */
+  /* Re-open WYL_LOG_FILE under sink_mutex. fflush() per record in the
+   * writer already handles ordering; setvbuf line-buffering is
+   * redundant and dropped here. */
   const char *path = g_getenv ("WYL_LOG_FILE");
   g_mutex_lock (&sink_mutex);
   if (log_file_sink != NULL) {
@@ -238,7 +241,6 @@ wyl_log_internal_reload_for_tests (void)
   if (path != NULL && path[0] != '\0') {
     FILE *f = fopen (path, "a");
     if (f != NULL) {
-      setvbuf (f, NULL, _IOLBF, 0);
       log_file_sink = f;
     } else {
       fprintf (stderr, "[wyrelog WARN] WYL_LOG_FILE=%s unwritable: %s\n",

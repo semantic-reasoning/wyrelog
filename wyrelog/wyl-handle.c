@@ -2,6 +2,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "wyl-id-private.h"
+#include "wyl-log-private.h"
 
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
@@ -59,6 +60,11 @@ wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
   (void) config_path;
+
+  /* Eagerly initialise the log subsystem before any other library code
+   * runs so that log sites in boot phases see the correct thresholds
+   * and file sink from the very first message. */
+  wyl_log_internal_reconfigure ();
 
   if (out_handle == NULL)
     return WYRELOG_E_INVALID;
