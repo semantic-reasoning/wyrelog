@@ -188,6 +188,13 @@ test_grant_req = executable('test-grant-req',
 
 test('grant-req', test_grant_req)
 
+test_revoke_req = executable('test-revoke-req',
+  'test-revoke-req.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('revoke-req', test_revoke_req)
+
 if get_option('enable_audit').allowed()
   test_audit_conn = executable('test-audit-conn',
     'test-audit-conn.c',
