@@ -33,6 +33,13 @@ test_dl_static = executable('test-dl-static',
 
 test('dl-static', test_dl_static)
 
+test_log = executable('test-log',
+  'test-log.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('log', test_log)
+
 fsm_principal_dl_path = join_paths(
   meson.project_source_root(),
   'templates', 'access', 'fsm', 'principal.dl',

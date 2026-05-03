@@ -59,6 +59,20 @@ option('duckdb_source',
               + 'subproject for from-source validation.'
 )
 
+option('wyrelog_log_max_level',
+  type : 'combo',
+  choices : ['none', 'error', 'warn', 'info', 'debug', 'trace'],
+  value : 'debug',
+  description : 'Compile-time ceiling for the WYL_LOG structured '
+              + 'logger. Levels above this value have their call '
+              + 'sites stripped at compile time so no .text bytes '
+              + 'and no argument evaluation occur. Use "error" or '
+              + '"warn" for release/production builds. Default '
+              + '"debug" suits in-tree development. The runtime '
+              + 'WYL_LOG environment variable filters within this '
+              + 'compile-time ceiling but cannot raise it.'
+)
+
 option('enable_break_glass',
   type : 'boolean',
   value : false,
