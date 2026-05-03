@@ -18,7 +18,8 @@ wyl_boot_run (const boot_phase_t *seq, gsize n, gpointer ctx)
     if (phase->fn == NULL) {
       if (phase->fail_closed)
         return WYRELOG_E_INTERNAL;
-      WYL_LOG_WARN ("boot phase %d (%s) has no fn; skipping",
+      WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+          "boot phase %d (%s) has no fn; skipping",
           phase->id, phase->name ? phase->name : "?");
       continue;
     }
@@ -26,11 +27,13 @@ wyl_boot_run (const boot_phase_t *seq, gsize n, gpointer ctx)
     rc = phase->fn (ctx);
     if (rc != WYRELOG_E_OK) {
       if (phase->fail_closed) {
-        WYL_LOG_ERROR ("boot phase %d (%s) failed; halting",
+        WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+            "boot phase %d (%s) failed; halting",
             phase->id, phase->name ? phase->name : "?");
         return rc;
       }
-      WYL_LOG_WARN ("boot phase %d (%s) failed (continuing)",
+      WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+          "boot phase %d (%s) failed (continuing)",
           phase->id, phase->name ? phase->name : "?");
     }
   }

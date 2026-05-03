@@ -8,33 +8,70 @@
 #endif
 
 /*
- * Severity macros mapped onto GLib log levels:
+ * Section-aware, compile-time-ceiling-aware severity macros.
  *
- *   WYL_LOG_DEBUG    -> G_LOG_LEVEL_DEBUG     (verbose)
- *   WYL_LOG_INFO     -> G_LOG_LEVEL_INFO      (informational)
- *   WYL_LOG_WARN     -> G_LOG_LEVEL_WARNING   (recoverable warning)
- *   WYL_LOG_ERROR    -> G_LOG_LEVEL_CRITICAL  (recoverable error;
- *                                              program continues)
- *   WYL_LOG_CRITICAL -> G_LOG_LEVEL_ERROR     (invariant violation;
- *                                              terminates the program)
+ * Every macro takes a WYL_LOG_SECTION_* constant as its first argument
+ * followed by a printf-style format and variadic arguments.
  *
- * The mapping for ERROR/CRITICAL is intentionally inverted relative to
- * the GLib level names because GLib treats G_LOG_LEVEL_ERROR as
- * always-fatal (it calls abort()) and G_LOG_LEVEL_CRITICAL as
- * non-fatal. Library code reaches for WYL_LOG_ERROR to record handled
- * but bad events; only WYL_LOG_CRITICAL is intended to terminate.
+ * Mapping onto GLib log levels (ERROR/CRITICAL intentionally inverted):
+ *
+ *   WYL_LOG_DEBUG(s,...)    -> WYL_LOG_LEVEL_DEBUG  ceiling,
+ *                              G_LOG_LEVEL_DEBUG
+ *   WYL_LOG_INFO(s,...)     -> WYL_LOG_LEVEL_INFO   ceiling,
+ *                              G_LOG_LEVEL_INFO
+ *   WYL_LOG_WARN(s,...)     -> WYL_LOG_LEVEL_WARN   ceiling,
+ *                              G_LOG_LEVEL_WARNING
+ *   WYL_LOG_ERROR(s,...)    -> WYL_LOG_LEVEL_ERROR  ceiling,
+ *                              G_LOG_LEVEL_CRITICAL (recoverable;
+ *                              program continues)
+ *   WYL_LOG_CRITICAL(s,...) -> WYL_LOG_LEVEL_ERROR  ceiling,
+ *                              G_LOG_LEVEL_ERROR    (invariant violation;
+ *                              GLib calls abort() — program terminates)
+ *
+ * The ERROR/CRITICAL inversion is deliberate: GLib treats
+ * G_LOG_LEVEL_ERROR as always-fatal (abort()) and G_LOG_LEVEL_CRITICAL
+ * as non-fatal. WYL_LOG_ERROR is for handled-but-bad events;
+ * WYL_LOG_CRITICAL is reserved for unrecoverable invariant violations
+ * and must NOT be used for errors that are expected to be handled.
+ *
+ * When WYL_LOG_MAX_LEVEL is below the macro's required level the macro
+ * expands to G_STMT_START {} G_STMT_END so arguments are never
+ * evaluated (compile-time dead-code elimination, no side-effects).
  */
 
-#define WYL_LOG_DEBUG(...) \
-  g_log (WYL_LOG_DOMAIN, G_LOG_LEVEL_DEBUG, __VA_ARGS__)
-#define WYL_LOG_INFO(...) \
-  g_log (WYL_LOG_DOMAIN, G_LOG_LEVEL_INFO, __VA_ARGS__)
-#define WYL_LOG_WARN(...) \
-  g_log (WYL_LOG_DOMAIN, G_LOG_LEVEL_WARNING, __VA_ARGS__)
-#define WYL_LOG_ERROR(...) \
-  g_log (WYL_LOG_DOMAIN, G_LOG_LEVEL_CRITICAL, __VA_ARGS__)
-#define WYL_LOG_CRITICAL(...) \
-  g_log (WYL_LOG_DOMAIN, G_LOG_LEVEL_ERROR, __VA_ARGS__)
+#define WYL_LOG_DEBUG(section, ...) \
+  G_STMT_START { \
+    if (WYL_LOG_LEVEL_DEBUG <= WYL_LOG_MAX_LEVEL) \
+      wyl_log_structured ((section), G_LOG_LEVEL_DEBUG, __VA_ARGS__); \
+  } G_STMT_END
+
+#define WYL_LOG_INFO(section, ...) \
+  G_STMT_START { \
+    if (WYL_LOG_LEVEL_INFO <= WYL_LOG_MAX_LEVEL) \
+      wyl_log_structured ((section), G_LOG_LEVEL_INFO, __VA_ARGS__); \
+  } G_STMT_END
+
+#define WYL_LOG_WARN(section, ...) \
+  G_STMT_START { \
+    if (WYL_LOG_LEVEL_WARN <= WYL_LOG_MAX_LEVEL) \
+      wyl_log_structured ((section), G_LOG_LEVEL_WARNING, __VA_ARGS__); \
+  } G_STMT_END
+
+#define WYL_LOG_ERROR(section, ...) \
+  G_STMT_START { \
+    if (WYL_LOG_LEVEL_ERROR <= WYL_LOG_MAX_LEVEL) \
+      wyl_log_structured ((section), G_LOG_LEVEL_CRITICAL, __VA_ARGS__); \
+  } G_STMT_END
+
+/* WYL_LOG_CRITICAL expands to G_LOG_LEVEL_ERROR which GLib treats as
+ * always-fatal (calls abort()). Use ONLY for unrecoverable invariant
+ * violations. Do NOT invoke for errors that callers are expected to
+ * handle; use WYL_LOG_ERROR instead. */
+#define WYL_LOG_CRITICAL(section, ...) \
+  G_STMT_START { \
+    if (WYL_LOG_LEVEL_ERROR <= WYL_LOG_MAX_LEVEL) \
+      wyl_log_structured ((section), G_LOG_LEVEL_ERROR, __VA_ARGS__); \
+  } G_STMT_END
 
 /* --- Section grammar -------------------------------------------------
  *
@@ -94,4 +131,4 @@ G_GNUC_PRINTF (3, 4);
      gint wyl_log_internal_get_section_level (wyl_log_section_t section);
      void wyl_log_internal_parse_spec (const char *spec,
     gint8 levels[WYL_LOG_SECTION_LAST_]);
-     void wyl_log_internal_reload_for_tests (void);
+     void wyl_log_internal_reconfigure (void);
