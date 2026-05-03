@@ -38,17 +38,19 @@ FOUND=0
 # Tier 1: meson introspect (authoritative, post-configure CI mode)
 # -----------------------------------------------------------------------
 if [ -d "$BUILDDIR" ] && command -v meson >/dev/null 2>&1; then
-  # Capture output and exit code separately so a meson failure is not
-  # silently swallowed.  An empty result from a successful introspect is
-  # valid (no installed files at all); a non-zero exit is a real error.
-  introspect_out=$(meson introspect --installed "$BUILDDIR" 2>&1)
-  introspect_rc=$?
-  if [ "$introspect_rc" -ne 0 ]; then
+  # Use `if ! var=$(cmd)` — exempt from set -e early-exit — so a meson
+  # failure is captured and reported rather than silently terminating the
+  # shell before $? can be read.  An empty result from a successful
+  # introspect is valid (no installed files at all); non-zero is a hard error.
+  # Note: $? inside the then-branch reflects the negated test result, not the
+  # original exit code; store it via a subshell trick instead.
+  introspect_out=$(meson introspect --installed "$BUILDDIR" 2>&1) || {
+    introspect_rc=$?
     echo "ERROR: meson introspect failed (exit $introspect_rc) — builddir may be corrupt or stale." >&2
     echo "$introspect_out" >&2
     echo "Re-run 'meson setup builddir' and retry." >&2
     exit 1
-  fi
+  }
 
   # introspect --installed emits JSON: {"dest": "src", ...}
   # Both keys and values can be install-destination paths.
