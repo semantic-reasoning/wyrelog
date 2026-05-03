@@ -1,44 +1,47 @@
-% session.dl — Wyrelog Access Intelligence Session FSM v0
-%
-% SPDX-License-Identifier: GPL-3.0-or-later
-% Copyright (C) 2026 wyrelog authors. Also available under a separate
-% commercial license; see LICENSE.md at the project root.
-%
-% Session lifecycle state machine. Five states, six events,
-% thirteen transitions (functional integrity constraint: at most
-% one (from, event) -> to row). The terminal state `closed` has
-% no outgoing edge.
-%
-% States  : idle, active, elevated, expiring, closed.
-% Events  : request, idle_timeout, expiry, elevate_grant,
-%           elevate_drop, logout.
-%
-% Intentional omissions (security invariant):
-%   * (expiring, request)      — no silent renewal of an expiring
-%                                 session; re-authentication is
-%                                 required.
-%   * (expiring, idle_timeout) — an expiring session cannot be
-%                                 collected by the idle path; it
-%                                 must follow the explicit expiry
-%                                 path or be closed.
-%
-% Row order is load-bearing: the test harness compares the rows
-% below line-by-line against the C mirror table, so reordering
-% one side without the other will fail the build. No
-% `session_transition(` token may appear inside comments.
+// session.dl — Wyrelog Access Intelligence Session FSM v0
+//
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 wyrelog authors. Also available under a separate
+// commercial license; see LICENSE.md at the project root.
+//
+// Session lifecycle state machine. Five states, six events,
+// thirteen transitions (functional integrity constraint: at most
+// one (from, event) -> to row). The terminal state `closed` has
+// no outgoing edge.
+//
+// States  : idle, active, elevated, expiring, closed.
+// Events  : request, idle_timeout, expiry, elevate_grant,
+//           elevate_drop, logout.
+//
+// Intentional omissions (security invariant):
+//   * (expiring, request)      — no silent renewal of an expiring
+//                                 session; re-authentication is
+//                                 required.
+//   * (expiring, idle_timeout) — an expiring session cannot be
+//                                 collected by the idle path; it
+//                                 must follow the explicit expiry
+//                                 path or be closed.
+//
+// Row order is load-bearing: the test harness compares the rows
+// below line-by-line against the C mirror table, so reordering one
+// side without the other will fail the build. No
+// `session_transition(` token may appear inside comments.
 
-session_transition(idle,      request,         active).
-session_transition(idle,      expiry,          closed).
-session_transition(idle,      logout,          closed).
-session_transition(active,    idle_timeout,    idle).
-session_transition(active,    expiry,          expiring).
-session_transition(active,    elevate_grant,   elevated).
-session_transition(active,    logout,          closed).
-session_transition(elevated,  idle_timeout,    idle).
-session_transition(elevated,  expiry,          expiring).
-session_transition(elevated,  elevate_drop,    active).
-session_transition(elevated,  logout,          closed).
-session_transition(expiring,  expiry,          closed).
-session_transition(expiring,  logout,          closed).
+.decl session_transition(from: symbol, event: symbol, to: symbol)
+.decl session_step(from: symbol, event: symbol, to: symbol)
+
+session_transition("idle",     "request",       "active").
+session_transition("idle",     "expiry",        "closed").
+session_transition("idle",     "logout",        "closed").
+session_transition("active",   "idle_timeout",  "idle").
+session_transition("active",   "expiry",        "expiring").
+session_transition("active",   "elevate_grant", "elevated").
+session_transition("active",   "logout",        "closed").
+session_transition("elevated", "idle_timeout",  "idle").
+session_transition("elevated", "expiry",        "expiring").
+session_transition("elevated", "elevate_drop",  "active").
+session_transition("elevated", "logout",        "closed").
+session_transition("expiring", "expiry",        "closed").
+session_transition("expiring", "logout",        "closed").
 
 session_step(From, Ev, To) :- session_transition(From, Ev, To).
