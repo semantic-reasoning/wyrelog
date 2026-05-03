@@ -70,11 +70,40 @@ jobs:
   build-windows:
     name: build-windows
     runs-on: windows-latest
+    permissions:
+      contents: read
+      packages: write
     env:
-      VCPKG_INSTALLED_DIR: C:\vcpkg\installed\x64-windows
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows
+      VCPKG_BINARY_SOURCES: "clear;nuget,https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json,readwrite"
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - name: Remove system vcpkg
+        shell: bash
+        run: rm -rf "$VCPKG_INSTALLATION_ROOT"
+
+      - name: Bootstrap vendored vcpkg
+        shell: cmd
+        run: |
+          @echo off
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
+          call "%VCPKG_ROOT%\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Register NuGet source
+        shell: pwsh
+        run: |
+          $nuget = & "$env:VCPKG_ROOT\vcpkg.exe" fetch nuget | Select-Object -Last 1
+          $feed  = "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json"
+          & $nuget sources add `
+            -Source $feed `
+            -StorePasswordInClearText `
+            -Name GitHubPackages `
+            -UserName "${{ github.repository_owner }}" `
+            -Password "${{ secrets.GITHUB_TOKEN }}"
+          & $nuget setapikey "${{ secrets.GITHUB_TOKEN }}" -Source $feed
 
       - name: Install meson and ninja
         shell: cmd
@@ -84,27 +113,11 @@ jobs:
         shell: cmd
         run: choco install pkgconfiglite -y --allow-empty-checksums
 
-      - name: Prepare vcpkg binary cache directory
-        shell: cmd
-        run: |
-          @echo off
-          set "CACHE_DIR=%RUNNER_TEMP%\vcpkg-cache"
-          if not exist "%CACHE_DIR%" mkdir "%CACHE_DIR%"
-          echo VCPKG_DEFAULT_BINARY_CACHE=%CACHE_DIR%>> %GITHUB_ENV%
-
-      - name: Restore vcpkg binary cache
-        uses: actions/cache@v4
-        with:
-          path: ${{ runner.temp }}\vcpkg-cache
-          key: windows-vcpkg-${{ hashFiles('.github/workflows/ci.yml') }}-v1
-          restore-keys: |
-            windows-vcpkg-
-
       - name: Install C dependencies (vcpkg)
         shell: cmd
         run: |
           @echo off
-          vcpkg install glib:x64-windows libsodium:x64-windows
+          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
 
       - name: Cache meson packagecache
         uses: actions/cache@v4
