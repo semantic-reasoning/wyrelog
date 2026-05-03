@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include "wyl-access-decision-private.h"
+#include "decision-private.h"
 
 static const gchar *const reason_names[] = {
   "frozen",
