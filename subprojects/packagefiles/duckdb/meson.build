@@ -20,7 +20,6 @@ duckdb_lib = library('duckdb',
   'duckdb.cpp',
   dependencies : duckdb_deps,
   include_directories : include_directories('.'),
-  gnu_symbol_visibility : 'hidden',
   install : true,
 )
 
