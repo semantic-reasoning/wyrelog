@@ -8,14 +8,27 @@ struct _WylSession
   GObject parent_instance;
   wyl_id_t id;
   gint64 created_at_us;
+  gchar *username;
 };
 
 G_DEFINE_FINAL_TYPE (WylSession, wyl_session, G_TYPE_OBJECT);
 
 static void
+wyl_session_finalize (GObject *object)
+{
+  WylSession *self = WYL_SESSION (object);
+
+  g_free (self->username);
+
+  G_OBJECT_CLASS (wyl_session_parent_class)->finalize (object);
+}
+
+static void
 wyl_session_class_init (WylSessionClass *klass)
 {
-  (void) klass;
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+
+  object_class->finalize = wyl_session_finalize;
 }
 
 static void
@@ -39,12 +52,15 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylSession **out_session)
 {
   (void) handle;
-  (void) req;
 
   if (out_session == NULL)
     return WYRELOG_E_INVALID;
 
-  *out_session = g_object_new (WYL_TYPE_SESSION, NULL);
+  WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
+  if (req != NULL)
+    session->username = g_strdup (wyl_login_req_get_username (req));
+
+  *out_session = session;
   return WYRELOG_E_OK;
 }
 
@@ -73,4 +89,13 @@ wyl_session_get_created_at_us (const WylSession *self)
 {
   g_return_val_if_fail (WYL_IS_SESSION (self), -1);
   return self->created_at_us;
+}
+
+gchar *
+wyl_session_dup_username (const WylSession *self)
+{
+  g_return_val_if_fail (WYL_IS_SESSION (self), NULL);
+  if (self->username == NULL)
+    return NULL;
+  return g_strdup (self->username);
 }

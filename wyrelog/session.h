@@ -71,4 +71,13 @@ gchar *wyl_session_dup_id_string (const WylSession * self);
  */
 gint64 wyl_session_get_created_at_us (const WylSession * self);
 
+/*
+ * Returns a heap-allocated copy of the principal username carried
+ * into the session by wyl_session_login (i.e. wyl_login_req's
+ * username field at login time). Returns NULL when the request
+ * supplied no username or when |self| is NULL or not a WylSession.
+ * Caller frees with g_free or g_autofree.
+ */
+gchar *wyl_session_dup_username (const WylSession * self);
+
 G_END_DECLS;
