@@ -10,13 +10,15 @@ duckdb_lib = cc.find_library('duckdb',
   required : true,
 )
 
-# Copy duckdb.dll into the build root so test executables can locate it
-# at runtime via the Windows loader's same-directory search rule.
-fs = import('fs')
-duckdb_runtime_dll = fs.copyfile('duckdb.dll', install : false)
-
+# duckdb.dll lives next to the import library duckdb.lib found above.
+# Tests need the DLL on the loader search path at run time; the
+# wrapping consumer (wyrelog/meson.build) is responsible for staging
+# it next to the test executables. We deliberately do NOT add the
+# DLL to declare_dependency's sources because that would feed it
+# into the consumer's lib.exe / link.exe input list and break the
+# static archive build on MSVC.
 duckdb_dep = declare_dependency(
   dependencies : duckdb_lib,
-  sources : duckdb_runtime_dll,
   include_directories : include_directories('.'),
 )
+
