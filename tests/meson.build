@@ -181,6 +181,13 @@ test_decide_resp = executable('test-decide-resp',
 
 test('decide-resp', test_decide_resp)
 
+test_grant_req = executable('test-grant-req',
+  'test-grant-req.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('grant-req', test_grant_req)
+
 if get_option('enable_audit').allowed()
   test_audit_conn = executable('test-audit-conn',
     'test-audit-conn.c',
