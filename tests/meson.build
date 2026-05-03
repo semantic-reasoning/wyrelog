@@ -138,3 +138,10 @@ test_audit_event = executable('test-audit-event',
 )
 
 test('audit-event', test_audit_event)
+
+test_handle_id = executable('test-handle-id',
+  'test-handle-id.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('handle-id', test_handle_id)
