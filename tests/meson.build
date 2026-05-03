@@ -195,6 +195,13 @@ test_revoke_req = executable('test-revoke-req',
 
 test('revoke-req', test_revoke_req)
 
+test_decide = executable('test-decide',
+  'test-decide.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('decide', test_decide)
+
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \

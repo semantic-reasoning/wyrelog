@@ -108,8 +108,29 @@ wyrelog_error_t
 wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     wyl_decide_resp_t *resp)
 {
-  (void) handle;
-  (void) req;
-  (void) resp;
-  return WYRELOG_E_INTERNAL;
+  if (handle == NULL || req == NULL || resp == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* The policy decision point is not yet wired to the principal /
+   * session FSMs or to a configured allow-list, so every decide
+   * call returns DENY. This keeps the public contract fail-closed
+   * by default; a future commit will replace this with the actual
+   * Datalog evaluation. */
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+
+#ifdef WYL_HAS_AUDIT
+  /* Mirror the decision into the audit log so every decide call
+   * leaves a row regardless of whether downstream callers also
+   * emit explicitly. Failures from emit are intentionally not
+   * propagated: a decision was made and reported; the audit-side
+   * write is best-effort relative to the caller's contract. */
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, wyl_decide_req_get_subject_id (req));
+  wyl_audit_event_set_action (ev, wyl_decide_req_get_action (req));
+  wyl_audit_event_set_resource_id (ev, wyl_decide_req_get_resource_id (req));
+  wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
+  (void) wyl_audit_emit (handle, ev);
+#endif
+
+  return WYRELOG_E_OK;
 }
