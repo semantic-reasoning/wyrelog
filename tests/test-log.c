@@ -1,6 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <stdio.h>
-#include <unistd.h>
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -201,7 +200,7 @@ test_file_sink_redirection (void)
           "redirect-test-marker 42"));
 
   remove (path);
-  rmdir (tmpdir);
+  g_rmdir (tmpdir);
 }
 
 static void
@@ -256,7 +255,7 @@ test_runtime_filter_end_to_end (void)
           "general-debug-should-not-appear"));
 
   remove (path);
-  rmdir (tmpdir);
+  g_rmdir (tmpdir);
 }
 
 static void
@@ -292,7 +291,7 @@ test_file_sink_reopen_same_path_no_crash (void)
           "coexistence-test-marker"));
 
   remove (path);
-  rmdir (tmpdir);
+  g_rmdir (tmpdir);
 }
 
 /* T7 — Thread-stress: sink_mutex serialises concurrent writes correctly.
