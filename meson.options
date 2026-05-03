@@ -44,6 +44,21 @@ option('enable_audit',
               + 'linkage).'
 )
 
+option('duckdb_source',
+  type : 'combo',
+  choices : ['prebuilt', 'subproject'],
+  value : 'prebuilt',
+  description : 'How libduckdb is sourced when enable_audit is on. '
+              + '"prebuilt" downloads the upstream-published library '
+              + 'binary for the host platform (fast: ~30 MB download '
+              + 'and zero compile). "subproject" downloads the '
+              + 'upstream amalgamated source release at v1.5.1 and '
+              + 'compiles the single 25 MB duckdb.cpp translation unit '
+              + 'in tree (slow: multi-minute single-TU compile). '
+              + 'Default is prebuilt; main-branch CI overrides to '
+              + 'subproject for from-source validation.'
+)
+
 option('enable_break_glass',
   type : 'boolean',
   value : false,
