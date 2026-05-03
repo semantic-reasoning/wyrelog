@@ -175,11 +175,18 @@ G_GNUC_PRINTF (6, 7);
  *     held simultaneously.
  *   - NOT async-signal-safe: do NOT call from signal handlers. The
  *     function acquires mutexes and calls fopen/fclose.
- *   - NOT safe across fork(2). The file FILE* is inherited along with
- *     its userspace stdio buffer. The child MUST NOT call fclose on
- *     the inherited handle (which would flush shared OS-level buffers
- *     and potentially corrupt the parent's pending writes); instead
- *     the child should construct a fresh log state from scratch (e.g.
- *     via wyl_log_internal_reconfigure after the inherited FILE* has
- *     been abandoned with freopen(/dev/null, ...) or by re-execing). */
+ *   - NOT safe across fork(2). The FILE* sink is inherited along with
+ *     its userspace stdio buffer, which is shared at the OS level with
+ *     the parent. The child MUST NOT call fclose (flushes the shared
+ *     buffer, corrupting parent's pending writes) and MUST NOT call
+ *     freopen (which calls fclose internally — same hazard). The
+ *     supported pattern is post-fork re-exec: the child re-executes
+ *     itself so that inherited FILE* handles are closed by the C
+ *     runtime before main() runs. If re-exec is not possible and the
+ *     child must silence the inherited handle, call
+ *     close(fileno(inherited_fp)) directly after ensuring no other
+ *     code path in the child references it; do NOT call
+ *     wyl_log_internal_reconfigure on a path that the parent also
+ *     writes to, as this would open a shared output and interleave
+ *     records. */
      void wyl_log_internal_reconfigure (void);
