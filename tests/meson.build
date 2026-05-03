@@ -145,3 +145,10 @@ test_handle_id = executable('test-handle-id',
 )
 
 test('handle-id', test_handle_id)
+
+test_session_id = executable('test-session-id',
+  'test-session-id.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('session-id', test_session_id)
