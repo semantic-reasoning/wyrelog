@@ -84,6 +84,11 @@ test_error_evaluates_args (void)
 static void
 test_critical_aborts_process (void)
 {
+#ifdef G_OS_WIN32
+  g_test_skip ("g_test_trap_subprocess is not portable to Windows; "
+      "the abort/bypass invariant is verified on POSIX hosts only.");
+  return;
+#endif
   if (g_test_subprocess ()) {
     /* Child: fire CRITICAL — expected to abort via G_LOG_LEVEL_ERROR. */
     WYL_LOG_CRITICAL (WYL_LOG_SECTION_GENERAL, "boom");
@@ -113,6 +118,11 @@ test_critical_aborts_process (void)
 static void
 test_critical_bypasses_ceiling (void)
 {
+#ifdef G_OS_WIN32
+  g_test_skip ("g_test_trap_subprocess is not portable to Windows; "
+      "the abort/bypass invariant is verified on POSIX hosts only.");
+  return;
+#endif
   if (g_test_subprocess ()) {
     /* Child path: read unique tmpdir from env, silence the runtime
      * threshold, then fire CRITICAL.  The sentinel file is written
