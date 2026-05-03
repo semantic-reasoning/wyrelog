@@ -92,6 +92,100 @@ check_accessor_null_safety (void)
   return 0;
 }
 
+static gint
+check_decision_default_is_deny (void)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  if (wyl_audit_event_get_decision (ev) != WYL_DECISION_DENY)
+    return 110;
+  return 0;
+}
+
+static gint
+check_set_decision_round_trip (void)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  if (wyl_audit_event_get_decision (ev) != WYL_DECISION_ALLOW)
+    return 120;
+  wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
+  if (wyl_audit_event_get_decision (ev) != WYL_DECISION_DENY)
+    return 121;
+  return 0;
+}
+
+static gint
+check_get_decision_null_is_deny (void)
+{
+  if (wyl_audit_event_get_decision (NULL) != WYL_DECISION_DENY)
+    return 130;
+  return 0;
+}
+
+static gint
+check_string_field_defaults_are_null (void)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  if (wyl_audit_event_get_subject_id (ev) != NULL)
+    return 140;
+  if (wyl_audit_event_get_action (ev) != NULL)
+    return 141;
+  if (wyl_audit_event_get_resource_id (ev) != NULL)
+    return 142;
+  return 0;
+}
+
+static gint
+check_string_field_round_trips (void)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "alice");
+  wyl_audit_event_set_action (ev, "read");
+  wyl_audit_event_set_resource_id (ev, "doc/42");
+  if (g_strcmp0 (wyl_audit_event_get_subject_id (ev), "alice") != 0)
+    return 150;
+  if (g_strcmp0 (wyl_audit_event_get_action (ev), "read") != 0)
+    return 151;
+  if (g_strcmp0 (wyl_audit_event_get_resource_id (ev), "doc/42") != 0)
+    return 152;
+  return 0;
+}
+
+static gint
+check_string_set_null_clears (void)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "alice");
+  wyl_audit_event_set_subject_id (ev, NULL);
+  if (wyl_audit_event_get_subject_id (ev) != NULL)
+    return 160;
+  return 0;
+}
+
+static gint
+check_string_caller_buffer_is_copied (void)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  gchar buf[16] = "alice";
+  wyl_audit_event_set_subject_id (ev, buf);
+  buf[0] = 'X';
+  if (g_strcmp0 (wyl_audit_event_get_subject_id (ev), "alice") != 0)
+    return 170;
+  return 0;
+}
+
+static gint
+check_string_get_null_event (void)
+{
+  if (wyl_audit_event_get_subject_id (NULL) != NULL)
+    return 180;
+  if (wyl_audit_event_get_action (NULL) != NULL)
+    return 181;
+  if (wyl_audit_event_get_resource_id (NULL) != NULL)
+    return 182;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -110,6 +204,22 @@ main (void)
   if ((rc = check_created_at_monotonic_with_minting_order ()) != 0)
     return rc;
   if ((rc = check_accessor_null_safety ()) != 0)
+    return rc;
+  if ((rc = check_decision_default_is_deny ()) != 0)
+    return rc;
+  if ((rc = check_set_decision_round_trip ()) != 0)
+    return rc;
+  if ((rc = check_get_decision_null_is_deny ()) != 0)
+    return rc;
+  if ((rc = check_string_field_defaults_are_null ()) != 0)
+    return rc;
+  if ((rc = check_string_field_round_trips ()) != 0)
+    return rc;
+  if ((rc = check_string_set_null_clears ()) != 0)
+    return rc;
+  if ((rc = check_string_caller_buffer_is_copied ()) != 0)
+    return rc;
+  if ((rc = check_string_get_null_event ()) != 0)
     return rc;
 
   return 0;
