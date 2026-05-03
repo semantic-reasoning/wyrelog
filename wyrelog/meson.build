@@ -31,10 +31,17 @@ wyrelog_sources = files(
   'wyl-version.c',
 )
 
+wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep]
+
+if get_option('enable_audit').allowed()
+  wyrelog_sources += files('wyl-audit-conn.c')
+  wyrelog_deps += duckdb_dep
+endif
+
 libwyrelog = library('wyrelog',
   wyrelog_sources,
   include_directories : wyrelog_inc,
-  dependencies : [glib_dep, gio_dep, libchronoid_dep],
+  dependencies : wyrelog_deps,
   install : true,
   soversion : '0',
 )

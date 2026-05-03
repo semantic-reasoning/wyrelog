@@ -180,3 +180,12 @@ test_decide_resp = executable('test-decide-resp',
 )
 
 test('decide-resp', test_decide_resp)
+
+if get_option('enable_audit').allowed()
+  test_audit_conn = executable('test-audit-conn',
+    'test-audit-conn.c',
+    dependencies : [wyrelog_dep, duckdb_dep],
+  )
+
+  test('audit-conn', test_audit_conn)
+endif
