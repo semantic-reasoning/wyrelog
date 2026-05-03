@@ -17,6 +17,7 @@ wyrelog_sources = files(
   'wyl-fsm-session.c',
   'wyl-guard-expr.c',
   'wyl-handle.c',
+  'wyl-id.c',
   'wyl-keyprovider-dev.c',
   'wyl-perm.c',
   'wyl-permission-scope.c',
@@ -27,7 +28,7 @@ wyrelog_sources = files(
 libwyrelog = library('wyrelog',
   wyrelog_sources,
   include_directories : wyrelog_inc,
-  dependencies : [glib_dep, gio_dep],
+  dependencies : [glib_dep, gio_dep, libchronoid_dep],
   install : true,
   soversion : '0',
 )
