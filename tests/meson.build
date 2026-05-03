@@ -209,6 +209,13 @@ test_perm = executable('test-perm',
 
 test('perm', test_perm)
 
+test_session_logout = executable('test-session-logout',
+  'test-session-logout.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('session-logout', test_session_logout)
+
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \
