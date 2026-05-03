@@ -71,6 +71,33 @@ test_error_evaluates_args (void)
   g_assert_cmpint (side_effect_counter, ==, 1);
 }
 
+/* T6 — Death test: WYL_LOG_CRITICAL triggers abort() via G_LOG_LEVEL_ERROR.
+ *
+ * Uses g_test_trap_subprocess to spawn a child that calls
+ * WYL_LOG_CRITICAL(GENERAL, "boom"). GLib raises G_LOG_LEVEL_ERROR which
+ * always calls abort(). The parent verifies the child did not exit cleanly
+ * (g_test_trap_assert_failed) and that GLib's abort-class message reached
+ * stderr.
+ *
+ * This is distinct from test_critical_bypasses_ceiling, which proves side-
+ * effect evaluation under ceiling=2. T6 proves the abort itself fires. */
+static void
+test_critical_aborts_process (void)
+{
+  if (g_test_subprocess ()) {
+    /* Child: fire CRITICAL — expected to abort via G_LOG_LEVEL_ERROR. */
+    WYL_LOG_CRITICAL (WYL_LOG_SECTION_GENERAL, "boom");
+    /* Unreachable. */
+    return;
+  }
+
+  g_test_trap_subprocess (NULL, 0, 0);
+  g_test_trap_assert_failed ();
+  /* The child's stderr carries the wyrelog-formatted record that
+   * triggered the abort; verify the message text reached stderr. */
+  g_test_trap_assert_stderr ("*boom*");
+}
+
 /* Test that WYL_LOG_CRITICAL evaluates its arguments even when:
  *   - WYL_LOG_MAX_LEVEL=2  (compile-time ceiling, set at build time)
  *   - WYL_LOG=*:none       (runtime threshold suppresses all sections)
@@ -152,6 +179,8 @@ main (int argc, char **argv)
       test_error_evaluates_args);
   g_test_add_func ("/wyl-log/ceiling/critical-bypasses-ceiling",
       test_critical_bypasses_ceiling);
+  g_test_add_func ("/wyl-log/ceiling/critical-aborts-process",
+      test_critical_aborts_process);
 
   return g_test_run ();
 }
