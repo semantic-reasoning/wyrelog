@@ -187,5 +187,19 @@ if get_option('enable_audit').allowed()
     dependencies : [wyrelog_dep, duckdb_dep],
   )
 
-  test('audit-conn', test_audit_conn)
+  audit_conn_test_env = environment()
+  if host_machine.system() == 'windows' \
+      and get_option('duckdb_source') == 'prebuilt'
+    # Prepend the prebuilt subproject directory to PATH so the
+    # Windows loader can find duckdb.dll at test run time. The DLL
+    # is not in dependency.sources (that would feed it into the
+    # static-archive link step and fail). Instead we add its
+    # directory here.
+    audit_conn_test_env.prepend('PATH',
+      meson.project_source_root() / 'subprojects'
+        / 'duckdb-prebuilt-windows-amd64',
+      separator : ';')
+  endif
+
+  test('audit-conn', test_audit_conn, env : audit_conn_test_env)
 endif
