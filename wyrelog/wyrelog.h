@@ -108,6 +108,22 @@ wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);
 
+/*
+ * Returns the session's construct-time identifier as a 36-character
+ * canonical string (caller frees with g_free or g_autofree). May
+ * return NULL only if the session is NULL or not a WylSession. The
+ * id is independent of wyl_session_id_t (the integer handle used
+ * for logout dispatch) -- this is the long-lived persistence-side
+ * identifier carried into audit events.
+ */
+gchar *wyl_session_dup_id_string (const WylSession * self);
+
+/*
+ * Returns the construct-time wall-clock stamp in microseconds since
+ * the Unix epoch (g_get_real_time). Returns -1 on a NULL argument.
+ */
+gint64 wyl_session_get_created_at_us (const WylSession * self);
+
 /* Permissions (admin) */
 wyrelog_error_t wyl_perm_grant (WylHandle * handle,
     const wyl_grant_req_t * req);
