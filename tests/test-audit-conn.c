@@ -1,0 +1,152 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <duckdb.h>
+
+#include "wyrelog/wyl-audit-conn-private.h"
+
+/* --- in-memory open/close lifecycle ---------------------------- */
+
+static gint
+check_open_memory_null_path (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 1;
+  if (conn == NULL)
+    return 2;
+  return 0;
+}
+
+static gint
+check_open_memory_literal (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (":memory:", &conn) != WYRELOG_E_OK)
+    return 10;
+  if (conn == NULL)
+    return 11;
+  return 0;
+}
+
+/* --- on-disk open + DDL round-trip ----------------------------- */
+
+static gint
+check_open_tempfile_and_query (void)
+{
+  g_autoptr (GError) err = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-audit-XXXXXX", &err);
+  if (tmpdir == NULL)
+    return 20;
+  g_autofree gchar *path = g_build_filename (tmpdir, "audit.db", NULL);
+
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK) {
+    g_rmdir (tmpdir);
+    return 21;
+  }
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  duckdb_result result;
+  if (duckdb_query (h, "CREATE TABLE t (x INTEGER);", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_unlink (path);
+    g_rmdir (tmpdir);
+    return 22;
+  }
+  duckdb_destroy_result (&result);
+
+  /* close before unlink so the database file is no longer mapped. */
+  wyl_audit_conn_close (g_steal_pointer (&conn));
+  g_unlink (path);
+  g_rmdir (tmpdir);
+  return 0;
+}
+
+/* --- bad path fails closed ------------------------------------- */
+
+static gint
+check_open_bad_path (void)
+{
+  /* An obviously unwritable parent. The sentinel pointer must
+   * survive the call untouched. */
+  wyl_audit_conn_t *sentinel = (wyl_audit_conn_t *) (gpointer) 0xDEADBEEF;
+  wyl_audit_conn_t *conn = sentinel;
+  wyrelog_error_t rc =
+      wyl_audit_conn_open ("/nonexistent-dir-wyrelog-audit/audit.db", &conn);
+  if (rc == WYRELOG_E_OK)
+    return 30;
+  if (conn != sentinel)
+    return 31;
+  return 0;
+}
+
+/* --- argument validation --------------------------------------- */
+
+static gint
+check_invalid_args (void)
+{
+  if (wyl_audit_conn_open ("anything", NULL) != WYRELOG_E_INVALID)
+    return 40;
+  return 0;
+}
+
+/* --- close semantics ------------------------------------------- */
+
+static gint
+check_close_null_noop (void)
+{
+  /* Direct NULL close is a no-op. */
+  wyl_audit_conn_close (NULL);
+
+  /* Open then explicit close, then a second close on a NULL local
+   * is also a no-op. autoptr cleanup at scope-end on the same
+   * NULL-after-steal pointer is a no-op too. */
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 50;
+  wyl_audit_conn_close (g_steal_pointer (&conn));
+  /* conn is now NULL; the autoptr scope-end will see NULL. */
+  if (conn != NULL)
+    return 51;
+  return 0;
+}
+
+/* --- handle accessor on NULL ---------------------------------- */
+
+static gint
+check_get_connection_null (void)
+{
+  duckdb_connection h = wyl_audit_conn_get_connection (NULL);
+  /* The accessor returns a zero-initialised handle on NULL input;
+   * DuckDB treats that as not-a-connection. We can't dereference
+   * it here without crashing, but we can confirm the field is
+   * zero by reading the bytes. Since the type is opaque we
+   * compare against a freshly memset zero buffer of the same
+   * size. */
+  duckdb_connection zero;
+  memset (&zero, 0, sizeof (zero));
+  if (memcmp (&h, &zero, sizeof (h)) != 0)
+    return 60;
+  return 0;
+}
+
+int
+main (void)
+{
+  gint rc;
+  if ((rc = check_open_memory_null_path ()) != 0)
+    return rc;
+  if ((rc = check_open_memory_literal ()) != 0)
+    return rc;
+  if ((rc = check_open_tempfile_and_query ()) != 0)
+    return rc;
+  if ((rc = check_open_bad_path ()) != 0)
+    return rc;
+  if ((rc = check_invalid_args ()) != 0)
+    return rc;
+  if ((rc = check_close_null_noop ()) != 0)
+    return rc;
+  if ((rc = check_get_connection_null ()) != 0)
+    return rc;
+  return 0;
+}
