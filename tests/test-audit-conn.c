@@ -3,7 +3,7 @@
 #include <glib/gstdio.h>
 #include <duckdb.h>
 
-#include "wyrelog/wyl-audit-conn-private.h"
+#include "wyrelog/audit/conn-private.h"
 
 /* --- in-memory open/close lifecycle ---------------------------- */
 

@@ -1,5 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include "wyl-audit-conn-private.h"
+#include "conn-private.h"
 
 #include <string.h>
 
