@@ -90,12 +90,7 @@ wyl_log_structured (wyl_log_section_t section, GLogLevelFlags level,
     const char *fmt, ...)
 G_GNUC_PRINTF (3, 4);
 
-/*
- * Internal hooks (suffix _internal_: not stable API). Exposed so the
- * parser-test suite can drive the spec parser without mutating
- * process-global env state, and so a future test can probe the
- * active section threshold table without reaching into static
- * storage.
- */
-     void wyl_log_internal_parse_spec (const char *spec, gint8 *levels);
+/* Internal hooks (suffix _internal_: not stable API). */
      gint wyl_log_internal_get_section_level (wyl_log_section_t section);
+     void wyl_log_internal_parse_spec (const char *spec,
+    gint8 levels[WYL_LOG_SECTION_LAST_]);
