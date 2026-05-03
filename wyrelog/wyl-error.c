@@ -16,11 +16,13 @@ wyrelog_error_string (wyrelog_error_t err)
     case WYRELOG_E_CRYPTO:
       return "cryptographic operation failed";
     case WYRELOG_E_POLICY:
-      return "policy evaluation failed";
+      return "policy load or shape error";
     case WYRELOG_E_AUTH:
       return "authentication or authorization failure";
     case WYRELOG_E_INTERNAL:
       return "internal invariant violated";
+    case WYRELOG_E_EXEC:
+      return "policy evaluation runtime fault";
   }
   return "unknown error";
 }
