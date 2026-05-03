@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <stdio.h>
+#include <unistd.h>
+
 #include <glib.h>
 
 #include "wyrelog/wyl-log-private.h"
@@ -166,6 +169,131 @@ test_section_count (void)
   g_assert_cmpint (wyl_log_section_count (), ==, WYL_LOG_SECTION_LAST_);
 }
 
+/* --- File sink tests ------------------------------------------------ */
+
+static void
+test_file_sink_redirection (void)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyrelog-test-XXXXXX", NULL);
+  g_assert_nonnull (tmpdir);
+  g_autofree gchar *path = g_build_filename (tmpdir, "wyl.log", NULL);
+
+  g_setenv ("WYL_LOG_FILE", path, TRUE);
+  g_setenv ("WYL_LOG", "*:5", TRUE);
+  wyl_log_internal_reload_for_tests ();
+
+  wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
+      "redirect-test-marker %d", 42);
+
+  /* Flush any pending writes. */
+  wyl_log_internal_reload_for_tests (); /* closes the file */
+  g_unsetenv ("WYL_LOG_FILE");
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reload_for_tests ();
+
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gboolean ok = g_file_get_contents (path, &contents, &len, NULL);
+  g_assert_true (ok);
+  g_assert_nonnull (contents);
+  g_assert_nonnull (g_strstr_len (contents, (gssize) len,
+          "redirect-test-marker 42"));
+
+  remove (path);
+  rmdir (tmpdir);
+}
+
+static void
+test_file_sink_fallback_on_invalid_path (void)
+{
+  g_setenv ("WYL_LOG_FILE", "/nonexistent-dir/xxx.log", TRUE);
+  g_setenv ("WYL_LOG", "*:5", TRUE);
+
+  /* Must not crash — stderr fallback applies (FC1: do not refuse to boot). */
+  wyl_log_internal_reload_for_tests ();
+  wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
+      "fallback-test-marker");
+
+  g_unsetenv ("WYL_LOG_FILE");
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reload_for_tests ();
+}
+
+static void
+test_runtime_filter_end_to_end (void)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyrelog-test-XXXXXX", NULL);
+  g_assert_nonnull (tmpdir);
+  g_autofree gchar *path = g_build_filename (tmpdir, "wyl.log", NULL);
+
+  g_setenv ("WYL_LOG_FILE", path, TRUE);
+  /* GENERAL threshold = ERROR (1); POLICY threshold = TRACE (5). */
+  g_setenv ("WYL_LOG", "GENERAL:1,POLICY:5", TRUE);
+  wyl_log_internal_reload_for_tests ();
+
+  /* DEBUG (wyl level 4) > GENERAL threshold (1) -> should be suppressed. */
+  wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_DEBUG,
+      "general-debug-should-not-appear");
+  /* DEBUG (wyl level 4) <= POLICY threshold (5) -> should appear. */
+  wyl_log_structured (WYL_LOG_SECTION_POLICY, G_LOG_LEVEL_DEBUG,
+      "policy-debug-should-appear");
+
+  /* Close the file by reloading with no WYL_LOG_FILE. */
+  g_unsetenv ("WYL_LOG_FILE");
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reload_for_tests ();
+
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gboolean ok = g_file_get_contents (path, &contents, &len, NULL);
+  g_assert_true (ok);
+  g_assert_nonnull (contents);
+
+  g_assert_nonnull (g_strstr_len (contents, (gssize) len,
+          "policy-debug-should-appear"));
+  g_assert_null (g_strstr_len (contents, (gssize) len,
+          "general-debug-should-not-appear"));
+
+  remove (path);
+  rmdir (tmpdir);
+}
+
+static void
+test_same_path_coexistence_no_crash (void)
+{
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyrelog-test-XXXXXX", NULL);
+  g_assert_nonnull (tmpdir);
+  g_autofree gchar *path = g_build_filename (tmpdir, "shared.log", NULL);
+
+  /* WL_LOG_FILE is wirelog's env var. Both point at the same file.
+   * Interleaving with wirelog's writes is operator error and is not a
+   * wyrelog correctness contract; this test only asserts no crash and
+   * that wyrelog's own line is present. */
+  g_setenv ("WL_LOG_FILE", path, TRUE);
+  g_setenv ("WYL_LOG_FILE", path, TRUE);
+  g_setenv ("WYL_LOG", "*:5", TRUE);
+  wyl_log_internal_reload_for_tests ();
+
+  wyl_log_structured (WYL_LOG_SECTION_GENERAL, G_LOG_LEVEL_WARNING,
+      "coexistence-test-marker");
+
+  g_unsetenv ("WL_LOG_FILE");
+  g_unsetenv ("WYL_LOG_FILE");
+  g_unsetenv ("WYL_LOG");
+  wyl_log_internal_reload_for_tests ();
+
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gboolean ok = g_file_get_contents (path, &contents, &len, NULL);
+  g_assert_true (ok);
+  g_assert_nonnull (contents);
+  g_assert_nonnull (g_strstr_len (contents, (gssize) len,
+          "coexistence-test-marker"));
+
+  remove (path);
+  rmdir (tmpdir);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -197,6 +325,14 @@ main (int argc, char **argv)
   g_test_add_func ("/wyl-log/section/name-out-of-range",
       test_section_name_out_of_range);
   g_test_add_func ("/wyl-log/section/count", test_section_count);
+
+  g_test_add_func ("/wyl-log/file/redirection", test_file_sink_redirection);
+  g_test_add_func ("/wyl-log/file/fallback-on-invalid-path",
+      test_file_sink_fallback_on_invalid_path);
+  g_test_add_func ("/wyl-log/runtime/filter-end-to-end",
+      test_runtime_filter_end_to_end);
+  g_test_add_func ("/wyl-log/runtime/same-path-coexistence-no-crash",
+      test_same_path_coexistence_no_crash);
 
   return g_test_run ();
 }

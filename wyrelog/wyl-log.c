@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyl-log-private.h"
 
+#include <errno.h>
 #include <glib.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -114,6 +115,10 @@ static GMutex log_mutex;
 static gint8 section_levels[WYL_LOG_SECTION_LAST_];
 static gsize init_once = 0;
 
+/* File sink state. Protected by sink_mutex; NULL means use stderr. */
+static GMutex sink_mutex;
+static FILE *log_file_sink = NULL;
+
 static gint
 glib_level_to_wyl (GLogLevelFlags level)
 {
@@ -167,14 +172,14 @@ log_writer (GLogLevelFlags log_level,
   if (wyl_level > threshold)
     return G_LOG_WRITER_HANDLED;
 
-  /* Stderr sink for commit 1; file sink lands in a follow-up commit
-   * that wires WYL_LOG_FILE. The mutex around fputs is process-local
-   * (not async-signal-safe) — matches wirelog's stance. */
-  static GMutex sink_mutex;
+  /* Route to WYL_LOG_FILE if open, else stderr. The mutex is
+   * module-scope (sink_mutex) so the reload path can swap the fd
+   * safely. Process-local only — not async-signal-safe. */
   g_mutex_lock (&sink_mutex);
-  fprintf (stderr, "[wyrelog %s] %s\n",
+  FILE *sink = log_file_sink != NULL ? log_file_sink : stderr;
+  fprintf (sink, "[wyrelog %s] %s\n",
       section_names[section], message != NULL ? message : "(no message)");
-  fflush (stderr);
+  fflush (sink);
   g_mutex_unlock (&sink_mutex);
 
   return G_LOG_WRITER_HANDLED;
@@ -185,14 +190,62 @@ ensure_init (void)
 {
   if (g_once_init_enter (&init_once)) {
     g_mutex_init (&log_mutex);
+    g_mutex_init (&sink_mutex);
     const char *spec = g_getenv ("WYL_LOG");
     wyl_log_internal_parse_spec (spec, section_levels);
+
+    const char *path = g_getenv ("WYL_LOG_FILE");
+    if (path != NULL && path[0] != '\0') {
+      FILE *f = fopen (path, "a");
+      if (f != NULL) {
+        setvbuf (f, NULL, _IOLBF, 0);
+        log_file_sink = f;
+      } else {
+        fprintf (stderr, "[wyrelog WARN] WYL_LOG_FILE=%s unwritable: %s\n",
+            path, g_strerror (errno));
+      }
+    }
+
     /* g_log_set_writer_func is set-once per process; subsequent calls
      * trigger a one-line GLib warning and are ignored. Embedders that
      * also call it lose to whichever caller wins the race. */
     g_log_set_writer_func (log_writer, NULL, NULL);
     g_once_init_leave (&init_once, 1);
   }
+}
+
+void
+wyl_log_internal_reload_for_tests (void)
+{
+  ensure_init ();
+
+  /* Re-read WYL_LOG spec under log_mutex. */
+  const char *spec = g_getenv ("WYL_LOG");
+  gint8 new_levels[WYL_LOG_SECTION_LAST_];
+  wyl_log_internal_parse_spec (spec, new_levels);
+  g_mutex_lock (&log_mutex);
+  for (gint i = 0; i < WYL_LOG_SECTION_LAST_; i++)
+    section_levels[i] = new_levels[i];
+  g_mutex_unlock (&log_mutex);
+
+  /* Re-open WYL_LOG_FILE under sink_mutex. */
+  const char *path = g_getenv ("WYL_LOG_FILE");
+  g_mutex_lock (&sink_mutex);
+  if (log_file_sink != NULL) {
+    fclose (log_file_sink);
+    log_file_sink = NULL;
+  }
+  if (path != NULL && path[0] != '\0') {
+    FILE *f = fopen (path, "a");
+    if (f != NULL) {
+      setvbuf (f, NULL, _IOLBF, 0);
+      log_file_sink = f;
+    } else {
+      fprintf (stderr, "[wyrelog WARN] WYL_LOG_FILE=%s unwritable: %s\n",
+          path, g_strerror (errno));
+    }
+  }
+  g_mutex_unlock (&sink_mutex);
 }
 
 gint
