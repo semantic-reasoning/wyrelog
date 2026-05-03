@@ -1,0 +1,10 @@
+[wrap-file]
+directory = duckdb-prebuilt-osx-universal
+source_url = https://github.com/duckdb/duckdb/releases/download/v1.5.1/libduckdb-osx-universal.zip
+source_filename = libduckdb-osx-universal.zip
+source_hash = d9dd723c59f8571202b468f6bf71d4555238544553dd1445e6c9ecb39f54c0f3
+lead_directory_missing = true
+patch_directory = duckdb-prebuilt-osx
+
+[provide]
+duckdb-prebuilt-osx = duckdb_dep

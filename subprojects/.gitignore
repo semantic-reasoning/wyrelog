@@ -1,6 +1,8 @@
 *
 !.gitignore
-!duckdb.wrap
+!duckdb-prebuilt-linux.wrap
+!duckdb-prebuilt-osx.wrap
+!duckdb-prebuilt-windows.wrap
 !libchronoid.wrap
 !wirelog.wrap
 !packagefiles
