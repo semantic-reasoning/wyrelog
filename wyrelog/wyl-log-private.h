@@ -94,3 +94,4 @@ G_GNUC_PRINTF (3, 4);
      gint wyl_log_internal_get_section_level (wyl_log_section_t section);
      void wyl_log_internal_parse_spec (const char *spec,
     gint8 levels[WYL_LOG_SECTION_LAST_]);
+     void wyl_log_internal_reload_for_tests (void);
