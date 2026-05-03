@@ -40,6 +40,16 @@ test_log = executable('test-log',
 
 test('log', test_log)
 
+# Compile with ceiling=WARN (2) to verify disabled levels do not
+# evaluate their arguments and CRITICAL still bypasses the ceiling.
+test_log_ceiling = executable('test-log-ceiling',
+  'test-log-ceiling.c',
+  c_args : ['-DWYL_LOG_MAX_LEVEL=2'],
+  dependencies : [wyrelog_dep],
+)
+
+test('log-ceiling', test_log_ceiling)
+
 fsm_principal_dl_path = join_paths(
   meson.project_source_root(),
   'templates', 'access', 'fsm', 'principal.dl',
@@ -222,6 +232,12 @@ test_session_logout = executable('test-session-logout',
 )
 
 test('session-logout', test_session_logout)
+
+check_private_headers = find_program(
+  '../tools/check-private-headers-not-installed.sh',
+)
+
+test('check-private-headers-not-installed', check_private_headers)
 
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()

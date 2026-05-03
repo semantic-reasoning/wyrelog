@@ -146,6 +146,9 @@ log_writer (GLogLevelFlags log_level,
   wyl_log_section_t section = WYL_LOG_SECTION_GENERAL;
   const char *message = NULL;
   const char *domain = NULL;
+  const char *code_file = NULL;
+  const char *code_line = NULL;
+  const char *code_func = NULL;
   for (gsize i = 0; i < n_fields; i++) {
     if (strcmp (fields[i].key, "WYL_SECTION") == 0) {
       gint s = parse_section_token ((const char *) fields[i].value);
@@ -155,6 +158,12 @@ log_writer (GLogLevelFlags log_level,
       message = (const char *) fields[i].value;
     } else if (strcmp (fields[i].key, "GLIB_DOMAIN") == 0) {
       domain = (const char *) fields[i].value;
+    } else if (strcmp (fields[i].key, "CODE_FILE") == 0) {
+      code_file = (const char *) fields[i].value;
+    } else if (strcmp (fields[i].key, "CODE_LINE") == 0) {
+      code_line = (const char *) fields[i].value;
+    } else if (strcmp (fields[i].key, "CODE_FUNC") == 0) {
+      code_func = (const char *) fields[i].value;
     }
   }
 
@@ -177,8 +186,15 @@ log_writer (GLogLevelFlags log_level,
    * safely. Process-local only — not async-signal-safe. */
   g_mutex_lock (&sink_mutex);
   FILE *sink = log_file_sink != NULL ? log_file_sink : stderr;
-  fprintf (sink, "[wyrelog %s] %s\n",
-      section_names[section], message != NULL ? message : "(no message)");
+  if (code_file != NULL && code_line != NULL) {
+    fprintf (sink, "[wyrelog %s %s:%s] %s\n",
+        section_names[section], code_file, code_line,
+        message != NULL ? message : "(no message)");
+  } else {
+    fprintf (sink, "[wyrelog %s] %s\n",
+        section_names[section], message != NULL ? message : "(no message)");
+  }
+  (void) code_func;
   fflush (sink);
   g_mutex_unlock (&sink_mutex);
 
@@ -260,6 +276,45 @@ wyl_log_internal_get_section_level (wyl_log_section_t section)
   gint level = section_levels[section];
   g_mutex_unlock (&log_mutex);
   return level;
+}
+
+void
+wyl_log_structured_at (wyl_log_section_t section,
+    GLogLevelFlags level, const char *file, gint line, const char *func,
+    const char *fmt, ...)
+{
+  if ((gint) section < 0 || (gint) section >= WYL_LOG_SECTION_LAST_)
+    section = WYL_LOG_SECTION_GENERAL;
+
+  ensure_init ();
+
+  va_list ap;
+  va_start (ap, fmt);
+  g_autofree gchar *msg = g_strdup_vprintf (fmt, ap);
+  va_end (ap);
+
+  /* Format CODE_LINE as a decimal string in a stack buffer. */
+  char line_buf[24];
+  g_snprintf (line_buf, sizeof (line_buf), "%d", line);
+
+  if (file != NULL && func != NULL) {
+    GLogField fields[6] = {
+      {"GLIB_DOMAIN", WYL_LOG_DOMAIN, -1},
+      {"WYL_SECTION", section_names[section], -1},
+      {"MESSAGE", msg, -1},
+      {"CODE_FILE", file, -1},
+      {"CODE_LINE", line_buf, -1},
+      {"CODE_FUNC", func, -1},
+    };
+    g_log_structured_array (level, fields, G_N_ELEMENTS (fields));
+  } else {
+    GLogField fields[3] = {
+      {"GLIB_DOMAIN", WYL_LOG_DOMAIN, -1},
+      {"WYL_SECTION", section_names[section], -1},
+      {"MESSAGE", msg, -1},
+    };
+    g_log_structured_array (level, fields, G_N_ELEMENTS (fields));
+  }
 }
 
 void

@@ -24,7 +24,7 @@
  *   WYL_LOG_ERROR(s,...)    -> WYL_LOG_LEVEL_ERROR  ceiling,
  *                              G_LOG_LEVEL_CRITICAL (recoverable;
  *                              program continues)
- *   WYL_LOG_CRITICAL(s,...) -> WYL_LOG_LEVEL_ERROR  ceiling,
+ *   WYL_LOG_CRITICAL(s,...) -> BYPASSES WYL_LOG_MAX_LEVEL ceiling,
  *                              G_LOG_LEVEL_ERROR    (invariant violation;
  *                              GLib calls abort() — program terminates)
  *
@@ -34,43 +34,57 @@
  * WYL_LOG_CRITICAL is reserved for unrecoverable invariant violations
  * and must NOT be used for errors that are expected to be handled.
  *
- * When WYL_LOG_MAX_LEVEL is below the macro's required level the macro
- * expands to G_STMT_START {} G_STMT_END so arguments are never
- * evaluated (compile-time dead-code elimination, no side-effects).
+ * WYL_LOG_DEBUG/INFO/WARN/ERROR are subject to WYL_LOG_MAX_LEVEL and
+ * may compile to no-ops (G_STMT_START {} G_STMT_END) when the ceiling
+ * is set below their required level — arguments are never evaluated in
+ * that case (compile-time dead-code elimination, no side-effects).
+ *
+ * WYL_LOG_CRITICAL bypasses WYL_LOG_MAX_LEVEL entirely because
+ * invariant violations must always abort, even under
+ * -Dwyrelog_log_max_level=none. Silencing an abort-class invariant
+ * violation is a safety defect, not a tuning option.
+ *
+ * All macros pass __FILE__, __LINE__, and G_STRFUNC to the internal
+ * entry point so the formatted output includes source location.
  */
 
 #define WYL_LOG_DEBUG(section, ...) \
   G_STMT_START { \
     if (WYL_LOG_LEVEL_DEBUG <= WYL_LOG_MAX_LEVEL) \
-      wyl_log_structured ((section), G_LOG_LEVEL_DEBUG, __VA_ARGS__); \
+      wyl_log_structured_at ((section), G_LOG_LEVEL_DEBUG, \
+          __FILE__, __LINE__, G_STRFUNC, __VA_ARGS__); \
   } G_STMT_END
 
 #define WYL_LOG_INFO(section, ...) \
   G_STMT_START { \
     if (WYL_LOG_LEVEL_INFO <= WYL_LOG_MAX_LEVEL) \
-      wyl_log_structured ((section), G_LOG_LEVEL_INFO, __VA_ARGS__); \
+      wyl_log_structured_at ((section), G_LOG_LEVEL_INFO, \
+          __FILE__, __LINE__, G_STRFUNC, __VA_ARGS__); \
   } G_STMT_END
 
 #define WYL_LOG_WARN(section, ...) \
   G_STMT_START { \
     if (WYL_LOG_LEVEL_WARN <= WYL_LOG_MAX_LEVEL) \
-      wyl_log_structured ((section), G_LOG_LEVEL_WARNING, __VA_ARGS__); \
+      wyl_log_structured_at ((section), G_LOG_LEVEL_WARNING, \
+          __FILE__, __LINE__, G_STRFUNC, __VA_ARGS__); \
   } G_STMT_END
 
 #define WYL_LOG_ERROR(section, ...) \
   G_STMT_START { \
     if (WYL_LOG_LEVEL_ERROR <= WYL_LOG_MAX_LEVEL) \
-      wyl_log_structured ((section), G_LOG_LEVEL_CRITICAL, __VA_ARGS__); \
+      wyl_log_structured_at ((section), G_LOG_LEVEL_CRITICAL, \
+          __FILE__, __LINE__, G_STRFUNC, __VA_ARGS__); \
   } G_STMT_END
 
-/* WYL_LOG_CRITICAL expands to G_LOG_LEVEL_ERROR which GLib treats as
- * always-fatal (calls abort()). Use ONLY for unrecoverable invariant
- * violations. Do NOT invoke for errors that callers are expected to
- * handle; use WYL_LOG_ERROR instead. */
+/* WYL_LOG_CRITICAL bypasses WYL_LOG_MAX_LEVEL because invariant
+ * violations must always abort. Setting -Dwyrelog_log_max_level=none
+ * still emits and aborts for CRITICAL. Use ONLY for unrecoverable
+ * invariant violations. Do NOT invoke for errors that callers are
+ * expected to handle; use WYL_LOG_ERROR instead. */
 #define WYL_LOG_CRITICAL(section, ...) \
   G_STMT_START { \
-    if (WYL_LOG_LEVEL_ERROR <= WYL_LOG_MAX_LEVEL) \
-      wyl_log_structured ((section), G_LOG_LEVEL_ERROR, __VA_ARGS__); \
+    wyl_log_structured_at ((section), G_LOG_LEVEL_ERROR, \
+        __FILE__, __LINE__, G_STRFUNC, __VA_ARGS__); \
   } G_STMT_END
 
 /* --- Section grammar -------------------------------------------------
@@ -84,6 +98,11 @@
  * Section names are operator-visible (they appear in env-var input
  * and in formatted log output). Names are deliberately neutral and
  * do not advertise wyrelog-internal axioms.
+ *
+ * Output routing note: the writer routes each record to the file sink
+ * (WYL_LOG_FILE) XOR stderr — tee-style logging to both is not
+ * supported in v0. fflush() errors are not currently propagated;
+ * persistent I/O errors silently drop records.
  */
 typedef enum
 {
@@ -118,17 +137,48 @@ typedef enum
 const char *wyl_log_section_name (wyl_log_section_t section);
 gint wyl_log_section_count (void);
 
-/* Structured log entry point. Carries a WYL_SECTION GLib log field so
- * the wyrelog writer can route by section. Callers normally reach for
- * the section-aware macros that arrive in a follow-up commit; this
- * function is the single landing point those macros expand to. */
+/* Primary structured log entry point. Accepts source location fields
+ * (file, line, func) that are emitted as CODE_FILE / CODE_LINE /
+ * CODE_FUNC GLib structured fields and included in the formatted
+ * output line. Callers use the WYL_LOG_* macros which supply
+ * __FILE__, __LINE__, G_STRFUNC automatically.
+ *
+ * wyl_log_structured is a thin wrapper that passes NULL / 0 / NULL for
+ * location fields; it exists for call sites (e.g. tests) that do not
+ * need source attribution. */
 void
-wyl_log_structured (wyl_log_section_t section, GLogLevelFlags level,
+wyl_log_structured_at (wyl_log_section_t section, GLogLevelFlags level,
+    const char *file, gint line, const char *func, const char *fmt, ...)
+G_GNUC_PRINTF (6, 7);
+
+     void wyl_log_structured (wyl_log_section_t section, GLogLevelFlags level,
     const char *fmt, ...)
-G_GNUC_PRINTF (3, 4);
+  G_GNUC_PRINTF (3, 4);
 
 /* Internal hooks (suffix _internal_: not stable API). */
      gint wyl_log_internal_get_section_level (wyl_log_section_t section);
      void wyl_log_internal_parse_spec (const char *spec,
     gint8 levels[WYL_LOG_SECTION_LAST_]);
+
+/* wyl_log_internal_reconfigure — reload log configuration from env vars.
+ *
+ * Re-reads WYL_LOG (section:level spec) and WYL_LOG_FILE (output path)
+ * on each call. If WYL_LOG_FILE changes, the prior file is closed and
+ * the new path opened in append mode.
+ *
+ * Properties:
+ *   - Idempotent: calling it multiple times with the same environment
+ *     is equivalent to calling it once; the prior sink is closed and
+ *     reopened on each call.
+ *   - Thread-safe: section levels are updated under log_mutex; the
+ *     file sink is swapped under sink_mutex. The two locks are never
+ *     held simultaneously.
+ *   - NOT async-signal-safe: do NOT call from signal handlers. The
+ *     function acquires mutexes and calls fopen/fclose.
+ *   - NOT fork-safe: after fork() the child inherits the open FILE*
+ *     from the parent. Sharing a FILE* across a fork boundary leads
+ *     to buffer aliasing and undefined behaviour. The child must not
+ *     call wyl_log_structured* or wyl_log_internal_reconfigure without
+ *     first calling wyl_log_internal_reconfigure to close and reopen
+ *     the sink in the child's address space. */
      void wyl_log_internal_reconfigure (void);
