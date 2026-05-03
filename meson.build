@@ -18,7 +18,19 @@ sodium_dep = dependency('libsodium', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
 if enable_audit_opt.allowed()
-  duckdb_dep = dependency('duckdb', fallback : ['duckdb', 'duckdb_dep'])
+  if host_machine.system() == 'linux'
+    duckdb_dep = dependency('duckdb-prebuilt-linux',
+      fallback : ['duckdb-prebuilt-linux', 'duckdb_dep'])
+  elif host_machine.system() == 'darwin'
+    duckdb_dep = dependency('duckdb-prebuilt-osx',
+      fallback : ['duckdb-prebuilt-osx', 'duckdb_dep'])
+  elif host_machine.system() == 'windows'
+    duckdb_dep = dependency('duckdb-prebuilt-windows',
+      fallback : ['duckdb-prebuilt-windows', 'duckdb_dep'])
+  else
+    error('enable_audit is not supported on host system: '
+        + host_machine.system())
+  endif
 else
   duckdb_dep = disabler()
 endif

@@ -1,0 +1,10 @@
+[wrap-file]
+directory = duckdb-prebuilt-linux-amd64
+source_url = https://github.com/duckdb/duckdb/releases/download/v1.5.1/libduckdb-linux-amd64.zip
+source_filename = libduckdb-linux-amd64.zip
+source_hash = 21aec66a60eae1696270ba715a481ab066a88d99a62718d0577579ac1a7a4834
+lead_directory_missing = true
+patch_directory = duckdb-prebuilt-linux
+
+[provide]
+duckdb-prebuilt-linux = duckdb_dep
