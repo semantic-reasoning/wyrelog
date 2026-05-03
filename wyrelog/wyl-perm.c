@@ -3,7 +3,7 @@
 
 struct _wyl_login_req
 {
-  gint placeholder;
+  gchar *username;
 };
 
 struct _wyl_grant_req
@@ -25,7 +25,25 @@ wyl_login_req_new (void)
 void
 wyl_login_req_free (wyl_login_req_t *req)
 {
+  if (req == NULL)
+    return;
+  g_free (req->username);
   g_free (req);
+}
+
+void
+wyl_login_req_set_username (wyl_login_req_t *req, const gchar *username)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->username);
+  req->username = g_strdup (username);
+}
+
+const gchar *
+wyl_login_req_get_username (const wyl_login_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->username;
 }
 
 wyl_grant_req_t *
