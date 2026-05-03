@@ -18,18 +18,29 @@ sodium_dep = dependency('libsodium', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
 if enable_audit_opt.allowed()
-  if host_machine.system() == 'linux'
-    duckdb_dep = dependency('duckdb-prebuilt-linux',
-      fallback : ['duckdb-prebuilt-linux', 'duckdb_dep'])
-  elif host_machine.system() == 'darwin'
-    duckdb_dep = dependency('duckdb-prebuilt-osx',
-      fallback : ['duckdb-prebuilt-osx', 'duckdb_dep'])
-  elif host_machine.system() == 'windows'
-    duckdb_dep = dependency('duckdb-prebuilt-windows',
-      fallback : ['duckdb-prebuilt-windows', 'duckdb_dep'])
+  duckdb_source = get_option('duckdb_source')
+  if duckdb_source == 'prebuilt'
+    if host_machine.system() == 'linux'
+      duckdb_dep = dependency('duckdb-prebuilt-linux',
+        fallback : ['duckdb-prebuilt-linux', 'duckdb_dep'])
+    elif host_machine.system() == 'darwin'
+      duckdb_dep = dependency('duckdb-prebuilt-osx',
+        fallback : ['duckdb-prebuilt-osx', 'duckdb_dep'])
+    elif host_machine.system() == 'windows'
+      duckdb_dep = dependency('duckdb-prebuilt-windows',
+        fallback : ['duckdb-prebuilt-windows', 'duckdb_dep'])
+    else
+      error('duckdb_source=prebuilt is not supported on host system: '
+          + host_machine.system())
+    endif
   else
-    error('enable_audit is not supported on host system: '
-        + host_machine.system())
+    # From-source build of the upstream DuckDB amalgamated single-TU
+    # release. Slow (multi-minute single-TU C++ compile) but uses the
+    # same source layout the upstream project ships and exercises the
+    # full link path. Intended for main-branch CI to validate that
+    # wyrelog still links cleanly against a freshly built libduckdb.
+    duckdb_dep = dependency('duckdb-amalgamated',
+      fallback : ['duckdb-amalgamated', 'duckdb_dep'])
   endif
 else
   duckdb_dep = disabler()

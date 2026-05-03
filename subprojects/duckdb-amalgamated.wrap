@@ -1,0 +1,10 @@
+[wrap-file]
+directory = duckdb-amalgamated-src
+source_url = https://github.com/duckdb/duckdb/releases/download/v1.5.1/libduckdb-src-v1.5.1.zip
+source_filename = libduckdb-src-v1.5.1.zip
+source_hash = e5b4e9c449bb1ae0e005bb23a48b208efbe813556c12eb7f9cd3e4c9dbe01fdc
+lead_directory_missing = true
+patch_directory = duckdb-amalgamated
+
+[provide]
+duckdb-amalgamated = duckdb_dep
