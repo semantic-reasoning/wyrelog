@@ -13,7 +13,7 @@ wyrelog_public_headers = files(
 
 wyrelog_sources = files(
   'wyl-access-decision.c',
-  'wyl-audit-event.c',
+  'audit/event.c',
   'wyl-boot.c',
   'wyl-decide.c',
   'wyl-dl-static.c',
@@ -34,7 +34,7 @@ wyrelog_sources = files(
 wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep]
 
 if get_option('enable_audit').allowed()
-  wyrelog_sources += files('wyl-audit-conn.c')
+  wyrelog_sources += files('audit/conn.c')
   wyrelog_deps += duckdb_dep
 endif
 
@@ -62,7 +62,7 @@ if build_client
   )
 
   wyrelog_client_sources = files(
-    'wyl-audit-iter.c',
+    'audit/iter.c',
     'wyl-client.c',
   )
 
