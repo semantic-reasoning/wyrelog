@@ -385,7 +385,9 @@ check_name_mirror (void)
   gsize expected = wyl_perm_arm_rule_count ();
   for (gsize i = 0; lines[i] != NULL; i++) {
     g_autofree gchar *trimmed = g_strdup (g_strchug (lines[i]));
-    if (trimmed[0] == '%' || trimmed[0] == '\0')
+    if (trimmed[0] == '%' || trimmed[0] == '\0'
+        || g_str_has_prefix (trimmed, "//")
+        || g_str_has_prefix (trimmed, ".decl"))
       continue;
     /* Catalogue rows always quote the perm id immediately. The
      * rule-3 body has `perm_arm_rule(P, G)` which would otherwise

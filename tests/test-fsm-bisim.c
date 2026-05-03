@@ -41,6 +41,24 @@ make_key (const gchar *from, const gchar *event)
 }
 
 /*
+ * Strip surrounding whitespace and a single pair of double-quotes
+ * from a Datalog field token. wirelog requires symbol literals in
+ * fact position to be quoted; this oracle compares against unquoted
+ * state/event names from the C catalogue, so we unwrap here.
+ */
+static gchar *
+strip_dl_symbol (const gchar *raw)
+{
+  g_autofree gchar *s = g_strstrip (g_strdup (raw));
+  gsize n = strlen (s);
+  if (n >= 2 && s[0] == '"' && s[n - 1] == '"') {
+    s[n - 1] = '\0';
+    return g_strdup (s + 1);
+  }
+  return g_steal_pointer (&s);
+}
+
+/*
  * Parses lines of the shape `<predicate>(<from>, <event>, <to>).` and
  * inserts them into a GHashTable keyed on "from|event" with values
  * g_strdup'd to-state names. A literal duplicate (same key, same
@@ -68,7 +86,9 @@ parse_text_table (const gchar *path, const gchar *predicate,
   g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
   for (gsize i = 0; lines[i] != NULL; i++) {
     g_autofree gchar *trimmed = g_strdup (g_strchug (lines[i]));
-    if (trimmed[0] == '%' || trimmed[0] == '\0')
+    if (trimmed[0] == '%' || trimmed[0] == '\0'
+        || g_str_has_prefix (trimmed, "//")
+        || g_str_has_prefix (trimmed, ".decl"))
       continue;
     if (!g_str_has_prefix (trimmed, prefix))
       continue;
@@ -81,9 +101,9 @@ parse_text_table (const gchar *path, const gchar *predicate,
     fields = g_strsplit (inner, ",", -1);
     if (g_strv_length (fields) != 3)
       continue;
-    g_autofree gchar *from = g_strstrip (g_strdup (fields[0]));
-    g_autofree gchar *event = g_strstrip (g_strdup (fields[1]));
-    g_autofree gchar *to = g_strstrip (g_strdup (fields[2]));
+    g_autofree gchar *from = strip_dl_symbol (fields[0]);
+    g_autofree gchar *event = strip_dl_symbol (fields[1]);
+    g_autofree gchar *to = strip_dl_symbol (fields[2]);
     gchar *key = make_key (from, event);
     gpointer existing = g_hash_table_lookup (table, key);
     if (existing != NULL) {

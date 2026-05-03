@@ -129,6 +129,25 @@ check_argument_validation (void)
  * either side fails this test, which is the synchronization gate
  * between the two artifacts.
  */
+/*
+ * Strip surrounding whitespace and a single pair of double-quotes
+ * from a Datalog field token. wirelog requires symbol literals in
+ * fact position to be quoted (e.g. `"unverified"` not bare
+ * `unverified`); this test compares against unquoted state names
+ * from the C catalogue, so we unwrap here.
+ */
+static gchar *
+strip_dl_symbol (const gchar *raw)
+{
+  g_autofree gchar *s = g_strstrip (g_strdup (raw));
+  gsize n = strlen (s);
+  if (n >= 2 && s[0] == '"' && s[n - 1] == '"') {
+    s[n - 1] = '\0';
+    return g_strdup (s + 1);
+  }
+  return g_steal_pointer (&s);
+}
+
 static gboolean
 parse_one_row (const gchar *line, gchar **out_from, gchar **out_event,
     gchar **out_to)
@@ -154,9 +173,9 @@ parse_one_row (const gchar *line, gchar **out_from, gchar **out_event,
   if (g_strv_length (fields) != 3)
     return FALSE;
 
-  *out_from = g_strstrip (g_strdup (fields[0]));
-  *out_event = g_strstrip (g_strdup (fields[1]));
-  *out_to = g_strstrip (g_strdup (fields[2]));
+  *out_from = strip_dl_symbol (fields[0]);
+  *out_event = strip_dl_symbol (fields[1]);
+  *out_to = strip_dl_symbol (fields[2]);
   return TRUE;
 }
 
@@ -180,7 +199,9 @@ check_text_mirror (void)
 
   for (gsize i = 0; lines[i] != NULL; i++) {
     g_autofree gchar *trimmed = g_strdup (g_strchug (lines[i]));
-    if (trimmed[0] == '%' || trimmed[0] == '\0')
+    if (trimmed[0] == '%' || trimmed[0] == '\0'
+        || g_str_has_prefix (trimmed, "//")
+        || g_str_has_prefix (trimmed, ".decl"))
       continue;
     if (!g_str_has_prefix (trimmed, "principal_transition"))
       continue;
