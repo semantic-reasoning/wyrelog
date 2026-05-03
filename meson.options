@@ -20,3 +20,39 @@ option('enable_client',
               + 'builds without vcpkg-staged libsoup); the server library '
               + '(libwyrelog) and its tests still build under disabled.'
 )
+
+option('require_tpm',
+  type : 'boolean',
+  value : true,
+  description : 'Runtime fail-closed gate for the hardware-backed key '
+              + 'provider. When true, wyrelog refuses to start if the '
+              + 'tss2-esys provider cannot be initialised, even if the '
+              + 'development stub is compiled in. Set to false only for '
+              + 'host development environments where running against the '
+              + 'dev key provider is acceptable. Wiring lands in a '
+              + 'follow-up commit (runtime gate in wyl_init).'
+)
+
+option('enable_audit',
+  type : 'feature',
+  value : 'disabled',
+  description : 'Build the DuckDB-backed audit subsystem that records '
+              + 'access decisions to a local analytic store. Disabled by '
+              + 'default pending dependency stabilisation; set to enabled '
+              + 'to opt in once the DuckDB integration is ready. Wiring '
+              + 'lands in a follow-up commit (audit sink + DuckDB '
+              + 'linkage).'
+)
+
+option('enable_break_glass',
+  type : 'boolean',
+  value : false,
+  description : 'Compile in the break-glass override path that allows a '
+              + 'pre-authorised principal to bypass the policy decision '
+              + 'point under declared emergency. Off by default; only '
+              + 'enable for builds that ship the corresponding signed '
+              + 'override credential. Must not be enabled unless '
+              + 'enable_audit is also enabled, since the override path '
+              + 'requires a recorded audit reason code. Wiring lands in '
+              + 'a follow-up commit (override path + audit reason code).'
+)
