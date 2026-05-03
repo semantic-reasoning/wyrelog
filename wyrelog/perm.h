@@ -44,6 +44,24 @@ wyl_revoke_req_t *wyl_revoke_req_new (void);
 void wyl_revoke_req_free (wyl_revoke_req_t * req);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_revoke_req_t, wyl_revoke_req_free);
 
+/*
+ * Setters / getters for the subject, action, and resource fields
+ * of an admin revoke request. Setters duplicate the caller's string
+ * so the caller may free it immediately after the call; passing
+ * NULL clears the field. Getters return a borrowed pointer that is
+ * valid until the next set call or until the request is freed.
+ */
+void wyl_revoke_req_set_subject_id (wyl_revoke_req_t * req,
+    const gchar * subject_id);
+const gchar *wyl_revoke_req_get_subject_id (const wyl_revoke_req_t * req);
+
+void wyl_revoke_req_set_action (wyl_revoke_req_t * req, const gchar * action);
+const gchar *wyl_revoke_req_get_action (const wyl_revoke_req_t * req);
+
+void wyl_revoke_req_set_resource_id (wyl_revoke_req_t * req,
+    const gchar * resource_id);
+const gchar *wyl_revoke_req_get_resource_id (const wyl_revoke_req_t * req);
+
 wyrelog_error_t wyl_perm_grant (WylHandle * handle,
     const wyl_grant_req_t * req);
 wyrelog_error_t wyl_perm_revoke (WylHandle * handle,
