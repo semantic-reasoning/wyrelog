@@ -3,6 +3,13 @@
 
 #include "wyl-id-private.h"
 
+#ifdef WYL_HAS_AUDIT
+#include <duckdb.h>
+
+#include "audit/conn-private.h"
+#include "wyl-handle-private.h"
+#endif
+
 struct _WylAuditEvent
 {
   GObject parent_instance;
@@ -143,7 +150,69 @@ wyl_audit_event_get_decision (const WylAuditEvent *self)
 wyrelog_error_t
 wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
 {
+#ifdef WYL_HAS_AUDIT
+  wyl_audit_conn_t *audit_conn;
+  duckdb_connection conn;
+  duckdb_prepared_statement stmt;
+  duckdb_result result;
+  duckdb_state rc;
+  gchar id_buf[WYL_ID_STRING_BUF];
+  const gchar *value;
+
+  if (handle == NULL || event == NULL)
+    return WYRELOG_E_INVALID;
+
+  audit_conn = wyl_handle_get_audit_conn (handle);
+  if (audit_conn == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  conn = wyl_audit_conn_get_connection (audit_conn);
+
+  static const gchar *sql =
+      "INSERT INTO audit_events "
+      "(id, created_at_us, subject_id, action, resource_id, decision) "
+      "VALUES (?, ?, ?, ?, ?, ?);";
+
+  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  if (wyl_id_format (&event->id, id_buf, sizeof id_buf) != WYRELOG_E_OK) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_INTERNAL;
+  }
+  duckdb_bind_varchar (stmt, 1, id_buf);
+  duckdb_bind_int64 (stmt, 2, event->created_at_us);
+
+  value = event->subject_id;
+  if (value != NULL)
+    duckdb_bind_varchar (stmt, 3, value);
+  else
+    duckdb_bind_null (stmt, 3);
+
+  value = event->action;
+  if (value != NULL)
+    duckdb_bind_varchar (stmt, 4, value);
+  else
+    duckdb_bind_null (stmt, 4);
+
+  value = event->resource_id;
+  if (value != NULL)
+    duckdb_bind_varchar (stmt, 5, value);
+  else
+    duckdb_bind_null (stmt, 5);
+
+  duckdb_bind_int16 (stmt, 6, (int16_t) event->decision);
+
+  rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+
+  return (rc == DuckDBSuccess) ? WYRELOG_E_OK : WYRELOG_E_IO;
+#else
   (void) handle;
   (void) event;
   return WYRELOG_E_INTERNAL;
+#endif
 }

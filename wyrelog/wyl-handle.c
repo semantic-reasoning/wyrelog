@@ -118,3 +118,12 @@ wyl_handle_get_created_at_us (const WylHandle *self)
   g_return_val_if_fail (WYL_IS_HANDLE (self), -1);
   return self->created_at_us;
 }
+
+#ifdef WYL_HAS_AUDIT
+wyl_audit_conn_t *
+wyl_handle_get_audit_conn (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  return self->audit_conn;
+}
+#endif
