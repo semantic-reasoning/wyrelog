@@ -1,4 +1,4 @@
 [wrap-git]
 url = https://github.com/semantic-reasoning/libchronoid.git
-revision = main
+revision = v1.0.1
 depth = 1
