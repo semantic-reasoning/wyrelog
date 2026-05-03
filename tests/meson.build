@@ -196,11 +196,6 @@ test_revoke_req = executable('test-revoke-req',
 test('revoke-req', test_revoke_req)
 
 if get_option('enable_audit').allowed()
-  test_audit_conn = executable('test-audit-conn',
-    'test-audit-conn.c',
-    dependencies : [wyrelog_dep, duckdb_dep],
-  )
-
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \
       and get_option('duckdb_source') == 'prebuilt'
@@ -215,5 +210,18 @@ if get_option('enable_audit').allowed()
       separator : ';')
   endif
 
+  test_audit_conn = executable('test-audit-conn',
+    'test-audit-conn.c',
+    dependencies : [wyrelog_dep, duckdb_dep],
+  )
+
   test('audit-conn', test_audit_conn, env : audit_conn_test_env)
+
+  test_audit_emit = executable('test-audit-emit',
+    'test-audit-emit.c',
+    c_args : ['-DWYL_HAS_AUDIT'],
+    dependencies : [wyrelog_dep, duckdb_dep],
+  )
+
+  test('audit-emit', test_audit_emit, env : audit_conn_test_env)
 endif
