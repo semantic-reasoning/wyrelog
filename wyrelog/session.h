@@ -36,6 +36,21 @@ wyl_login_req_t *wyl_login_req_new (void);
 void wyl_login_req_free (wyl_login_req_t * req);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_login_req_t, wyl_login_req_free);
 
+/*
+ * Set the principal username carried by the login request. Replaces
+ * any previously set value (the prior string is freed). |username|
+ * may be NULL to clear the field; the caller's string is duplicated
+ * into the request so it may be freed immediately after the call.
+ */
+void wyl_login_req_set_username (wyl_login_req_t * req, const gchar * username);
+
+/*
+ * Returns the borrowed username carried by |req|, or NULL when
+ * unset. The pointer is owned by the request and remains valid
+ * until the next set call or until the request is freed.
+ */
+const gchar *wyl_login_req_get_username (const wyl_login_req_t * req);
+
 wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);

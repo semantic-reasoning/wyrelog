@@ -152,3 +152,10 @@ test_session_id = executable('test-session-id',
 )
 
 test('session-id', test_session_id)
+
+test_login_req = executable('test-login-req',
+  'test-login-req.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('login-req', test_login_req)
