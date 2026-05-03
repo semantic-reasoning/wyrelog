@@ -3,19 +3,42 @@
 
 #include "wyl-id-private.h"
 
+#ifdef WYL_HAS_AUDIT
+#include "audit/conn-private.h"
+#endif
+
 struct _WylHandle
 {
   GObject parent_instance;
   wyl_id_t id;
   gint64 created_at_us;
+#ifdef WYL_HAS_AUDIT
+  wyl_audit_conn_t *audit_conn;
+#endif
 };
 
 G_DEFINE_FINAL_TYPE (WylHandle, wyl_handle, G_TYPE_OBJECT);
 
 static void
+wyl_handle_finalize (GObject *object)
+{
+#ifdef WYL_HAS_AUDIT
+  WylHandle *self = WYL_HANDLE (object);
+  /* NULL-safe: if wyl_shutdown already closed the conn the pointer
+   * was reset to NULL there; otherwise this is the only close site
+   * and the audit log file (if any) is released here. */
+  g_clear_pointer (&self->audit_conn, wyl_audit_conn_close);
+#endif
+
+  G_OBJECT_CLASS (wyl_handle_parent_class)->finalize (object);
+}
+
+static void
 wyl_handle_class_init (WylHandleClass *klass)
 {
-  (void) klass;
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+
+  object_class->finalize = wyl_handle_finalize;
 }
 
 static void
@@ -40,15 +63,41 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
   if (out_handle == NULL)
     return WYRELOG_E_INVALID;
 
-  *out_handle = g_object_new (WYL_TYPE_HANDLE, NULL);
+  WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
+
+#ifdef WYL_HAS_AUDIT
+  /* Open an in-memory audit database and create the audit_events
+   * schema. config_path will eventually direct this at a persistent
+   * location; for now the in-memory store is enough to exercise the
+   * full lifecycle. */
+  wyrelog_error_t rc = wyl_audit_conn_open (NULL, &self->audit_conn);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+  rc = wyl_audit_conn_create_schema (self->audit_conn);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+#endif
+
+  *out_handle = self;
   return WYRELOG_E_OK;
 }
 
 void
 wyl_shutdown (WylHandle *handle)
 {
-  (void) handle;
-  /* Real implementation drains queues, closes DBs, finalizes TPM. */
+  if (handle == NULL)
+    return;
+
+#ifdef WYL_HAS_AUDIT
+  /* Close the audit log before tearing down so any pending writers
+   * see the close in deterministic order. finalize is NULL-safe and
+   * will not double-close. */
+  g_clear_pointer (&handle->audit_conn, wyl_audit_conn_close);
+#endif
 }
 
 gchar *
