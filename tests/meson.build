@@ -233,6 +233,11 @@ test_session_logout = executable('test-session-logout',
 
 test('session-logout', test_session_logout)
 
+# NOTE: WYL_TEST_TEMPLATE_DIR points at the in-tree source layout
+# only. The installed layout (${datadir}/wyrelog/access) — produced
+# by install_subdir at the top-level meson.build — is not
+# exercised by these tests. Validation of the installed layout is
+# tracked as packaging-CI follow-up rather than unit-test concern.
 test_engine = executable('test-engine',
   'test-engine.c',
   c_args : [

@@ -83,6 +83,7 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
     gsize *dl_src_len_out)
 {
   g_autoptr (GString) combined = g_string_new (NULL);
+  gsize total_content_bytes = 0;
 
   for (gsize i = 0; i < G_N_ELEMENTS (TEMPLATE_FILES); i++) {
     g_autofree gchar *path =
@@ -102,6 +103,17 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
       g_string_append_c (combined, '\n');
 
     g_string_append_len (combined, contents, (gssize) len);
+    total_content_bytes += len;
+  }
+
+  /* In-tree invariant: the 5 template files must collectively contain at
+   * least one byte of policy content.  A zero total means all files are
+   * empty, which is a wyrelog-side invariant violation (not operator-authored
+   * bad policy).  Separator newlines inserted above are not counted. */
+  if (total_content_bytes == 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "engine: invariant violated — in-tree templates produced zero bytes");
+    return WYRELOG_E_INTERNAL;
   }
 
   /* Capture the authoritative byte count before transferring ownership of the
@@ -134,17 +146,6 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
       wyl_engine_load_templates (template_dir, &dl_src, &dl_src_len);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  /* Defense-in-depth: reject a zero-byte policy source before it reaches the
-   * evaluator.  Under normal operation the TEMPLATE_FILES array always
-   * produces content, but guard against a future refactor that mistakenly
-   * empties it or produces only empty files. */
-  if (dl_src_len == 0) {
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "engine: empty policy source (zero bytes loaded)");
-    g_free (dl_src);
-    return WYRELOG_E_POLICY;
-  }
 
   wl_easy_open_opts_t opts = {
     .size = sizeof (opts),
