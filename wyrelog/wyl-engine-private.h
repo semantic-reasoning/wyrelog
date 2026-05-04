@@ -37,7 +37,7 @@ wyrelog_error_t wyl_engine_map_wirelog_error (wirelog_error_t wl_err);
  *                   containing all template file contents concatenated with
  *                   '\n' between files. Caller is responsible for zeroing and
  *                   freeing the buffer via memset(@dl_src_len_out bytes) +
- *                   g_free.
+ *                   g_free. Must not be NULL.
  * @dl_src_len_out:  (out) On success, receives the byte length of the buffer
  *                   pointed to by *@dl_src_out, not including the NUL
  *                   terminator. Use this value — not strlen() — for memset to
