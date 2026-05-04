@@ -12,6 +12,14 @@ test_boot_smoke = executable('test-boot-smoke',
 
 test('boot-smoke', test_boot_smoke)
 
+test('wyrelogd-check', wyrelogd_exe,
+  args : [
+    '--template-dir',
+    meson.project_source_root() / 'templates' / 'access',
+    '--check',
+  ],
+)
+
 test_client_smoke = executable('test-client-smoke',
   'test-client-smoke.c',
   dependencies : [wyrelog_client_dep],
