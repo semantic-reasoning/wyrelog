@@ -71,6 +71,32 @@ CREATE INDEX IF NOT EXISTS idx_direct_permissions_subject_scope
     ON direct_permissions (subject_id, scope);
 
 -- ---------------------------------------------------------------------------
+-- Table: principal_states
+-- Durable principal authentication state mirrored into principal_state/2.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS principal_states (
+    subject_id TEXT PRIMARY KEY,
+    state      TEXT    NOT NULL,
+    updated_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_principal_states_state
+    ON principal_states (state);
+
+-- ---------------------------------------------------------------------------
+-- Table: session_states
+-- Durable session lifecycle state mirrored into session_state/2.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS session_states (
+    session_id TEXT PRIMARY KEY,
+    state      TEXT    NOT NULL,
+    updated_at INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_states_state
+    ON session_states (state);
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically

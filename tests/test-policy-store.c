@@ -5,6 +5,10 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
+#ifndef WYL_TEST_SQLITE_SCHEMA_PATH
+#error "WYL_TEST_SQLITE_SCHEMA_PATH must be defined by the build."
+#endif
+
 static gint
 check_store_creates_authority_schema (void)
 {
@@ -37,24 +41,64 @@ check_store_creates_authority_schema (void)
 }
 
 static gint
+check_template_schema_creates_state_tables (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_autofree gchar *schema = NULL;
+  gsize schema_len = 0;
+  g_autoptr (GError) error = NULL;
+  char *errmsg = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 20;
+  if (!g_file_get_contents (WYL_TEST_SQLITE_SCHEMA_PATH, &schema,
+          &schema_len, &error))
+    return 21;
+  if (sqlite3_exec (wyl_policy_store_get_db (store), schema, NULL, NULL,
+          &errmsg) != SQLITE_OK) {
+    sqlite3_free (errmsg);
+    return 22;
+  }
+
+  const gchar *tables[] = {
+    "roles",
+    "permissions",
+    "role_permissions",
+    "direct_permissions",
+    "principal_states",
+    "session_states",
+    "policy_signatures",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
+    gboolean exists = FALSE;
+    if (wyl_policy_store_table_exists (store, tables[i], &exists)
+        != WYRELOG_E_OK)
+      return 23;
+    if (!exists)
+      return 24;
+  }
+  return 0;
+}
+
+static gint
 check_store_rejects_invalid_args (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
 
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
-    return 20;
+    return 30;
   gboolean exists = FALSE;
   if (wyl_policy_store_create_schema (NULL) != WYRELOG_E_INVALID)
-    return 21;
+    return 31;
   if (wyl_policy_store_table_exists (NULL, "roles", &exists)
       != WYRELOG_E_INVALID)
-    return 22;
+    return 32;
   if (wyl_policy_store_table_exists (store, NULL, &exists)
       != WYRELOG_E_INVALID)
-    return 23;
+    return 33;
   if (wyl_policy_store_table_exists (store, "roles", NULL)
       != WYRELOG_E_INVALID)
-    return 24;
+    return 34;
   return 0;
 }
 
@@ -368,6 +412,8 @@ main (void)
   gint rc;
 
   if ((rc = check_store_creates_authority_schema ()) != 0)
+    return rc;
+  if ((rc = check_template_schema_creates_state_tables ()) != 0)
     return rc;
   if ((rc = check_store_rejects_invalid_args ()) != 0)
     return rc;
