@@ -13,6 +13,7 @@ struct _WylSession
   wyl_id_t id;
   gint64 created_at_us;
   gchar *username;
+  wyl_session_state_t state;
 };
 
 G_DEFINE_FINAL_TYPE (WylSession, wyl_session, G_TYPE_OBJECT);
@@ -49,6 +50,7 @@ wyl_session_init (WylSession *self)
   if (wyl_id_new (&self->id) != WYRELOG_E_OK)
     g_error ("wyl_session_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
+  self->state = WYL_SESSION_STATE_IDLE;
 }
 
 static wyrelog_error_t
@@ -216,7 +218,11 @@ transition_session_state (WylHandle *handle, WylSession *session,
   rc = insert_session_state (handle, session_id, new_state_name);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return store_session_state (handle, session_id, new_state_name);
+  rc = store_session_state (handle, session_id, new_state_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  session->state = new_state;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -262,6 +268,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     g_object_unref (session);
     return rc;
   }
+  session->state = WYL_SESSION_STATE_ACTIVE;
 
   *out_session = session;
   return WYRELOG_E_OK;
@@ -292,13 +299,12 @@ wyl_session_close (WylHandle *handle, WylSession *session)
     return WYRELOG_E_INVALID;
 
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (WYL_SESSION_STATE_ACTIVE,
-      WYL_SESSION_EVENT_LOGOUT, &state);
+  wyrelog_error_t rc =
+      wyl_fsm_session_step (session->state, WYL_SESSION_EVENT_LOGOUT, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_CLOSED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, WYL_SESSION_STATE_ACTIVE,
-      state);
+  return transition_session_state (handle, session, session->state, state);
 }
 
 wyrelog_error_t
@@ -308,13 +314,12 @@ wyl_session_elevate (WylHandle *handle, WylSession *session)
     return WYRELOG_E_INVALID;
 
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (WYL_SESSION_STATE_ACTIVE,
+  wyrelog_error_t rc = wyl_fsm_session_step (session->state,
       WYL_SESSION_EVENT_ELEVATE_GRANT, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_ELEVATED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, WYL_SESSION_STATE_ACTIVE,
-      state);
+  return transition_session_state (handle, session, session->state, state);
 }
 
 wyrelog_error_t
@@ -324,13 +329,12 @@ wyl_session_drop_elevation (WylHandle *handle, WylSession *session)
     return WYRELOG_E_INVALID;
 
   wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
-  wyrelog_error_t rc = wyl_fsm_session_step (WYL_SESSION_STATE_ELEVATED,
+  wyrelog_error_t rc = wyl_fsm_session_step (session->state,
       WYL_SESSION_EVENT_ELEVATE_DROP, &state);
   if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_ACTIVE)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  return transition_session_state (handle, session, WYL_SESSION_STATE_ELEVATED,
-      state);
+  return transition_session_state (handle, session, session->state, state);
 }
 
 wyrelog_error_t
