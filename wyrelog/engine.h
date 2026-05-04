@@ -200,4 +200,64 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
      wyrelog_error_t wyl_engine_snapshot (WylEngine *self,
     const gchar *relation, WylTupleCallback cb, gpointer user_data);
 
+/*
+ * WylDeltaKind:
+ * @WYL_DELTA_REMOVE: A tuple was removed.
+ * @WYL_DELTA_INSERT: A tuple was inserted.
+ *
+ * Typed tuple-change kind passed to WylDeltaCallback.
+ */
+     typedef enum
+     {
+       WYL_DELTA_REMOVE = -1,
+       WYL_DELTA_INSERT = 1,
+     } WylDeltaKind;
+
+/*
+ * WylDeltaCallback:
+ * @relation: The relation name for the delivered tuple change.  Borrowed
+ *   from the engine; valid only for the duration of this callback.
+ * @row: (array length=ncols): The integer row values.  Borrowed;
+ *   the array must not be retained beyond the callback's return.
+ * @ncols: The number of columns in @row.
+ * @kind: Whether the tuple was inserted or removed.
+ * @user_data: The user-data pointer passed to
+ *   wyl_engine_set_delta_callback().
+ *
+ * Invoked synchronously during wyl_engine_step() for tuple changes emitted
+ * by the engine.  The relation name and row pointer are owned by the engine
+ * and are only valid for the duration of the callback; copy them if they
+ * must be retained.  @user_data is forwarded unchanged.  The caller is
+ * responsible for the lifetime of @user_data: it must outlive the engine, or
+ * the callback must be cleared with wyl_engine_set_delta_callback(NULL)
+ * before @user_data is freed.
+ *
+ * Only wyl_engine_intern_symbol() may be called on the same engine instance
+ * from inside the callback.  All other public operations on that engine,
+ * including step, snapshot, insert, remove, setting this callback, close, and
+ * releasing the last reference, are undefined while the callback is running.
+ */
+     typedef void (*WylDeltaCallback) (const gchar *relation,
+    const gint64 *row, guint ncols, WylDeltaKind kind, gpointer user_data);
+
+/*
+ * wyl_engine_set_delta_callback:
+ * @self: A `WylEngine` instance.  Must not be NULL.
+ * @cb: Callback invoked during wyl_engine_step(), or NULL to clear the
+ *   current callback.
+ * @user_data: Opaque pointer passed through to @cb.
+ *
+ * Registers a callback for tuple changes emitted while stepping the engine.
+ * Passing NULL for @cb clears the callback; the underlying evaluator
+ * guarantees NULL-clear behavior.  This function is rejected with
+ * %WYRELOG_E_INVALID if @self has already entered snapshot mode.
+ *
+ * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if @self is NULL,
+ *   has no live session, or is in snapshot mode; %WYRELOG_E_POLICY,
+ *   %WYRELOG_E_EXEC, %WYRELOG_E_NOMEM, %WYRELOG_E_IO, or
+ *   %WYRELOG_E_INTERNAL if the underlying evaluator rejects setup.
+ */
+     wyrelog_error_t wyl_engine_set_delta_callback (WylEngine *self,
+    WylDeltaCallback cb, gpointer user_data);
+
 G_END_DECLS;
