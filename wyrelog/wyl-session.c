@@ -308,6 +308,11 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       g_object_unref (session);
       return rc;
     }
+#ifdef WYL_HAS_AUDIT
+    emit_principal_state_audit (handle, username,
+        wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
+        wyl_principal_state_name (state));
+#endif
   }
 
   wyrelog_error_t rc = set_session_state (handle, session, "active");
