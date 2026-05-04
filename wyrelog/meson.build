@@ -3,6 +3,7 @@ wyrelog_inc = include_directories('..')
 wyrelog_public_headers = files(
   'audit.h',
   'decide.h',
+  'engine.h',
   'error.h',
   'events.h',
   'handle.h',
@@ -18,6 +19,7 @@ wyrelog_sources = files(
   'wyl-boot.c',
   'wyl-decide.c',
   'wyl-dl-static.c',
+  'wyl-engine.c',
   'wyl-error.c',
   'wyl-events.c',
   'wyl-fsm-principal.c',
@@ -33,7 +35,7 @@ wyrelog_sources = files(
   'wyl-version.c',
 )
 
-wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep]
+wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep, wirelog_dep]
 
 wyrelog_log_levels = {
   'none' : 0,

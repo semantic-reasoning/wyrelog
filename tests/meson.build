@@ -233,6 +233,16 @@ test_session_logout = executable('test-session-logout',
 
 test('session-logout', test_session_logout)
 
+test_engine = executable('test-engine',
+  'test-engine.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+test('engine', test_engine)
+
 check_private_headers = find_program(
   '../tools/check-private-headers-not-installed.sh',
 )
