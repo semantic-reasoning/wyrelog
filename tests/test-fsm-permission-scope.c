@@ -14,22 +14,20 @@
 /* --- Stratification self-check ---------------------------------- */
 
 /*
- * Lifts the three armed/3 rules + the eval_guard host bridge fact
+ * Lifts the two armed/3 rules + the eval_guard host bridge fact
  * into wyl_dl_rule_t form and asserts the program is stratified.
- * The two negation edges (rule-2 references \+ perm_arm_rule, and
- * the rule-3 path goes through eval_guard / context_now) cannot
- * close a cycle because perm_arm_rule, perm_state, has_permission,
- * context_now, eval_guard and in_window are EDB-only — none of
- * them appears as a head predicate in the lifted rule set.
+ * The negation edge in the state-driven rule references
+ * \+ perm_arm_rule, and the guarded rule goes through eval_guard /
+ * context_now. No edge can close a cycle because perm_arm_rule,
+ * perm_state, has_permission, context_now and eval_guard are
+ * EDB-only — none of them appears as a head predicate in the
+ * lifted rule set.
  */
 static gint
 check_stratification (void)
 {
   static const wyl_dl_body_atom_t rule1_body[] = {
     {.predicate = "perm_state",.negated = FALSE},
-  };
-  static const wyl_dl_body_atom_t rule2_body[] = {
-    {.predicate = "has_permission",.negated = FALSE},
     {.predicate = "perm_arm_rule",.negated = TRUE},
   };
   static const wyl_dl_body_atom_t rule3_body[] = {
@@ -40,7 +38,6 @@ check_stratification (void)
   };
   wyl_dl_rule_t rules[] = {
     {.head = "armed",.body = rule1_body,.body_len = G_N_ELEMENTS (rule1_body)},
-    {.head = "armed",.body = rule2_body,.body_len = G_N_ELEMENTS (rule2_body)},
     {.head = "armed",.body = rule3_body,.body_len = G_N_ELEMENTS (rule3_body)},
   };
 
