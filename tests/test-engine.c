@@ -312,9 +312,10 @@ test_engine_double_close_safe (void)
 static gint
 test_engine_concat_with_newline_helper (void)
 {
-  /* Test wyl_engine_load_templates indirectly: create a tmpdir with two
-   * files where the first lacks a trailing newline, verify the combined
-   * source has a newline boundary between them. */
+  /* Test wyl_engine_load_templates directly via the internal helper exposed
+   * by wyl-engine-private.h: create a tmpdir with two files where the first
+   * lacks a trailing newline, verify the combined source has a newline
+   * boundary between them. */
   g_autofree gchar *tmpdir = make_tmpdir ();
   if (tmpdir == NULL)
     return 70;
@@ -353,7 +354,8 @@ test_engine_concat_with_newline_helper (void)
   }
 
   gchar *dl_src = NULL;
-  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src);
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src, &dl_src_len);
 
   if (rc != WYRELOG_E_OK) {
     g_printerr ("test_engine_concat_with_newline_helper: "
@@ -368,7 +370,9 @@ test_engine_concat_with_newline_helper (void)
   gboolean has_newline = (boundary != NULL)
       && (*(boundary + strlen ("% bootstrap")) == '\n');
 
-  memset (dl_src, 0, strlen (dl_src));
+  /* Use the tracked length (not strlen) for the zero-fill to ensure the full
+   * buffer is overwritten regardless of any embedded NUL bytes. */
+  memset (dl_src, 0, dl_src_len);
   g_free (dl_src);
   rmdir_recursive (tmpdir);
 

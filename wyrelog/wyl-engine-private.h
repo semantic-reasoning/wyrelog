@@ -32,11 +32,17 @@ wyrelog_error_t wyl_engine_map_wirelog_error (wirelog_error_t wl_err);
 
 /*
  * wyl_engine_load_templates:
- * @template_dir: Directory containing the policy template files.
- * @dl_src_out:   (out) On success, receives a newly-allocated gchar* containing
- *                all template file contents concatenated with '\n' between
- *                files. Caller is responsible for zeroing and freeing the
- *                buffer via memset + g_free.
+ * @template_dir:    Directory containing the policy template files.
+ * @dl_src_out:      (out) On success, receives a newly-allocated gchar*
+ *                   containing all template file contents concatenated with
+ *                   '\n' between files. Caller is responsible for zeroing and
+ *                   freeing the buffer via memset(@dl_src_len_out bytes) +
+ *                   g_free.
+ * @dl_src_len_out:  (out) On success, receives the byte length of the buffer
+ *                   pointed to by *@dl_src_out, not including the NUL
+ *                   terminator. Use this value — not strlen() — for memset to
+ *                   ensure every byte is overwritten regardless of embedded
+ *                   NUL bytes.
  *
  * Reads the policy templates in a fixed dependency order and concatenates
  * them into a single source string suitable for passing to the evaluator.
@@ -45,6 +51,6 @@ wyrelog_error_t wyl_engine_map_wirelog_error (wirelog_error_t wl_err);
  * unreadable, WYRELOG_E_NOMEM on allocation failure.
  */
 wyrelog_error_t wyl_engine_load_templates (const gchar * template_dir,
-    gchar ** dl_src_out);
+    gchar ** dl_src_out, gsize * dl_src_len_out);
 
 G_END_DECLS;
