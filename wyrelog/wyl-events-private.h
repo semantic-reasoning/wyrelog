@@ -56,8 +56,13 @@ G_BEGIN_DECLS;
  * transition is orphaned at the ingress boundary.
  */
 
-/* Internal LAST_ sentinel for the domain enum (not in public header). */
+/* Internal LAST_ sentinel for the domain enum (not in public header).
+ * This constant MUST be updated atomically whenever the public
+ * wyl_access_event_domain_t enum gains a new domain value; the
+ * static assertion below locks it to the actual public cardinality
+ * so that silent bounds drift is caught at compile time. */
 #define WYL_ACCESS_EVENT_DOMAIN_LAST_ ((wyl_access_event_domain_t) 2)
+G_STATIC_ASSERT (WYL_ACCESS_EVENT_DOMAIN_LAST_ == 2);
 
 typedef struct wyl_access_event_t
 {

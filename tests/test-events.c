@@ -359,6 +359,152 @@ test_event_ctor_session_sentinel_fsm_rejects (void)
   return 0;
 }
 
+static gint
+test_event_ctor_session_nil_event_id_rejects (void)
+{
+  wyl_id_t sid = make_test_id (23);
+  WylAccessEvent *sentinel = (WylAccessEvent *) (gpointer) 0xdeadbeef;
+  WylAccessEvent *e = sentinel;
+  wyrelog_error_t rc;
+
+  rc = wyl_access_event_new_session (WYL_ID_NIL, sid,
+      WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, &e);
+
+  if (rc != WYRELOG_E_INVALID)
+    return 270;
+  if (e != NULL)
+    return 271;
+  return 0;
+}
+
+static gint
+test_event_ctor_session_nil_session_id_rejects (void)
+{
+  wyl_id_t eid = make_test_id (24);
+  WylAccessEvent *sentinel = (WylAccessEvent *) (gpointer) 0xdeadbeef;
+  WylAccessEvent *e = sentinel;
+  wyrelog_error_t rc;
+
+  rc = wyl_access_event_new_session (eid, WYL_ID_NIL,
+      WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, &e);
+
+  if (rc != WYRELOG_E_INVALID)
+    return 280;
+  if (e != NULL)
+    return 281;
+  return 0;
+}
+
+static gint
+test_event_ctor_session_null_out_rejects (void)
+{
+  wyl_id_t eid = make_test_id (25);
+  wyl_id_t sid = make_test_id (26);
+  wyrelog_error_t rc;
+
+  rc = wyl_access_event_new_session (eid, sid,
+      WYL_SESSION_EVENT_REQUEST, NULL, NULL, 0, NULL, NULL);
+
+  if (rc != WYRELOG_E_INVALID)
+    return 290;
+  return 0;
+}
+
+static gint
+test_event_cross_domain_accessor_isolation_full (void)
+{
+  wyl_id_t p_eid = make_test_id (27);
+  wyl_id_t pid = make_test_id (28);
+  wyl_id_t s_eid = make_test_id (29);
+  wyl_id_t sid = make_test_id (30);
+  WylAccessEvent *pe = NULL;
+  WylAccessEvent *se = NULL;
+  wyrelog_error_t rc;
+
+  rc = wyl_access_event_new_principal (p_eid, pid,
+      WYL_PRINCIPAL_EVENT_LOGIN_OK,
+      "password", "10.0.0.1", "UA/1", 0, NULL, &pe);
+  if (rc != WYRELOG_E_OK)
+    return 300;
+
+  rc = wyl_access_event_new_session (s_eid, sid,
+      WYL_SESSION_EVENT_REQUEST, "10.0.0.2", "UA/2", 0, NULL, &se);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (pe);
+    return 301;
+  }
+
+  /* --- Principal accessors on a SESSION event must return sentinels --- */
+  {
+    wyl_id_t r = wyl_access_event_get_principal_id (se);
+    if (!wyl_id_equal (&r, &WYL_ID_NIL))
+      goto fail_302;
+  }
+  if (wyl_access_event_get_principal_fsm_event (se) !=
+      WYL_PRINCIPAL_EVENT_LAST_)
+    goto fail_303;
+  if (wyl_access_event_get_auth_method (se) != NULL)
+    goto fail_304;
+  if (wyl_access_event_get_principal_source_ip (se) != NULL)
+    goto fail_305;
+  if (wyl_access_event_get_principal_user_agent (se) != NULL)
+    goto fail_306;
+
+  /* --- Session accessors on a PRINCIPAL event must return sentinels --- */
+  {
+    wyl_id_t r = wyl_access_event_get_session_id (pe);
+    if (!wyl_id_equal (&r, &WYL_ID_NIL))
+      goto fail_307;
+  }
+  if (wyl_access_event_get_session_fsm_event (pe) != WYL_SESSION_EVENT_LAST_)
+    goto fail_308;
+  if (wyl_access_event_get_session_source_ip (pe) != NULL)
+    goto fail_309;
+  if (wyl_access_event_get_session_user_agent (pe) != NULL)
+    goto fail_310;
+
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 0;
+
+fail_302:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 302;
+fail_303:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 303;
+fail_304:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 304;
+fail_305:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 305;
+fail_306:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 306;
+fail_307:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 307;
+fail_308:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 308;
+fail_309:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 309;
+fail_310:
+  g_object_unref (pe);
+  g_object_unref (se);
+  return 310;
+}
+
 /* -----------------------------------------------------------------------
  * Autoptr cleanup (build-level: no crash = pass)
  * --------------------------------------------------------------------- */
@@ -529,11 +675,19 @@ main (void)
     return rc;
   if ((rc = test_event_ctor_session_sentinel_fsm_rejects ()) != 0)
     return rc;
+  if ((rc = test_event_ctor_session_nil_event_id_rejects ()) != 0)
+    return rc;
+  if ((rc = test_event_ctor_session_nil_session_id_rejects ()) != 0)
+    return rc;
+  if ((rc = test_event_ctor_session_null_out_rejects ()) != 0)
+    return rc;
 
   /* Autoptr, cross-domain, context, owned strings */
   if ((rc = test_event_autoptr_cleanup ()) != 0)
     return rc;
   if ((rc = test_event_cross_domain_accessor_isolation ()) != 0)
+    return rc;
+  if ((rc = test_event_cross_domain_accessor_isolation_full ()) != 0)
     return rc;
   if ((rc = test_event_context_attachment ()) != 0)
     return rc;

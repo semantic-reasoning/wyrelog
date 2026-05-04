@@ -200,14 +200,14 @@ wyl_access_event_new_principal (wyl_id_t event_id, wyl_id_t principal_id,
 {
   if (out == NULL)
     return WYRELOG_E_INVALID;
+  *out = NULL;
   if (id_is_nil (&event_id))
     return WYRELOG_E_INVALID;
   if (id_is_nil (&principal_id))
     return WYRELOG_E_INVALID;
   if (auth_method == NULL)
     return WYRELOG_E_INVALID;
-  if (fsm_event == WYL_PRINCIPAL_EVENT_LAST_ ||
-      (guint) fsm_event >= (guint) WYL_PRINCIPAL_EVENT_LAST_)
+  if ((guint) fsm_event >= (guint) WYL_PRINCIPAL_EVENT_LAST_)
     return WYRELOG_E_INVALID;
 
   WylAccessEvent *self = g_object_new (WYL_TYPE_ACCESS_EVENT, NULL);
@@ -234,12 +234,12 @@ wyl_access_event_new_session (wyl_id_t event_id, wyl_id_t session_id,
 {
   if (out == NULL)
     return WYRELOG_E_INVALID;
+  *out = NULL;
   if (id_is_nil (&event_id))
     return WYRELOG_E_INVALID;
   if (id_is_nil (&session_id))
     return WYRELOG_E_INVALID;
-  if (fsm_event == WYL_SESSION_EVENT_LAST_ ||
-      (guint) fsm_event >= (guint) WYL_SESSION_EVENT_LAST_)
+  if ((guint) fsm_event >= (guint) WYL_SESSION_EVENT_LAST_)
     return WYRELOG_E_INVALID;
 
   WylAccessEvent *self = g_object_new (WYL_TYPE_ACCESS_EVENT, NULL);

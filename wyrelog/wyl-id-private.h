@@ -34,9 +34,18 @@ G_BEGIN_DECLS;
  * cleanup function.
  */
 
-#define WYL_ID_BYTES        16
 #define WYL_ID_STRING_LEN   36
 #define WYL_ID_STRING_BUF   37
+
+/*
+ * Guard: wyrelog/events.h is the authoritative public definition site
+ * for wyl_id_t, WYL_ID_BYTES, WYL_ID_NIL, and wyl_id_equal. This
+ * block is guarded so that whichever header is included first wins;
+ * the two definitions are identical and the guard prevents a
+ * redefinition error.
+ */
+#ifndef WYL_ID_BYTES
+#define WYL_ID_BYTES        16
 
 typedef struct wyl_id_t
 {
@@ -46,6 +55,13 @@ typedef struct wyl_id_t
 G_STATIC_ASSERT (sizeof (wyl_id_t) == WYL_ID_BYTES);
 
 extern const wyl_id_t WYL_ID_NIL;
+
+/*
+ * Bytewise equality. NULL on either side returns FALSE.
+ */
+gboolean wyl_id_equal (const wyl_id_t * a, const wyl_id_t * b);
+
+#endif /* WYL_ID_BYTES */
 
 /*
  * Generate a fresh time-ordered id stamped with the current wall-
@@ -79,11 +95,6 @@ wyrelog_error_t wyl_id_format (const wyl_id_t * id, gchar * buf, gsize buf_len);
  * guaranteed to round-trip through wyl_id_format.
  */
 wyrelog_error_t wyl_id_parse (const gchar * str, wyl_id_t * out);
-
-/*
- * Bytewise equality. NULL on either side returns FALSE.
- */
-gboolean wyl_id_equal (const wyl_id_t * a, const wyl_id_t * b);
 
 /*
  * Bytewise total order: returns <0, 0, >0 in memcmp fashion. NULL
