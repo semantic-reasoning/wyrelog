@@ -321,6 +321,32 @@ test_snapshot_observes_inserted_row (void)
 }
 
 static void
+test_snapshot_observes_direct_permission (void)
+{
+  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  gint64 row[3];
+  SnapshotExpect expect;
+
+  g_assert_cmpint (wyl_engine_intern_symbol (engine,
+          "direct-permission-user", &row[0]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_intern_symbol (engine,
+          "wr.direct-permission", &row[1]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_intern_symbol (engine,
+          "direct-permission-scope", &row[2]), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_engine_insert (engine, "direct_permission", row, 3),
+      ==, WYRELOG_E_OK);
+
+  expect.relation = "has_permission";
+  expect.expected_row = row;
+  expect.expected_ncols = 3;
+  expect.seen = 0;
+
+  g_assert_cmpint (wyl_engine_snapshot (engine, "has_permission",
+          snapshot_expect_cb, &expect), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (expect.seen, ==, 1);
+}
+
+static void
 test_snapshot_observes_removed_row (void)
 {
   g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
@@ -725,6 +751,8 @@ main (int argc, char **argv)
       test_snapshot_after_step_rejected);
   g_test_add_func ("/engine-io/snapshot-observes-inserted-row",
       test_snapshot_observes_inserted_row);
+  g_test_add_func ("/engine-io/snapshot-observes-direct-permission",
+      test_snapshot_observes_direct_permission);
   g_test_add_func ("/engine-io/snapshot-observes-removed-row",
       test_snapshot_observes_removed_row);
   g_test_add_func ("/engine-io/delta-nominal", test_delta_nominal);

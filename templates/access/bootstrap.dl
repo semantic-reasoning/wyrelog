@@ -37,6 +37,7 @@
 .decl ttl(key: symbol, seconds: int32)
 
 // EDB injected by the host at runtime
+.decl direct_permission(user: symbol, perm: symbol, scope: symbol)
 .decl member_of(user: symbol, role: symbol, scope: symbol)
 .decl now(ts: int64)
 .decl break_glass_used(ts: int64)
@@ -192,6 +193,7 @@ effective_permission(R, P) :- role_permission(R, P).
 effective_permission(R, P) :- inherits(R, R2), effective_permission(R2, P).
 
 has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).
+has_permission(U, P, S) :- direct_permission(U, P, S).
 
 is_admin(U) :- has_permission(U, "wr.sys.admin", _).
 is_admin(U) :- has_permission(U, "wr.svc.admin", _).
