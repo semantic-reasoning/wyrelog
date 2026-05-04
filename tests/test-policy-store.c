@@ -80,6 +80,27 @@ check_handle_owns_policy_store (void)
 
 typedef struct
 {
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  guint matches;
+} DirectPermissionExpect;
+
+static wyrelog_error_t
+direct_permission_expect_cb (const gchar *subject_id, const gchar *perm_id,
+    const gchar *scope, gpointer user_data)
+{
+  DirectPermissionExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
   const gchar *role_id;
   const gchar *perm_id;
   guint matches;
@@ -156,6 +177,16 @@ check_store_grants_direct_permission (void)
     return 65;
   if (!exists)
     return 66;
+  DirectPermissionExpect expect = {
+    .subject_id = "direct-user",
+    .perm_id = "wr.direct.read",
+    .scope = "direct-scope",
+  };
+  if (wyl_policy_store_foreach_direct_permission (store,
+          direct_permission_expect_cb, &expect) != WYRELOG_E_OK)
+    return 78;
+  if (expect.matches != 1)
+    return 79;
   if (wyl_policy_store_revoke_direct_permission (store, "direct-user",
           "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 67;
@@ -189,6 +220,9 @@ check_store_rejects_bad_direct_permission (void)
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
           "missing-perm", "direct-scope", NULL) != WYRELOG_E_INVALID)
     return 75;
+  if (wyl_policy_store_foreach_direct_permission (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 78;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
           "missing-perm", "direct-scope", &exists) != WYRELOG_E_OK)
     return 76;
