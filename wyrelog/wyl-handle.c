@@ -263,6 +263,17 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
   return wyl_engine_remove (self->delta_engine, relation, row, ncols);
 }
 
+wyrelog_error_t
+wyl_handle_engine_step_delta (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_step (self->delta_engine);
+}
+
 typedef struct
 {
   const gchar *relation;
