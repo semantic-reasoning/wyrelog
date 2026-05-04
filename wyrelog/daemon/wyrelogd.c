@@ -106,6 +106,15 @@ check_audit_sink_ready (WylHandle *handle)
     return rc;
   if (!found)
     return WYRELOG_E_IO;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "wyrelogd");
+  wyl_audit_event_set_action (ev, "daemon_check");
+  wyl_audit_event_set_resource_id (ev, "audit_events");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  rc = wyl_audit_emit (handle, ev);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 #else
   (void) handle;
 #endif
