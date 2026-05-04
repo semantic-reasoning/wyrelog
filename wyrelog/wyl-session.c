@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 
 struct _WylSession
@@ -51,14 +52,37 @@ wyrelog_error_t
 wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylSession **out_session)
 {
-  (void) handle;
-
   if (out_session == NULL)
     return WYRELOG_E_INVALID;
+  *out_session = NULL;
 
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
-  if (req != NULL)
-    session->username = g_strdup (wyl_login_req_get_username (req));
+  const gchar *username = NULL;
+  if (req != NULL) {
+    username = wyl_login_req_get_username (req);
+    session->username = g_strdup (username);
+  }
+
+  if (handle != NULL && username != NULL
+      && wyl_handle_get_read_engine (handle) != NULL) {
+    gint64 row[2];
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (handle, username, &row[0]);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (session);
+      return rc;
+    }
+    rc = wyl_handle_intern_engine_symbol (handle, "authenticated", &row[1]);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (session);
+      return rc;
+    }
+    rc = wyl_handle_engine_insert (handle, "principal_state", row, 2);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (session);
+      return rc;
+    }
+  }
 
   *out_session = session;
   return WYRELOG_E_OK;
