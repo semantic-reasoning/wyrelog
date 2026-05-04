@@ -180,6 +180,23 @@ check_open_pair_creates_distinct_engines (void)
 }
 
 static gint
+check_init_config_opens_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 25;
+  if (wyl_handle_get_read_engine (handle) == NULL)
+    return 26;
+  if (wyl_handle_get_delta_engine (handle) == NULL)
+    return 27;
+  if (wyl_handle_get_read_engine (handle) == wyl_handle_get_delta_engine
+      (handle))
+    return 28;
+  return 0;
+}
+
+static gint
 check_invalid_template_pair_open_fails_closed (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -194,6 +211,19 @@ check_invalid_template_pair_open_fails_closed (void)
     return 32;
   if (wyl_handle_get_delta_engine (handle) != NULL)
     return 33;
+  return 0;
+}
+
+static gint
+check_invalid_config_init_fails_closed (void)
+{
+  WylHandle *handle = (WylHandle *) 0x1;
+
+  if (wyl_init ("/definitely/not/a/wyrelog/template-dir", &handle)
+      != WYRELOG_E_IO)
+    return 35;
+  if (handle != NULL)
+    return 36;
   return 0;
 }
 
@@ -494,7 +524,11 @@ main (void)
     return rc;
   if ((rc = check_open_pair_creates_distinct_engines ()) != 0)
     return rc;
+  if ((rc = check_init_config_opens_engine_pair ()) != 0)
+    return rc;
   if ((rc = check_invalid_template_pair_open_fails_closed ()) != 0)
+    return rc;
+  if ((rc = check_invalid_config_init_fails_closed ()) != 0)
     return rc;
   if ((rc = check_shutdown_clears_engine_pair ()) != 0)
     return rc;

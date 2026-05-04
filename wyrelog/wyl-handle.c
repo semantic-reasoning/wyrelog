@@ -2,6 +2,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "wyrelog/engine.h"
+#include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
 
@@ -72,14 +73,20 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
 
   if (out_handle == NULL)
     return WYRELOG_E_INVALID;
+  *out_handle = NULL;
 
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
 
+  if (config_path != NULL) {
+    wyrelog_error_t rc = wyl_handle_open_engine_pair (self, config_path);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (self);
+      return rc;
+    }
+  }
 #ifdef WYL_HAS_AUDIT
   /* Open an in-memory audit database and create the audit_events
-   * schema. config_path will eventually direct this at a persistent
-   * location; for now the in-memory store is enough to exercise the
-   * full lifecycle. */
+   * schema. Audit persistence is not wired to config_path yet. */
   wyrelog_error_t rc = wyl_audit_conn_open (NULL, &self->audit_conn);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
@@ -93,7 +100,6 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
 #endif
 
   *out_handle = self;
-  (void) config_path;
   return WYRELOG_E_OK;
 }
 
