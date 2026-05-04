@@ -432,7 +432,8 @@ check_principal_transition_emits_audit_row (void)
   duckdb_result result;
   if (duckdb_query (conn,
           "SELECT subject_id, action, resource_id, deny_origin, decision "
-          "FROM audit_events WHERE action = 'principal_state';", &result)
+          "FROM audit_events WHERE action = 'principal_state' "
+          "AND deny_origin = 'mfa_required';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -460,6 +461,123 @@ check_principal_transition_emits_audit_row (void)
     rc = 88;
   else if (decision != WYL_DECISION_ALLOW)
     rc = 89;
+
+  duckdb_free ((void *) subject);
+  duckdb_free ((void *) action);
+  duckdb_free ((void *) resource);
+  duckdb_free ((void *) old_state);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
+check_login_principal_state_emits_audit_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 90;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-login-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 91;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "FROM audit_events WHERE action = 'principal_state';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 92;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 93;
+  }
+
+  gint rc = 0;
+  const gchar *subject = duckdb_value_varchar (&result, 0, 0);
+  const gchar *action = duckdb_value_varchar (&result, 1, 0);
+  const gchar *resource = duckdb_value_varchar (&result, 2, 0);
+  const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  if (g_strcmp0 (subject, "audit-login-user") != 0)
+    rc = 94;
+  else if (g_strcmp0 (action, "principal_state") != 0)
+    rc = 95;
+  else if (g_strcmp0 (resource, "mfa_required") != 0)
+    rc = 96;
+  else if (g_strcmp0 (old_state, "unverified") != 0)
+    rc = 97;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 98;
+
+  duckdb_free ((void *) subject);
+  duckdb_free ((void *) action);
+  duckdb_free ((void *) resource);
+  duckdb_free ((void *) old_state);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
+check_login_skip_mfa_emits_principal_state_audit_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 100;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-skip-mfa-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 101;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "FROM audit_events WHERE action = 'principal_state';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 102;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 103;
+  }
+
+  gint rc = 0;
+  const gchar *subject = duckdb_value_varchar (&result, 0, 0);
+  const gchar *action = duckdb_value_varchar (&result, 1, 0);
+  const gchar *resource = duckdb_value_varchar (&result, 2, 0);
+  const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  if (g_strcmp0 (subject, "audit-skip-mfa-user") != 0)
+    rc = 104;
+  else if (g_strcmp0 (action, "principal_state") != 0)
+    rc = 105;
+  else if (g_strcmp0 (resource, "authenticated") != 0)
+    rc = 106;
+  else if (g_strcmp0 (old_state, "unverified") != 0)
+    rc = 107;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 108;
 
   duckdb_free ((void *) subject);
   duckdb_free ((void *) action);
@@ -506,6 +624,10 @@ main (void)
   if ((rc = check_session_transition_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_principal_transition_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_login_principal_state_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_emits_principal_state_audit_row ()) != 0)
     return rc;
   if ((rc = check_emit_rejects_null_args ()) != 0)
     return rc;
