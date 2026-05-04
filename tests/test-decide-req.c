@@ -16,6 +16,8 @@ check_defaults_are_null (void)
     return 12;
   if (wyl_decide_req_get_resource_id (req) != NULL)
     return 13;
+  if (wyl_decide_req_has_guard_context (req))
+    return 14;
   return 0;
 }
 
@@ -121,6 +123,68 @@ check_free_null_is_safe (void)
   return 0;
 }
 
+static gint
+check_guard_context_round_trip (void)
+{
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_guard_context (req, 1234, "trusted", 42);
+
+  if (!wyl_decide_req_has_guard_context (req))
+    return 110;
+  if (wyl_decide_req_get_guard_timestamp (req) != 1234)
+    return 111;
+  if (g_strcmp0 (wyl_decide_req_get_guard_loc_class (req), "trusted") != 0)
+    return 112;
+  if (wyl_decide_req_get_guard_risk (req) != 42)
+    return 113;
+  return 0;
+}
+
+static gint
+check_guard_context_copies_loc_class (void)
+{
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  gchar loc_class[16] = "public";
+  wyl_decide_req_set_guard_context (req, 99, loc_class, 7);
+  loc_class[0] = 'X';
+
+  if (g_strcmp0 (wyl_decide_req_get_guard_loc_class (req), "public") != 0)
+    return 120;
+  return 0;
+}
+
+static gint
+check_guard_context_clear_resets_fields (void)
+{
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_guard_context (req, 1234, "trusted", 42);
+  wyl_decide_req_clear_guard_context (req);
+
+  if (wyl_decide_req_has_guard_context (req))
+    return 130;
+  if (wyl_decide_req_get_guard_timestamp (req) != 0)
+    return 131;
+  if (wyl_decide_req_get_guard_loc_class (req) != NULL)
+    return 132;
+  if (wyl_decide_req_get_guard_risk (req) != 0)
+    return 133;
+  return 0;
+}
+
+static gint
+check_guard_context_get_null_request (void)
+{
+  if (wyl_decide_req_has_guard_context (NULL))
+    return 140;
+  if (wyl_decide_req_get_guard_timestamp (NULL) != 0)
+    return 141;
+  if (wyl_decide_req_get_guard_loc_class (NULL) != NULL)
+    return 142;
+  if (wyl_decide_req_get_guard_risk (NULL) != 0)
+    return 143;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -145,6 +209,14 @@ main (void)
   if ((rc = check_get_null_request ()) != 0)
     return rc;
   if ((rc = check_free_null_is_safe ()) != 0)
+    return rc;
+  if ((rc = check_guard_context_round_trip ()) != 0)
+    return rc;
+  if ((rc = check_guard_context_copies_loc_class ()) != 0)
+    return rc;
+  if ((rc = check_guard_context_clear_resets_fields ()) != 0)
+    return rc;
+  if ((rc = check_guard_context_get_null_request ()) != 0)
     return rc;
 
   return 0;

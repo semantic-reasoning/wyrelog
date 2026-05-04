@@ -60,6 +60,10 @@ const gchar *wyl_decide_req_get_resource_id (const wyl_decide_req_t * req);
 void wyl_decide_req_set_guard_context (wyl_decide_req_t * req,
     gint64 timestamp, const gchar * loc_class, gint64 risk);
 void wyl_decide_req_clear_guard_context (wyl_decide_req_t * req);
+gboolean wyl_decide_req_has_guard_context (const wyl_decide_req_t * req);
+gint64 wyl_decide_req_get_guard_timestamp (const wyl_decide_req_t * req);
+const gchar *wyl_decide_req_get_guard_loc_class (const wyl_decide_req_t * req);
+gint64 wyl_decide_req_get_guard_risk (const wyl_decide_req_t * req);
 
 wyl_decide_resp_t *wyl_decide_resp_new (void);
 void wyl_decide_resp_free (wyl_decide_resp_t * resp);
