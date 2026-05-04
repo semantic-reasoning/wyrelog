@@ -197,6 +197,40 @@ wyl_handle_intern_engine_symbol (WylHandle *self, const gchar *symbol,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc =
+      wyl_engine_insert (self->read_engine, relation, row, ncols);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_engine_insert (self->delta_engine, relation, row, ncols);
+}
+
+wyrelog_error_t
+wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc =
+      wyl_engine_remove (self->read_engine, relation, row, ncols);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_engine_remove (self->delta_engine, relation, row, ncols);
+}
+
 WylEngine *
 wyl_handle_get_read_engine (WylHandle *self)
 {

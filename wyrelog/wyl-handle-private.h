@@ -39,6 +39,17 @@ wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
     const gchar * symbol, gint64 * out_id);
 
 /*
+ * Applies an EDB row update to both handle-owned policy engines. Rejected
+ * unless the engine pair is already open. This helper is not transactional
+ * across the two engines; callers must treat a non-OK return as terminal for
+ * the pair.
+ */
+wyrelog_error_t wyl_handle_engine_insert (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
+
+/*
  * Borrowed policy engine sessions owned by |self|. These are NULL when
  * no policy engine pair has been opened. The read engine is reserved for
  * snapshot-style reads; the delta engine is reserved for step/delta
