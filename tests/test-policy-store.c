@@ -21,6 +21,7 @@ check_store_creates_authority_schema (void)
     "role_permissions",
     "direct_permissions",
     "principal_states",
+    "session_states",
     "policy_signatures",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
@@ -114,6 +115,25 @@ principal_state_expect_cb (const gchar *subject_id, const gchar *state,
   PrincipalStateExpect *expect = user_data;
 
   if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  const gchar *session_id;
+  const gchar *state;
+  guint matches;
+} SessionStateExpect;
+
+static wyrelog_error_t
+session_state_expect_cb (const gchar *session_id, const gchar *state,
+    gpointer user_data)
+{
+  SessionStateExpect *expect = user_data;
+
+  if (g_strcmp0 (session_id, expect->session_id) == 0
       && g_strcmp0 (state, expect->state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
@@ -247,6 +267,34 @@ check_store_sets_principal_state (void)
 }
 
 static gint
+check_store_sets_session_state (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 86;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 87;
+  if (wyl_policy_store_set_session_state (store, "session/1", "active")
+      != WYRELOG_E_OK)
+    return 88;
+  if (wyl_policy_store_set_session_state (store, "session/1", "closed")
+      != WYRELOG_E_OK)
+    return 89;
+
+  SessionStateExpect expect = {
+    .session_id = "session/1",
+    .state = "closed",
+  };
+  if (wyl_policy_store_foreach_session_state (store,
+          session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 90;
+  if (expect.matches != 1)
+    return 91;
+  return 0;
+}
+
+static gint
 check_store_rejects_bad_direct_permission (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -305,6 +353,12 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_principal_state (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 57;
+  if (wyl_policy_store_set_session_state (store, NULL, "active")
+      != WYRELOG_E_INVALID)
+    return 58;
+  if (wyl_policy_store_foreach_session_state (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 59;
   return 0;
 }
 
@@ -324,6 +378,8 @@ main (void)
   if ((rc = check_store_grants_direct_permission ()) != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
+    return rc;
+  if ((rc = check_store_sets_session_state ()) != 0)
     return rc;
   if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
     return rc;

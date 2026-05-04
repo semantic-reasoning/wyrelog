@@ -946,6 +946,69 @@ check_policy_store_principal_states_require_engine_pair (void)
   return 0;
 }
 
+static gint
+check_policy_store_session_states_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 390;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_session_state (store, "session-load-scope",
+          "active") != WYRELOG_E_OK)
+    return 391;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 392;
+
+  if (insert2_symbol (handle, "role_permission", "wr.session-role",
+          "wr.session.read") != WYRELOG_E_OK)
+    return 393;
+  if (insert2_symbol (handle, "principal_state", "session-load-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 394;
+  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 395;
+  gint64 member_row[3];
+  if (intern3 (handle, "session-load-user", "wr.session-role",
+          "session-load-scope", member_row) != WYRELOG_E_OK)
+    return 396;
+  if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
+      != WYRELOG_E_OK)
+    return 397;
+  if (insert4_symbol (handle, "perm_state", "session-load-user",
+          "wr.session.read", "session-load-scope", "armed") != WYRELOG_E_OK)
+    return 398;
+
+  gint64 row[3];
+  if (intern3 (handle, "session-load-user", "wr.session.read",
+          "session-load-scope", row) != WYRELOG_E_OK)
+    return 399;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, row, &allowed)
+      != WYRELOG_E_OK)
+    return 400;
+  if (!allowed)
+    return 401;
+  return 0;
+}
+
+static gint
+check_policy_store_session_states_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 410;
+  if (wyl_handle_load_policy_store_session_states (NULL) != WYRELOG_E_INVALID)
+    return 411;
+  if (wyl_handle_load_policy_store_session_states (handle)
+      != WYRELOG_E_INVALID)
+    return 412;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -1010,6 +1073,10 @@ main (void)
   if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_principal_states_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_session_states_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_session_states_require_engine_pair ()) != 0)
     return rc;
 
   return 0;
