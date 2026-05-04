@@ -21,6 +21,8 @@ typedef enum
   WYL_ENGINE_MODE_SNAPSHOT,
 } wyl_engine_mode_t;
 
+typedef struct _WylDeltaCookie WylDeltaCookie;
+
 struct _WylEngine
 {
   GObject parent_instance;
@@ -28,6 +30,7 @@ struct _WylEngine
   /* Logical path strings for diagnostic logging only; freed in finalize. */
   gchar *dl_src_logical_paths[WYL_ENGINE_TEMPLATE_COUNT];
   wyl_engine_mode_t mode;       /* Latched at first step or snapshot. */
+  WylDeltaCookie *delta_cookie; /* Heap-owned, NULL when no cb. */
 };
 
 /*

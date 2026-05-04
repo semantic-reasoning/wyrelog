@@ -6,6 +6,7 @@
 #include "wyl-common-private.h"
 
 G_STATIC_ASSERT (sizeof (gint64) == sizeof (int64_t));
+G_STATIC_ASSERT (sizeof (gint32) == sizeof (int32_t));
 
 /*
  * Fixed dependency order for policy template files.
@@ -29,6 +30,12 @@ typedef struct
   gpointer user_data;
 } wyl_engine_tuple_cookie_t;
 
+struct _WylDeltaCookie
+{
+  WylDeltaCallback callback;
+  gpointer user_data;
+};
+
 static void
 wyl_engine_tuple_trampoline (const char *relation, const int64_t *row,
     uint32_t ncols, void *user)
@@ -36,6 +43,27 @@ wyl_engine_tuple_trampoline (const char *relation, const int64_t *row,
   const wyl_engine_tuple_cookie_t *cookie = user;
 
   cookie->cb (relation, (const gint64 *) row, (guint) ncols, cookie->user_data);
+}
+
+static void
+wyl_engine_delta_trampoline (const char *relation, const int64_t *row,
+    uint32_t ncols, int32_t diff, void *user)
+{
+  const WylDeltaCookie *cookie = user;
+  WylDeltaKind kind;
+
+  if (diff == 1) {
+    kind = WYL_DELTA_INSERT;
+  } else if (diff == -1) {
+    kind = WYL_DELTA_REMOVE;
+  } else {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: unexpected delta diff value (skipping callback)");
+    return;
+  }
+
+  cookie->callback (relation, (const gint64 *) row, (guint) ncols, kind,
+      cookie->user_data);
 }
 
 /* --- GObject boilerplate ------------------------------------------- */
@@ -48,6 +76,7 @@ wyl_engine_finalize (GObject *object)
   WylEngine *self = WYL_ENGINE (object);
 
   g_clear_pointer (&self->session, wl_easy_close);
+  g_clear_pointer (&self->delta_cookie, g_free);
 
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     g_clear_pointer (&self->dl_src_logical_paths[i], g_free);
@@ -310,6 +339,53 @@ wyl_engine_snapshot (WylEngine *self, const gchar *relation,
   }
 
   return rc;
+}
+
+wyrelog_error_t
+wyl_engine_set_delta_callback (WylEngine *self, WylDeltaCallback cb,
+    gpointer user_data)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->mode == WYL_ENGINE_MODE_SNAPSHOT)
+    return WYRELOG_E_INVALID;
+
+  if (cb == NULL) {
+    /* Clear the substrate hook before releasing the cookie it may reference. */
+    wirelog_error_t wl_rc = wl_easy_set_delta_cb (self->session, NULL, NULL);
+    wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+    if (rc != WYRELOG_E_OK) {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+          "engine: clear delta callback failed (rc=%d)", (int) rc);
+      return rc;
+    }
+
+    g_clear_pointer (&self->delta_cookie, g_free);
+    return WYRELOG_E_OK;
+  }
+
+  WylDeltaCookie *new_cookie = g_new0 (WylDeltaCookie, 1);
+  new_cookie->callback = cb;
+  new_cookie->user_data = user_data;
+
+  wirelog_error_t wl_rc =
+      wl_easy_set_delta_cb (self->session, wyl_engine_delta_trampoline,
+      new_cookie);
+  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc != WYRELOG_E_OK) {
+    g_free (new_cookie);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: install delta callback failed (rc=%d)", (int) rc);
+    return rc;
+  }
+
+  WylDeltaCookie *old = self->delta_cookie;
+  self->delta_cookie = new_cookie;
+  g_free (old);
+
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
