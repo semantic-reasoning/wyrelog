@@ -52,7 +52,9 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  *
  * Releases the engine and its underlying evaluator session. Equivalent to
  * g_clear_object when called on a g_autoptr-managed variable, but available
- * as an explicit close site for callers that do not use autoptr.
+ * as an explicit close site for callers that do not use autoptr.  This call
+ * releases and invalidates the handle; callers must not dereference @engine
+ * after it returns.
  */
      void wyl_engine_close (WylEngine *engine);
 
@@ -71,8 +73,9 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  * engine instances are not interchangeable.
  *
  * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any
- *   argument is NULL or @self has been closed; %WYRELOG_E_INTERNAL
- *   if the engine cannot register the symbol.
+ *   argument is NULL or @self is in an uninitialized or partially-finalized
+ *   state; %WYRELOG_E_INTERNAL if the underlying wirelog engine fails to
+ *   intern the symbol.
  */
      wyrelog_error_t wyl_engine_intern_symbol (WylEngine *self,
     const gchar *symbol, gint64 *out_id);
@@ -88,12 +91,13 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  *
  * Inserts a single row into the named relation. The evaluator accepts
  * the row as fact data; if the loaded program declares the relation
- * with a different arity, the insert fails with %WYRELOG_E_EXEC.
+ * with a different arity, or the underlying engine rejects the row for
+ * any other evaluator-side reason, the call fails with %WYRELOG_E_EXEC.
  *
  * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any
  *   argument fails its precondition or @self has no live session;
  *   %WYRELOG_E_EXEC if the underlying engine rejects the row;
- *   other %WYRELOG_E_* codes on internal failure.
+ *   %WYRELOG_E_INTERNAL on a wyrelog-side invariant violation.
  */
      wyrelog_error_t wyl_engine_insert (WylEngine *self,
     const gchar *relation, const gint64 *row, gsize ncols);
@@ -113,7 +117,7 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any
  *   argument fails its precondition or @self has no live session;
  *   %WYRELOG_E_EXEC if the underlying engine rejects the row;
- *   other %WYRELOG_E_* codes on internal failure.
+ *   %WYRELOG_E_INTERNAL on a wyrelog-side invariant violation.
  */
      wyrelog_error_t wyl_engine_remove (WylEngine *self,
     const gchar *relation, const gint64 *row, gsize ncols);
@@ -130,7 +134,11 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  * Invoked once per tuple during a snapshot.  The relation name
  * and row pointer are owned by the engine and are only valid for
  * the duration of the callback; if the caller wishes to retain
- * either, it must copy them.
+ * either, it must copy them.  @user_data is the same opaque pointer
+ * passed to wyl_engine_snapshot() and is forwarded unchanged to each
+ * callback invocation.  The callback is invoked synchronously while the
+ * engine is mid-evaluation; the callback MUST NOT re-enter the same
+ * `WylEngine` instance via any of its public functions.
  */
      typedef void (*WylTupleCallback) (const gchar *relation,
     const gint64 *row, guint ncols, gpointer user_data);
@@ -149,8 +157,14 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  * not allow mixing step advancement and snapshot probing on the same batch.
  *
  * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if @self is NULL,
- *   has no live session, or has already been used in snapshot mode; other
- *   %WYRELOG_E_* codes on internal failure.
+ *   has no live session, or has already been used in snapshot mode;
+ *   %WYRELOG_E_EXEC on a wirelog evaluator failure; %WYRELOG_E_INTERNAL on
+ *   a wyrelog-side invariant violation.  On %WYRELOG_E_EXEC, the engine is
+ *   not latched into incremental mode by this wrapper; callers should not
+ *   assume the underlying session state was rolled back unless the underlying
+ *   engine documents that guarantee.  Treat a step failure as terminal for
+ *   this engine instance unless the underlying engine explicitly supports
+ *   retry.
  */
      wyrelog_error_t wyl_engine_step (WylEngine *self);
 
@@ -174,7 +188,8 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  *
  * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any argument is
  *   NULL, @self has no live session, or the engine has already been used in
- *   step mode; other %WYRELOG_E_* codes on internal failure.
+ *   step mode; %WYRELOG_E_EXEC on a wirelog evaluator failure;
+ *   %WYRELOG_E_INTERNAL on a wyrelog-side invariant violation.
  */
      wyrelog_error_t wyl_engine_snapshot (WylEngine *self,
     const gchar *relation, WylTupleCallback cb, gpointer user_data);
