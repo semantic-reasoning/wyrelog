@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "wyl-fsm-principal-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 
@@ -48,6 +49,50 @@ wyl_session_init (WylSession *self)
   self->created_at_us = g_get_real_time ();
 }
 
+static wyrelog_error_t
+insert_principal_state (WylHandle *handle, const gchar *username,
+    wyl_principal_state_t state)
+{
+  if (username == NULL || wyl_handle_get_read_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+
+  const gchar *state_name = wyl_principal_state_name (state);
+  if (state_name == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  gint64 row[2];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, username, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, state_name, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, "principal_state", row, 2);
+}
+
+static wyrelog_error_t
+remove_principal_state (WylHandle *handle, const gchar *username,
+    wyl_principal_state_t state)
+{
+  if (username == NULL || wyl_handle_get_read_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+
+  const gchar *state_name = wyl_principal_state_name (state);
+  if (state_name == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  gint64 row[2];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, username, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, state_name, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_remove (handle, "principal_state", row, 2);
+}
+
 wyrelog_error_t
 wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylSession **out_session)
@@ -65,20 +110,15 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     session->username = g_strdup (username);
   }
 
-  if (username != NULL && wyl_handle_get_read_engine (handle) != NULL) {
-    gint64 row[2];
-    wyrelog_error_t rc =
-        wyl_handle_intern_engine_symbol (handle, username, &row[0]);
-    if (rc != WYRELOG_E_OK) {
+  if (username != NULL) {
+    wyl_principal_state_t state = WYL_PRINCIPAL_STATE_LAST_;
+    wyrelog_error_t rc = wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_UNVERIFIED,
+        WYL_PRINCIPAL_EVENT_LOGIN_OK, &state);
+    if (rc != WYRELOG_E_OK || state != WYL_PRINCIPAL_STATE_MFA_REQUIRED) {
       g_object_unref (session);
-      return rc;
+      return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
     }
-    rc = wyl_handle_intern_engine_symbol (handle, "authenticated", &row[1]);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (session);
-      return rc;
-    }
-    rc = wyl_handle_engine_insert (handle, "principal_state", row, 2);
+    rc = insert_principal_state (handle, username, state);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
       return rc;
@@ -87,6 +127,27 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 
   *out_session = session;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
+{
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
+    return WYRELOG_E_INVALID;
+  if (session->username == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_principal_state_t state = WYL_PRINCIPAL_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_MFA_REQUIRED,
+      WYL_PRINCIPAL_EVENT_MFA_OK, &state);
+  if (rc != WYRELOG_E_OK || state != WYL_PRINCIPAL_STATE_AUTHENTICATED)
+    return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
+
+  rc = remove_principal_state (handle, session->username,
+      WYL_PRINCIPAL_STATE_MFA_REQUIRED);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_principal_state (handle, session->username, state);
 }
 
 wyrelog_error_t

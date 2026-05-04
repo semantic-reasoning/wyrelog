@@ -32,6 +32,8 @@ typedef enum wyl_principal_state_t
   WYL_PRINCIPAL_STATE_LAST_,
 } wyl_principal_state_t;
 
+#ifndef WYL_PRINCIPAL_EVENT_T_DEFINED
+#define WYL_PRINCIPAL_EVENT_T_DEFINED
 typedef enum wyl_principal_event_t
 {
   WYL_PRINCIPAL_EVENT_LOGIN_OK = 0,
@@ -43,6 +45,7 @@ typedef enum wyl_principal_event_t
   WYL_PRINCIPAL_EVENT_REVOKE,
   WYL_PRINCIPAL_EVENT_LAST_,
 } wyl_principal_event_t;
+#endif /* WYL_PRINCIPAL_EVENT_T_DEFINED */
 
 typedef struct wyl_principal_transition_t
 {

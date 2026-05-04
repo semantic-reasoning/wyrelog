@@ -10,7 +10,7 @@
 G_BEGIN_DECLS;
 
 /*
- * WylSession - active authenticated session.
+ * WylSession - active login session.
  *
  * Carries the principal identity, MFA state, and tenant binding for a
  * sequence of decide calls. Acquired through wyl_session_login,
@@ -53,6 +53,8 @@ const gchar *wyl_login_req_get_username (const wyl_login_req_t * req);
 
 wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);
+wyrelog_error_t wyl_session_mfa_verify (WylHandle * handle,
+    WylSession * session);
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);
 
 /*
