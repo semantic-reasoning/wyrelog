@@ -4,6 +4,7 @@
 #include "wyl-fsm-principal-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
+#include "policy/store-private.h"
 
 struct _WylSession
 {
@@ -93,6 +94,44 @@ remove_principal_state (WylHandle *handle, const gchar *username,
   return wyl_handle_engine_remove (handle, "principal_state", row, 2);
 }
 
+static wyrelog_error_t
+store_principal_state (WylHandle *handle, const gchar *username,
+    wyl_principal_state_t state)
+{
+  if (username == NULL)
+    return WYRELOG_E_OK;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_OK;
+
+  const gchar *state_name = wyl_principal_state_name (state);
+  if (state_name == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  return wyl_policy_store_set_principal_state (store, username, state_name);
+}
+
+static wyrelog_error_t
+set_principal_state (WylHandle *handle, const gchar *username,
+    wyl_principal_state_t state)
+{
+  wyrelog_error_t rc = insert_principal_state (handle, username, state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return store_principal_state (handle, username, state);
+}
+
+static wyrelog_error_t
+transition_principal_state (WylHandle *handle, const gchar *username,
+    wyl_principal_state_t old_state, wyl_principal_state_t new_state)
+{
+  wyrelog_error_t rc = remove_principal_state (handle, username, old_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return set_principal_state (handle, username, new_state);
+}
+
 wyrelog_error_t
 wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylSession **out_session)
@@ -118,7 +157,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       g_object_unref (session);
       return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
     }
-    rc = insert_principal_state (handle, username, state);
+    rc = set_principal_state (handle, username, state);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
       return rc;
@@ -143,11 +182,8 @@ wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
   if (rc != WYRELOG_E_OK || state != WYL_PRINCIPAL_STATE_AUTHENTICATED)
     return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
 
-  rc = remove_principal_state (handle, session->username,
-      WYL_PRINCIPAL_STATE_MFA_REQUIRED);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return insert_principal_state (handle, session->username, state);
+  return transition_principal_state (handle, session->username,
+      WYL_PRINCIPAL_STATE_MFA_REQUIRED, state);
 }
 
 wyrelog_error_t

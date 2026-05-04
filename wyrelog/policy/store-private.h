@@ -14,6 +14,8 @@ typedef wyrelog_error_t (*wyl_policy_role_permission_cb) (const gchar * role_id,
     const gchar * perm_id, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_direct_permission_cb) (const gchar *
     subject_id, const gchar * perm_id, const gchar * scope, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_principal_state_cb) (const gchar *
+    subject_id, const gchar * state, gpointer user_data);
 
 /*
  * Policy authority store lifecycle wrapper.
@@ -52,5 +54,9 @@ wyrelog_error_t wyl_policy_store_direct_permission_exists (wyl_policy_store_t *
     gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_foreach_direct_permission (wyl_policy_store_t *
     store, wyl_policy_direct_permission_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_set_principal_state (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * state);
+wyrelog_error_t wyl_policy_store_foreach_principal_state (wyl_policy_store_t *
+    store, wyl_policy_principal_state_cb cb, gpointer user_data);
 
 G_END_DECLS;
