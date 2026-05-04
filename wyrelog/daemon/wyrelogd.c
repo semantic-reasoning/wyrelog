@@ -20,6 +20,12 @@ typedef struct
   gboolean show_version;
 } WylDaemonOptions;
 
+typedef struct
+{
+  gint64 expected_row[3];
+  gboolean matched;
+} WylDeltaReadinessProbe;
+
 static gboolean
 parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
     GError **error)
@@ -57,6 +63,52 @@ check_wirelog_policy_ready (WylHandle *handle)
   if (!found)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
+}
+
+static void
+delta_readiness_cb (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
+{
+  WylDeltaReadinessProbe *probe = user_data;
+
+  if (g_strcmp0 (relation, "effective_member") != 0)
+    return;
+  if (kind != WYL_DELTA_INSERT || ncols != 3)
+    return;
+  if (row[0] == probe->expected_row[0] && row[1] == probe->expected_row[1]
+      && row[2] == probe->expected_row[2])
+    probe->matched = TRUE;
+}
+
+static wyrelog_error_t
+check_wirelog_delta_ready (WylHandle *handle)
+{
+  WylDeltaReadinessProbe probe = { {0, 0, 0}, FALSE };
+
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-user",
+      &probe.expected_row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "wr.viewer",
+      &probe.expected_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-scope",
+      &probe.expected_row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_handle_engine_set_delta_callback (handle, delta_readiness_cb,
+      &probe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (handle, "member_of", probe.expected_row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!probe.matched)
+    return WYRELOG_E_POLICY;
+  return wyl_handle_engine_set_delta_callback (handle, NULL, NULL);
 }
 
 static void
@@ -143,6 +195,12 @@ main (int argc, char **argv)
   }
 
   if (opts.check_only) {
+    rc = check_wirelog_delta_ready (handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: delta readiness check failed: %s\n",
+          wyrelog_error_string (rc));
+      return 1;
+    }
     rc = check_wirelog_policy_ready (handle);
     if (rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: policy readiness check failed: %s\n",
