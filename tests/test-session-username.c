@@ -506,6 +506,96 @@ check_login_skip_mfa_authenticates_principal (void)
   return 0;
 }
 
+static gint
+check_session_close_persists_closed_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 160;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "close-state-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 161;
+  if (wyl_session_close (handle, session) != WYRELOG_E_OK)
+    return 162;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 163;
+  SessionStateExpect expect = {
+    .session_id = session_id,
+    .state = "closed",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 164;
+  if (expect.matches != 1)
+    return 165;
+  return 0;
+}
+
+static gint
+check_session_close_deactivates_decision_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 170;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.close-role",
+          "wr.close-permission") != WYRELOG_E_OK)
+    return 171;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "close-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 172;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 173;
+  if (insert_symbol_row3 (handle, "member_of", "close-user", "wr.close-role",
+          session_id) != WYRELOG_E_OK)
+    return 174;
+  if (insert_symbol_row4 (handle, "perm_state", "close-user",
+          "wr.close-permission", session_id, "armed") != WYRELOG_E_OK)
+    return 175;
+
+  if (wyl_session_close (handle, session) != WYRELOG_E_OK)
+    return 176;
+
+  g_autoptr (wyl_decide_req_t) after = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (after, "close-user");
+  wyl_decide_req_set_action (after, "wr.close-permission");
+  wyl_decide_req_set_resource_id (after, session_id);
+  g_autoptr (wyl_decide_resp_t) after_resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, after, after_resp) != WYRELOG_E_OK)
+    return 177;
+  if (wyl_decide_resp_get_decision (after_resp) != WYL_DECISION_DENY)
+    return 178;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (after_resp),
+          "session_inactive") != 0)
+    return 179;
+  return 0;
+}
+
+static gint
+check_session_close_rejects_invalid_args (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 190;
+
+  if (wyl_session_close (NULL, NULL) != WYRELOG_E_INVALID)
+    return 191;
+  if (wyl_session_close (handle, NULL) != WYRELOG_E_INVALID)
+    return 192;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -538,6 +628,12 @@ main (void)
   if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
+    return rc;
+  if ((rc = check_session_close_persists_closed_state ()) != 0)
+    return rc;
+  if ((rc = check_session_close_deactivates_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_session_close_rejects_invalid_args ()) != 0)
     return rc;
 
   return 0;

@@ -36,6 +36,8 @@ typedef enum wyl_session_state_t
   WYL_SESSION_STATE_LAST_,
 } wyl_session_state_t;
 
+#ifndef WYL_SESSION_EVENT_T_DEFINED
+#define WYL_SESSION_EVENT_T_DEFINED
 typedef enum wyl_session_event_t
 {
   WYL_SESSION_EVENT_REQUEST = 0,
@@ -46,6 +48,7 @@ typedef enum wyl_session_event_t
   WYL_SESSION_EVENT_LOGOUT,
   WYL_SESSION_EVENT_LAST_,
 } wyl_session_event_t;
+#endif /* WYL_SESSION_EVENT_T_DEFINED */
 
 typedef struct wyl_session_transition_t
 {

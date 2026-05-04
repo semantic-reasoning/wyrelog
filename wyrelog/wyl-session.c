@@ -2,6 +2,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "wyl-fsm-principal-private.h"
+#include "wyl-fsm-session-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "policy/store-private.h"
@@ -153,6 +154,26 @@ insert_session_state (WylHandle *handle, const gchar *session_id,
 }
 
 static wyrelog_error_t
+remove_session_state (WylHandle *handle, const gchar *session_id,
+    const gchar *state)
+{
+  if (session_id == NULL || wyl_handle_get_read_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+  if (state == NULL)
+    return WYRELOG_E_INVALID;
+
+  gint64 row[2];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, session_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, state, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_remove (handle, "session_state", row, 2);
+}
+
+static wyrelog_error_t
 store_session_state (WylHandle *handle, const gchar *session_id,
     const gchar *state)
 {
@@ -176,6 +197,26 @@ set_session_state (WylHandle *handle, WylSession *session, const gchar *state)
   if (rc != WYRELOG_E_OK)
     return rc;
   return store_session_state (handle, session_id, state);
+}
+
+static wyrelog_error_t
+transition_session_state (WylHandle *handle, WylSession *session,
+    wyl_session_state_t old_state, wyl_session_state_t new_state)
+{
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  const gchar *old_state_name = wyl_session_state_name (old_state);
+  const gchar *new_state_name = wyl_session_state_name (new_state);
+  if (old_state_name == NULL || new_state_name == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  wyrelog_error_t rc =
+      remove_session_state (handle, session_id, old_state_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_session_state (handle, session_id, new_state_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return store_session_state (handle, session_id, new_state_name);
 }
 
 wyrelog_error_t
@@ -242,6 +283,22 @@ wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
 
   return transition_principal_state (handle, session->username,
       WYL_PRINCIPAL_STATE_MFA_REQUIRED, state);
+}
+
+wyrelog_error_t
+wyl_session_close (WylHandle *handle, WylSession *session)
+{
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
+    return WYRELOG_E_INVALID;
+
+  wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_session_step (WYL_SESSION_STATE_ACTIVE,
+      WYL_SESSION_EVENT_LOGOUT, &state);
+  if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_CLOSED)
+    return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
+
+  return transition_session_state (handle, session, WYL_SESSION_STATE_ACTIVE,
+      state);
 }
 
 wyrelog_error_t
