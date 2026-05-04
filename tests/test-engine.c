@@ -384,6 +384,60 @@ test_engine_concat_with_newline_helper (void)
   return 0;
 }
 
+static gint
+test_engine_open_empty_templates (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 80;
+
+  /* Create fsm/ subdir. */
+  g_autofree gchar *fsm_dir = g_build_filename (tmpdir, "fsm", NULL);
+  if (g_mkdir (fsm_dir, 0755) != 0) {
+    rmdir_recursive (tmpdir);
+    return 81;
+  }
+
+  /* Write all 5 template files as zero-byte files. */
+  static const char *all_files[] = {
+    "bootstrap.dl",
+    "fsm/principal.dl",
+    "fsm/session.dl",
+    "fsm/permission_scope.dl",
+    "decision.dl",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (all_files); i++) {
+    g_autofree gchar *path = g_build_filename (tmpdir, all_files[i], NULL);
+    g_autoptr (GError) err = NULL;
+    if (!g_file_set_contents (path, "", 0, &err)) {
+      g_printerr ("test_engine_open_empty_templates: "
+          "cannot create %s: %s\n", all_files[i], err ? err->message : "?");
+      rmdir_recursive (tmpdir);
+      return 82;
+    }
+  }
+
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open (tmpdir, 1, &engine);
+
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_INTERNAL) {
+    g_printerr ("test_engine_open_empty_templates: "
+        "expected WYRELOG_E_INTERNAL, got %d\n", (int) rc);
+    if (engine != NULL)
+      g_object_unref (engine);
+    return 83;
+  }
+  if (engine != NULL) {
+    g_printerr ("test_engine_open_empty_templates: "
+        "*out should be NULL on failure\n");
+    g_object_unref (engine);
+    return 84;
+  }
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
@@ -415,6 +469,9 @@ main (void)
     return rc;
 
   if ((rc = test_engine_concat_with_newline_helper ()) != 0)
+    return rc;
+
+  if ((rc = test_engine_open_empty_templates ()) != 0)
     return rc;
 
   return 0;

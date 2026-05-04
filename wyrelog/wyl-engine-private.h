@@ -42,7 +42,7 @@ wyrelog_error_t wyl_engine_map_wirelog_error (wirelog_error_t wl_err);
  *                   pointed to by *@dl_src_out, not including the NUL
  *                   terminator. Use this value — not strlen() — for memset to
  *                   ensure every byte is overwritten regardless of embedded
- *                   NUL bytes.
+ *                   NUL bytes. Must not be NULL.
  *
  * Reads the policy templates in a fixed dependency order and concatenates
  * them into a single source string suitable for passing to the evaluator.
