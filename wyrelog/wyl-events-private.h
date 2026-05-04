@@ -2,10 +2,31 @@
 #pragma once
 
 #include <glib.h>
+#include <glib-object.h>
 
 #include "wyrelog/error.h"
+
+/*
+ * Include the FSM and ID private headers first so their type
+ * definitions are established before events.h sees the guard macros.
+ * events.h declares the same types under #ifndef guards so that
+ * external callers (who cannot include the private headers) still get
+ * the definitions; internal code gets them here instead.
+ */
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
+#include "wyl-id-private.h"
+
+/*
+ * Inform events.h that wyl_principal_event_t, wyl_session_event_t,
+ * and wyl_id_t are already defined so it skips its guarded copies.
+ */
+#define WYL_PRINCIPAL_EVENT_T_DEFINED
+#define WYL_SESSION_EVENT_T_DEFINED
+/* WYL_ID_BYTES is already defined by wyl-id-private.h above */
+
+#include "wyrelog/events.h"
+#include "wyl-log-private.h"
 
 G_BEGIN_DECLS;
 
@@ -35,12 +56,8 @@ G_BEGIN_DECLS;
  * transition is orphaned at the ingress boundary.
  */
 
-typedef enum wyl_access_event_domain_t
-{
-  WYL_ACCESS_EVENT_DOMAIN_PRINCIPAL = 0,
-  WYL_ACCESS_EVENT_DOMAIN_SESSION,
-  WYL_ACCESS_EVENT_DOMAIN_LAST_,
-} wyl_access_event_domain_t;
+/* Internal LAST_ sentinel for the domain enum (not in public header). */
+#define WYL_ACCESS_EVENT_DOMAIN_LAST_ ((wyl_access_event_domain_t) 2)
 
 typedef struct wyl_access_event_t
 {
@@ -54,6 +71,60 @@ typedef struct wyl_access_event_t
   const gchar *user_id;
   const gchar *session_id;
 } wyl_access_event_t;
+
+/*
+ * Private layout of the PRINCIPAL-domain payload union arm.
+ */
+typedef struct _WylPrincipalPayload
+{
+  wyl_id_t principal_id;
+  wyl_principal_event_t fsm_event;
+  gchar *auth_method;
+  gchar *source_ip;
+  gchar *user_agent;
+} _WylPrincipalPayload;
+
+/*
+ * Private layout of the SESSION-domain payload union arm.
+ */
+typedef struct _WylSessionPayload
+{
+  wyl_id_t session_id;
+  wyl_session_event_t fsm_event;
+  gchar *source_ip;
+  gchar *user_agent;
+} _WylSessionPayload;
+
+G_STATIC_ASSERT (sizeof (gint64) == 8);
+
+/*
+ * Private struct layout for WylAccessContext (GObject).
+ */
+struct _WylAccessContext
+{
+  GObject parent_instance;
+  gint64 timestamp_us;
+  gchar *source_ip;
+  gchar *user_agent;
+  gchar *request_id;
+};
+
+/*
+ * Private struct layout for WylAccessEvent (GObject).
+ */
+struct _WylAccessEvent
+{
+  GObject parent_instance;
+  wyl_access_event_domain_t domain;
+  wyl_id_t event_id;
+  union
+  {
+    _WylPrincipalPayload principal;
+    _WylSessionPayload session;
+  } payload;
+  gint64 timestamp_us;
+  WylAccessContext *context;
+};
 
 /*
  * Lexical name of the domain ordinal. NULL on out-of-range input.

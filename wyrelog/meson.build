@@ -4,6 +4,7 @@ wyrelog_public_headers = files(
   'audit.h',
   'decide.h',
   'error.h',
+  'events.h',
   'handle.h',
   'perm.h',
   'session.h',

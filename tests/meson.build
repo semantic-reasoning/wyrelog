@@ -239,6 +239,12 @@ check_private_headers = find_program(
 
 test('check-private-headers-not-installed', check_private_headers)
 
+check_public_headers = find_program(
+  '../tools/check-public-headers-no-novelty-tokens.sh',
+)
+
+test('check-public-headers-no-novelty-tokens', check_public_headers)
+
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \
