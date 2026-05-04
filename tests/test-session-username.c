@@ -701,20 +701,68 @@ check_elevated_session_remains_active_decision_scope (void)
 }
 
 static gint
+check_elevated_session_close_deactivates_decision_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 230;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.elevated-close-role",
+          "wr.elevated-close-permission") != WYRELOG_E_OK)
+    return 231;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "elevated-close-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 232;
+  if (wyl_session_elevate (handle, session) != WYRELOG_E_OK)
+    return 233;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 234;
+  if (insert_symbol_row3 (handle, "member_of", "elevated-close-user",
+          "wr.elevated-close-role", session_id) != WYRELOG_E_OK)
+    return 235;
+  if (insert_symbol_row4 (handle, "perm_state", "elevated-close-user",
+          "wr.elevated-close-permission", session_id, "armed") != WYRELOG_E_OK)
+    return 236;
+
+  if (wyl_session_close (handle, session) != WYRELOG_E_OK)
+    return 237;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "elevated-close-user");
+  wyl_decide_req_set_action (decide, "wr.elevated-close-permission");
+  wyl_decide_req_set_resource_id (decide, session_id);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 238;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 239;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "session_inactive") != 0)
+    return 240;
+  return 0;
+}
+
+static gint
 check_session_elevation_rejects_invalid_args (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
-    return 230;
+    return 250;
 
   if (wyl_session_elevate (NULL, NULL) != WYRELOG_E_INVALID)
-    return 231;
+    return 251;
   if (wyl_session_elevate (handle, NULL) != WYRELOG_E_INVALID)
-    return 232;
+    return 252;
   if (wyl_session_drop_elevation (NULL, NULL) != WYRELOG_E_INVALID)
-    return 233;
+    return 253;
   if (wyl_session_drop_elevation (handle, NULL) != WYRELOG_E_INVALID)
-    return 234;
+    return 254;
   return 0;
 }
 
@@ -762,6 +810,8 @@ main (void)
   if ((rc = check_session_drop_elevation_persists_active_state ()) != 0)
     return rc;
   if ((rc = check_elevated_session_remains_active_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_elevated_session_close_deactivates_decision_scope ()) != 0)
     return rc;
   if ((rc = check_session_elevation_rejects_invalid_args ()) != 0)
     return rc;
