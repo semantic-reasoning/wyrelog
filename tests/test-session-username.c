@@ -414,6 +414,48 @@ check_login_persists_active_session_state (void)
   return 0;
 }
 
+static gint
+check_login_session_id_is_active_decision_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 140;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.session-id-role",
+          "wr.session-id-permission") != WYRELOG_E_OK)
+    return 141;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "session-id-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 142;
+  if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
+    return 143;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 144;
+  if (insert_symbol_row3 (handle, "member_of", "session-id-user",
+          "wr.session-id-role", session_id) != WYRELOG_E_OK)
+    return 145;
+  if (insert_symbol_row4 (handle, "perm_state", "session-id-user",
+          "wr.session-id-permission", session_id, "armed") != WYRELOG_E_OK)
+    return 146;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "session-id-user");
+  wyl_decide_req_set_action (decide, "wr.session-id-permission");
+  wyl_decide_req_set_resource_id (decide, session_id);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 147;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 148;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -442,6 +484,8 @@ main (void)
   if ((rc = check_mfa_verify_persists_authenticated_state ()) != 0)
     return rc;
   if ((rc = check_login_persists_active_session_state ()) != 0)
+    return rc;
+  if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
     return rc;
 
   return 0;
