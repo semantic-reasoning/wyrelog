@@ -105,6 +105,34 @@ wyl_decide_req_clear_guard_context (wyl_decide_req_t *req)
   req->guard_risk = 0;
 }
 
+gboolean
+wyl_decide_req_has_guard_context (const wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, FALSE);
+  return req->has_guard_context;
+}
+
+gint64
+wyl_decide_req_get_guard_timestamp (const wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, 0);
+  return req->guard_timestamp;
+}
+
+const gchar *
+wyl_decide_req_get_guard_loc_class (const wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->guard_loc_class;
+}
+
+gint64
+wyl_decide_req_get_guard_risk (const wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, 0);
+  return req->guard_risk;
+}
+
 wyl_decide_resp_t *
 wyl_decide_resp_new (void)
 {
