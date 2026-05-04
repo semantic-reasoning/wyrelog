@@ -5,6 +5,10 @@
 
 #include "wyrelog/audit/conn-private.h"
 
+#ifndef WYL_TEST_DUCKDB_SCHEMA_PATH
+#error "WYL_TEST_DUCKDB_SCHEMA_PATH must be defined by the build."
+#endif
+
 /* --- in-memory open/close lifecycle ---------------------------- */
 
 static gint
@@ -170,6 +174,37 @@ check_create_schema_null_arg (void)
 }
 
 static gint
+check_template_schema_creates_audit_events (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  g_autofree gchar *schema = NULL;
+  gsize schema_len = 0;
+  g_autoptr (GError) error = NULL;
+  duckdb_result result;
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 85;
+  if (!g_file_get_contents (WYL_TEST_DUCKDB_SCHEMA_PATH, &schema,
+          &schema_len, &error))
+    return 86;
+
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  if (duckdb_query (h, schema, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 87;
+  }
+  duckdb_destroy_result (&result);
+
+  gboolean exists = FALSE;
+  if (wyl_audit_conn_table_exists (conn, "audit_events", &exists)
+      != WYRELOG_E_OK)
+    return 88;
+  if (!exists)
+    return 89;
+  return 0;
+}
+
+static gint
 check_table_probe_reports_schema (void)
 {
   g_autoptr (wyl_audit_conn_t) conn = NULL;
@@ -235,6 +270,8 @@ main (void)
   if ((rc = check_create_schema ()) != 0)
     return rc;
   if ((rc = check_create_schema_null_arg ()) != 0)
+    return rc;
+  if ((rc = check_template_schema_creates_audit_events ()) != 0)
     return rc;
   if ((rc = check_table_probe_reports_schema ()) != 0)
     return rc;

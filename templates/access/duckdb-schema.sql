@@ -48,33 +48,35 @@ CREATE INDEX IF NOT EXISTS idx_context_facts_timestamp
     ON context_facts (timestamp);
 
 -- ---------------------------------------------------------------------------
--- Table: audit_log
--- Append-only WORM ledger. Written by FSM S6 COMMIT.
--- Merkle chain: each row seals the hash of the previous event.
--- TSA response attached asynchronously after insertion.
+-- Table: audit_events
+-- Runtime audit sink used by libwyrelog. The id is minted by the host and
+-- created_at_us carries a microsecond wall-clock timestamp.
 -- ---------------------------------------------------------------------------
-CREATE SEQUENCE IF NOT EXISTS audit_log_seq START 1;
-
-CREATE TABLE IF NOT EXISTS audit_log (
-    event_id     INTEGER     PRIMARY KEY DEFAULT nextval('audit_log_seq'),
-    timestamp    INTEGER     NOT NULL,   -- Unix epoch (seconds)
-    user_id      TEXT        NOT NULL,
-    operation    TEXT        NOT NULL,   -- e.g. 'authorize', 'deny', 'stepup'
-    resource     TEXT,                   -- target resource identifier
-    decision     TEXT,                   -- 'grant', 'deny', 'stepup', 'approval'
-    seal_merkle  BLOB,                   -- Merkle hash chain (previous || current)
-    tsa_response BLOB,                   -- TSA timestamp authority response (async)
-    created_at   INTEGER     NOT NULL    -- wall-clock insertion time
+CREATE TABLE IF NOT EXISTS audit_events (
+    id            VARCHAR PRIMARY KEY,
+    created_at_us BIGINT  NOT NULL,
+    subject_id    VARCHAR,
+    action        VARCHAR,
+    resource_id   VARCHAR,
+    deny_reason   VARCHAR,
+    deny_origin   VARCHAR,
+    decision      SMALLINT NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_audit_log_timestamp
-    ON audit_log (timestamp);
+CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us
+    ON audit_events (created_at_us);
 
-CREATE INDEX IF NOT EXISTS idx_audit_log_user_id
-    ON audit_log (user_id);
+CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id
+    ON audit_events (subject_id);
 
-CREATE INDEX IF NOT EXISTS idx_audit_log_decision
-    ON audit_log (decision);
+CREATE INDEX IF NOT EXISTS idx_audit_events_action
+    ON audit_events (action);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_decision
+    ON audit_events (decision);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason
+    ON audit_events (deny_reason);
 
 -- ---------------------------------------------------------------------------
 -- Table: cache
