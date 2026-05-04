@@ -26,7 +26,8 @@ typedef struct
   guint64 removed;
   gboolean expect_effective_member;
   gint64 expected_row[3];
-  gboolean matched_expected;
+  gboolean matched_expected_insert;
+  gboolean matched_expected_remove;
 } WylDaemonRuntime;
 
 static gboolean
@@ -139,12 +140,16 @@ daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     return;
   if (g_strcmp0 (relation, "effective_member") != 0)
     return;
-  if (kind != WYL_DELTA_INSERT || ncols != 3)
+  if ((kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE) || ncols != 3)
     return;
   if (row[0] == runtime->expected_row[0]
       && row[1] == runtime->expected_row[1]
-      && row[2] == runtime->expected_row[2])
-    runtime->matched_expected = TRUE;
+      && row[2] == runtime->expected_row[2]) {
+    if (kind == WYL_DELTA_INSERT)
+      runtime->matched_expected_insert = TRUE;
+    else if (kind == WYL_DELTA_REMOVE)
+      runtime->matched_expected_remove = TRUE;
+  }
 }
 
 static wyrelog_error_t
@@ -181,7 +186,12 @@ check_wirelog_delta_ready (WylHandle *handle)
   rc = wyl_handle_engine_insert (handle, "member_of", runtime.expected_row, 3);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (runtime.inserted == 0 || !runtime.matched_expected)
+  if (runtime.inserted == 0 || !runtime.matched_expected_insert)
+    return WYRELOG_E_POLICY;
+  rc = wyl_handle_engine_remove (handle, "member_of", runtime.expected_row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (runtime.removed == 0 || !runtime.matched_expected_remove)
     return WYRELOG_E_POLICY;
   return wyl_handle_engine_set_delta_callback (handle, NULL, NULL);
 }
