@@ -454,6 +454,39 @@ check_insert_fanout_reaches_delta_engine (void)
 }
 
 static gint
+check_snapshot_only_insert_skips_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 row[3];
+  DeltaExpect expect = {
+    "direct_permission",
+    row,
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 180;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 181;
+  if (intern3 (handle, "snapshot-only-user", "wr.stream.list",
+          "snapshot-only-scope", row) != WYRELOG_E_OK)
+    return 182;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_expect_cb, &expect)
+      != WYRELOG_E_OK)
+    return 183;
+  if (wyl_handle_engine_insert (handle, "direct_permission", row, 3)
+      != WYRELOG_E_OK)
+    return 184;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+    return 185;
+  if (expect.matching != 0)
+    return 186;
+  return 0;
+}
+
+static gint
 check_remove_fanout_reaches_read_engine (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -735,6 +768,8 @@ main (void)
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_snapshot_only_insert_skips_delta_engine ()) != 0)
     return rc;
   if ((rc = check_remove_fanout_reaches_read_engine ()) != 0)
     return rc;

@@ -229,6 +229,12 @@ wyl_handle_intern_engine_symbol (WylHandle *self, const gchar *symbol,
   return WYRELOG_E_OK;
 }
 
+static gboolean
+relation_fans_out_to_delta (const gchar *relation)
+{
+  return g_strcmp0 (relation, "member_of") == 0;
+}
+
 wyrelog_error_t
 wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
     const gint64 *row, gsize ncols)
@@ -243,6 +249,8 @@ wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  if (!relation_fans_out_to_delta (relation))
+    return WYRELOG_E_OK;
   return wyl_engine_insert (self->delta_engine, relation, row, ncols);
 }
 
@@ -260,6 +268,8 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  if (!relation_fans_out_to_delta (relation))
+    return WYRELOG_E_OK;
   return wyl_engine_remove (self->delta_engine, relation, row, ncols);
 }
 
