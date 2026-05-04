@@ -125,14 +125,43 @@ set_principal_state (WylHandle *handle, const gchar *username,
   return store_principal_state (handle, username, state);
 }
 
+#ifdef WYL_HAS_AUDIT
+static void
+emit_principal_state_audit (WylHandle *handle, const gchar *username,
+    const gchar *old_state, const gchar *new_state)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, username);
+  wyl_audit_event_set_action (ev, "principal_state");
+  wyl_audit_event_set_resource_id (ev, new_state);
+  wyl_audit_event_set_deny_origin (ev, old_state);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+}
+#endif
+
 static wyrelog_error_t
 transition_principal_state (WylHandle *handle, const gchar *username,
     wyl_principal_state_t old_state, wyl_principal_state_t new_state)
 {
+  const gchar *old_state_name = wyl_principal_state_name (old_state);
+  const gchar *new_state_name = wyl_principal_state_name (new_state);
+  if (old_state_name == NULL || new_state_name == NULL)
+    return WYRELOG_E_INTERNAL;
+
   wyrelog_error_t rc = remove_principal_state (handle, username, old_state);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return set_principal_state (handle, username, new_state);
+  rc = insert_principal_state (handle, username, new_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = store_principal_state (handle, username, new_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#ifdef WYL_HAS_AUDIT
+  emit_principal_state_audit (handle, username, old_state_name, new_state_name);
+#endif
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
