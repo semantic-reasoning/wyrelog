@@ -7,6 +7,7 @@
 #endif
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_DEFAULT_TEMPLATE_DIR
 #error "WYL_DEFAULT_TEMPLATE_DIR must be defined by the build."
@@ -38,6 +39,24 @@ parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
   g_option_context_add_main_entries (context, entries, NULL);
 
   return g_option_context_parse (context, argc, argv, error);
+}
+
+static wyrelog_error_t
+check_wirelog_policy_ready (WylHandle *handle)
+{
+  gint64 row[1];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, "wr.audit.read", &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean found = FALSE;
+  rc = wyl_handle_engine_contains (handle, "guarded_perm", row, 1, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
 }
 
 #ifdef G_OS_UNIX
@@ -106,8 +125,15 @@ main (int argc, char **argv)
     return 1;
   }
 
-  if (opts.check_only)
+  if (opts.check_only) {
+    rc = check_wirelog_policy_ready (handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: policy readiness check failed: %s\n",
+          wyrelog_error_string (rc));
+      return 1;
+    }
     return 0;
+  }
 
   g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
   guint sigint_id = 0;
