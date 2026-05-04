@@ -774,6 +774,42 @@ check_policy_store_role_permissions_load_into_engine (void)
 }
 
 static gint
+check_policy_store_role_permissions_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 340;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.autoload-role",
+          "autoload role") != WYRELOG_E_OK)
+    return 341;
+  if (wyl_policy_store_upsert_permission (store, "wr.autoload.read",
+          "autoload read", "basic") != WYRELOG_E_OK)
+    return 342;
+  if (wyl_policy_store_grant_role_permission (store, "wr.autoload-role",
+          "wr.autoload.read") != WYRELOG_E_OK)
+    return 343;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 344;
+
+  gint64 decision_row[3];
+  if (insert_decision_fixture (handle, "autoload-user", "wr.autoload-role",
+          "wr.autoload.read", "autoload-scope", "authenticated", "active",
+          decision_row) != WYRELOG_E_OK)
+    return 345;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 346;
+  if (!allowed)
+    return 347;
+  return 0;
+}
+
+static gint
 check_policy_store_role_permissions_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -841,6 +877,8 @@ main (void)
   if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_load_into_engine ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_role_permissions_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
     return rc;
