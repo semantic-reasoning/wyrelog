@@ -160,6 +160,9 @@ test_insert_remove_idempotent_remove (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", row, 3),
       ==, WYRELOG_E_OK);
+  /* Pin: the wirelog substrate currently treats removing a never-inserted row
+   * as a no-op update.  This test exists to detect a future upstream change
+   * that promotes the case to an error. */
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", row, 3),
       ==, WYRELOG_E_OK);
 }
@@ -299,6 +302,10 @@ test_insert_after_close (void)
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", row, 3),
       ==, WYRELOG_E_INVALID);
 
+  /* g_autoptr is intentionally not used: the test mutates engine->session via
+   * the private header, and that reach-in is incompatible with autoptr's
+   * blanket cleanup discipline.  On assertion failure the engine leaks until
+   * process exit, which is acceptable for a test-side fixture. */
   g_object_unref (engine);
 }
 
@@ -318,6 +325,10 @@ test_step_after_close (void)
 
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_INVALID);
 
+  /* g_autoptr is intentionally not used: the test mutates engine->session via
+   * the private header, and that reach-in is incompatible with autoptr's
+   * blanket cleanup discipline.  On assertion failure the engine leaks until
+   * process exit, which is acceptable for a test-side fixture. */
   g_object_unref (engine);
 }
 
@@ -362,6 +373,10 @@ test_snapshot_after_close (void)
   g_assert_cmpint (wyl_engine_snapshot (engine, "member_of",
           snapshot_count_cb, &seen), ==, WYRELOG_E_INVALID);
 
+  /* g_autoptr is intentionally not used: the test mutates engine->session via
+   * the private header, and that reach-in is incompatible with autoptr's
+   * blanket cleanup discipline.  On assertion failure the engine leaks until
+   * process exit, which is acceptable for a test-side fixture. */
   g_object_unref (engine);
 }
 
@@ -415,6 +430,10 @@ test_remove_after_close (void)
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", row, 3),
       ==, WYRELOG_E_INVALID);
 
+  /* g_autoptr is intentionally not used: the test mutates engine->session via
+   * the private header, and that reach-in is incompatible with autoptr's
+   * blanket cleanup discipline.  On assertion failure the engine leaks until
+   * process exit, which is acceptable for a test-side fixture. */
   g_object_unref (engine);
 }
 
