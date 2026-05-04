@@ -90,10 +90,44 @@ insert1_symbol (WylHandle *handle, const gchar *relation, const gchar *a)
 }
 
 static wyrelog_error_t
-insert_decision_fixture (WylHandle *handle, const gchar *user,
+insert2_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b)
+{
+  gint64 row[2];
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 2);
+}
+
+static wyrelog_error_t
+insert4_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, const gchar *c, const gchar *d)
+{
+  gint64 row[4];
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, d, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 4);
+}
+
+static wyrelog_error_t
+insert_decision_fixture_state (WylHandle *handle, const gchar *user,
     const gchar *role, const gchar *permission, const gchar *scope,
     const gchar *principal_state, const gchar *session_state,
-    gint64 decision_row[3])
+    gboolean armed, gint64 decision_row[3])
 {
   gint64 member_row[3];
   gint64 principal_state_row[2];
@@ -137,11 +171,27 @@ insert_decision_fixture (WylHandle *handle, const gchar *user,
   rc = insert1_symbol (handle, "session_active", session_state);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (armed) {
+    rc = insert4_symbol (handle, "perm_state", user, permission, scope,
+        "armed");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   decision_row[0] = member_row[0];
   decision_row[1] = role_permission_row[1];
   decision_row[2] = member_row[2];
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+insert_decision_fixture (WylHandle *handle, const gchar *user,
+    const gchar *role, const gchar *permission, const gchar *scope,
+    const gchar *principal_state, const gchar *session_state,
+    gint64 decision_row[3])
+{
+  return insert_decision_fixture_state (handle, user, role, permission, scope,
+      principal_state, session_state, TRUE, decision_row);
 }
 
 static gint
@@ -500,6 +550,113 @@ check_decision_query_denies_missing_tuple (void)
 }
 
 static gint
+check_decision_query_denies_frozen_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 145;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 146;
+  if (insert_decision_fixture (handle, "decision-user-c",
+          "wr.decision-role-c", "wr.decision-permission-c",
+          "decision-scope-c", "authenticated", "active", decision_row)
+      != WYRELOG_E_OK)
+    return 147;
+  if (insert1_symbol (handle, "frozen", "decision-scope-c") != WYRELOG_E_OK)
+    return 148;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 149;
+  if (allowed)
+    return 150;
+  return 0;
+}
+
+static gint
+check_decision_query_denies_disabled_role (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 155;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 156;
+  if (insert_decision_fixture (handle, "decision-user-d",
+          "wr.decision-role-d", "wr.decision-permission-d",
+          "decision-scope-d", "authenticated", "active", decision_row)
+      != WYRELOG_E_OK)
+    return 157;
+  if (insert2_symbol (handle, "disabled_role_for", "decision-user-d",
+          "wr.decision-permission-d") != WYRELOG_E_OK)
+    return 158;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 159;
+  if (allowed)
+    return 160;
+  return 0;
+}
+
+static gint
+check_decision_query_denies_sod_violation (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 165;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 166;
+  if (insert_decision_fixture (handle, "decision-user-e",
+          "wr.decision-role-e", "wr.decision-permission-e",
+          "decision-scope-e", "authenticated", "active", decision_row)
+      != WYRELOG_E_OK)
+    return 167;
+  if (insert4_symbol (handle, "policy_violation", "sod", "decision-user-e",
+          "wr.decision-permission-e", "witness-e") != WYRELOG_E_OK)
+    return 168;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 169;
+  if (allowed)
+    return 170;
+  return 0;
+}
+
+static gint
+check_decision_query_denies_unarmed_catalogue_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 171;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 172;
+  if (insert_decision_fixture_state (handle, "decision-user-f",
+          "wr.decision-role-f", "wr.audit.read", "decision-scope-f",
+          "authenticated", "active", FALSE, decision_row) != WYRELOG_E_OK)
+    return 173;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 174;
+  if (allowed)
+    return 175;
+  return 0;
+}
+
+static gint
 check_decision_query_rejects_missing_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -551,6 +708,14 @@ main (void)
   if ((rc = check_decision_query_allows_matching_tuple ()) != 0)
     return rc;
   if ((rc = check_decision_query_denies_missing_tuple ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_denies_frozen_scope ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_denies_disabled_role ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_denies_sod_violation ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_denies_unarmed_catalogue_permission ()) != 0)
     return rc;
   if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
     return rc;

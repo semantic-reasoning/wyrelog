@@ -57,6 +57,26 @@ insert_symbol_row3 (WylHandle *handle, const gchar *relation,
   return wyl_handle_engine_insert (handle, relation, row, 3);
 }
 
+static wyrelog_error_t
+insert_symbol_row4 (WylHandle *handle, const gchar *relation,
+    const gchar *a, const gchar *b, const gchar *c, const gchar *d)
+{
+  gint64 row[4];
+  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, d, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 4);
+}
+
 static WylSession *
 login_with_username (const gchar *username)
 {
@@ -186,14 +206,17 @@ check_login_authenticates_engine_principal (void)
     return 73;
   if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
     return 74;
+  if (insert_symbol_row4 (handle, "perm_state", "login-user",
+          "wr.login-permission", "login-scope", "armed") != WYRELOG_E_OK)
+    return 75;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "login-user");
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
-    return 75;
-  if (session == NULL)
     return 76;
+  if (session == NULL)
+    return 77;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "login-user");
@@ -202,9 +225,9 @@ check_login_authenticates_engine_principal (void)
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
-    return 77;
-  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 78;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 79;
   return 0;
 }
 
