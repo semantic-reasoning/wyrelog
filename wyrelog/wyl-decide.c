@@ -114,6 +114,10 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     return WYRELOG_E_INVALID;
 
   wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+  if (wyl_decide_req_get_subject_id (req) == NULL
+      || wyl_decide_req_get_action (req) == NULL
+      || wyl_decide_req_get_resource_id (req) == NULL)
+    return WYRELOG_E_INVALID;
 
   if (wyl_handle_get_read_engine (handle) != NULL) {
     gint64 row[3];
