@@ -69,6 +69,30 @@ check_wirelog_policy_ready (WylHandle *handle)
 }
 
 static wyrelog_error_t
+check_policy_store_ready (WylHandle *handle)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  const gchar *tables[] = {
+    "roles",
+    "permissions",
+    "role_permissions",
+    "policy_signatures",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
+    gboolean found = FALSE;
+    wyrelog_error_t rc =
+        wyl_policy_store_table_exists (store, tables[i], &found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!found)
+      return WYRELOG_E_POLICY;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 check_audit_sink_ready (WylHandle *handle)
 {
 #ifdef WYL_HAS_AUDIT
@@ -228,6 +252,12 @@ main (int argc, char **argv)
     rc = check_wirelog_policy_ready (handle);
     if (rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: policy readiness check failed: %s\n",
+          wyrelog_error_string (rc));
+      return 1;
+    }
+    rc = check_policy_store_ready (handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: policy store readiness check failed: %s\n",
           wyrelog_error_string (rc));
       return 1;
     }
