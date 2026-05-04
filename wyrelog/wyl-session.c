@@ -55,6 +55,8 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (out_session == NULL)
     return WYRELOG_E_INVALID;
   *out_session = NULL;
+  if (handle == NULL)
+    return WYRELOG_E_INVALID;
 
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   const gchar *username = NULL;
@@ -63,8 +65,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     session->username = g_strdup (username);
   }
 
-  if (handle != NULL && username != NULL
-      && wyl_handle_get_read_engine (handle) != NULL) {
+  if (username != NULL && wyl_handle_get_read_engine (handle) != NULL) {
     gint64 row[2];
     wyrelog_error_t rc =
         wyl_handle_intern_engine_symbol (handle, username, &row[0]);

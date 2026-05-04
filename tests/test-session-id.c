@@ -87,6 +87,18 @@ check_accessor_null_safety (void)
   return 0;
 }
 
+static gint
+check_login_rejects_null_handle (void)
+{
+  WylSession *session = (WylSession *) 0x1;
+
+  if (wyl_session_login (NULL, NULL, &session) != WYRELOG_E_INVALID)
+    return 60;
+  if (session != NULL)
+    return 61;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -101,6 +113,8 @@ main (void)
   if ((rc = check_created_at_is_recent ()) != 0)
     return rc;
   if ((rc = check_accessor_null_safety ()) != 0)
+    return rc;
+  if ((rc = check_login_rejects_null_handle ()) != 0)
     return rc;
 
   return 0;
