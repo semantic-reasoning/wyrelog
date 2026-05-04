@@ -38,21 +38,25 @@
     witness: symbol)
 
 .decl allow(user: symbol, perm: symbol, scope: symbol)
+.decl allow_guard_base(user: symbol, perm: symbol, scope: symbol)
 .decl allow_bool(user: symbol, perm: symbol, scope: symbol)
 .decl deny_reason(user: symbol, perm: symbol, scope: symbol,
     code: symbol, origin: symbol)
 
 // --- allow / allow_bool ----------------------------------------------
 
-allow(U, P, S) :-
+allow_guard_base(U, P, S) :-
     has_permission(U, P, S),
     principal_state(U, "authenticated"),
     session_state(S, ST),
     session_active(ST),
-    armed(U, P, S),
     !frozen(S),
     !disabled_role_for(U, P),
     !policy_violation("sod", U, P, _).
+
+allow(U, P, S) :-
+    allow_guard_base(U, P, S),
+    armed(U, P, S).
 
 allow_bool(U, P, S) :- allow(U, P, S).
 

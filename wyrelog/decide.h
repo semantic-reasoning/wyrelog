@@ -52,6 +52,15 @@ void wyl_decide_req_set_resource_id (wyl_decide_req_t * req,
     const gchar * resource_id);
 const gchar *wyl_decide_req_get_resource_id (const wyl_decide_req_t * req);
 
+/*
+ * Sets or clears request-time attributes used by guarded catalogue
+ * permissions. When no guard context is set, guarded permissions remain
+ * fail-closed. The location class string is duplicated by the request.
+ */
+void wyl_decide_req_set_guard_context (wyl_decide_req_t * req,
+    gint64 timestamp, const gchar * loc_class, gint64 risk);
+void wyl_decide_req_clear_guard_context (wyl_decide_req_t * req);
+
 wyl_decide_resp_t *wyl_decide_resp_new (void);
 void wyl_decide_resp_free (wyl_decide_resp_t * resp);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_decide_resp_t, wyl_decide_resp_free);
