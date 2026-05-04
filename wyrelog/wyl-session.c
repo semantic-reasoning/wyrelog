@@ -302,6 +302,38 @@ wyl_session_close (WylHandle *handle, WylSession *session)
 }
 
 wyrelog_error_t
+wyl_session_elevate (WylHandle *handle, WylSession *session)
+{
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
+    return WYRELOG_E_INVALID;
+
+  wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_session_step (WYL_SESSION_STATE_ACTIVE,
+      WYL_SESSION_EVENT_ELEVATE_GRANT, &state);
+  if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_ELEVATED)
+    return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
+
+  return transition_session_state (handle, session, WYL_SESSION_STATE_ACTIVE,
+      state);
+}
+
+wyrelog_error_t
+wyl_session_drop_elevation (WylHandle *handle, WylSession *session)
+{
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
+    return WYRELOG_E_INVALID;
+
+  wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_session_step (WYL_SESSION_STATE_ELEVATED,
+      WYL_SESSION_EVENT_ELEVATE_DROP, &state);
+  if (rc != WYRELOG_E_OK || state != WYL_SESSION_STATE_ACTIVE)
+    return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
+
+  return transition_session_state (handle, session, WYL_SESSION_STATE_ELEVATED,
+      state);
+}
+
+wyrelog_error_t
 wyl_session_logout (WylHandle *handle, wyl_session_id_t sid)
 {
   if (handle == NULL)
