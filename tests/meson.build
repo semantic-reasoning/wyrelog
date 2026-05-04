@@ -345,6 +345,9 @@ if get_option('enable_audit').allowed()
 
   test_audit_conn = executable('test-audit-conn',
     'test-audit-conn.c',
+    c_args : [
+      '-DWYL_TEST_DUCKDB_SCHEMA_PATH="' + meson.project_source_root() / 'templates' / 'access' / 'duckdb-schema.sql' + '"',
+    ],
     dependencies : [wyrelog_dep, duckdb_dep],
   )
 
