@@ -86,6 +86,27 @@ wyl_handle_seed_perm_arm_rules (WylHandle *self)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+wyl_handle_seed_session_active_states (WylHandle *self)
+{
+  static const gchar *states[] = {
+    "active",
+    "elevated",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (states); i++) {
+    gint64 row[1];
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (self, states[i], &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_engine_insert (self, "session_active", row, 1);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
@@ -214,6 +235,12 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   self->read_engine = read_engine;
   self->delta_engine = delta_engine;
   rc = wyl_handle_seed_perm_arm_rules (self);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_object (&self->read_engine);
+    g_clear_object (&self->delta_engine);
+    return rc;
+  }
+  rc = wyl_handle_seed_session_active_states (self);
   if (rc != WYRELOG_E_OK) {
     g_clear_object (&self->read_engine);
     g_clear_object (&self->delta_engine);

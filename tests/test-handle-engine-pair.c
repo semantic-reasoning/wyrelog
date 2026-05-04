@@ -904,8 +904,6 @@ check_policy_store_principal_states_autoload_on_open (void)
   if (insert2_symbol (handle, "session_state", "state-scope", "active")
       != WYRELOG_E_OK)
     return 374;
-  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
-    return 375;
   gint64 member_row[3];
   if (intern3 (handle, "state-load-user", "wr.state-role", "state-scope",
           member_row) != WYRELOG_E_OK)
@@ -968,8 +966,6 @@ check_policy_store_session_states_autoload_on_open (void)
   if (insert2_symbol (handle, "principal_state", "session-load-user",
           "authenticated") != WYRELOG_E_OK)
     return 394;
-  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
-    return 395;
   gint64 member_row[3];
   if (intern3 (handle, "session-load-user", "wr.session-role",
           "session-load-scope", member_row) != WYRELOG_E_OK)
