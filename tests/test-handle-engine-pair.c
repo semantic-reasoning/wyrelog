@@ -825,6 +825,63 @@ check_policy_store_role_permissions_require_engine_pair (void)
   return 0;
 }
 
+static gint
+check_policy_store_direct_permissions_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 350;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.direct.autoload",
+          "direct autoload", "basic") != WYRELOG_E_OK)
+    return 351;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-load-user",
+          "wr.direct.autoload", "direct-load-scope") != WYRELOG_E_OK)
+    return 352;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 353;
+
+  if (insert2_symbol (handle, "principal_state", "direct-load-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 354;
+  if (insert2_symbol (handle, "session_state", "direct-load-scope",
+          "active") != WYRELOG_E_OK)
+    return 355;
+  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 356;
+
+  gint64 decision_row[3];
+  if (intern3 (handle, "direct-load-user", "wr.direct.autoload",
+          "direct-load-scope", decision_row) != WYRELOG_E_OK)
+    return 357;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 358;
+  if (!allowed)
+    return 359;
+  return 0;
+}
+
+static gint
+check_policy_store_direct_permissions_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 360;
+  if (wyl_handle_load_policy_store_direct_permissions (NULL)
+      != WYRELOG_E_INVALID)
+    return 361;
+  if (wyl_handle_load_policy_store_direct_permissions (handle)
+      != WYRELOG_E_INVALID)
+    return 362;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -881,6 +938,10 @@ main (void)
   if ((rc = check_policy_store_role_permissions_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_direct_permissions_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
     return rc;
 
   return 0;

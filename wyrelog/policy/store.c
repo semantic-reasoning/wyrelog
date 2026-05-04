@@ -298,6 +298,38 @@ wyl_policy_store_direct_permission_exists (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_foreach_direct_permission (wyl_policy_store_t *store,
+    wyl_policy_direct_permission_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT subject_id, perm_id, scope FROM direct_permissions "
+      "ORDER BY subject_id, perm_id, scope;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
+    rc = cb (subject_id, perm_id, scope, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
 wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
     const gchar *perm_id, const gchar *perm_name, const gchar *klass)
 {
