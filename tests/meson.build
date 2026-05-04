@@ -47,6 +47,9 @@ test('traits-compile', test_traits_compile)
 
 test_policy_store = executable('test-policy-store',
   'test-policy-store.c',
+  c_args : [
+    '-DWYL_TEST_SQLITE_SCHEMA_PATH="' + meson.project_source_root() / 'templates' / 'access' / 'sqlite-schema.sql' + '"',
+  ],
   dependencies : [wyrelog_dep, sqlite_dep],
 )
 
