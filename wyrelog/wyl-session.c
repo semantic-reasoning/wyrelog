@@ -320,6 +320,11 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     g_object_unref (session);
     return rc;
   }
+#ifdef WYL_HAS_AUDIT
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  emit_session_state_audit (handle, session_id,
+      wyl_session_state_name (session->state), "active");
+#endif
   session->state = WYL_SESSION_STATE_ACTIVE;
 
   *out_session = session;
