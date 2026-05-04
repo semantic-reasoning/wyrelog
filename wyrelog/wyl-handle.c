@@ -274,6 +274,18 @@ wyl_handle_engine_step_delta (WylHandle *self)
   return wyl_engine_step (self->delta_engine);
 }
 
+wyrelog_error_t
+wyl_handle_engine_set_delta_callback (WylHandle *self, WylDeltaCallback cb,
+    gpointer user_data)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_set_delta_callback (self->delta_engine, cb, user_data);
+}
+
 typedef struct
 {
   const gchar *relation;

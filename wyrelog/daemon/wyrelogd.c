@@ -59,6 +59,23 @@ check_wirelog_policy_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static void
+daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
+{
+  (void) relation;
+  (void) row;
+  (void) ncols;
+  (void) kind;
+  (void) user_data;
+}
+
+static wyrelog_error_t
+start_wirelog_delta_callbacks (WylHandle *handle)
+{
+  return wyl_handle_engine_set_delta_callback (handle, daemon_delta_cb, NULL);
+}
+
 #ifdef G_OS_UNIX
 static gboolean
 quit_loop_from_signal (gpointer user_data)
@@ -133,6 +150,13 @@ main (int argc, char **argv)
       return 1;
     }
     return 0;
+  }
+
+  rc = start_wirelog_delta_callbacks (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: delta callback setup failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
   }
 
   g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);

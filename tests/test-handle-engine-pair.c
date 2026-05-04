@@ -440,8 +440,8 @@ check_insert_fanout_reaches_delta_engine (void)
   if (intern3 (handle, "fanout-user-b", "wr.viewer", "fanout-scope-b",
           member_row) != WYRELOG_E_OK)
     return 102;
-  if (wyl_engine_set_delta_callback (wyl_handle_get_delta_engine (handle),
-          delta_expect_cb, &expect) != WYRELOG_E_OK)
+  if (wyl_handle_engine_set_delta_callback (handle, delta_expect_cb, &expect)
+      != WYRELOG_E_OK)
     return 103;
   if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
       != WYRELOG_E_OK)
@@ -498,6 +498,9 @@ check_insert_fanout_rejects_missing_pair (void)
     return 122;
   if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_INVALID)
     return 123;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_expect_cb, NULL)
+      != WYRELOG_E_INVALID)
+    return 124;
   return 0;
 }
 
