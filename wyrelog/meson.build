@@ -104,3 +104,13 @@ if build_client
 else
   wyrelog_client_dep = disabler()
 endif
+
+wyrelogd_exe = executable('wyrelogd',
+  files('daemon/wyrelogd.c'),
+  include_directories : wyrelog_inc,
+  dependencies : [wyrelog_dep, glib_dep, gio_dep],
+  c_args : [
+    '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
+  ],
+  install : true,
+)
