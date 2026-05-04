@@ -189,7 +189,7 @@ check_dup_null_session (void)
 }
 
 static gint
-check_login_authenticates_engine_principal (void)
+check_login_requires_mfa_before_allow (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -226,8 +226,73 @@ check_login_authenticates_engine_principal (void)
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
     return 78;
-  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 79;
+  return 0;
+}
+
+static gint
+check_mfa_verify_authenticates_engine_principal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 80;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.login-role",
+          "wr.login-permission") != WYRELOG_E_OK)
+    return 81;
+  if (insert_symbol_row3 (handle, "member_of", "login-user",
+          "wr.login-role", "login-scope") != WYRELOG_E_OK)
+    return 82;
+  if (insert_symbol_row2 (handle, "session_state", "login-scope", "active")
+      != WYRELOG_E_OK)
+    return 83;
+  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 84;
+  if (insert_symbol_row4 (handle, "perm_state", "login-user",
+          "wr.login-permission", "login-scope", "armed") != WYRELOG_E_OK)
+    return 85;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "login-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 86;
+  if (session == NULL)
+    return 87;
+  if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
+    return 88;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "login-user");
+  wyl_decide_req_set_action (decide, "wr.login-permission");
+  wyl_decide_req_set_resource_id (decide, "login-scope");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 89;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 90;
+  return 0;
+}
+
+static gint
+check_mfa_verify_rejects_invalid_args (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 100;
+
+  if (wyl_session_mfa_verify (NULL, NULL) != WYRELOG_E_INVALID)
+    return 101;
+  if (wyl_session_mfa_verify (handle, NULL) != WYRELOG_E_INVALID)
+    return 102;
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, NULL, &session) != WYRELOG_E_OK)
+    return 103;
+  if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_INVALID)
+    return 104;
   return 0;
 }
 
@@ -248,7 +313,11 @@ main (void)
     return rc;
   if ((rc = check_dup_null_session ()) != 0)
     return rc;
-  if ((rc = check_login_authenticates_engine_principal ()) != 0)
+  if ((rc = check_login_requires_mfa_before_allow ()) != 0)
+    return rc;
+  if ((rc = check_mfa_verify_authenticates_engine_principal ()) != 0)
+    return rc;
+  if ((rc = check_mfa_verify_rejects_invalid_args ()) != 0)
     return rc;
 
   return 0;

@@ -135,6 +135,8 @@ check_grant_allows_engine_decide (void)
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 52;
+  if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
+    return 59;
 
   gint64 active_row[1];
   if (wyl_handle_intern_engine_symbol (handle, "active", &active_row[0])
