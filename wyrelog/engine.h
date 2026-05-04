@@ -56,4 +56,25 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  */
      void wyl_engine_close (WylEngine *engine);
 
+/*
+ * wyl_engine_intern_symbol:
+ * @self: A `WylEngine` instance.
+ * @symbol: A symbolic string to be assigned a stable identifier.
+ *   Must not be NULL.
+ * @out_id: (out) On success, receives the integer identifier
+ *   that the engine has registered for @symbol. Must not be NULL.
+ *
+ * Registers @symbol with the engine and returns its stable
+ * integer identifier. Subsequent calls on the same engine with
+ * the same @symbol return the same identifier. Identifiers are
+ * stable for the lifetime of @self; identifiers from different
+ * engine instances are not interchangeable.
+ *
+ * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any
+ *   argument is NULL or @self has been closed; %WYRELOG_E_INTERNAL
+ *   if the engine cannot register the symbol.
+ */
+     wyrelog_error_t wyl_engine_intern_symbol (WylEngine *self,
+    const gchar *symbol, gint64 *out_id);
+
 G_END_DECLS;

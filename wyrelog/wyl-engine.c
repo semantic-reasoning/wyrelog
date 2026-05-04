@@ -192,3 +192,25 @@ wyl_engine_close (WylEngine *engine)
     return;
   g_object_unref (engine);
 }
+
+wyrelog_error_t
+wyl_engine_intern_symbol (WylEngine *self, const gchar *symbol, gint64 *out_id)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (symbol == NULL || out_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+
+  int64_t id = wl_easy_intern (self->session, symbol);
+  if (id < 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: symbol interning failed for symbol of length %zu",
+        strlen (symbol));
+    return WYRELOG_E_INTERNAL;
+  }
+
+  *out_id = id;
+  return WYRELOG_E_OK;
+}

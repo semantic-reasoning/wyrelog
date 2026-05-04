@@ -248,6 +248,16 @@ test_engine = executable('test-engine',
 
 test('engine', test_engine)
 
+test_engine_intern = executable('test-engine-intern',
+  'test-engine-intern.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+test('engine-intern', test_engine_intern)
+
 check_private_headers = find_program(
   '../tools/check-private-headers-not-installed.sh',
 )
