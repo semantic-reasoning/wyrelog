@@ -64,6 +64,9 @@ wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);
 wyrelog_error_t wyl_session_mfa_verify (WylHandle * handle,
     WylSession * session);
+wyrelog_error_t wyl_session_elevate (WylHandle * handle, WylSession * session);
+wyrelog_error_t wyl_session_drop_elevation (WylHandle * handle,
+    WylSession * session);
 wyrelog_error_t wyl_session_close (WylHandle * handle, WylSession * session);
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);
 
