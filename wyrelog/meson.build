@@ -16,6 +16,7 @@ wyrelog_public_headers = files(
 wyrelog_sources = files(
   'access/decision.c',
   'audit/event.c',
+  'policy/store.c',
   'wyl-boot.c',
   'wyl-decide.c',
   'wyl-dl-static.c',
@@ -35,7 +36,7 @@ wyrelog_sources = files(
   'wyl-version.c',
 )
 
-wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep, wirelog_dep]
+wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep, sqlite_dep, wirelog_dep]
 
 wyrelog_log_levels = {
   'none' : 0,

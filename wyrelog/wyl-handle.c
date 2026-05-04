@@ -6,6 +6,7 @@
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
 #include "wyl-permission-scope-private.h"
+#include "policy/store-private.h"
 
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
@@ -18,6 +19,7 @@ struct _WylHandle
   gint64 created_at_us;
   WylEngine *read_engine;
   WylEngine *delta_engine;
+  wyl_policy_store_t *policy_store;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
 #endif
@@ -32,6 +34,7 @@ wyl_handle_finalize (GObject *object)
 
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
+  g_clear_pointer (&self->policy_store, wyl_policy_store_close);
 #ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
    * was reset to NULL there; otherwise this is the only close site
@@ -97,8 +100,19 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
 
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
 
+  wyrelog_error_t rc = wyl_policy_store_open (NULL, &self->policy_store);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+  rc = wyl_policy_store_create_schema (self->policy_store);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+
   if (config_path != NULL) {
-    wyrelog_error_t rc = wyl_handle_open_engine_pair (self, config_path);
+    rc = wyl_handle_open_engine_pair (self, config_path);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (self);
       return rc;
@@ -107,7 +121,7 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
 #ifdef WYL_HAS_AUDIT
   /* Open an in-memory audit database and create the audit_events
    * schema. Audit persistence is not wired to config_path yet. */
-  wyrelog_error_t rc = wyl_audit_conn_open (NULL, &self->audit_conn);
+  rc = wyl_audit_conn_open (NULL, &self->audit_conn);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
     return rc;
@@ -135,6 +149,7 @@ wyl_shutdown (WylHandle *handle)
    * will not double-close. */
   g_clear_pointer (&handle->audit_conn, wyl_audit_conn_close);
 #endif
+  g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
 }
@@ -166,6 +181,13 @@ wyl_handle_get_audit_conn (WylHandle *self)
   return self->audit_conn;
 }
 #endif
+
+wyl_policy_store_t *
+wyl_handle_get_policy_store (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  return self->policy_store;
+}
 
 wyrelog_error_t
 wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)

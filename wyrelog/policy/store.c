@@ -1,0 +1,143 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "store-private.h"
+
+struct wyl_policy_store_t
+{
+  sqlite3 *db;
+};
+
+static wyrelog_error_t
+exec_sql (sqlite3 *db, const gchar *sql)
+{
+  char *errmsg = NULL;
+
+  if (sqlite3_exec (db, sql, NULL, NULL, &errmsg) != SQLITE_OK) {
+    sqlite3_free (errmsg);
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
+{
+  if (out_store == NULL)
+    return WYRELOG_E_INVALID;
+
+  const gchar *effective_path = path;
+  if (effective_path == NULL || g_strcmp0 (effective_path, ":memory:") == 0)
+    effective_path = ":memory:";
+
+  wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
+  if (sqlite3_open_v2 (effective_path, &self->db,
+          SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+          NULL) != SQLITE_OK) {
+    if (self->db != NULL)
+      sqlite3_close (self->db);
+    g_free (self);
+    return WYRELOG_E_IO;
+  }
+
+  wyrelog_error_t rc = exec_sql (self->db,
+      "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;");
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_close (self);
+    return rc;
+  }
+
+  *out_store = self;
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_policy_store_close (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return;
+  if (store->db != NULL)
+    sqlite3_close (store->db);
+  g_free (store);
+}
+
+sqlite3 *
+wyl_policy_store_get_db (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return NULL;
+  return store->db;
+}
+
+wyrelog_error_t
+wyl_policy_store_create_schema (wyl_policy_store_t *store)
+{
+  static const gchar *ddl =
+      "CREATE TABLE IF NOT EXISTS roles ("
+      "  role_id TEXT PRIMARY KEY,"
+      "  role_name TEXT UNIQUE NOT NULL,"
+      "  description TEXT,"
+      "  created_at INTEGER,"
+      "  modified_at INTEGER"
+      ");"
+      "CREATE TABLE IF NOT EXISTS permissions ("
+      "  perm_id TEXT PRIMARY KEY,"
+      "  perm_name TEXT UNIQUE NOT NULL,"
+      "  class TEXT NOT NULL CHECK "
+      "    (class IN ('basic', 'sensitive', 'critical')),"
+      "  created_at INTEGER"
+      ");"
+      "CREATE TABLE IF NOT EXISTS role_permissions ("
+      "  role_id TEXT NOT NULL,"
+      "  perm_id TEXT NOT NULL,"
+      "  granted_at INTEGER,"
+      "  granted_by TEXT,"
+      "  PRIMARY KEY (role_id, perm_id),"
+      "  FOREIGN KEY (role_id) REFERENCES roles (role_id),"
+      "  FOREIGN KEY (perm_id) REFERENCES permissions (perm_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_role_permissions_role_id "
+      "  ON role_permissions (role_id);"
+      "CREATE INDEX IF NOT EXISTS idx_role_permissions_perm_id "
+      "  ON role_permissions (perm_id);"
+      "CREATE TABLE IF NOT EXISTS policy_signatures ("
+      "  policy_version INTEGER PRIMARY KEY,"
+      "  policy_hash BLOB NOT NULL,"
+      "  signature BLOB NOT NULL,"
+      "  signed_by TEXT NOT NULL," "  signed_at INTEGER NOT NULL" ");";
+
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+  return exec_sql (store->db, ddl);
+}
+
+wyrelog_error_t
+wyl_policy_store_table_exists (wyl_policy_store_t *store,
+    const gchar *table_name, gboolean *out_exists)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || table_name == NULL
+      || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?;";
+  if (sqlite3_prepare_v2 (store->db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  if (sqlite3_bind_text (stmt, 1, table_name, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int rc = sqlite3_step (stmt);
+  if (rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  else if (rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}

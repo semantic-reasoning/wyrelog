@@ -25,7 +25,7 @@ if host_machine.system() != 'windows'
   test('wyrelogd-sigterm', sh,
     args : [
       '-c',
-      '"' + wyrelogd_exe.full_path() + '" --template-dir "' + meson.project_source_root() / 'templates' / 'access' + '" & pid=$!; sleep 0.2; kill -TERM "$pid"; wait "$pid"',
+      '"' + wyrelogd_exe.full_path() + '" --template-dir "' + meson.project_source_root() / 'templates' / 'access' + '" & pid=$!; sleep 1; kill -TERM "$pid"; wait "$pid"',
     ],
     depends : wyrelogd_exe,
   )
@@ -44,6 +44,13 @@ test_traits_compile = executable('test-traits-compile',
 )
 
 test('traits-compile', test_traits_compile)
+
+test_policy_store = executable('test-policy-store',
+  'test-policy-store.c',
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('policy-store', test_policy_store)
 
 test_dl_static = executable('test-dl-static',
   'test-dl-static.c',

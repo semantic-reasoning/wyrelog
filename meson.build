@@ -15,6 +15,7 @@ libsoup_dep = dependency('libsoup-3.0',
   required : get_option('enable_client'),
 )
 sodium_dep = dependency('libsodium', required : true)
+sqlite_dep = dependency('sqlite3', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
 if enable_audit_opt.allowed()
