@@ -67,6 +67,26 @@ insert_symbol_row3 (WylHandle *handle, const gchar *relation, const gchar *a,
 }
 
 static wyrelog_error_t
+insert_symbol_row4 (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, const gchar *c, const gchar *d)
+{
+  gint64 row[4];
+  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, d, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 4);
+}
+
+static wyrelog_error_t
 insert_not_armed_decide_fixture (WylHandle *handle)
 {
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
@@ -85,6 +105,32 @@ insert_not_armed_decide_fixture (WylHandle *handle)
   if (rc != WYRELOG_E_OK)
     return rc;
   return insert_symbol_row1 (handle, "session_active", "active");
+}
+
+static wyrelog_error_t
+insert_allow_decide_fixture (WylHandle *handle)
+{
+  wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
+      "wr.audit-allow-role", "wr.audit-allow");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", "audit-allow-user",
+      "wr.audit-allow-role", "audit-allow-scope");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "principal_state", "audit-allow-user",
+      "authenticated");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", "audit-allow-scope",
+      "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row1 (handle, "session_active", "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row4 (handle, "perm_state", "audit-allow-user",
+      "wr.audit-allow", "audit-allow-scope", "armed");
 }
 
 static gint
@@ -247,6 +293,55 @@ check_decide_persists_representative_deny_reason (void)
 }
 
 static gint
+check_decide_fail_closes_on_audit_append_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 50;
+  if (insert_allow_decide_fixture (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 51;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn, "DROP TABLE audit_events;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 52;
+  }
+  duckdb_destroy_result (&result);
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "audit-allow-user");
+  wyl_decide_req_set_action (req, "wr.audit-allow");
+  wyl_decide_req_set_resource_id (req, "audit-allow-scope");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 53;
+  }
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY) {
+    g_object_unref (handle);
+    return 54;
+  }
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "audit_unavailable") != 0) {
+    g_object_unref (handle);
+    return 55;
+  }
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "audit_events") != 0) {
+    g_object_unref (handle);
+    return 56;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
 check_emit_rejects_null_args (void)
 {
   WylHandle *handle = NULL;
@@ -276,6 +371,8 @@ main (void)
   if ((rc = check_emit_persists_event_fields ()) != 0)
     return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
+    return rc;
+  if ((rc = check_decide_fail_closes_on_audit_append_failure ()) != 0)
     return rc;
   if ((rc = check_emit_rejects_null_args ()) != 0)
     return rc;

@@ -268,6 +268,15 @@ find_deny_reason (WylHandle *handle, const gint64 row[3],
   return WYRELOG_E_OK;
 }
 
+#ifdef WYL_HAS_AUDIT
+static void
+fail_closed_for_audit (wyl_decide_resp_t *resp)
+{
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+  wyl_decide_resp_set_deny_tags (resp, "audit_unavailable", "audit_events");
+}
+#endif
+
 wyrelog_error_t
 wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     wyl_decide_resp_t *resp)
@@ -348,9 +357,8 @@ emit_audit:
 #ifdef WYL_HAS_AUDIT
   /* Mirror the decision into the audit log so every decide call
    * leaves a row regardless of whether downstream callers also
-   * emit explicitly. Failures from emit are intentionally not
-   * propagated: a decision was made and reported; the audit-side
-   * write is best-effort relative to the caller's contract. */
+   * emit explicitly. If the append fails, close the response back
+   * to DENY so the caller never observes an unaudited ALLOW. */
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_decide_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, wyl_decide_req_get_action (req));
@@ -358,7 +366,8 @@ emit_audit:
   wyl_audit_event_set_deny_reason (ev, deny_reason);
   wyl_audit_event_set_deny_origin (ev, deny_origin);
   wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
-  (void) wyl_audit_emit (handle, ev);
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK)
+    fail_closed_for_audit (resp);
 #endif
 
   return WYRELOG_E_OK;
