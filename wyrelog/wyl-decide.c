@@ -19,6 +19,8 @@ struct _wyl_decide_req
 struct _wyl_decide_resp
 {
   wyl_decision_t decision;
+  gchar *deny_reason;
+  gchar *deny_origin;
 };
 
 wyl_decide_req_t *
@@ -143,6 +145,10 @@ wyl_decide_resp_new (void)
 void
 wyl_decide_resp_free (wyl_decide_resp_t *resp)
 {
+  if (resp == NULL)
+    return;
+  g_free (resp->deny_reason);
+  g_free (resp->deny_origin);
   g_free (resp);
 }
 
@@ -153,6 +159,17 @@ wyl_decide_resp_set_decision (wyl_decide_resp_t *resp, wyl_decision_t decision)
   resp->decision = decision;
 }
 
+static void
+wyl_decide_resp_set_deny_tags (wyl_decide_resp_t *resp,
+    const gchar *deny_reason, const gchar *deny_origin)
+{
+  g_return_if_fail (resp != NULL);
+  g_free (resp->deny_reason);
+  g_free (resp->deny_origin);
+  resp->deny_reason = g_strdup (deny_reason);
+  resp->deny_origin = g_strdup (deny_origin);
+}
+
 wyl_decision_t
 wyl_decide_resp_get_decision (const wyl_decide_resp_t *resp)
 {
@@ -161,6 +178,20 @@ wyl_decide_resp_get_decision (const wyl_decide_resp_t *resp)
    * response must not silently observe an ALLOW. */
   g_return_val_if_fail (resp != NULL, WYL_DECISION_DENY);
   return resp->decision;
+}
+
+const gchar *
+wyl_decide_resp_get_deny_reason (const wyl_decide_resp_t *resp)
+{
+  g_return_val_if_fail (resp != NULL, NULL);
+  return resp->deny_reason;
+}
+
+const gchar *
+wyl_decide_resp_get_deny_origin (const wyl_decide_resp_t *resp)
+{
+  g_return_val_if_fail (resp != NULL, NULL);
+  return resp->deny_origin;
 }
 
 static gboolean
@@ -245,6 +276,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     return WYRELOG_E_INVALID;
 
   wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+  wyl_decide_resp_set_deny_tags (resp, NULL, NULL);
   if (wyl_decide_req_get_subject_id (req) == NULL
       || wyl_decide_req_get_action (req) == NULL
       || wyl_decide_req_get_resource_id (req) == NULL)
@@ -284,6 +316,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
           return rc;
         deny_reason = wyl_deny_reason_name (code);
         deny_origin = wyl_deny_reason_origin (code);
+        wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
         goto emit_audit;
       }
       rc = insert_guard_eval_facts (handle, row);
@@ -305,6 +338,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       deny_origin = wyl_deny_reason_origin (code);
     }
   }
+  wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
 emit_audit:
   ;
 #ifndef WYL_HAS_AUDIT

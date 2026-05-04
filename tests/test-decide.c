@@ -200,6 +200,10 @@ check_decide_allows_engine_tuple (void)
     return 43;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 44;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 45;
+  if (wyl_decide_resp_get_deny_origin (resp) != NULL)
+    return 46;
   return 0;
 }
 
@@ -289,6 +293,10 @@ check_decide_denies_guarded_permission_on_context_miss (void)
     return 73;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 74;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 75;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 76;
 
   return 0;
 }
