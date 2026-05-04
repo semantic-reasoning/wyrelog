@@ -118,4 +118,65 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
      wyrelog_error_t wyl_engine_remove (WylEngine *self,
     const gchar *relation, const gint64 *row, gsize ncols);
 
+/*
+ * WylTupleCallback:
+ * @relation: The relation name for the delivered tuple.  Borrowed
+ *   from the engine; valid only for the duration of this callback.
+ * @row: (array length=ncols): The integer row values.  Borrowed;
+ *   the array must not be retained beyond the callback's return.
+ * @ncols: The number of columns in @row.
+ * @user_data: The user-data pointer passed to wyl_engine_snapshot().
+ *
+ * Invoked once per tuple during a snapshot.  The relation name
+ * and row pointer are owned by the engine and are only valid for
+ * the duration of the callback; if the caller wishes to retain
+ * either, it must copy them.
+ */
+     typedef void (*WylTupleCallback) (const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data);
+
+/*
+ * wyl_engine_step:
+ * @self: A `WylEngine` instance.  Must not be NULL.
+ *
+ * Advances the engine's queued evaluation work by one logical step,
+ * processing any pending fact changes accumulated via wyl_engine_insert() /
+ * wyl_engine_remove() since the last step.
+ *
+ * Calling wyl_engine_step() commits this engine to step mode for the rest of
+ * its lifetime.  After a successful step call, wyl_engine_snapshot() returns
+ * %WYRELOG_E_INVALID.  This is intentional: the underlying evaluator does
+ * not allow mixing step advancement and snapshot probing on the same batch.
+ *
+ * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if @self is NULL,
+ *   has no live session, or has already been used in snapshot mode; other
+ *   %WYRELOG_E_* codes on internal failure.
+ */
+     wyrelog_error_t wyl_engine_step (WylEngine *self);
+
+/*
+ * wyl_engine_snapshot:
+ * @self: A `WylEngine` instance.  Must not be NULL.
+ * @relation: The relation name to probe.  Must not be NULL.
+ * @cb: A callback invoked once per tuple of the relation.  Must
+ *   not be NULL.
+ * @user_data: Opaque pointer passed through to @cb.
+ *
+ * Probes the named relation and invokes @cb once per tuple in the relation's
+ * current state.  Tuples are delivered in an unspecified order; do not rely
+ * on a particular ordering.
+ *
+ * Calling wyl_engine_snapshot() commits this engine to snapshot mode for the
+ * rest of its lifetime.  After a successful snapshot call, wyl_engine_step()
+ * returns %WYRELOG_E_INVALID.  This is intentional: the underlying evaluator
+ * does not allow mixing snapshot probing and step advancement on the same
+ * batch.
+ *
+ * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any argument is
+ *   NULL, @self has no live session, or the engine has already been used in
+ *   step mode; other %WYRELOG_E_* codes on internal failure.
+ */
+     wyrelog_error_t wyl_engine_snapshot (WylEngine *self,
+    const gchar *relation, WylTupleCallback cb, gpointer user_data);
+
 G_END_DECLS;
