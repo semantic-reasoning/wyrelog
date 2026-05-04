@@ -219,6 +219,12 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
     g_clear_object (&self->delta_engine);
     return rc;
   }
+  rc = wyl_handle_load_policy_store_role_permissions (self);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_object (&self->read_engine);
+    g_clear_object (&self->delta_engine);
+    return rc;
+  }
   return WYRELOG_E_OK;
 }
 
