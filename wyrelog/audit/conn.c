@@ -73,7 +73,19 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
       "  action        VARCHAR,"
       "  resource_id   VARCHAR,"
       "  deny_reason   VARCHAR,"
-      "  deny_origin   VARCHAR," "  decision      SMALLINT NOT NULL" ");";
+      "  deny_origin   VARCHAR,"
+      "  decision      SMALLINT NOT NULL"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us "
+      "  ON audit_events (created_at_us);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id "
+      "  ON audit_events (subject_id);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_action "
+      "  ON audit_events (action);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_decision "
+      "  ON audit_events (decision);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason "
+      "  ON audit_events (deny_reason);";
 
   if (conn == NULL)
     return WYRELOG_E_INVALID;
