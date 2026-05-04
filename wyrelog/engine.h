@@ -77,4 +77,45 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
      wyrelog_error_t wyl_engine_intern_symbol (WylEngine *self,
     const gchar *symbol, gint64 *out_id);
 
+/*
+ * wyl_engine_insert:
+ * @self: A `WylEngine` instance. Must not be NULL.
+ * @relation: The relation name to insert into. Must not be NULL.
+ * @row: (array length=ncols): The integer row values. Must not be
+ *   NULL when @ncols > 0. Each value is either a raw integer or
+ *   the stable identifier returned by wyl_engine_intern_symbol().
+ * @ncols: The number of columns in @row. Must be > 0.
+ *
+ * Inserts a single row into the named relation. The evaluator accepts
+ * the row as fact data; if the loaded program declares the relation
+ * with a different arity, the insert fails with %WYRELOG_E_EXEC.
+ *
+ * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any
+ *   argument fails its precondition or @self has no live session;
+ *   %WYRELOG_E_EXEC if the underlying engine rejects the row;
+ *   other %WYRELOG_E_* codes on internal failure.
+ */
+     wyrelog_error_t wyl_engine_insert (WylEngine *self,
+    const gchar *relation, const gint64 *row, gsize ncols);
+
+/*
+ * wyl_engine_remove:
+ * @self: A `WylEngine` instance. Must not be NULL.
+ * @relation: The relation name to retract from. Must not be NULL.
+ * @row: (array length=ncols): The integer row values to retract.
+ *   Must not be NULL when @ncols > 0.
+ * @ncols: The number of columns in @row. Must be > 0.
+ *
+ * Retracts a single previously-inserted row from the named relation.
+ * Removing a row that was never inserted is not an error; the engine
+ * treats it as a no-op.
+ *
+ * Returns: %WYRELOG_E_OK on success; %WYRELOG_E_INVALID if any
+ *   argument fails its precondition or @self has no live session;
+ *   %WYRELOG_E_EXEC if the underlying engine rejects the row;
+ *   other %WYRELOG_E_* codes on internal failure.
+ */
+     wyrelog_error_t wyl_engine_remove (WylEngine *self,
+    const gchar *relation, const gint64 *row, gsize ncols);
+
 G_END_DECLS;

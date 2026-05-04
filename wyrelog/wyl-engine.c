@@ -214,3 +214,55 @@ wyl_engine_intern_symbol (WylEngine *self, const gchar *symbol, gint64 *out_id)
   *out_id = id;
   return WYRELOG_E_OK;
 }
+
+wyrelog_error_t
+wyl_engine_insert (WylEngine *self, const gchar *relation, const gint64 *row,
+    gsize ncols)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (relation == NULL || ncols == 0 || ncols > G_MAXUINT32)
+    return WYRELOG_E_INVALID;
+  if (row == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+
+  wirelog_error_t wl_rc =
+      wl_easy_insert (self->session, relation, (const int64_t *) row,
+      (uint32_t) ncols);
+  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc != WYRELOG_E_OK) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: insert failed for relation '%s' with %" G_GSIZE_FORMAT
+        " columns", relation, ncols);
+  }
+
+  return rc;
+}
+
+wyrelog_error_t
+wyl_engine_remove (WylEngine *self, const gchar *relation, const gint64 *row,
+    gsize ncols)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (relation == NULL || ncols == 0 || ncols > G_MAXUINT32)
+    return WYRELOG_E_INVALID;
+  if (row == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+
+  wirelog_error_t wl_rc =
+      wl_easy_remove (self->session, relation, (const int64_t *) row,
+      (uint32_t) ncols);
+  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc != WYRELOG_E_OK) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: remove failed for relation '%s' with %" G_GSIZE_FORMAT
+        " columns", relation, ncols);
+  }
+
+  return rc;
+}
