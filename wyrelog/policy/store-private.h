@@ -10,6 +10,9 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
+typedef wyrelog_error_t (*wyl_policy_role_permission_cb) (const gchar * role_id,
+    const gchar * perm_id, gpointer user_data);
+
 /*
  * Policy authority store lifecycle wrapper.
  *
@@ -28,5 +31,13 @@ sqlite3 *wyl_policy_store_get_db (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
+wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
+    const gchar * role_id, const gchar * role_name);
+wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,
+    const gchar * perm_id, const gchar * perm_name, const gchar * klass);
+wyrelog_error_t wyl_policy_store_grant_role_permission (wyl_policy_store_t *
+    store, const gchar * role_id, const gchar * perm_id);
+wyrelog_error_t wyl_policy_store_foreach_role_permission (wyl_policy_store_t *
+    store, wyl_policy_role_permission_cb cb, gpointer user_data);
 
 G_END_DECLS;
