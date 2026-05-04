@@ -22,14 +22,11 @@ typedef struct
 
 typedef struct
 {
-  gint64 expected_row[3];
-  gboolean matched;
-} WylDeltaReadinessProbe;
-
-typedef struct
-{
   guint64 inserted;
   guint64 removed;
+  gboolean expect_effective_member;
+  gint64 expected_row[3];
+  gboolean matched_expected;
 } WylDaemonRuntime;
 
 static gboolean
@@ -72,67 +69,29 @@ check_wirelog_policy_ready (WylHandle *handle)
 }
 
 static void
-delta_readiness_cb (const gchar *relation, const gint64 *row, guint ncols,
-    WylDeltaKind kind, gpointer user_data)
-{
-  WylDeltaReadinessProbe *probe = user_data;
-
-  if (g_strcmp0 (relation, "effective_member") != 0)
-    return;
-  if (kind != WYL_DELTA_INSERT || ncols != 3)
-    return;
-  if (row[0] == probe->expected_row[0] && row[1] == probe->expected_row[1]
-      && row[2] == probe->expected_row[2])
-    probe->matched = TRUE;
-}
-
-static wyrelog_error_t
-check_wirelog_delta_ready (WylHandle *handle)
-{
-  WylDeltaReadinessProbe probe = { {0, 0, 0}, FALSE };
-
-  wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-user",
-      &probe.expected_row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wr.viewer",
-      &probe.expected_row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-scope",
-      &probe.expected_row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_handle_engine_set_delta_callback (handle, delta_readiness_cb,
-      &probe);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_engine_insert (handle, "member_of", probe.expected_row, 3);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (!probe.matched)
-    return WYRELOG_E_POLICY;
-  return wyl_handle_engine_set_delta_callback (handle, NULL, NULL);
-}
-
-static void
 daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     WylDeltaKind kind, gpointer user_data)
 {
   WylDaemonRuntime *runtime = user_data;
 
-  (void) relation;
-  (void) row;
-  (void) ncols;
-
   if (runtime == NULL)
     return;
-  if (kind == WYL_DELTA_INSERT)
+  if (kind == WYL_DELTA_INSERT) {
     runtime->inserted++;
-  else if (kind == WYL_DELTA_REMOVE)
+  } else if (kind == WYL_DELTA_REMOVE) {
     runtime->removed++;
+  }
+
+  if (!runtime->expect_effective_member)
+    return;
+  if (g_strcmp0 (relation, "effective_member") != 0)
+    return;
+  if (kind != WYL_DELTA_INSERT || ncols != 3)
+    return;
+  if (row[0] == runtime->expected_row[0]
+      && row[1] == runtime->expected_row[1]
+      && row[2] == runtime->expected_row[2])
+    runtime->matched_expected = TRUE;
 }
 
 static wyrelog_error_t
@@ -140,6 +99,38 @@ start_wirelog_delta_callbacks (WylHandle *handle, WylDaemonRuntime *runtime)
 {
   return wyl_handle_engine_set_delta_callback (handle, daemon_delta_cb,
       runtime);
+}
+
+static wyrelog_error_t
+check_wirelog_delta_ready (WylHandle *handle)
+{
+  WylDaemonRuntime runtime = {
+    .expect_effective_member = TRUE,
+  };
+
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-user",
+      &runtime.expected_row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "wr.viewer",
+      &runtime.expected_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-check-scope",
+      &runtime.expected_row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = start_wirelog_delta_callbacks (handle, &runtime);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (handle, "member_of", runtime.expected_row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (runtime.inserted == 0 || !runtime.matched_expected)
+    return WYRELOG_E_POLICY;
+  return wyl_handle_engine_set_delta_callback (handle, NULL, NULL);
 }
 
 #ifdef G_OS_UNIX
@@ -224,7 +215,7 @@ main (int argc, char **argv)
     return 0;
   }
 
-  WylDaemonRuntime runtime = { 0, 0 };
+  WylDaemonRuntime runtime = { 0 };
   rc = start_wirelog_delta_callbacks (handle, &runtime);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: delta callback setup failed: %s\n",
