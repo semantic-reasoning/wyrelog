@@ -163,6 +163,16 @@ test_handle_id = executable('test-handle-id',
 
 test('handle-id', test_handle_id)
 
+test_handle_engine_pair = executable('test-handle-engine-pair',
+  'test-handle-engine-pair.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+test('handle-engine-pair', test_handle_engine_pair)
+
 test_session_id = executable('test-session-id',
   'test-session-id.c',
   dependencies : [wyrelog_dep],

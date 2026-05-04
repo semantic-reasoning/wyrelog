@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "wyrelog/engine.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
 
@@ -13,6 +14,8 @@ struct _WylHandle
   GObject parent_instance;
   wyl_id_t id;
   gint64 created_at_us;
+  WylEngine *read_engine;
+  WylEngine *delta_engine;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
 #endif
@@ -23,8 +26,11 @@ G_DEFINE_FINAL_TYPE (WylHandle, wyl_handle, G_TYPE_OBJECT);
 static void
 wyl_handle_finalize (GObject *object)
 {
-#ifdef WYL_HAS_AUDIT
   WylHandle *self = WYL_HANDLE (object);
+
+  g_clear_object (&self->read_engine);
+  g_clear_object (&self->delta_engine);
+#ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
    * was reset to NULL there; otherwise this is the only close site
    * and the audit log file (if any) is released here. */
@@ -59,8 +65,6 @@ wyl_handle_init (WylHandle *self)
 wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
-  (void) config_path;
-
   /* Eagerly initialise the log subsystem before any other library code
    * runs so that log sites in boot phases see the correct thresholds
    * and file sink from the very first message. */
@@ -89,6 +93,7 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
 #endif
 
   *out_handle = self;
+  (void) config_path;
   return WYRELOG_E_OK;
 }
 
@@ -104,6 +109,8 @@ wyl_shutdown (WylHandle *handle)
    * will not double-close. */
   g_clear_pointer (&handle->audit_conn, wyl_audit_conn_close);
 #endif
+  g_clear_object (&handle->read_engine);
+  g_clear_object (&handle->delta_engine);
 }
 
 gchar *
@@ -133,3 +140,44 @@ wyl_handle_get_audit_conn (WylHandle *self)
   return self->audit_conn;
 }
 #endif
+
+wyrelog_error_t
+wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (template_dir == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->read_engine != NULL || self->delta_engine != NULL)
+    return WYRELOG_E_INVALID;
+
+  WylEngine *read_engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open (template_dir, 1, &read_engine);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylEngine *delta_engine = NULL;
+  rc = wyl_engine_open (template_dir, 1, &delta_engine);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (read_engine);
+    return rc;
+  }
+
+  self->read_engine = read_engine;
+  self->delta_engine = delta_engine;
+  return WYRELOG_E_OK;
+}
+
+WylEngine *
+wyl_handle_get_read_engine (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  return self->read_engine;
+}
+
+WylEngine *
+wyl_handle_get_delta_engine (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  return self->delta_engine;
+}
