@@ -11,6 +11,7 @@
  */
 
 #include "wyrelog/error.h"
+#include "wyrelog/events.h"
 #include "wyrelog/handle.h"
 #include "wyrelog/session.h"
 #include "wyrelog/audit.h"

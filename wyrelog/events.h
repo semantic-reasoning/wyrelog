@@ -191,8 +191,8 @@ const gchar *wyl_access_context_get_request_id (const WylAccessContext * ctx);
  * @event_id:     caller-issued identifier for this event; MUST NOT be
  *                WYL_ID_NIL.
  * @principal_id: identifier of the principal; MUST NOT be WYL_ID_NIL.
- * @fsm_event:    the FSM event being recorded; MUST NOT be
- *                WYL_PRINCIPAL_EVENT_LAST_.
+ * @fsm_event:    the FSM event being recorded; MUST be a valid ordinal
+ *                less than WYL_PRINCIPAL_EVENT_LAST_.
  * @auth_method:  NUL-terminated authentication method string; MUST NOT
  *                be NULL.
  * @source_ip:    NUL-terminated source IP address string, or NULL.
@@ -205,7 +205,8 @@ const gchar *wyl_access_context_get_request_id (const WylAccessContext * ctx);
  * Returns WYRELOG_E_OK on success.
  * Returns WYRELOG_E_INVALID when any mandatory argument is absent or
  * out-of-range (event_id is NIL, principal_id is NIL, auth_method is
- * NULL, fsm_event is LAST_, or out is NULL).
+ * NULL, fsm_event is at or beyond WYL_PRINCIPAL_EVENT_LAST_, or out
+ * is NULL).
  *
  * Strings are duplicated at construction; the event is immutable
  * post-construction. Caller releases with g_object_unref or
@@ -223,8 +224,8 @@ wyrelog_error_t wyl_access_event_new_principal (wyl_id_t event_id,
  * @event_id:    caller-issued identifier for this event; MUST NOT be
  *               WYL_ID_NIL.
  * @session_id:  identifier of the session; MUST NOT be WYL_ID_NIL.
- * @fsm_event:   the session FSM event being recorded; MUST NOT be
- *               WYL_SESSION_EVENT_LAST_.
+ * @fsm_event:   the session FSM event being recorded; MUST be a valid
+ *               ordinal less than WYL_SESSION_EVENT_LAST_.
  * @source_ip:   NUL-terminated source IP address string, or NULL.
  * @user_agent:  NUL-terminated user-agent string, or NULL.
  * @timestamp_us: event timestamp in microseconds since the Unix epoch.
