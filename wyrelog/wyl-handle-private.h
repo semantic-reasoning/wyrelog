@@ -57,6 +57,13 @@ wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
 wyrelog_error_t wyl_handle_engine_step_delta (WylHandle * self);
 
 /*
+ * Installs or clears the handle-owned delta engine callback. Rejected unless
+ * the engine pair is already open. Passing NULL for @cb clears the callback.
+ */
+wyrelog_error_t wyl_handle_engine_set_delta_callback (WylHandle * self,
+    WylDeltaCallback cb, gpointer user_data);
+
+/*
  * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
  * engine pair is already open.
  */
