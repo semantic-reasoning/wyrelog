@@ -237,7 +237,10 @@ test('decide', test_decide)
 
 test_perm = executable('test-perm',
   'test-perm.c',
-  dependencies : [wyrelog_dep],
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
 )
 
 test('perm', test_perm)
