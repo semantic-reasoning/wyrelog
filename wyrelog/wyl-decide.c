@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "wyl-handle-private.h"
+
 struct _wyl_decide_req
 {
   gchar *subject_id;
@@ -111,13 +113,30 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
   if (handle == NULL || req == NULL || resp == NULL)
     return WYRELOG_E_INVALID;
 
-  /* The policy decision point is not yet wired to the principal /
-   * session FSMs or to a configured allow-list, so every decide
-   * call returns DENY. This keeps the public contract fail-closed
-   * by default; a future commit will replace this with the actual
-   * Datalog evaluation. */
   wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
 
+  if (wyl_handle_get_read_engine (handle) != NULL) {
+    gint64 row[3];
+    wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle,
+        wyl_decide_req_get_subject_id (req), &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (handle, wyl_decide_req_get_action
+        (req), &row[1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (handle,
+        wyl_decide_req_get_resource_id (req), &row[2]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+
+    gboolean allowed = FALSE;
+    rc = wyl_handle_engine_decide (handle, row, &allowed);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (allowed)
+      wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  }
 #ifdef WYL_HAS_AUDIT
   /* Mirror the decision into the audit log so every decide call
    * leaves a row regardless of whether downstream callers also
