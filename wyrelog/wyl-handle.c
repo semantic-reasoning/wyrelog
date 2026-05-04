@@ -5,6 +5,7 @@
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
+#include "wyl-permission-scope-private.h"
 
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
@@ -61,6 +62,25 @@ wyl_handle_init (WylHandle *self)
   if (wyl_id_new (&self->id) != WYRELOG_E_OK)
     g_error ("wyl_handle_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
+}
+
+static wyrelog_error_t
+wyl_handle_seed_perm_arm_rules (WylHandle *self)
+{
+  for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {
+    gint64 row[2];
+    wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self,
+        wyl_perm_arm_rule_perm_id (i), &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, "_v0_deferred", &row[1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_engine_insert (self, "perm_arm_rule", row, 2);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -171,6 +191,12 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
 
   self->read_engine = read_engine;
   self->delta_engine = delta_engine;
+  rc = wyl_handle_seed_perm_arm_rules (self);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_object (&self->read_engine);
+    g_clear_object (&self->delta_engine);
+    return rc;
+  }
   return WYRELOG_E_OK;
 }
 

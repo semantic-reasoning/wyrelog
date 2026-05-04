@@ -39,6 +39,7 @@
 
 .decl allow(user: symbol, perm: symbol, scope: symbol)
 .decl allow_guard_base(user: symbol, perm: symbol, scope: symbol)
+.decl guarded_perm(perm: symbol)
 .decl allow_bool(user: symbol, perm: symbol, scope: symbol)
 .decl deny_reason(user: symbol, perm: symbol, scope: symbol,
     code: symbol, origin: symbol)
@@ -54,9 +55,12 @@ allow_guard_base(U, P, S) :-
     !disabled_role_for(U, P),
     !policy_violation("sod", U, P, _).
 
+guarded_perm(P) :- perm_arm_rule(P, G).
+
 allow(U, P, S) :-
     allow_guard_base(U, P, S),
-    armed(U, P, S).
+    armed(U, P, S),
+    !guarded_perm(P).
 
 allow_bool(U, P, S) :- allow(U, P, S).
 

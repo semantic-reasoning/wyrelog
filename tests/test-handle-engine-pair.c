@@ -657,6 +657,36 @@ check_decision_query_denies_unarmed_catalogue_permission (void)
 }
 
 static gint
+check_decision_query_denies_armed_catalogue_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 176;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 177;
+  if (insert_decision_fixture_state (handle, "decision-user-g",
+          "wr.decision-role-g", "wr.audit.read", "decision-scope-g",
+          "authenticated", "active", TRUE, decision_row) != WYRELOG_E_OK)
+    return 178;
+  gboolean guarded = FALSE;
+  if (wyl_handle_engine_contains (handle, "guarded_perm", &decision_row[1], 1,
+          &guarded) != WYRELOG_E_OK)
+    return 179;
+  if (!guarded)
+    return 180;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 181;
+  if (allowed)
+    return 182;
+  return 0;
+}
+
+static gint
 check_decision_query_rejects_missing_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -716,6 +746,8 @@ main (void)
   if ((rc = check_decision_query_denies_sod_violation ()) != 0)
     return rc;
   if ((rc = check_decision_query_denies_unarmed_catalogue_permission ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_denies_armed_catalogue_permission ()) != 0)
     return rc;
   if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
     return rc;

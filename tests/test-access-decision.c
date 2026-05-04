@@ -13,7 +13,7 @@
 /* --- Stratification self-check ---------------------------------- */
 
 /*
- * Lifts the eight rule heads introduced by decision.dl into
+ * Lifts the rule heads introduced by decision.dl into
  * wyl_dl_rule_t form and asserts the program is stratified. Every
  * negation edge from these rules lands on either an EDB predicate
  * (frozen, disabled_role_for, policy_violation, principal_state,
@@ -24,15 +24,22 @@
 static gint
 check_stratification (void)
 {
-  static const wyl_dl_body_atom_t allow_body[] = {
+  static const wyl_dl_body_atom_t allow_guard_base_body[] = {
     {.predicate = "has_permission",.negated = FALSE},
     {.predicate = "principal_state",.negated = FALSE},
     {.predicate = "session_state",.negated = FALSE},
     {.predicate = "session_active",.negated = FALSE},
-    {.predicate = "armed",.negated = FALSE},
     {.predicate = "frozen",.negated = TRUE},
     {.predicate = "disabled_role_for",.negated = TRUE},
     {.predicate = "policy_violation",.negated = TRUE},
+  };
+  static const wyl_dl_body_atom_t allow_body[] = {
+    {.predicate = "allow_guard_base",.negated = FALSE},
+    {.predicate = "armed",.negated = FALSE},
+    {.predicate = "guarded_perm",.negated = TRUE},
+  };
+  static const wyl_dl_body_atom_t guarded_perm_body[] = {
+    {.predicate = "perm_arm_rule",.negated = FALSE},
   };
   static const wyl_dl_body_atom_t allow_bool_body[] = {
     {.predicate = "allow",.negated = FALSE},
@@ -67,6 +74,10 @@ check_stratification (void)
     {.predicate = "armed",.negated = TRUE},
   };
   wyl_dl_rule_t rules[] = {
+    {.head = "allow_guard_base",.body = allow_guard_base_body,
+        .body_len = G_N_ELEMENTS (allow_guard_base_body)},
+    {.head = "guarded_perm",.body = guarded_perm_body,
+        .body_len = G_N_ELEMENTS (guarded_perm_body)},
     {.head = "allow",.body = allow_body,.body_len = G_N_ELEMENTS (allow_body)},
     {.head = "allow_bool",.body = allow_bool_body,
         .body_len = G_N_ELEMENTS (allow_bool_body)},
