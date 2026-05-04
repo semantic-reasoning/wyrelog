@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "access/decision-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-permission-scope-private.h"
 
@@ -189,6 +190,53 @@ insert_guard_eval_facts (WylHandle *handle, const gint64 row[3])
   return wyl_handle_engine_insert (handle, "eval_guard", row, 3);
 }
 
+static wyrelog_error_t
+intern_deny_reason_catalog (WylHandle *handle,
+    gint64 names[WYL_DENY_REASON_LAST_], gint64 origins[WYL_DENY_REASON_LAST_])
+{
+  for (guint i = 0; i < wyl_deny_reason_count (); i++) {
+    const gchar *name = wyl_deny_reason_name ((wyl_deny_reason_code_t) i);
+    const gchar *origin = wyl_deny_reason_origin ((wyl_deny_reason_code_t) i);
+    if (name == NULL || origin == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (handle, name, &names[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (handle, origin, &origins[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+find_deny_reason (WylHandle *handle, const gint64 row[3],
+    const gint64 names[WYL_DENY_REASON_LAST_],
+    const gint64 origins[WYL_DENY_REASON_LAST_],
+    wyl_deny_reason_code_t *out_code)
+{
+  if (out_code == NULL)
+    return WYRELOG_E_INVALID;
+  *out_code = WYL_DENY_REASON_LAST_;
+
+  for (guint i = 0; i < wyl_deny_reason_count (); i++) {
+    gint64 reason_row[5] = { row[0], row[1], row[2], names[i], origins[i] };
+
+    gboolean found = FALSE;
+    wyrelog_error_t rc = wyl_handle_engine_contains (handle, "deny_reason",
+        reason_row, 5, &found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (found) {
+      *out_code = (wyl_deny_reason_code_t) i;
+      return WYRELOG_E_OK;
+    }
+  }
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     wyl_decide_resp_t *resp)
@@ -202,6 +250,8 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       || wyl_decide_req_get_resource_id (req) == NULL)
     return WYRELOG_E_INVALID;
 
+  const gchar *deny_reason = NULL;
+  const gchar *deny_origin = NULL;
   if (wyl_handle_get_read_engine (handle) != NULL) {
     gint64 row[3];
     wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle,
@@ -216,13 +266,26 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         wyl_decide_req_get_resource_id (req), &row[2]);
     if (rc != WYRELOG_E_OK)
       return rc;
+    gint64 reason_names[WYL_DENY_REASON_LAST_] = { 0 };
+    gint64 reason_origins[WYL_DENY_REASON_LAST_] = { 0 };
+    rc = intern_deny_reason_catalog (handle, reason_names, reason_origins);
+    if (rc != WYRELOG_E_OK)
+      return rc;
 
     gboolean allowed = FALSE;
     const wyl_guard_expr_t *guard =
         wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
     if (guard != NULL) {
-      if (!guard_is_satisfied (guard, req))
+      if (!guard_is_satisfied (guard, req)) {
+        wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
+        rc = find_deny_reason (handle, row, reason_names, reason_origins,
+            &code);
+        if (rc != WYRELOG_E_OK)
+          return rc;
+        deny_reason = wyl_deny_reason_name (code);
+        deny_origin = wyl_deny_reason_origin (code);
         goto emit_audit;
+      }
       rc = insert_guard_eval_facts (handle, row);
       if (rc != WYRELOG_E_OK)
         return rc;
@@ -231,11 +294,23 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     rc = wyl_handle_engine_decide (handle, row, &allowed);
     if (rc != WYRELOG_E_OK)
       return rc;
-    if (allowed)
+    if (allowed) {
       wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+    } else {
+      wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
+      rc = find_deny_reason (handle, row, reason_names, reason_origins, &code);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      deny_reason = wyl_deny_reason_name (code);
+      deny_origin = wyl_deny_reason_origin (code);
+    }
   }
 emit_audit:
   ;
+#ifndef WYL_HAS_AUDIT
+  (void) deny_reason;
+  (void) deny_origin;
+#endif
 #ifdef WYL_HAS_AUDIT
   /* Mirror the decision into the audit log so every decide call
    * leaves a row regardless of whether downstream callers also
@@ -246,6 +321,8 @@ emit_audit:
   wyl_audit_event_set_subject_id (ev, wyl_decide_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, wyl_decide_req_get_action (req));
   wyl_audit_event_set_resource_id (ev, wyl_decide_req_get_resource_id (req));
+  wyl_audit_event_set_deny_reason (ev, deny_reason);
+  wyl_audit_event_set_deny_origin (ev, deny_origin);
   wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
   (void) wyl_audit_emit (handle, ev);
 #endif
