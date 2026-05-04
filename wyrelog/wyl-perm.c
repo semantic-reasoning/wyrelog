@@ -277,17 +277,15 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
     return rc;
 
 #ifdef WYL_HAS_AUDIT
-  /* Record the grant attempt in the audit log so admin operations
-   * are observable even before the durable permission store is
-   * wired. WYL_DECISION_ALLOW marks the operation accepted at the
-   * API surface; rejection logic lands when the policy decision
-   * point gets a real backing store. Audit-emit failures are not
-   * propagated; the operation has been accepted and that should
-   * not be undone by a transient log write hiccup. */
+  /* Record the accepted admin operation in the audit log. The
+   * action column carries operation semantics while deny_origin
+   * retains the granted permission name for readers that need the
+   * full target triple. */
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_grant_req_get_subject_id (req));
-  wyl_audit_event_set_action (ev, wyl_grant_req_get_action (req));
+  wyl_audit_event_set_action (ev, "permission_grant");
   wyl_audit_event_set_resource_id (ev, wyl_grant_req_get_resource_id (req));
+  wyl_audit_event_set_deny_origin (ev, wyl_grant_req_get_action (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   (void) wyl_audit_emit (handle, ev);
 #endif
@@ -318,13 +316,12 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
 
 #ifdef WYL_HAS_AUDIT
   /* Mirror revoke in audit alongside grant (see wyl_perm_grant for
-   * rationale). The decision field still reads ALLOW because the
-   * admin operation itself was accepted; the audit row's action
-   * column carries the "revoke" semantics. */
+   * rationale). */
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_revoke_req_get_subject_id (req));
-  wyl_audit_event_set_action (ev, wyl_revoke_req_get_action (req));
+  wyl_audit_event_set_action (ev, "permission_revoke");
   wyl_audit_event_set_resource_id (ev, wyl_revoke_req_get_resource_id (req));
+  wyl_audit_event_set_deny_origin (ev, wyl_revoke_req_get_action (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   (void) wyl_audit_emit (handle, ev);
 #endif
