@@ -32,6 +32,13 @@ wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
     const gchar * template_dir);
 
 /*
+ * Interns @symbol into both handle-owned policy engines and returns the shared
+ * integer id. Rejected unless the engine pair is already open.
+ */
+wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
+    const gchar * symbol, gint64 * out_id);
+
+/*
  * Borrowed policy engine sessions owned by |self|. These are NULL when
  * no policy engine pair has been opened. The read engine is reserved for
  * snapshot-style reads; the delta engine is reserved for step/delta

@@ -95,6 +95,76 @@ check_second_open_is_rejected (void)
   return 0;
 }
 
+static gint
+check_symbol_intern_reaches_both_engines (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 pair_id = -1;
+  gint64 read_id = -1;
+  gint64 delta_id = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 60;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 61;
+  if (wyl_handle_intern_engine_symbol (handle, "pair-symbol-a", &pair_id)
+      != WYRELOG_E_OK)
+    return 62;
+  if (pair_id < 0)
+    return 63;
+  if (wyl_engine_intern_symbol (wyl_handle_get_read_engine (handle),
+          "pair-symbol-a", &read_id) != WYRELOG_E_OK)
+    return 64;
+  if (wyl_engine_intern_symbol (wyl_handle_get_delta_engine (handle),
+          "pair-symbol-a", &delta_id) != WYRELOG_E_OK)
+    return 65;
+  if (pair_id != read_id)
+    return 66;
+  if (pair_id != delta_id)
+    return 67;
+  return 0;
+}
+
+static gint
+check_symbol_intern_is_stable (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 first = -1;
+  gint64 second = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 70;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 71;
+  if (wyl_handle_intern_engine_symbol (handle, "pair-symbol-b", &first)
+      != WYRELOG_E_OK)
+    return 72;
+  if (wyl_handle_intern_engine_symbol (handle, "pair-symbol-b", &second)
+      != WYRELOG_E_OK)
+    return 73;
+  if (first != second)
+    return 74;
+  return 0;
+}
+
+static gint
+check_symbol_intern_rejects_missing_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 id = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 80;
+  if (wyl_handle_intern_engine_symbol (handle, "pair-symbol-c", &id)
+      != WYRELOG_E_INVALID)
+    return 81;
+  if (id != -1)
+    return 82;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -109,6 +179,12 @@ main (void)
   if ((rc = check_shutdown_clears_engine_pair ()) != 0)
     return rc;
   if ((rc = check_second_open_is_rejected ()) != 0)
+    return rc;
+  if ((rc = check_symbol_intern_reaches_both_engines ()) != 0)
+    return rc;
+  if ((rc = check_symbol_intern_is_stable ()) != 0)
+    return rc;
+  if ((rc = check_symbol_intern_rejects_missing_pair ()) != 0)
     return rc;
 
   return 0;
