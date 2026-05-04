@@ -54,9 +54,10 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  * g_clear_object when called on a g_autoptr-managed variable, but available
  * as an explicit close site for callers that do not use autoptr.  Drops one
  * reference on @engine.  If this was the last reference, the underlying
- * evaluator session is closed and @engine is finalized and must not be
- * dereferenced.  If the caller holds additional references via g_object_ref(),
- * @engine remains valid and those references must be released separately.
+ * evaluator session is closed and @engine is finalized; @engine must not be
+ * dereferenced after this call returns.  If the caller holds additional
+ * references via g_object_ref(), @engine remains valid and those references
+ * must be released separately.
  */
      void wyl_engine_close (WylEngine *engine);
 
@@ -139,12 +140,12 @@ G_DECLARE_FINAL_TYPE (WylEngine, wyl_engine, WYL, ENGINE, GObject)
  * either, it must copy them.  @user_data is the same opaque pointer
  * passed to wyl_engine_snapshot() and is forwarded unchanged to each
  * callback invocation.  The callback is invoked synchronously while the
- * engine is mid-evaluation; the callback MUST NOT call wyl_engine_step(),
- * wyl_engine_snapshot(), wyl_engine_insert(), or wyl_engine_remove() on @self
- * while the callback is running; recursing into those evaluating or mutating
- * operations on the same engine while it is mid-evaluation is undefined.
- * wyl_engine_intern_symbol() is safe to call from inside the callback.
- */
+ * engine is mid-evaluation.  Only wyl_engine_intern_symbol() may be called on
+ * the same engine instance that was passed to wyl_engine_snapshot() from
+ * inside the callback; all other public operations on that engine, including
+ * releasing the last reference (e.g. wyl_engine_close, g_object_unref), are
+ * undefined while the callback is running.
+*/
      typedef void (*WylTupleCallback) (const gchar *relation,
     const gint64 *row, guint ncols, gpointer user_data);
 
