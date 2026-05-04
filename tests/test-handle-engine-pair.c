@@ -78,6 +78,72 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
   return wyl_handle_intern_engine_symbol (handle, c, &row[2]);
 }
 
+static wyrelog_error_t
+insert1_symbol (WylHandle *handle, const gchar *relation, const gchar *a)
+{
+  gint64 row[1];
+
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 1);
+}
+
+static wyrelog_error_t
+insert_decision_fixture (WylHandle *handle, const gchar *user,
+    const gchar *role, const gchar *permission, const gchar *scope,
+    const gchar *principal_state, const gchar *session_state,
+    gint64 decision_row[3])
+{
+  gint64 member_row[3];
+  gint64 principal_state_row[2];
+  gint64 session_state_row[2];
+  wyrelog_error_t rc = intern3 (handle, user, role, scope, member_row);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 role_permission_row[2] = { member_row[1], -1 };
+  rc = wyl_handle_intern_engine_symbol (handle, permission,
+      &role_permission_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (handle, "role_permission",
+      role_permission_row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (handle, "member_of", member_row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  principal_state_row[0] = member_row[0];
+  rc = wyl_handle_intern_engine_symbol (handle, principal_state,
+      &principal_state_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (handle, "principal_state",
+      principal_state_row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  session_state_row[0] = member_row[2];
+  rc = wyl_handle_intern_engine_symbol (handle, session_state,
+      &session_state_row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (handle, "session_state", session_state_row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = insert1_symbol (handle, "session_active", session_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  decision_row[0] = member_row[0];
+  decision_row[1] = role_permission_row[1];
+  decision_row[2] = member_row[2];
+  return WYRELOG_E_OK;
+}
+
 static gint
 check_init_keeps_engines_absent (void)
 {
@@ -353,6 +419,72 @@ check_insert_fanout_rejects_missing_pair (void)
   return 0;
 }
 
+static gint
+check_decision_query_allows_matching_tuple (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = FALSE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 130;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 131;
+  if (insert_decision_fixture (handle, "decision-user-a",
+          "wr.decision-role-a", "wr.decision-permission-a",
+          "decision-scope-a", "authenticated", "active", decision_row)
+      != WYRELOG_E_OK)
+    return 132;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 133;
+  if (!allowed)
+    return 134;
+  return 0;
+}
+
+static gint
+check_decision_query_denies_missing_tuple (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 140;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 141;
+  if (insert_decision_fixture (handle, "decision-user-b",
+          "wr.decision-role-b", "wr.decision-permission-b",
+          "decision-scope-b", "unverified", "active", decision_row)
+      != WYRELOG_E_OK)
+    return 142;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 143;
+  if (allowed)
+    return 144;
+  return 0;
+}
+
+static gint
+check_decision_query_rejects_missing_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 row[3] = { 1, 2, 3 };
+  gboolean allowed = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 150;
+  if (wyl_handle_engine_decide (handle, row, &allowed) != WYRELOG_E_INVALID)
+    return 151;
+  if (!allowed)
+    return 152;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -381,6 +513,12 @@ main (void)
   if ((rc = check_remove_fanout_reaches_read_engine ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_allows_matching_tuple ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_denies_missing_tuple ()) != 0)
+    return rc;
+  if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
     return rc;
 
   return 0;

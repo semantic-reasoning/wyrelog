@@ -50,6 +50,13 @@ wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 
 /*
+ * Reads allow_bool/3 from the handle-owned read engine for @row
+ * (user, permission, scope). Rejected unless the engine pair is already open.
+ */
+wyrelog_error_t wyl_handle_engine_decide (WylHandle * self,
+    const gint64 row[3], gboolean * out_allowed);
+
+/*
  * Borrowed policy engine sessions owned by |self|. These are NULL when
  * no policy engine pair has been opened. The read engine is reserved for
  * snapshot-style reads; the delta engine is reserved for step/delta

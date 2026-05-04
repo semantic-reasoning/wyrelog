@@ -231,6 +231,49 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
   return wyl_engine_remove (self->delta_engine, relation, row, ncols);
 }
 
+typedef struct
+{
+  const gint64 *row;
+  gboolean matched;
+} WylDecisionProbe;
+
+static void
+wyl_handle_decide_snapshot_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  WylDecisionProbe *probe = user_data;
+
+  (void) relation;
+
+  if (ncols != 3)
+    return;
+  if (row[0] == probe->row[0] && row[1] == probe->row[1]
+      && row[2] == probe->row[2]) {
+    probe->matched = TRUE;
+  }
+}
+
+wyrelog_error_t
+wyl_handle_engine_decide (WylHandle *self, const gint64 row[3],
+    gboolean *out_allowed)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (row == NULL || out_allowed == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylDecisionProbe probe = { row, FALSE };
+  wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine,
+      "allow_bool", wyl_handle_decide_snapshot_cb, &probe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_allowed = probe.matched;
+  return WYRELOG_E_OK;
+}
+
 WylEngine *
 wyl_handle_get_read_engine (WylHandle *self)
 {
