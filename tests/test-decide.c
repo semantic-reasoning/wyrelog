@@ -123,7 +123,7 @@ check_decide_rejects_null_args (void)
 }
 
 static gint
-check_decide_default_resp_stays_deny (void)
+check_decide_rejects_incomplete_req_as_deny (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
@@ -131,12 +131,16 @@ check_decide_default_resp_stays_deny (void)
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
-  /* Pre-set ALLOW; decide must overwrite back to DENY. */
+  /* Pre-set ALLOW; invalid decide must overwrite back to DENY. */
   wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
-  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
     return 31;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 32;
+  wyl_decide_req_set_subject_id (req, "alice");
+  wyl_decide_req_set_action (req, "read");
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
+    return 33;
   return 0;
 }
 
@@ -200,7 +204,7 @@ main (void)
     return rc;
   if ((rc = check_decide_rejects_null_args ()) != 0)
     return rc;
-  if ((rc = check_decide_default_resp_stays_deny ()) != 0)
+  if ((rc = check_decide_rejects_incomplete_req_as_deny ()) != 0)
     return rc;
   if ((rc = check_decide_allows_engine_tuple ()) != 0)
     return rc;
