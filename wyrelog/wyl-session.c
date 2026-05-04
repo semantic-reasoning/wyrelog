@@ -191,6 +191,21 @@ store_session_state (WylHandle *handle, const gchar *session_id,
   return wyl_policy_store_set_session_state (store, session_id, state);
 }
 
+#ifdef WYL_HAS_AUDIT
+static void
+emit_session_state_audit (WylHandle *handle, const gchar *session_id,
+    const gchar *old_state, const gchar *new_state)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, session_id);
+  wyl_audit_event_set_action (ev, "session_state");
+  wyl_audit_event_set_resource_id (ev, new_state);
+  wyl_audit_event_set_deny_origin (ev, old_state);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+}
+#endif
+
 static wyrelog_error_t
 set_session_state (WylHandle *handle, WylSession *session, const gchar *state)
 {
@@ -221,6 +236,9 @@ transition_session_state (WylHandle *handle, WylSession *session,
   rc = store_session_state (handle, session_id, new_state_name);
   if (rc != WYRELOG_E_OK)
     return rc;
+#ifdef WYL_HAS_AUDIT
+  emit_session_state_audit (handle, session_id, old_state_name, new_state_name);
+#endif
   session->state = new_state;
   return WYRELOG_E_OK;
 }

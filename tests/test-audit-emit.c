@@ -342,6 +342,73 @@ check_decide_fail_closes_on_audit_append_failure (void)
 }
 
 static gint
+check_session_transition_emits_audit_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 60;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-session-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 61;
+  }
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL) {
+    g_object_unref (handle);
+    return 62;
+  }
+  if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 63;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "FROM audit_events WHERE action = 'session_state';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 64;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 65;
+  }
+
+  gint rc = 0;
+  const gchar *subject = duckdb_value_varchar (&result, 0, 0);
+  const gchar *action = duckdb_value_varchar (&result, 1, 0);
+  const gchar *resource = duckdb_value_varchar (&result, 2, 0);
+  const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  if (g_strcmp0 (subject, session_id) != 0)
+    rc = 66;
+  else if (g_strcmp0 (action, "session_state") != 0)
+    rc = 67;
+  else if (g_strcmp0 (resource, "idle") != 0)
+    rc = 68;
+  else if (g_strcmp0 (old_state, "active") != 0)
+    rc = 69;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 70;
+
+  duckdb_free ((void *) subject);
+  duckdb_free ((void *) action);
+  duckdb_free ((void *) resource);
+  duckdb_free ((void *) old_state);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
 check_emit_rejects_null_args (void)
 {
   WylHandle *handle = NULL;
@@ -373,6 +440,8 @@ main (void)
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
   if ((rc = check_decide_fail_closes_on_audit_append_failure ()) != 0)
+    return rc;
+  if ((rc = check_session_transition_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_emit_rejects_null_args ()) != 0)
     return rc;
