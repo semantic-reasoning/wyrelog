@@ -77,6 +77,82 @@ check_handle_owns_policy_store (void)
   return 0;
 }
 
+typedef struct
+{
+  const gchar *role_id;
+  const gchar *perm_id;
+  guint matches;
+} RolePermissionExpect;
+
+static wyrelog_error_t
+role_permission_expect_cb (const gchar *role_id, const gchar *perm_id,
+    gpointer user_data)
+{
+  RolePermissionExpect *expect = user_data;
+
+  if (g_strcmp0 (role_id, expect->role_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_store_grants_role_permission (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 40;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 41;
+  if (wyl_policy_store_upsert_role (store, "wr.test-role", "test role")
+      != WYRELOG_E_OK)
+    return 42;
+  if (wyl_policy_store_upsert_permission (store, "wr.test.read", "test read",
+          "basic") != WYRELOG_E_OK)
+    return 43;
+  if (wyl_policy_store_grant_role_permission (store, "wr.test-role",
+          "wr.test.read") != WYRELOG_E_OK)
+    return 44;
+  if (wyl_policy_store_grant_role_permission (store, "wr.test-role",
+          "wr.test.read") != WYRELOG_E_OK)
+    return 45;
+
+  RolePermissionExpect expect = {
+    .role_id = "wr.test-role",
+    .perm_id = "wr.test.read",
+  };
+  if (wyl_policy_store_foreach_role_permission (store,
+          role_permission_expect_cb, &expect) != WYRELOG_E_OK)
+    return 46;
+  if (expect.matches != 1)
+    return 47;
+  return 0;
+}
+
+static gint
+check_store_rejects_bad_role_permission (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 50;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 51;
+  if (wyl_policy_store_grant_role_permission (store, "missing-role",
+          "missing-perm") != WYRELOG_E_IO)
+    return 52;
+  if (wyl_policy_store_upsert_role (NULL, "role", "role") != WYRELOG_E_INVALID)
+    return 53;
+  if (wyl_policy_store_upsert_permission (store, "perm", "perm", "unknown")
+      != WYRELOG_E_IO)
+    return 54;
+  if (wyl_policy_store_foreach_role_permission (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 55;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -87,6 +163,10 @@ main (void)
   if ((rc = check_store_rejects_invalid_args ()) != 0)
     return rc;
   if ((rc = check_handle_owns_policy_store ()) != 0)
+    return rc;
+  if ((rc = check_store_grants_role_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_rejects_bad_role_permission ()) != 0)
     return rc;
   return 0;
 }

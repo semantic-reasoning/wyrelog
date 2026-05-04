@@ -18,6 +18,23 @@ exec_sql (sqlite3 *db, const gchar *sql)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+prepare_stmt (sqlite3 *db, const gchar *sql, sqlite3_stmt **out_stmt)
+{
+  if (sqlite3_prepare_v2 (db, sql, -1, out_stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+bind_text (sqlite3_stmt *stmt, int index, const gchar *value)
+{
+  if (sqlite3_bind_text (stmt, index, value, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
 {
@@ -140,4 +157,123 @@ wyl_policy_store_table_exists (wyl_policy_store_t *store,
 
   sqlite3_finalize (stmt);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_upsert_role (wyl_policy_store_t *store, const gchar *role_id,
+    const gchar *role_name)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || role_id == NULL
+      || role_name == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO roles (role_id, role_name, created_at, modified_at) "
+      "VALUES (?, ?, unixepoch(), unixepoch()) "
+      "ON CONFLICT(role_id) DO UPDATE SET "
+      "  role_name = excluded.role_name,"
+      "  modified_at = excluded.modified_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, role_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, role_name)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
+    const gchar *perm_id, const gchar *perm_name, const gchar *klass)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || perm_id == NULL
+      || perm_name == NULL || klass == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO permissions (perm_id, perm_name, class, created_at) "
+      "VALUES (?, ?, ?, unixepoch()) "
+      "ON CONFLICT(perm_id) DO UPDATE SET "
+      "  perm_name = excluded.perm_name," "  class = excluded.class;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_name)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, klass)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_grant_role_permission (wyl_policy_store_t *store,
+    const gchar *role_id, const gchar *perm_id)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || role_id == NULL || perm_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO role_permissions (role_id, perm_id, granted_at) "
+      "VALUES (?, ?, unixepoch()) "
+      "ON CONFLICT(role_id, perm_id) DO UPDATE SET "
+      "  granted_at = excluded.granted_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, role_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_role_permission (wyl_policy_store_t *store,
+    wyl_policy_role_permission_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT role_id, perm_id FROM role_permissions "
+      "ORDER BY role_id, perm_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *role_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    rc = cb (role_id, perm_id, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
