@@ -46,7 +46,7 @@ jobs:
           brew install meson ninja pkg-config glib sqlite libsoup libsodium
 
       - name: Cache meson packagecache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: subprojects/packagecache
           key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -65,7 +65,7 @@ jobs:
 
       - name: Upload meson logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: meson-logs-${{ matrix.os }}
           path: builddir/meson-logs/
@@ -124,7 +124,7 @@ jobs:
           "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
 
       - name: Cache meson packagecache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: subprojects/packagecache
           key: windows-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload meson logs on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: meson-logs-windows
           path: builddir/meson-logs/
