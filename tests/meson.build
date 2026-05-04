@@ -189,7 +189,10 @@ test('login-req', test_login_req)
 
 test_session_username = executable('test-session-username',
   'test-session-username.c',
-  dependencies : [wyrelog_dep],
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
 )
 
 test('session-username', test_session_username)
