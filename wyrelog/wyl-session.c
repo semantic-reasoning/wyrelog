@@ -132,6 +132,52 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   return set_principal_state (handle, username, new_state);
 }
 
+static wyrelog_error_t
+insert_session_state (WylHandle *handle, const gchar *session_id,
+    const gchar *state)
+{
+  if (session_id == NULL || wyl_handle_get_read_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+  if (state == NULL)
+    return WYRELOG_E_INVALID;
+
+  gint64 row[2];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, session_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, state, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, "session_state", row, 2);
+}
+
+static wyrelog_error_t
+store_session_state (WylHandle *handle, const gchar *session_id,
+    const gchar *state)
+{
+  if (session_id == NULL)
+    return WYRELOG_E_OK;
+  if (state == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_OK;
+
+  return wyl_policy_store_set_session_state (store, session_id, state);
+}
+
+static wyrelog_error_t
+set_session_state (WylHandle *handle, WylSession *session, const gchar *state)
+{
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  wyrelog_error_t rc = insert_session_state (handle, session_id, state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return store_session_state (handle, session_id, state);
+}
+
 wyrelog_error_t
 wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     WylSession **out_session)
@@ -162,6 +208,12 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       g_object_unref (session);
       return rc;
     }
+  }
+
+  wyrelog_error_t rc = set_session_state (handle, session, "active");
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (session);
+    return rc;
   }
 
   *out_session = session;

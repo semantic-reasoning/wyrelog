@@ -79,6 +79,25 @@ insert_symbol_row4 (WylHandle *handle, const gchar *relation,
 
 typedef struct
 {
+  const gchar *session_id;
+  const gchar *state;
+  guint matches;
+} SessionStateExpect;
+
+static wyrelog_error_t
+session_state_expect_cb (const gchar *session_id, const gchar *state,
+    gpointer user_data)
+{
+  SessionStateExpect *expect = user_data;
+
+  if (g_strcmp0 (session_id, expect->session_id) == 0
+      && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
   const gchar *subject_id;
   const gchar *state;
   guint matches;
@@ -367,6 +386,34 @@ check_mfa_verify_persists_authenticated_state (void)
   return 0;
 }
 
+static gint
+check_login_persists_active_session_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 130;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "session-state-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 131;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 132;
+  SessionStateExpect expect = {
+    .session_id = session_id,
+    .state = "active",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 133;
+  if (expect.matches != 1)
+    return 134;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -393,6 +440,8 @@ main (void)
   if ((rc = check_login_persists_mfa_required_state ()) != 0)
     return rc;
   if ((rc = check_mfa_verify_persists_authenticated_state ()) != 0)
+    return rc;
+  if ((rc = check_login_persists_active_session_state ()) != 0)
     return rc;
 
   return 0;
