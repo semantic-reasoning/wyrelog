@@ -169,6 +169,51 @@ check_create_schema_null_arg (void)
   return 0;
 }
 
+static gint
+check_table_probe_reports_schema (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 90;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 91;
+
+  gboolean exists = FALSE;
+  if (wyl_audit_conn_table_exists (conn, "audit_events", &exists)
+      != WYRELOG_E_OK)
+    return 92;
+  if (!exists)
+    return 93;
+
+  if (wyl_audit_conn_table_exists (conn, "missing_table", &exists)
+      != WYRELOG_E_OK)
+    return 94;
+  if (exists)
+    return 95;
+  return 0;
+}
+
+static gint
+check_table_probe_rejects_invalid_args (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  gboolean exists = FALSE;
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 100;
+  if (wyl_audit_conn_table_exists (NULL, "audit_events", &exists)
+      != WYRELOG_E_INVALID)
+    return 101;
+  if (wyl_audit_conn_table_exists (conn, NULL, &exists)
+      != WYRELOG_E_INVALID)
+    return 102;
+  if (wyl_audit_conn_table_exists (conn, "audit_events", NULL)
+      != WYRELOG_E_INVALID)
+    return 103;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -190,6 +235,10 @@ main (void)
   if ((rc = check_create_schema ()) != 0)
     return rc;
   if ((rc = check_create_schema_null_arg ()) != 0)
+    return rc;
+  if ((rc = check_table_probe_reports_schema ()) != 0)
+    return rc;
+  if ((rc = check_table_probe_rejects_invalid_args ()) != 0)
     return rc;
   return 0;
 }

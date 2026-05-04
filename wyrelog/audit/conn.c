@@ -84,3 +84,38 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
   duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
 }
+
+wyrelog_error_t
+wyl_audit_conn_table_exists (wyl_audit_conn_t *conn, const gchar *table_name,
+    gboolean *out_exists)
+{
+  duckdb_prepared_statement stmt;
+  duckdb_result result;
+  duckdb_state rc;
+
+  if (conn == NULL || table_name == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT COUNT(*) FROM information_schema.tables " "WHERE table_name = ?;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_bind_varchar (stmt, 1, table_name) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_prepare (&stmt);
+  if (rc != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  *out_exists = duckdb_value_int64 (&result, 0, 0) > 0;
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}

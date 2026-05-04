@@ -83,4 +83,12 @@ duckdb_connection wyl_audit_conn_get_connection (wyl_audit_conn_t * conn);
  */
 wyrelog_error_t wyl_audit_conn_create_schema (wyl_audit_conn_t * conn);
 
+/*
+ * Probes whether @table_name exists in the audit DuckDB catalog. Intended for
+ * daemon readiness checks and private tests; append/query paths should use
+ * their typed APIs rather than catalog inspection.
+ */
+wyrelog_error_t wyl_audit_conn_table_exists (wyl_audit_conn_t * conn,
+    const gchar * table_name, gboolean * out_exists);
+
 G_END_DECLS;
