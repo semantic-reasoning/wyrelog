@@ -8,6 +8,76 @@
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
 #endif
 
+typedef struct
+{
+  const gint64 *expected_row;
+  guint seen;
+} SnapshotExpect;
+
+typedef struct
+{
+  const gchar *expected_relation;
+  const gint64 *expected_row;
+  WylDeltaKind expected_kind;
+  guint matching;
+} DeltaExpect;
+
+static void
+snapshot_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  SnapshotExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "has_permission") != 0 || ncols != 3)
+    return;
+  if (row[0] == expect->expected_row[0] && row[1] == expect->expected_row[1]
+      && row[2] == expect->expected_row[2]) {
+    expect->seen++;
+  }
+}
+
+static void
+snapshot_count_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  guint *seen = user_data;
+
+  (void) relation;
+  (void) row;
+  (void) ncols;
+
+  (*seen)++;
+}
+
+static void
+delta_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
+{
+  DeltaExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, expect->expected_relation) != 0 || ncols != 3)
+    return;
+  if (kind != expect->expected_kind)
+    return;
+  if (row[0] == expect->expected_row[0] && row[1] == expect->expected_row[1]
+      && row[2] == expect->expected_row[2]) {
+    expect->matching++;
+  }
+}
+
+static wyrelog_error_t
+intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
+    gint64 row[3])
+{
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_intern_engine_symbol (handle, c, &row[2]);
+}
+
 static gint
 check_init_keeps_engines_absent (void)
 {
@@ -165,6 +235,124 @@ check_symbol_intern_rejects_missing_pair (void)
   return 0;
 }
 
+static gint
+check_insert_fanout_reaches_read_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 member_row[3];
+  gint64 role_permission_row[2];
+  gint64 expected_row[3];
+  SnapshotExpect expect = { expected_row, 0 };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 90;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 91;
+  if (intern3 (handle, "fanout-user-a", "wr.fanout-role-a", "fanout-scope-a",
+          member_row) != WYRELOG_E_OK)
+    return 92;
+  expected_row[0] = member_row[0];
+  role_permission_row[0] = member_row[1];
+  if (wyl_handle_intern_engine_symbol (handle, "wr.fanout-permission-a",
+          &expected_row[1]) != WYRELOG_E_OK)
+    return 93;
+  role_permission_row[1] = expected_row[1];
+  expected_row[2] = member_row[2];
+
+  if (wyl_handle_engine_insert (handle, "role_permission",
+          role_permission_row, 2) != WYRELOG_E_OK)
+    return 94;
+  if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
+      != WYRELOG_E_OK)
+    return 95;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "has_permission", snapshot_expect_cb, &expect) != WYRELOG_E_OK)
+    return 96;
+  if (expect.seen != 1)
+    return 97;
+  return 0;
+}
+
+static gint
+check_insert_fanout_reaches_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 member_row[3];
+  DeltaExpect expect = {
+    "effective_member",
+    member_row,
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 100;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 101;
+  if (intern3 (handle, "fanout-user-b", "wr.viewer", "fanout-scope-b",
+          member_row) != WYRELOG_E_OK)
+    return 102;
+  if (wyl_engine_set_delta_callback (wyl_handle_get_delta_engine (handle),
+          delta_expect_cb, &expect) != WYRELOG_E_OK)
+    return 103;
+  if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
+      != WYRELOG_E_OK)
+    return 104;
+  if (wyl_engine_step (wyl_handle_get_delta_engine (handle)) != WYRELOG_E_OK)
+    return 105;
+  if (expect.matching == 0)
+    return 106;
+  return 0;
+}
+
+static gint
+check_remove_fanout_reaches_read_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 member_row[3];
+  guint seen = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 110;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 111;
+  if (intern3 (handle, "fanout-user-c", "wr.viewer", "fanout-scope-c",
+          member_row) != WYRELOG_E_OK)
+    return 112;
+  if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
+      != WYRELOG_E_OK)
+    return 113;
+  if (wyl_handle_engine_remove (handle, "member_of", member_row, 3)
+      != WYRELOG_E_OK)
+    return 114;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "effective_member", snapshot_count_cb, &seen) != WYRELOG_E_OK)
+    return 115;
+  if (seen != 0)
+    return 116;
+  return 0;
+}
+
+static gint
+check_insert_fanout_rejects_missing_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 row[3] = { 1, 2, 3 };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 120;
+  if (wyl_handle_engine_insert (handle, "member_of", row, 3)
+      != WYRELOG_E_INVALID)
+    return 121;
+  if (wyl_handle_engine_remove (handle, "member_of", row, 3)
+      != WYRELOG_E_INVALID)
+    return 122;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -185,6 +373,14 @@ main (void)
   if ((rc = check_symbol_intern_is_stable ()) != 0)
     return rc;
   if ((rc = check_symbol_intern_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
+    return rc;
+  if ((rc = check_insert_fanout_reaches_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_remove_fanout_reaches_read_engine ()) != 0)
+    return rc;
+  if ((rc = check_insert_fanout_rejects_missing_pair ()) != 0)
     return rc;
 
   return 0;
