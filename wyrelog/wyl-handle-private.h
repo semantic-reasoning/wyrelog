@@ -50,6 +50,13 @@ wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 
 /*
+ * Advances the handle-owned delta engine by one logical step. Rejected unless
+ * the engine pair is already open. The read engine is untouched so snapshot
+ * decision probes remain available.
+ */
+wyrelog_error_t wyl_handle_engine_step_delta (WylHandle * self);
+
+/*
  * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
  * engine pair is already open.
  */

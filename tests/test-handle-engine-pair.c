@@ -446,7 +446,7 @@ check_insert_fanout_reaches_delta_engine (void)
   if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
       != WYRELOG_E_OK)
     return 104;
-  if (wyl_engine_step (wyl_handle_get_delta_engine (handle)) != WYRELOG_E_OK)
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
     return 105;
   if (expect.matching == 0)
     return 106;
@@ -496,6 +496,8 @@ check_insert_fanout_rejects_missing_pair (void)
   if (wyl_handle_engine_remove (handle, "member_of", row, 3)
       != WYRELOG_E_INVALID)
     return 122;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_INVALID)
+    return 123;
   return 0;
 }
 
