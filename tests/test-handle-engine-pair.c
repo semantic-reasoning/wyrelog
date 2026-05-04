@@ -738,6 +738,57 @@ check_decision_query_rejects_missing_pair (void)
   return 0;
 }
 
+static gint
+check_policy_store_role_permissions_load_into_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 320;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.store-role", "store role")
+      != WYRELOG_E_OK)
+    return 321;
+  if (wyl_policy_store_upsert_permission (store, "wr.store.read",
+          "store read", "basic") != WYRELOG_E_OK)
+    return 322;
+  if (wyl_policy_store_grant_role_permission (store, "wr.store-role",
+          "wr.store.read") != WYRELOG_E_OK)
+    return 323;
+  if (wyl_handle_load_policy_store_role_permissions (handle) != WYRELOG_E_OK)
+    return 324;
+
+  gint64 decision_row[3];
+  if (insert_decision_fixture (handle, "store-user", "wr.store-role",
+          "wr.store.read", "store-scope", "authenticated", "active",
+          decision_row) != WYRELOG_E_OK)
+    return 325;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 326;
+  if (!allowed)
+    return 328;
+  return 0;
+}
+
+static gint
+check_policy_store_role_permissions_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 330;
+  if (wyl_handle_load_policy_store_role_permissions (NULL)
+      != WYRELOG_E_INVALID)
+    return 331;
+  if (wyl_handle_load_policy_store_role_permissions (handle)
+      != WYRELOG_E_INVALID)
+    return 332;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -788,6 +839,10 @@ main (void)
   if ((rc = check_decision_query_denies_armed_catalogue_permission ()) != 0)
     return rc;
   if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_role_permissions_load_into_engine ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
     return rc;
 
   return 0;
