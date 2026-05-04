@@ -36,7 +36,6 @@ check_stratification (void)
   static const wyl_dl_body_atom_t allow_body[] = {
     {.predicate = "allow_guard_base",.negated = FALSE},
     {.predicate = "armed",.negated = FALSE},
-    {.predicate = "guarded_perm",.negated = TRUE},
   };
   static const wyl_dl_body_atom_t guarded_perm_body[] = {
     {.predicate = "perm_arm_rule",.negated = FALSE},

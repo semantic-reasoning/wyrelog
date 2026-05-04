@@ -59,8 +59,7 @@ guarded_perm(P) :- perm_arm_rule(P, G).
 
 allow(U, P, S) :-
     allow_guard_base(U, P, S),
-    armed(U, P, S),
-    !guarded_perm(P).
+    armed(U, P, S).
 
 allow_bool(U, P, S) :- allow(U, P, S).
 

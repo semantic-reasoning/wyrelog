@@ -6,23 +6,20 @@
 //
 // Stateless armed/3 derivation. The version-0 perm-scope is a pure
 // IDB rule set with no transition lifecycle: the host must inject
-// perm_state(user, perm, scope, "armed") for permissions that are
-// ready to participate in allow/3. Guard-derived arming lands in a
-// future commit when compound guard payloads are bridged into the
-// engine.
+// perm_state(user, perm, scope, "armed") for unguarded permissions
+// that are ready to participate in allow/3. Guarded permissions are
+// armed only when the host injects the request-local context_now/2
+// and eval_guard/3 bridge facts for a satisfied guard expression.
 //
 // EDB schemas (host-populated, no clauses below):
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
 //   has_permission(user, perm, scope)            -- declared in
 //                                                   bootstrap.dl
 //   perm_arm_rule(perm, guard_handle)            -- compound guard
-//                                                   payload deferred
-//                                                   to a follow-up
-//                                                   commit; for v0
-//                                                   this relation is
-//                                                   declared but the
-//                                                   gated armed/3
-//                                                   rule is omitted.
+//                                                   payload key
+//   context_now(user, scope)                     -- request context
+//                                                   activation
+//   eval_guard(user, perm, scope)                -- host guard result
 //
 // Row order in any future perm_arm_rule block will be load-bearing:
 // the test harness compares the perm-id list line by line against
@@ -31,6 +28,8 @@
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: symbol)
+.decl context_now(user: symbol, scope: symbol)
+.decl eval_guard(user: symbol, perm: symbol, scope: symbol)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
 // --- perm_arm_rule catalogue mirror ----------------------------------
@@ -41,7 +40,8 @@
 // other will fail the build. The second argument is a guard handle —
 // the compound-term guard payload itself lives in the C catalogue,
 // keyed by perm-id; the `_v0_deferred` placeholder pins the row count
-// without committing to a wirelog encoding for compound guards.
+// while the host bridge exposes satisfied guard decisions as
+// eval_guard/3 facts.
 
 perm_arm_rule("wr.sys.admin",        "_v0_deferred").
 perm_arm_rule("wr.sys.key_rotate",   "_v0_deferred").
@@ -57,13 +57,18 @@ perm_arm_rule("wr.audit.explain",    "_v0_deferred").
 // --- armed/3 derivation ----------------------------------------------
 
 // rule-1: state-driven path. perm_state is host-populated; an
-// "armed" entry directly arms the (user, perm, scope) tuple.
-armed(U, P, S) :- perm_state(U, P, S, "armed").
+// "armed" entry directly arms the (user, perm, scope) tuple only
+// when the permission is not guarded by the catalogue.
+armed(U, P, S) :-
+    perm_state(U, P, S, "armed"),
+    !perm_arm_rule(P, _).
 
-// rule-3: gated permission with compound-term guard payload.
-// Deferred: the embedded Datalog engine supports compound terms
-// (`functor/arity`), but the host-bridged `eval_guard/2` predicate
-// and the wirelog encoding of guard expressions need their own
-// atomic commit. Until that lands, the gated armed/3 path is served
-// by the C-side wyl_eval_guard against the catalogue keyed by
-// perm-id.
+// rule-3: gated permission with compound-term guard payload. The
+// payload tree remains in the C catalogue for now, keyed by P; the
+// host evaluates it against request context and injects eval_guard/3
+// only when the guard is satisfied.
+armed(U, P, S) :-
+    has_permission(U, P, S),
+    context_now(U, S),
+    perm_arm_rule(P, _),
+    eval_guard(U, P, S).

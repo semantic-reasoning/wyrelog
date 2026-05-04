@@ -162,15 +162,11 @@ wyl_decide_resp_get_decision (const wyl_decide_resp_t *resp)
   return resp->decision;
 }
 
-static wyrelog_error_t
-guard_base_decide_if_satisfied (WylHandle *handle,
-    const wyl_guard_expr_t *guard, const wyl_decide_req_t *req,
-    const gint64 row[3], gboolean *out_allowed)
+static gboolean
+guard_is_satisfied (const wyl_guard_expr_t *guard, const wyl_decide_req_t *req)
 {
-  *out_allowed = FALSE;
-
   if (guard == NULL || !req->has_guard_context)
-    return WYRELOG_E_OK;
+    return FALSE;
 
   wyl_scope_t scope = {
     .user = wyl_decide_req_get_subject_id (req),
@@ -178,11 +174,19 @@ guard_base_decide_if_satisfied (WylHandle *handle,
     .loc_class = req->guard_loc_class,
     .risk = req->guard_risk,
   };
-  if (!wyl_eval_guard (guard, &scope))
-    return WYRELOG_E_OK;
+  return wyl_eval_guard (guard, &scope);
+}
 
-  return wyl_handle_engine_contains (handle, "allow_guard_base", row, 3,
-      out_allowed);
+static wyrelog_error_t
+insert_guard_eval_facts (WylHandle *handle, const gint64 row[3])
+{
+  gint64 context_row[2] = { row[0], row[2] };
+  wyrelog_error_t rc =
+      wyl_handle_engine_insert (handle, "context_now", context_row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_handle_engine_insert (handle, "eval_guard", row, 3);
 }
 
 wyrelog_error_t
@@ -217,17 +221,21 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     const wyl_guard_expr_t *guard =
         wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
     if (guard != NULL) {
-      rc = guard_base_decide_if_satisfied (handle, guard, req, row, &allowed);
-      if (rc != WYRELOG_E_OK)
-        return rc;
-    } else {
-      rc = wyl_handle_engine_decide (handle, row, &allowed);
+      if (!guard_is_satisfied (guard, req))
+        goto emit_audit;
+      rc = insert_guard_eval_facts (handle, row);
       if (rc != WYRELOG_E_OK)
         return rc;
     }
+
+    rc = wyl_handle_engine_decide (handle, row, &allowed);
+    if (rc != WYRELOG_E_OK)
+      return rc;
     if (allowed)
       wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
   }
+emit_audit:
+  ;
 #ifdef WYL_HAS_AUDIT
   /* Mirror the decision into the audit log so every decide call
    * leaves a row regardless of whether downstream callers also
