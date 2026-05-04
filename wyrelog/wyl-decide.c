@@ -2,12 +2,17 @@
 #include "wyrelog/wyrelog.h"
 
 #include "wyl-handle-private.h"
+#include "wyl-permission-scope-private.h"
 
 struct _wyl_decide_req
 {
   gchar *subject_id;
   gchar *action;
   gchar *resource_id;
+  gboolean has_guard_context;
+  gint64 guard_timestamp;
+  gchar *guard_loc_class;
+  gint64 guard_risk;
 };
 
 struct _wyl_decide_resp
@@ -29,6 +34,7 @@ wyl_decide_req_free (wyl_decide_req_t *req)
   g_free (req->subject_id);
   g_free (req->action);
   g_free (req->resource_id);
+  g_free (req->guard_loc_class);
   g_free (req);
 }
 
@@ -77,6 +83,28 @@ wyl_decide_req_get_resource_id (const wyl_decide_req_t *req)
   return req->resource_id;
 }
 
+void
+wyl_decide_req_set_guard_context (wyl_decide_req_t *req, gint64 timestamp,
+    const gchar *loc_class, gint64 risk)
+{
+  g_return_if_fail (req != NULL);
+  req->has_guard_context = TRUE;
+  req->guard_timestamp = timestamp;
+  g_free (req->guard_loc_class);
+  req->guard_loc_class = g_strdup (loc_class);
+  req->guard_risk = risk;
+}
+
+void
+wyl_decide_req_clear_guard_context (wyl_decide_req_t *req)
+{
+  g_return_if_fail (req != NULL);
+  req->has_guard_context = FALSE;
+  req->guard_timestamp = 0;
+  g_clear_pointer (&req->guard_loc_class, g_free);
+  req->guard_risk = 0;
+}
+
 wyl_decide_resp_t *
 wyl_decide_resp_new (void)
 {
@@ -104,6 +132,29 @@ wyl_decide_resp_get_decision (const wyl_decide_resp_t *resp)
    * response must not silently observe an ALLOW. */
   g_return_val_if_fail (resp != NULL, WYL_DECISION_DENY);
   return resp->decision;
+}
+
+static wyrelog_error_t
+guard_base_decide_if_satisfied (WylHandle *handle,
+    const wyl_guard_expr_t *guard, const wyl_decide_req_t *req,
+    const gint64 row[3], gboolean *out_allowed)
+{
+  *out_allowed = FALSE;
+
+  if (guard == NULL || !req->has_guard_context)
+    return WYRELOG_E_OK;
+
+  wyl_scope_t scope = {
+    .user = wyl_decide_req_get_subject_id (req),
+    .timestamp = req->guard_timestamp,
+    .loc_class = req->guard_loc_class,
+    .risk = req->guard_risk,
+  };
+  if (!wyl_eval_guard (guard, &scope))
+    return WYRELOG_E_OK;
+
+  return wyl_handle_engine_contains (handle, "allow_guard_base", row, 3,
+      out_allowed);
 }
 
 wyrelog_error_t
@@ -135,9 +186,17 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       return rc;
 
     gboolean allowed = FALSE;
-    rc = wyl_handle_engine_decide (handle, row, &allowed);
-    if (rc != WYRELOG_E_OK)
-      return rc;
+    const wyl_guard_expr_t *guard =
+        wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
+    if (guard != NULL) {
+      rc = guard_base_decide_if_satisfied (handle, guard, req, row, &allowed);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    } else {
+      rc = wyl_handle_engine_decide (handle, row, &allowed);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
     if (allowed)
       wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
   }

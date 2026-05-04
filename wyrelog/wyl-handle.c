@@ -239,24 +239,48 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
 
 typedef struct
 {
+  const gchar *relation;
   const gint64 *row;
+  gsize ncols;
   gboolean matched;
-} WylDecisionProbe;
+} WylRowProbe;
 
 static void
-wyl_handle_decide_snapshot_cb (const gchar *relation, const gint64 *row,
+wyl_handle_row_snapshot_cb (const gchar *relation, const gint64 *row,
     guint ncols, gpointer user_data)
 {
-  WylDecisionProbe *probe = user_data;
+  WylRowProbe *probe = user_data;
 
-  (void) relation;
-
-  if (ncols != 3)
+  if (g_strcmp0 (relation, probe->relation) != 0)
     return;
-  if (row[0] == probe->row[0] && row[1] == probe->row[1]
-      && row[2] == probe->row[2]) {
-    probe->matched = TRUE;
+  if (ncols != probe->ncols)
+    return;
+  for (gsize i = 0; i < probe->ncols; i++) {
+    if (row[i] != probe->row[i])
+      return;
   }
+  probe->matched = TRUE;
+}
+
+wyrelog_error_t
+wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
+    const gint64 *row, gsize ncols, gboolean *out_contains)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (relation == NULL || row == NULL || ncols == 0 || out_contains == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylRowProbe probe = { relation, row, ncols, FALSE };
+  wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine,
+      relation, wyl_handle_row_snapshot_cb, &probe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_contains = probe.matched;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -270,14 +294,7 @@ wyl_handle_engine_decide (WylHandle *self, const gint64 row[3],
   if (self->read_engine == NULL || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  WylDecisionProbe probe = { row, FALSE };
-  wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine,
-      "allow_bool", wyl_handle_decide_snapshot_cb, &probe);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  *out_allowed = probe.matched;
-  return WYRELOG_E_OK;
+  return wyl_handle_engine_contains (self, "allow_bool", row, 3, out_allowed);
 }
 
 WylEngine *

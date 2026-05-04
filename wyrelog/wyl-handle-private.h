@@ -50,6 +50,14 @@ wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 
 /*
+ * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
+ * engine pair is already open.
+ */
+wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols,
+    gboolean * out_contains);
+
+/*
  * Reads allow_bool/3 from the handle-owned read engine for @row
  * (user, permission, scope). Rejected unless the engine pair is already open.
  */
