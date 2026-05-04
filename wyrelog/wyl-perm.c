@@ -178,6 +178,27 @@ wyl_revoke_req_get_resource_id (const wyl_revoke_req_t *req)
 }
 
 static wyrelog_error_t
+update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
+    const gchar *action, const gchar *resource_id, gboolean insert)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (insert) {
+    wyrelog_error_t rc =
+        wyl_policy_store_upsert_permission (store, action, action, "basic");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    return wyl_policy_store_grant_direct_permission (store, subject_id,
+        action, resource_id);
+  }
+
+  return wyl_policy_store_revoke_direct_permission (store, subject_id,
+      action, resource_id);
+}
+
+static wyrelog_error_t
 update_direct_permission (WylHandle *handle, const gchar *subject_id,
     const gchar *action, const gchar *resource_id, gboolean insert)
 {
@@ -225,10 +246,18 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
       || wyl_grant_req_get_action (req) == NULL
       || wyl_grant_req_get_resource_id (req) == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_handle_get_read_engine (handle) != NULL
+      && wyl_perm_arm_rule_lookup (wyl_grant_req_get_action (req)) != NULL)
+    return WYRELOG_E_POLICY;
 
-  wyrelog_error_t rc = update_direct_permission (handle,
+  wyrelog_error_t rc = update_direct_permission_store (handle,
       wyl_grant_req_get_subject_id (req), wyl_grant_req_get_action (req),
       wyl_grant_req_get_resource_id (req), TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = update_direct_permission (handle, wyl_grant_req_get_subject_id (req),
+      wyl_grant_req_get_action (req), wyl_grant_req_get_resource_id (req),
+      TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -248,9 +277,6 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
   (void) wyl_audit_emit (handle, ev);
 #endif
 
-  /* Durable permission-store persistence lands in a follow-up; v0
-   * mirrors the direct fact into the attached engine pair and records
-   * the accepted operation in the audit log. */
   return WYRELOG_E_OK;
 }
 
@@ -264,9 +290,14 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
       || wyl_revoke_req_get_resource_id (req) == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = update_direct_permission (handle,
+  wyrelog_error_t rc = update_direct_permission_store (handle,
       wyl_revoke_req_get_subject_id (req), wyl_revoke_req_get_action (req),
       wyl_revoke_req_get_resource_id (req), FALSE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = update_direct_permission (handle, wyl_revoke_req_get_subject_id (req),
+      wyl_revoke_req_get_action (req), wyl_revoke_req_get_resource_id (req),
+      FALSE);
   if (rc != WYRELOG_E_OK)
     return rc;
 

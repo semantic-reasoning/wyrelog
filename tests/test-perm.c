@@ -10,11 +10,10 @@
 
 /*
  * v0 contract for wyl_perm_grant / wyl_perm_revoke: validate
- * arguments, mirror direct permission plus armed-state facts into
- * any attached policy engine pair, record the admin operation in
- * the audit log when audit is enabled, and return WYRELOG_E_OK
- * without touching a durable permission store. The store wiring is
- * a follow-up.
+ * arguments, persist direct permission authority rows, mirror direct
+ * permission plus armed-state facts into any attached policy engine
+ * pair, record the admin operation in the audit log when audit is
+ * enabled, and return WYRELOG_E_OK.
  */
 
 static gint
@@ -182,6 +181,62 @@ check_gated_grant_is_rejected_by_engine_path (void)
 }
 
 static gint
+check_grant_persists_direct_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 70;
+
+  g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (req, "store-user");
+  wyl_grant_req_set_action (req, "wr.store-direct");
+  wyl_grant_req_set_resource_id (req, "store-scope");
+  if (wyl_perm_grant (handle, req) != WYRELOG_E_OK)
+    return 71;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
+          (handle), "store-user", "wr.store-direct", "store-scope",
+          &exists) != WYRELOG_E_OK)
+    return 72;
+  if (!exists)
+    return 73;
+  return 0;
+}
+
+static gint
+check_revoke_removes_store_grant (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 80;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "store-revoke-user");
+  wyl_grant_req_set_action (grant, "wr.store-revoke");
+  wyl_grant_req_set_resource_id (grant, "store-revoke-scope");
+  if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK)
+    return 81;
+
+  g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
+  wyl_revoke_req_set_subject_id (revoke, "store-revoke-user");
+  wyl_revoke_req_set_action (revoke, "wr.store-revoke");
+  wyl_revoke_req_set_resource_id (revoke, "store-revoke-scope");
+  if (wyl_perm_revoke (handle, revoke) != WYRELOG_E_OK)
+    return 82;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
+          (handle), "store-revoke-user", "wr.store-revoke",
+          "store-revoke-scope", &exists)
+      != WYRELOG_E_OK)
+    return 83;
+  if (exists)
+    return 84;
+  return 0;
+}
+
+static gint
 check_revoke_removes_engine_grant (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -239,6 +294,10 @@ main (void)
   if ((rc = check_grant_allows_engine_decide ()) != 0)
     return rc;
   if ((rc = check_gated_grant_is_rejected_by_engine_path ()) != 0)
+    return rc;
+  if ((rc = check_grant_persists_direct_permission ()) != 0)
+    return rc;
+  if ((rc = check_revoke_removes_store_grant ()) != 0)
     return rc;
   if ((rc = check_revoke_removes_engine_grant ()) != 0)
     return rc;

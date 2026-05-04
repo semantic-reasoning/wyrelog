@@ -115,6 +115,18 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON role_permissions (role_id);"
       "CREATE INDEX IF NOT EXISTS idx_role_permissions_perm_id "
       "  ON role_permissions (perm_id);"
+      "CREATE TABLE IF NOT EXISTS direct_permissions ("
+      "  subject_id TEXT NOT NULL,"
+      "  perm_id TEXT NOT NULL,"
+      "  scope TEXT NOT NULL,"
+      "  granted_at INTEGER,"
+      "  PRIMARY KEY (subject_id, perm_id, scope),"
+      "  FOREIGN KEY (perm_id) REFERENCES permissions (perm_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_direct_permissions_perm_id "
+      "  ON direct_permissions (perm_id);"
+      "CREATE INDEX IF NOT EXISTS idx_direct_permissions_subject_scope "
+      "  ON direct_permissions (subject_id, scope);"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -187,6 +199,102 @@ wyl_policy_store_upsert_role (wyl_policy_store_t *store, const gchar *role_id,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_grant_direct_permission (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO direct_permissions "
+      "  (subject_id, perm_id, scope, granted_at) "
+      "VALUES (?, ?, ?, unixepoch()) "
+      "ON CONFLICT(subject_id, perm_id, scope) DO UPDATE SET "
+      "  granted_at = excluded.granted_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "DELETE FROM direct_permissions "
+      "WHERE subject_id = ? AND perm_id = ? AND scope = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_direct_permission_exists (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gboolean *out_exists)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT 1 FROM direct_permissions "
+      "WHERE subject_id = ? AND perm_id = ? AND scope = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

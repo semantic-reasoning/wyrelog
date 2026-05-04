@@ -76,6 +76,7 @@ check_policy_store_ready (WylHandle *handle)
     "roles",
     "permissions",
     "role_permissions",
+    "direct_permissions",
     "policy_signatures",
   };
 

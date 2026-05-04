@@ -19,6 +19,7 @@ check_store_creates_authority_schema (void)
     "roles",
     "permissions",
     "role_permissions",
+    "direct_permissions",
     "policy_signatures",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
@@ -131,6 +132,72 @@ check_store_grants_role_permission (void)
 }
 
 static gint
+check_store_grants_direct_permission (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 60;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 61;
+  if (wyl_policy_store_upsert_permission (store, "wr.direct.read",
+          "direct read", "basic") != WYRELOG_E_OK)
+    return 62;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-user",
+          "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
+    return 63;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-user",
+          "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
+    return 64;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists (store, "direct-user",
+          "wr.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
+    return 65;
+  if (!exists)
+    return 66;
+  if (wyl_policy_store_revoke_direct_permission (store, "direct-user",
+          "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
+    return 67;
+  if (wyl_policy_store_direct_permission_exists (store, "direct-user",
+          "wr.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
+    return 68;
+  if (exists)
+    return 69;
+  return 0;
+}
+
+static gint
+check_store_rejects_bad_direct_permission (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean exists = FALSE;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 70;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 71;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-user",
+          "missing-perm", "direct-scope") != WYRELOG_E_IO)
+    return 72;
+  if (wyl_policy_store_grant_direct_permission (NULL, "direct-user",
+          "missing-perm", "direct-scope") != WYRELOG_E_INVALID)
+    return 73;
+  if (wyl_policy_store_revoke_direct_permission (store, NULL,
+          "missing-perm", "direct-scope") != WYRELOG_E_INVALID)
+    return 74;
+  if (wyl_policy_store_direct_permission_exists (store, "direct-user",
+          "missing-perm", "direct-scope", NULL) != WYRELOG_E_INVALID)
+    return 75;
+  if (wyl_policy_store_direct_permission_exists (store, "direct-user",
+          "missing-perm", "direct-scope", &exists) != WYRELOG_E_OK)
+    return 76;
+  if (exists)
+    return 77;
+  return 0;
+}
+
+static gint
 check_store_rejects_bad_role_permission (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -165,6 +232,10 @@ main (void)
   if ((rc = check_handle_owns_policy_store ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_grants_direct_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
     return rc;
   if ((rc = check_store_rejects_bad_role_permission ()) != 0)
     return rc;
