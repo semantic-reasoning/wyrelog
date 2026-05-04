@@ -5,6 +5,8 @@
 #include "wyl-engine-private.h"
 #include "wyl-common-private.h"
 
+G_STATIC_ASSERT (sizeof (gint64) == sizeof (int64_t));
+
 /*
  * Fixed dependency order for policy template files.
  *
@@ -20,6 +22,21 @@ static const char *const TEMPLATE_FILES[] = {
 };
 
 G_STATIC_ASSERT (G_N_ELEMENTS (TEMPLATE_FILES) == WYL_ENGINE_TEMPLATE_COUNT);
+
+typedef struct
+{
+  WylTupleCallback cb;
+  gpointer user_data;
+} wyl_engine_tuple_cookie_t;
+
+static void
+wyl_engine_tuple_trampoline (const char *relation, const int64_t *row,
+    uint32_t ncols, void *user)
+{
+  const wyl_engine_tuple_cookie_t *cookie = user;
+
+  cookie->cb (relation, (const gint64 *) row, (guint) ncols, cookie->user_data);
+}
 
 /* --- GObject boilerplate ------------------------------------------- */
 
@@ -50,6 +67,7 @@ static void
 wyl_engine_init (WylEngine *self)
 {
   self->session = NULL;
+  self->mode = WYL_ENGINE_MODE_NONE;
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     self->dl_src_logical_paths[i] = NULL;
 }
@@ -176,6 +194,8 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
 
   WylEngine *engine = g_object_new (WYL_TYPE_ENGINE, NULL);
   engine->session = session;
+  /* Keep the initial mode explicit instead of relying on zero-fill. */
+  engine->mode = WYL_ENGINE_MODE_NONE;
 
   /* Store logical paths for diagnostic logging. */
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
@@ -236,6 +256,57 @@ wyl_engine_insert (WylEngine *self, const gchar *relation, const gint64 *row,
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
         "engine: insert failed for relation '%s' with %" G_GSIZE_FORMAT
         " columns", relation, ncols);
+  }
+
+  return rc;
+}
+
+wyrelog_error_t
+wyl_engine_step (WylEngine *self)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->mode == WYL_ENGINE_MODE_SNAPSHOT)
+    return WYRELOG_E_INVALID;
+
+  wirelog_error_t wl_rc = wl_easy_step (self->session);
+  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc == WYRELOG_E_OK) {
+    self->mode = WYL_ENGINE_MODE_STEP;
+  } else {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: step failed (rc=%d)", (int) rc);
+  }
+
+  return rc;
+}
+
+wyrelog_error_t
+wyl_engine_snapshot (WylEngine *self, const gchar *relation,
+    WylTupleCallback cb, gpointer user_data)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (relation == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->mode == WYL_ENGINE_MODE_STEP)
+    return WYRELOG_E_INVALID;
+
+  wyl_engine_tuple_cookie_t cookie = { cb, user_data };
+  wirelog_error_t wl_rc =
+      wl_easy_snapshot (self->session, relation, wyl_engine_tuple_trampoline,
+      &cookie);
+  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc == WYRELOG_E_OK) {
+    self->mode = WYL_ENGINE_MODE_SNAPSHOT;
+  } else {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: snapshot failed for relation '%s' (rc=%d)", relation,
+        (int) rc);
   }
 
   return rc;

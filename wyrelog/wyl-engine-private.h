@@ -14,12 +14,20 @@ G_BEGIN_DECLS;
 /* Number of policy template files loaded at open time. */
 #define WYL_ENGINE_TEMPLATE_COUNT 5
 
+typedef enum
+{
+  WYL_ENGINE_MODE_NONE = 0,
+  WYL_ENGINE_MODE_STEP,
+  WYL_ENGINE_MODE_SNAPSHOT,
+} wyl_engine_mode_t;
+
 struct _WylEngine
 {
   GObject parent_instance;
   wl_easy_session_t *session;
   /* Logical path strings for diagnostic logging only; freed in finalize. */
   gchar *dl_src_logical_paths[WYL_ENGINE_TEMPLATE_COUNT];
+  wyl_engine_mode_t mode;       /* Latched at first step or snapshot. */
 };
 
 /*
