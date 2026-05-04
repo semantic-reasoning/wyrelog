@@ -83,6 +83,14 @@ void wyl_decide_resp_set_decision (wyl_decide_resp_t * resp,
  */
 wyl_decision_t wyl_decide_resp_get_decision (const wyl_decide_resp_t * resp);
 
+/*
+ * Returns the representative deny reason and source relation tag carried by
+ * |resp|. Both return NULL when the decision is ALLOW, when no policy engine
+ * was available to produce deny_reason/5 rows, or when |resp| is NULL.
+ */
+const gchar *wyl_decide_resp_get_deny_reason (const wyl_decide_resp_t * resp);
+const gchar *wyl_decide_resp_get_deny_origin (const wyl_decide_resp_t * resp);
+
 wyrelog_error_t wyl_decide (WylHandle * handle,
     const wyl_decide_req_t * req, wyl_decide_resp_t * resp);
 

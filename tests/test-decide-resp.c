@@ -11,6 +11,10 @@ check_default_is_deny (void)
     return 10;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 11;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 12;
+  if (wyl_decide_resp_get_deny_origin (resp) != NULL)
+    return 13;
   return 0;
 }
 
@@ -42,6 +46,10 @@ check_get_null_is_deny (void)
    * produced", which downstream consumers must treat as a denial. */
   if (wyl_decide_resp_get_decision (NULL) != WYL_DECISION_DENY)
     return 40;
+  if (wyl_decide_resp_get_deny_reason (NULL) != NULL)
+    return 41;
+  if (wyl_decide_resp_get_deny_origin (NULL) != NULL)
+    return 42;
   return 0;
 }
 
