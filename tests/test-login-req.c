@@ -12,6 +12,8 @@ check_default_username_is_null (void)
     return 10;
   if (wyl_login_req_get_username (req) != NULL)
     return 11;
+  if (wyl_login_req_get_skip_mfa (req))
+    return 12;
   return 0;
 }
 
@@ -84,6 +86,27 @@ check_free_null_is_safe (void)
   return 0;
 }
 
+static gint
+check_skip_mfa_set_then_get (void)
+{
+  g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
+  wyl_login_req_set_skip_mfa (req, TRUE);
+  if (!wyl_login_req_get_skip_mfa (req))
+    return 80;
+  wyl_login_req_set_skip_mfa (req, FALSE);
+  if (wyl_login_req_get_skip_mfa (req))
+    return 81;
+  return 0;
+}
+
+static gint
+check_skip_mfa_null_request (void)
+{
+  if (wyl_login_req_get_skip_mfa (NULL))
+    return 90;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -102,6 +125,10 @@ main (void)
   if ((rc = check_get_null_request ()) != 0)
     return rc;
   if ((rc = check_free_null_is_safe ()) != 0)
+    return rc;
+  if ((rc = check_skip_mfa_set_then_get ()) != 0)
+    return rc;
+  if ((rc = check_skip_mfa_null_request ()) != 0)
     return rc;
 
   return 0;

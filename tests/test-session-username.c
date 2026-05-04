@@ -456,6 +456,56 @@ check_login_session_id_is_active_decision_scope (void)
   return 0;
 }
 
+static gint
+check_login_skip_mfa_authenticates_principal (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 150;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.skip-mfa-role",
+          "wr.skip-mfa-permission") != WYRELOG_E_OK)
+    return 151;
+  if (insert_symbol_row3 (handle, "member_of", "skip-mfa-user",
+          "wr.skip-mfa-role", "skip-mfa-scope") != WYRELOG_E_OK)
+    return 152;
+  if (insert_symbol_row2 (handle, "session_state", "skip-mfa-scope", "active")
+      != WYRELOG_E_OK)
+    return 153;
+  if (insert_symbol_row4 (handle, "perm_state", "skip-mfa-user",
+          "wr.skip-mfa-permission", "skip-mfa-scope", "armed") != WYRELOG_E_OK)
+    return 154;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "skip-mfa-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 155;
+
+  PrincipalStateExpect expect = {
+    .subject_id = "skip-mfa-user",
+    .state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 156;
+  if (expect.matches != 1)
+    return 157;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "skip-mfa-user");
+  wyl_decide_req_set_action (decide, "wr.skip-mfa-permission");
+  wyl_decide_req_set_resource_id (decide, "skip-mfa-scope");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 158;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 159;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -486,6 +536,8 @@ main (void)
   if ((rc = check_login_persists_active_session_state ()) != 0)
     return rc;
   if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
     return rc;
 
   return 0;

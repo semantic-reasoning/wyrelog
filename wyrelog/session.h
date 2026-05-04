@@ -51,6 +51,15 @@ void wyl_login_req_set_username (wyl_login_req_t * req, const gchar * username);
  */
 const gchar *wyl_login_req_get_username (const wyl_login_req_t * req);
 
+/*
+ * Marks the request as already satisfying the MFA requirement. When
+ * TRUE, wyl_session_login drives the principal FSM through the
+ * login_skip_mfa event and records the principal as authenticated.
+ * The default for a fresh request is FALSE.
+ */
+void wyl_login_req_set_skip_mfa (wyl_login_req_t * req, gboolean skip_mfa);
+gboolean wyl_login_req_get_skip_mfa (const wyl_login_req_t * req);
+
 wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);
 wyrelog_error_t wyl_session_mfa_verify (WylHandle * handle,

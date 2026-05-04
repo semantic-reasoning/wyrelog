@@ -197,9 +197,15 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 
   if (username != NULL) {
     wyl_principal_state_t state = WYL_PRINCIPAL_STATE_LAST_;
+    wyl_principal_event_t event = WYL_PRINCIPAL_EVENT_LOGIN_OK;
+    wyl_principal_state_t expected = WYL_PRINCIPAL_STATE_MFA_REQUIRED;
+    if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
+      event = WYL_PRINCIPAL_EVENT_LOGIN_SKIP_MFA;
+      expected = WYL_PRINCIPAL_STATE_AUTHENTICATED;
+    }
     wyrelog_error_t rc = wyl_fsm_principal_step (WYL_PRINCIPAL_STATE_UNVERIFIED,
-        WYL_PRINCIPAL_EVENT_LOGIN_OK, &state);
-    if (rc != WYRELOG_E_OK || state != WYL_PRINCIPAL_STATE_MFA_REQUIRED) {
+        event, &state);
+    if (rc != WYRELOG_E_OK || state != expected) {
       g_object_unref (session);
       return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
     }

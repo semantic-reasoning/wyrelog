@@ -7,6 +7,7 @@
 struct _wyl_login_req
 {
   gchar *username;
+  gboolean skip_mfa;
 };
 
 struct _wyl_grant_req
@@ -51,6 +52,20 @@ wyl_login_req_get_username (const wyl_login_req_t *req)
 {
   g_return_val_if_fail (req != NULL, NULL);
   return req->username;
+}
+
+void
+wyl_login_req_set_skip_mfa (wyl_login_req_t *req, gboolean skip_mfa)
+{
+  g_return_if_fail (req != NULL);
+  req->skip_mfa = skip_mfa;
+}
+
+gboolean
+wyl_login_req_get_skip_mfa (const wyl_login_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, FALSE);
+  return req->skip_mfa;
 }
 
 wyl_grant_req_t *
