@@ -251,7 +251,10 @@ wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
 
   if (!relation_fans_out_to_delta (relation))
     return WYRELOG_E_OK;
-  return wyl_engine_insert (self->delta_engine, relation, row, ncols);
+  rc = wyl_engine_insert (self->delta_engine, relation, row, ncols);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_engine_step (self->delta_engine);
 }
 
 wyrelog_error_t
@@ -270,7 +273,10 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
 
   if (!relation_fans_out_to_delta (relation))
     return WYRELOG_E_OK;
-  return wyl_engine_remove (self->delta_engine, relation, row, ncols);
+  rc = wyl_engine_remove (self->delta_engine, relation, row, ncols);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_engine_step (self->delta_engine);
 }
 
 wyrelog_error_t

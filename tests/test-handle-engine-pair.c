@@ -446,10 +446,8 @@ check_insert_fanout_reaches_delta_engine (void)
   if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
       != WYRELOG_E_OK)
     return 104;
-  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
-    return 105;
   if (expect.matching == 0)
-    return 106;
+    return 105;
   return 0;
 }
 
