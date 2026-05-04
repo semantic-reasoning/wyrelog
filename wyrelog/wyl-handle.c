@@ -168,6 +168,35 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_handle_intern_engine_symbol (WylHandle *self, const gchar *symbol,
+    gint64 *out_id)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (symbol == NULL || out_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  gint64 read_id = -1;
+  wyrelog_error_t rc =
+      wyl_engine_intern_symbol (self->read_engine, symbol, &read_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 delta_id = -1;
+  rc = wyl_engine_intern_symbol (self->delta_engine, symbol, &delta_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (read_id != delta_id)
+    return WYRELOG_E_INTERNAL;
+
+  *out_id = read_id;
+  return WYRELOG_E_OK;
+}
+
 WylEngine *
 wyl_handle_get_read_engine (WylHandle *self)
 {
