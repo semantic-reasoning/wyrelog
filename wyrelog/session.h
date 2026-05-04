@@ -69,6 +69,7 @@ wyrelog_error_t wyl_session_drop_elevation (WylHandle * handle,
     WylSession * session);
 wyrelog_error_t wyl_session_idle_timeout (WylHandle * handle,
     WylSession * session);
+wyrelog_error_t wyl_session_expire (WylHandle * handle, WylSession * session);
 wyrelog_error_t wyl_session_close (WylHandle * handle, WylSession * session);
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);
 

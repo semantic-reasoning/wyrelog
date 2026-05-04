@@ -873,6 +873,146 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
 }
 
 static gint
+check_session_expire_persists_expiring_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 300;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "expiry-state-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 301;
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 302;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 303;
+  SessionStateExpect expect = {
+    .session_id = session_id,
+    .state = "expiring",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 304;
+  if (expect.matches != 1)
+    return 305;
+  return 0;
+}
+
+static gint
+check_expiring_session_deactivates_decision_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 310;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.expiry-role",
+          "wr.expiry-permission") != WYRELOG_E_OK)
+    return 311;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "expiry-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 312;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 313;
+  if (insert_symbol_row3 (handle, "member_of", "expiry-user",
+          "wr.expiry-role", session_id) != WYRELOG_E_OK)
+    return 314;
+  if (insert_symbol_row4 (handle, "perm_state", "expiry-user",
+          "wr.expiry-permission", session_id, "armed") != WYRELOG_E_OK)
+    return 315;
+
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 316;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "expiry-user");
+  wyl_decide_req_set_action (decide, "wr.expiry-permission");
+  wyl_decide_req_set_resource_id (decide, session_id);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 317;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 318;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "session_inactive") != 0)
+    return 319;
+  return 0;
+}
+
+static gint
+check_expiring_session_expire_persists_closed_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 320;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "expiry-close-state-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 321;
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 322;
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 323;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 324;
+  SessionStateExpect expect = {
+    .session_id = session_id,
+    .state = "closed",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 325;
+  if (expect.matches != 1)
+    return 326;
+  return 0;
+}
+
+static gint
+check_elevated_session_expire_persists_expiring_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 330;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "elevated-expiry-state-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 331;
+  if (wyl_session_elevate (handle, session) != WYRELOG_E_OK)
+    return 332;
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 333;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 334;
+  SessionStateExpect expect = {
+    .session_id = session_id,
+    .state = "expiring",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 335;
+  if (expect.matches != 1)
+    return 336;
+  return 0;
+}
+
+static gint
 check_session_elevation_rejects_invalid_args (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -891,6 +1031,10 @@ check_session_elevation_rejects_invalid_args (void)
     return 255;
   if (wyl_session_idle_timeout (handle, NULL) != WYRELOG_E_INVALID)
     return 256;
+  if (wyl_session_expire (NULL, NULL) != WYRELOG_E_INVALID)
+    return 257;
+  if (wyl_session_expire (handle, NULL) != WYRELOG_E_INVALID)
+    return 258;
   return 0;
 }
 
@@ -946,6 +1090,14 @@ main (void)
   if ((rc = check_idle_session_deactivates_decision_scope ()) != 0)
     return rc;
   if ((rc = check_elevated_session_idle_timeout_deactivates_scope ()) != 0)
+    return rc;
+  if ((rc = check_session_expire_persists_expiring_state ()) != 0)
+    return rc;
+  if ((rc = check_expiring_session_deactivates_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_expiring_session_expire_persists_closed_state ()) != 0)
+    return rc;
+  if ((rc = check_elevated_session_expire_persists_expiring_state ()) != 0)
     return rc;
   if ((rc = check_session_elevation_rejects_invalid_args ()) != 0)
     return rc;

@@ -353,6 +353,21 @@ wyl_session_idle_timeout (WylHandle *handle, WylSession *session)
 }
 
 wyrelog_error_t
+wyl_session_expire (WylHandle *handle, WylSession *session)
+{
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
+    return WYRELOG_E_INVALID;
+
+  wyl_session_state_t state = WYL_SESSION_STATE_LAST_;
+  wyrelog_error_t rc =
+      wyl_fsm_session_step (session->state, WYL_SESSION_EVENT_EXPIRY, &state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return transition_session_state (handle, session, session->state, state);
+}
+
+wyrelog_error_t
 wyl_session_logout (WylHandle *handle, wyl_session_id_t sid)
 {
   if (handle == NULL)
