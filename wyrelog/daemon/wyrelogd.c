@@ -68,6 +68,25 @@ check_wirelog_policy_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+check_audit_sink_ready (WylHandle *handle)
+{
+#ifdef WYL_HAS_AUDIT
+  wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
+  gboolean found = FALSE;
+
+  wyrelog_error_t rc =
+      wyl_audit_conn_table_exists (conn, "audit_events", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_IO;
+#else
+  (void) handle;
+#endif
+  return WYRELOG_E_OK;
+}
+
 static void
 daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     WylDeltaKind kind, gpointer user_data)
@@ -209,6 +228,12 @@ main (int argc, char **argv)
     rc = check_wirelog_policy_ready (handle);
     if (rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: policy readiness check failed: %s\n",
+          wyrelog_error_string (rc));
+      return 1;
+    }
+    rc = check_audit_sink_ready (handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: audit readiness check failed: %s\n",
           wyrelog_error_string (rc));
       return 1;
     }
