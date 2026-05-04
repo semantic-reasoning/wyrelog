@@ -2,6 +2,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "wyl-handle-private.h"
+#include "wyl-permission-scope-private.h"
 
 struct _wyl_login_req
 {
@@ -182,6 +183,8 @@ update_direct_permission (WylHandle *handle, const gchar *subject_id,
 {
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
+  if (insert && wyl_perm_arm_rule_lookup (action) != NULL)
+    return WYRELOG_E_POLICY;
 
   gint64 row[3];
   wyrelog_error_t rc =

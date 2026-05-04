@@ -165,6 +165,22 @@ check_grant_allows_engine_decide (void)
 }
 
 static gint
+check_gated_grant_is_rejected_by_engine_path (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 59;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "gated-grant-user");
+  wyl_grant_req_set_action (grant, "wr.audit.read");
+  wyl_grant_req_set_resource_id (grant, "gated-grant-scope");
+  if (wyl_perm_grant (handle, grant) != WYRELOG_E_POLICY)
+    return 68;
+  return 0;
+}
+
+static gint
 check_revoke_removes_engine_grant (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -220,6 +236,8 @@ main (void)
   if ((rc = check_revoke_rejects_incomplete_req ()) != 0)
     return rc;
   if ((rc = check_grant_allows_engine_decide ()) != 0)
+    return rc;
+  if ((rc = check_gated_grant_is_rejected_by_engine_path ()) != 0)
     return rc;
   if ((rc = check_revoke_removes_engine_grant ()) != 0)
     return rc;
