@@ -39,5 +39,14 @@ wyrelog_error_t wyl_policy_store_grant_role_permission (wyl_policy_store_t *
     store, const gchar * role_id, const gchar * perm_id);
 wyrelog_error_t wyl_policy_store_foreach_role_permission (wyl_policy_store_t *
     store, wyl_policy_role_permission_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_grant_direct_permission (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id,
+    const gchar * scope);
+wyrelog_error_t wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id,
+    const gchar * scope);
+wyrelog_error_t wyl_policy_store_direct_permission_exists (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
+    gboolean * out_exists);
 
 G_END_DECLS;

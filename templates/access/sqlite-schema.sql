@@ -52,6 +52,25 @@ CREATE INDEX IF NOT EXISTS idx_role_permissions_perm_id
     ON role_permissions (perm_id);
 
 -- ---------------------------------------------------------------------------
+-- Table: direct_permissions
+-- Per-principal direct grants mirrored into direct_permission/3.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS direct_permissions (
+    subject_id TEXT NOT NULL,
+    perm_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    granted_at INTEGER,               -- Unix epoch (seconds)
+    PRIMARY KEY (subject_id, perm_id, scope),
+    FOREIGN KEY (perm_id) REFERENCES permissions (perm_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_direct_permissions_perm_id
+    ON direct_permissions (perm_id);
+
+CREATE INDEX IF NOT EXISTS idx_direct_permissions_subject_scope
+    ON direct_permissions (subject_id, scope);
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically
