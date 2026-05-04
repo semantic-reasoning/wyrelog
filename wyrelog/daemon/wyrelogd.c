@@ -26,6 +26,12 @@ typedef struct
   gboolean matched;
 } WylDeltaReadinessProbe;
 
+typedef struct
+{
+  guint64 inserted;
+  guint64 removed;
+} WylDaemonRuntime;
+
 static gboolean
 parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
     GError **error)
@@ -115,17 +121,25 @@ static void
 daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     WylDeltaKind kind, gpointer user_data)
 {
+  WylDaemonRuntime *runtime = user_data;
+
   (void) relation;
   (void) row;
   (void) ncols;
-  (void) kind;
-  (void) user_data;
+
+  if (runtime == NULL)
+    return;
+  if (kind == WYL_DELTA_INSERT)
+    runtime->inserted++;
+  else if (kind == WYL_DELTA_REMOVE)
+    runtime->removed++;
 }
 
 static wyrelog_error_t
-start_wirelog_delta_callbacks (WylHandle *handle)
+start_wirelog_delta_callbacks (WylHandle *handle, WylDaemonRuntime *runtime)
 {
-  return wyl_handle_engine_set_delta_callback (handle, daemon_delta_cb, NULL);
+  return wyl_handle_engine_set_delta_callback (handle, daemon_delta_cb,
+      runtime);
 }
 
 #ifdef G_OS_UNIX
@@ -210,7 +224,8 @@ main (int argc, char **argv)
     return 0;
   }
 
-  rc = start_wirelog_delta_callbacks (handle);
+  WylDaemonRuntime runtime = { 0, 0 };
+  rc = start_wirelog_delta_callbacks (handle, &runtime);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: delta callback setup failed: %s\n",
         wyrelog_error_string (rc));
