@@ -5,6 +5,7 @@
 
 #include "wyrelog/handle.h"
 #include "wyrelog/engine.h"
+#include "policy/store-private.h"
 
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
@@ -22,6 +23,12 @@ G_BEGIN_DECLS;
  */
 wyl_audit_conn_t *wyl_handle_get_audit_conn (WylHandle * self);
 #endif
+
+/*
+ * Returns the borrowed policy authority store owned by |self|. The pointer is
+ * valid until wyl_shutdown or g_object_unref.
+ */
+wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
 
 /*
  * Opens the handle-owned policy engine pair from @template_dir.

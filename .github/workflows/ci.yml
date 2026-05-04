@@ -36,14 +36,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             meson ninja-build pkg-config \
-            libglib2.0-dev libsoup-3.0-dev libsodium-dev \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
             libtss2-dev
 
       - name: Install build dependencies (macOS)
         if: runner.os == 'macOS'
         run: |
           brew update
-          brew install meson ninja pkg-config glib libsoup libsodium
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium
 
       - name: Cache meson packagecache
         uses: actions/cache@v4
@@ -121,7 +121,7 @@ jobs:
         shell: cmd
         run: |
           @echo off
-          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
+          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
 
       - name: Cache meson packagecache
         uses: actions/cache@v4
