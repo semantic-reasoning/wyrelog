@@ -20,6 +20,17 @@ test('wyrelogd-check', wyrelogd_exe,
   ],
 )
 
+if host_machine.system() != 'windows'
+  sh = find_program('sh')
+  test('wyrelogd-sigterm', sh,
+    args : [
+      '-c',
+      '"' + wyrelogd_exe.full_path() + '" --template-dir "' + meson.project_source_root() / 'templates' / 'access' + '" & pid=$!; sleep 0.2; kill -TERM "$pid"; wait "$pid"',
+    ],
+    depends : wyrelogd_exe,
+  )
+endif
+
 test_client_smoke = executable('test-client-smoke',
   'test-client-smoke.c',
   dependencies : [wyrelog_client_dep],

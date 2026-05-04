@@ -1,5 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <signal.h>
+
+#ifdef G_OS_UNIX
+#include <glib-unix.h>
+#endif
 
 #include "wyrelog/wyrelog.h"
 
@@ -35,6 +40,47 @@ parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
   return g_option_context_parse (context, argc, argv, error);
 }
 
+#ifdef G_OS_UNIX
+static gboolean
+quit_loop_from_signal (gpointer user_data)
+{
+  GMainLoop *loop = user_data;
+
+  g_main_loop_quit (loop);
+  return G_SOURCE_CONTINUE;
+}
+
+static void
+install_signal_handlers (GMainLoop *loop, guint *sigint_id, guint *sigterm_id)
+{
+  *sigint_id = g_unix_signal_add (SIGINT, quit_loop_from_signal, loop);
+  *sigterm_id = g_unix_signal_add (SIGTERM, quit_loop_from_signal, loop);
+}
+
+static void
+remove_signal_handler (guint *source_id)
+{
+  if (*source_id != 0) {
+    g_source_remove (*source_id);
+    *source_id = 0;
+  }
+}
+#else
+static void
+install_signal_handlers (GMainLoop *loop, guint *sigint_id, guint *sigterm_id)
+{
+  (void) loop;
+  *sigint_id = 0;
+  *sigterm_id = 0;
+}
+
+static void
+remove_signal_handler (guint *source_id)
+{
+  (void) source_id;
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -64,6 +110,11 @@ main (int argc, char **argv)
     return 0;
 
   g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+  guint sigint_id = 0;
+  guint sigterm_id = 0;
+  install_signal_handlers (loop, &sigint_id, &sigterm_id);
   g_main_loop_run (loop);
+  remove_signal_handler (&sigterm_id);
+  remove_signal_handler (&sigint_id);
   return 0;
 }
