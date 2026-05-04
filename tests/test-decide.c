@@ -62,6 +62,26 @@ insert_symbol_row3 (WylHandle *handle, const gchar *relation,
 }
 
 static wyrelog_error_t
+insert_symbol_row4 (WylHandle *handle, const gchar *relation,
+    const gchar *a, const gchar *b, const gchar *c, const gchar *d)
+{
+  gint64 row[4];
+  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, d, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 4);
+}
+
+static wyrelog_error_t
 insert_allow_fixture (WylHandle *handle, const gchar *subject,
     const gchar *action, const gchar *resource)
 {
@@ -80,7 +100,11 @@ insert_allow_fixture (WylHandle *handle, const gchar *subject,
   rc = insert_symbol_row2 (handle, "session_state", resource, "active");
   if (rc != WYRELOG_E_OK)
     return rc;
-  return insert_symbol_row1 (handle, "session_active", "active");
+  rc = insert_symbol_row1 (handle, "session_active", "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row4 (handle, "perm_state", subject, action, resource,
+      "armed");
 }
 
 static gint

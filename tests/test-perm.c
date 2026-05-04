@@ -10,10 +10,11 @@
 
 /*
  * v0 contract for wyl_perm_grant / wyl_perm_revoke: validate
- * arguments, mirror the direct permission fact into any attached
- * policy engine pair, record the admin operation in the audit log
- * when audit is enabled, and return WYRELOG_E_OK without touching a
- * durable permission store. The store wiring is a follow-up.
+ * arguments, mirror direct permission plus armed-state facts into
+ * any attached policy engine pair, record the admin operation in
+ * the audit log when audit is enabled, and return WYRELOG_E_OK
+ * without touching a durable permission store. The store wiring is
+ * a follow-up.
  */
 
 static gint

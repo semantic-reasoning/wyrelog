@@ -198,9 +198,22 @@ update_direct_permission (WylHandle *handle, const gchar *subject_id,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  if (insert)
-    return wyl_handle_engine_insert (handle, "direct_permission", row, 3);
-  return wyl_handle_engine_remove (handle, "direct_permission", row, 3);
+  gint64 state_row[4] = { row[0], row[1], row[2], -1 };
+  rc = wyl_handle_intern_engine_symbol (handle, "armed", &state_row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (insert) {
+    rc = wyl_handle_engine_insert (handle, "direct_permission", row, 3);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    return wyl_handle_engine_insert (handle, "perm_state", state_row, 4);
+  }
+
+  rc = wyl_handle_engine_remove (handle, "direct_permission", row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_remove (handle, "perm_state", state_row, 4);
 }
 
 wyrelog_error_t

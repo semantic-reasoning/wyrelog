@@ -5,10 +5,11 @@
 // commercial license; see LICENSE.md at the project root.
 //
 // Stateless armed/3 derivation. The version-0 perm-scope is a pure
-// IDB rule set with no transition lifecycle: a permission is either
-// ungated (no perm_arm_rule entry, in which case it is always
-// armed when the principal holds it) or, in a future commit, gated
-// by a guard expression evaluated against the request scope.
+// IDB rule set with no transition lifecycle: the host must inject
+// perm_state(user, perm, scope, "armed") for permissions that are
+// ready to participate in allow/3. Guard-derived arming lands in a
+// future commit when compound guard payloads are bridged into the
+// engine.
 //
 // EDB schemas (host-populated, no clauses below):
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
@@ -58,14 +59,6 @@ perm_arm_rule("wr.audit.explain",    "_v0_deferred").
 // rule-1: state-driven path. perm_state is host-populated; an
 // "armed" entry directly arms the (user, perm, scope) tuple.
 armed(U, P, S) :- perm_state(U, P, S, "armed").
-
-// rule-2: ungated permission -- no perm_arm_rule entry means the
-// permission is always armed when held. With the v0 catalogue above
-// populated for every gated perm, rule-2 is reserved for permissions
-// outside the catalogue (e.g. host-issued operational perms).
-armed(U, P, S) :-
-    has_permission(U, P, S),
-    !perm_arm_rule(P, _).
 
 // rule-3: gated permission with compound-term guard payload.
 // Deferred: the embedded Datalog engine supports compound terms
