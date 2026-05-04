@@ -349,7 +349,10 @@ if get_option('enable_audit').allowed()
 
   test_audit_emit = executable('test-audit-emit',
     'test-audit-emit.c',
-    c_args : ['-DWYL_HAS_AUDIT'],
+    c_args : [
+      '-DWYL_HAS_AUDIT',
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    ],
     dependencies : [wyrelog_dep, duckdb_dep],
   )
 

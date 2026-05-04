@@ -6,6 +6,10 @@
 #include "wyrelog/audit/conn-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
+#ifndef WYL_TEST_TEMPLATE_DIR
+#error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
+#endif
+
 /*
  * End-to-end audit-emit test. wyl_init opens the audit log and
  * creates the schema; we then construct an audit event, hand it to
@@ -13,6 +17,75 @@
  * table by querying the underlying DuckDB connection through the
  * private accessor pair.
  */
+
+static wyrelog_error_t
+intern_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
+{
+  return wyl_handle_intern_engine_symbol (handle, symbol, out_id);
+}
+
+static wyrelog_error_t
+insert_symbol_row1 (WylHandle *handle, const gchar *relation,
+    const gchar *value)
+{
+  gint64 row[1];
+  wyrelog_error_t rc = intern_symbol (handle, value, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 1);
+}
+
+static wyrelog_error_t
+insert_symbol_row2 (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b)
+{
+  gint64 row[2];
+  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 2);
+}
+
+static wyrelog_error_t
+insert_symbol_row3 (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, const gchar *c)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 3);
+}
+
+static wyrelog_error_t
+insert_not_armed_decide_fixture (WylHandle *handle)
+{
+  wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
+      "wr.audit-role", "wr.audit-permission");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", "audit-user",
+      "wr.audit-role", "audit-scope");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "principal_state", "audit-user",
+      "authenticated");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", "audit-scope", "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row1 (handle, "session_active", "active");
+}
 
 static gint
 check_emit_inserts_a_row (void)
@@ -120,6 +193,60 @@ check_emit_persists_event_fields (void)
 }
 
 static gint
+check_decide_persists_representative_deny_reason (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 40;
+  if (insert_not_armed_decide_fixture (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 41;
+  }
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "audit-user");
+  wyl_decide_req_set_action (req, "wr.audit-permission");
+  wyl_decide_req_set_resource_id (req, "audit-scope");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 42;
+  }
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY) {
+    g_object_unref (handle);
+    return 43;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT deny_reason, deny_origin, decision "
+          "FROM audit_events;", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 44;
+  }
+
+  gint rc = 0;
+  const gchar *deny_reason = duckdb_value_varchar (&result, 0, 0);
+  const gchar *deny_origin = duckdb_value_varchar (&result, 1, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 2, 0);
+  if (g_strcmp0 (deny_reason, "not_armed") != 0)
+    rc = 45;
+  else if (g_strcmp0 (deny_origin, "perm_state") != 0)
+    rc = 46;
+  else if (decision != WYL_DECISION_DENY)
+    rc = 47;
+
+  duckdb_free ((void *) deny_reason);
+  duckdb_free ((void *) deny_origin);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
 check_emit_rejects_null_args (void)
 {
   WylHandle *handle = NULL;
@@ -147,6 +274,8 @@ main (void)
   if ((rc = check_emit_inserts_a_row ()) != 0)
     return rc;
   if ((rc = check_emit_persists_event_fields ()) != 0)
+    return rc;
+  if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
   if ((rc = check_emit_rejects_null_args ()) != 0)
     return rc;
