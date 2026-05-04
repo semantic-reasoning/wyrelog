@@ -882,6 +882,70 @@ check_policy_store_direct_permissions_require_engine_pair (void)
   return 0;
 }
 
+static gint
+check_policy_store_principal_states_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 370;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_principal_state (store, "state-load-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 371;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 372;
+
+  if (insert2_symbol (handle, "role_permission", "wr.state-role",
+          "wr.state.read") != WYRELOG_E_OK)
+    return 373;
+  if (insert2_symbol (handle, "session_state", "state-scope", "active")
+      != WYRELOG_E_OK)
+    return 374;
+  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 375;
+  gint64 member_row[3];
+  if (intern3 (handle, "state-load-user", "wr.state-role", "state-scope",
+          member_row) != WYRELOG_E_OK)
+    return 376;
+  if (wyl_handle_engine_insert (handle, "member_of", member_row, 3)
+      != WYRELOG_E_OK)
+    return 384;
+  if (insert4_symbol (handle, "perm_state", "state-load-user",
+          "wr.state.read", "state-scope", "armed") != WYRELOG_E_OK)
+    return 377;
+
+  gint64 row[3];
+  if (intern3 (handle, "state-load-user", "wr.state.read", "state-scope",
+          row) != WYRELOG_E_OK)
+    return 378;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, row, &allowed)
+      != WYRELOG_E_OK)
+    return 379;
+  if (!allowed)
+    return 383;
+  return 0;
+}
+
+static gint
+check_policy_store_principal_states_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 380;
+  if (wyl_handle_load_policy_store_principal_states (NULL)
+      != WYRELOG_E_INVALID)
+    return 381;
+  if (wyl_handle_load_policy_store_principal_states (handle)
+      != WYRELOG_E_INVALID)
+    return 382;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -942,6 +1006,10 @@ main (void)
   if ((rc = check_policy_store_direct_permissions_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_principal_states_require_engine_pair ()) != 0)
     return rc;
 
   return 0;

@@ -127,6 +127,13 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON direct_permissions (perm_id);"
       "CREATE INDEX IF NOT EXISTS idx_direct_permissions_subject_scope "
       "  ON direct_permissions (subject_id, scope);"
+      "CREATE TABLE IF NOT EXISTS principal_states ("
+      "  subject_id TEXT PRIMARY KEY,"
+      "  state TEXT NOT NULL,"
+      "  updated_at INTEGER"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_principal_states_state "
+      "  ON principal_states (state);"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -319,6 +326,64 @@ wyl_policy_store_foreach_direct_permission (wyl_policy_store_t *store,
     const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
     const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
     rc = cb (subject_id, perm_id, scope, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_set_principal_state (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *state)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL || state == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO principal_states (subject_id, state, updated_at) "
+      "VALUES (?, ?, unixepoch()) "
+      "ON CONFLICT(subject_id) DO UPDATE SET "
+      "  state = excluded.state," "  updated_at = excluded.updated_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, state)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_principal_state (wyl_policy_store_t *store,
+    wyl_policy_principal_state_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT subject_id, state FROM principal_states " "ORDER BY subject_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *state = (const gchar *) sqlite3_column_text (stmt, 1);
+    rc = cb (subject_id, state, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;

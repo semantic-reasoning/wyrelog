@@ -20,6 +20,7 @@ check_store_creates_authority_schema (void)
     "permissions",
     "role_permissions",
     "direct_permissions",
+    "principal_states",
     "policy_signatures",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
@@ -95,6 +96,25 @@ direct_permission_expect_cb (const gchar *subject_id, const gchar *perm_id,
   if (g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (perm_id, expect->perm_id) == 0
       && g_strcmp0 (scope, expect->scope) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *state;
+  guint matches;
+} PrincipalStateExpect;
+
+static wyrelog_error_t
+principal_state_expect_cb (const gchar *subject_id, const gchar *state,
+    gpointer user_data)
+{
+  PrincipalStateExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (state, expect->state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -199,6 +219,34 @@ check_store_grants_direct_permission (void)
 }
 
 static gint
+check_store_sets_principal_state (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 80;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 81;
+  if (wyl_policy_store_set_principal_state (store, "principal-user",
+          "mfa_required") != WYRELOG_E_OK)
+    return 82;
+  if (wyl_policy_store_set_principal_state (store, "principal-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 83;
+
+  PrincipalStateExpect expect = {
+    .subject_id = "principal-user",
+    .state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_state (store,
+          principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 84;
+  if (expect.matches != 1)
+    return 85;
+  return 0;
+}
+
+static gint
 check_store_rejects_bad_direct_permission (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -251,6 +299,12 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_role_permission (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 55;
+  if (wyl_policy_store_set_principal_state (store, NULL, "authenticated")
+      != WYRELOG_E_INVALID)
+    return 56;
+  if (wyl_policy_store_foreach_principal_state (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 57;
   return 0;
 }
 
@@ -268,6 +322,8 @@ main (void)
   if ((rc = check_store_grants_role_permission ()) != 0)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;
   if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
     return rc;

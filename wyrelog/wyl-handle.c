@@ -231,6 +231,12 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
     g_clear_object (&self->delta_engine);
     return rc;
   }
+  rc = wyl_handle_load_policy_store_principal_states (self);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_object (&self->read_engine);
+    g_clear_object (&self->delta_engine);
+    return rc;
+  }
   return WYRELOG_E_OK;
 }
 
@@ -408,6 +414,36 @@ wyl_handle_load_policy_store_direct_permissions (WylHandle *self)
 
   return wyl_policy_store_foreach_direct_permission (self->policy_store,
       insert_policy_store_direct_permission, self);
+}
+
+static wyrelog_error_t
+insert_policy_store_principal_state (const gchar *subject_id,
+    const gchar *state, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[2];
+
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, state, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "principal_state", row, 2);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_principal_states (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_principal_state (self->policy_store,
+      insert_policy_store_principal_state, self);
 }
 
 typedef struct
