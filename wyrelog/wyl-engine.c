@@ -79,7 +79,8 @@ wyl_engine_map_wirelog_error (wirelog_error_t wl_err)
 }
 
 wyrelog_error_t
-wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out)
+wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
+    gsize *dl_src_len_out)
 {
   g_autoptr (GString) combined = g_string_new (NULL);
 
@@ -103,6 +104,10 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out)
     g_string_append_len (combined, contents, (gssize) len);
   }
 
+  /* Capture the authoritative byte count before transferring ownership of the
+   * underlying buffer.  strlen() must not be used for the subsequent memset
+   * because it short-circuits at the first embedded NUL byte. */
+  *dl_src_len_out = combined->len;
   *dl_src_out = g_string_free (g_steal_pointer (&combined), FALSE);
   return WYRELOG_E_OK;
 }
@@ -124,9 +129,22 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
     return WYRELOG_E_INVALID;
 
   gchar *dl_src = NULL;
-  wyrelog_error_t rc = wyl_engine_load_templates (template_dir, &dl_src);
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc =
+      wyl_engine_load_templates (template_dir, &dl_src, &dl_src_len);
   if (rc != WYRELOG_E_OK)
     return rc;
+
+  /* Defense-in-depth: reject a zero-byte policy source before it reaches the
+   * evaluator.  Under normal operation the TEMPLATE_FILES array always
+   * produces content, but guard against a future refactor that mistakenly
+   * empties it or produces only empty files. */
+  if (dl_src_len == 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "engine: empty policy source (zero bytes loaded)");
+    g_free (dl_src);
+    return WYRELOG_E_POLICY;
+  }
 
   wl_easy_open_opts_t opts = {
     .size = sizeof (opts),
@@ -138,9 +156,11 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
   wl_easy_session_t *session = NULL;
   wirelog_error_t wl_rc = wl_easy_open_opts (dl_src, &opts, &session);
 
-  /* FC4: zero-fill the policy source buffer before freeing to avoid
-   * leaving policy text in core dumps or swap. */
-  memset (dl_src, 0, strlen (dl_src));
+  /* FC4: zero-fill the policy source buffer before freeing to avoid leaving
+   * policy text in core dumps or swap.  Use the tracked length rather than
+   * strlen() to ensure every byte — including any tail past an embedded NUL —
+   * is overwritten. */
+  memset (dl_src, 0, dl_src_len);
   g_free (dl_src);
   dl_src = NULL;
 
