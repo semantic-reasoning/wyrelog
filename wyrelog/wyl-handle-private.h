@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "wyrelog/handle.h"
+#include "wyrelog/engine.h"
 
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
@@ -21,5 +22,22 @@ G_BEGIN_DECLS;
  */
 wyl_audit_conn_t *wyl_handle_get_audit_conn (WylHandle * self);
 #endif
+
+/*
+ * Opens the handle-owned policy engine pair from @template_dir.
+ * Rejected if the pair is already present. On failure the handle is left
+ * without policy engines.
+ */
+wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
+    const gchar * template_dir);
+
+/*
+ * Borrowed policy engine sessions owned by |self|. These are NULL when
+ * no policy engine pair has been opened. The read engine is reserved for
+ * snapshot-style reads; the delta engine is reserved for step/delta
+ * processing.
+ */
+WylEngine *wyl_handle_get_read_engine (WylHandle * self);
+WylEngine *wyl_handle_get_delta_engine (WylHandle * self);
 
 G_END_DECLS;
