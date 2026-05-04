@@ -749,6 +749,130 @@ check_elevated_session_close_deactivates_decision_scope (void)
 }
 
 static gint
+check_session_idle_timeout_persists_idle_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 260;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "idle-state-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 261;
+  if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
+    return 262;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 263;
+  SessionStateExpect expect = {
+    .session_id = session_id,
+    .state = "idle",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 264;
+  if (expect.matches != 1)
+    return 265;
+  return 0;
+}
+
+static gint
+check_idle_session_deactivates_decision_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 270;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.idle-role",
+          "wr.idle-permission") != WYRELOG_E_OK)
+    return 271;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "idle-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 272;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 273;
+  if (insert_symbol_row3 (handle, "member_of", "idle-user", "wr.idle-role",
+          session_id) != WYRELOG_E_OK)
+    return 274;
+  if (insert_symbol_row4 (handle, "perm_state", "idle-user",
+          "wr.idle-permission", session_id, "armed") != WYRELOG_E_OK)
+    return 275;
+
+  if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
+    return 276;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "idle-user");
+  wyl_decide_req_set_action (decide, "wr.idle-permission");
+  wyl_decide_req_set_resource_id (decide, session_id);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 277;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 278;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "session_inactive") != 0)
+    return 279;
+  return 0;
+}
+
+static gint
+check_elevated_session_idle_timeout_deactivates_scope (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 280;
+
+  if (insert_symbol_row2 (handle, "role_permission", "wr.elevated-idle-role",
+          "wr.elevated-idle-permission") != WYRELOG_E_OK)
+    return 281;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "elevated-idle-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 282;
+  if (wyl_session_elevate (handle, session) != WYRELOG_E_OK)
+    return 283;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 284;
+  if (insert_symbol_row3 (handle, "member_of", "elevated-idle-user",
+          "wr.elevated-idle-role", session_id) != WYRELOG_E_OK)
+    return 285;
+  if (insert_symbol_row4 (handle, "perm_state", "elevated-idle-user",
+          "wr.elevated-idle-permission", session_id, "armed") != WYRELOG_E_OK)
+    return 286;
+
+  if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
+    return 287;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "elevated-idle-user");
+  wyl_decide_req_set_action (decide, "wr.elevated-idle-permission");
+  wyl_decide_req_set_resource_id (decide, session_id);
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 288;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 289;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "session_inactive") != 0)
+    return 290;
+  return 0;
+}
+
+static gint
 check_session_elevation_rejects_invalid_args (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -763,6 +887,10 @@ check_session_elevation_rejects_invalid_args (void)
     return 253;
   if (wyl_session_drop_elevation (handle, NULL) != WYRELOG_E_INVALID)
     return 254;
+  if (wyl_session_idle_timeout (NULL, NULL) != WYRELOG_E_INVALID)
+    return 255;
+  if (wyl_session_idle_timeout (handle, NULL) != WYRELOG_E_INVALID)
+    return 256;
   return 0;
 }
 
@@ -812,6 +940,12 @@ main (void)
   if ((rc = check_elevated_session_remains_active_decision_scope ()) != 0)
     return rc;
   if ((rc = check_elevated_session_close_deactivates_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_session_idle_timeout_persists_idle_state ()) != 0)
+    return rc;
+  if ((rc = check_idle_session_deactivates_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_elevated_session_idle_timeout_deactivates_scope ()) != 0)
     return rc;
   if ((rc = check_session_elevation_rejects_invalid_args ()) != 0)
     return rc;
