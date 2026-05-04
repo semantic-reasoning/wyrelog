@@ -132,6 +132,10 @@ check_string_field_defaults_are_null (void)
     return 141;
   if (wyl_audit_event_get_resource_id (ev) != NULL)
     return 142;
+  if (wyl_audit_event_get_deny_reason (ev) != NULL)
+    return 143;
+  if (wyl_audit_event_get_deny_origin (ev) != NULL)
+    return 144;
   return 0;
 }
 
@@ -142,12 +146,20 @@ check_string_field_round_trips (void)
   wyl_audit_event_set_subject_id (ev, "alice");
   wyl_audit_event_set_action (ev, "read");
   wyl_audit_event_set_resource_id (ev, "doc/42");
+  wyl_audit_event_set_deny_reason (ev, "not_authenticated");
+  wyl_audit_event_set_deny_origin (ev, "principal_state");
   if (g_strcmp0 (wyl_audit_event_get_subject_id (ev), "alice") != 0)
     return 150;
   if (g_strcmp0 (wyl_audit_event_get_action (ev), "read") != 0)
     return 151;
   if (g_strcmp0 (wyl_audit_event_get_resource_id (ev), "doc/42") != 0)
     return 152;
+  if (g_strcmp0 (wyl_audit_event_get_deny_reason (ev), "not_authenticated")
+      != 0)
+    return 153;
+  if (g_strcmp0 (wyl_audit_event_get_deny_origin (ev), "principal_state")
+      != 0)
+    return 154;
   return 0;
 }
 
@@ -156,9 +168,17 @@ check_string_set_null_clears (void)
 {
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, "alice");
+  wyl_audit_event_set_deny_reason (ev, "not_armed");
+  wyl_audit_event_set_deny_origin (ev, "perm_state");
   wyl_audit_event_set_subject_id (ev, NULL);
+  wyl_audit_event_set_deny_reason (ev, NULL);
+  wyl_audit_event_set_deny_origin (ev, NULL);
   if (wyl_audit_event_get_subject_id (ev) != NULL)
     return 160;
+  if (wyl_audit_event_get_deny_reason (ev) != NULL)
+    return 161;
+  if (wyl_audit_event_get_deny_origin (ev) != NULL)
+    return 162;
   return 0;
 }
 
@@ -183,6 +203,10 @@ check_string_get_null_event (void)
     return 181;
   if (wyl_audit_event_get_resource_id (NULL) != NULL)
     return 182;
+  if (wyl_audit_event_get_deny_reason (NULL) != NULL)
+    return 183;
+  if (wyl_audit_event_get_deny_origin (NULL) != NULL)
+    return 184;
   return 0;
 }
 

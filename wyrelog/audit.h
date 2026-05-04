@@ -57,6 +57,14 @@ void wyl_audit_event_set_resource_id (WylAuditEvent * self,
     const gchar * resource_id);
 const gchar *wyl_audit_event_get_resource_id (const WylAuditEvent * self);
 
+void wyl_audit_event_set_deny_reason (WylAuditEvent * self,
+    const gchar * deny_reason);
+const gchar *wyl_audit_event_get_deny_reason (const WylAuditEvent * self);
+
+void wyl_audit_event_set_deny_origin (WylAuditEvent * self,
+    const gchar * deny_origin);
+const gchar *wyl_audit_event_get_deny_origin (const WylAuditEvent * self);
+
 /*
  * Records the verdict produced for the request the event describes.
  * Default for a freshly constructed event is WYL_DECISION_DENY so

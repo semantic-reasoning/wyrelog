@@ -76,6 +76,8 @@ duckdb_connection wyl_audit_conn_get_connection (wyl_audit_conn_t * conn);
  *   subject_id    VARCHAR
  *   action        VARCHAR
  *   resource_id   VARCHAR
+ *   deny_reason   VARCHAR              -- representative deny code
+ *   deny_origin   VARCHAR              -- source relation tag
  *   decision      SMALLINT             -- 0 = DENY, 1 = ALLOW
  *
  * Returns WYRELOG_E_OK on success, WYRELOG_E_INVALID for a NULL

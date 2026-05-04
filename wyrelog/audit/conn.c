@@ -71,7 +71,9 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
       "  created_at_us BIGINT  NOT NULL,"
       "  subject_id    VARCHAR,"
       "  action        VARCHAR,"
-      "  resource_id   VARCHAR," "  decision      SMALLINT NOT NULL" ");";
+      "  resource_id   VARCHAR,"
+      "  deny_reason   VARCHAR,"
+      "  deny_origin   VARCHAR," "  decision      SMALLINT NOT NULL" ");";
 
   if (conn == NULL)
     return WYRELOG_E_INVALID;

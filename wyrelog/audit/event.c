@@ -18,6 +18,8 @@ struct _WylAuditEvent
   gchar *subject_id;
   gchar *action;
   gchar *resource_id;
+  gchar *deny_reason;
+  gchar *deny_origin;
   wyl_decision_t decision;
 };
 
@@ -31,6 +33,8 @@ wyl_audit_event_finalize (GObject *object)
   g_free (self->subject_id);
   g_free (self->action);
   g_free (self->resource_id);
+  g_free (self->deny_reason);
+  g_free (self->deny_origin);
 
   G_OBJECT_CLASS (wyl_audit_event_parent_class)->finalize (object);
 }
@@ -132,6 +136,36 @@ wyl_audit_event_get_resource_id (const WylAuditEvent *self)
 }
 
 void
+wyl_audit_event_set_deny_reason (WylAuditEvent *self, const gchar *deny_reason)
+{
+  g_return_if_fail (WYL_IS_AUDIT_EVENT (self));
+  g_free (self->deny_reason);
+  self->deny_reason = g_strdup (deny_reason);
+}
+
+const gchar *
+wyl_audit_event_get_deny_reason (const WylAuditEvent *self)
+{
+  g_return_val_if_fail (WYL_IS_AUDIT_EVENT (self), NULL);
+  return self->deny_reason;
+}
+
+void
+wyl_audit_event_set_deny_origin (WylAuditEvent *self, const gchar *deny_origin)
+{
+  g_return_if_fail (WYL_IS_AUDIT_EVENT (self));
+  g_free (self->deny_origin);
+  self->deny_origin = g_strdup (deny_origin);
+}
+
+const gchar *
+wyl_audit_event_get_deny_origin (const WylAuditEvent *self)
+{
+  g_return_val_if_fail (WYL_IS_AUDIT_EVENT (self), NULL);
+  return self->deny_origin;
+}
+
+void
 wyl_audit_event_set_decision (WylAuditEvent *self, wyl_decision_t decision)
 {
   g_return_if_fail (WYL_IS_AUDIT_EVENT (self));
@@ -170,8 +204,8 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
 
   static const gchar *sql =
       "INSERT INTO audit_events "
-      "(id, created_at_us, subject_id, action, resource_id, decision) "
-      "VALUES (?, ?, ?, ?, ?, ?);";
+      "(id, created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, decision) " "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
 
   if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
@@ -203,7 +237,19 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   else
     duckdb_bind_null (stmt, 5);
 
-  duckdb_bind_int16 (stmt, 6, (int16_t) event->decision);
+  value = event->deny_reason;
+  if (value != NULL)
+    duckdb_bind_varchar (stmt, 6, value);
+  else
+    duckdb_bind_null (stmt, 6);
+
+  value = event->deny_origin;
+  if (value != NULL)
+    duckdb_bind_varchar (stmt, 7, value);
+  else
+    duckdb_bind_null (stmt, 7);
+
+  duckdb_bind_int16 (stmt, 8, (int16_t) event->decision);
 
   rc = duckdb_execute_prepared (stmt, &result);
   duckdb_destroy_result (&result);

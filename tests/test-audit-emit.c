@@ -62,6 +62,8 @@ check_emit_persists_event_fields (void)
   wyl_audit_event_set_subject_id (ev, "bob");
   wyl_audit_event_set_action (ev, "write");
   wyl_audit_event_set_resource_id (ev, "doc/99");
+  wyl_audit_event_set_deny_reason (ev, "not_armed");
+  wyl_audit_event_set_deny_origin (ev, "perm_state");
   wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
 
   g_autofree gchar *expected_id = wyl_audit_event_dup_id_string (ev);
@@ -75,7 +77,8 @@ check_emit_persists_event_fields (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT id, subject_id, action, resource_id, decision "
+          "SELECT id, subject_id, action, resource_id, deny_reason, "
+          "deny_origin, decision "
           "FROM audit_events;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -86,7 +89,9 @@ check_emit_persists_event_fields (void)
   const gchar *subject = duckdb_value_varchar (&result, 1, 0);
   const gchar *action = duckdb_value_varchar (&result, 2, 0);
   const gchar *resource = duckdb_value_varchar (&result, 3, 0);
-  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  const gchar *deny_reason = duckdb_value_varchar (&result, 4, 0);
+  const gchar *deny_origin = duckdb_value_varchar (&result, 5, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 6, 0);
 
   if (g_strcmp0 (id, expected_id) != 0)
     rc = 23;
@@ -96,13 +101,19 @@ check_emit_persists_event_fields (void)
     rc = 25;
   else if (g_strcmp0 (resource, "doc/99") != 0)
     rc = 26;
-  else if (decision != WYL_DECISION_DENY)
+  else if (g_strcmp0 (deny_reason, "not_armed") != 0)
     rc = 27;
+  else if (g_strcmp0 (deny_origin, "perm_state") != 0)
+    rc = 28;
+  else if (decision != WYL_DECISION_DENY)
+    rc = 29;
 
   duckdb_free ((void *) id);
   duckdb_free ((void *) subject);
   duckdb_free ((void *) action);
   duckdb_free ((void *) resource);
+  duckdb_free ((void *) deny_reason);
+  duckdb_free ((void *) deny_origin);
   duckdb_destroy_result (&result);
   g_object_unref (handle);
   return rc;
