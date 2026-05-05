@@ -93,4 +93,20 @@ wyrelog_error_t wyl_audit_conn_create_schema (wyl_audit_conn_t * conn);
 wyrelog_error_t wyl_audit_conn_table_exists (wyl_audit_conn_t * conn,
     const gchar * table_name, gboolean * out_exists);
 
+/*
+ * Serialises audit_events rows to a compact JSON array ordered by newest
+ * first. @filter may be NULL/empty or one exact-match term:
+ *
+ *   decision=deny|allow
+ *   subject_id=<value>
+ *   action=<value>
+ *   resource_id=<value>
+ *   deny_reason=<value>
+ *   deny_origin=<value>
+ *
+ * On success @out_json owns a newly allocated string.
+ */
+wyrelog_error_t wyl_audit_conn_query_events_json (wyl_audit_conn_t * conn,
+    const gchar * filter, gchar ** out_json);
+
 G_END_DECLS;
