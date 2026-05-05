@@ -69,18 +69,18 @@ check_wirelog_delta_audit_rows (WylHandle *handle)
   duckdb_result result;
   if (duckdb_query (conn,
           "SELECT "
-          "SUM(CASE WHEN action = 'effective_member_delta' "
+          "COUNT(*) FILTER (WHERE action = 'effective_member_delta' "
           "AND subject_id = 'wyrelogd-check-user' "
           "AND resource_id = 'wr.viewer' "
           "AND deny_origin = 'wyrelogd-check-scope' "
           "AND deny_reason = 'insert' "
-          "AND decision = 1 THEN 1 ELSE 0 END), "
-          "SUM(CASE WHEN action = 'effective_member_delta' "
+          "AND decision = 1), "
+          "COUNT(*) FILTER (WHERE action = 'effective_member_delta' "
           "AND subject_id = 'wyrelogd-check-user' "
           "AND resource_id = 'wr.viewer' "
           "AND deny_origin = 'wyrelogd-check-scope' "
           "AND deny_reason = 'remove' "
-          "AND decision = 1 THEN 1 ELSE 0 END) " "FROM audit_events;", &result)
+          "AND decision = 1) " "FROM audit_events;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -100,30 +100,30 @@ check_wirelog_fsm_audit_rows (WylHandle *handle)
   duckdb_result result;
   if (duckdb_query (conn,
           "SELECT "
-          "SUM(CASE WHEN action = 'principal_fired_delta_insert' "
+          "COUNT(*) FILTER (WHERE action = 'principal_fired_delta_insert' "
           "AND subject_id = 'wyrelogd-principal-user' "
           "AND resource_id = 'mfa_required' "
           "AND deny_reason = 'login_ok' "
           "AND deny_origin = 'unverified' "
-          "AND decision = 1 THEN 1 ELSE 0 END), "
-          "SUM(CASE WHEN action = 'session_fired_delta_insert' "
+          "AND decision = 1), "
+          "COUNT(*) FILTER (WHERE action = 'session_fired_delta_insert' "
           "AND subject_id = 'wyrelogd-session' "
           "AND resource_id = 'elevated' "
           "AND deny_reason = 'elevate_grant' "
           "AND deny_origin = 'active' "
-          "AND decision = 1 THEN 1 ELSE 0 END), "
-          "SUM(CASE WHEN action = 'principal_fired_delta_remove' "
+          "AND decision = 1), "
+          "COUNT(*) FILTER (WHERE action = 'principal_fired_delta_remove' "
           "AND subject_id = 'wyrelogd-principal-user' "
           "AND resource_id = 'mfa_required' "
           "AND deny_reason = 'login_ok' "
           "AND deny_origin = 'unverified' "
-          "AND decision = 1 THEN 1 ELSE 0 END), "
-          "SUM(CASE WHEN action = 'session_fired_delta_remove' "
+          "AND decision = 1), "
+          "COUNT(*) FILTER (WHERE action = 'session_fired_delta_remove' "
           "AND subject_id = 'wyrelogd-session' "
           "AND resource_id = 'elevated' "
           "AND deny_reason = 'elevate_grant' "
           "AND deny_origin = 'active' "
-          "AND decision = 1 THEN 1 ELSE 0 END) " "FROM audit_events;", &result)
+          "AND decision = 1) " "FROM audit_events;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
