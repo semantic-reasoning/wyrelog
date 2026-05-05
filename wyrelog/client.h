@@ -4,6 +4,7 @@
 #include <glib.h>
 #include <glib-object.h>
 
+#include "wyrelog/audit.h"
 #include "wyrelog/error.h"
 
 G_BEGIN_DECLS;
