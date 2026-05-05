@@ -31,12 +31,17 @@ if host_machine.system() != 'windows'
   )
 
   python3 = find_program('python3')
+  wyrelogd_healthz_expect_audit = '0'
+  if get_option('enable_audit').allowed()
+    wyrelogd_healthz_expect_audit = '1'
+  endif
   test('wyrelogd-healthz', sh,
     args : [
       meson.current_source_dir() / 'check-wyrelogd-healthz.sh',
       wyrelogd_exe.full_path(),
       meson.project_source_root() / 'templates' / 'access',
       python3.full_path(),
+      wyrelogd_healthz_expect_audit,
     ],
     depends : wyrelogd_exe,
   )
