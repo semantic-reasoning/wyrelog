@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/audit/event-private.h"
 
 static gint
 check_construction (void)
@@ -79,6 +80,56 @@ check_created_at_monotonic_with_minting_order (void)
   if (wyl_audit_event_get_created_at_us (a)
       >= wyl_audit_event_get_created_at_us (b))
     return 60;
+  return 0;
+}
+
+static gint
+check_private_rehydrate_preserves_fields (void)
+{
+  const gchar *id = "018f3f9b-7f4d-7a2e-8a51-467a0bc7d001";
+  g_autoptr (WylAuditEvent) ev = NULL;
+  if (wyl_audit_event_new_from_fields (id, 1234567, "alice", "read",
+          "doc/42", "not_armed", "perm_state", WYL_DECISION_ALLOW, &ev)
+      != WYRELOG_E_OK)
+    return 65;
+
+  g_autofree gchar *actual_id = wyl_audit_event_dup_id_string (ev);
+  if (g_strcmp0 (actual_id, id) != 0)
+    return 66;
+  if (wyl_audit_event_get_created_at_us (ev) != 1234567)
+    return 67;
+  if (g_strcmp0 (wyl_audit_event_get_subject_id (ev), "alice") != 0)
+    return 68;
+  if (g_strcmp0 (wyl_audit_event_get_action (ev), "read") != 0)
+    return 69;
+  if (g_strcmp0 (wyl_audit_event_get_resource_id (ev), "doc/42") != 0)
+    return 72;
+  if (g_strcmp0 (wyl_audit_event_get_deny_reason (ev), "not_armed") != 0)
+    return 73;
+  if (g_strcmp0 (wyl_audit_event_get_deny_origin (ev), "perm_state") != 0)
+    return 74;
+  if (wyl_audit_event_get_decision (ev) != WYL_DECISION_ALLOW)
+    return 75;
+  return 0;
+}
+
+static gint
+check_private_rehydrate_rejects_invalid_fields (void)
+{
+  WylAuditEvent *ev = (WylAuditEvent *) (gpointer) 0x1;
+  if (wyl_audit_event_new_from_fields (NULL, 1, NULL, NULL, NULL, NULL, NULL,
+          WYL_DECISION_DENY, &ev) != WYRELOG_E_INVALID)
+    return 76;
+  if (ev != NULL)
+    return 77;
+  if (wyl_audit_event_new_from_fields ("018f3f9b-7f4d-7a2e-8a51-467a0bc7d001",
+          -1, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY,
+          &ev) != WYRELOG_E_INVALID)
+    return 78;
+  if (wyl_audit_event_new_from_fields ("018f3f9b-7f4d-7a2e-8a51-467a0bc7d001",
+          1, NULL, NULL, NULL, NULL, NULL, (wyl_decision_t) 99,
+          &ev) != WYRELOG_E_INVALID)
+    return 79;
   return 0;
 }
 
@@ -226,6 +277,10 @@ main (void)
   if ((rc = check_created_at_is_recent ()) != 0)
     return rc;
   if ((rc = check_created_at_monotonic_with_minting_order ()) != 0)
+    return rc;
+  if ((rc = check_private_rehydrate_preserves_fields ()) != 0)
+    return rc;
+  if ((rc = check_private_rehydrate_rejects_invalid_fields ()) != 0)
     return rc;
   if ((rc = check_accessor_null_safety ()) != 0)
     return rc;
