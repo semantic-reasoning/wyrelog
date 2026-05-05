@@ -112,6 +112,9 @@ wyrelog_error_t wyl_audit_conn_insert_event_full (wyl_audit_conn_t * conn,
     const gchar * deny_reason, const gchar * deny_origin,
     wyl_decision_t decision, gboolean * out_inserted);
 
+wyrelog_error_t wyl_audit_conn_delete_event (wyl_audit_conn_t * conn,
+    const gchar * id);
+
 /*
  * Serialises audit_events rows to a compact JSON array ordered by newest
  * first. @filter may be NULL/empty or one exact-match term. Both
