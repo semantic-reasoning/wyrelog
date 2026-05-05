@@ -8,6 +8,8 @@ typedef struct
   WylHandle *handle;
   guint64 inserted;
   guint64 removed;
+  guint64 audit_errors;
+  wyrelog_error_t last_audit_error;
   gboolean expect_effective_member;
   gint64 expected_row[3];
   gboolean matched_expected_insert;

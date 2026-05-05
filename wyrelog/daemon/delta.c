@@ -5,6 +5,16 @@
 
 #ifdef WYL_HAS_AUDIT
 static void
+record_daemon_audit_result (WylDaemonRuntime *runtime, wyrelog_error_t rc)
+{
+  if (runtime == NULL || rc == WYRELOG_E_OK)
+    return;
+
+  runtime->audit_errors++;
+  runtime->last_audit_error = rc;
+}
+
+static void
 emit_wirelog_effective_member_audit (WylDaemonRuntime *runtime,
     const gint64 row[3], WylDeltaKind kind)
 {
@@ -28,7 +38,7 @@ emit_wirelog_effective_member_audit (WylDaemonRuntime *runtime,
       kind == WYL_DELTA_INSERT ? "insert" : "remove");
   wyl_audit_event_set_deny_origin (ev, scope);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (runtime->handle, ev);
+  record_daemon_audit_result (runtime, wyl_audit_emit (runtime->handle, ev));
 }
 
 static void
@@ -58,7 +68,7 @@ emit_wirelog_fsm_fired_audit (WylDaemonRuntime *runtime, const gchar *relation,
   wyl_audit_event_set_deny_reason (ev, event);
   wyl_audit_event_set_deny_origin (ev, from_state);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (runtime->handle, ev);
+  record_daemon_audit_result (runtime, wyl_audit_emit (runtime->handle, ev));
 }
 
 static wyrelog_error_t
@@ -343,6 +353,11 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 #ifdef WYL_HAS_AUDIT
+  if (runtime.audit_errors > 0) {
+    rc = runtime.last_audit_error != WYRELOG_E_OK ?
+        runtime.last_audit_error : WYRELOG_E_IO;
+    goto cleanup;
+  }
   rc = check_wirelog_delta_audit_rows (handle);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
