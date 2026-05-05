@@ -201,6 +201,16 @@ test_access_decision = executable('test-access-decision',
 
 test('access-decision', test_access_decision)
 
+test_template_tree = executable('test-template-tree',
+  'test-template-tree.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [glib_dep],
+)
+
+test('template-tree', test_template_tree)
+
 test_fsm_bisim = executable('test-fsm-bisim',
   'test-fsm-bisim.c',
   c_args : [
