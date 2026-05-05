@@ -76,5 +76,7 @@ const wyl_session_transition_t *wyl_fsm_session_table (gsize * out_len);
  * input. */
 const gchar *wyl_session_state_name (wyl_session_state_t s);
 const gchar *wyl_session_event_name (wyl_session_event_t ev);
+wyl_session_state_t wyl_session_state_from_name (const gchar * name);
+wyl_session_event_t wyl_session_event_from_name (const gchar * name);
 
 G_END_DECLS;

@@ -31,6 +31,7 @@ check_store_creates_authority_schema (void)
     "principal_events",
     "principal_states",
     "session_states",
+    "session_events",
     "audit_events",
     "policy_signatures",
   };
@@ -78,6 +79,7 @@ check_template_schema_creates_state_tables (void)
     "principal_events",
     "principal_states",
     "session_states",
+    "session_events",
     "audit_events",
     "policy_signatures",
   };
@@ -222,6 +224,15 @@ typedef struct
   guint matches;
 } SessionStateExpect;
 
+typedef struct
+{
+  const gchar *session_id;
+  const gchar *event;
+  const gchar *from_state;
+  const gchar *to_state;
+  guint matches;
+} SessionEventExpect;
+
 static wyrelog_error_t
 session_state_expect_cb (const gchar *session_id, const gchar *state,
     gpointer user_data)
@@ -230,6 +241,20 @@ session_state_expect_cb (const gchar *session_id, const gchar *state,
 
   if (g_strcmp0 (session_id, expect->session_id) == 0
       && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+session_event_expect_cb (const gchar *session_id, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  SessionEventExpect *expect = user_data;
+
+  if (g_strcmp0 (session_id, expect->session_id) == 0
+      && g_strcmp0 (event, expect->event) == 0
+      && g_strcmp0 (from_state, expect->from_state) == 0
+      && g_strcmp0 (to_state, expect->to_state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -623,6 +648,33 @@ check_store_appends_principal_event (void)
 }
 
 static gint
+check_store_appends_session_event (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 97;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 98;
+  if (wyl_policy_store_append_session_event (store, "session/1",
+          "elevate_grant", "active", "elevated") != WYRELOG_E_OK)
+    return 99;
+
+  SessionEventExpect expect = {
+    .session_id = "session/1",
+    .event = "elevate_grant",
+    .from_state = "active",
+    .to_state = "elevated",
+  };
+  if (wyl_policy_store_foreach_session_event (store, session_event_expect_cb,
+          &expect) != WYRELOG_E_OK)
+    return 100;
+  if (expect.matches != 1)
+    return 101;
+  return 0;
+}
+
+static gint
 check_store_appends_audit_event (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -783,6 +835,12 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_session_state (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 59;
+  if (wyl_policy_store_append_session_event (store, NULL, "request", "idle",
+          "active") != WYRELOG_E_INVALID)
+    return 60;
+  if (wyl_policy_store_foreach_session_event (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 61;
   if (wyl_policy_store_append_audit_event (store, NULL, 0, NULL, NULL, NULL,
           NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
     return 94;
@@ -823,6 +881,8 @@ main (void)
   if ((rc = check_store_sets_session_state ()) != 0)
     return rc;
   if ((rc = check_store_appends_principal_event ()) != 0)
+    return rc;
+  if ((rc = check_store_appends_session_event ()) != 0)
     return rc;
   if ((rc = check_store_appends_audit_event ()) != 0)
     return rc;

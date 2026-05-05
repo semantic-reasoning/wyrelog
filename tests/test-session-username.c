@@ -57,6 +57,15 @@ typedef struct
   guint matches;
 } SessionStateExpect;
 
+typedef struct
+{
+  const gchar *session_id;
+  const gchar *event;
+  const gchar *from_state;
+  const gchar *to_state;
+  guint matches;
+} SessionEventExpect;
+
 static wyrelog_error_t
 session_state_expect_cb (const gchar *session_id, const gchar *state,
     gpointer user_data)
@@ -65,6 +74,20 @@ session_state_expect_cb (const gchar *session_id, const gchar *state,
 
   if (g_strcmp0 (session_id, expect->session_id) == 0
       && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+session_event_expect_cb (const gchar *session_id, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  SessionEventExpect *expect = user_data;
+
+  if (g_strcmp0 (session_id, expect->session_id) == 0
+      && g_strcmp0 (event, expect->event) == 0
+      && g_strcmp0 (from_state, expect->from_state) == 0
+      && g_strcmp0 (to_state, expect->to_state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -150,6 +173,24 @@ intern_principal_fired_row (WylHandle *handle, const gchar *subject_id,
 }
 
 static wyrelog_error_t
+intern_session_fired_row (WylHandle *handle, const gchar *session_id,
+    const gchar *from_state, const gchar *event, const gchar *to_state,
+    gint64 row[4])
+{
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, session_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, from_state, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, event, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_intern_engine_symbol (handle, to_state, &row[3]);
+}
+
+static wyrelog_error_t
 count_principal_event_fact (WylHandle *handle, const gchar *relation,
     const gint64 row[4], guint *out_matches)
 {
@@ -161,6 +202,46 @@ count_principal_event_fact (WylHandle *handle, const gchar *relation,
     return rc;
   *out_matches = expect.matches;
   return WYRELOG_E_OK;
+}
+
+static gint
+expect_session_transition (WylHandle *handle, const gchar *session_id,
+    const gchar *from_state, const gchar *event, const gchar *to_state,
+    gint base_code)
+{
+  SessionEventExpect event_expect = {
+    .session_id = session_id,
+    .event = event,
+    .from_state = from_state,
+    .to_state = to_state,
+  };
+  if (wyl_policy_store_foreach_session_event (wyl_handle_get_policy_store
+          (handle), session_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+    return base_code;
+  if (event_expect.matches != 1)
+    return base_code + 1;
+
+  gint64 row[4];
+  if (intern_session_fired_row (handle, session_id, from_state, event,
+          to_state, row) != WYRELOG_E_OK)
+    return base_code + 2;
+  guint matches = 0;
+  if (count_principal_event_fact (handle, "session_fired", row, &matches)
+      != WYRELOG_E_OK)
+    return base_code + 3;
+  if (matches != 1)
+    return base_code + 4;
+
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return base_code + 5;
+  if (intern_session_fired_row (handle, session_id, from_state, event,
+          to_state, row) != WYRELOG_E_OK)
+    return base_code + 6;
+  matches = 0;
+  if (count_principal_event_fact (handle, "session_fired", row, &matches)
+      != WYRELOG_E_OK)
+    return base_code + 7;
+  return matches == 1 ? 0 : base_code + 8;
 }
 
 static WylSession *
@@ -445,6 +526,26 @@ check_login_persists_active_session_state (void)
 }
 
 static gint
+check_login_inserts_wirelog_session_fired (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 136;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "session-fired-login-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 137;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 138;
+  return expect_session_transition (handle, session_id, "idle", "request",
+      "active", 139);
+}
+
+static gint
 check_login_session_id_is_active_decision_scope (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -679,6 +780,27 @@ check_session_close_persists_closed_state (void)
 }
 
 static gint
+check_session_close_inserts_wirelog_session_fired (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 166;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "session-fired-close-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 167;
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 168;
+  if (wyl_session_close (handle, session) != WYRELOG_E_OK)
+    return 169;
+  return expect_session_transition (handle, session_id, "active", "logout",
+      "closed", 175);
+}
+
+static gint
 check_session_close_deactivates_decision_scope (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -760,6 +882,40 @@ check_session_elevate_persists_elevated_state (void)
   if (expect.matches != 1)
     return 205;
   return 0;
+}
+
+static gint
+check_session_transitions_insert_wirelog_session_fired (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 206;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "session-fired-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 207;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 208;
+  if (wyl_session_elevate (handle, session) != WYRELOG_E_OK)
+    return 209;
+  gint rc = expect_session_transition (handle, session_id, "active",
+      "elevate_grant", "elevated", 210);
+  if (rc != 0)
+    return rc;
+  if (wyl_session_drop_elevation (handle, session) != WYRELOG_E_OK)
+    return 219;
+  rc = expect_session_transition (handle, session_id, "elevated",
+      "elevate_drop", "active", 220);
+  if (rc != 0)
+    return rc;
+  if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
+    return 229;
+  return expect_session_transition (handle, session_id, "active",
+      "idle_timeout", "idle", 230);
 }
 
 static gint
@@ -1087,6 +1243,33 @@ check_expiring_session_expire_persists_closed_state (void)
 }
 
 static gint
+check_session_expiry_inserts_wirelog_session_fired (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 327;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "session-fired-expiry-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 328;
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return 329;
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 337;
+  gint rc = expect_session_transition (handle, session_id, "active",
+      "expiry", "expiring", 338);
+  if (rc != 0)
+    return rc;
+  if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
+    return 347;
+  return expect_session_transition (handle, session_id, "expiring",
+      "expiry", "closed", 348);
+}
+
+static gint
 check_elevated_session_expire_persists_expiring_state (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1173,6 +1356,8 @@ main (void)
     return rc;
   if ((rc = check_login_persists_active_session_state ()) != 0)
     return rc;
+  if ((rc = check_login_inserts_wirelog_session_fired ()) != 0)
+    return rc;
   if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_rejected_by_default ()) != 0)
@@ -1185,11 +1370,15 @@ main (void)
     return rc;
   if ((rc = check_session_close_persists_closed_state ()) != 0)
     return rc;
+  if ((rc = check_session_close_inserts_wirelog_session_fired ()) != 0)
+    return rc;
   if ((rc = check_session_close_deactivates_decision_scope ()) != 0)
     return rc;
   if ((rc = check_session_close_rejects_invalid_args ()) != 0)
     return rc;
   if ((rc = check_session_elevate_persists_elevated_state ()) != 0)
+    return rc;
+  if ((rc = check_session_transitions_insert_wirelog_session_fired ()) != 0)
     return rc;
   if ((rc = check_session_drop_elevation_persists_active_state ()) != 0)
     return rc;
@@ -1208,6 +1397,8 @@ main (void)
   if ((rc = check_expiring_session_deactivates_decision_scope ()) != 0)
     return rc;
   if ((rc = check_expiring_session_expire_persists_closed_state ()) != 0)
+    return rc;
+  if ((rc = check_session_expiry_inserts_wirelog_session_fired ()) != 0)
     return rc;
   if ((rc = check_elevated_session_expire_persists_expiring_state ()) != 0)
     return rc;

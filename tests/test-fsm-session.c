@@ -80,18 +80,32 @@ static gint
 check_name_roundtrip (void)
 {
   for (guint s = 0; s < WYL_SESSION_STATE_LAST_; s++) {
-    if (wyl_session_state_name ((wyl_session_state_t) s) == NULL)
+    const gchar *name = wyl_session_state_name ((wyl_session_state_t) s);
+    if (name == NULL)
       return 3;
+    if (wyl_session_state_from_name (name) != (wyl_session_state_t) s)
+      return 7;
   }
   if (wyl_session_state_name (WYL_SESSION_STATE_LAST_) != NULL)
     return 4;
+  if (wyl_session_state_from_name (NULL) != WYL_SESSION_STATE_LAST_)
+    return 8;
+  if (wyl_session_state_from_name ("missing") != WYL_SESSION_STATE_LAST_)
+    return 9;
 
   for (guint e = 0; e < WYL_SESSION_EVENT_LAST_; e++) {
-    if (wyl_session_event_name ((wyl_session_event_t) e) == NULL)
+    const gchar *name = wyl_session_event_name ((wyl_session_event_t) e);
+    if (name == NULL)
       return 5;
+    if (wyl_session_event_from_name (name) != (wyl_session_event_t) e)
+      return 10;
   }
   if (wyl_session_event_name (WYL_SESSION_EVENT_LAST_) != NULL)
     return 6;
+  if (wyl_session_event_from_name (NULL) != WYL_SESSION_EVENT_LAST_)
+    return 11;
+  if (wyl_session_event_from_name ("missing") != WYL_SESSION_EVENT_LAST_)
+    return 12;
   return 0;
 }
 
@@ -268,6 +282,8 @@ check_text_mirror (void)
         || g_str_has_prefix (trimmed, ".decl"))
       continue;
     if (!g_str_has_prefix (trimmed, "session_transition"))
+      continue;
+    if (strstr (trimmed, ":-") != NULL || strchr (trimmed, '"') == NULL)
       continue;
 
     g_autofree gchar *from = NULL;

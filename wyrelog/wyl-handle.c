@@ -3,6 +3,7 @@
 
 #include "wyrelog/engine.h"
 #include "wyl-fsm-principal-private.h"
+#include "wyl-fsm-session-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
@@ -148,6 +149,37 @@ wyl_handle_seed_principal_transitions (WylHandle *self)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+wyl_handle_seed_session_transitions (WylHandle *self)
+{
+  gsize n = 0;
+  const wyl_session_transition_t *table = wyl_fsm_session_table (&n);
+
+  for (gsize i = 0; i < n; i++) {
+    gint64 row[3];
+    const gchar *from_name = wyl_session_state_name (table[i].from);
+    const gchar *event_name = wyl_session_event_name (table[i].event);
+    const gchar *to_name = wyl_session_state_name (table[i].to);
+    if (from_name == NULL || event_name == NULL || to_name == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (self, from_name, &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, event_name, &row[1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, to_name, &row[2]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_engine_insert (self, "session_transition", row, 3);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
@@ -287,6 +319,9 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_seed_principal_transitions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_handle_seed_session_transitions (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_handle_load_policy_store_role_permissions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -302,7 +337,10 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_principal_events (self);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_load_policy_store_session_states (self);
+  rc = wyl_handle_load_policy_store_session_states (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_load_policy_store_session_events (self);
 }
 
 static wyrelog_error_t
@@ -724,6 +762,55 @@ wyl_handle_load_policy_store_session_states (WylHandle *self)
 
   return wyl_policy_store_foreach_session_state (self->policy_store,
       insert_policy_store_session_state, self);
+}
+
+static wyrelog_error_t
+insert_policy_store_session_event (const gchar *session_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[4];
+  wyl_session_state_t from = wyl_session_state_from_name (from_state);
+  wyl_session_event_t ev = wyl_session_event_from_name (event);
+  wyl_session_state_t to = wyl_session_state_from_name (to_state);
+
+  if (from == WYL_SESSION_STATE_LAST_ || ev == WYL_SESSION_EVENT_LAST_
+      || to == WYL_SESSION_STATE_LAST_)
+    return WYRELOG_E_POLICY;
+  wyl_session_state_t validated = WYL_SESSION_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_session_step (from, ev, &validated);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (validated != to)
+    return WYRELOG_E_POLICY;
+
+  rc = wyl_handle_intern_engine_symbol (self, session_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, event, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "session_event", row, 4);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_session_events (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_session_event (self->policy_store,
+      insert_policy_store_session_event, self);
 }
 
 typedef struct
