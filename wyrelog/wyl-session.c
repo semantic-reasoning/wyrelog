@@ -116,6 +116,14 @@ store_principal_state (WylHandle *handle, const gchar *username,
 }
 
 static wyrelog_error_t
+reload_session_snapshot (WylHandle *handle)
+{
+  if (wyl_handle_get_read_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
+static wyrelog_error_t
 store_principal_event (WylHandle *handle, const gchar *username,
     wyl_principal_state_t old_state, wyl_principal_event_t event,
     wyl_principal_state_t new_state)
@@ -144,7 +152,10 @@ set_principal_state (WylHandle *handle, const gchar *username,
   wyrelog_error_t rc = insert_principal_state (handle, username, state);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return store_principal_state (handle, username, state);
+  rc = store_principal_state (handle, username, state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return reload_session_snapshot (handle);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -179,6 +190,9 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = store_principal_state (handle, username, new_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reload_session_snapshot (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = store_principal_event (handle, username, old_state,
@@ -270,7 +284,10 @@ set_session_state (WylHandle *handle, WylSession *session, const gchar *state)
   wyrelog_error_t rc = insert_session_state (handle, session_id, state);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return store_session_state (handle, session_id, state);
+  rc = store_session_state (handle, session_id, state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return reload_session_snapshot (handle);
 }
 
 static wyrelog_error_t
@@ -291,6 +308,9 @@ transition_session_state (WylHandle *handle, WylSession *session,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = store_session_state (handle, session_id, new_state_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reload_session_snapshot (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
 #ifdef WYL_HAS_AUDIT
