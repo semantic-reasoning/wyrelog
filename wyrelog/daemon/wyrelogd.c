@@ -273,6 +273,43 @@ check_audit_sink_ready (WylHandle *handle)
 }
 
 static wyrelog_error_t
+check_policy_snapshot_reload_ready (WylHandle *handle)
+{
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "wyrelogd-snapshot-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+
+  g_autoptr (WylSession) session = NULL;
+  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "wyrelogd-snapshot-user");
+  wyl_grant_req_set_action (grant, "wyrelogd.snapshot.read");
+  wyl_grant_req_set_resource_id (grant, session_id);
+  rc = wyl_perm_grant (handle, grant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "wyrelogd-snapshot-user");
+  wyl_decide_req_set_action (decide, "wyrelogd.snapshot.read");
+  wyl_decide_req_set_resource_id (decide, session_id);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  rc = wyl_decide (handle, decide, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
 emit_daemon_start_event (WylHandle *handle)
 {
 #ifdef WYL_HAS_AUDIT
@@ -456,6 +493,12 @@ main (int argc, char **argv)
     rc = check_policy_store_ready (handle);
     if (rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: policy store readiness check failed: %s\n",
+          wyrelog_error_string (rc));
+      return 1;
+    }
+    rc = check_policy_snapshot_reload_ready (handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: policy snapshot reload check failed: %s\n",
           wyrelog_error_string (rc));
       return 1;
     }
