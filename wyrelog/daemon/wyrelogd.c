@@ -1,133 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
-#include <signal.h>
-
-#ifdef G_OS_UNIX
-#include <glib-unix.h>
-#endif
 
 #include "daemon/checks.h"
 #include "daemon/delta.h"
 #include "daemon/http.h"
 #include "daemon/options.h"
+#include "daemon/signals.h"
 #include "wyrelog/wyrelog.h"
 
 #ifndef WYL_DEFAULT_TEMPLATE_DIR
 #error "WYL_DEFAULT_TEMPLATE_DIR must be defined by the build."
-#endif
-
-static gboolean
-parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
-    GError **error)
-{
-  GOptionEntry entries[] = {
-    {"template-dir", 0, 0, G_OPTION_ARG_STRING, &opts->template_dir,
-        "Access policy template directory", "DIR"},
-#ifdef WYL_HAS_DAEMON_HTTP
-    {"listen-port", 0, 0, G_OPTION_ARG_INT, &opts->listen_port,
-        "HTTP listen port", "PORT"},
-#endif
-    {"check", 0, 0, G_OPTION_ARG_NONE, &opts->check_only,
-        "Load policy templates and exit", NULL},
-    {"version", 0, 0, G_OPTION_ARG_NONE, &opts->show_version,
-        "Print version and exit", NULL},
-    {NULL}
-  };
-
-  g_autoptr (GOptionContext) context =
-      g_option_context_new ("- wyrelog daemon");
-  g_option_context_add_main_entries (context, entries, NULL);
-
-  return g_option_context_parse (context, argc, argv, error);
-}
-
-static int
-run_checks (WylHandle *handle)
-{
-  wyrelog_error_t rc = wyl_daemon_check_delta_ready (handle);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyrelogd: delta readiness check failed: %s\n",
-        wyrelog_error_string (rc));
-    return 1;
-  }
-
-  rc = wyl_daemon_check_wirelog_policy_ready (handle);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyrelogd: policy readiness check failed: %s\n",
-        wyrelog_error_string (rc));
-    return 1;
-  }
-
-  rc = wyl_daemon_check_policy_store_ready (handle);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyrelogd: policy store readiness check failed: %s\n",
-        wyrelog_error_string (rc));
-    return 1;
-  }
-
-  rc = wyl_daemon_check_policy_snapshot_reload_ready (handle);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyrelogd: policy snapshot reload check failed: %s\n",
-        wyrelog_error_string (rc));
-    return 1;
-  }
-
-  rc = wyl_daemon_check_role_permission_snapshot_reload_ready (handle);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyrelogd: role permission reload check failed: %s\n",
-        wyrelog_error_string (rc));
-    return 1;
-  }
-
-  rc = wyl_daemon_check_audit_sink_ready (handle);
-  if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyrelogd: audit readiness check failed: %s\n",
-        wyrelog_error_string (rc));
-    return 1;
-  }
-
-  return 0;
-}
-
-#ifdef G_OS_UNIX
-static gboolean
-quit_loop_from_signal (gpointer user_data)
-{
-  GMainLoop *loop = user_data;
-
-  g_main_loop_quit (loop);
-  return G_SOURCE_CONTINUE;
-}
-
-static void
-install_signal_handlers (GMainLoop *loop, guint *sigint_id, guint *sigterm_id)
-{
-  *sigint_id = g_unix_signal_add (SIGINT, quit_loop_from_signal, loop);
-  *sigterm_id = g_unix_signal_add (SIGTERM, quit_loop_from_signal, loop);
-}
-
-static void
-remove_signal_handler (guint *source_id)
-{
-  if (*source_id != 0) {
-    g_source_remove (*source_id);
-    *source_id = 0;
-  }
-}
-#else
-static void
-install_signal_handlers (GMainLoop *loop, guint *sigint_id, guint *sigterm_id)
-{
-  (void) loop;
-  *sigint_id = 0;
-  *sigterm_id = 0;
-}
-
-static void
-remove_signal_handler (guint *source_id)
-{
-  (void) source_id;
-}
 #endif
 
 int
@@ -139,7 +21,7 @@ main (int argc, char **argv)
   };
   g_autoptr (GError) error = NULL;
 
-  if (!parse_options (&argc, &argv, &opts, &error)) {
+  if (!wyl_daemon_parse_options (&argc, &argv, &opts, &error)) {
     g_printerr ("wyrelogd: %s\n", error->message);
     return 2;
   }
@@ -157,7 +39,7 @@ main (int argc, char **argv)
   }
 
   if (opts.check_only)
-    return run_checks (handle);
+    return wyl_daemon_run_checks (handle);
 
   WylDaemonRuntime runtime = {
     .handle = handle,
@@ -188,12 +70,12 @@ main (int argc, char **argv)
 
   guint sigint_id = 0;
   guint sigterm_id = 0;
-  install_signal_handlers (loop, &sigint_id, &sigterm_id);
+  wyl_daemon_install_signal_handlers (loop, &sigint_id, &sigterm_id);
   g_main_loop_run (loop);
 #ifdef WYL_HAS_DAEMON_HTTP
   soup_server_disconnect (server);
 #endif
-  remove_signal_handler (&sigterm_id);
-  remove_signal_handler (&sigint_id);
+  wyl_daemon_remove_signal_handler (&sigterm_id);
+  wyl_daemon_remove_signal_handler (&sigint_id);
   return 0;
 }

@@ -10,3 +10,6 @@ typedef struct
   gboolean check_only;
   gboolean show_version;
 } WylDaemonOptions;
+
+gboolean wyl_daemon_parse_options (gint * argc, gchar *** argv,
+    WylDaemonOptions * opts, GError ** error);
