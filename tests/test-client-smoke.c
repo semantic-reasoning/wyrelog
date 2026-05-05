@@ -2,6 +2,7 @@
 #include <glib.h>
 
 #include "wyrelog/client.h"
+#include "wyrelog/wyl-client-private.h"
 
 int
 main (void)
@@ -31,6 +32,8 @@ main (void)
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (g_strcmp0 (base_url, "http://example.invalid") != 0)
     return 12;
+  if (wyl_client_get_soup_session (client) == NULL)
+    return 17;
 
   /* Audit iterator returns a non-NULL WylAuditIter on success and
    * yields no rows in the stub state. */

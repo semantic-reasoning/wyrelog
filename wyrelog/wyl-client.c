@@ -1,7 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include <libsoup/soup.h>
-
-#include "wyrelog/client.h"
+#include "wyrelog/wyl-client-private.h"
 
 struct _WylClient
 {
@@ -67,6 +65,13 @@ wyl_client_dup_base_url (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
   return g_strdup (client->base_url);
+}
+
+SoupSession *
+wyl_client_get_soup_session (WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT (client), NULL);
+  return client->session;
 }
 
 wyrelog_error_t

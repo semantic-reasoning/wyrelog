@@ -33,7 +33,7 @@ endif
 
 test_client_smoke = executable('test-client-smoke',
   'test-client-smoke.c',
-  dependencies : [wyrelog_client_dep],
+  dependencies : [wyrelog_client_dep, libsoup_dep],
 )
 
 test('client-smoke', test_client_smoke)
