@@ -267,6 +267,16 @@ test_handle_engine_pair = executable('test-handle-engine-pair',
 
 test('handle-engine-pair', test_handle_engine_pair)
 
+test_lobac_partial_delta = executable('test-lobac-partial-delta',
+  'test-lobac-partial-delta.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+test('lobac-partial-delta', test_lobac_partial_delta)
+
 test_session_id = executable('test-session-id',
   'test-session-id.c',
   dependencies : [wyrelog_dep],
