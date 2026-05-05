@@ -22,6 +22,13 @@ typedef struct
   guint matching;
 } DeltaExpect;
 
+typedef struct
+{
+  const gchar *expected_relation;
+  WylDeltaKind expected_kind;
+  guint matching;
+} DeltaRelationExpect;
+
 static void
 snapshot_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
     gpointer user_data)
@@ -63,6 +70,22 @@ delta_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
       && row[2] == expect->expected_row[2]) {
     expect->matching++;
   }
+}
+
+static void
+delta_relation_expect_cb (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  DeltaRelationExpect *expect = user_data;
+
+  (void) row;
+  (void) ncols;
+
+  if (g_strcmp0 (relation, expect->expected_relation) != 0)
+    return;
+  if (kind != expect->expected_kind)
+    return;
+  expect->matching++;
 }
 
 static wyrelog_error_t
@@ -580,6 +603,41 @@ check_snapshot_only_insert_skips_delta_engine (void)
     return 185;
   if (expect.matching != 0)
     return 186;
+  return 0;
+}
+
+static gint
+check_role_permission_insert_skips_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 row[2];
+  DeltaRelationExpect expect = {
+    "role_permission",
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 187;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 188;
+  if (wyl_handle_intern_engine_symbol (handle, "wr.snapshot-role", &row[0])
+      != WYRELOG_E_OK)
+    return 189;
+  if (wyl_handle_intern_engine_symbol (handle, "wr.snapshot-role.read",
+          &row[1]) != WYRELOG_E_OK)
+    return 190;
+  if (wyl_handle_engine_set_delta_callback (handle,
+          delta_relation_expect_cb, &expect) != WYRELOG_E_OK)
+    return 191;
+  if (wyl_handle_engine_insert (handle, "role_permission", row, 2)
+      != WYRELOG_E_OK)
+    return 192;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+    return 193;
+  if (expect.matching != 0)
+    return 194;
   return 0;
 }
 
@@ -1140,6 +1198,8 @@ main (void)
   if ((rc = check_insert_fanout_reaches_delta_engine ()) != 0)
     return rc;
   if ((rc = check_snapshot_only_insert_skips_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_role_permission_insert_skips_delta_engine ()) != 0)
     return rc;
   if ((rc = check_remove_fanout_reaches_read_engine ()) != 0)
     return rc;
