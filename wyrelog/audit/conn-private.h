@@ -95,14 +95,21 @@ wyrelog_error_t wyl_audit_conn_table_exists (wyl_audit_conn_t * conn,
 
 /*
  * Serialises audit_events rows to a compact JSON array ordered by newest
- * first. @filter may be NULL/empty or one exact-match term:
+ * first. @filter may be NULL/empty or one exact-match term. Both
+ * key=value and compound predicate forms are accepted:
  *
  *   decision=deny|allow
+ *   decision("deny"|"allow")
  *   subject_id=<value>
+ *   subject_id("<value>")
  *   action=<value>
+ *   action("<value>")
  *   resource_id=<value>
+ *   resource_id("<value>")
  *   deny_reason=<value>
+ *   deny_reason("<value>")
  *   deny_origin=<value>
+ *   deny_origin("<value>")
  *
  * On success @out_json owns a newly allocated string.
  */
