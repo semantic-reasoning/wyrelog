@@ -10,16 +10,27 @@ main (void)
   if (version == NULL || version[0] == '\0')
     return 1;
 
+  g_autoptr (WylClient) client = NULL;
+
   /* Input validation: NULL out_client must be rejected. */
   if (wyl_client_new ("http://example.invalid", NULL) != WYRELOG_E_INVALID)
     return 2;
+  if (wyl_client_new (NULL, &client) != WYRELOG_E_INVALID)
+    return 9;
+  if (wyl_client_new ("", &client) != WYRELOG_E_INVALID)
+    return 10;
+  if (wyl_client_new ("file:///tmp/wyrelog.sock", &client) != WYRELOG_E_INVALID)
+    return 11;
 
   /* Successful path returns a non-NULL WylClient. */
-  g_autoptr (WylClient) client = NULL;
+  client = NULL;
   if (wyl_client_new ("http://example.invalid", &client) != WYRELOG_E_OK)
     return 3;
   if (client == NULL)
     return 4;
+  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
+  if (g_strcmp0 (base_url, "http://example.invalid") != 0)
+    return 12;
 
   /* Audit iterator returns a non-NULL WylAuditIter on success and
    * yields no rows in the stub state. */
