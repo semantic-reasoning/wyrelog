@@ -128,12 +128,13 @@ set_principal_state (WylHandle *handle, const gchar *username,
 #ifdef WYL_HAS_AUDIT
 static void
 emit_principal_state_audit (WylHandle *handle, const gchar *username,
-    const gchar *old_state, const gchar *new_state)
+    const gchar *old_state, const gchar *new_state, const gchar *event)
 {
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, username);
   wyl_audit_event_set_action (ev, "principal_state");
   wyl_audit_event_set_resource_id (ev, new_state);
+  wyl_audit_event_set_deny_reason (ev, event);
   wyl_audit_event_set_deny_origin (ev, old_state);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   (void) wyl_audit_emit (handle, ev);
@@ -159,7 +160,8 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   if (rc != WYRELOG_E_OK)
     return rc;
 #ifdef WYL_HAS_AUDIT
-  emit_principal_state_audit (handle, username, old_state_name, new_state_name);
+  emit_principal_state_audit (handle, username, old_state_name, new_state_name,
+      wyl_principal_event_name (WYL_PRINCIPAL_EVENT_MFA_OK));
 #endif
   return WYRELOG_E_OK;
 }
@@ -311,7 +313,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 #ifdef WYL_HAS_AUDIT
     emit_principal_state_audit (handle, username,
         wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-        wyl_principal_state_name (state));
+        wyl_principal_state_name (state), wyl_principal_event_name (event));
 #endif
   }
 

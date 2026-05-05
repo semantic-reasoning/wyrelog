@@ -604,7 +604,8 @@ check_principal_transition_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "SELECT subject_id, action, resource_id, deny_reason, "
+          "deny_origin, decision "
           "FROM audit_events WHERE action = 'principal_state' "
           "AND deny_origin = 'mfa_required';", &result)
       != DuckDBSuccess) {
@@ -622,22 +623,26 @@ check_principal_transition_emits_audit_row (void)
   const gchar *subject = duckdb_value_varchar (&result, 0, 0);
   const gchar *action = duckdb_value_varchar (&result, 1, 0);
   const gchar *resource = duckdb_value_varchar (&result, 2, 0);
-  const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
-  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  const gchar *event = duckdb_value_varchar (&result, 3, 0);
+  const gchar *old_state = duckdb_value_varchar (&result, 4, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 5, 0);
   if (g_strcmp0 (subject, "audit-principal-user") != 0)
     rc = 85;
   else if (g_strcmp0 (action, "principal_state") != 0)
     rc = 86;
   else if (g_strcmp0 (resource, "authenticated") != 0)
     rc = 87;
-  else if (g_strcmp0 (old_state, "mfa_required") != 0)
+  else if (g_strcmp0 (event, "mfa_ok") != 0)
     rc = 88;
-  else if (decision != WYL_DECISION_ALLOW)
+  else if (g_strcmp0 (old_state, "mfa_required") != 0)
     rc = 89;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 90;
 
   duckdb_free ((void *) subject);
   duckdb_free ((void *) action);
   duckdb_free ((void *) resource);
+  duckdb_free ((void *) event);
   duckdb_free ((void *) old_state);
   duckdb_destroy_result (&result);
   g_object_unref (handle);
@@ -663,7 +668,8 @@ check_login_principal_state_emits_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "SELECT subject_id, action, resource_id, deny_reason, "
+          "deny_origin, decision "
           "FROM audit_events WHERE action = 'principal_state';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -680,22 +686,26 @@ check_login_principal_state_emits_audit_row (void)
   const gchar *subject = duckdb_value_varchar (&result, 0, 0);
   const gchar *action = duckdb_value_varchar (&result, 1, 0);
   const gchar *resource = duckdb_value_varchar (&result, 2, 0);
-  const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
-  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  const gchar *event = duckdb_value_varchar (&result, 3, 0);
+  const gchar *old_state = duckdb_value_varchar (&result, 4, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 5, 0);
   if (g_strcmp0 (subject, "audit-login-user") != 0)
     rc = 94;
   else if (g_strcmp0 (action, "principal_state") != 0)
     rc = 95;
   else if (g_strcmp0 (resource, "mfa_required") != 0)
     rc = 96;
-  else if (g_strcmp0 (old_state, "unverified") != 0)
+  else if (g_strcmp0 (event, "login_ok") != 0)
     rc = 97;
-  else if (decision != WYL_DECISION_ALLOW)
+  else if (g_strcmp0 (old_state, "unverified") != 0)
     rc = 98;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 99;
 
   duckdb_free ((void *) subject);
   duckdb_free ((void *) action);
   duckdb_free ((void *) resource);
+  duckdb_free ((void *) event);
   duckdb_free ((void *) old_state);
   duckdb_destroy_result (&result);
   g_object_unref (handle);
@@ -722,7 +732,8 @@ check_login_skip_mfa_emits_principal_state_audit_row (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result;
   if (duckdb_query (conn,
-          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "SELECT subject_id, action, resource_id, deny_reason, "
+          "deny_origin, decision "
           "FROM audit_events WHERE action = 'principal_state';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -739,22 +750,26 @@ check_login_skip_mfa_emits_principal_state_audit_row (void)
   const gchar *subject = duckdb_value_varchar (&result, 0, 0);
   const gchar *action = duckdb_value_varchar (&result, 1, 0);
   const gchar *resource = duckdb_value_varchar (&result, 2, 0);
-  const gchar *old_state = duckdb_value_varchar (&result, 3, 0);
-  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  const gchar *event = duckdb_value_varchar (&result, 3, 0);
+  const gchar *old_state = duckdb_value_varchar (&result, 4, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 5, 0);
   if (g_strcmp0 (subject, "audit-skip-mfa-user") != 0)
     rc = 104;
   else if (g_strcmp0 (action, "principal_state") != 0)
     rc = 105;
   else if (g_strcmp0 (resource, "authenticated") != 0)
     rc = 106;
-  else if (g_strcmp0 (old_state, "unverified") != 0)
+  else if (g_strcmp0 (event, "login_skip_mfa") != 0)
     rc = 107;
-  else if (decision != WYL_DECISION_ALLOW)
+  else if (g_strcmp0 (old_state, "unverified") != 0)
     rc = 108;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 109;
 
   duckdb_free ((void *) subject);
   duckdb_free ((void *) action);
   duckdb_free ((void *) resource);
+  duckdb_free ((void *) event);
   duckdb_free ((void *) old_state);
   duckdb_destroy_result (&result);
   g_object_unref (handle);
