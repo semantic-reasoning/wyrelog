@@ -116,6 +116,28 @@ store_principal_state (WylHandle *handle, const gchar *username,
 }
 
 static wyrelog_error_t
+store_principal_event (WylHandle *handle, const gchar *username,
+    wyl_principal_state_t old_state, wyl_principal_event_t event,
+    wyl_principal_state_t new_state)
+{
+  if (username == NULL)
+    return WYRELOG_E_OK;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_OK;
+
+  const gchar *old_state_name = wyl_principal_state_name (old_state);
+  const gchar *event_name = wyl_principal_event_name (event);
+  const gchar *new_state_name = wyl_principal_state_name (new_state);
+  if (old_state_name == NULL || event_name == NULL || new_state_name == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  return wyl_policy_store_append_principal_event (store, username, event_name,
+      old_state_name, new_state_name);
+}
+
+static wyrelog_error_t
 set_principal_state (WylHandle *handle, const gchar *username,
     wyl_principal_state_t state)
 {
@@ -157,6 +179,10 @@ transition_principal_state (WylHandle *handle, const gchar *username,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = store_principal_state (handle, username, new_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = store_principal_event (handle, username, old_state,
+      WYL_PRINCIPAL_EVENT_MFA_OK, new_state);
   if (rc != WYRELOG_E_OK)
     return rc;
 #ifdef WYL_HAS_AUDIT
@@ -306,6 +332,12 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
     }
     rc = set_principal_state (handle, username, state);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (session);
+      return rc;
+    }
+    rc = store_principal_event (handle, username,
+        WYL_PRINCIPAL_STATE_UNVERIFIED, event, state);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (session);
       return rc;

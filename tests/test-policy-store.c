@@ -24,6 +24,7 @@ check_store_creates_authority_schema (void)
     "permissions",
     "role_permissions",
     "direct_permissions",
+    "principal_events",
     "principal_states",
     "session_states",
     "policy_signatures",
@@ -65,6 +66,7 @@ check_template_schema_creates_state_tables (void)
     "permissions",
     "role_permissions",
     "direct_permissions",
+    "principal_events",
     "principal_states",
     "session_states",
     "policy_signatures",
@@ -152,6 +154,15 @@ typedef struct
   guint matches;
 } PrincipalStateExpect;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *event;
+  const gchar *from_state;
+  const gchar *to_state;
+  guint matches;
+} PrincipalEventExpect;
+
 static wyrelog_error_t
 principal_state_expect_cb (const gchar *subject_id, const gchar *state,
     gpointer user_data)
@@ -160,6 +171,20 @@ principal_state_expect_cb (const gchar *subject_id, const gchar *state,
 
   if (g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+principal_event_expect_cb (const gchar *subject_id, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  PrincipalEventExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (event, expect->event) == 0
+      && g_strcmp0 (from_state, expect->from_state) == 0
+      && g_strcmp0 (to_state, expect->to_state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -339,6 +364,33 @@ check_store_sets_session_state (void)
 }
 
 static gint
+check_store_appends_principal_event (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 92;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 93;
+  if (wyl_policy_store_append_principal_event (store, "principal-user",
+          "login_skip_mfa", "unverified", "authenticated") != WYRELOG_E_OK)
+    return 94;
+
+  PrincipalEventExpect expect = {
+    .subject_id = "principal-user",
+    .event = "login_skip_mfa",
+    .from_state = "unverified",
+    .to_state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_event (store,
+          principal_event_expect_cb, &expect) != WYRELOG_E_OK)
+    return 95;
+  if (expect.matches != 1)
+    return 96;
+  return 0;
+}
+
+static gint
 check_store_rejects_bad_direct_permission (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -397,6 +449,12 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_principal_state (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 57;
+  if (wyl_policy_store_append_principal_event (store, NULL, "login_ok",
+          "unverified", "mfa_required") != WYRELOG_E_INVALID)
+    return 92;
+  if (wyl_policy_store_foreach_principal_event (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 93;
   if (wyl_policy_store_set_session_state (store, NULL, "active")
       != WYRELOG_E_INVALID)
     return 58;
@@ -426,6 +484,8 @@ main (void)
   if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;
   if ((rc = check_store_sets_session_state ()) != 0)
+    return rc;
+  if ((rc = check_store_appends_principal_event ()) != 0)
     return rc;
   if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
     return rc;
