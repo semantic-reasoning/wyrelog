@@ -102,6 +102,7 @@ jobs:
           key: vcpkg-windows-v2-2026.04.27-glib-sqlite3-libsodium
           restore-keys: |
             vcpkg-windows-v2-
+            vcpkg-windows-
 
       - name: Create vcpkg binary cache
         shell: cmd
