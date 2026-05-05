@@ -25,6 +25,16 @@ typedef struct
 typedef struct
 {
   const gchar *expected_relation;
+  const gint64 *first_row;
+  const gint64 *second_row;
+  guint ncols;
+  guint first_seen;
+  guint second_seen;
+} RelationPairSnapshotExpect;
+
+typedef struct
+{
+  const gchar *expected_relation;
   const gint64 *expected_row;
   WylDeltaKind expected_kind;
   guint matching;
@@ -88,6 +98,31 @@ relation_snapshot_expect_cb (const gchar *relation, const gint64 *row,
       return;
   }
   expect->seen++;
+}
+
+static void
+relation_pair_snapshot_expect_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  RelationPairSnapshotExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, expect->expected_relation) != 0)
+    return;
+  if (ncols != expect->ncols)
+    return;
+
+  gboolean matches_first = TRUE;
+  gboolean matches_second = TRUE;
+  for (guint i = 0; i < ncols; i++) {
+    if (row[i] != expect->first_row[i])
+      matches_first = FALSE;
+    if (row[i] != expect->second_row[i])
+      matches_second = FALSE;
+  }
+  if (matches_first)
+    expect->first_seen++;
+  if (matches_second)
+    expect->second_seen++;
 }
 
 static void
@@ -166,6 +201,23 @@ intern4 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_intern_engine_symbol (handle, d, &row[3]);
+}
+
+static wyrelog_error_t
+intern_event5 (WylHandle *handle, gint64 event_id, const gchar *a,
+    const gchar *b, const gchar *c, const gchar *d, gint64 row[5])
+{
+  row[0] = event_id;
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, c, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_intern_engine_symbol (handle, d, &row[4]);
 }
 
 static wyrelog_error_t
@@ -635,12 +687,12 @@ static gint
 check_principal_event_fanout_derives_delta (void)
 {
   g_autoptr (WylHandle) handle = NULL;
-  gint64 event_row[4];
-  gint64 fired_row[4];
+  gint64 event_row[5];
+  gint64 fired_row[5];
   DeltaRowExpect expect = {
     "principal_fired",
     fired_row,
-    4,
+    5,
     WYL_DELTA_INSERT,
     0,
   };
@@ -650,36 +702,40 @@ check_principal_event_fanout_derives_delta (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 107;
-  if (intern4 (handle, "delta-principal-user", "login_ok", "unverified",
-          "mfa_required", event_row) != WYRELOG_E_OK)
+  if (intern_event5 (handle, 101, "delta-principal-user", "login_ok",
+          "unverified", "mfa_required", event_row) != WYRELOG_E_OK)
     return 108;
-  if (intern4 (handle, "delta-principal-user", "unverified", "login_ok",
-          "mfa_required", fired_row) != WYRELOG_E_OK)
+  if (intern_event5 (handle, 101, "delta-principal-user", "unverified",
+          "login_ok", "mfa_required", fired_row) != WYRELOG_E_OK)
     return 109;
   if (wyl_handle_engine_set_delta_callback (handle, delta_row_expect_cb,
           &expect) != WYRELOG_E_OK)
     return 117;
-  if (wyl_handle_engine_insert (handle, "principal_event", event_row, 4)
+  if (wyl_handle_engine_insert (handle, "principal_event", event_row, 5)
       != WYRELOG_E_OK)
     return 118;
   if (expect.matching != 1)
     return 119;
-  if (wyl_handle_engine_insert (handle, "principal_event", event_row, 4)
-      != WYRELOG_E_OK)
+  if (intern_event5 (handle, 102, "delta-principal-user", "login_ok",
+          "unverified", "mfa_required", event_row) != WYRELOG_E_OK)
     return 150;
-  return expect.matching == 1 ? 0 : 151;
+  fired_row[0] = 102;
+  if (wyl_handle_engine_insert (handle, "principal_event", event_row, 5)
+      != WYRELOG_E_OK)
+    return 151;
+  return expect.matching == 2 ? 0 : 152;
 }
 
 static gint
 check_session_event_fanout_derives_delta (void)
 {
   g_autoptr (WylHandle) handle = NULL;
-  gint64 event_row[4];
-  gint64 fired_row[4];
+  gint64 event_row[5];
+  gint64 fired_row[5];
   DeltaRowExpect expect = {
     "session_fired",
     fired_row,
-    4,
+    5,
     WYL_DELTA_INSERT,
     0,
   };
@@ -689,31 +745,40 @@ check_session_event_fanout_derives_delta (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 126;
-  if (intern4 (handle, "delta-session", "elevate_grant", "active",
+  if (intern_event5 (handle, 201, "delta-session", "elevate_grant", "active",
           "elevated", event_row) != WYRELOG_E_OK)
     return 127;
-  if (intern4 (handle, "delta-session", "active", "elevate_grant",
+  if (intern_event5 (handle, 201, "delta-session", "active", "elevate_grant",
           "elevated", fired_row) != WYRELOG_E_OK)
     return 128;
   if (wyl_handle_engine_set_delta_callback (handle, delta_row_expect_cb,
           &expect) != WYRELOG_E_OK)
     return 129;
-  if (wyl_handle_engine_insert (handle, "session_event", event_row, 4)
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
       != WYRELOG_E_OK)
     return 135;
-  return expect.matching == 1 ? 0 : 136;
+  if (expect.matching != 1)
+    return 136;
+  if (intern_event5 (handle, 202, "delta-session", "elevate_grant", "active",
+          "elevated", event_row) != WYRELOG_E_OK)
+    return 153;
+  fired_row[0] = 202;
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_OK)
+    return 154;
+  return expect.matching == 2 ? 0 : 155;
 }
 
 static gint
 check_delta_callback_survives_reload (void)
 {
   g_autoptr (WylHandle) handle = NULL;
-  gint64 live_event_row[4];
-  gint64 fired_row[4];
+  gint64 live_event_row[5];
+  gint64 fired_row[5];
   DeltaRowExpect expect = {
     "session_fired",
     fired_row,
-    4,
+    5,
     WYL_DELTA_INSERT,
     0,
   };
@@ -725,13 +790,13 @@ check_delta_callback_survives_reload (void)
     return 138;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_append_session_event (store, "delta-replay-session",
-          "elevate_grant", "active", "elevated") != WYRELOG_E_OK)
+          "elevate_grant", "active", "elevated", NULL) != WYRELOG_E_OK)
     return 139;
-  if (intern4 (handle, "delta-reload-session", "idle_timeout", "active",
-          "idle", live_event_row) != WYRELOG_E_OK)
+  if (intern_event5 (handle, 301, "delta-reload-session", "idle_timeout",
+          "active", "idle", live_event_row) != WYRELOG_E_OK)
     return 146;
-  if (intern4 (handle, "delta-reload-session", "active", "idle_timeout",
-          "idle", fired_row) != WYRELOG_E_OK)
+  if (intern_event5 (handle, 301, "delta-reload-session", "active",
+          "idle_timeout", "idle", fired_row) != WYRELOG_E_OK)
     return 146;
   if (wyl_handle_engine_set_delta_callback (handle, delta_row_expect_cb,
           &expect) != WYRELOG_E_OK)
@@ -740,7 +805,7 @@ check_delta_callback_survives_reload (void)
     return 148;
   if (expect.matching != 0)
     return 152;
-  if (wyl_handle_engine_insert (handle, "session_event", live_event_row, 4)
+  if (wyl_handle_engine_insert (handle, "session_event", live_event_row, 5)
       != WYRELOG_E_OK)
     return 149;
   return expect.matching == 1 ? 0 : 156;
@@ -1400,21 +1465,23 @@ check_policy_store_principal_events_autoload_on_open (void)
     return 390;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 event_id = -1;
   if (wyl_policy_store_append_principal_event (store, "event-load-user",
-          "login_ok", "unverified", "mfa_required") != WYRELOG_E_OK)
+          "login_ok", "unverified", "mfa_required", &event_id)
+      != WYRELOG_E_OK)
     return 391;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 392;
 
-  gint64 fired_row[4];
-  if (intern4 (handle, "event-load-user", "unverified", "login_ok",
-          "mfa_required", fired_row) != WYRELOG_E_OK)
+  gint64 fired_row[5];
+  if (intern_event5 (handle, event_id, "event-load-user", "unverified",
+          "login_ok", "mfa_required", fired_row) != WYRELOG_E_OK)
     return 393;
   RelationSnapshotExpect fired_expect = {
     .expected_relation = "principal_fired",
     .expected_row = fired_row,
-    .ncols = 4,
+    .ncols = 5,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
           "principal_fired", relation_snapshot_expect_cb, &fired_expect)
@@ -1435,11 +1502,61 @@ check_policy_store_principal_events_reject_invalid_edges (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_append_principal_event (store, "event-invalid-user",
-          "mfa_ok", "unverified", "authenticated") != WYRELOG_E_OK)
+          "mfa_ok", "unverified", "authenticated", NULL) != WYRELOG_E_OK)
     return 401;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_POLICY)
     return 402;
+  return 0;
+}
+
+static gint
+check_policy_store_principal_event_duplicates_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 446;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 first_event_id = -1;
+  gint64 second_event_id = -1;
+  if (wyl_policy_store_append_principal_event (store, "event-dup-user",
+          "login_ok", "unverified", "mfa_required", &first_event_id)
+      != WYRELOG_E_OK)
+    return 447;
+  if (wyl_policy_store_append_principal_event (store, "event-dup-user",
+          "login_ok", "unverified", "mfa_required", &second_event_id)
+      != WYRELOG_E_OK)
+    return 448;
+  if (second_event_id <= first_event_id)
+    return 449;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 450;
+
+  gint64 first_fired[5];
+  if (intern_event5 (handle, first_event_id, "event-dup-user", "unverified",
+          "login_ok", "mfa_required", first_fired) != WYRELOG_E_OK)
+    return 451;
+  gint64 second_fired[5];
+  if (intern_event5 (handle, second_event_id, "event-dup-user", "unverified",
+          "login_ok", "mfa_required", second_fired) != WYRELOG_E_OK)
+    return 452;
+  RelationPairSnapshotExpect fired_expect = {
+    .expected_relation = "principal_fired",
+    .first_row = first_fired,
+    .second_row = second_fired,
+    .ncols = 5,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "principal_fired", relation_pair_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 453;
+  if (fired_expect.first_seen != 1)
+    return 454;
+  if (fired_expect.second_seen != 1)
+    return 455;
   return 0;
 }
 
@@ -1529,21 +1646,22 @@ check_policy_store_session_events_autoload_on_open (void)
     return 420;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 event_id = -1;
   if (wyl_policy_store_append_session_event (store, "session-event-load",
-          "elevate_grant", "active", "elevated") != WYRELOG_E_OK)
+          "elevate_grant", "active", "elevated", &event_id) != WYRELOG_E_OK)
     return 421;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 422;
 
-  gint64 fired_row[4];
-  if (intern4 (handle, "session-event-load", "active", "elevate_grant",
-          "elevated", fired_row) != WYRELOG_E_OK)
+  gint64 fired_row[5];
+  if (intern_event5 (handle, event_id, "session-event-load", "active",
+          "elevate_grant", "elevated", fired_row) != WYRELOG_E_OK)
     return 423;
   RelationSnapshotExpect fired_expect = {
     .expected_relation = "session_fired",
     .expected_row = fired_row,
-    .ncols = 4,
+    .ncols = 5,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
           "session_fired", relation_snapshot_expect_cb, &fired_expect)
@@ -1564,11 +1682,61 @@ check_policy_store_session_events_reject_invalid_edges (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_append_session_event (store, "session-event-invalid",
-          "request", "expiring", "active") != WYRELOG_E_OK)
+          "request", "expiring", "active", NULL) != WYRELOG_E_OK)
     return 431;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_POLICY)
     return 432;
+  return 0;
+}
+
+static gint
+check_policy_store_session_event_duplicates_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 457;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 first_event_id = -1;
+  gint64 second_event_id = -1;
+  if (wyl_policy_store_append_session_event (store, "session-event-dup",
+          "elevate_grant", "active", "elevated", &first_event_id)
+      != WYRELOG_E_OK)
+    return 458;
+  if (wyl_policy_store_append_session_event (store, "session-event-dup",
+          "elevate_grant", "active", "elevated", &second_event_id)
+      != WYRELOG_E_OK)
+    return 459;
+  if (second_event_id <= first_event_id)
+    return 460;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 461;
+
+  gint64 first_fired[5];
+  if (intern_event5 (handle, first_event_id, "session-event-dup", "active",
+          "elevate_grant", "elevated", first_fired) != WYRELOG_E_OK)
+    return 462;
+  gint64 second_fired[5];
+  if (intern_event5 (handle, second_event_id, "session-event-dup", "active",
+          "elevate_grant", "elevated", second_fired) != WYRELOG_E_OK)
+    return 463;
+  RelationPairSnapshotExpect fired_expect = {
+    .expected_relation = "session_fired",
+    .first_row = first_fired,
+    .second_row = second_fired,
+    .ncols = 5,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "session_fired", relation_pair_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 464;
+  if (fired_expect.first_seen != 1)
+    return 465;
+  if (fired_expect.second_seen != 1)
+    return 466;
   return 0;
 }
 
@@ -1587,7 +1755,7 @@ check_policy_store_session_events_reload_failure_preserves_pair (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_append_session_event (store, "session-event-invalid",
-          "request", "expiring", "active") != WYRELOG_E_OK)
+          "request", "expiring", "active", NULL) != WYRELOG_E_OK)
     return 435;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
     return 436;
@@ -1698,6 +1866,9 @@ main (void)
     return rc;
   if ((rc = check_policy_store_principal_events_autoload_on_open ()) != 0)
     return rc;
+  if ((rc = check_policy_store_principal_event_duplicates_autoload_on_open ())
+      != 0)
+    return rc;
   if ((rc = check_policy_store_principal_events_reject_invalid_edges ()) != 0)
     return rc;
   if ((rc = check_policy_store_principal_events_require_engine_pair ()) != 0)
@@ -1707,6 +1878,9 @@ main (void)
   if ((rc = check_policy_store_session_states_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_session_events_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_session_event_duplicates_autoload_on_open ())
+      != 0)
     return rc;
   if ((rc = check_policy_store_session_events_reject_invalid_edges ()) != 0)
     return rc;

@@ -149,28 +149,30 @@ store_principal_event (WylHandle *handle, const gchar *username,
   if (validated != new_state)
     return WYRELOG_E_POLICY;
 
+  gint64 event_id = -1;
   wyrelog_error_t rc = wyl_policy_store_append_principal_event (store,
-      username, event_name, old_state_name, new_state_name);
+      username, event_name, old_state_name, new_state_name, &event_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
 
-  gint64 row[4];
-  rc = wyl_handle_intern_engine_symbol (handle, username, &row[0]);
+  gint64 row[5];
+  row[0] = event_id;
+  rc = wyl_handle_intern_engine_symbol (handle, username, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[1]);
+  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[2]);
+  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[3]);
+  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, "principal_event", row, 4);
+  return wyl_handle_engine_insert (handle, "principal_event", row, 5);
 }
 
 static wyrelog_error_t
@@ -329,28 +331,30 @@ store_session_event (WylHandle *handle, const gchar *session_id,
   if (validated != new_state)
     return WYRELOG_E_POLICY;
 
+  gint64 event_id = -1;
   wyrelog_error_t rc = wyl_policy_store_append_session_event (store,
-      session_id, event_name, old_state_name, new_state_name);
+      session_id, event_name, old_state_name, new_state_name, &event_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
 
-  gint64 row[4];
-  rc = wyl_handle_intern_engine_symbol (handle, session_id, &row[0]);
+  gint64 row[5];
+  row[0] = event_id;
+  rc = wyl_handle_intern_engine_symbol (handle, session_id, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[1]);
+  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[2]);
+  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[3]);
+  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (handle, "session_event", row, 4);
+  return wyl_handle_engine_insert (handle, "session_event", row, 5);
 }
 
 #ifdef WYL_HAS_AUDIT

@@ -59,6 +59,7 @@ typedef struct
 
 typedef struct
 {
+  gint64 event_id;
   const gchar *session_id;
   const gchar *event;
   const gchar *from_state;
@@ -79,16 +80,21 @@ session_state_expect_cb (const gchar *session_id, const gchar *state,
 }
 
 static wyrelog_error_t
-session_event_expect_cb (const gchar *session_id, const gchar *event,
-    const gchar *from_state, const gchar *to_state, gpointer user_data)
+session_event_expect_cb (gint64 event_id, const gchar *session_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
 {
   SessionEventExpect *expect = user_data;
 
-  if (g_strcmp0 (session_id, expect->session_id) == 0
+  if ((expect->event_id <= 0 || event_id == expect->event_id)
+      && g_strcmp0 (session_id, expect->session_id) == 0
       && g_strcmp0 (event, expect->event) == 0
       && g_strcmp0 (from_state, expect->from_state) == 0
-      && g_strcmp0 (to_state, expect->to_state) == 0)
+      && g_strcmp0 (to_state, expect->to_state) == 0) {
+    if (expect->event_id <= 0)
+      expect->event_id = event_id;
     expect->matches++;
+  }
   return WYRELOG_E_OK;
 }
 
@@ -101,6 +107,7 @@ typedef struct
 
 typedef struct
 {
+  gint64 event_id;
   const gchar *subject_id;
   const gchar *event;
   const gchar *from_state;
@@ -137,16 +144,21 @@ principal_state_expect_cb (const gchar *subject_id, const gchar *state,
 }
 
 static wyrelog_error_t
-principal_event_expect_cb (const gchar *subject_id, const gchar *event,
-    const gchar *from_state, const gchar *to_state, gpointer user_data)
+principal_event_expect_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
 {
   PrincipalEventExpect *expect = user_data;
 
-  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+  if ((expect->event_id <= 0 || event_id == expect->event_id)
+      && g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (event, expect->event) == 0
       && g_strcmp0 (from_state, expect->from_state) == 0
-      && g_strcmp0 (to_state, expect->to_state) == 0)
+      && g_strcmp0 (to_state, expect->to_state) == 0) {
+    if (expect->event_id <= 0)
+      expect->event_id = event_id;
     expect->matches++;
+  }
   return WYRELOG_E_OK;
 }
 
@@ -156,10 +168,11 @@ principal_event_fact_expect_cb (const gchar *relation, const gint64 *row,
 {
   PrincipalEventFactExpect *expect = user_data;
 
-  if (g_strcmp0 (relation, expect->relation) != 0 || ncols != 4)
+  if (g_strcmp0 (relation, expect->relation) != 0 || ncols != 5)
     return;
   if (row[0] == expect->row[0] && row[1] == expect->row[1]
-      && row[2] == expect->row[2] && row[3] == expect->row[3])
+      && row[2] == expect->row[2] && row[3] == expect->row[3]
+      && row[4] == expect->row[4])
     expect->matches++;
 }
 
@@ -187,50 +200,52 @@ delta_relation_count_cb (const gchar *relation, const gint64 *row,
 
   (void) row;
 
-  if (g_strcmp0 (relation, "session_fired") == 0 && ncols == 4
+  if (g_strcmp0 (relation, "session_fired") == 0 && ncols == 5
       && kind == WYL_DELTA_INSERT)
     (*matches)++;
 }
 
 static wyrelog_error_t
-intern_principal_fired_row (WylHandle *handle, const gchar *subject_id,
-    const gchar *from_state, const gchar *event, const gchar *to_state,
-    gint64 row[4])
+intern_principal_fired_row (WylHandle *handle, gint64 event_id,
+    const gchar *subject_id, const gchar *from_state, const gchar *event,
+    const gchar *to_state, gint64 row[5])
 {
+  row[0] = event_id;
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, subject_id, &row[0]);
+      wyl_handle_intern_engine_symbol (handle, subject_id, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, from_state, &row[1]);
+  rc = wyl_handle_intern_engine_symbol (handle, from_state, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, event, &row[2]);
+  rc = wyl_handle_intern_engine_symbol (handle, event, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_intern_engine_symbol (handle, to_state, &row[3]);
+  return wyl_handle_intern_engine_symbol (handle, to_state, &row[4]);
 }
 
 static wyrelog_error_t
-intern_session_fired_row (WylHandle *handle, const gchar *session_id,
-    const gchar *from_state, const gchar *event, const gchar *to_state,
-    gint64 row[4])
+intern_session_fired_row (WylHandle *handle, gint64 event_id,
+    const gchar *session_id, const gchar *from_state, const gchar *event,
+    const gchar *to_state, gint64 row[5])
 {
+  row[0] = event_id;
   wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, session_id, &row[0]);
+      wyl_handle_intern_engine_symbol (handle, session_id, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, from_state, &row[1]);
+  rc = wyl_handle_intern_engine_symbol (handle, from_state, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, event, &row[2]);
+  rc = wyl_handle_intern_engine_symbol (handle, event, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_intern_engine_symbol (handle, to_state, &row[3]);
+  return wyl_handle_intern_engine_symbol (handle, to_state, &row[4]);
 }
 
 static wyrelog_error_t
 count_principal_event_fact (WylHandle *handle, const gchar *relation,
-    const gint64 row[4], guint *out_matches)
+    const gint64 row[5], guint *out_matches)
 {
   PrincipalEventFactExpect expect = { relation, row, 0 };
 
@@ -259,9 +274,9 @@ expect_session_transition (WylHandle *handle, const gchar *session_id,
   if (event_expect.matches != 1)
     return base_code + 1;
 
-  gint64 row[4];
-  if (intern_session_fired_row (handle, session_id, from_state, event,
-          to_state, row) != WYRELOG_E_OK)
+  gint64 row[5];
+  if (intern_session_fired_row (handle, event_expect.event_id, session_id,
+          from_state, event, to_state, row) != WYRELOG_E_OK)
     return base_code + 2;
   guint matches = 0;
   if (count_principal_event_fact (handle, "session_fired", row, &matches)
@@ -272,8 +287,8 @@ expect_session_transition (WylHandle *handle, const gchar *session_id,
 
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return base_code + 5;
-  if (intern_session_fired_row (handle, session_id, from_state, event,
-          to_state, row) != WYRELOG_E_OK)
+  if (intern_session_fired_row (handle, event_expect.event_id, session_id,
+          from_state, event, to_state, row) != WYRELOG_E_OK)
     return base_code + 6;
   matches = 0;
   if (count_principal_event_fact (handle, "session_fired", row, &matches)
@@ -476,14 +491,14 @@ check_mfa_delta_callback_survives_state_reload (void)
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 92;
 
-  gint64 row[4];
-  if (intern_principal_fired_row (handle, "mfa-delta-user", "mfa_required",
-          "mfa_ok", "authenticated", row) != WYRELOG_E_OK)
+  gint64 row[5];
+  if (intern_principal_fired_row (handle, 2, "mfa-delta-user",
+          "mfa_required", "mfa_ok", "authenticated", row) != WYRELOG_E_OK)
     return 93;
   DeltaFactExpect expect = {
     .relation = "principal_fired",
     .row = row,
-    .ncols = 4,
+    .ncols = 5,
     .kind = WYL_DELTA_INSERT,
   };
   if (wyl_handle_engine_set_delta_callback (handle, delta_fact_expect_cb,
@@ -621,14 +636,14 @@ check_login_delta_callback_survives_state_reload (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 141;
 
-  gint64 row[4];
-  if (intern_principal_fired_row (handle, "login-delta-user", "unverified",
-          "login_ok", "mfa_required", row) != WYRELOG_E_OK)
+  gint64 row[5];
+  if (intern_principal_fired_row (handle, 1, "login-delta-user",
+          "unverified", "login_ok", "mfa_required", row) != WYRELOG_E_OK)
     return 142;
   DeltaFactExpect principal_expect = {
     .relation = "principal_fired",
     .row = row,
-    .ncols = 4,
+    .ncols = 5,
     .kind = WYL_DELTA_INSERT,
   };
   if (wyl_handle_engine_set_delta_callback (handle, delta_fact_expect_cb,
@@ -790,8 +805,8 @@ check_login_skip_mfa_inserts_wirelog_principal_fired (void)
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 163;
 
-  gint64 row[4];
-  if (intern_principal_fired_row (handle, "skip-mfa-fired-user",
+  gint64 row[5];
+  if (intern_principal_fired_row (handle, 1, "skip-mfa-fired-user",
           "unverified", "login_skip_mfa", "authenticated", row)
       != WYRELOG_E_OK)
     return 164;
@@ -804,7 +819,7 @@ check_login_skip_mfa_inserts_wirelog_principal_fired (void)
 
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 167;
-  if (intern_principal_fired_row (handle, "skip-mfa-fired-user",
+  if (intern_principal_fired_row (handle, 1, "skip-mfa-fired-user",
           "unverified", "login_skip_mfa", "authenticated", row)
       != WYRELOG_E_OK)
     return 168;

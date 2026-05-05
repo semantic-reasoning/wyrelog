@@ -27,14 +27,14 @@ typedef wyrelog_error_t (*wyl_policy_direct_permission_event_cb) (const gchar *
     const gchar * operation, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_principal_state_cb) (const gchar *
     subject_id, const gchar * state, gpointer user_data);
-typedef wyrelog_error_t (*wyl_policy_principal_event_cb) (const gchar *
-    subject_id, const gchar * event, const gchar * from_state,
-    const gchar * to_state, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_principal_event_cb) (gint64 event_id,
+    const gchar * subject_id, const gchar * event,
+    const gchar * from_state, const gchar * to_state, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_session_state_cb) (const gchar *
     session_id, const gchar * state, gpointer user_data);
-typedef wyrelog_error_t (*wyl_policy_session_event_cb) (const gchar *
-    session_id, const gchar * event, const gchar * from_state,
-    const gchar * to_state, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_session_event_cb) (gint64 event_id,
+    const gchar * session_id, const gchar * event,
+    const gchar * from_state, const gchar * to_state, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_audit_event_cb) (const gchar * id,
     gint64 created_at_us, const gchar * subject_id, const gchar * action,
     const gchar * resource_id, const gchar * deny_reason,
@@ -112,7 +112,7 @@ wyrelog_error_t wyl_policy_store_foreach_principal_state (wyl_policy_store_t *
     store, wyl_policy_principal_state_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_principal_event (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * event,
-    const gchar * from_state, const gchar * to_state);
+    const gchar * from_state, const gchar * to_state, gint64 * out_event_id);
 wyrelog_error_t wyl_policy_store_foreach_principal_event (wyl_policy_store_t *
     store, wyl_policy_principal_event_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_set_session_state (wyl_policy_store_t * store,
@@ -121,7 +121,7 @@ wyrelog_error_t wyl_policy_store_foreach_session_state (wyl_policy_store_t *
     store, wyl_policy_session_state_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_session_event (wyl_policy_store_t *
     store, const gchar * session_id, const gchar * event,
-    const gchar * from_state, const gchar * to_state);
+    const gchar * from_state, const gchar * to_state, gint64 * out_event_id);
 wyrelog_error_t wyl_policy_store_foreach_session_event (wyl_policy_store_t *
     store, wyl_policy_session_event_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_audit_event (wyl_policy_store_t *

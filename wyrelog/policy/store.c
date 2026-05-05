@@ -586,7 +586,7 @@ wyl_policy_store_foreach_principal_state (wyl_policy_store_t *store,
 wyrelog_error_t
 wyl_policy_store_append_principal_event (wyl_policy_store_t *store,
     const gchar *subject_id, const gchar *event, const gchar *from_state,
-    const gchar *to_state)
+    const gchar *to_state, gint64 *out_event_id)
 {
   sqlite3_stmt *stmt = NULL;
 
@@ -611,7 +611,15 @@ wyl_policy_store_append_principal_event (wyl_policy_store_t *store,
 
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
-  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (out_event_id != NULL) {
+    sqlite3_int64 event_id = sqlite3_last_insert_rowid (store->db);
+    if (event_id <= 0)
+      return WYRELOG_E_IO;
+    *out_event_id = event_id;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -624,7 +632,7 @@ wyl_policy_store_foreach_principal_event (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   static const gchar *sql =
-      "SELECT subject_id, event, from_state, to_state "
+      "SELECT event_id, subject_id, event, from_state, to_state "
       "FROM principal_events ORDER BY event_id;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -632,11 +640,16 @@ wyl_policy_store_foreach_principal_event (wyl_policy_store_t *store,
 
   int step_rc;
   while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
-    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
-    const gchar *event = (const gchar *) sqlite3_column_text (stmt, 1);
-    const gchar *from_state = (const gchar *) sqlite3_column_text (stmt, 2);
-    const gchar *to_state = (const gchar *) sqlite3_column_text (stmt, 3);
-    rc = cb (subject_id, event, from_state, to_state, user_data);
+    gint64 event_id = sqlite3_column_int64 (stmt, 0);
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *event = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *from_state = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *to_state = (const gchar *) sqlite3_column_text (stmt, 4);
+    if (event_id <= 0) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    rc = cb (event_id, subject_id, event, from_state, to_state, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;
@@ -708,7 +721,7 @@ wyl_policy_store_foreach_session_state (wyl_policy_store_t *store,
 wyrelog_error_t
 wyl_policy_store_append_session_event (wyl_policy_store_t *store,
     const gchar *session_id, const gchar *event, const gchar *from_state,
-    const gchar *to_state)
+    const gchar *to_state, gint64 *out_event_id)
 {
   sqlite3_stmt *stmt = NULL;
 
@@ -733,7 +746,15 @@ wyl_policy_store_append_session_event (wyl_policy_store_t *store,
 
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
-  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (out_event_id != NULL) {
+    sqlite3_int64 event_id = sqlite3_last_insert_rowid (store->db);
+    if (event_id <= 0)
+      return WYRELOG_E_IO;
+    *out_event_id = event_id;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -746,7 +767,7 @@ wyl_policy_store_foreach_session_event (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   static const gchar *sql =
-      "SELECT session_id, event, from_state, to_state "
+      "SELECT event_id, session_id, event, from_state, to_state "
       "FROM session_events ORDER BY event_id;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -754,11 +775,16 @@ wyl_policy_store_foreach_session_event (wyl_policy_store_t *store,
 
   int step_rc;
   while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
-    const gchar *session_id = (const gchar *) sqlite3_column_text (stmt, 0);
-    const gchar *event = (const gchar *) sqlite3_column_text (stmt, 1);
-    const gchar *from_state = (const gchar *) sqlite3_column_text (stmt, 2);
-    const gchar *to_state = (const gchar *) sqlite3_column_text (stmt, 3);
-    rc = cb (session_id, event, from_state, to_state, user_data);
+    gint64 event_id = sqlite3_column_int64 (stmt, 0);
+    const gchar *session_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *event = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *from_state = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *to_state = (const gchar *) sqlite3_column_text (stmt, 4);
+    if (event_id <= 0) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    rc = cb (event_id, session_id, event, from_state, to_state, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;
