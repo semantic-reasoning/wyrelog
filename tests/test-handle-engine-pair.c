@@ -104,6 +104,17 @@ insert2_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
 }
 
 static wyrelog_error_t
+insert3_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, const gchar *c)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern3 (handle, a, b, c, row);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 3);
+}
+
+static wyrelog_error_t
 insert4_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
     const gchar *b, const gchar *c, const gchar *d)
 {
@@ -308,6 +319,70 @@ check_second_open_is_rejected (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_INVALID)
     return 52;
+  return 0;
+}
+
+static gint
+check_reload_rejects_missing_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 55;
+  if (wyl_handle_reload_engine_pair (NULL) != WYRELOG_E_INVALID)
+    return 56;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_INVALID)
+    return 57;
+  return 0;
+}
+
+static gint
+check_reload_loads_policy_store_snapshot (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 58;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 59;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.reload-role", "reload role")
+      != WYRELOG_E_OK)
+    return 53;
+  if (wyl_policy_store_upsert_permission (store, "wr.reload.read",
+          "reload read", "basic") != WYRELOG_E_OK)
+    return 54;
+  if (wyl_policy_store_grant_role_permission (store, "wr.reload-role",
+          "wr.reload.read") != WYRELOG_E_OK)
+    return 45;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 46;
+
+  if (insert3_symbol (handle, "member_of", "reload-user", "wr.reload-role",
+          "reload-scope") != WYRELOG_E_OK)
+    return 47;
+  if (insert2_symbol (handle, "principal_state", "reload-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 48;
+  if (insert2_symbol (handle, "session_state", "reload-scope", "active")
+      != WYRELOG_E_OK)
+    return 49;
+  if (insert4_symbol (handle, "perm_state", "reload-user", "wr.reload.read",
+          "reload-scope", "armed") != WYRELOG_E_OK)
+    return 44;
+
+  gint64 decision_row[3];
+  if (intern3 (handle, "reload-user", "wr.reload.read", "reload-scope",
+          decision_row) != WYRELOG_E_OK)
+    return 33;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 34;
+  if (!allowed)
+    return 37;
   return 0;
 }
 
@@ -1047,6 +1122,10 @@ main (void)
   if ((rc = check_shutdown_clears_engine_pair ()) != 0)
     return rc;
   if ((rc = check_second_open_is_rejected ()) != 0)
+    return rc;
+  if ((rc = check_reload_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_reload_loads_policy_store_snapshot ()) != 0)
     return rc;
   if ((rc = check_symbol_intern_reaches_both_engines ()) != 0)
     return rc;
