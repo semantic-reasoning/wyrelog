@@ -86,19 +86,35 @@ wyl_daemon_check_audit_sink_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+login_check_principal (WylHandle *handle, const gchar *username,
+    WylSession **out_session)
+{
+  if (out_session == NULL)
+    return WYRELOG_E_INVALID;
+  *out_session = NULL;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, username);
+
+  g_autoptr (WylSession) session = NULL;
+  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_session_mfa_verify (handle, session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_session = g_steal_pointer (&session);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_daemon_check_policy_snapshot_reload_ready (WylHandle *handle)
 {
-  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
-  wyl_login_req_set_username (login, "wyrelogd-snapshot-user");
-  wyl_login_req_set_skip_mfa (login, TRUE);
-
   g_autoptr (WylSession) session = NULL;
-  gboolean skip_mfa_was_allowed =
-      wyl_handle_get_login_skip_mfa_allowed (handle);
-  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
-  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
-  wyl_handle_set_login_skip_mfa_allowed (handle, skip_mfa_was_allowed);
+  wyrelog_error_t rc =
+      login_check_principal (handle, "wyrelogd-snapshot-user", &session);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -149,16 +165,9 @@ insert_symbol_row (WylHandle *handle, const gchar *relation,
 wyrelog_error_t
 wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
 {
-  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
-  wyl_login_req_set_username (login, "wyrelogd-role-user");
-  wyl_login_req_set_skip_mfa (login, TRUE);
-
   g_autoptr (WylSession) session = NULL;
-  gboolean skip_mfa_was_allowed =
-      wyl_handle_get_login_skip_mfa_allowed (handle);
-  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
-  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
-  wyl_handle_set_login_skip_mfa_allowed (handle, skip_mfa_was_allowed);
+  wyrelog_error_t rc =
+      login_check_principal (handle, "wyrelogd-role-user", &session);
   if (rc != WYRELOG_E_OK)
     return rc;
 
