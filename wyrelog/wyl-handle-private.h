@@ -79,9 +79,9 @@ wyrelog_error_t wyl_handle_engine_set_delta_callback (WylHandle * self,
     WylDeltaCallback cb, gpointer user_data);
 
 /*
- * Loads role_permission rows from the handle-owned policy authority store into
- * the attached read/delta engine pair. Rejected unless both the store and
- * engine pair are available.
+ * Loads effective role_permission rows from the handle-owned policy authority
+ * store into the attached read/delta engine pair. Role inheritance edges are
+ * flattened by the store iterator before they reach the engine.
  */
 wyrelog_error_t wyl_handle_load_policy_store_role_permissions (WylHandle *
     self);

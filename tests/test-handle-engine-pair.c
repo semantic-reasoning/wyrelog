@@ -967,6 +967,60 @@ check_policy_store_role_permissions_autoload_on_open (void)
 }
 
 static gint
+check_policy_store_role_inheritances_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 348;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.inherit-child",
+          "inherit child") != WYRELOG_E_OK)
+    return 349;
+  if (wyl_policy_store_upsert_role (store, "wr.inherit-parent",
+          "inherit parent") != WYRELOG_E_OK)
+    return 350;
+  if (wyl_policy_store_upsert_permission (store, "wr.inherit.read",
+          "inherit read", "basic") != WYRELOG_E_OK)
+    return 351;
+  if (wyl_policy_store_grant_role_permission (store, "wr.inherit-parent",
+          "wr.inherit.read") != WYRELOG_E_OK)
+    return 352;
+  if (wyl_policy_store_grant_role_inheritance (store, "wr.inherit-child",
+          "wr.inherit-parent") != WYRELOG_E_OK)
+    return 353;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 354;
+
+  if (insert3_symbol (handle, "member_of", "inherit-user",
+          "wr.inherit-child", "inherit-scope") != WYRELOG_E_OK)
+    return 355;
+  if (insert2_symbol (handle, "principal_state", "inherit-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 356;
+  if (insert2_symbol (handle, "session_state", "inherit-scope", "active")
+      != WYRELOG_E_OK)
+    return 357;
+  if (insert4_symbol (handle, "perm_state", "inherit-user",
+          "wr.inherit.read", "inherit-scope", "armed") != WYRELOG_E_OK)
+    return 358;
+
+  gint64 decision_row[3];
+  if (intern3 (handle, "inherit-user", "wr.inherit.read", "inherit-scope",
+          decision_row) != WYRELOG_E_OK)
+    return 359;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 360;
+  if (!allowed)
+    return 361;
+  return 0;
+}
+
+static gint
 check_policy_store_role_permissions_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1224,6 +1278,8 @@ main (void)
   if ((rc = check_policy_store_role_permissions_load_into_engine ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_role_inheritances_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
     return rc;

@@ -52,6 +52,26 @@ CREATE INDEX IF NOT EXISTS idx_role_permissions_perm_id
     ON role_permissions (perm_id);
 
 -- ---------------------------------------------------------------------------
+-- Table: role_inheritances
+-- Mutable role graph edges flattened into role_permission/2 snapshots.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS role_inheritances (
+    child_role_id  TEXT    NOT NULL,
+    parent_role_id TEXT    NOT NULL,
+    granted_at     INTEGER,               -- Unix epoch (seconds)
+    granted_by     TEXT,                  -- Platform engineer identifier
+    PRIMARY KEY (child_role_id, parent_role_id),
+    FOREIGN KEY (child_role_id) REFERENCES roles (role_id),
+    FOREIGN KEY (parent_role_id) REFERENCES roles (role_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_role_inheritances_child
+    ON role_inheritances (child_role_id);
+
+CREATE INDEX IF NOT EXISTS idx_role_inheritances_parent
+    ON role_inheritances (parent_role_id);
+
+-- ---------------------------------------------------------------------------
 -- Table: direct_permissions
 -- Per-principal direct grants mirrored into direct_permission/3.
 -- ---------------------------------------------------------------------------
