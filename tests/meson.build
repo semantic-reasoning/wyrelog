@@ -183,6 +183,10 @@ test('fsm-permission-scope', test_fsm_permission_scope)
 
 access_decision_dl_path = join_paths(
   meson.project_source_root(),
+  'templates', 'access', 'lobac', 'decision.dl',
+)
+access_decision_legacy_dl_path = join_paths(
+  meson.project_source_root(),
   'templates', 'access', 'decision.dl',
 )
 
@@ -190,6 +194,7 @@ test_access_decision = executable('test-access-decision',
   'test-access-decision.c',
   c_args : [
     '-DWYL_TEST_ACCESS_DECISION_DL_PATH="' + access_decision_dl_path + '"',
+    '-DWYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH="' + access_decision_legacy_dl_path + '"',
   ],
   dependencies : [wyrelog_dep],
 )

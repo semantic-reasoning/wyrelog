@@ -11,13 +11,13 @@ G_BEGIN_DECLS;
  * Access decision rule set support code.
  *
  * The Datalog source of truth lives at
- * <datadir>/wyrelog/access/decision.dl. This module exposes the
- * deny-reason taxonomy on the C side: the six v0 codes, their
- * matching origin tags, and a fixed priority that the engine uses
- * to pick a single representative reason for the H1 result struct
- * when multiple deny_reason rows fire for the same (user, perm,
- * scope) tuple. The full row set still goes to the audit log; the
- * priority only collapses the user-visible single-reason field.
+ * <datadir>/wyrelog/access/lobac/decision.dl, with a legacy copy at
+ * <datadir>/wyrelog/access/decision.dl for older template trees. This
+ * module exposes the deny-reason taxonomy on the C side: the six v0
+ * codes, their matching origin tags, and a fixed priority that the
+ * engine uses to pick a single representative reason for the H1 result
+ * struct when multiple deny_reason rows fire for the same (user, perm,
+ * scope) tuple.
  *
  * Code uniqueness contract: the v0 catalogue keys by code alone.
  * Every code maps to exactly one origin tag. A future row that
@@ -42,7 +42,7 @@ typedef enum wyl_deny_reason_code_t
 
 /*
  * Lexical names. The `name` is the string that appears as the
- * fourth argument of the deny_reason/5 fact in decision.dl; the
+ * fourth argument of the deny_reason/5 fact in lobac/decision.dl; the
  * `origin` is the fifth argument. NULL on out-of-range input;
  * callers must not free the returned strings.
  */
