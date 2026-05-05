@@ -24,6 +24,7 @@ check_store_creates_authority_schema (void)
     "permissions",
     "role_permissions",
     "role_inheritances",
+    "role_memberships",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",
@@ -69,6 +70,7 @@ check_template_schema_creates_state_tables (void)
     "permissions",
     "role_permissions",
     "role_inheritances",
+    "role_memberships",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",
@@ -244,6 +246,14 @@ typedef struct
   guint matches;
 } RoleInheritanceExpect;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *role_id;
+  const gchar *scope;
+  guint matches;
+} RoleMembershipExpect;
+
 static wyrelog_error_t
 role_permission_expect_cb (const gchar *role_id, const gchar *perm_id,
     gpointer user_data)
@@ -264,6 +274,19 @@ role_inheritance_expect_cb (const gchar *child_role_id,
 
   if (g_strcmp0 (child_role_id, expect->child_role_id) == 0
       && g_strcmp0 (parent_role_id, expect->parent_role_id) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+role_membership_expect_cb (const gchar *subject_id, const gchar *role_id,
+    const gchar *scope, gpointer user_data)
+{
+  RoleMembershipExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (role_id, expect->role_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -349,6 +372,38 @@ check_store_grants_role_inheritance (void)
     return 66;
   if (permission_expect.matches != 1)
     return 67;
+  return 0;
+}
+
+static gint
+check_store_grants_role_membership (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 68;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 69;
+  if (wyl_policy_store_upsert_role (store, "wr.member-role", "member role")
+      != WYRELOG_E_OK)
+    return 70;
+  if (wyl_policy_store_grant_role_membership (store, "member-user",
+          "wr.member-role", "member-scope") != WYRELOG_E_OK)
+    return 71;
+  if (wyl_policy_store_grant_role_membership (store, "member-user",
+          "wr.member-role", "member-scope") != WYRELOG_E_OK)
+    return 72;
+
+  RoleMembershipExpect expect = {
+    .subject_id = "member-user",
+    .role_id = "wr.member-role",
+    .scope = "member-scope",
+  };
+  if (wyl_policy_store_foreach_role_membership (store,
+          role_membership_expect_cb, &expect) != WYRELOG_E_OK)
+    return 73;
+  if (expect.matches != 1)
+    return 74;
   return 0;
 }
 
@@ -626,6 +681,15 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_role_inheritance (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 59;
+  if (wyl_policy_store_grant_role_membership (store, "role-user",
+          "missing-role", "role-scope") != WYRELOG_E_IO)
+    return 97;
+  if (wyl_policy_store_grant_role_membership (store, NULL, "missing-role",
+          "role-scope") != WYRELOG_E_INVALID)
+    return 98;
+  if (wyl_policy_store_foreach_role_membership (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 99;
   if (wyl_policy_store_set_principal_state (store, NULL, "authenticated")
       != WYRELOG_E_INVALID)
     return 56;
@@ -672,6 +736,8 @@ main (void)
   if ((rc = check_store_grants_role_permission ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_inheritance ()) != 0)
+    return rc;
+  if ((rc = check_store_grants_role_membership ()) != 0)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
     return rc;

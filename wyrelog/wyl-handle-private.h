@@ -95,6 +95,13 @@ wyrelog_error_t wyl_handle_load_policy_store_role_permissions (WylHandle *
     self);
 
 /*
+ * Loads role_membership rows from the handle-owned policy authority store into
+ * the attached read/delta engine pair as member_of/3 facts.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_role_memberships (WylHandle *
+    self);
+
+/*
  * Loads direct_permission rows from the handle-owned policy authority store
  * into the attached read/delta engine pair, together with their "armed"
  * perm_state rows. Rejected unless both the store and engine pair are

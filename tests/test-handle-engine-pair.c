@@ -1037,6 +1037,69 @@ check_policy_store_role_permissions_require_engine_pair (void)
 }
 
 static gint
+check_policy_store_role_memberships_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 333;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.member-load-role",
+          "member load role") != WYRELOG_E_OK)
+    return 334;
+  if (wyl_policy_store_upsert_permission (store, "wr.member-load.read",
+          "member load read", "basic") != WYRELOG_E_OK)
+    return 335;
+  if (wyl_policy_store_grant_role_permission (store, "wr.member-load-role",
+          "wr.member-load.read") != WYRELOG_E_OK)
+    return 336;
+  if (wyl_policy_store_grant_role_membership (store, "member-load-user",
+          "wr.member-load-role", "member-load-scope") != WYRELOG_E_OK)
+    return 337;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 338;
+
+  if (insert2_symbol (handle, "principal_state", "member-load-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 339;
+  if (insert2_symbol (handle, "session_state", "member-load-scope",
+          "active") != WYRELOG_E_OK)
+    return 340;
+  if (insert4_symbol (handle, "perm_state", "member-load-user",
+          "wr.member-load.read", "member-load-scope", "armed")
+      != WYRELOG_E_OK)
+    return 341;
+
+  gint64 decision_row[3];
+  if (intern3 (handle, "member-load-user", "wr.member-load.read",
+          "member-load-scope", decision_row) != WYRELOG_E_OK)
+    return 342;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 343;
+  return allowed ? 0 : 344;
+}
+
+static gint
+check_policy_store_role_memberships_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 345;
+  if (wyl_handle_load_policy_store_role_memberships (NULL)
+      != WYRELOG_E_INVALID)
+    return 346;
+  if (wyl_handle_load_policy_store_role_memberships (handle)
+      != WYRELOG_E_INVALID)
+    return 347;
+  return 0;
+}
+
+static gint
 check_policy_store_direct_permissions_autoload_on_open (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1282,6 +1345,10 @@ main (void)
   if ((rc = check_policy_store_role_inheritances_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_role_memberships_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_role_memberships_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_direct_permissions_autoload_on_open ()) != 0)
     return rc;
