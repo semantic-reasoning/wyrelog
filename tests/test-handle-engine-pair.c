@@ -43,13 +43,6 @@ typedef struct
 typedef struct
 {
   const gchar *expected_relation;
-  WylDeltaKind expected_kind;
-  guint matching;
-} DeltaRelationExpect;
-
-typedef struct
-{
-  const gchar *expected_relation;
   const gint64 *expected_row;
   guint ncols;
   WylDeltaKind expected_kind;
@@ -142,19 +135,31 @@ delta_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
 }
 
 static void
-delta_relation_expect_cb (const gchar *relation, const gint64 *row,
-    guint ncols, WylDeltaKind kind, gpointer user_data)
+delta_count_cb (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
 {
-  DeltaRelationExpect *expect = user_data;
+  guint *seen = user_data;
 
+  (void) relation;
   (void) row;
   (void) ncols;
+  (void) kind;
 
-  if (g_strcmp0 (relation, expect->expected_relation) != 0)
-    return;
-  if (kind != expect->expected_kind)
-    return;
-  expect->matching++;
+  (*seen)++;
+}
+
+static wyrelog_error_t
+drain_delta_callbacks (WylHandle *handle, guint *deltas)
+{
+  for (guint i = 0; i < 8; i++) {
+    *deltas = 0;
+    wyrelog_error_t rc = wyl_handle_engine_step_delta (handle);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (*deltas == 0)
+      return WYRELOG_E_OK;
+  }
+  return WYRELOG_E_INTERNAL;
 }
 
 static void
@@ -816,12 +821,7 @@ check_snapshot_only_insert_skips_delta_engine (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   gint64 row[3];
-  DeltaExpect expect = {
-    "direct_permission",
-    row,
-    WYL_DELTA_INSERT,
-    0,
-  };
+  guint deltas = 0;
 
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 180;
@@ -831,16 +831,18 @@ check_snapshot_only_insert_skips_delta_engine (void)
   if (intern3 (handle, "snapshot-only-user", "wr.stream.list",
           "snapshot-only-scope", row) != WYRELOG_E_OK)
     return 182;
-  if (wyl_handle_engine_set_delta_callback (handle, delta_expect_cb, &expect)
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
       != WYRELOG_E_OK)
     return 183;
+  if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
+    return 185;
   if (wyl_handle_engine_insert (handle, "direct_permission", row, 3)
       != WYRELOG_E_OK)
     return 184;
   if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
-    return 185;
-  if (expect.matching != 0)
-    return 186;
+    return 187;
+  if (deltas != 0)
+    return 188;
   return 0;
 }
 
@@ -849,11 +851,7 @@ check_role_permission_insert_skips_delta_engine (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   gint64 row[2];
-  DeltaRelationExpect expect = {
-    "role_permission",
-    WYL_DELTA_INSERT,
-    0,
-  };
+  guint deltas = 0;
 
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 187;
@@ -866,17 +864,116 @@ check_role_permission_insert_skips_delta_engine (void)
   if (wyl_handle_intern_engine_symbol (handle, "wr.snapshot-role.read",
           &row[1]) != WYRELOG_E_OK)
     return 190;
-  if (wyl_handle_engine_set_delta_callback (handle,
-          delta_relation_expect_cb, &expect) != WYRELOG_E_OK)
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
     return 191;
+  if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
+    return 193;
   if (wyl_handle_engine_insert (handle, "role_permission", row, 2)
       != WYRELOG_E_OK)
     return 192;
   if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
-    return 193;
-  if (expect.matching != 0)
-    return 194;
+    return 195;
+  if (deltas != 0)
+    return 196;
   return 0;
+}
+
+static gint
+check_principal_state_insert_skips_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 195;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 196;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 197;
+  if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
+    return 201;
+  if (insert2_symbol (handle, "principal_state", "snapshot-state-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 198;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+    return 202;
+  return deltas == 0 ? 0 : 203;
+}
+
+static gint
+check_session_state_insert_skips_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 201;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 202;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 203;
+  if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
+    return 207;
+  if (insert2_symbol (handle, "session_state", "snapshot-session",
+          "active") != WYRELOG_E_OK)
+    return 204;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+    return 208;
+  return deltas == 0 ? 0 : 209;
+}
+
+static gint
+check_session_active_insert_skips_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 207;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 208;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 209;
+  if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
+    return 213;
+  if (insert1_symbol (handle, "session_active", "snapshot-active")
+      != WYRELOG_E_OK)
+    return 210;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+    return 214;
+  return deltas == 0 ? 0 : 215;
+}
+
+static gint
+check_perm_state_insert_skips_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 213;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 214;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 215;
+  if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
+    return 219;
+  if (insert4_symbol (handle, "perm_state", "snapshot-perm-user",
+          "wr.snapshot-perm", "snapshot-perm-scope", "armed")
+      != WYRELOG_E_OK)
+    return 216;
+  if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+    return 220;
+  return deltas == 0 ? 0 : 221;
 }
 
 static gint
@@ -1823,6 +1920,14 @@ main (void)
   if ((rc = check_snapshot_only_insert_skips_delta_engine ()) != 0)
     return rc;
   if ((rc = check_role_permission_insert_skips_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_principal_state_insert_skips_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_session_state_insert_skips_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_session_active_insert_skips_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_insert_skips_delta_engine ()) != 0)
     return rc;
   if ((rc = check_remove_fanout_reaches_read_engine ()) != 0)
     return rc;
