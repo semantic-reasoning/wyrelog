@@ -35,10 +35,17 @@ main (void)
   /* Audit iterator returns a non-NULL WylAuditIter on success and
    * yields no rows in the stub state. */
   g_autoptr (WylAuditIter) iter = NULL;
-  if (wyl_client_audit_query (client, NULL, &iter) != WYRELOG_E_OK)
+  if (wyl_client_audit_query (NULL, NULL, &iter) != WYRELOG_E_INVALID)
+    return 13;
+  if (wyl_client_audit_query (client, NULL, NULL) != WYRELOG_E_INVALID)
+    return 14;
+  if (wyl_client_audit_query (client, "decision=deny", &iter) != WYRELOG_E_OK)
     return 5;
   if (iter == NULL)
     return 6;
+  g_autofree gchar *query_filter = wyl_audit_iter_dup_query_filter (iter);
+  if (g_strcmp0 (query_filter, "decision=deny") != 0)
+    return 15;
 
   gboolean has_next = TRUE;
   if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
