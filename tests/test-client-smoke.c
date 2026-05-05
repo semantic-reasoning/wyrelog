@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 
+#include "wyrelog/audit/iter-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/wyl-client-private.h"
 
@@ -53,6 +54,15 @@ main (void)
   if (g_strcmp0 (request_uri,
           "http://example.invalid/audit/events?filter=decision%3Ddeny") != 0)
     return 16;
+  g_autoptr (SoupMessage) message = wyl_audit_iter_new_request_message (iter);
+  if (message == NULL)
+    return 18;
+  if (g_strcmp0 (soup_message_get_method (message), "GET") != 0)
+    return 19;
+  g_autofree gchar *message_uri =
+      g_uri_to_string (soup_message_get_uri (message));
+  if (g_strcmp0 (message_uri, request_uri) != 0)
+    return 20;
 
   gboolean has_next = TRUE;
   if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
