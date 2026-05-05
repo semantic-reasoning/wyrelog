@@ -201,7 +201,8 @@ check_text_mirror (void)
     g_autofree gchar *trimmed = g_strdup (g_strchug (lines[i]));
     if (trimmed[0] == '%' || trimmed[0] == '\0'
         || g_str_has_prefix (trimmed, "//")
-        || g_str_has_prefix (trimmed, ".decl"))
+        || g_str_has_prefix (trimmed, ".decl")
+        || strstr (trimmed, ":-") != NULL || strchr (trimmed, '"') == NULL)
       continue;
     if (!g_str_has_prefix (trimmed, "principal_transition"))
       continue;

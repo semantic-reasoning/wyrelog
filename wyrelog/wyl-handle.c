@@ -2,6 +2,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "wyrelog/engine.h"
+#include "wyl-fsm-principal-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
@@ -108,6 +109,39 @@ wyl_handle_seed_session_active_states (WylHandle *self)
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_handle_engine_insert (self, "session_active", row, 1);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+wyl_handle_seed_principal_transitions (WylHandle *self)
+{
+  gsize n = 0;
+  const wyl_principal_transition_t *table = wyl_fsm_principal_table (&n);
+
+  /* The .dl facts keep the source catalogue readable; this runtime seed makes
+   * the same catalogue available to wirelog snapshots and derived facts. */
+  for (gsize i = 0; i < n; i++) {
+    gint64 row[3];
+    const gchar *from_name = wyl_principal_state_name (table[i].from);
+    const gchar *event_name = wyl_principal_event_name (table[i].event);
+    const gchar *to_name = wyl_principal_state_name (table[i].to);
+    if (from_name == NULL || event_name == NULL || to_name == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (self, from_name, &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, event_name, &row[1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, to_name, &row[2]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_engine_insert (self, "principal_transition", row, 3);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -250,6 +284,9 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_seed_session_active_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_handle_seed_principal_transitions (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_handle_load_policy_store_role_permissions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -260,6 +297,9 @@ load_current_engine_pair (WylHandle *self)
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_load_policy_store_principal_states (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_principal_events (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_load_policy_store_session_states (self);
@@ -605,6 +645,55 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
 
   return wyl_policy_store_foreach_principal_state (self->policy_store,
       insert_policy_store_principal_state, self);
+}
+
+static wyrelog_error_t
+insert_policy_store_principal_event (const gchar *subject_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[4];
+  wyl_principal_state_t from = wyl_principal_state_from_name (from_state);
+  wyl_principal_event_t ev = wyl_principal_event_from_name (event);
+  wyl_principal_state_t to = wyl_principal_state_from_name (to_state);
+
+  if (from == WYL_PRINCIPAL_STATE_LAST_ || ev == WYL_PRINCIPAL_EVENT_LAST_
+      || to == WYL_PRINCIPAL_STATE_LAST_)
+    return WYRELOG_E_POLICY;
+  wyl_principal_state_t validated = WYL_PRINCIPAL_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_principal_step (from, ev, &validated);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (validated != to)
+    return WYRELOG_E_POLICY;
+
+  rc = wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, event, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "principal_event", row, 4);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_principal_events (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_principal_event (self->policy_store,
+      insert_policy_store_principal_event, self);
 }
 
 static wyrelog_error_t

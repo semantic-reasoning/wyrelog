@@ -84,3 +84,27 @@ wyl_principal_event_name (wyl_principal_event_t ev)
     return NULL;
   return event_names[ev];
 }
+
+wyl_principal_state_t
+wyl_principal_state_from_name (const gchar *name)
+{
+  if (name == NULL)
+    return WYL_PRINCIPAL_STATE_LAST_;
+  for (guint i = 0; i < WYL_PRINCIPAL_STATE_LAST_; i++) {
+    if (g_strcmp0 (name, state_names[i]) == 0)
+      return (wyl_principal_state_t) i;
+  }
+  return WYL_PRINCIPAL_STATE_LAST_;
+}
+
+wyl_principal_event_t
+wyl_principal_event_from_name (const gchar *name)
+{
+  if (name == NULL)
+    return WYL_PRINCIPAL_EVENT_LAST_;
+  for (guint i = 0; i < WYL_PRINCIPAL_EVENT_LAST_; i++) {
+    if (g_strcmp0 (name, event_names[i]) == 0)
+      return (wyl_principal_event_t) i;
+  }
+  return WYL_PRINCIPAL_EVENT_LAST_;
+}
