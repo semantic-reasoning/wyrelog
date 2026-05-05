@@ -130,17 +130,22 @@ main (void)
   if (body_size != 2 || memcmp (body_data, "[]", 2) != 0)
     return 26;
 
+  gboolean has_next = TRUE;
+  if (wyl_audit_iter_next (local_iter, &has_next) != WYRELOG_E_OK)
+    return 7;
+  if (has_next)
+    return 8;
+  has_next = TRUE;
+  if (wyl_audit_iter_next (local_iter, &has_next) != WYRELOG_E_OK)
+    return 27;
+  if (has_next)
+    return 28;
+
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
-
-  gboolean has_next = TRUE;
-  if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
-    return 7;
-  if (has_next)
-    return 8;
 
   return 0;
 }
