@@ -37,6 +37,15 @@ typedef struct
   guint matching;
 } DeltaRelationExpect;
 
+typedef struct
+{
+  const gchar *expected_relation;
+  const gint64 *expected_row;
+  guint ncols;
+  WylDeltaKind expected_kind;
+  guint matching;
+} DeltaRowExpect;
+
 static void
 snapshot_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
     gpointer user_data)
@@ -110,6 +119,23 @@ delta_relation_expect_cb (const gchar *relation, const gint64 *row,
     return;
   if (kind != expect->expected_kind)
     return;
+  expect->matching++;
+}
+
+static void
+delta_row_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
+{
+  DeltaRowExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, expect->expected_relation) != 0)
+    return;
+  if (ncols != expect->ncols || kind != expect->expected_kind)
+    return;
+  for (guint i = 0; i < ncols; i++) {
+    if (row[i] != expect->expected_row[i])
+      return;
+  }
   expect->matching++;
 }
 
@@ -603,6 +629,121 @@ check_insert_fanout_reaches_delta_engine (void)
   if (expect.matching == 0)
     return 105;
   return 0;
+}
+
+static gint
+check_principal_event_fanout_derives_delta (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[4];
+  gint64 fired_row[4];
+  DeltaRowExpect expect = {
+    "principal_fired",
+    fired_row,
+    4,
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 106;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 107;
+  if (intern4 (handle, "delta-principal-user", "login_ok", "unverified",
+          "mfa_required", event_row) != WYRELOG_E_OK)
+    return 108;
+  if (intern4 (handle, "delta-principal-user", "unverified", "login_ok",
+          "mfa_required", fired_row) != WYRELOG_E_OK)
+    return 109;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_row_expect_cb,
+          &expect) != WYRELOG_E_OK)
+    return 117;
+  if (wyl_handle_engine_insert (handle, "principal_event", event_row, 4)
+      != WYRELOG_E_OK)
+    return 118;
+  if (expect.matching != 1)
+    return 119;
+  if (wyl_handle_engine_insert (handle, "principal_event", event_row, 4)
+      != WYRELOG_E_OK)
+    return 150;
+  return expect.matching == 1 ? 0 : 151;
+}
+
+static gint
+check_session_event_fanout_derives_delta (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[4];
+  gint64 fired_row[4];
+  DeltaRowExpect expect = {
+    "session_fired",
+    fired_row,
+    4,
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 125;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 126;
+  if (intern4 (handle, "delta-session", "elevate_grant", "active",
+          "elevated", event_row) != WYRELOG_E_OK)
+    return 127;
+  if (intern4 (handle, "delta-session", "active", "elevate_grant",
+          "elevated", fired_row) != WYRELOG_E_OK)
+    return 128;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_row_expect_cb,
+          &expect) != WYRELOG_E_OK)
+    return 129;
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 4)
+      != WYRELOG_E_OK)
+    return 135;
+  return expect.matching == 1 ? 0 : 136;
+}
+
+static gint
+check_delta_callback_survives_reload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 live_event_row[4];
+  gint64 fired_row[4];
+  DeltaRowExpect expect = {
+    "session_fired",
+    fired_row,
+    4,
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 137;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 138;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_session_event (store, "delta-replay-session",
+          "elevate_grant", "active", "elevated") != WYRELOG_E_OK)
+    return 139;
+  if (intern4 (handle, "delta-reload-session", "idle_timeout", "active",
+          "idle", live_event_row) != WYRELOG_E_OK)
+    return 146;
+  if (intern4 (handle, "delta-reload-session", "active", "idle_timeout",
+          "idle", fired_row) != WYRELOG_E_OK)
+    return 146;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_row_expect_cb,
+          &expect) != WYRELOG_E_OK)
+    return 147;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 148;
+  if (expect.matching != 0)
+    return 152;
+  if (wyl_handle_engine_insert (handle, "session_event", live_event_row, 4)
+      != WYRELOG_E_OK)
+    return 149;
+  return expect.matching == 1 ? 0 : 156;
 }
 
 static gint
@@ -1504,6 +1645,12 @@ main (void)
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_principal_event_fanout_derives_delta ()) != 0)
+    return rc;
+  if ((rc = check_session_event_fanout_derives_delta ()) != 0)
+    return rc;
+  if ((rc = check_delta_callback_survives_reload ()) != 0)
     return rc;
   if ((rc = check_snapshot_only_insert_skips_delta_engine ()) != 0)
     return rc;

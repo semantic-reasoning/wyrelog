@@ -23,6 +23,8 @@ struct _WylHandle
   WylEngine *delta_engine;
   GHashTable *engine_symbols_by_id;
   gchar *template_dir;
+  WylDeltaCallback delta_callback;
+  gpointer delta_callback_user_data;
   wyl_policy_store_t *policy_store;
   gboolean login_skip_mfa_allowed;
 #ifdef WYL_HAS_AUDIT
@@ -380,6 +382,21 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
     self->template_dir = old_template_dir;
     return rc;
   }
+  if (self->delta_callback != NULL) {
+    rc = wyl_engine_set_delta_callback (self->delta_engine,
+        self->delta_callback, self->delta_callback_user_data);
+    if (rc != WYRELOG_E_OK) {
+      g_clear_object (&self->read_engine);
+      g_clear_object (&self->delta_engine);
+      g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
+      g_clear_pointer (&self->template_dir, g_free);
+      self->read_engine = old_read_engine;
+      self->delta_engine = old_delta_engine;
+      self->engine_symbols_by_id = old_symbols;
+      self->template_dir = old_template_dir;
+      return rc;
+    }
+  }
 
   g_clear_object (&old_read_engine);
   g_clear_object (&old_delta_engine);
@@ -464,7 +481,11 @@ wyl_handle_dup_engine_symbol (WylHandle *self, gint64 id)
 static gboolean
 relation_fans_out_to_delta (const gchar *relation)
 {
-  return g_strcmp0 (relation, "member_of") == 0;
+  return g_strcmp0 (relation, "member_of") == 0
+      || g_strcmp0 (relation, "principal_transition") == 0
+      || g_strcmp0 (relation, "session_transition") == 0
+      || g_strcmp0 (relation, "principal_event") == 0
+      || g_strcmp0 (relation, "session_event") == 0;
 }
 
 wyrelog_error_t
@@ -545,7 +566,14 @@ wyl_handle_engine_set_delta_callback (WylHandle *self, WylDeltaCallback cb,
   if (self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  return wyl_engine_set_delta_callback (self->delta_engine, cb, user_data);
+  wyrelog_error_t rc =
+      wyl_engine_set_delta_callback (self->delta_engine, cb, user_data);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  self->delta_callback = cb;
+  self->delta_callback_user_data = user_data;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
