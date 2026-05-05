@@ -31,6 +31,7 @@ G_DECLARE_FINAL_TYPE (WylAuditIter, wyl_audit_iter, WYL, AUDIT_ITER, GObject);
 /* Lifecycle */
 wyrelog_error_t wyl_client_new (const gchar * base_url,
     WylClient ** out_client);
+gchar *wyl_client_dup_base_url (const WylClient * client);
 
 /* Authentication */
 wyrelog_error_t wyl_client_login (WylClient * client,

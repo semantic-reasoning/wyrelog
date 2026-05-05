@@ -4,14 +4,27 @@
 struct _WylClient
 {
   GObject parent_instance;
+  gchar *base_url;
 };
 
 G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
 
 static void
+wyl_client_finalize (GObject *object)
+{
+  WylClient *self = WYL_CLIENT (object);
+
+  g_free (self->base_url);
+
+  G_OBJECT_CLASS (wyl_client_parent_class)->finalize (object);
+}
+
+static void
 wyl_client_class_init (WylClientClass *klass)
 {
-  (void) klass;
+  GObjectClass *object_class = G_OBJECT_CLASS (klass);
+
+  object_class->finalize = wyl_client_finalize;
 }
 
 static void
@@ -23,13 +36,32 @@ wyl_client_init (WylClient *self)
 wyrelog_error_t
 wyl_client_new (const gchar *base_url, WylClient **out_client)
 {
-  (void) base_url;
-
   if (out_client == NULL)
     return WYRELOG_E_INVALID;
+  *out_client = NULL;
+  if (base_url == NULL || base_url[0] == '\0')
+    return WYRELOG_E_INVALID;
 
-  *out_client = g_object_new (WYL_TYPE_CLIENT, NULL);
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GUri) uri = g_uri_parse (base_url, G_URI_FLAGS_NONE, &error);
+  if (uri == NULL)
+    return WYRELOG_E_INVALID;
+
+  const gchar *scheme = g_uri_get_scheme (uri);
+  if (g_strcmp0 (scheme, "http") != 0 && g_strcmp0 (scheme, "https") != 0)
+    return WYRELOG_E_INVALID;
+
+  WylClient *client = g_object_new (WYL_TYPE_CLIENT, NULL);
+  client->base_url = g_strdup (base_url);
+  *out_client = client;
   return WYRELOG_E_OK;
+}
+
+gchar *
+wyl_client_dup_base_url (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->base_url);
 }
 
 wyrelog_error_t
