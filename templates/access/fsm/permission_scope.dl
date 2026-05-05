@@ -8,8 +8,9 @@
 // IDB rule set with no transition lifecycle: the host must inject
 // perm_state(user, perm, scope, "armed") for unguarded permissions
 // that are ready to participate in allow/3. Guarded permissions are
-// armed only when the host injects the request-local context_now/2
-// and eval_guard/3 bridge facts for a satisfied guard expression.
+// armed only when the host injects request-local context_now/3,
+// guard_context/6, and eval_guard/4 bridge facts for a satisfied
+// guard expression.
 //
 // EDB schemas (host-populated, no clauses below):
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
@@ -17,9 +18,11 @@
 //                                                   bootstrap.dl
 //   perm_arm_rule(perm, guard_handle)            -- compound guard
 //                                                   payload key
-//   context_now(user, scope)                     -- request context
+//   context_now(user, scope, ctx)                -- request context
 //                                                   activation
-//   eval_guard(user, perm, scope)                -- host guard result
+//   guard_context(ctx, user, scope, timestamp,   -- structured request
+//                 loc_class, risk)                  context payload
+//   eval_guard(user, perm, scope, ctx)           -- host guard result
 //
 // Row order in any future perm_arm_rule block will be load-bearing:
 // the test harness compares the perm-id list line by line against
@@ -28,8 +31,10 @@
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: symbol)
-.decl context_now(user: symbol, scope: symbol)
-.decl eval_guard(user: symbol, perm: symbol, scope: symbol)
+.decl context_now(user: symbol, scope: symbol, ctx: symbol)
+.decl guard_context(ctx: symbol, user: symbol, scope: symbol,
+    timestamp: int64, loc_class: symbol, risk: int64)
+.decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: symbol)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
 // --- perm_arm_rule catalogue mirror ----------------------------------
@@ -41,7 +46,7 @@
 // the compound-term guard payload itself lives in the C catalogue,
 // keyed by perm-id; the `_v0_deferred` placeholder pins the row count
 // while the host bridge exposes satisfied guard decisions as
-// eval_guard/3 facts.
+// eval_guard/4 facts tied to a structured guard_context/6 row.
 
 perm_arm_rule("wr.sys.admin",        "_v0_deferred").
 perm_arm_rule("wr.sys.key_rotate",   "_v0_deferred").
@@ -66,10 +71,11 @@ armed(U, P, S) :-
 
 // rule-3: gated permission with compound-term guard payload. The
 // payload tree remains in the C catalogue for now, keyed by P; the
-// host evaluates it against request context and injects eval_guard/3
+// host evaluates it against request context and injects eval_guard/4
 // only when the guard is satisfied.
 armed(U, P, S) :-
     has_permission(U, P, S),
-    context_now(U, S),
+    context_now(U, S, C),
+    guard_context(C, U, S, _, _, _),
     perm_arm_rule(P, _),
-    eval_guard(U, P, S).
+    eval_guard(U, P, S, C).
