@@ -330,6 +330,10 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (handle == NULL)
     return WYRELOG_E_INVALID;
 
+  if (req != NULL && wyl_login_req_get_skip_mfa (req) &&
+      !wyl_handle_get_login_skip_mfa_allowed (handle))
+    return WYRELOG_E_POLICY;
+
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
   const gchar *username = NULL;
   if (req != NULL) {

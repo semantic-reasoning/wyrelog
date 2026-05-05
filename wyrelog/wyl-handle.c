@@ -22,6 +22,7 @@ struct _WylHandle
   GHashTable *engine_symbols_by_id;
   gchar *template_dir;
   wyl_policy_store_t *policy_store;
+  gboolean login_skip_mfa_allowed;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
 #endif
@@ -216,6 +217,20 @@ wyl_handle_get_policy_store (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return self->policy_store;
+}
+
+void
+wyl_handle_set_login_skip_mfa_allowed (WylHandle *self, gboolean allowed)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->login_skip_mfa_allowed = allowed;
+}
+
+gboolean
+wyl_handle_get_login_skip_mfa_allowed (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
+  return self->login_skip_mfa_allowed;
 }
 
 static GHashTable *

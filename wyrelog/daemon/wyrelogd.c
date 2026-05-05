@@ -282,7 +282,11 @@ check_policy_snapshot_reload_ready (WylHandle *handle)
   wyl_login_req_set_skip_mfa (login, TRUE);
 
   g_autoptr (WylSession) session = NULL;
+  gboolean skip_mfa_was_allowed =
+      wyl_handle_get_login_skip_mfa_allowed (handle);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  wyl_handle_set_login_skip_mfa_allowed (handle, skip_mfa_was_allowed);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -338,7 +342,11 @@ check_role_permission_snapshot_reload_ready (WylHandle *handle)
   wyl_login_req_set_skip_mfa (login, TRUE);
 
   g_autoptr (WylSession) session = NULL;
+  gboolean skip_mfa_was_allowed =
+      wyl_handle_get_login_skip_mfa_allowed (handle);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  wyl_handle_set_login_skip_mfa_allowed (handle, skip_mfa_was_allowed);
   if (rc != WYRELOG_E_OK)
     return rc;
 

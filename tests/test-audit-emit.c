@@ -788,6 +788,7 @@ check_login_skip_mfa_emits_principal_state_audit_row (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "audit-skip-mfa-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK) {
     g_object_unref (handle);

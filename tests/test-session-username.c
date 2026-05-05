@@ -405,6 +405,36 @@ check_login_session_id_is_active_decision_scope (void)
 }
 
 static gint
+check_login_skip_mfa_rejected_by_default (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 149;
+
+  if (wyl_handle_get_login_skip_mfa_allowed (handle))
+    return 150;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "skip-mfa-denied-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_POLICY)
+    return 151;
+  if (session != NULL)
+    return 152;
+
+  PrincipalStateExpect expect = {
+    .subject_id = "skip-mfa-denied-user",
+    .state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 153;
+  return expect.matches == 0 ? 0 : 154;
+}
+
+static gint
 check_login_skip_mfa_authenticates_principal (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -420,6 +450,7 @@ check_login_skip_mfa_authenticates_principal (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "skip-mfa-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 155;
@@ -498,6 +529,7 @@ check_session_close_deactivates_decision_scope (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "close-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 172;
@@ -613,6 +645,7 @@ check_elevated_session_remains_active_decision_scope (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevate-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 222;
@@ -648,6 +681,7 @@ check_elevated_session_close_deactivates_decision_scope (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-close-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 232;
@@ -719,6 +753,7 @@ check_idle_session_deactivates_decision_scope (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "idle-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 272;
@@ -758,6 +793,7 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-idle-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 282;
@@ -829,6 +865,7 @@ check_expiring_session_deactivates_decision_scope (void)
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "expiry-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   g_autoptr (WylSession) session = NULL;
   if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
     return 312;
@@ -978,6 +1015,8 @@ main (void)
   if ((rc = check_login_persists_active_session_state ()) != 0)
     return rc;
   if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_rejected_by_default ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
     return rc;
