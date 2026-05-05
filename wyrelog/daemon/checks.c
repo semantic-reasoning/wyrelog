@@ -59,6 +59,77 @@ wyl_daemon_check_policy_store_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+contains_symbol_row2 (WylHandle *handle, const gchar *relation,
+    const gchar *a, const gchar *b, gboolean *out_found)
+{
+  gint64 row[2];
+
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, relation, row, 2, out_found);
+}
+
+wyrelog_error_t
+wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
+{
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+
+  wyl_audit_event_set_subject_id (ev, "wyrelogd");
+  wyl_audit_event_set_action (ev, "policy_audit_reload_check");
+  wyl_audit_event_set_resource_id (ev, "audit_event");
+  wyl_audit_event_set_deny_reason (ev, "readiness");
+  wyl_audit_event_set_deny_origin (ev, "policy_store");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+
+  g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (ev);
+  if (audit_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_append_audit_event (store, audit_id,
+      wyl_audit_event_get_created_at_us (ev),
+      wyl_audit_event_get_subject_id (ev), wyl_audit_event_get_action (ev),
+      wyl_audit_event_get_resource_id (ev),
+      wyl_audit_event_get_deny_reason (ev),
+      wyl_audit_event_get_deny_origin (ev),
+      wyl_audit_event_get_decision (ev));
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_handle_reload_engine_pair (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 event_row[3];
+  gboolean found = FALSE;
+  rc = wyl_handle_intern_engine_symbol (handle, audit_id, &event_row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  event_row[1] = wyl_audit_event_get_created_at_us (ev);
+  rc = wyl_handle_intern_engine_symbol (handle, "allow", &event_row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_contains (handle, "audit_event", event_row, 3, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+
+  rc = contains_symbol_row2 (handle, "audit_event_action", audit_id,
+      "policy_audit_reload_check", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_daemon_check_audit_sink_ready (WylHandle *handle)
 {
@@ -291,6 +362,13 @@ wyl_daemon_run_checks (WylHandle *handle)
   rc = wyl_daemon_check_policy_store_ready (handle);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: policy store readiness check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_policy_audit_facts_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: policy audit fact readiness check failed: %s\n",
         wyrelog_error_string (rc));
     return 1;
   }
