@@ -83,7 +83,27 @@ typedef struct
 {
   gchar *relation;
   wyrelog_error_t rc;
-} WylHandleEngineRemoveFaultOnce;
+} WylHandleEngineFaultOnce;
+
+typedef WylHandleEngineFaultOnce WylHandleEngineInsertFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineRemoveFaultOnce;
+
+static inline void
+wyl_handle_engine_fault_once_free (gpointer data)
+{
+  WylHandleEngineFaultOnce *fault = data;
+
+  if (fault == NULL)
+    return;
+  g_free (fault->relation);
+  g_free (fault);
+}
+
+static inline GQuark
+wyl_handle_engine_insert_fault_once_quark (void)
+{
+  return g_quark_from_static_string ("wyrelog-handle-engine-insert-fault-once");
+}
 
 static inline GQuark
 wyl_handle_engine_remove_fault_once_quark (void)
@@ -94,12 +114,31 @@ wyl_handle_engine_remove_fault_once_quark (void)
 static inline void
 wyl_handle_engine_remove_fault_once_free (gpointer data)
 {
-  WylHandleEngineRemoveFaultOnce *fault = data;
+  wyl_handle_engine_fault_once_free (data);
+}
 
-  if (fault == NULL)
-    return;
-  g_free (fault->relation);
-  g_free (fault);
+/*
+ * Test-only fault hook for private insert-path coverage. The next
+ * wyl_handle_engine_insert() call for @relation fails with @rc before the row
+ * reaches the engine. The hook clears after one match.
+ * @rc must be a non-OK error.
+ */
+static inline void
+wyl_handle_set_engine_insert_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineInsertFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineInsertFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_insert_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
 }
 
 /*
@@ -201,6 +240,17 @@ wyrelog_error_t wyl_handle_load_policy_store_session_events (WylHandle * self);
  * symbols. Rejected unless both the store and engine pair are available.
  */
 wyrelog_error_t wyl_handle_load_policy_store_audit_facts (WylHandle * self);
+
+/*
+ * Projects one durable audit row into the currently attached read engine as
+ * private audit_event* facts. A handle without an open engine pair accepts the
+ * row as already durable and performs no live projection.
+ */
+wyrelog_error_t wyl_handle_insert_audit_fact (WylHandle * self,
+    const gchar * id, gint64 created_at_us, const gchar * subject_id,
+    const gchar * action, const gchar * resource_id,
+    const gchar * deny_reason, const gchar * deny_origin,
+    wyl_decision_t decision);
 
 /*
  * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
