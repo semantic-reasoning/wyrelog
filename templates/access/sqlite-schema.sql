@@ -196,6 +196,26 @@ CREATE INDEX IF NOT EXISTS idx_session_states_state
     ON session_states (state);
 
 -- ---------------------------------------------------------------------------
+-- Table: session_events
+-- Append-only session FSM transition ledger. Current state is kept in
+-- session_states; this table preserves the event edge that produced it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS session_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT    NOT NULL,
+    event      TEXT    NOT NULL,
+    from_state TEXT    NOT NULL,
+    to_state   TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_events_session_id
+    ON session_events (session_id);
+
+CREATE INDEX IF NOT EXISTS idx_session_events_event
+    ON session_events (event);
+
+-- ---------------------------------------------------------------------------
 -- Table: audit_events
 -- Append-only audit sink mirrored from runtime audit emission.
 -- ---------------------------------------------------------------------------

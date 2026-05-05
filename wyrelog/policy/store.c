@@ -216,6 +216,18 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       ");"
       "CREATE INDEX IF NOT EXISTS idx_session_states_state "
       "  ON session_states (state);"
+      "CREATE TABLE IF NOT EXISTS session_events ("
+      "  event_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  session_id TEXT NOT NULL,"
+      "  event TEXT NOT NULL,"
+      "  from_state TEXT NOT NULL,"
+      "  to_state TEXT NOT NULL,"
+      "  created_at INTEGER NOT NULL"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_session_events_session_id "
+      "  ON session_events (session_id);"
+      "CREATE INDEX IF NOT EXISTS idx_session_events_event "
+      "  ON session_events (event);"
       "CREATE TABLE IF NOT EXISTS audit_events ("
       "  id TEXT PRIMARY KEY,"
       "  created_at_us INTEGER NOT NULL,"
@@ -672,6 +684,70 @@ wyl_policy_store_foreach_session_state (wyl_policy_store_t *store,
     const gchar *session_id = (const gchar *) sqlite3_column_text (stmt, 0);
     const gchar *state = (const gchar *) sqlite3_column_text (stmt, 1);
     rc = cb (session_id, state, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_append_session_event (wyl_policy_store_t *store,
+    const gchar *session_id, const gchar *event, const gchar *from_state,
+    const gchar *to_state)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || session_id == NULL
+      || event == NULL || from_state == NULL || to_state == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO session_events "
+      "  (session_id, event, from_state, to_state, created_at) "
+      "VALUES (?, ?, ?, ?, unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, session_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, event)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, from_state)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, to_state)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_session_event (wyl_policy_store_t *store,
+    wyl_policy_session_event_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT session_id, event, from_state, to_state "
+      "FROM session_events ORDER BY event_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *session_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *event = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *from_state = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *to_state = (const gchar *) sqlite3_column_text (stmt, 3);
+    rc = cb (session_id, event, from_state, to_state, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;

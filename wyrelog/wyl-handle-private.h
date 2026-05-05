@@ -181,6 +181,13 @@ wyrelog_error_t wyl_handle_load_policy_store_principal_events (WylHandle *
 wyrelog_error_t wyl_handle_load_policy_store_session_states (WylHandle * self);
 
 /*
+ * Loads session_event rows from the handle-owned policy authority store into
+ * the attached read/delta engine pair as session_event/4 facts. Rejected
+ * unless both the store and engine pair are available.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_session_events (WylHandle * self);
+
+/*
  * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
  * engine pair is already open.
  */

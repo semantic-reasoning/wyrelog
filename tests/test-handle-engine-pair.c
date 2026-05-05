@@ -1379,6 +1379,97 @@ check_policy_store_session_states_require_engine_pair (void)
   return 0;
 }
 
+static gint
+check_policy_store_session_events_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 420;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_session_event (store, "session-event-load",
+          "elevate_grant", "active", "elevated") != WYRELOG_E_OK)
+    return 421;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 422;
+
+  gint64 fired_row[4];
+  if (intern4 (handle, "session-event-load", "active", "elevate_grant",
+          "elevated", fired_row) != WYRELOG_E_OK)
+    return 423;
+  RelationSnapshotExpect fired_expect = {
+    .expected_relation = "session_fired",
+    .expected_row = fired_row,
+    .ncols = 4,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "session_fired", relation_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 424;
+  if (fired_expect.seen != 1)
+    return 425;
+  return 0;
+}
+
+static gint
+check_policy_store_session_events_reject_invalid_edges (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 430;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_session_event (store, "session-event-invalid",
+          "request", "expiring", "active") != WYRELOG_E_OK)
+    return 431;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 432;
+  return 0;
+}
+
+static gint
+check_policy_store_session_events_reload_failure_preserves_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 433;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 434;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_session_event (store, "session-event-invalid",
+          "request", "expiring", "active") != WYRELOG_E_OK)
+    return 435;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 436;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 437;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 438;
+}
+
+static gint
+check_policy_store_session_events_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 440;
+  if (wyl_handle_load_policy_store_session_events (NULL) != WYRELOG_E_INVALID)
+    return 441;
+  if (wyl_handle_load_policy_store_session_events (handle)
+      != WYRELOG_E_INVALID)
+    return 442;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -1467,6 +1558,15 @@ main (void)
   if ((rc = check_policy_store_session_states_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_session_states_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_session_events_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_session_events_reject_invalid_edges ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_session_events_reload_failure_preserves_pair ())
+      != 0)
+    return rc;
+  if ((rc = check_policy_store_session_events_require_engine_pair ()) != 0)
     return rc;
 
   return 0;
