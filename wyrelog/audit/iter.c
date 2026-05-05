@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include "wyrelog/audit/iter-private.h"
 #include "wyrelog/client.h"
 
 struct _WylAuditIter
@@ -74,6 +75,15 @@ wyl_audit_iter_dup_request_uri (const WylAuditIter *iter)
   g_autofree gchar *escaped =
       g_uri_escape_string (iter->query_filter, NULL, TRUE);
   return g_strdup_printf ("%s?filter=%s", path, escaped);
+}
+
+SoupMessage *
+wyl_audit_iter_new_request_message (WylAuditIter *iter)
+{
+  g_return_val_if_fail (WYL_IS_AUDIT_ITER (iter), NULL);
+
+  g_autofree gchar *request_uri = wyl_audit_iter_dup_request_uri (iter);
+  return soup_message_new ("GET", request_uri);
 }
 
 wyrelog_error_t
