@@ -88,6 +88,71 @@ insert_symbol_row4 (WylHandle *handle, const gchar *relation, const gchar *a,
 }
 
 static wyrelog_error_t
+contains_audit_event_fact (WylHandle *handle, const gchar *id,
+    gint64 created_at_us, const gchar *decision, gboolean *out_contains)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern_symbol (handle, id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  row[1] = created_at_us;
+  rc = intern_symbol (handle, decision, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, "audit_event", row, 3,
+      out_contains);
+}
+
+static wyrelog_error_t
+contains_audit_event_attr_fact (WylHandle *handle, const gchar *relation,
+    const gchar *id, const gchar *value, gboolean *out_contains)
+{
+  gint64 row[2];
+  wyrelog_error_t rc = intern_symbol (handle, id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, value, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, relation, row, 2, out_contains);
+}
+
+typedef struct
+{
+  gint64 audit_id;
+  guint matches;
+} AuditFactCount;
+
+static void
+count_audit_fact_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  (void) relation;
+  AuditFactCount *count = user_data;
+
+  if (ncols >= 1 && row[0] == count->audit_id)
+    count->matches++;
+}
+
+static wyrelog_error_t
+count_audit_attr_facts (WylHandle *handle, const gchar *relation,
+    const gchar *id, guint *out_count)
+{
+  gint64 audit_id = 0;
+  wyrelog_error_t rc = intern_symbol (handle, id, &audit_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  AuditFactCount count = { audit_id, 0 };
+  rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle), relation,
+      count_audit_fact_cb, &count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_count = count.matches;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 insert_not_armed_decide_fixture (WylHandle *handle)
 {
   wyrelog_error_t rc = insert_symbol_row2 (handle, "role_permission",
@@ -1446,6 +1511,112 @@ check_emit_rejects_null_args (void)
   return 0;
 }
 
+static gint
+check_policy_store_audit_rows_load_wirelog_facts (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 161;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  static const gchar *full_id = "01890c10-2e3f-7000-8000-000000000010";
+  if (wyl_policy_store_append_audit_event (store, full_id, 1001,
+          "audit-fact-user", "audit-fact-action", "audit-fact-resource",
+          "not_armed", "perm_state", WYL_DECISION_DENY) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 162;
+  }
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 163;
+  }
+
+  gboolean contains = FALSE;
+  wyrelog_error_t fact_rc =
+      contains_audit_event_fact (handle, full_id, 1001, "deny", &contains);
+  if (fact_rc != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 192;
+  }
+  if (!contains) {
+    g_object_unref (handle);
+    return 164;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_subject", full_id,
+          "audit-fact-user", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 165;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", full_id,
+          "audit-fact-action", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 166;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_resource", full_id,
+          "audit-fact-resource", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 167;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason",
+          full_id, "not_armed", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 168;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin",
+          full_id, "perm_state", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 169;
+  }
+
+  static const gchar *sparse_id = "01890c10-2e3f-7000-8000-000000000011";
+  if (wyl_policy_store_append_audit_event (store, sparse_id, 1002, NULL,
+          "audit-sparse-action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 170;
+  }
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 171;
+  }
+  if (contains_audit_event_fact (handle, sparse_id, 1002, "allow", &contains)
+      != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 172;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", sparse_id,
+          "audit-sparse-action", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 173;
+  }
+
+  static const struct
+  {
+    const gchar *relation;
+    guint expected;
+  } optional_counts[] = {
+    {"audit_event_subject", 0},
+    {"audit_event_resource", 0},
+    {"audit_event_deny_reason", 0},
+    {"audit_event_deny_origin", 0},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (optional_counts); i++) {
+    guint count = 0;
+    if (count_audit_attr_facts (handle, optional_counts[i].relation,
+            sparse_id, &count) != WYRELOG_E_OK) {
+      g_object_unref (handle);
+      return (gint) (174 + i);
+    }
+    if (count != optional_counts[i].expected) {
+      g_object_unref (handle);
+      return (gint) (180 + i);
+    }
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
 int
 main (void)
 {
@@ -1489,6 +1660,8 @@ main (void)
   if ((rc = check_role_grant_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_role_revoke_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_audit_rows_load_wirelog_facts ()) != 0)
     return rc;
   if ((rc = check_emit_rejects_null_args ()) != 0)
     return rc;

@@ -400,7 +400,10 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_session_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_load_policy_store_session_events (self);
+  rc = wyl_handle_load_policy_store_session_events (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_load_policy_store_audit_facts (self);
 }
 
 static wyrelog_error_t
@@ -899,6 +902,90 @@ wyl_handle_load_policy_store_session_events (WylHandle *self)
 
   return wyl_policy_store_foreach_session_event (self->policy_store,
       insert_policy_store_session_event, self);
+}
+
+static const gchar *
+decision_symbol (wyl_decision_t decision)
+{
+  switch (decision) {
+    case WYL_DECISION_DENY:
+      return "deny";
+    case WYL_DECISION_ALLOW:
+      return "allow";
+    default:
+      return NULL;
+  }
+}
+
+static wyrelog_error_t
+insert_audit_fact_symbol (WylHandle *self, const gchar *relation,
+    gint64 audit_id, const gchar *value)
+{
+  if (value == NULL)
+    return WYRELOG_E_OK;
+
+  gint64 row[2] = { audit_id, 0 };
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self, value, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, relation, row, 2);
+}
+
+static wyrelog_error_t
+insert_policy_store_audit_fact (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    wyl_decision_t decision, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  const gchar *decision_name = decision_symbol (decision);
+  if (decision_name == NULL)
+    return WYRELOG_E_POLICY;
+
+  gint64 audit_event[3];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, id, &audit_event[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  audit_event[1] = created_at_us;
+  rc = wyl_handle_intern_engine_symbol (self, decision_name, &audit_event[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_engine_insert (self, "audit_event_input", audit_event, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = insert_audit_fact_symbol (self, "audit_event_subject_input",
+      audit_event[0], subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_audit_fact_symbol (self, "audit_event_action_input",
+      audit_event[0], action);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_audit_fact_symbol (self, "audit_event_resource_input",
+      audit_event[0], resource_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_audit_fact_symbol (self, "audit_event_deny_reason_input",
+      audit_event[0], deny_reason);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_audit_fact_symbol (self, "audit_event_deny_origin_input",
+      audit_event[0], deny_origin);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_audit_facts (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_audit_event (self->policy_store,
+      insert_policy_store_audit_fact, self);
 }
 
 typedef struct
