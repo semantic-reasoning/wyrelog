@@ -18,8 +18,9 @@
  * into wyl_dl_rule_t form and asserts the program is stratified.
  * The negation edge in the state-driven rule references
  * \+ perm_arm_rule, and the guarded rule goes through eval_guard /
- * context_now. No edge can close a cycle because perm_arm_rule,
- * perm_state, has_permission, context_now and eval_guard are
+ * context_now / guard_context. No edge can close a cycle because
+ * perm_arm_rule, perm_state, has_permission, context_now,
+ * guard_context and eval_guard are
  * EDB-only — none of them appears as a head predicate in the
  * lifted rule set.
  */
@@ -33,6 +34,7 @@ check_stratification (void)
   static const wyl_dl_body_atom_t rule3_body[] = {
     {.predicate = "has_permission",.negated = FALSE},
     {.predicate = "context_now",.negated = FALSE},
+    {.predicate = "guard_context",.negated = FALSE},
     {.predicate = "perm_arm_rule",.negated = FALSE},
     {.predicate = "eval_guard",.negated = FALSE},
   };

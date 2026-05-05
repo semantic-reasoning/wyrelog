@@ -15,13 +15,14 @@ G_BEGIN_DECLS;
  * <datadir>/wyrelog/access/fsm/permission_scope.dl. This module
  * mirrors the catalogue rows on the C side and provides a guard
  * evaluator the decision layer can call before it exposes a
- * request-local eval_guard/3 bridge fact to wirelog.
+ * request-local eval_guard/4 bridge fact to wirelog.
  *
- * The version-0 Datalog bridge is intentionally flat:
- * context_now(user, scope) and eval_guard(user, perm, scope).
- * Richer scope metadata remains in wyl_scope_t and in the C guard
- * catalogue until wirelog compound declarations can carry the
- * canonical scope payload directly.
+ * The version-0 Datalog bridge carries a request-local context
+ * handle: context_now(user, scope, ctx), guard_context(ctx, user,
+ * scope, timestamp, loc_class, risk), and eval_guard(user, perm,
+ * scope, ctx). The guard expression payload remains in the C
+ * catalogue until wirelog compound declarations can carry it
+ * directly.
  *
  * Evaluation contract: every uncertain or undefined branch
  * returns FALSE (fail-closed). This includes a NULL expression, a

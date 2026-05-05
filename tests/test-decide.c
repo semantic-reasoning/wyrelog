@@ -124,6 +124,12 @@ typedef struct
   guint calls;
 } WindowExpect;
 
+typedef struct
+{
+  const gint64 *row;
+  guint matches;
+} GuardFactExpect;
+
 static gboolean
 window_expect_cb (gint64 timestamp, const gchar *window_name,
     gpointer user_data)
@@ -135,6 +141,37 @@ window_expect_cb (gint64 timestamp, const gchar *window_name,
   if (g_strcmp0 (window_name, expect->expected_window) != 0)
     return FALSE;
   return expect->answer;
+}
+
+static void
+count_context_now_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  (void) relation;
+  GuardFactExpect *expect = user_data;
+  if (ncols == 3 && row[0] == expect->row[0] && row[1] == expect->row[2])
+    expect->matches++;
+}
+
+static void
+count_eval_guard_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  (void) relation;
+  GuardFactExpect *expect = user_data;
+  if (ncols == 4 && row[0] == expect->row[0] && row[1] == expect->row[1]
+      && row[2] == expect->row[2])
+    expect->matches++;
+}
+
+static void
+count_guard_context_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  (void) relation;
+  GuardFactExpect *expect = user_data;
+  if (ncols == 6 && row[1] == expect->row[0] && row[2] == expect->row[2])
+    expect->matches++;
 }
 
 static gint
@@ -152,21 +189,29 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return base_code + 2;
 
-  gint64 context_row[2] = { row[0], row[2] };
-  gboolean found = TRUE;
-  rc = wyl_handle_engine_contains (handle, "context_now", context_row, 2,
-      &found);
+  GuardFactExpect expect = { row, 0 };
+  rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+      "context_now", count_context_now_cb, &expect);
   if (rc != WYRELOG_E_OK)
     return base_code + 3;
-  if (found)
+  if (expect.matches != 0)
     return base_code + 4;
 
-  found = TRUE;
-  rc = wyl_handle_engine_contains (handle, "eval_guard", row, 3, &found);
+  expect.matches = 0;
+  rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+      "eval_guard", count_eval_guard_cb, &expect);
   if (rc != WYRELOG_E_OK)
     return base_code + 5;
-  if (found)
+  if (expect.matches != 0)
     return base_code + 6;
+
+  expect.matches = 0;
+  rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+      "guard_context", count_guard_context_cb, &expect);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 7;
+  if (expect.matches != 0)
+    return base_code + 8;
 
   return 0;
 }

@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <string.h>
+
 #include "wyrelog/wyrelog.h"
 
 #include "access/decision-private.h"
@@ -24,6 +26,16 @@ struct _wyl_decide_resp
   gchar *deny_reason;
   gchar *deny_origin;
 };
+
+typedef struct guard_eval_facts_t
+{
+  gint64 context_now[3];
+  gint64 guard_context[6];
+  gint64 eval_guard[4];
+  gboolean context_now_inserted;
+  gboolean guard_context_inserted;
+  gboolean eval_guard_inserted;
+} guard_eval_facts_t;
 
 wyl_decide_req_t *
 wyl_decide_req_new (void)
@@ -255,33 +267,99 @@ guard_is_satisfied (const wyl_guard_expr_t *guard, const wyl_decide_req_t *req)
   return wyl_eval_guard (guard, &scope);
 }
 
-static wyrelog_error_t
-insert_guard_eval_facts (WylHandle *handle, const gint64 row[3])
+static gchar *
+build_guard_context_symbol (const wyl_decide_req_t *req)
 {
-  gint64 context_row[2] = { row[0], row[2] };
-  wyrelog_error_t rc =
-      wyl_handle_engine_insert (handle, "context_now", context_row, 2);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_handle_engine_insert (handle, "eval_guard", row, 3);
-  if (rc != WYRELOG_E_OK) {
-    (void) wyl_handle_engine_remove (handle, "context_now", context_row, 2);
-    return rc;
-  }
-
-  return WYRELOG_E_OK;
+  static gint next_id = 0;
+  gint id = g_atomic_int_add (&next_id, 1) + 1;
+  return g_strdup_printf ("scope(metadata(%" G_GINT64_FORMAT ",%s,%"
+      G_GINT64_FORMAT "),request(%d))", req->guard_timestamp,
+      req->guard_loc_class, req->guard_risk, id);
 }
 
 static wyrelog_error_t
-remove_guard_eval_facts (WylHandle *handle, const gint64 row[3])
+remove_guard_eval_facts (WylHandle *handle, const guard_eval_facts_t *facts)
 {
-  gint64 context_row[2] = { row[0], row[2] };
-  wyrelog_error_t rc = wyl_handle_engine_remove (handle, "eval_guard", row, 3);
+  wyrelog_error_t first_rc = WYRELOG_E_OK;
+
+  if (facts->eval_guard_inserted) {
+    wyrelog_error_t rc =
+        wyl_handle_engine_remove (handle, "eval_guard", facts->eval_guard, 4);
+    if (first_rc == WYRELOG_E_OK)
+      first_rc = rc;
+  }
+  if (facts->context_now_inserted) {
+    wyrelog_error_t rc =
+        wyl_handle_engine_remove (handle, "context_now", facts->context_now, 3);
+    if (first_rc == WYRELOG_E_OK)
+      first_rc = rc;
+  }
+  if (facts->guard_context_inserted) {
+    wyrelog_error_t rc = wyl_handle_engine_remove (handle, "guard_context",
+        facts->guard_context, 6);
+    if (first_rc == WYRELOG_E_OK)
+      first_rc = rc;
+  }
+
+  return first_rc;
+}
+
+static wyrelog_error_t
+insert_guard_eval_facts (WylHandle *handle, const gint64 row[3],
+    const wyl_decide_req_t *req, guard_eval_facts_t *facts)
+{
+  memset (facts, 0, sizeof (*facts));
+
+  g_autofree gchar *context_symbol = build_guard_context_symbol (req);
+  gint64 context_id = 0;
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, context_symbol, &context_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  return wyl_handle_engine_remove (handle, "context_now", context_row, 2);
+  gint64 loc_class_id = 0;
+  rc = wyl_handle_intern_engine_symbol (handle, req->guard_loc_class,
+      &loc_class_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  facts->guard_context[0] = context_id;
+  facts->guard_context[1] = row[0];
+  facts->guard_context[2] = row[2];
+  facts->guard_context[3] = req->guard_timestamp;
+  facts->guard_context[4] = loc_class_id;
+  facts->guard_context[5] = req->guard_risk;
+
+  facts->context_now[0] = row[0];
+  facts->context_now[1] = row[2];
+  facts->context_now[2] = context_id;
+
+  facts->eval_guard[0] = row[0];
+  facts->eval_guard[1] = row[1];
+  facts->eval_guard[2] = row[2];
+  facts->eval_guard[3] = context_id;
+
+  rc = wyl_handle_engine_insert (handle, "guard_context",
+      facts->guard_context, 6);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  facts->guard_context_inserted = TRUE;
+
+  rc = wyl_handle_engine_insert (handle, "context_now", facts->context_now, 3);
+  if (rc != WYRELOG_E_OK) {
+    (void) remove_guard_eval_facts (handle, facts);
+    return rc;
+  }
+  facts->context_now_inserted = TRUE;
+
+  rc = wyl_handle_engine_insert (handle, "eval_guard", facts->eval_guard, 4);
+  if (rc != WYRELOG_E_OK) {
+    (void) remove_guard_eval_facts (handle, facts);
+    return rc;
+  }
+  facts->eval_guard_inserted = TRUE;
+
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -379,7 +457,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       return rc;
 
     gboolean allowed = FALSE;
-    gboolean guard_facts_inserted = FALSE;
+    guard_eval_facts_t guard_facts = { 0 };
     const wyl_guard_expr_t *guard =
         wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
     if (guard != NULL) {
@@ -394,16 +472,15 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
         goto emit_audit;
       }
-      rc = insert_guard_eval_facts (handle, row);
+      rc = insert_guard_eval_facts (handle, row, req, &guard_facts);
       if (rc != WYRELOG_E_OK)
         return rc;
-      guard_facts_inserted = TRUE;
     }
 
     rc = wyl_handle_engine_decide (handle, row, &allowed);
     if (rc != WYRELOG_E_OK) {
-      if (guard_facts_inserted)
-        (void) remove_guard_eval_facts (handle, row);
+      if (guard_facts.eval_guard_inserted)
+        (void) remove_guard_eval_facts (handle, &guard_facts);
       return rc;
     }
     if (allowed) {
@@ -412,15 +489,15 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
       rc = find_deny_reason (handle, row, reason_names, reason_origins, &code);
       if (rc != WYRELOG_E_OK) {
-        if (guard_facts_inserted)
-          (void) remove_guard_eval_facts (handle, row);
+        if (guard_facts.eval_guard_inserted)
+          (void) remove_guard_eval_facts (handle, &guard_facts);
         return rc;
       }
       deny_reason = wyl_deny_reason_name (code);
       deny_origin = wyl_deny_reason_origin (code);
     }
-    if (guard_facts_inserted) {
-      rc = remove_guard_eval_facts (handle, row);
+    if (guard_facts.eval_guard_inserted) {
+      rc = remove_guard_eval_facts (handle, &guard_facts);
       if (rc != WYRELOG_E_OK) {
         wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
         wyl_decide_resp_set_deny_tags (resp, "guard_cleanup_failed",
