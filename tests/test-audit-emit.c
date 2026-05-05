@@ -4,6 +4,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/audit/conn-private.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -345,6 +346,71 @@ check_query_events_json_filters_rows (void)
 
   g_object_unref (handle);
   return 0;
+}
+
+static gint
+check_emit_mirrors_policy_store_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 160;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "policy-audit-user");
+  wyl_audit_event_set_action (ev, "audit.write");
+  wyl_audit_event_set_resource_id (ev, "audit-log");
+  wyl_audit_event_set_deny_reason (ev, "allowed");
+  wyl_audit_event_set_deny_origin (ev, "test");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  g_autofree gchar *expected_id = wyl_audit_event_dup_id_string (ev);
+
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 161;
+  }
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT subject_id, action, resource_id, deny_reason, deny_origin, "
+      "decision FROM audit_events WHERE id = ?;";
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
+          NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 162;
+  }
+  if (sqlite3_bind_text (stmt, 1, expected_id, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    g_object_unref (handle);
+    return 163;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  gint rc = 0;
+  if (step_rc != SQLITE_ROW)
+    rc = 164;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 0),
+          "policy-audit-user") != 0)
+    rc = 165;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
+          "audit.write") != 0)
+    rc = 166;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
+          "audit-log") != 0)
+    rc = 167;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 3),
+          "allowed") != 0)
+    rc = 168;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
+          "test") != 0)
+    rc = 169;
+  else if (sqlite3_column_int (stmt, 5) != WYL_DECISION_ALLOW)
+    rc = 170;
+
+  sqlite3_finalize (stmt);
+  g_object_unref (handle);
+  return rc;
 }
 
 static gint
@@ -933,6 +999,8 @@ main (void)
   if ((rc = check_emit_persists_event_fields ()) != 0)
     return rc;
   if ((rc = check_query_events_json_filters_rows ()) != 0)
+    return rc;
+  if ((rc = check_emit_mirrors_policy_store_row ()) != 0)
     return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;

@@ -29,6 +29,7 @@ check_store_creates_authority_schema (void)
     "principal_events",
     "principal_states",
     "session_states",
+    "audit_events",
     "policy_signatures",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
@@ -73,6 +74,7 @@ check_template_schema_creates_state_tables (void)
     "principal_events",
     "principal_states",
     "session_states",
+    "audit_events",
     "policy_signatures",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
@@ -507,6 +509,59 @@ check_store_appends_principal_event (void)
 }
 
 static gint
+check_store_appends_audit_event (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 120;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 121;
+  if (wyl_policy_store_append_audit_event (store, "audit-store-id", 123,
+          "audit-user", "read", "doc/1", "not_armed", "perm_state",
+          WYL_DECISION_DENY) != WYRELOG_E_OK)
+    return 122;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT subject_id, action, resource_id, deny_reason, deny_origin, "
+      "decision FROM audit_events WHERE id = ?;";
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
+          NULL) != SQLITE_OK)
+    return 123;
+  if (sqlite3_bind_text (stmt, 1, "audit-store-id", -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return 124;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  gint rc = 0;
+  if (step_rc != SQLITE_ROW)
+    rc = 125;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 0),
+          "audit-user") != 0)
+    rc = 126;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
+          "read") != 0)
+    rc = 127;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
+          "doc/1") != 0)
+    rc = 128;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 3),
+          "not_armed") != 0)
+    rc = 129;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
+          "perm_state") != 0)
+    rc = 130;
+  else if (sqlite3_column_int (stmt, 5) != WYL_DECISION_DENY)
+    rc = 131;
+
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static gint
 check_store_rejects_bad_direct_permission (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -589,6 +644,15 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_session_state (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 59;
+  if (wyl_policy_store_append_audit_event (store, NULL, 0, NULL, NULL, NULL,
+          NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+    return 94;
+  if (wyl_policy_store_append_audit_event (store, "audit-bad", -1, NULL,
+          NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+    return 95;
+  if (wyl_policy_store_append_audit_event (store, "audit-bad", 0, NULL,
+          NULL, NULL, NULL, NULL, (wyl_decision_t) 9) != WYRELOG_E_INVALID)
+    return 96;
   return 0;
 }
 
@@ -618,6 +682,8 @@ main (void)
   if ((rc = check_store_sets_session_state ()) != 0)
     return rc;
   if ((rc = check_store_appends_principal_event ()) != 0)
+    return rc;
+  if ((rc = check_store_appends_audit_event ()) != 0)
     return rc;
   if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
     return rc;

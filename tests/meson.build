@@ -399,7 +399,7 @@ if get_option('enable_audit').allowed()
       '-DWYL_HAS_AUDIT',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep],
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
   )
 
   test('audit-emit', test_audit_emit, env : audit_conn_test_env)

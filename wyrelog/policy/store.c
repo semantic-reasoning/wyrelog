@@ -35,6 +35,17 @@ bind_text (sqlite3_stmt *stmt, int index, const gchar *value)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+bind_nullable_text (sqlite3_stmt *stmt, int index, const gchar *value)
+{
+  if (value == NULL) {
+    if (sqlite3_bind_null (stmt, index) != SQLITE_OK)
+      return WYRELOG_E_IO;
+    return WYRELOG_E_OK;
+  }
+  return bind_text (stmt, index, value);
+}
+
 wyrelog_error_t
 wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
 {
@@ -179,6 +190,26 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       ");"
       "CREATE INDEX IF NOT EXISTS idx_session_states_state "
       "  ON session_states (state);"
+      "CREATE TABLE IF NOT EXISTS audit_events ("
+      "  id TEXT PRIMARY KEY,"
+      "  created_at_us INTEGER NOT NULL,"
+      "  subject_id TEXT,"
+      "  action TEXT,"
+      "  resource_id TEXT,"
+      "  deny_reason TEXT,"
+      "  deny_origin TEXT,"
+      "  decision INTEGER NOT NULL CHECK (decision IN (0, 1))"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us "
+      "  ON audit_events (created_at_us);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id "
+      "  ON audit_events (subject_id);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_action "
+      "  ON audit_events (action);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_decision "
+      "  ON audit_events (decision);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason "
+      "  ON audit_events (deny_reason);"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -779,6 +810,44 @@ wyl_policy_store_foreach_role_inheritance (wyl_policy_store_t *store,
     }
   }
 
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
+    const gchar *id, gint64 created_at_us, const gchar *subject_id,
+    const gchar *action, const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, wyl_decision_t decision)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || id == NULL || created_at_us < 0)
+    return WYRELOG_E_INVALID;
+  if (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO audit_events "
+      "  (id, created_at_us, subject_id, action, resource_id, "
+      "   deny_reason, deny_origin, decision) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 2, created_at_us) != SQLITE_OK
+      || (rc = bind_nullable_text (stmt, 3, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 4, action)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 5, resource_id)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 6, deny_reason)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 7, deny_origin)) != WYRELOG_E_OK
+      || sqlite3_bind_int (stmt, 8, (int) decision) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
