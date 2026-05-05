@@ -87,12 +87,61 @@ check_login_reload_failure_keeps_durable_state_repairable (void)
   return 0;
 }
 
+static gint
+check_anonymous_login_reload_failure_keeps_session_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 30;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "session_state",
+      WYRELOG_E_INTERNAL);
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, NULL, &session) != WYRELOG_E_INTERNAL)
+    return 31;
+  if (session != NULL)
+    return 32;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 count = -1;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM principal_states;", &count))
+    return 33;
+  if (count != 0)
+    return 34;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM session_states WHERE state = 'active';",
+          &count))
+    return 35;
+  if (count != 1)
+    return 36;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", &count))
+    return 37;
+  if (count != 1)
+    return 38;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'session_state' AND resource_id = 'active';", &count))
+    return 39;
+  if (count != 1)
+    return 40;
+
+  return 0;
+}
+
 int
 main (void)
 {
   gint rc;
 
   if ((rc = check_login_reload_failure_keeps_durable_state_repairable ()) != 0)
+    return rc;
+  if ((rc = check_anonymous_login_reload_failure_keeps_session_state ()) != 0)
     return rc;
   return 0;
 }
