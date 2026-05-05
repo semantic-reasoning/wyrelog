@@ -4,6 +4,9 @@
 
 #include "wyrelog/wyrelog.h"
 
+static gboolean window_matcher (gint64 timestamp, const gchar * window_name,
+    gpointer user_data);
+
 static gint
 check_defaults_are_null (void)
 {
@@ -158,6 +161,7 @@ check_guard_context_clear_resets_fields (void)
 {
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   wyl_decide_req_set_guard_context (req, 1234, "trusted", 42);
+  wyl_decide_req_set_guard_window_matcher (req, window_matcher, req);
   wyl_decide_req_clear_guard_context (req);
 
   if (wyl_decide_req_has_guard_context (req))
@@ -168,6 +172,8 @@ check_guard_context_clear_resets_fields (void)
     return 132;
   if (wyl_decide_req_get_guard_risk (req) != 0)
     return 133;
+  if (wyl_decide_req_get_guard_window_matcher (req, NULL) != NULL)
+    return 134;
   return 0;
 }
 
@@ -182,6 +188,38 @@ check_guard_context_get_null_request (void)
     return 142;
   if (wyl_decide_req_get_guard_risk (NULL) != 0)
     return 143;
+  return 0;
+}
+
+static gboolean
+window_matcher (gint64 timestamp, const gchar *window_name, gpointer user_data)
+{
+  (void) timestamp;
+  (void) window_name;
+  (void) user_data;
+  return TRUE;
+}
+
+static gint
+check_guard_window_matcher_round_trip (void)
+{
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  gpointer marker = req;
+  wyl_decide_req_set_guard_window_matcher (req, window_matcher, marker);
+
+  gpointer user_data = NULL;
+  if (wyl_decide_req_get_guard_window_matcher (req, &user_data)
+      != window_matcher)
+    return 150;
+  if (user_data != marker)
+    return 151;
+
+  wyl_decide_req_set_guard_window_matcher (req, NULL, NULL);
+  user_data = marker;
+  if (wyl_decide_req_get_guard_window_matcher (req, &user_data) != NULL)
+    return 152;
+  if (user_data != NULL)
+    return 153;
   return 0;
 }
 
@@ -217,6 +255,8 @@ main (void)
   if ((rc = check_guard_context_clear_resets_fields ()) != 0)
     return rc;
   if ((rc = check_guard_context_get_null_request ()) != 0)
+    return rc;
+  if ((rc = check_guard_window_matcher_round_trip ()) != 0)
     return rc;
 
   return 0;

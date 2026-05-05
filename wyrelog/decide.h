@@ -30,6 +30,9 @@ typedef enum wyl_decision_t
 typedef struct _wyl_decide_req wyl_decide_req_t;
 typedef struct _wyl_decide_resp wyl_decide_resp_t;
 
+typedef gboolean (*wyl_guard_window_matcher_t) (gint64 timestamp,
+    const gchar * window_name, gpointer user_data);
+
 wyl_decide_req_t *wyl_decide_req_new (void);
 void wyl_decide_req_free (wyl_decide_req_t * req);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_decide_req_t, wyl_decide_req_free);
@@ -56,6 +59,11 @@ const gchar *wyl_decide_req_get_resource_id (const wyl_decide_req_t * req);
  * Sets or clears request-time attributes used by guarded catalogue
  * permissions. When no guard context is set, guarded permissions remain
  * fail-closed. The location class string is duplicated by the request.
+ *
+ * wyl_decide validates the context before policy evaluation:
+ * timestamp must be non-negative, loc_class must be one of
+ * trusted/semi_trusted/public/untrusted, and risk must be in [0, 100].
+ * A window matcher is called synchronously by wyl_decide and is not retained.
  */
 void wyl_decide_req_set_guard_context (wyl_decide_req_t * req,
     gint64 timestamp, const gchar * loc_class, gint64 risk);
@@ -64,6 +72,10 @@ gboolean wyl_decide_req_has_guard_context (const wyl_decide_req_t * req);
 gint64 wyl_decide_req_get_guard_timestamp (const wyl_decide_req_t * req);
 const gchar *wyl_decide_req_get_guard_loc_class (const wyl_decide_req_t * req);
 gint64 wyl_decide_req_get_guard_risk (const wyl_decide_req_t * req);
+void wyl_decide_req_set_guard_window_matcher (wyl_decide_req_t * req,
+    wyl_guard_window_matcher_t matcher, gpointer user_data);
+wyl_guard_window_matcher_t wyl_decide_req_get_guard_window_matcher
+    (const wyl_decide_req_t * req, gpointer * out_user_data);
 
 wyl_decide_resp_t *wyl_decide_resp_new (void);
 void wyl_decide_resp_free (wyl_decide_resp_t * resp);
