@@ -130,6 +130,13 @@ typedef struct
   guint matches;
 } GuardFactExpect;
 
+typedef enum
+{
+  GUARD_FACT_EVAL_GUARD,
+  GUARD_FACT_CONTEXT_NOW,
+  GUARD_FACT_GUARD_CONTEXT,
+} GuardFactKind;
+
 static gboolean
 window_expect_cb (gint64 timestamp, const gchar *window_name,
     gpointer user_data)
@@ -212,6 +219,75 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
     return base_code + 7;
   if (expect.matches != 0)
     return base_code + 8;
+
+  return 0;
+}
+
+static gint
+count_guard_bridge_fact (WylHandle *handle, const gint64 row[3],
+    GuardFactKind kind, guint *out_matches)
+{
+  GuardFactExpect expect = { row, 0 };
+  const gchar *relation = NULL;
+  WylTupleCallback cb = NULL;
+
+  switch (kind) {
+    case GUARD_FACT_EVAL_GUARD:
+      relation = "eval_guard";
+      cb = count_eval_guard_cb;
+      break;
+    case GUARD_FACT_CONTEXT_NOW:
+      relation = "context_now";
+      cb = count_context_now_cb;
+      break;
+    case GUARD_FACT_GUARD_CONTEXT:
+      relation = "guard_context";
+      cb = count_guard_context_cb;
+      break;
+    default:
+      return 999;
+  }
+
+  wyrelog_error_t rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+      relation, cb, &expect);
+  if (rc != WYRELOG_E_OK)
+    return 998;
+  *out_matches = expect.matches;
+  return 0;
+}
+
+static gint
+check_guard_cleanup_fault_residue (WylHandle *handle, gint base_code)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern_symbol (handle, "cleanup-user", &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return base_code;
+  rc = intern_symbol (handle, "wr.audit.read", &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 1;
+  rc = intern_symbol (handle, "cleanup-resource", &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 2;
+
+  guint eval_guard = 0;
+  guint context_now = 0;
+  guint guard_context = 0;
+  gint check = count_guard_bridge_fact (handle, row, GUARD_FACT_EVAL_GUARD,
+      &eval_guard);
+  if (check != 0)
+    return base_code + 3;
+  check = count_guard_bridge_fact (handle, row, GUARD_FACT_CONTEXT_NOW,
+      &context_now);
+  if (check != 0)
+    return base_code + 4;
+  check = count_guard_bridge_fact (handle, row, GUARD_FACT_GUARD_CONTEXT,
+      &guard_context);
+  if (check != 0)
+    return base_code + 5;
+
+  if (eval_guard != 0 || context_now != 0 || guard_context != 0)
+    return base_code + 6;
 
   return 0;
 }
@@ -525,6 +601,53 @@ check_decide_cleans_guard_facts_after_guarded_deny (void)
 }
 
 static gint
+check_guard_cleanup_fault (const gchar *relation, gint base_code)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return base_code;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return base_code + 1;
+  if (insert_allow_fixture_state (handle, "cleanup-user", "wr.audit.read",
+          "cleanup-resource", FALSE) != WYRELOG_E_OK)
+    return base_code + 2;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "cleanup-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "cleanup-resource");
+  wyl_decide_req_set_guard_context (req, 123, "public", 69);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_handle_set_engine_remove_fault_once (handle, relation,
+      WYRELOG_E_INTERNAL);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INTERNAL)
+    return base_code + 3;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return base_code + 4;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "guard_cleanup_failed") != 0)
+    return base_code + 5;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "eval_guard") != 0)
+    return base_code + 6;
+  return check_guard_cleanup_fault_residue (handle, base_code + 7);
+}
+
+static gint
+check_decide_fail_closes_on_guard_cleanup_faults (void)
+{
+  gint rc = check_guard_cleanup_fault ("eval_guard", 130);
+  if (rc != 0)
+    return rc;
+  rc = check_guard_cleanup_fault ("context_now", 160);
+  if (rc != 0)
+    return rc;
+  return check_guard_cleanup_fault ("guard_context", 190);
+}
+
+static gint
 check_decide_evaluates_window_guard (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -591,6 +714,8 @@ main (void)
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
     return rc;
   if ((rc = check_decide_cleans_guard_facts_after_guarded_deny ()) != 0)
+    return rc;
+  if ((rc = check_decide_fail_closes_on_guard_cleanup_faults ()) != 0)
     return rc;
   if ((rc = check_decide_evaluates_window_guard ()) != 0)
     return rc;

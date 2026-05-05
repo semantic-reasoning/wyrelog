@@ -72,6 +72,53 @@ wyrelog_error_t wyl_handle_engine_insert (WylHandle * self,
 wyrelog_error_t wyl_handle_engine_remove (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols);
 
+typedef struct
+{
+  gchar *relation;
+  wyrelog_error_t rc;
+} WylHandleEngineRemoveFaultOnce;
+
+static inline GQuark
+wyl_handle_engine_remove_fault_once_quark (void)
+{
+  return g_quark_from_static_string ("wyrelog-handle-engine-remove-fault-once");
+}
+
+static inline void
+wyl_handle_engine_remove_fault_once_free (gpointer data)
+{
+  WylHandleEngineRemoveFaultOnce *fault = data;
+
+  if (fault == NULL)
+    return;
+  g_free (fault->relation);
+  g_free (fault);
+}
+
+/*
+ * Test-only fault hook for private cleanup-path coverage. The next
+ * wyl_handle_engine_remove() call for @relation performs the remove, then
+ * returns @rc if the remove itself succeeded. The hook clears after one match.
+ * @rc must be a non-OK error.
+ */
+static inline void
+wyl_handle_set_engine_remove_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineRemoveFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineRemoveFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_remove_fault_once_quark (), fault,
+      wyl_handle_engine_remove_fault_once_free);
+}
+
 /*
  * Advances the handle-owned delta engine by one logical step. Rejected unless
  * the engine pair is already open. The read engine is untouched so snapshot

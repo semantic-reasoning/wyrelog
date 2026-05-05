@@ -181,6 +181,8 @@ wyl_shutdown (WylHandle *handle)
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
   g_clear_pointer (&handle->template_dir, g_free);
+  g_object_set_qdata (G_OBJECT (handle),
+      wyl_handle_engine_remove_fault_once_quark (), NULL);
   g_hash_table_remove_all (handle->engine_symbols_by_id);
 }
 
@@ -418,17 +420,31 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
   if (self->read_engine == NULL || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
+  WylHandleEngineRemoveFaultOnce *fault = g_object_get_qdata (G_OBJECT (self),
+      wyl_handle_engine_remove_fault_once_quark ());
+  gboolean fault_matches =
+      fault != NULL && g_strcmp0 (fault->relation, relation) == 0;
+  wyrelog_error_t fault_rc = fault != NULL ? fault->rc : WYRELOG_E_OK;
+  if (fault_matches) {
+    g_object_steal_qdata (G_OBJECT (self),
+        wyl_handle_engine_remove_fault_once_quark ());
+    wyl_handle_engine_remove_fault_once_free (fault);
+  }
+
   wyrelog_error_t rc =
       wyl_engine_remove (self->read_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   if (!relation_fans_out_to_delta (relation))
-    return WYRELOG_E_OK;
+    return fault_matches ? fault_rc : WYRELOG_E_OK;
   rc = wyl_engine_remove (self->delta_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_engine_step (self->delta_engine);
+  rc = wyl_engine_step (self->delta_engine);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return fault_matches ? fault_rc : WYRELOG_E_OK;
 }
 
 wyrelog_error_t
