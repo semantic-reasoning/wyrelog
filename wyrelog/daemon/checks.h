@@ -6,6 +6,7 @@
 wyrelog_error_t wyl_daemon_check_wirelog_policy_ready (WylHandle * handle);
 wyrelog_error_t wyl_daemon_check_policy_store_ready (WylHandle * handle);
 wyrelog_error_t wyl_daemon_check_audit_sink_ready (WylHandle * handle);
+wyrelog_error_t wyl_daemon_check_login_skip_mfa_ready (WylHandle * handle);
 wyrelog_error_t wyl_daemon_check_policy_snapshot_reload_ready (WylHandle *
     handle);
 wyrelog_error_t
