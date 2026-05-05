@@ -11,6 +11,7 @@ typedef struct
 {
   SoupServer *server;
   GMainLoop *loop;
+  const gchar *body;
 } TestHttpServer;
 
 static gpointer
@@ -29,9 +30,9 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   (void) server;
   (void) path;
   (void) query;
-  (void) user_data;
+  TestHttpServer *http = user_data;
 
-  const gchar *body = "[]";
+  const gchar *body = http->body != NULL ? http->body : "[]";
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
       body, strlen (body));
@@ -99,7 +100,8 @@ main (void)
   TestHttpServer http = { 0 };
   http.server = soup_server_new (NULL, NULL);
   http.loop = g_main_loop_new (NULL, FALSE);
-  soup_server_add_handler (http.server, NULL, test_http_server_handler, NULL,
+  http.body = "[]";
+  soup_server_add_handler (http.server, NULL, test_http_server_handler, &http,
       NULL);
   g_autoptr (GError) listen_error = NULL;
   if (!soup_server_listen_local (http.server, 0, 0, &listen_error))
@@ -140,6 +142,35 @@ main (void)
     return 27;
   if (has_next)
     return 28;
+
+  http.body = "[{\"id\":\"a\"},{\"id\":\"b\"}]";
+  g_autoptr (WylAuditIter) rows_iter = NULL;
+  if (wyl_client_audit_query (local_client, NULL, &rows_iter) != WYRELOG_E_OK)
+    return 29;
+  has_next = FALSE;
+  if (wyl_audit_iter_next (rows_iter, &has_next) != WYRELOG_E_OK)
+    return 30;
+  if (!has_next)
+    return 31;
+  has_next = FALSE;
+  if (wyl_audit_iter_next (rows_iter, &has_next) != WYRELOG_E_OK)
+    return 32;
+  if (!has_next)
+    return 33;
+  has_next = TRUE;
+  if (wyl_audit_iter_next (rows_iter, &has_next) != WYRELOG_E_OK)
+    return 34;
+  if (has_next)
+    return 35;
+
+  http.body = "not-json";
+  g_autoptr (WylAuditIter) invalid_iter = NULL;
+  if (wyl_client_audit_query (local_client, NULL, &invalid_iter)
+      != WYRELOG_E_OK)
+    return 36;
+  has_next = FALSE;
+  if (wyl_audit_iter_next (invalid_iter, &has_next) == WYRELOG_E_OK)
+    return 37;
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);

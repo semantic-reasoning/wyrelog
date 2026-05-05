@@ -8,6 +8,7 @@ struct _WylAuditIter
   GObject parent_instance;
   WylClient *client;
   gchar *query_filter;
+  guint pending_events;
   gboolean exhausted;
 };
 
@@ -88,11 +89,92 @@ wyl_audit_iter_new_request_message (WylAuditIter *iter)
   return soup_message_new ("GET", request_uri);
 }
 
+static wyrelog_error_t
+count_top_level_json_objects (const gchar *data, gsize size, guint *out_count)
+{
+  if (data == NULL || out_count == NULL)
+    return WYRELOG_E_INVALID;
+
+  gsize i = 0;
+  while (i < size && g_ascii_isspace (data[i]))
+    i++;
+  if (i >= size || data[i] != '[')
+    return WYRELOG_E_IO;
+  i++;
+
+  guint count = 0;
+  gint depth = 1;
+  gboolean in_string = FALSE;
+  gboolean escaped = FALSE;
+
+  for (; i < size; i++) {
+    gchar ch = data[i];
+
+    if (in_string) {
+      if (escaped) {
+        escaped = FALSE;
+      } else if (ch == '\\') {
+        escaped = TRUE;
+      } else if (ch == '"') {
+        in_string = FALSE;
+      }
+      continue;
+    }
+
+    if (ch == '"') {
+      in_string = TRUE;
+      continue;
+    }
+    if (g_ascii_isspace (ch) || ch == ',')
+      continue;
+    if (ch == '{') {
+      if (depth == 1)
+        count++;
+      depth++;
+      continue;
+    }
+    if (ch == '}') {
+      depth--;
+      if (depth < 1)
+        return WYRELOG_E_IO;
+      continue;
+    }
+    if (ch == '[') {
+      depth++;
+      continue;
+    }
+    if (ch == ']') {
+      depth--;
+      if (depth != 0)
+        return WYRELOG_E_IO;
+      i++;
+      break;
+    }
+
+    if (depth == 1)
+      return WYRELOG_E_IO;
+  }
+
+  while (i < size && g_ascii_isspace (data[i]))
+    i++;
+  if (depth != 0 || i != size || in_string || escaped)
+    return WYRELOG_E_IO;
+
+  *out_count = count;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_audit_iter_next (WylAuditIter *iter, gboolean *out_has_next)
 {
   if (iter == NULL || !WYL_IS_AUDIT_ITER (iter) || out_has_next == NULL)
     return WYRELOG_E_INVALID;
+
+  if (iter->pending_events > 0) {
+    iter->pending_events--;
+    *out_has_next = TRUE;
+    return WYRELOG_E_OK;
+  }
 
   if (iter->exhausted) {
     *out_has_next = FALSE;
@@ -105,7 +187,20 @@ wyl_audit_iter_next (WylAuditIter *iter, gboolean *out_has_next)
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  gsize body_size = 0;
+  const gchar *body_data = g_bytes_get_data (body, &body_size);
+  guint event_count = 0;
+  rc = count_top_level_json_objects (body_data, body_size, &event_count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   iter->exhausted = TRUE;
-  *out_has_next = FALSE;
+  if (event_count == 0) {
+    *out_has_next = FALSE;
+    return WYRELOG_E_OK;
+  }
+
+  iter->pending_events = event_count - 1;
+  *out_has_next = TRUE;
   return WYRELOG_E_OK;
 }
