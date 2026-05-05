@@ -428,4 +428,17 @@ if get_option('enable_audit').allowed()
   )
 
   test('audit-emit', test_audit_emit, env : audit_conn_test_env)
+
+  test_daemon_delta = executable('test-daemon-delta',
+    'test-daemon-delta.c',
+    '../wyrelog/daemon/delta.c',
+    c_args : [
+      '-DWYL_HAS_AUDIT',
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, duckdb_dep],
+  )
+
+  test('daemon-delta', test_daemon_delta, env : audit_conn_test_env)
 endif
