@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/audit/iter-private.h"
 #include "wyrelog/client.h"
+#include "wyrelog/wyl-client-private.h"
 
 struct _WylAuditIter
 {
   GObject parent_instance;
   WylClient *client;
   gchar *query_filter;
+  gboolean exhausted;
 };
 
 G_DEFINE_FINAL_TYPE (WylAuditIter, wyl_audit_iter, G_TYPE_OBJECT);
@@ -92,6 +94,18 @@ wyl_audit_iter_next (WylAuditIter *iter, gboolean *out_has_next)
   if (iter == NULL || !WYL_IS_AUDIT_ITER (iter) || out_has_next == NULL)
     return WYRELOG_E_INVALID;
 
+  if (iter->exhausted) {
+    *out_has_next = FALSE;
+    return WYRELOG_E_OK;
+  }
+
+  g_autoptr (SoupMessage) message = wyl_audit_iter_new_request_message (iter);
+  g_autoptr (GBytes) body = NULL;
+  wyrelog_error_t rc = wyl_client_send_message (iter->client, message, &body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  iter->exhausted = TRUE;
   *out_has_next = FALSE;
   return WYRELOG_E_OK;
 }
