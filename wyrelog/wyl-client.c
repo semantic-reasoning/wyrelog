@@ -1,10 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <libsoup/soup.h>
+
 #include "wyrelog/client.h"
 
 struct _WylClient
 {
   GObject parent_instance;
   gchar *base_url;
+  SoupSession *session;
 };
 
 G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
@@ -15,6 +18,7 @@ wyl_client_finalize (GObject *object)
   WylClient *self = WYL_CLIENT (object);
 
   g_free (self->base_url);
+  g_clear_object (&self->session);
 
   G_OBJECT_CLASS (wyl_client_parent_class)->finalize (object);
 }
@@ -53,6 +57,7 @@ wyl_client_new (const gchar *base_url, WylClient **out_client)
 
   WylClient *client = g_object_new (WYL_TYPE_CLIENT, NULL);
   client->base_url = g_strdup (base_url);
+  client->session = soup_session_new ();
   *out_client = client;
   return WYRELOG_E_OK;
 }
