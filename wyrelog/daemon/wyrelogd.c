@@ -216,6 +216,22 @@ check_audit_sink_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+emit_daemon_start_event (WylHandle *handle)
+{
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "wyrelogd");
+  wyl_audit_event_set_action (ev, "daemon_start");
+  wyl_audit_event_set_resource_id (ev, "audit_events");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  return wyl_audit_emit (handle, ev);
+#else
+  (void) handle;
+  return WYRELOG_E_OK;
+#endif
+}
+
 static void
 daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     WylDeltaKind kind, gpointer user_data)
@@ -389,6 +405,12 @@ main (int argc, char **argv)
   rc = start_wirelog_delta_callbacks (handle, &runtime);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: delta callback setup failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+  rc = emit_daemon_start_event (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: audit start event failed: %s\n",
         wyrelog_error_string (rc));
     return 1;
   }
