@@ -14,6 +14,8 @@ struct _wyl_decide_req
   gint64 guard_timestamp;
   gchar *guard_loc_class;
   gint64 guard_risk;
+  wyl_guard_window_matcher_t guard_in_window;
+  gpointer guard_in_window_user_data;
 };
 
 struct _wyl_decide_resp
@@ -106,6 +108,8 @@ wyl_decide_req_clear_guard_context (wyl_decide_req_t *req)
   req->guard_timestamp = 0;
   g_clear_pointer (&req->guard_loc_class, g_free);
   req->guard_risk = 0;
+  req->guard_in_window = NULL;
+  req->guard_in_window_user_data = NULL;
 }
 
 gboolean
@@ -134,6 +138,25 @@ wyl_decide_req_get_guard_risk (const wyl_decide_req_t *req)
 {
   g_return_val_if_fail (req != NULL, 0);
   return req->guard_risk;
+}
+
+void
+wyl_decide_req_set_guard_window_matcher (wyl_decide_req_t *req,
+    wyl_guard_window_matcher_t matcher, gpointer user_data)
+{
+  g_return_if_fail (req != NULL);
+  req->guard_in_window = matcher;
+  req->guard_in_window_user_data = user_data;
+}
+
+wyl_guard_window_matcher_t
+wyl_decide_req_get_guard_window_matcher (const wyl_decide_req_t *req,
+    gpointer *out_user_data)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  if (out_user_data != NULL)
+    *out_user_data = req->guard_in_window_user_data;
+  return req->guard_in_window;
 }
 
 wyl_decide_resp_t *
@@ -195,6 +218,27 @@ wyl_decide_resp_get_deny_origin (const wyl_decide_resp_t *resp)
 }
 
 static gboolean
+is_valid_guard_loc_class (const gchar *loc_class)
+{
+  return g_strcmp0 (loc_class, "trusted") == 0 ||
+      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
+      g_strcmp0 (loc_class, "public") == 0 ||
+      g_strcmp0 (loc_class, "untrusted") == 0;
+}
+
+static gboolean
+guard_context_is_valid (const wyl_decide_req_t *req)
+{
+  if (!req->has_guard_context)
+    return TRUE;
+  if (req->guard_timestamp < 0)
+    return FALSE;
+  if (!is_valid_guard_loc_class (req->guard_loc_class))
+    return FALSE;
+  return req->guard_risk >= 0 && req->guard_risk <= 100;
+}
+
+static gboolean
 guard_is_satisfied (const wyl_guard_expr_t *guard, const wyl_decide_req_t *req)
 {
   if (guard == NULL || !req->has_guard_context)
@@ -205,6 +249,8 @@ guard_is_satisfied (const wyl_guard_expr_t *guard, const wyl_decide_req_t *req)
     .timestamp = req->guard_timestamp,
     .loc_class = req->guard_loc_class,
     .risk = req->guard_risk,
+    .in_window = req->guard_in_window,
+    .in_window_user_data = req->guard_in_window_user_data,
   };
   return wyl_eval_guard (guard, &scope);
 }
@@ -306,6 +352,8 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
   if (wyl_decide_req_get_subject_id (req) == NULL
       || wyl_decide_req_get_action (req) == NULL
       || wyl_decide_req_get_resource_id (req) == NULL)
+    return WYRELOG_E_INVALID;
+  if (!guard_context_is_valid (req))
     return WYRELOG_E_INVALID;
 
   const gchar *deny_reason = NULL;

@@ -51,7 +51,7 @@ check_stratification (void)
 static gint
 check_catalogue_invariants (void)
 {
-  if (wyl_perm_arm_rule_count () != 10)
+  if (wyl_perm_arm_rule_count () != 11)
     return 11;
   if (wyl_perm_arm_rule_lookup (NULL) != NULL)
     return 12;
@@ -136,6 +136,13 @@ check_catalogue_derivation (void)
     return 78;
   if (wyl_eval_guard (seal, &scope_public_low_risk))
     return 79;
+
+  const wyl_guard_expr_t *stream =
+      wyl_perm_arm_rule_lookup ("wr.stream.write_reserved");
+  if (stream == NULL)
+    return 80;
+  if (wyl_eval_guard (stream, &scope_trusted_low_risk))
+    return 81;
   return 0;
 }
 
@@ -264,6 +271,10 @@ check_in_window_callback (void)
       wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "off_hours");
   if (g == NULL)
     return 110;
+  const wyl_guard_expr_t *stream =
+      wyl_perm_arm_rule_lookup ("wr.stream.write_reserved");
+  if (stream == NULL)
+    return 116;
 
   /* Without a callback, the timestamp-in test fails closed. */
   wyl_scope_t no_cb = {
@@ -272,6 +283,8 @@ check_in_window_callback (void)
   };
   if (wyl_eval_guard (g, &no_cb))
     return 111;
+  if (wyl_eval_guard (stream, &no_cb))
+    return 117;
 
   /* With a callback that says yes, eval returns TRUE. */
   window_stub_t st_yes = {
@@ -284,7 +297,9 @@ check_in_window_callback (void)
   };
   if (!wyl_eval_guard (g, &cb_yes))
     return 112;
-  if (st_yes.calls != 1)
+  if (!wyl_eval_guard (stream, &cb_yes))
+    return 118;
+  if (st_yes.calls != 2)
     return 113;
 
   /* Same callback, says no. */
@@ -298,7 +313,9 @@ check_in_window_callback (void)
   };
   if (wyl_eval_guard (g, &cb_no))
     return 114;
-  if (st_no.calls != 1)
+  if (wyl_eval_guard (stream, &cb_no))
+    return 119;
+  if (st_no.calls != 2)
     return 115;
   return 0;
 }

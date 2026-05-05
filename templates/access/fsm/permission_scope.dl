@@ -53,6 +53,7 @@ perm_arm_rule("wr.svc.unfreeze",     "_v0_deferred").
 perm_arm_rule("wr.svc.grant_role",   "_v0_deferred").
 perm_arm_rule("wr.audit.read",       "_v0_deferred").
 perm_arm_rule("wr.audit.explain",    "_v0_deferred").
+perm_arm_rule("wr.stream.write_reserved", "_v0_deferred").
 
 // --- armed/3 derivation ----------------------------------------------
 

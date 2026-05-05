@@ -74,6 +74,13 @@ build_audit_explain (void)
           "trusted"));
 }
 
+static wyl_guard_expr_t *
+build_stream_write_reserved (void)
+{
+  return wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN,
+      "off_hours");
+}
+
 typedef struct catalogue_entry_t
 {
   const gchar *perm_id;
@@ -91,6 +98,7 @@ static const catalogue_entry_t catalogue[] = {
   {"wr.svc.grant_role", build_svc_grant_role},
   {"wr.audit.read", build_audit_read},
   {"wr.audit.explain", build_audit_explain},
+  {"wr.stream.write_reserved", build_stream_write_reserved},
 };
 
 /* The compiled trees are owned by this module for process

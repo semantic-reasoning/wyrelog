@@ -27,6 +27,29 @@ grant_direct (WylHandle *handle, const gchar *subject_id,
   return wyl_perm_grant (handle, grant);
 }
 
+static wyrelog_error_t
+grant_role_permission (WylHandle *handle, const gchar *subject_id,
+    const gchar *role_id, const gchar *permission, const gchar *scope)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_upsert_role (store, role_id, role_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_upsert_permission (store, permission, permission,
+      "basic");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_grant_role_permission (store, role_id, permission);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (grant, subject_id);
+  wyl_role_grant_req_set_role_id (grant, role_id);
+  wyl_role_grant_req_set_scope (grant, scope);
+  return wyl_role_grant (handle, grant);
+}
+
 typedef struct
 {
   const gchar *session_id;
@@ -486,6 +509,50 @@ check_login_skip_mfa_authenticates_principal (void)
     return 158;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 159;
+  return 0;
+}
+
+static gint
+check_login_skip_mfa_does_not_bypass_guarded_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 166;
+
+  if (store_active_scope (handle, "skip-mfa-guarded-scope") != WYRELOG_E_OK)
+    return 167;
+  if (grant_role_permission (handle, "skip-mfa-guarded-user",
+          "wr.skip-mfa-guarded-role", "wr.audit.read",
+          "skip-mfa-guarded-scope") != WYRELOG_E_OK)
+    return 168;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "skip-mfa-guarded-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 169;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "skip-mfa-guarded-user");
+  wyl_decide_req_set_action (decide, "wr.audit.read");
+  wyl_decide_req_set_resource_id (decide, "skip-mfa-guarded-scope");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 170;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 171;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 172;
+
+  wyl_decide_req_set_guard_context (decide, 123, "public", 69);
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 173;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 174;
+
   return 0;
 }
 
@@ -1019,6 +1086,8 @@ main (void)
   if ((rc = check_login_skip_mfa_rejected_by_default ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_does_not_bypass_guarded_permission ()) != 0)
     return rc;
   if ((rc = check_session_close_persists_closed_state ()) != 0)
     return rc;

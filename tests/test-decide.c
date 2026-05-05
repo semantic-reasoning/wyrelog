@@ -116,6 +116,27 @@ insert_allow_fixture (WylHandle *handle, const gchar *subject,
   return insert_allow_fixture_state (handle, subject, action, resource, TRUE);
 }
 
+typedef struct
+{
+  const gchar *expected_window;
+  gint64 expected_timestamp;
+  gboolean answer;
+  guint calls;
+} WindowExpect;
+
+static gboolean
+window_expect_cb (gint64 timestamp, const gchar *window_name,
+    gpointer user_data)
+{
+  WindowExpect *expect = user_data;
+  expect->calls++;
+  if (timestamp != expect->expected_timestamp)
+    return FALSE;
+  if (g_strcmp0 (window_name, expect->expected_window) != 0)
+    return FALSE;
+  return expect->answer;
+}
+
 static gint
 check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
     const gchar *action, const gchar *resource, gint base_code)
@@ -148,6 +169,33 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
     return base_code + 6;
 
   return 0;
+}
+
+static wyrelog_error_t
+run_stream_window_decide (WylHandle *handle, gboolean install_matcher,
+    gboolean matcher_answer, wyl_decision_t *out_decision, guint *out_calls)
+{
+  WindowExpect expect = {
+    .expected_window = "off_hours",
+    .expected_timestamp = 4242,
+    .answer = matcher_answer,
+    .calls = 0,
+  };
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "window-user");
+  wyl_decide_req_set_action (req, "wr.stream.write_reserved");
+  wyl_decide_req_set_resource_id (req, "window-resource");
+  wyl_decide_req_set_guard_context (req, 4242, "trusted", 1);
+  if (install_matcher)
+    wyl_decide_req_set_guard_window_matcher (req, window_expect_cb, &expect);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyrelog_error_t rc = wyl_decide (handle, req, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_decision = wyl_decide_resp_get_decision (resp);
+  *out_calls = expect.calls;
+  return WYRELOG_E_OK;
 }
 
 static gint
@@ -208,6 +256,63 @@ check_decide_rejects_incomplete_req_as_deny (void)
   wyl_decide_req_set_action (req, "read");
   if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
     return 33;
+  return 0;
+}
+
+static gint
+check_decide_rejects_invalid_guard_context (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 34;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "ctx-user");
+  wyl_decide_req_set_action (req, "read");
+  wyl_decide_req_set_resource_id (req, "ctx-resource");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_decide_req_set_guard_context (req, -1, "trusted", 1);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
+    return 35;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 36;
+
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_decide_req_set_guard_context (req, 1, "unknown", 1);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
+    return 37;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 38;
+
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_decide_req_set_guard_context (req, 1, NULL, 1);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
+    return 39;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 40;
+
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_decide_req_set_guard_context (req, 1, "trusted", -1);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
+    return 41;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 42;
+
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  wyl_decide_req_set_guard_context (req, 1, "trusted", 101);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INVALID)
+    return 43;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 44;
+
+  wyl_decide_req_set_guard_context (req, 1, "semi_trusted", 100);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 45;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 46;
+
   return 0;
 }
 
@@ -374,6 +479,52 @@ check_decide_cleans_guard_facts_after_guarded_deny (void)
       "wr.audit.read", "decide-resource-e", 87);
 }
 
+static gint
+check_decide_evaluates_window_guard (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 90;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 91;
+  if (insert_allow_fixture_state (handle, "window-user",
+          "wr.stream.write_reserved", "window-resource", FALSE)
+      != WYRELOG_E_OK)
+    return 92;
+
+  wyl_decision_t decision = WYL_DECISION_ALLOW;
+  guint calls = 99;
+  if (run_stream_window_decide (handle, FALSE, FALSE, &decision, &calls)
+      != WYRELOG_E_OK)
+    return 93;
+  if (decision != WYL_DECISION_DENY || calls != 0)
+    return 94;
+  if (check_guard_bridge_facts_absent (handle, "window-user",
+          "wr.stream.write_reserved", "window-resource", 95) != 0)
+    return 102;
+
+  if (run_stream_window_decide (handle, TRUE, FALSE, &decision, &calls)
+      != WYRELOG_E_OK)
+    return 103;
+  if (decision != WYL_DECISION_DENY || calls != 1)
+    return 104;
+  if (check_guard_bridge_facts_absent (handle, "window-user",
+          "wr.stream.write_reserved", "window-resource", 105) != 0)
+    return 112;
+
+  if (run_stream_window_decide (handle, TRUE, TRUE, &decision, &calls)
+      != WYRELOG_E_OK)
+    return 113;
+  if (decision != WYL_DECISION_ALLOW || calls != 1)
+    return 114;
+  if (check_guard_bridge_facts_absent (handle, "window-user",
+          "wr.stream.write_reserved", "window-resource", 115) != 0)
+    return 122;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -384,6 +535,8 @@ main (void)
     return rc;
   if ((rc = check_decide_rejects_incomplete_req_as_deny ()) != 0)
     return rc;
+  if ((rc = check_decide_rejects_invalid_guard_context ()) != 0)
+    return rc;
   if ((rc = check_decide_allows_engine_tuple ()) != 0)
     return rc;
   if ((rc = check_decide_denies_engine_miss ()) != 0)
@@ -393,6 +546,8 @@ main (void)
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
     return rc;
   if ((rc = check_decide_cleans_guard_facts_after_guarded_deny ()) != 0)
+    return rc;
+  if ((rc = check_decide_evaluates_window_guard ()) != 0)
     return rc;
   return 0;
 }
