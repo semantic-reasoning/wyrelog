@@ -31,6 +31,14 @@ wyl_audit_conn_t *wyl_handle_get_audit_conn (WylHandle * self);
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
 
 /*
+ * Host-side ingress guard for login requests that carry skip_mfa. The default
+ * is FALSE; callers that model a trusted non-production path must opt in
+ * explicitly before passing such requests to wyl_session_login.
+ */
+void wyl_handle_set_login_skip_mfa_allowed (WylHandle * self, gboolean allowed);
+gboolean wyl_handle_get_login_skip_mfa_allowed (WylHandle * self);
+
+/*
  * Opens the handle-owned policy engine pair from @template_dir.
  * Rejected if the pair is already present. On failure the handle is left
  * without policy engines.
