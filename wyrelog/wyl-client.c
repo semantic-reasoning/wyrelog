@@ -75,6 +75,31 @@ wyl_client_get_soup_session (WylClient *client)
 }
 
 wyrelog_error_t
+wyl_client_send_message (WylClient *client, SoupMessage *message,
+    GBytes **out_body)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL ||
+      out_body == NULL)
+    return WYRELOG_E_INVALID;
+  *out_body = NULL;
+
+  g_autoptr (GError) error = NULL;
+  GBytes *body = soup_session_send_and_read (client->session, message, NULL,
+      &error);
+  if (body == NULL)
+    return WYRELOG_E_IO;
+
+  guint status = soup_message_get_status (message);
+  if (status < 200 || status >= 300) {
+    g_bytes_unref (body);
+    return WYRELOG_E_IO;
+  }
+
+  *out_body = body;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_client_login (WylClient *client, const gchar *username,
     const gchar *password)
 {
