@@ -14,14 +14,14 @@ G_BEGIN_DECLS;
  * The Datalog source of truth lives at
  * <datadir>/wyrelog/access/fsm/permission_scope.dl. This module
  * mirrors the catalogue rows on the C side and provides a guard
- * evaluator the engine can call to resolve eval_guard/2 against a
- * request scope.
+ * evaluator the decision layer can call before it exposes a
+ * request-local eval_guard/3 bridge fact to wirelog.
  *
- * scope/4 in the .dl is laid out as (user, timestamp, loc_class,
- * risk). The fourth slot is `risk` rather than `tenant` because
- * the version-0 catalogue exercises `risk` heavily and `tenant`
- * not at all; the tenant slot is reserved for tenant-scoped policy
- * wiring in a follow-up commit.
+ * The version-0 Datalog bridge is intentionally flat:
+ * context_now(user, scope) and eval_guard(user, perm, scope).
+ * Richer scope metadata remains in wyl_scope_t and in the C guard
+ * catalogue until wirelog compound declarations can carry the
+ * canonical scope payload directly.
  *
  * Evaluation contract: every uncertain or undefined branch
  * returns FALSE (fail-closed). This includes a NULL expression, a

@@ -218,7 +218,24 @@ insert_guard_eval_facts (WylHandle *handle, const gint64 row[3])
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  return wyl_handle_engine_insert (handle, "eval_guard", row, 3);
+  rc = wyl_handle_engine_insert (handle, "eval_guard", row, 3);
+  if (rc != WYRELOG_E_OK) {
+    (void) wyl_handle_engine_remove (handle, "context_now", context_row, 2);
+    return rc;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+remove_guard_eval_facts (WylHandle *handle, const gint64 row[3])
+{
+  gint64 context_row[2] = { row[0], row[2] };
+  wyrelog_error_t rc = wyl_handle_engine_remove (handle, "eval_guard", row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_handle_engine_remove (handle, "context_now", context_row, 2);
 }
 
 static wyrelog_error_t
@@ -314,6 +331,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       return rc;
 
     gboolean allowed = FALSE;
+    gboolean guard_facts_inserted = FALSE;
     const wyl_guard_expr_t *guard =
         wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
     if (guard != NULL) {
@@ -331,20 +349,36 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       rc = insert_guard_eval_facts (handle, row);
       if (rc != WYRELOG_E_OK)
         return rc;
+      guard_facts_inserted = TRUE;
     }
 
     rc = wyl_handle_engine_decide (handle, row, &allowed);
-    if (rc != WYRELOG_E_OK)
+    if (rc != WYRELOG_E_OK) {
+      if (guard_facts_inserted)
+        (void) remove_guard_eval_facts (handle, row);
       return rc;
+    }
     if (allowed) {
       wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
     } else {
       wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
       rc = find_deny_reason (handle, row, reason_names, reason_origins, &code);
-      if (rc != WYRELOG_E_OK)
+      if (rc != WYRELOG_E_OK) {
+        if (guard_facts_inserted)
+          (void) remove_guard_eval_facts (handle, row);
         return rc;
+      }
       deny_reason = wyl_deny_reason_name (code);
       deny_origin = wyl_deny_reason_origin (code);
+    }
+    if (guard_facts_inserted) {
+      rc = remove_guard_eval_facts (handle, row);
+      if (rc != WYRELOG_E_OK) {
+        wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+        wyl_decide_resp_set_deny_tags (resp, "guard_cleanup_failed",
+            "eval_guard");
+        return rc;
+      }
     }
   }
   wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);

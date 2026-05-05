@@ -117,6 +117,40 @@ insert_allow_fixture (WylHandle *handle, const gchar *subject,
 }
 
 static gint
+check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
+    const gchar *action, const gchar *resource, gint base_code)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern_symbol (handle, subject, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return base_code;
+  rc = intern_symbol (handle, action, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 1;
+  rc = intern_symbol (handle, resource, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 2;
+
+  gint64 context_row[2] = { row[0], row[2] };
+  gboolean found = TRUE;
+  rc = wyl_handle_engine_contains (handle, "context_now", context_row, 2,
+      &found);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 3;
+  if (found)
+    return base_code + 4;
+
+  found = TRUE;
+  rc = wyl_handle_engine_contains (handle, "eval_guard", row, 3, &found);
+  if (rc != WYRELOG_E_OK)
+    return base_code + 5;
+  if (found)
+    return base_code + 6;
+
+  return 0;
+}
+
+static gint
 check_decide_returns_ok_and_deny (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -257,6 +291,10 @@ check_decide_allows_guarded_permission_with_context (void)
     return 63;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 64;
+  gint guard_rc = check_guard_bridge_facts_absent (handle, "decide-user-c",
+      "wr.audit.read", "decide-resource-c", 67);
+  if (guard_rc != 0)
+    return guard_rc;
 
   wyl_decide_req_clear_guard_context (req);
   wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
@@ -301,6 +339,41 @@ check_decide_denies_guarded_permission_on_context_miss (void)
   return 0;
 }
 
+static gint
+check_decide_cleans_guard_facts_after_guarded_deny (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 80;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 81;
+  if (insert_allow_fixture_state (handle, "decide-user-e", "wr.audit.read",
+          "decide-resource-e", FALSE) != WYRELOG_E_OK)
+    return 82;
+  if (insert_symbol_row1 (handle, "frozen", "decide-resource-e")
+      != WYRELOG_E_OK)
+    return 83;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "decide-user-e");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "decide-resource-e");
+  wyl_decide_req_set_guard_context (req, 123, "public", 69);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 84;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 85;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "frozen") != 0)
+    return 86;
+
+  return check_guard_bridge_facts_absent (handle, "decide-user-e",
+      "wr.audit.read", "decide-resource-e", 87);
+}
+
 int
 main (void)
 {
@@ -318,6 +391,8 @@ main (void)
   if ((rc = check_decide_allows_guarded_permission_with_context ()) != 0)
     return rc;
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
+    return rc;
+  if ((rc = check_decide_cleans_guard_facts_after_guarded_deny ()) != 0)
     return rc;
   return 0;
 }
