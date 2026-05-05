@@ -72,6 +72,26 @@ CREATE INDEX IF NOT EXISTS idx_role_inheritances_parent
     ON role_inheritances (parent_role_id);
 
 -- ---------------------------------------------------------------------------
+-- Table: role_memberships
+-- Per-principal role grants mirrored into member_of/3 snapshots.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS role_memberships (
+    subject_id TEXT NOT NULL,
+    role_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    granted_at INTEGER,               -- Unix epoch (seconds)
+    granted_by TEXT,                  -- Platform engineer identifier
+    PRIMARY KEY (subject_id, role_id, scope),
+    FOREIGN KEY (role_id) REFERENCES roles (role_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_role_memberships_role_id
+    ON role_memberships (role_id);
+
+CREATE INDEX IF NOT EXISTS idx_role_memberships_subject_scope
+    ON role_memberships (subject_id, scope);
+
+-- ---------------------------------------------------------------------------
 -- Table: direct_permissions
 -- Per-principal direct grants mirrored into direct_permission/3.
 -- ---------------------------------------------------------------------------

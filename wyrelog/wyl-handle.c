@@ -251,6 +251,9 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_role_permissions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_handle_load_policy_store_role_memberships (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_handle_load_policy_store_direct_permissions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -478,6 +481,39 @@ wyl_handle_load_policy_store_role_permissions (WylHandle *self)
 
   return wyl_policy_store_foreach_role_permission (self->policy_store,
       insert_policy_store_role_permission, self);
+}
+
+static wyrelog_error_t
+insert_policy_store_role_membership (const gchar *subject_id,
+    const gchar *role_id, const gchar *scope, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[3];
+
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, role_id, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, scope, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "member_of", row, 3);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_role_memberships (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_role_membership (self->policy_store,
+      insert_policy_store_role_membership, self);
 }
 
 static wyrelog_error_t
