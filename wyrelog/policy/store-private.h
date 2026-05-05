@@ -16,6 +16,9 @@ typedef wyrelog_error_t (*wyl_policy_direct_permission_cb) (const gchar *
     subject_id, const gchar * perm_id, const gchar * scope, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_principal_state_cb) (const gchar *
     subject_id, const gchar * state, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_principal_event_cb) (const gchar *
+    subject_id, const gchar * event, const gchar * from_state,
+    const gchar * to_state, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_session_state_cb) (const gchar *
     session_id, const gchar * state, gpointer user_data);
 
@@ -60,6 +63,11 @@ wyrelog_error_t wyl_policy_store_set_principal_state (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_principal_state (wyl_policy_store_t *
     store, wyl_policy_principal_state_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_append_principal_event (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * event,
+    const gchar * from_state, const gchar * to_state);
+wyrelog_error_t wyl_policy_store_foreach_principal_event (wyl_policy_store_t *
+    store, wyl_policy_principal_event_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_set_session_state (wyl_policy_store_t * store,
     const gchar * session_id, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_session_state (wyl_policy_store_t *

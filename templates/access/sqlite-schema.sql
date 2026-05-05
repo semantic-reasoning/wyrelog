@@ -84,6 +84,26 @@ CREATE INDEX IF NOT EXISTS idx_principal_states_state
     ON principal_states (state);
 
 -- ---------------------------------------------------------------------------
+-- Table: principal_events
+-- Append-only principal FSM transition ledger. Current state is kept in
+-- principal_states; this table preserves the event edge that produced it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS principal_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id TEXT    NOT NULL,
+    event      TEXT    NOT NULL,
+    from_state TEXT    NOT NULL,
+    to_state   TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_principal_events_subject_id
+    ON principal_events (subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_principal_events_event
+    ON principal_events (event);
+
+-- ---------------------------------------------------------------------------
 -- Table: session_states
 -- Durable session lifecycle state mirrored into session_state/2.
 -- ---------------------------------------------------------------------------

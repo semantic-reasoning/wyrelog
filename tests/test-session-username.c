@@ -103,6 +103,15 @@ typedef struct
   guint matches;
 } PrincipalStateExpect;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *event;
+  const gchar *from_state;
+  const gchar *to_state;
+  guint matches;
+} PrincipalEventExpect;
+
 static wyrelog_error_t
 principal_state_expect_cb (const gchar *subject_id, const gchar *state,
     gpointer user_data)
@@ -111,6 +120,20 @@ principal_state_expect_cb (const gchar *subject_id, const gchar *state,
 
   if (g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+principal_event_expect_cb (const gchar *subject_id, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  PrincipalEventExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (event, expect->event) == 0
+      && g_strcmp0 (from_state, expect->from_state) == 0
+      && g_strcmp0 (to_state, expect->to_state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -492,6 +515,17 @@ check_login_skip_mfa_authenticates_principal (void)
     return 156;
   if (expect.matches != 1)
     return 157;
+  PrincipalEventExpect event_expect = {
+    .subject_id = "skip-mfa-user",
+    .event = "login_skip_mfa",
+    .from_state = "unverified",
+    .to_state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_event (wyl_handle_get_policy_store
+          (handle), principal_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+    return 160;
+  if (event_expect.matches != 1)
+    return 161;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "skip-mfa-user");
