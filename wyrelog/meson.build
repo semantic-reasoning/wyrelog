@@ -90,7 +90,7 @@ if build_client
   libwyrelog_client = library('wyrelog-client',
     wyrelog_client_sources,
     include_directories : wyrelog_inc,
-    dependencies : [glib_dep, gio_dep, libsoup_dep],
+    dependencies : [wyrelog_dep, glib_dep, gio_dep, libsoup_dep],
     install : true,
     soversion : '0',
   )
@@ -100,7 +100,7 @@ if build_client
   wyrelog_client_dep = declare_dependency(
     link_with : libwyrelog_client,
     include_directories : wyrelog_inc,
-    dependencies : [glib_dep, gio_dep],
+    dependencies : [wyrelog_dep, glib_dep, gio_dep],
   )
 else
   wyrelog_client_dep = disabler()
