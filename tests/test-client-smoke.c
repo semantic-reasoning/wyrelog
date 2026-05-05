@@ -46,6 +46,10 @@ main (void)
   g_autofree gchar *query_filter = wyl_audit_iter_dup_query_filter (iter);
   if (g_strcmp0 (query_filter, "decision=deny") != 0)
     return 15;
+  g_autofree gchar *request_uri = wyl_audit_iter_dup_request_uri (iter);
+  if (g_strcmp0 (request_uri,
+          "http://example.invalid/audit/events?filter=decision%3Ddeny") != 0)
+    return 16;
 
   gboolean has_next = TRUE;
   if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)

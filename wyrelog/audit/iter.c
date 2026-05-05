@@ -59,6 +59,23 @@ wyl_audit_iter_dup_query_filter (const WylAuditIter *iter)
   return g_strdup (iter->query_filter);
 }
 
+gchar *
+wyl_audit_iter_dup_request_uri (const WylAuditIter *iter)
+{
+  g_return_val_if_fail (WYL_IS_AUDIT_ITER ((WylAuditIter *) iter), NULL);
+
+  g_autofree gchar *base_url = wyl_client_dup_base_url (iter->client);
+  const gchar *separator = g_str_has_suffix (base_url, "/") ? "" : "/";
+  g_autofree gchar *path =
+      g_strdup_printf ("%s%saudit/events", base_url, separator);
+  if (iter->query_filter == NULL || iter->query_filter[0] == '\0')
+    return g_steal_pointer (&path);
+
+  g_autofree gchar *escaped =
+      g_uri_escape_string (iter->query_filter, NULL, TRUE);
+  return g_strdup_printf ("%s?filter=%s", path, escaped);
+}
+
 wyrelog_error_t
 wyl_audit_iter_next (WylAuditIter *iter, gboolean *out_has_next)
 {
