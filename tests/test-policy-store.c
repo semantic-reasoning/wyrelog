@@ -24,6 +24,7 @@ check_store_creates_authority_schema (void)
     "permissions",
     "role_permissions",
     "direct_permissions",
+    "direct_permission_events",
     "principal_events",
     "principal_states",
     "session_states",
@@ -66,6 +67,7 @@ check_template_schema_creates_state_tables (void)
     "permissions",
     "role_permissions",
     "direct_permissions",
+    "direct_permission_events",
     "principal_events",
     "principal_states",
     "session_states",
@@ -131,6 +133,7 @@ typedef struct
   const gchar *subject_id;
   const gchar *perm_id;
   const gchar *scope;
+  const gchar *operation;
   guint matches;
 } DirectPermissionExpect;
 
@@ -143,6 +146,21 @@ direct_permission_expect_cb (const gchar *subject_id, const gchar *perm_id,
   if (g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (perm_id, expect->perm_id) == 0
       && g_strcmp0 (scope, expect->scope) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+direct_permission_event_expect_cb (const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *operation,
+    gpointer user_data)
+{
+  DirectPermissionExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0
+      && g_strcmp0 (operation, expect->operation) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -308,6 +326,33 @@ check_store_grants_direct_permission (void)
 }
 
 static gint
+check_store_appends_direct_permission_event (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 92;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 93;
+  if (wyl_policy_store_append_direct_permission_event (store, "direct-user",
+          "wr.direct.read", "direct-scope", "grant") != WYRELOG_E_OK)
+    return 94;
+
+  DirectPermissionExpect expect = {
+    .subject_id = "direct-user",
+    .perm_id = "wr.direct.read",
+    .scope = "direct-scope",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_direct_permission_event (store,
+          direct_permission_event_expect_cb, &expect) != WYRELOG_E_OK)
+    return 95;
+  if (expect.matches != 1)
+    return 96;
+  return 0;
+}
+
+static gint
 check_store_sets_principal_state (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -415,6 +460,12 @@ check_store_rejects_bad_direct_permission (void)
   if (wyl_policy_store_foreach_direct_permission (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 78;
+  if (wyl_policy_store_append_direct_permission_event (store, NULL,
+          "missing-perm", "direct-scope", "grant") != WYRELOG_E_INVALID)
+    return 79;
+  if (wyl_policy_store_foreach_direct_permission_event (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 80;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
           "missing-perm", "direct-scope", &exists) != WYRELOG_E_OK)
     return 76;
@@ -480,6 +531,8 @@ main (void)
   if ((rc = check_store_grants_role_permission ()) != 0)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_appends_direct_permission_event ()) != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;

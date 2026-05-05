@@ -127,6 +127,19 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON direct_permissions (perm_id);"
       "CREATE INDEX IF NOT EXISTS idx_direct_permissions_subject_scope "
       "  ON direct_permissions (subject_id, scope);"
+      "CREATE TABLE IF NOT EXISTS direct_permission_events ("
+      "  event_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  subject_id TEXT NOT NULL,"
+      "  perm_id TEXT NOT NULL,"
+      "  scope TEXT NOT NULL,"
+      "  operation TEXT NOT NULL CHECK "
+      "    (operation IN ('grant', 'revoke')),"
+      "  created_at INTEGER NOT NULL"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_direct_permission_events_subject "
+      "  ON direct_permission_events (subject_id);"
+      "CREATE INDEX IF NOT EXISTS idx_direct_permission_events_perm "
+      "  ON direct_permission_events (perm_id);"
       "CREATE TABLE IF NOT EXISTS principal_states ("
       "  subject_id TEXT PRIMARY KEY,"
       "  state TEXT NOT NULL,"
@@ -345,6 +358,70 @@ wyl_policy_store_foreach_direct_permission (wyl_policy_store_t *store,
     const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
     const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
     rc = cb (subject_id, perm_id, scope, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_append_direct_permission_event (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *operation)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || operation == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO direct_permission_events "
+      "  (subject_id, perm_id, scope, operation, created_at) "
+      "VALUES (?, ?, ?, ?, unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, operation)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_direct_permission_event (wyl_policy_store_t *store,
+    wyl_policy_direct_permission_event_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT subject_id, perm_id, scope, operation "
+      "FROM direct_permission_events ORDER BY event_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *operation = (const gchar *) sqlite3_column_text (stmt, 3);
+    rc = cb (subject_id, perm_id, scope, operation, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;

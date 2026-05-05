@@ -71,6 +71,25 @@ CREATE INDEX IF NOT EXISTS idx_direct_permissions_subject_scope
     ON direct_permissions (subject_id, scope);
 
 -- ---------------------------------------------------------------------------
+-- Table: direct_permission_events
+-- Append-only grant/revoke ledger for direct_permission/3 changes.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS direct_permission_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id TEXT    NOT NULL,
+    perm_id    TEXT    NOT NULL,
+    scope      TEXT    NOT NULL,
+    operation  TEXT    NOT NULL CHECK (operation IN ('grant', 'revoke')),
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_direct_permission_events_subject
+    ON direct_permission_events (subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_direct_permission_events_perm
+    ON direct_permission_events (perm_id);
+
+-- ---------------------------------------------------------------------------
 -- Table: principal_states
 -- Durable principal authentication state mirrored into principal_state/2.
 -- ---------------------------------------------------------------------------
