@@ -772,12 +772,12 @@ wyl_handle_load_policy_store_principal_states (WylHandle *self)
 }
 
 static wyrelog_error_t
-insert_policy_store_principal_event (const gchar *subject_id,
+insert_policy_store_principal_event (gint64 event_id, const gchar *subject_id,
     const gchar *event, const gchar *from_state, const gchar *to_state,
     gpointer user_data)
 {
   WylHandle *self = user_data;
-  gint64 row[4];
+  gint64 row[5];
   wyl_principal_state_t from = wyl_principal_state_from_name (from_state);
   wyl_principal_event_t ev = wyl_principal_event_from_name (event);
   wyl_principal_state_t to = wyl_principal_state_from_name (to_state);
@@ -792,19 +792,20 @@ insert_policy_store_principal_event (const gchar *subject_id,
   if (validated != to)
     return WYRELOG_E_POLICY;
 
-  rc = wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
+  row[0] = event_id;
+  rc = wyl_handle_intern_engine_symbol (self, subject_id, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (self, event, &row[1]);
+  rc = wyl_handle_intern_engine_symbol (self, event, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[2]);
+  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[3]);
+  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (self, "principal_event", row, 4);
+  return wyl_handle_engine_insert (self, "principal_event", row, 5);
 }
 
 wyrelog_error_t
@@ -851,12 +852,12 @@ wyl_handle_load_policy_store_session_states (WylHandle *self)
 }
 
 static wyrelog_error_t
-insert_policy_store_session_event (const gchar *session_id,
+insert_policy_store_session_event (gint64 event_id, const gchar *session_id,
     const gchar *event, const gchar *from_state, const gchar *to_state,
     gpointer user_data)
 {
   WylHandle *self = user_data;
-  gint64 row[4];
+  gint64 row[5];
   wyl_session_state_t from = wyl_session_state_from_name (from_state);
   wyl_session_event_t ev = wyl_session_event_from_name (event);
   wyl_session_state_t to = wyl_session_state_from_name (to_state);
@@ -871,19 +872,20 @@ insert_policy_store_session_event (const gchar *session_id,
   if (validated != to)
     return WYRELOG_E_POLICY;
 
-  rc = wyl_handle_intern_engine_symbol (self, session_id, &row[0]);
+  row[0] = event_id;
+  rc = wyl_handle_intern_engine_symbol (self, session_id, &row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (self, event, &row[1]);
+  rc = wyl_handle_intern_engine_symbol (self, event, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[2]);
+  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[3]);
+  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (self, "session_event", row, 4);
+  return wyl_handle_engine_insert (self, "session_event", row, 5);
 }
 
 wyrelog_error_t

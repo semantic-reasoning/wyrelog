@@ -14,8 +14,8 @@ typedef struct
   gboolean matched_expected_remove;
   gboolean expect_principal_fired;
   gboolean expect_session_fired;
-  gint64 expected_principal_fired[4];
-  gint64 expected_session_fired[4];
+  gint64 expected_principal_fired[5];
+  gint64 expected_session_fired[5];
   gboolean matched_principal_fired_insert;
   gboolean matched_session_fired_insert;
   gboolean matched_principal_fired_remove;

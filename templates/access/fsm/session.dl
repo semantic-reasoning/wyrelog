@@ -28,8 +28,8 @@
 // `session_transition(` token may appear inside comments.
 
 .decl session_transition(from: symbol, event: symbol, to: symbol)
-.decl session_event(session: symbol, event: symbol, from: symbol, to: symbol)
-.decl session_fired(session: symbol, from: symbol, event: symbol, to: symbol)
+.decl session_event(event_id: int64, session: symbol, event: symbol, from: symbol, to: symbol)
+.decl session_fired(event_id: int64, session: symbol, from: symbol, event: symbol, to: symbol)
 .decl session_step(from: symbol, event: symbol, to: symbol)
 
 session_transition("idle",     "request",       "active").
@@ -47,6 +47,6 @@ session_transition("expiring", "expiry",        "closed").
 session_transition("expiring", "logout",        "closed").
 
 session_step(From, Ev, To) :- session_transition(From, Ev, To).
-session_fired(S, From, Ev, To) :-
-    session_event(S, Ev, From, To),
+session_fired(EventId, S, From, Ev, To) :-
+    session_event(EventId, S, Ev, From, To),
     session_transition(From, Ev, To).

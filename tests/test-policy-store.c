@@ -184,6 +184,7 @@ typedef struct
 
 typedef struct
 {
+  gint64 event_id;
   const gchar *subject_id;
   const gchar *event;
   const gchar *from_state;
@@ -204,12 +205,14 @@ principal_state_expect_cb (const gchar *subject_id, const gchar *state,
 }
 
 static wyrelog_error_t
-principal_event_expect_cb (const gchar *subject_id, const gchar *event,
-    const gchar *from_state, const gchar *to_state, gpointer user_data)
+principal_event_expect_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
 {
   PrincipalEventExpect *expect = user_data;
 
-  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+  if ((expect->event_id <= 0 || event_id == expect->event_id)
+      && g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (event, expect->event) == 0
       && g_strcmp0 (from_state, expect->from_state) == 0
       && g_strcmp0 (to_state, expect->to_state) == 0)
@@ -226,6 +229,7 @@ typedef struct
 
 typedef struct
 {
+  gint64 event_id;
   const gchar *session_id;
   const gchar *event;
   const gchar *from_state;
@@ -246,12 +250,14 @@ session_state_expect_cb (const gchar *session_id, const gchar *state,
 }
 
 static wyrelog_error_t
-session_event_expect_cb (const gchar *session_id, const gchar *event,
-    const gchar *from_state, const gchar *to_state, gpointer user_data)
+session_event_expect_cb (gint64 event_id, const gchar *session_id,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
 {
   SessionEventExpect *expect = user_data;
 
-  if (g_strcmp0 (session_id, expect->session_id) == 0
+  if ((expect->event_id <= 0 || event_id == expect->event_id)
+      && g_strcmp0 (session_id, expect->session_id) == 0
       && g_strcmp0 (event, expect->event) == 0
       && g_strcmp0 (from_state, expect->from_state) == 0
       && g_strcmp0 (to_state, expect->to_state) == 0)
@@ -662,11 +668,14 @@ check_store_appends_principal_event (void)
     return 92;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 93;
+  gint64 event_id = -1;
   if (wyl_policy_store_append_principal_event (store, "principal-user",
-          "login_skip_mfa", "unverified", "authenticated") != WYRELOG_E_OK)
+          "login_skip_mfa", "unverified", "authenticated", &event_id)
+      != WYRELOG_E_OK)
     return 94;
 
   PrincipalEventExpect expect = {
+    .event_id = event_id,
     .subject_id = "principal-user",
     .event = "login_skip_mfa",
     .from_state = "unverified",
@@ -689,11 +698,13 @@ check_store_appends_session_event (void)
     return 97;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 98;
+  gint64 event_id = -1;
   if (wyl_policy_store_append_session_event (store, "session/1",
-          "elevate_grant", "active", "elevated") != WYRELOG_E_OK)
+          "elevate_grant", "active", "elevated", &event_id) != WYRELOG_E_OK)
     return 99;
 
   SessionEventExpect expect = {
+    .event_id = event_id,
     .session_id = "session/1",
     .event = "elevate_grant",
     .from_state = "active",
@@ -704,6 +715,67 @@ check_store_appends_session_event (void)
     return 100;
   if (expect.matches != 1)
     return 101;
+  return 0;
+}
+
+static gint
+check_store_distinguishes_duplicate_events (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 102;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 103;
+  gint64 principal_first = -1;
+  gint64 principal_second = -1;
+  if (wyl_policy_store_append_principal_event (store, "principal-dup",
+          "login_ok", "unverified", "mfa_required", &principal_first)
+      != WYRELOG_E_OK)
+    return 104;
+  if (wyl_policy_store_append_principal_event (store, "principal-dup",
+          "login_ok", "unverified", "mfa_required", &principal_second)
+      != WYRELOG_E_OK)
+    return 105;
+  if (principal_first <= 0 || principal_second <= principal_first)
+    return 106;
+
+  PrincipalEventExpect principal_expect = {
+    .subject_id = "principal-dup",
+    .event = "login_ok",
+    .from_state = "unverified",
+    .to_state = "mfa_required",
+  };
+  if (wyl_policy_store_foreach_principal_event (store,
+          principal_event_expect_cb, &principal_expect) != WYRELOG_E_OK)
+    return 107;
+  if (principal_expect.matches != 2)
+    return 108;
+
+  gint64 session_first = -1;
+  gint64 session_second = -1;
+  if (wyl_policy_store_append_session_event (store, "session-dup",
+          "elevate_grant", "active", "elevated", &session_first)
+      != WYRELOG_E_OK)
+    return 109;
+  if (wyl_policy_store_append_session_event (store, "session-dup",
+          "elevate_grant", "active", "elevated", &session_second)
+      != WYRELOG_E_OK)
+    return 110;
+  if (session_first <= 0 || session_second <= session_first)
+    return 111;
+
+  SessionEventExpect session_expect = {
+    .session_id = "session-dup",
+    .event = "elevate_grant",
+    .from_state = "active",
+    .to_state = "elevated",
+  };
+  if (wyl_policy_store_foreach_session_event (store, session_event_expect_cb,
+          &session_expect) != WYRELOG_E_OK)
+    return 112;
+  if (session_expect.matches != 2)
+    return 113;
   return 0;
 }
 
@@ -971,7 +1043,7 @@ check_store_rejects_bad_role_permission (void)
       != WYRELOG_E_INVALID)
     return 57;
   if (wyl_policy_store_append_principal_event (store, NULL, "login_ok",
-          "unverified", "mfa_required") != WYRELOG_E_INVALID)
+          "unverified", "mfa_required", NULL) != WYRELOG_E_INVALID)
     return 92;
   if (wyl_policy_store_foreach_principal_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
@@ -983,7 +1055,7 @@ check_store_rejects_bad_role_permission (void)
       != WYRELOG_E_INVALID)
     return 59;
   if (wyl_policy_store_append_session_event (store, NULL, "request", "idle",
-          "active") != WYRELOG_E_INVALID)
+          "active", NULL) != WYRELOG_E_INVALID)
     return 60;
   if (wyl_policy_store_foreach_session_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
@@ -1034,6 +1106,8 @@ main (void)
   if ((rc = check_store_appends_principal_event ()) != 0)
     return rc;
   if ((rc = check_store_appends_session_event ()) != 0)
+    return rc;
+  if ((rc = check_store_distinguishes_duplicate_events ()) != 0)
     return rc;
   if ((rc = check_store_appends_audit_event ()) != 0)
     return rc;

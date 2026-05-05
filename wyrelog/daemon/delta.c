@@ -33,19 +33,19 @@ emit_wirelog_effective_member_audit (WylDaemonRuntime *runtime,
 
 static void
 emit_wirelog_fsm_fired_audit (WylDaemonRuntime *runtime, const gchar *relation,
-    const gint64 row[4], WylDeltaKind kind)
+    const gint64 row[5], WylDeltaKind kind)
 {
   if (runtime == NULL || runtime->handle == NULL)
     return;
 
   g_autofree gchar *entity =
-      wyl_handle_dup_engine_symbol (runtime->handle, row[0]);
-  g_autofree gchar *from_state =
       wyl_handle_dup_engine_symbol (runtime->handle, row[1]);
-  g_autofree gchar *event =
+  g_autofree gchar *from_state =
       wyl_handle_dup_engine_symbol (runtime->handle, row[2]);
-  g_autofree gchar *to_state =
+  g_autofree gchar *event =
       wyl_handle_dup_engine_symbol (runtime->handle, row[3]);
+  g_autofree gchar *to_state =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[4]);
   if (entity == NULL || from_state == NULL || event == NULL || to_state == NULL)
     return;
 
@@ -178,7 +178,7 @@ daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
 fsm_relations:
   if ((g_strcmp0 (relation, "principal_fired") != 0
           && g_strcmp0 (relation, "session_fired") != 0)
-      || (kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE) || ncols != 4)
+      || (kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE) || ncols != 5)
     return;
 
 #ifdef WYL_HAS_AUDIT
@@ -190,7 +190,8 @@ fsm_relations:
       && row[0] == runtime->expected_principal_fired[0]
       && row[1] == runtime->expected_principal_fired[1]
       && row[2] == runtime->expected_principal_fired[2]
-      && row[3] == runtime->expected_principal_fired[3]) {
+      && row[3] == runtime->expected_principal_fired[3]
+      && row[4] == runtime->expected_principal_fired[4]) {
     if (kind == WYL_DELTA_INSERT)
       runtime->matched_principal_fired_insert = TRUE;
     else if (kind == WYL_DELTA_REMOVE)
@@ -201,7 +202,8 @@ fsm_relations:
       && row[0] == runtime->expected_session_fired[0]
       && row[1] == runtime->expected_session_fired[1]
       && row[2] == runtime->expected_session_fired[2]
-      && row[3] == runtime->expected_session_fired[3]) {
+      && row[3] == runtime->expected_session_fired[3]
+      && row[4] == runtime->expected_session_fired[4]) {
     if (kind == WYL_DELTA_INSERT)
       runtime->matched_session_fired_insert = TRUE;
     else if (kind == WYL_DELTA_REMOVE)
@@ -239,36 +241,38 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
       &runtime.expected_row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
+  runtime.expected_principal_fired[0] = 1;
   rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-principal-user",
-      &runtime.expected_principal_fired[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "unverified",
       &runtime.expected_principal_fired[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "login_ok",
+  rc = wyl_handle_intern_engine_symbol (handle, "unverified",
       &runtime.expected_principal_fired[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "mfa_required",
+  rc = wyl_handle_intern_engine_symbol (handle, "login_ok",
       &runtime.expected_principal_fired[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-session",
-      &runtime.expected_session_fired[0]);
+  rc = wyl_handle_intern_engine_symbol (handle, "mfa_required",
+      &runtime.expected_principal_fired[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "active",
+  runtime.expected_session_fired[0] = 2;
+  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-session",
       &runtime.expected_session_fired[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "elevate_grant",
+  rc = wyl_handle_intern_engine_symbol (handle, "active",
       &runtime.expected_session_fired[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, "elevated",
+  rc = wyl_handle_intern_engine_symbol (handle, "elevate_grant",
       &runtime.expected_session_fired[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "elevated",
+      &runtime.expected_session_fired[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -276,17 +280,19 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  gint64 principal_event[4] = {
+  gint64 principal_event[5] = {
     runtime.expected_principal_fired[0],
-    runtime.expected_principal_fired[2],
     runtime.expected_principal_fired[1],
     runtime.expected_principal_fired[3],
+    runtime.expected_principal_fired[2],
+    runtime.expected_principal_fired[4],
   };
-  gint64 session_event[4] = {
+  gint64 session_event[5] = {
     runtime.expected_session_fired[0],
-    runtime.expected_session_fired[2],
     runtime.expected_session_fired[1],
     runtime.expected_session_fired[3],
+    runtime.expected_session_fired[2],
+    runtime.expected_session_fired[4],
   };
 
   rc = wyl_handle_engine_insert (handle, "member_of", runtime.expected_row, 3);
@@ -297,7 +303,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_insert (handle, "principal_event", principal_event, 4);
+  rc = wyl_handle_engine_insert (handle, "principal_event", principal_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_principal_fired_insert) {
@@ -305,7 +311,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_insert (handle, "session_event", session_event, 4);
+  rc = wyl_handle_engine_insert (handle, "session_event", session_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_session_fired_insert) {
@@ -313,7 +319,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_remove (handle, "principal_event", principal_event, 4);
+  rc = wyl_handle_engine_remove (handle, "principal_event", principal_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_principal_fired_remove) {
@@ -321,7 +327,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
-  rc = wyl_handle_engine_remove (handle, "session_event", session_event, 4);
+  rc = wyl_handle_engine_remove (handle, "session_event", session_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_session_fired_remove) {
