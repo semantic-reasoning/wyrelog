@@ -29,6 +29,7 @@ wyl_daemon_check_policy_store_ready (WylHandle *handle)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   const gchar *tables[] = {
+    "wyrelog_config",
     "roles",
     "permissions",
     "role_permissions",

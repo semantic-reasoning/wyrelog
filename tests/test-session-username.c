@@ -790,6 +790,66 @@ check_login_skip_mfa_authenticates_principal (void)
   return 0;
 }
 
+static wyrelog_error_t
+login_skip_mfa_user (WylHandle *handle, const gchar *username,
+    WylSession **out_session)
+{
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, username);
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  return wyl_session_login (handle, login, out_session);
+}
+
+static gint
+check_login_skip_mfa_uses_deployment_mode (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 160;
+
+  if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
+          (handle), "development") != WYRELOG_E_OK)
+    return 161;
+  if (!wyl_handle_get_login_skip_mfa_allowed (handle))
+    return 162;
+
+  g_autoptr (WylSession) development_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-development-user",
+          &development_session) != WYRELOG_E_OK)
+    return 163;
+  if (development_session == NULL)
+    return 164;
+
+  if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
+          (handle), "demo") != WYRELOG_E_OK)
+    return 165;
+
+  g_autoptr (WylSession) demo_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-demo-user", &demo_session)
+      != WYRELOG_E_OK)
+    return 166;
+  if (demo_session == NULL)
+    return 167;
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (!wyl_handle_get_login_skip_mfa_allowed (handle))
+    return 168;
+
+  if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
+          (handle), "production") != WYRELOG_E_OK)
+    return 169;
+  if (wyl_handle_get_login_skip_mfa_allowed (handle))
+    return 170;
+
+  g_autoptr (WylSession) production_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-production-user",
+          &production_session) != WYRELOG_E_POLICY)
+    return 171;
+  if (production_session != NULL)
+    return 172;
+  return 0;
+}
+
 static gint
 check_login_skip_mfa_inserts_wirelog_principal_fired (void)
 {
@@ -1492,6 +1552,8 @@ main (void)
   if ((rc = check_login_skip_mfa_rejected_by_default ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_uses_deployment_mode ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_inserts_wirelog_principal_fired ()) != 0)
     return rc;

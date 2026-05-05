@@ -38,9 +38,10 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
 
 /*
- * Host-side ingress guard for login requests that carry skip_mfa. The default
- * is FALSE; callers that model a trusted non-production path must opt in
- * explicitly before passing such requests to wyl_session_login.
+ * Host-side ingress guard for login requests that carry skip_mfa. Explicitly
+ * setting this flag to TRUE allows skip-MFA independently of deployment mode.
+ * When it is FALSE, the Policy DB deployment mode still allows skip-MFA for
+ * non-production modes and rejects it for production or unreadable config.
  */
 void wyl_handle_set_login_skip_mfa_allowed (WylHandle * self, gboolean allowed);
 gboolean wyl_handle_get_login_skip_mfa_allowed (WylHandle * self);

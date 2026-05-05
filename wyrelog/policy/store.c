@@ -57,6 +57,13 @@ column_nullable_text_equal (sqlite3_stmt *stmt, int col, const gchar *expected)
       expected) == 0;
 }
 
+static gboolean
+deployment_mode_is_valid (const gchar *mode)
+{
+  return g_strcmp0 (mode, "production") == 0
+      || g_strcmp0 (mode, "development") == 0 || g_strcmp0 (mode, "demo") == 0;
+}
+
 wyrelog_error_t
 wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {
@@ -135,6 +142,13 @@ wyrelog_error_t
 wyl_policy_store_create_schema (wyl_policy_store_t *store)
 {
   static const gchar *ddl =
+      "CREATE TABLE IF NOT EXISTS wyrelog_config ("
+      "  config_key TEXT PRIMARY KEY,"
+      "  config_value TEXT NOT NULL CHECK ("
+      "    config_key != 'deployment_mode' OR "
+      "    config_value IN ('production', 'development', 'demo')),"
+      "  updated_at INTEGER NOT NULL"
+      ");"
       "CREATE TABLE IF NOT EXISTS roles ("
       "  role_id TEXT PRIMARY KEY,"
       "  role_name TEXT UNIQUE NOT NULL,"
@@ -293,6 +307,72 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
   return exec_sql (store->db, ddl);
+}
+
+wyrelog_error_t
+wyl_policy_store_set_deployment_mode (wyl_policy_store_t *store,
+    const gchar *mode)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || mode == NULL)
+    return WYRELOG_E_INVALID;
+  if (!deployment_mode_is_valid (mode))
+    return WYRELOG_E_POLICY;
+
+  static const gchar *sql =
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "VALUES ('deployment_mode', ?, unixepoch()) "
+      "ON CONFLICT(config_key) DO UPDATE SET "
+      "  config_value = excluded.config_value,"
+      "  updated_at = excluded.updated_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, mode)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_deployment_mode (wyl_policy_store_t *store,
+    gchar **out_mode)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || out_mode == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_mode = NULL;
+  static const gchar *sql =
+      "SELECT config_value FROM wyrelog_config "
+      "WHERE config_key = 'deployment_mode';";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *mode = (const gchar *) sqlite3_column_text (stmt, 0);
+    if (!deployment_mode_is_valid (mode)) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    *out_mode = g_strdup (mode);
+  } else if (step_rc == SQLITE_DONE) {
+    *out_mode = g_strdup ("production");
+  } else {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
