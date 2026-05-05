@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "audit/event-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-permission-scope-private.h"
 
@@ -335,26 +336,60 @@ wyl_role_revoke_req_get_scope (const wyl_role_revoke_req_t *req)
 
 static wyrelog_error_t
 update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
-    const gchar *action, const gchar *resource_id, gboolean insert)
+    const gchar *action, const gchar *resource_id, gboolean insert,
+    const WylAuditEvent *audit_event)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
     return WYRELOG_E_INVALID;
 
-  return wyl_policy_store_apply_direct_permission_mutation (store, subject_id,
-      action, resource_id, insert);
+  if (audit_event == NULL) {
+    return wyl_policy_store_apply_direct_permission_mutation (store,
+        subject_id, action, resource_id, insert);
+  }
+
+  g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (audit_event);
+  if (audit_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  return wyl_policy_store_apply_direct_permission_mutation_with_audit (store,
+      subject_id, action, resource_id, insert, audit_id,
+      wyl_audit_event_get_created_at_us (audit_event),
+      wyl_audit_event_get_subject_id (audit_event),
+      wyl_audit_event_get_action (audit_event),
+      wyl_audit_event_get_resource_id (audit_event),
+      wyl_audit_event_get_deny_reason (audit_event),
+      wyl_audit_event_get_deny_origin (audit_event),
+      wyl_audit_event_get_decision (audit_event));
 }
 
 static wyrelog_error_t
 update_role_membership_store (WylHandle *handle, const gchar *subject_id,
-    const gchar *role_id, const gchar *scope, gboolean insert)
+    const gchar *role_id, const gchar *scope, gboolean insert,
+    const WylAuditEvent *audit_event)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
     return WYRELOG_E_INVALID;
 
-  return wyl_policy_store_apply_role_membership_mutation (store, subject_id,
-      role_id, scope, insert);
+  if (audit_event == NULL) {
+    return wyl_policy_store_apply_role_membership_mutation (store, subject_id,
+        role_id, scope, insert);
+  }
+
+  g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (audit_event);
+  if (audit_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  return wyl_policy_store_apply_role_membership_mutation_with_audit (store,
+      subject_id, role_id, scope, insert, audit_id,
+      wyl_audit_event_get_created_at_us (audit_event),
+      wyl_audit_event_get_subject_id (audit_event),
+      wyl_audit_event_get_action (audit_event),
+      wyl_audit_event_get_resource_id (audit_event),
+      wyl_audit_event_get_deny_reason (audit_event),
+      wyl_audit_event_get_deny_origin (audit_event),
+      wyl_audit_event_get_decision (audit_event));
 }
 
 static wyrelog_error_t
@@ -363,6 +398,21 @@ reload_policy_snapshot (WylHandle *handle)
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
   return wyl_handle_reload_engine_pair (handle);
+}
+
+static wyrelog_error_t
+finish_policy_mutation (WylHandle *handle, const WylAuditEvent *audit_event)
+{
+  wyrelog_error_t rc = reload_policy_snapshot (handle);
+
+#ifdef WYL_HAS_AUDIT
+  if (audit_event != NULL)
+    (void) wyl_audit_mirror_event (handle, audit_event);
+#else
+  (void) audit_event;
+#endif
+
+  return rc;
 }
 
 wyrelog_error_t
@@ -378,30 +428,26 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
       && wyl_perm_arm_rule_lookup (wyl_grant_req_get_action (req)) != NULL)
     return WYRELOG_E_POLICY;
 
-  wyrelog_error_t rc = update_direct_permission_store (handle,
-      wyl_grant_req_get_subject_id (req), wyl_grant_req_get_action (req),
-      wyl_grant_req_get_resource_id (req), TRUE);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = reload_policy_snapshot (handle);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
 #ifdef WYL_HAS_AUDIT
-  /* Record the accepted admin operation in the audit log. The
-   * action column carries operation semantics while deny_origin
-   * retains the granted permission name for readers that need the
-   * full target triple. */
+  /* Record the accepted admin operation in the durable audit store as
+   * part of the policy mutation savepoint. The action column carries
+   * operation semantics while deny_origin retains the permission name. */
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_grant_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "permission_grant");
   wyl_audit_event_set_resource_id (ev, wyl_grant_req_get_resource_id (req));
   wyl_audit_event_set_deny_origin (ev, wyl_grant_req_get_action (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (handle, ev);
+#else
+  WylAuditEvent *ev = NULL;
 #endif
 
-  return WYRELOG_E_OK;
+  wyrelog_error_t rc = update_direct_permission_store (handle,
+      wyl_grant_req_get_subject_id (req), wyl_grant_req_get_action (req),
+      wyl_grant_req_get_resource_id (req), TRUE, ev);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return finish_policy_mutation (handle, ev);
 }
 
 wyrelog_error_t
@@ -414,28 +460,23 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
       || wyl_revoke_req_get_resource_id (req) == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = update_direct_permission_store (handle,
-      wyl_revoke_req_get_subject_id (req), wyl_revoke_req_get_action (req),
-      wyl_revoke_req_get_resource_id (req), FALSE);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = reload_policy_snapshot (handle);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
 #ifdef WYL_HAS_AUDIT
-  /* Mirror revoke in audit alongside grant (see wyl_perm_grant for
-   * rationale). */
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_revoke_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "permission_revoke");
   wyl_audit_event_set_resource_id (ev, wyl_revoke_req_get_resource_id (req));
   wyl_audit_event_set_deny_origin (ev, wyl_revoke_req_get_action (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (handle, ev);
+#else
+  WylAuditEvent *ev = NULL;
 #endif
 
-  return WYRELOG_E_OK;
+  wyrelog_error_t rc = update_direct_permission_store (handle,
+      wyl_revoke_req_get_subject_id (req), wyl_revoke_req_get_action (req),
+      wyl_revoke_req_get_resource_id (req), FALSE, ev);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return finish_policy_mutation (handle, ev);
 }
 
 wyrelog_error_t
@@ -448,16 +489,6 @@ wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
       || wyl_role_grant_req_get_scope (req) == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = update_role_membership_store (handle,
-      wyl_role_grant_req_get_subject_id (req),
-      wyl_role_grant_req_get_role_id (req), wyl_role_grant_req_get_scope (req),
-      TRUE);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = reload_policy_snapshot (handle);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_role_grant_req_get_subject_id (req));
@@ -465,10 +496,17 @@ wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
   wyl_audit_event_set_resource_id (ev, wyl_role_grant_req_get_scope (req));
   wyl_audit_event_set_deny_origin (ev, wyl_role_grant_req_get_role_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (handle, ev);
+#else
+  WylAuditEvent *ev = NULL;
 #endif
 
-  return WYRELOG_E_OK;
+  wyrelog_error_t rc = update_role_membership_store (handle,
+      wyl_role_grant_req_get_subject_id (req),
+      wyl_role_grant_req_get_role_id (req), wyl_role_grant_req_get_scope (req),
+      TRUE, ev);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return finish_policy_mutation (handle, ev);
 }
 
 wyrelog_error_t
@@ -481,16 +519,6 @@ wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
       || wyl_role_revoke_req_get_scope (req) == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = update_role_membership_store (handle,
-      wyl_role_revoke_req_get_subject_id (req),
-      wyl_role_revoke_req_get_role_id (req),
-      wyl_role_revoke_req_get_scope (req), FALSE);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = reload_policy_snapshot (handle);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, wyl_role_revoke_req_get_subject_id (req));
@@ -498,8 +526,15 @@ wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
   wyl_audit_event_set_resource_id (ev, wyl_role_revoke_req_get_scope (req));
   wyl_audit_event_set_deny_origin (ev, wyl_role_revoke_req_get_role_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (handle, ev);
+#else
+  WylAuditEvent *ev = NULL;
 #endif
 
-  return WYRELOG_E_OK;
+  wyrelog_error_t rc = update_role_membership_store (handle,
+      wyl_role_revoke_req_get_subject_id (req),
+      wyl_role_revoke_req_get_role_id (req),
+      wyl_role_revoke_req_get_scope (req), FALSE, ev);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return finish_policy_mutation (handle, ev);
 }

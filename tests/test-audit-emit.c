@@ -87,6 +87,9 @@ insert_symbol_row4 (WylHandle *handle, const gchar *relation, const gchar *a,
   return wyl_handle_engine_insert (handle, relation, row, 4);
 }
 
+static gint seed_audit_role_permission (WylHandle * handle,
+    const gchar * role_id, const gchar * perm_id);
+
 static wyrelog_error_t
 contains_audit_event_fact (WylHandle *handle, const gchar *id,
     gint64 created_at_us, const gchar *decision, gboolean *out_contains)
@@ -806,6 +809,148 @@ check_decide_fail_closes_on_audit_append_failure (void)
   if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "audit_events") != 0) {
     g_object_unref (handle);
     return 56;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_permission_grant_rolls_back_on_store_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 57;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_permission_grant_audit "
+          "BEFORE INSERT ON audit_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+          NULL, NULL, NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 58;
+  }
+
+  g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (req, "audit-grant-rollback-user");
+  wyl_grant_req_set_action (req, "wr.audit-grant-rollback");
+  wyl_grant_req_set_resource_id (req, "audit-grant-rollback-scope");
+  if (wyl_perm_grant (handle, req) != WYRELOG_E_IO) {
+    g_object_unref (handle);
+    return 59;
+  }
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_direct_permission_exists (store,
+          "audit-grant-rollback-user", "wr.audit-grant-rollback",
+          "audit-grant-rollback-scope", &exists) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 60;
+  }
+  if (exists) {
+    g_object_unref (handle);
+    return 61;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_role_grant_rolls_back_on_store_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 68;
+  if (seed_audit_role_permission (handle, "wr.audit-role-rollback",
+          "wr.audit-role-rollback.read") != 0) {
+    g_object_unref (handle);
+    return 69;
+  }
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_role_grant_audit "
+          "BEFORE INSERT ON audit_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+          NULL, NULL, NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 70;
+  }
+
+  g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (req, "audit-role-rollback-user");
+  wyl_role_grant_req_set_role_id (req, "wr.audit-role-rollback");
+  wyl_role_grant_req_set_scope (req, "audit-role-rollback-scope");
+  if (wyl_role_grant (handle, req) != WYRELOG_E_IO) {
+    g_object_unref (handle);
+    return 71;
+  }
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_role_membership_exists (store,
+          "audit-role-rollback-user", "wr.audit-role-rollback",
+          "audit-role-rollback-scope", &exists) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 72;
+  }
+  if (exists) {
+    g_object_unref (handle);
+    return 73;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_permission_grant_survives_runtime_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 62;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn, "DROP TABLE audit_events;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 63;
+  }
+  duckdb_destroy_result (&result);
+
+  g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (req, "audit-grant-runtime-user");
+  wyl_grant_req_set_action (req, "wr.audit-grant-runtime");
+  wyl_grant_req_set_resource_id (req, "audit-grant-runtime-scope");
+  if (wyl_perm_grant (handle, req) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 64;
+  }
+
+  sqlite3_stmt *stmt = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+          "SELECT COUNT(*) FROM audit_events WHERE action = ?;", -1, &stmt,
+          NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 65;
+  }
+  if (sqlite3_bind_text (stmt, 1, "permission_grant", -1,
+          SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    g_object_unref (handle);
+    return 66;
+  }
+  int step_rc = sqlite3_step (stmt);
+  gint64 count = step_rc == SQLITE_ROW ? sqlite3_column_int64 (stmt, 0) : -1;
+  sqlite3_finalize (stmt);
+  if (count != 1) {
+    g_object_unref (handle);
+    return 67;
   }
 
   g_object_unref (handle);
@@ -1640,6 +1785,12 @@ main (void)
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
   if ((rc = check_decide_fail_closes_on_audit_append_failure ()) != 0)
+    return rc;
+  if ((rc = check_permission_grant_rolls_back_on_store_audit_failure ()) != 0)
+    return rc;
+  if ((rc = check_role_grant_rolls_back_on_store_audit_failure ()) != 0)
+    return rc;
+  if ((rc = check_permission_grant_survives_runtime_audit_failure ()) != 0)
     return rc;
   if ((rc = check_session_transition_emits_audit_row ()) != 0)
     return rc;
