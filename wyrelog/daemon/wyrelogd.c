@@ -229,6 +229,7 @@ check_policy_store_ready (WylHandle *handle)
     "principal_events",
     "principal_states",
     "session_states",
+    "audit_events",
     "policy_signatures",
   };
 

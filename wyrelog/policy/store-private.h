@@ -4,6 +4,7 @@
 #include <glib.h>
 #include <sqlite3.h>
 
+#include "wyrelog/decide.h"
 #include "wyrelog/error.h"
 
 G_BEGIN_DECLS;
@@ -88,5 +89,9 @@ wyrelog_error_t wyl_policy_store_set_session_state (wyl_policy_store_t * store,
     const gchar * session_id, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_session_state (wyl_policy_store_t *
     store, wyl_policy_session_state_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_append_audit_event (wyl_policy_store_t *
+    store, const gchar * id, gint64 created_at_us, const gchar * subject_id,
+    const gchar * action, const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, wyl_decision_t decision);
 
 G_END_DECLS;

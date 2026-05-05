@@ -156,6 +156,36 @@ CREATE INDEX IF NOT EXISTS idx_session_states_state
     ON session_states (state);
 
 -- ---------------------------------------------------------------------------
+-- Table: audit_events
+-- Append-only audit sink mirrored from runtime audit emission.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_events (
+    id            TEXT    PRIMARY KEY,
+    created_at_us INTEGER NOT NULL,
+    subject_id    TEXT,
+    action        TEXT,
+    resource_id   TEXT,
+    deny_reason   TEXT,
+    deny_origin   TEXT,
+    decision      INTEGER NOT NULL CHECK (decision IN (0, 1))
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us
+    ON audit_events (created_at_us);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id
+    ON audit_events (subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_action
+    ON audit_events (action);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_decision
+    ON audit_events (decision);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason
+    ON audit_events (deny_reason);
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically

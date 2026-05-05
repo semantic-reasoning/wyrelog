@@ -8,6 +8,7 @@
 #include <duckdb.h>
 
 #include "audit/conn-private.h"
+#include "policy/store-private.h"
 #include "wyl-handle-private.h"
 #endif
 
@@ -289,7 +290,29 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   duckdb_destroy_result (&result);
   duckdb_destroy_prepare (&stmt);
 
-  return (rc == DuckDBSuccess) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (rc != DuckDBSuccess)
+    return WYRELOG_E_IO;
+
+  wyrelog_error_t store_rc =
+      wyl_policy_store_append_audit_event (wyl_handle_get_policy_store (handle),
+      id_buf, event->created_at_us,
+      event->subject_id, event->action, event->resource_id,
+      event->deny_reason, event->deny_origin, event->decision);
+  if (store_rc != WYRELOG_E_OK) {
+    duckdb_prepared_statement delete_stmt = NULL;
+    duckdb_result delete_result = { 0 };
+
+    static const gchar *delete_sql = "DELETE FROM audit_events WHERE id = ?;";
+    if (duckdb_prepare (conn, delete_sql, &delete_stmt) == DuckDBSuccess) {
+      duckdb_bind_varchar (delete_stmt, 1, id_buf);
+      duckdb_execute_prepared (delete_stmt, &delete_result);
+      duckdb_destroy_result (&delete_result);
+    }
+    duckdb_destroy_prepare (&delete_stmt);
+    return store_rc;
+  }
+
+  return WYRELOG_E_OK;
 #else
   (void) handle;
   (void) event;
