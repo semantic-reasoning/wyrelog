@@ -338,6 +338,71 @@ check_audit_fact_declarations (void)
   return 0;
 }
 
+static gint
+check_snippet_present (const gchar *contents, gsize len, const gchar *snippet,
+    gint code)
+{
+  if (g_strstr_len (contents, (gssize) len, snippet) == NULL)
+    return code;
+  return 0;
+}
+
+static gint
+check_decision_rule_bodies (void)
+{
+  static const gchar *snippets[] = {
+    "allow_guard_base(U, P, S) :-\n"
+        "    has_permission(U, P, S),\n"
+        "    principal_state(U, \"authenticated\"),\n"
+        "    session_state(S, ST),\n"
+        "    session_active(ST),\n"
+        "    !frozen(S),\n"
+        "    !disabled_role_for(U, P),\n"
+        "    !policy_violation(\"sod\", U, P, _).",
+    "guarded_perm(P) :- perm_arm_rule(P, G).",
+    "allow(U, P, S) :-\n"
+        "    allow_guard_base(U, P, S),\n" "    armed(U, P, S).",
+    "allow_bool(U, P, S) :- allow(U, P, S).",
+    "deny_reason(U, P, S, \"frozen\", \"frozen\") :-\n"
+        "    has_permission(U, P, S),\n" "    frozen(S).",
+    "deny_reason(U, P, S, \"disabled_role\", \"disabled_role_for\") :-\n"
+        "    has_permission(U, P, S),\n" "    disabled_role_for(U, P).",
+    "deny_reason(U, P, S, \"sod\", \"policy_violation\") :-\n"
+        "    has_permission(U, P, S),\n"
+        "    policy_violation(\"sod\", U, P, _).",
+    "deny_reason(U, P, S, \"not_authenticated\", \"principal_state\") :-\n"
+        "    has_permission(U, P, S),\n"
+        "    !principal_state(U, \"authenticated\").",
+    "deny_reason(U, P, S, \"session_inactive\", \"session_state\") :-\n"
+        "    has_permission(U, P, S),\n"
+        "    principal_state(U, \"authenticated\"),\n"
+        "    session_state(S, ST),\n" "    !session_active(ST).",
+    "deny_reason(U, P, S, \"not_armed\", \"perm_state\") :-\n"
+        "    has_permission(U, P, S),\n"
+        "    principal_state(U, \"authenticated\"),\n"
+        "    session_state(S, ST),\n"
+        "    session_active(ST),\n" "    !armed(U, P, S).",
+  };
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+
+  if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &contents,
+          &len, &err)) {
+    g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
+        err ? err->message : "?");
+    return 180;
+  }
+
+  for (gsize i = 0; i < G_N_ELEMENTS (snippets); i++) {
+    gint rc = check_snippet_present (contents, len, snippets[i],
+        (gint) (181 + i));
+    if (rc != 0)
+      return rc;
+  }
+  return 0;
+}
+
 static void
 append_non_comment_lines (GString *out, const gchar *contents)
 {
@@ -403,6 +468,8 @@ main (void)
   if ((rc = check_head_mirror ()) != 0)
     return rc;
   if ((rc = check_audit_fact_declarations ()) != 0)
+    return rc;
+  if ((rc = check_decision_rule_bodies ()) != 0)
     return rc;
   if ((rc = check_legacy_template_matches_canonical ()) != 0)
     return rc;
