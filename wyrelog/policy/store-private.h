@@ -55,6 +55,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
 
 sqlite3 *wyl_policy_store_get_db (wyl_policy_store_t * store);
 
+wyrelog_error_t wyl_policy_store_begin_mutation (wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_commit_mutation (wyl_policy_store_t * store);
+void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);
+
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
