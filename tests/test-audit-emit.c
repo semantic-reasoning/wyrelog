@@ -43,6 +43,58 @@ policy_count_rows (wyl_policy_store_t *store, const gchar *sql,
   return ok;
 }
 
+static gboolean
+policy_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+          "SELECT COUNT(*) FROM audit_events WHERE id = ?;", -1, &stmt, NULL)
+      != SQLITE_OK)
+    return FALSE;
+  if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return FALSE;
+  }
+
+  gboolean ok = FALSE;
+  if (sqlite3_step (stmt) == SQLITE_ROW) {
+    *out_count = sqlite3_column_int64 (stmt, 0);
+    ok = TRUE;
+  }
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gboolean
+runtime_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
+{
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+
+  if (duckdb_prepare (conn,
+          "SELECT COUNT(*) FROM audit_events WHERE id = ?;", &stmt)
+      != DuckDBSuccess)
+    return FALSE;
+  if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return FALSE;
+  }
+
+  gboolean ok = FALSE;
+  if (duckdb_execute_prepared (stmt, &result) == DuckDBSuccess
+      && duckdb_row_count (&result) == 1) {
+    *out_count = duckdb_value_int64 (&result, 0, 0);
+    ok = TRUE;
+  }
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  return ok;
+}
+
 static wyrelog_error_t
 insert_symbol_row1 (WylHandle *handle, const gchar *relation,
     const gchar *value)
@@ -2060,9 +2112,66 @@ check_emit_reports_live_projection_failure (void)
   wyl_audit_event_set_subject_id (ev, "audit-live-fail-user");
   wyl_audit_event_set_action (ev, "audit-live-fail-action");
   wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
   if (wyl_audit_emit (handle, ev) != WYRELOG_E_INTERNAL) {
     g_object_unref (handle);
     return 216;
+  }
+  gint64 count = -1;
+  if (!runtime_count_audit_rows (handle, id, &count) || count != 0) {
+    g_object_unref (handle);
+    return 225;
+  }
+  if (!policy_count_audit_rows (handle, id, &count) || count != 0) {
+    g_object_unref (handle);
+    return 226;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_failed_duplicate_emit_keeps_durable_rows (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 227;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "audit-live-duplicate-user");
+  wyl_audit_event_set_action (ev, "audit-live-duplicate-action");
+  wyl_audit_event_set_resource_id (ev, "audit-live-duplicate-resource");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
+  gint64 created_at_us = wyl_audit_event_get_created_at_us (ev);
+
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 228;
+  }
+
+  wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
+      WYRELOG_E_INTERNAL);
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_INTERNAL) {
+    g_object_unref (handle);
+    return 229;
+  }
+
+  gint64 count = -1;
+  if (!runtime_count_audit_rows (handle, id, &count) || count != 1) {
+    g_object_unref (handle);
+    return 230;
+  }
+  if (!policy_count_audit_rows (handle, id, &count) || count != 1) {
+    g_object_unref (handle);
+    return 231;
+  }
+  gboolean contains = FALSE;
+  if (contains_audit_event_fact (handle, id, created_at_us, "allow",
+          &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 232;
   }
 
   g_object_unref (handle);
@@ -2108,6 +2217,15 @@ check_emit_rolls_back_partial_live_projection_failure (void)
     if (wyl_audit_emit (handle, ev) != WYRELOG_E_INTERNAL) {
       g_object_unref (handle);
       return (gint) (270 + i);
+    }
+    gint64 count = -1;
+    if (!runtime_count_audit_rows (handle, id, &count) || count != 0) {
+      g_object_unref (handle);
+      return (gint) (390 + i);
+    }
+    if (!policy_count_audit_rows (handle, id, &count) || count != 0) {
+      g_object_unref (handle);
+      return (gint) (400 + i);
     }
 
     for (gsize j = 0; j < G_N_ELEMENTS (projected_relations); j++) {
@@ -2325,6 +2443,8 @@ main (void)
   if ((rc = check_emit_projects_sparse_wirelog_facts_immediately ()) != 0)
     return rc;
   if ((rc = check_emit_reports_live_projection_failure ()) != 0)
+    return rc;
+  if ((rc = check_failed_duplicate_emit_keeps_durable_rows ()) != 0)
     return rc;
   if ((rc = check_emit_rolls_back_partial_live_projection_failure ()) != 0)
     return rc;

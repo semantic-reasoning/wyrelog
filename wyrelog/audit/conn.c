@@ -287,6 +287,32 @@ wyl_audit_conn_insert_event (wyl_audit_conn_t *conn, const gchar *id,
       &inserted);
 }
 
+wyrelog_error_t
+wyl_audit_conn_delete_event (wyl_audit_conn_t *conn, const gchar *id)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  wyl_id_t parsed_id;
+
+  if (conn == NULL || id == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql = "DELETE FROM audit_events WHERE id = ?;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  return step_rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
 static void
 append_json_string (GString *json, const gchar *value)
 {

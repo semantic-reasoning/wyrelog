@@ -1367,16 +1367,18 @@ wyl_policy_store_foreach_role_membership_event (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
+wyl_policy_store_append_audit_event_full (wyl_policy_store_t *store,
     const gchar *id, gint64 created_at_us, const gchar *subject_id,
     const gchar *action, const gchar *resource_id, const gchar *deny_reason,
-    const gchar *deny_origin, wyl_decision_t decision)
+    const gchar *deny_origin, wyl_decision_t decision, gboolean *out_inserted)
 {
   sqlite3_stmt *stmt = NULL;
   wyl_id_t parsed_id;
 
-  if (store == NULL || store->db == NULL || id == NULL || created_at_us < 0)
+  if (store == NULL || store->db == NULL || id == NULL || created_at_us < 0
+      || out_inserted == NULL)
     return WYRELOG_E_INVALID;
+  *out_inserted = FALSE;
   if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
     return WYRELOG_E_INVALID;
   if (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW)
@@ -1429,6 +1431,47 @@ wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
       || sqlite3_bind_int (stmt, 8, (int) decision) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  *out_inserted = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
+    const gchar *id, gint64 created_at_us, const gchar *subject_id,
+    const gchar *action, const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, wyl_decision_t decision)
+{
+  gboolean inserted = FALSE;
+
+  return wyl_policy_store_append_audit_event_full (store, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, decision,
+      &inserted);
+}
+
+wyrelog_error_t
+wyl_policy_store_delete_audit_event (wyl_policy_store_t *store, const gchar *id)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyl_id_t parsed_id;
+
+  if (store == NULL || store->db == NULL || id == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql = "DELETE FROM audit_events WHERE id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
   }
 
   int step_rc = sqlite3_step (stmt);

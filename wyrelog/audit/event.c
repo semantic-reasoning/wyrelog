@@ -247,6 +247,7 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
 #ifdef WYL_HAS_AUDIT
   gchar id_buf[WYL_ID_STRING_BUF];
   gboolean inserted = FALSE;
+  gboolean store_inserted = FALSE;
 
   if (handle == NULL || event == NULL)
     return WYRELOG_E_INVALID;
@@ -266,33 +267,40 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
     return rc;
 
   wyrelog_error_t store_rc =
-      wyl_policy_store_append_audit_event (wyl_handle_get_policy_store (handle),
-      id_buf, event->created_at_us,
+      wyl_policy_store_append_audit_event_full (wyl_handle_get_policy_store
+      (handle), id_buf, event->created_at_us,
       event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->decision);
+      event->deny_reason, event->deny_origin, event->decision,
+      &store_inserted);
   if (store_rc != WYRELOG_E_OK) {
-    if (!inserted)
-      return store_rc;
-
-    duckdb_connection conn = wyl_audit_conn_get_connection (audit_conn);
-    duckdb_prepared_statement delete_stmt = NULL;
-    duckdb_result delete_result = { 0 };
-
-    static const gchar *delete_sql = "DELETE FROM audit_events WHERE id = ?;";
-    if (duckdb_prepare (conn, delete_sql, &delete_stmt) == DuckDBSuccess) {
-      duckdb_bind_varchar (delete_stmt, 1, id_buf);
-      duckdb_execute_prepared (delete_stmt, &delete_result);
-      duckdb_destroy_result (&delete_result);
+    if (inserted) {
+      wyrelog_error_t cleanup_rc =
+          wyl_audit_conn_delete_event (audit_conn, id_buf);
+      if (cleanup_rc != WYRELOG_E_OK)
+        return cleanup_rc;
     }
-    duckdb_destroy_prepare (&delete_stmt);
     return store_rc;
   }
 
   rc = wyl_handle_insert_audit_fact (handle, id_buf, event->created_at_us,
       event->subject_id, event->action, event->resource_id,
       event->deny_reason, event->deny_origin, event->decision);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    if (store_inserted) {
+      wyrelog_error_t cleanup_rc =
+          wyl_policy_store_delete_audit_event (wyl_handle_get_policy_store
+          (handle), id_buf);
+      if (cleanup_rc != WYRELOG_E_OK)
+        return cleanup_rc;
+    }
+    if (inserted) {
+      wyrelog_error_t cleanup_rc =
+          wyl_audit_conn_delete_event (audit_conn, id_buf);
+      if (cleanup_rc != WYRELOG_E_OK)
+        return cleanup_rc;
+    }
     return rc;
+  }
 
   return WYRELOG_E_OK;
 #else
