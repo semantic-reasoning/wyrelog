@@ -25,6 +25,24 @@ intern_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
   return wyl_handle_intern_engine_symbol (handle, symbol, out_id);
 }
 
+static gboolean
+policy_count_rows (wyl_policy_store_t *store, const gchar *sql,
+    gint64 *out_count)
+{
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
+          NULL) != SQLITE_OK)
+    return FALSE;
+
+  gboolean ok = FALSE;
+  if (sqlite3_step (stmt) == SQLITE_ROW) {
+    *out_count = sqlite3_column_int64 (stmt, 0);
+    ok = TRUE;
+  }
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
 static wyrelog_error_t
 insert_symbol_row1 (WylHandle *handle, const gchar *relation,
     const gchar *value)
@@ -862,7 +880,7 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
 {
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
-    return 68;
+    return 246;
   if (seed_audit_role_permission (handle, "wr.audit-role-rollback",
           "wr.audit-role-rollback.read") != 0) {
     g_object_unref (handle);
@@ -951,6 +969,65 @@ check_permission_grant_survives_runtime_audit_failure (void)
   if (count != 1) {
     g_object_unref (handle);
     return 67;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_login_survives_runtime_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 68;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn, "DROP TABLE audit_events;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 247;
+  }
+  duckdb_destroy_result (&result);
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-login-runtime-user");
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 248;
+  }
+  if (session == NULL) {
+    g_object_unref (handle);
+    return 249;
+  }
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 count = -1;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'principal_state';", &count)) {
+    g_object_unref (handle);
+    return 250;
+  }
+  if (count != 1) {
+    g_object_unref (handle);
+    return 251;
+  }
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'session_state';", &count)) {
+    g_object_unref (handle);
+    return 252;
+  }
+  if (count != 1) {
+    g_object_unref (handle);
+    return 253;
   }
 
   g_object_unref (handle);
@@ -1389,6 +1466,165 @@ check_denied_login_skip_mfa_reports_audit_failure (void)
   if (contains) {
     g_object_unref (handle);
     return 229;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 230;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_skip_mfa_principal_audit "
+          "BEFORE INSERT ON audit_events WHEN NEW.action = 'principal_state' "
+          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+          NULL, NULL, NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 231;
+  }
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-skip-mfa-store-fail-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_IO) {
+    g_object_unref (handle);
+    return 232;
+  }
+  if (session != NULL) {
+    g_object_unref (handle);
+    return 233;
+  }
+
+  gboolean contains = FALSE;
+  gint64 authenticated[2];
+  if (intern_symbol (handle, "audit-skip-mfa-store-fail-user",
+          &authenticated[0]) != WYRELOG_E_OK
+      || intern_symbol (handle, "authenticated", &authenticated[1])
+      != WYRELOG_E_OK
+      || wyl_handle_engine_contains (handle, "principal_state", authenticated,
+          2, &contains) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 234;
+  }
+  if (contains) {
+    g_object_unref (handle);
+    return 235;
+  }
+
+  gint64 count = -1;
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_states;",
+          &count)) {
+    g_object_unref (handle);
+    return 254;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 255;
+  }
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_events;",
+          &count)) {
+    g_object_unref (handle);
+    return 256;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 257;
+  }
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM audit_events;", &count)) {
+    g_object_unref (handle);
+    return 258;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 259;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_login_session_state_rolls_back_on_store_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 236;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_session_state_audit "
+          "BEFORE INSERT ON audit_events WHEN NEW.action = 'session_state' "
+          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+          NULL, NULL, NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 237;
+  }
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-session-store-fail-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_IO) {
+    g_object_unref (handle);
+    return 238;
+  }
+  if (session != NULL) {
+    g_object_unref (handle);
+    return 239;
+  }
+
+  gint64 count = -1;
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM session_states;",
+          &count)) {
+    g_object_unref (handle);
+    return 240;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 241;
+  }
+
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_states;",
+          &count)) {
+    g_object_unref (handle);
+    return 242;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 243;
+  }
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM session_events;",
+          &count)) {
+    g_object_unref (handle);
+    return 244;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 245;
+  }
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM principal_events;",
+          &count)) {
+    g_object_unref (handle);
+    return 260;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 261;
+  }
+  if (!policy_count_rows (store, "SELECT COUNT(*) FROM audit_events;", &count)) {
+    g_object_unref (handle);
+    return 262;
+  }
+  if (count != 0) {
+    g_object_unref (handle);
+    return 263;
   }
 
   g_object_unref (handle);
@@ -2041,6 +2277,8 @@ main (void)
     return rc;
   if ((rc = check_permission_grant_survives_runtime_audit_failure ()) != 0)
     return rc;
+  if ((rc = check_login_survives_runtime_audit_failure ()) != 0)
+    return rc;
   if ((rc = check_session_transition_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_login_session_state_emits_audit_row ()) != 0)
@@ -2054,6 +2292,12 @@ main (void)
   if ((rc = check_denied_login_skip_mfa_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_denied_login_skip_mfa_reports_audit_failure ()) != 0)
+    return rc;
+  if ((rc = check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure ())
+      != 0)
+    return rc;
+  if ((rc = check_login_session_state_rolls_back_on_store_audit_failure ())
+      != 0)
     return rc;
   if ((rc = check_denied_login_skip_mfa_projects_audit_fact ()) != 0)
     return rc;

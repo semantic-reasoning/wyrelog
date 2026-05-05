@@ -57,24 +57,24 @@ column_nullable_text_equal (sqlite3_stmt *stmt, int col, const gchar *expected)
       expected) == 0;
 }
 
-static wyrelog_error_t
-begin_mutation_savepoint (wyl_policy_store_t *store)
+wyrelog_error_t
+wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
   return exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
 }
 
-static wyrelog_error_t
-commit_mutation_savepoint (wyl_policy_store_t *store)
+wyrelog_error_t
+wyl_policy_store_commit_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
   return exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
 }
 
-static void
-rollback_mutation_savepoint (wyl_policy_store_t *store)
+void
+wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return;
@@ -430,7 +430,7 @@ wyrelog_error_t
       || perm_id == NULL || scope == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = begin_mutation_savepoint (store);
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -456,13 +456,13 @@ wyrelog_error_t
         audit_decision);
   }
   if (rc != WYRELOG_E_OK) {
-    rollback_mutation_savepoint (store);
+    wyl_policy_store_rollback_mutation (store);
     return rc;
   }
 
-  rc = commit_mutation_savepoint (store);
+  rc = wyl_policy_store_commit_mutation (store);
   if (rc != WYRELOG_E_OK) {
-    rollback_mutation_savepoint (store);
+    wyl_policy_store_rollback_mutation (store);
     return rc;
   }
   return WYRELOG_E_OK;
@@ -1111,7 +1111,7 @@ wyrelog_error_t
       || role_id == NULL || scope == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = begin_mutation_savepoint (store);
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1131,13 +1131,13 @@ wyrelog_error_t
         audit_decision);
   }
   if (rc != WYRELOG_E_OK) {
-    rollback_mutation_savepoint (store);
+    wyl_policy_store_rollback_mutation (store);
     return rc;
   }
 
-  rc = commit_mutation_savepoint (store);
+  rc = wyl_policy_store_commit_mutation (store);
   if (rc != WYRELOG_E_OK) {
-    rollback_mutation_savepoint (store);
+    wyl_policy_store_rollback_mutation (store);
     return rc;
   }
   return WYRELOG_E_OK;

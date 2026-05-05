@@ -1088,3 +1088,22 @@ wyl_handle_get_delta_engine (WylHandle *self)
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return self->delta_engine;
 }
+
+wyrelog_error_t
+wyl_handle_replay_delta_insert (WylHandle *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (relation == NULL || row == NULL || ncols == 0)
+    return WYRELOG_E_INVALID;
+  if (self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (self->delta_callback == NULL)
+    return WYRELOG_E_OK;
+
+  self->delta_callback (relation, row, (guint) ncols, WYL_DELTA_INSERT,
+      self->delta_callback_user_data);
+  return WYRELOG_E_OK;
+}

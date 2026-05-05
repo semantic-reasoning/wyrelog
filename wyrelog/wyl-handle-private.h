@@ -275,5 +275,7 @@ wyrelog_error_t wyl_handle_engine_decide (WylHandle * self,
  */
 WylEngine *wyl_handle_get_read_engine (WylHandle * self);
 WylEngine *wyl_handle_get_delta_engine (WylHandle * self);
+wyrelog_error_t wyl_handle_replay_delta_insert (WylHandle * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
 
 G_END_DECLS;
