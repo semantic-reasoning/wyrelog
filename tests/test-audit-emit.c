@@ -1353,6 +1353,49 @@ check_denied_login_skip_mfa_emits_audit_row (void)
 }
 
 static gint
+check_denied_login_skip_mfa_reports_audit_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 225;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
+      WYRELOG_E_INTERNAL);
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-skip-mfa-fail-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_INTERNAL) {
+    g_object_unref (handle);
+    return 226;
+  }
+  if (session != NULL) {
+    g_object_unref (handle);
+    return 227;
+  }
+
+  gboolean contains = FALSE;
+  gint64 authenticated[2];
+  if (intern_symbol (handle, "audit-skip-mfa-fail-user",
+          &authenticated[0]) != WYRELOG_E_OK
+      || intern_symbol (handle, "authenticated", &authenticated[1])
+      != WYRELOG_E_OK
+      || wyl_handle_engine_contains (handle, "principal_state", authenticated,
+          2, &contains) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 228;
+  }
+  if (contains) {
+    g_object_unref (handle);
+    return 229;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
 check_permission_grant_emits_audit_row (void)
 {
   WylHandle *handle = NULL;
@@ -2009,6 +2052,8 @@ main (void)
   if ((rc = check_login_skip_mfa_emits_principal_state_audit_row ()) != 0)
     return rc;
   if ((rc = check_denied_login_skip_mfa_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_denied_login_skip_mfa_reports_audit_failure ()) != 0)
     return rc;
   if ((rc = check_denied_login_skip_mfa_projects_audit_fact ()) != 0)
     return rc;

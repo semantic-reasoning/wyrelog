@@ -189,7 +189,7 @@ set_principal_state (WylHandle *handle, const gchar *username,
 }
 
 #ifdef WYL_HAS_AUDIT
-static void
+static wyrelog_error_t
 emit_login_skip_mfa_denied_audit (WylHandle *handle, const gchar *username)
 {
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
@@ -199,7 +199,7 @@ emit_login_skip_mfa_denied_audit (WylHandle *handle, const gchar *username)
   wyl_audit_event_set_deny_reason (ev, "skip_mfa_not_allowed");
   wyl_audit_event_set_deny_origin (ev, "login_ingress");
   wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
-  (void) wyl_audit_emit (handle, ev);
+  return wyl_audit_emit (handle, ev);
 }
 
 static void
@@ -432,7 +432,10 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (req != NULL && wyl_login_req_get_skip_mfa (req) &&
       !wyl_handle_get_login_skip_mfa_allowed (handle)) {
 #ifdef WYL_HAS_AUDIT
-    emit_login_skip_mfa_denied_audit (handle, wyl_login_req_get_username (req));
+    wyrelog_error_t audit_rc = emit_login_skip_mfa_denied_audit (handle,
+        wyl_login_req_get_username (req));
+    if (audit_rc != WYRELOG_E_OK)
+      return audit_rc;
 #endif
     return WYRELOG_E_POLICY;
   }
