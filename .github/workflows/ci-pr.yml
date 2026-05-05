@@ -96,12 +96,13 @@ jobs:
           call "%VCPKG_ROOT%\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Restore vcpkg binary packages
+        id: vcpkg-cache
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-2026.04.27-glib-sqlite3-libsodium
+          key: vcpkg-windows-v2-2026.04.27-glib-sqlite3-libsodium
           restore-keys: |
-            vcpkg-windows-
+            vcpkg-windows-v2-
 
       - name: Create vcpkg binary cache
         shell: cmd
@@ -121,7 +122,16 @@ jobs:
           @echo off
           "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
 
+      - name: Save vcpkg binary packages
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
       - name: Restore meson packagecache
+        id: meson-packagecache
         uses: actions/cache/restore@v5
         with:
           path: subprojects/packagecache
@@ -137,6 +147,14 @@ jobs:
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
           set CC=clang-cl
           meson setup builddir -Denable_tpm=disabled -Denable_client=disabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
+
+      - name: Save meson packagecache
+        if: steps.meson-packagecache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: subprojects/packagecache
+          key: ${{ steps.meson-packagecache.outputs.cache-primary-key }}
 
       - name: Build and test (clang-cl)
         shell: cmd
