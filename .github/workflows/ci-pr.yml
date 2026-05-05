@@ -100,10 +100,19 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-v2-2026.04.27-glib-sqlite3-libsodium
+          key: vcpkg-windows-v3-2026.04.27-x64-windows-glib-sqlite3-libsodium
           restore-keys: |
-            vcpkg-windows-v2-
-            vcpkg-windows-
+            vcpkg-windows-v3-2026.04.27-x64-windows-
+            vcpkg-windows-2026.04.27-glib-sqlite3-libsodium
+
+      - name: Restore vcpkg installed tree
+        id: vcpkg-installed-cache
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.VCPKG_ROOT }}\installed
+          key: vcpkg-windows-installed-v1-2026.04.27-x64-windows-glib-sqlite3-libsodium
+          restore-keys: |
+            vcpkg-windows-installed-v1-2026.04.27-x64-windows-
 
       - name: Create vcpkg binary cache
         shell: cmd
@@ -130,6 +139,14 @@ jobs:
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
+
+      - name: Save vcpkg installed tree
+        if: steps.vcpkg-installed-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.VCPKG_ROOT }}\installed
+          key: ${{ steps.vcpkg-installed-cache.outputs.cache-primary-key }}
 
       - name: Restore meson packagecache
         id: meson-packagecache
