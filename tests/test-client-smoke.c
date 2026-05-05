@@ -14,6 +14,23 @@ typedef struct
   const gchar *body;
 } TestHttpServer;
 
+static const gchar *two_event_body =
+    "[{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d001\","
+    "\"created_at_us\":1234567,"
+    "\"subject_id\":\"alice\","
+    "\"action\":\"read\","
+    "\"resource_id\":\"doc/42\","
+    "\"deny_reason\":null,"
+    "\"deny_origin\":null,"
+    "\"decision\":1},"
+    "{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d002\","
+    "\"created_at_us\":1234568,"
+    "\"subject_id\":\"bob\","
+    "\"action\":\"write\","
+    "\"resource_id\":\"doc/43\","
+    "\"deny_reason\":\"missing_grant\","
+    "\"deny_origin\":\"policy\"," "\"decision\":0}]";
+
 static gpointer
 test_http_server_thread (gpointer data)
 {
@@ -142,8 +159,10 @@ main (void)
     return 27;
   if (has_next)
     return 28;
+  if (wyl_audit_iter_ref_event (local_iter) != NULL)
+    return 38;
 
-  http.body = "[{\"id\":\"a\"},{\"id\":\"b\"}]";
+  http.body = two_event_body;
   g_autoptr (WylAuditIter) rows_iter = NULL;
   if (wyl_client_audit_query (local_client, NULL, &rows_iter) != WYRELOG_E_OK)
     return 29;
@@ -152,16 +171,43 @@ main (void)
     return 30;
   if (!has_next)
     return 31;
+  g_autoptr (WylAuditEvent) first_event = wyl_audit_iter_ref_event (rows_iter);
+  if (first_event == NULL)
+    return 39;
+  if (wyl_audit_event_get_created_at_us (first_event) != 1234567)
+    return 40;
+  if (g_strcmp0 (wyl_audit_event_get_subject_id (first_event), "alice") != 0)
+    return 41;
+  if (g_strcmp0 (wyl_audit_event_get_action (first_event), "read") != 0)
+    return 42;
+  if (g_strcmp0 (wyl_audit_event_get_resource_id (first_event), "doc/42") != 0)
+    return 43;
+  if (wyl_audit_event_get_decision (first_event) != WYL_DECISION_ALLOW)
+    return 44;
   has_next = FALSE;
   if (wyl_audit_iter_next (rows_iter, &has_next) != WYRELOG_E_OK)
     return 32;
   if (!has_next)
     return 33;
+  g_autoptr (WylAuditEvent) second_event = wyl_audit_iter_ref_event (rows_iter);
+  if (second_event == NULL)
+    return 45;
+  if (g_strcmp0 (wyl_audit_event_get_subject_id (second_event), "bob") != 0)
+    return 46;
+  if (g_strcmp0 (wyl_audit_event_get_deny_reason (second_event),
+          "missing_grant") != 0)
+    return 47;
+  if (g_strcmp0 (wyl_audit_event_get_deny_origin (second_event), "policy") != 0)
+    return 48;
+  if (wyl_audit_event_get_decision (second_event) != WYL_DECISION_DENY)
+    return 49;
   has_next = TRUE;
   if (wyl_audit_iter_next (rows_iter, &has_next) != WYRELOG_E_OK)
     return 34;
   if (has_next)
     return 35;
+  if (wyl_audit_iter_ref_event (rows_iter) != NULL)
+    return 50;
 
   http.body = "not-json";
   g_autoptr (WylAuditIter) invalid_iter = NULL;

@@ -40,6 +40,12 @@ main (int argc, char **argv)
     return 9;
   if (!has_next)
     return 10;
+  g_autoptr (WylAuditEvent) start_event = wyl_audit_iter_ref_event (start_iter);
+  if (start_event == NULL)
+    return 13;
+  if (g_strcmp0 (wyl_audit_event_get_action (start_event), "daemon_start")
+      != 0)
+    return 14;
 
   has_next = TRUE;
   if (wyl_audit_iter_next (start_iter, &has_next) != WYRELOG_E_OK)
