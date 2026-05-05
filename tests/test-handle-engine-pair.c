@@ -366,6 +366,30 @@ check_symbol_intern_is_stable (void)
 }
 
 static gint
+check_symbol_intern_can_be_reversed (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 id = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 28;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 29;
+  if (wyl_handle_intern_engine_symbol (handle, "reverse-symbol", &id)
+      != WYRELOG_E_OK)
+    return 30;
+  g_autofree gchar *symbol = wyl_handle_dup_engine_symbol (handle, id);
+  if (g_strcmp0 (symbol, "reverse-symbol") != 0)
+    return 31;
+  if (wyl_handle_dup_engine_symbol (handle, -42) != NULL)
+    return 32;
+  if (wyl_handle_dup_engine_symbol (NULL, id) != NULL)
+    return 33;
+  return 0;
+}
+
+static gint
 check_symbol_intern_rejects_missing_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1027,6 +1051,8 @@ main (void)
   if ((rc = check_symbol_intern_reaches_both_engines ()) != 0)
     return rc;
   if ((rc = check_symbol_intern_is_stable ()) != 0)
+    return rc;
+  if ((rc = check_symbol_intern_can_be_reversed ()) != 0)
     return rc;
   if ((rc = check_symbol_intern_rejects_missing_pair ()) != 0)
     return rc;

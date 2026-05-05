@@ -44,6 +44,7 @@ wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
  */
 wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
     const gchar * symbol, gint64 * out_id);
+gchar *wyl_handle_dup_engine_symbol (WylHandle * self, gint64 id);
 
 /*
  * Applies an EDB row update to both handle-owned policy engines. Rejected
