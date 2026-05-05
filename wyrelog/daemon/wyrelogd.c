@@ -225,6 +225,7 @@ check_policy_store_ready (WylHandle *handle)
     "role_permissions",
     "role_inheritances",
     "role_memberships",
+    "role_membership_events",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",

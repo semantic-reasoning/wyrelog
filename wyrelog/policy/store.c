@@ -152,6 +152,19 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON role_memberships (role_id);"
       "CREATE INDEX IF NOT EXISTS idx_role_memberships_subject_scope "
       "  ON role_memberships (subject_id, scope);"
+      "CREATE TABLE IF NOT EXISTS role_membership_events ("
+      "  event_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+      "  subject_id TEXT NOT NULL,"
+      "  role_id TEXT NOT NULL,"
+      "  scope TEXT NOT NULL,"
+      "  operation TEXT NOT NULL CHECK (operation IN ('grant', 'revoke')),"
+      "  created_at INTEGER NOT NULL,"
+      "  FOREIGN KEY (role_id) REFERENCES roles (role_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_role_membership_events_subject "
+      "  ON role_membership_events (subject_id);"
+      "CREATE INDEX IF NOT EXISTS idx_role_membership_events_role "
+      "  ON role_membership_events (role_id);"
       "CREATE TABLE IF NOT EXISTS direct_permissions ("
       "  subject_id TEXT NOT NULL,"
       "  perm_id TEXT NOT NULL,"
@@ -859,6 +872,71 @@ wyl_policy_store_grant_role_membership (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_revoke_role_membership (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *role_id, const gchar *scope)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || role_id == NULL || scope == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "DELETE FROM role_memberships "
+      "WHERE subject_id = ? AND role_id = ? AND scope = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, role_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_role_membership_exists (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *role_id, const gchar *scope,
+    gboolean *out_exists)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || role_id == NULL || scope == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT 1 FROM role_memberships "
+      "WHERE subject_id = ? AND role_id = ? AND scope = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, role_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_policy_store_foreach_role_membership (wyl_policy_store_t *store,
     wyl_policy_role_membership_cb cb, gpointer user_data)
 {
@@ -880,6 +958,70 @@ wyl_policy_store_foreach_role_membership (wyl_policy_store_t *store,
     const gchar *role_id = (const gchar *) sqlite3_column_text (stmt, 1);
     const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
     rc = cb (subject_id, role_id, scope, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_append_role_membership_event (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *role_id, const gchar *scope,
+    const gchar *operation)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || role_id == NULL || scope == NULL || operation == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO role_membership_events "
+      "  (subject_id, role_id, scope, operation, created_at) "
+      "VALUES (?, ?, ?, ?, unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, role_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, operation)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_role_membership_event (wyl_policy_store_t *store,
+    wyl_policy_role_membership_event_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT subject_id, role_id, scope, operation "
+      "FROM role_membership_events ORDER BY event_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *role_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *operation = (const gchar *) sqlite3_column_text (stmt, 3);
+    rc = cb (subject_id, role_id, scope, operation, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;

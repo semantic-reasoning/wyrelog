@@ -17,6 +17,8 @@ G_BEGIN_DECLS;
  */
 typedef struct _wyl_grant_req wyl_grant_req_t;
 typedef struct _wyl_revoke_req wyl_revoke_req_t;
+typedef struct _wyl_role_grant_req wyl_role_grant_req_t;
+typedef struct _wyl_role_revoke_req wyl_role_revoke_req_t;
 
 wyl_grant_req_t *wyl_grant_req_new (void);
 void wyl_grant_req_free (wyl_grant_req_t * req);
@@ -66,5 +68,45 @@ wyrelog_error_t wyl_perm_grant (WylHandle * handle,
     const wyl_grant_req_t * req);
 wyrelog_error_t wyl_perm_revoke (WylHandle * handle,
     const wyl_revoke_req_t * req);
+
+wyl_role_grant_req_t *wyl_role_grant_req_new (void);
+void wyl_role_grant_req_free (wyl_role_grant_req_t * req);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_role_grant_req_t, wyl_role_grant_req_free);
+
+void wyl_role_grant_req_set_subject_id (wyl_role_grant_req_t * req,
+    const gchar * subject_id);
+const gchar *wyl_role_grant_req_get_subject_id (const wyl_role_grant_req_t *
+    req);
+
+void wyl_role_grant_req_set_role_id (wyl_role_grant_req_t * req,
+    const gchar * role_id);
+const gchar *wyl_role_grant_req_get_role_id (const wyl_role_grant_req_t * req);
+
+void wyl_role_grant_req_set_scope (wyl_role_grant_req_t * req,
+    const gchar * scope);
+const gchar *wyl_role_grant_req_get_scope (const wyl_role_grant_req_t * req);
+
+wyl_role_revoke_req_t *wyl_role_revoke_req_new (void);
+void wyl_role_revoke_req_free (wyl_role_revoke_req_t * req);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_role_revoke_req_t, wyl_role_revoke_req_free);
+
+void wyl_role_revoke_req_set_subject_id (wyl_role_revoke_req_t * req,
+    const gchar * subject_id);
+const gchar *wyl_role_revoke_req_get_subject_id (const wyl_role_revoke_req_t *
+    req);
+
+void wyl_role_revoke_req_set_role_id (wyl_role_revoke_req_t * req,
+    const gchar * role_id);
+const gchar *wyl_role_revoke_req_get_role_id (const wyl_role_revoke_req_t *
+    req);
+
+void wyl_role_revoke_req_set_scope (wyl_role_revoke_req_t * req,
+    const gchar * scope);
+const gchar *wyl_role_revoke_req_get_scope (const wyl_role_revoke_req_t * req);
+
+wyrelog_error_t wyl_role_grant (WylHandle * handle,
+    const wyl_role_grant_req_t * req);
+wyrelog_error_t wyl_role_revoke (WylHandle * handle,
+    const wyl_role_revoke_req_t * req);
 
 G_END_DECLS;

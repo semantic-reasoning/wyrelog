@@ -92,6 +92,26 @@ CREATE INDEX IF NOT EXISTS idx_role_memberships_subject_scope
     ON role_memberships (subject_id, scope);
 
 -- ---------------------------------------------------------------------------
+-- Table: role_membership_events
+-- Role membership grant/revoke history.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS role_membership_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id TEXT NOT NULL,
+    role_id    TEXT NOT NULL,
+    scope      TEXT NOT NULL,
+    operation  TEXT NOT NULL CHECK (operation IN ('grant', 'revoke')),
+    created_at INTEGER NOT NULL,       -- Unix epoch (seconds)
+    FOREIGN KEY (role_id) REFERENCES roles (role_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_role_membership_events_subject
+    ON role_membership_events (subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_role_membership_events_role
+    ON role_membership_events (role_id);
+
+-- ---------------------------------------------------------------------------
 -- Table: direct_permissions
 -- Per-principal direct grants mirrored into direct_permission/3.
 -- ---------------------------------------------------------------------------

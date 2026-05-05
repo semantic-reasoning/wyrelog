@@ -25,6 +25,7 @@ check_store_creates_authority_schema (void)
     "role_permissions",
     "role_inheritances",
     "role_memberships",
+    "role_membership_events",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",
@@ -71,6 +72,7 @@ check_template_schema_creates_state_tables (void)
     "role_permissions",
     "role_inheritances",
     "role_memberships",
+    "role_membership_events",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",
@@ -254,6 +256,15 @@ typedef struct
   guint matches;
 } RoleMembershipExpect;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *role_id;
+  const gchar *scope;
+  const gchar *operation;
+  guint matches;
+} RoleMembershipEventExpect;
+
 static wyrelog_error_t
 role_permission_expect_cb (const gchar *role_id, const gchar *perm_id,
     gpointer user_data)
@@ -287,6 +298,21 @@ role_membership_expect_cb (const gchar *subject_id, const gchar *role_id,
   if (g_strcmp0 (subject_id, expect->subject_id) == 0
       && g_strcmp0 (role_id, expect->role_id) == 0
       && g_strcmp0 (scope, expect->scope) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+role_membership_event_expect_cb (const gchar *subject_id,
+    const gchar *role_id, const gchar *scope, const gchar *operation,
+    gpointer user_data)
+{
+  RoleMembershipEventExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (role_id, expect->role_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0
+      && g_strcmp0 (operation, expect->operation) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -390,6 +416,9 @@ check_store_grants_role_membership (void)
   if (wyl_policy_store_grant_role_membership (store, "member-user",
           "wr.member-role", "member-scope") != WYRELOG_E_OK)
     return 71;
+  if (wyl_policy_store_append_role_membership_event (store, "member-user",
+          "wr.member-role", "member-scope", "grant") != WYRELOG_E_OK)
+    return 100;
   if (wyl_policy_store_grant_role_membership (store, "member-user",
           "wr.member-role", "member-scope") != WYRELOG_E_OK)
     return 72;
@@ -404,6 +433,36 @@ check_store_grants_role_membership (void)
     return 73;
   if (expect.matches != 1)
     return 74;
+  gboolean exists = FALSE;
+  if (wyl_policy_store_role_membership_exists (store, "member-user",
+          "wr.member-role", "member-scope", &exists) != WYRELOG_E_OK)
+    return 101;
+  if (!exists)
+    return 102;
+
+  RoleMembershipEventExpect event_expect = {
+    .subject_id = "member-user",
+    .role_id = "wr.member-role",
+    .scope = "member-scope",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_role_membership_event (store,
+          role_membership_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+    return 103;
+  if (event_expect.matches != 1)
+    return 104;
+  if (wyl_policy_store_revoke_role_membership (store, "member-user",
+          "wr.member-role", "member-scope") != WYRELOG_E_OK)
+    return 105;
+  if (wyl_policy_store_append_role_membership_event (store, "member-user",
+          "wr.member-role", "member-scope", "revoke") != WYRELOG_E_OK)
+    return 106;
+  exists = TRUE;
+  if (wyl_policy_store_role_membership_exists (store, "member-user",
+          "wr.member-role", "member-scope", &exists) != WYRELOG_E_OK)
+    return 107;
+  if (exists)
+    return 108;
   return 0;
 }
 
@@ -687,9 +746,25 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_grant_role_membership (store, NULL, "missing-role",
           "role-scope") != WYRELOG_E_INVALID)
     return 98;
+  if (wyl_policy_store_revoke_role_membership (store, NULL, "missing-role",
+          "role-scope") != WYRELOG_E_INVALID)
+    return 100;
+  gboolean exists = TRUE;
+  if (wyl_policy_store_role_membership_exists (store, NULL, "missing-role",
+          "role-scope", &exists) != WYRELOG_E_INVALID)
+    return 101;
   if (wyl_policy_store_foreach_role_membership (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 99;
+  if (wyl_policy_store_append_role_membership_event (store, "role-user",
+          "missing-role", "role-scope", "grant") != WYRELOG_E_IO)
+    return 102;
+  if (wyl_policy_store_append_role_membership_event (store, "role-user",
+          "missing-role", "role-scope", "invalid") != WYRELOG_E_IO)
+    return 103;
+  if (wyl_policy_store_foreach_role_membership_event (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 104;
   if (wyl_policy_store_set_principal_state (store, NULL, "authenticated")
       != WYRELOG_E_INVALID)
     return 56;
