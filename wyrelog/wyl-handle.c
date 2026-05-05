@@ -927,18 +927,42 @@ decision_symbol (wyl_decision_t decision)
   }
 }
 
+typedef struct
+{
+  const gchar *relation;
+  gint64 row[2];
+  gboolean inserted;
+} WylAuditAttrFact;
+
+static void
+rollback_audit_fact_inputs (WylHandle *self, const gint64 audit_event[3],
+    gboolean audit_event_inserted, WylAuditAttrFact *attrs, gsize n_attrs)
+{
+  for (gsize i = n_attrs; i > 0; i--) {
+    WylAuditAttrFact *attr = &attrs[i - 1];
+    if (attr->inserted)
+      (void) wyl_handle_engine_remove (self, attr->relation, attr->row, 2);
+  }
+  if (audit_event_inserted)
+    (void) wyl_handle_engine_remove (self, "audit_event_input", audit_event, 3);
+}
+
 static wyrelog_error_t
-insert_audit_fact_symbol (WylHandle *self, const gchar *relation,
+insert_audit_attr_fact (WylHandle *self, WylAuditAttrFact *attr,
     gint64 audit_id, const gchar *value)
 {
   if (value == NULL)
     return WYRELOG_E_OK;
 
-  gint64 row[2] = { audit_id, 0 };
-  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self, value, &row[1]);
+  attr->row[0] = audit_id;
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, value, &attr->row[1]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (self, relation, row, 2);
+  rc = wyl_handle_engine_insert (self, attr->relation, attr->row, 2);
+  if (rc == WYRELOG_E_OK)
+    attr->inserted = TRUE;
+  return rc;
 }
 
 static wyrelog_error_t
@@ -970,6 +994,15 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
     return WYRELOG_E_POLICY;
 
   gint64 audit_event[3];
+  gboolean audit_event_inserted = FALSE;
+  WylAuditAttrFact attrs[] = {
+    {.relation = "audit_event_subject_input"},
+    {.relation = "audit_event_action_input"},
+    {.relation = "audit_event_resource_input"},
+    {.relation = "audit_event_deny_reason_input"},
+    {.relation = "audit_event_deny_origin_input"},
+  };
+
   wyrelog_error_t rc =
       wyl_handle_intern_engine_symbol (self, id, &audit_event[0]);
   if (rc != WYRELOG_E_OK)
@@ -981,25 +1014,25 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
   rc = wyl_handle_engine_insert (self, "audit_event_input", audit_event, 3);
   if (rc != WYRELOG_E_OK)
     return rc;
+  audit_event_inserted = TRUE;
 
-  rc = insert_audit_fact_symbol (self, "audit_event_subject_input",
-      audit_event[0], subject_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = insert_audit_fact_symbol (self, "audit_event_action_input",
-      audit_event[0], action);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = insert_audit_fact_symbol (self, "audit_event_resource_input",
-      audit_event[0], resource_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = insert_audit_fact_symbol (self, "audit_event_deny_reason_input",
-      audit_event[0], deny_reason);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return insert_audit_fact_symbol (self, "audit_event_deny_origin_input",
-      audit_event[0], deny_origin);
+  const gchar *values[] = {
+    subject_id,
+    action,
+    resource_id,
+    deny_reason,
+    deny_origin,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (attrs); i++) {
+    rc = insert_audit_attr_fact (self, &attrs[i], audit_event[0], values[i]);
+    if (rc != WYRELOG_E_OK) {
+      rollback_audit_fact_inputs (self, audit_event, audit_event_inserted,
+          attrs, G_N_ELEMENTS (attrs));
+      return rc;
+    }
+  }
+
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

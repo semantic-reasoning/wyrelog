@@ -2070,6 +2070,65 @@ check_emit_reports_live_projection_failure (void)
 }
 
 static gint
+check_emit_rolls_back_partial_live_projection_failure (void)
+{
+  static const gchar *fault_relations[] = {
+    "audit_event_subject_input",
+    "audit_event_action_input",
+    "audit_event_resource_input",
+    "audit_event_deny_reason_input",
+    "audit_event_deny_origin_input",
+  };
+  static const gchar *projected_relations[] = {
+    "audit_event",
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (fault_relations); i++) {
+    WylHandle *handle = NULL;
+    if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+      return (gint) (264 + i);
+
+    wyl_handle_set_engine_insert_fault_once (handle, fault_relations[i],
+        WYRELOG_E_INTERNAL);
+
+    g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+    wyl_audit_event_set_subject_id (ev, "audit-live-partial-user");
+    wyl_audit_event_set_action (ev, "audit-live-partial-action");
+    wyl_audit_event_set_resource_id (ev, "audit-live-partial-resource");
+    wyl_audit_event_set_deny_reason (ev, "not_armed");
+    wyl_audit_event_set_deny_origin (ev, "perm_state");
+    wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
+    g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
+
+    if (wyl_audit_emit (handle, ev) != WYRELOG_E_INTERNAL) {
+      g_object_unref (handle);
+      return (gint) (270 + i);
+    }
+
+    for (gsize j = 0; j < G_N_ELEMENTS (projected_relations); j++) {
+      guint count = 0;
+      if (count_audit_attr_facts (handle, projected_relations[j], id, &count)
+          != WYRELOG_E_OK) {
+        g_object_unref (handle);
+        return (gint) (276 + i * 10 + j);
+      }
+      if (count != 0) {
+        g_object_unref (handle);
+        return (gint) (336 + i * 10 + j);
+      }
+    }
+
+    g_object_unref (handle);
+  }
+  return 0;
+}
+
+static gint
 check_denied_login_skip_mfa_projects_audit_fact (void)
 {
   WylHandle *handle = NULL;
@@ -2266,6 +2325,8 @@ main (void)
   if ((rc = check_emit_projects_sparse_wirelog_facts_immediately ()) != 0)
     return rc;
   if ((rc = check_emit_reports_live_projection_failure ()) != 0)
+    return rc;
+  if ((rc = check_emit_rolls_back_partial_live_projection_failure ()) != 0)
     return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
