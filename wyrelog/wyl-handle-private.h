@@ -39,6 +39,13 @@ wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
     const gchar * template_dir);
 
 /*
+ * Replaces the handle-owned policy engine pair with a freshly opened pair
+ * loaded from the same template directory and current policy store snapshot.
+ * On failure, the existing pair remains installed.
+ */
+wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
+
+/*
  * Interns @symbol into both handle-owned policy engines and returns the shared
  * integer id. Rejected unless the engine pair is already open.
  */

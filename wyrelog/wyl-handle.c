@@ -20,6 +20,7 @@ struct _WylHandle
   WylEngine *read_engine;
   WylEngine *delta_engine;
   GHashTable *engine_symbols_by_id;
+  gchar *template_dir;
   wyl_policy_store_t *policy_store;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
@@ -36,6 +37,7 @@ wyl_handle_finalize (GObject *object)
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
+  g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
 #ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
@@ -177,6 +179,7 @@ wyl_shutdown (WylHandle *handle)
   g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
+  g_clear_pointer (&handle->template_dir, g_free);
   g_hash_table_remove_all (handle->engine_symbols_by_id);
 }
 
@@ -215,6 +218,79 @@ wyl_handle_get_policy_store (WylHandle *self)
   return self->policy_store;
 }
 
+static GHashTable *
+new_engine_symbol_map (void)
+{
+  return g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
+}
+
+static wyrelog_error_t
+load_current_engine_pair (WylHandle *self)
+{
+  wyrelog_error_t rc = wyl_handle_seed_perm_arm_rules (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_seed_session_active_states (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_role_permissions (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_direct_permissions (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_principal_states (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_load_policy_store_session_states (self);
+}
+
+static wyrelog_error_t
+replace_engine_pair (WylHandle *self, const gchar *template_dir)
+{
+  WylEngine *old_read_engine = self->read_engine;
+  WylEngine *old_delta_engine = self->delta_engine;
+  GHashTable *old_symbols = self->engine_symbols_by_id;
+  gchar *old_template_dir = self->template_dir;
+
+  WylEngine *new_read_engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open (template_dir, 1, &new_read_engine);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylEngine *new_delta_engine = NULL;
+  rc = wyl_engine_open (template_dir, 1, &new_delta_engine);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (new_read_engine);
+    return rc;
+  }
+
+  self->read_engine = new_read_engine;
+  self->delta_engine = new_delta_engine;
+  self->engine_symbols_by_id = new_engine_symbol_map ();
+  self->template_dir = g_strdup (template_dir);
+
+  rc = load_current_engine_pair (self);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_object (&self->read_engine);
+    g_clear_object (&self->delta_engine);
+    g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
+    g_clear_pointer (&self->template_dir, g_free);
+    self->read_engine = old_read_engine;
+    self->delta_engine = old_delta_engine;
+    self->engine_symbols_by_id = old_symbols;
+    self->template_dir = old_template_dir;
+    return rc;
+  }
+
+  g_clear_object (&old_read_engine);
+  g_clear_object (&old_delta_engine);
+  if (old_symbols != NULL)
+    g_hash_table_unref (old_symbols);
+  g_free (old_template_dir);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
 {
@@ -225,57 +301,19 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   if (self->read_engine != NULL || self->delta_engine != NULL)
     return WYRELOG_E_INVALID;
 
-  WylEngine *read_engine = NULL;
-  wyrelog_error_t rc = wyl_engine_open (template_dir, 1, &read_engine);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  return replace_engine_pair (self, template_dir);
+}
 
-  WylEngine *delta_engine = NULL;
-  rc = wyl_engine_open (template_dir, 1, &delta_engine);
-  if (rc != WYRELOG_E_OK) {
-    g_object_unref (read_engine);
-    return rc;
-  }
+wyrelog_error_t
+wyl_handle_reload_engine_pair (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->template_dir == NULL)
+    return WYRELOG_E_INVALID;
 
-  self->read_engine = read_engine;
-  self->delta_engine = delta_engine;
-  rc = wyl_handle_seed_perm_arm_rules (self);
-  if (rc != WYRELOG_E_OK) {
-    g_clear_object (&self->read_engine);
-    g_clear_object (&self->delta_engine);
-    return rc;
-  }
-  rc = wyl_handle_seed_session_active_states (self);
-  if (rc != WYRELOG_E_OK) {
-    g_clear_object (&self->read_engine);
-    g_clear_object (&self->delta_engine);
-    return rc;
-  }
-  rc = wyl_handle_load_policy_store_role_permissions (self);
-  if (rc != WYRELOG_E_OK) {
-    g_clear_object (&self->read_engine);
-    g_clear_object (&self->delta_engine);
-    return rc;
-  }
-  rc = wyl_handle_load_policy_store_direct_permissions (self);
-  if (rc != WYRELOG_E_OK) {
-    g_clear_object (&self->read_engine);
-    g_clear_object (&self->delta_engine);
-    return rc;
-  }
-  rc = wyl_handle_load_policy_store_principal_states (self);
-  if (rc != WYRELOG_E_OK) {
-    g_clear_object (&self->read_engine);
-    g_clear_object (&self->delta_engine);
-    return rc;
-  }
-  rc = wyl_handle_load_policy_store_session_states (self);
-  if (rc != WYRELOG_E_OK) {
-    g_clear_object (&self->read_engine);
-    g_clear_object (&self->delta_engine);
-    return rc;
-  }
-  return WYRELOG_E_OK;
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  return replace_engine_pair (self, template_dir);
 }
 
 wyrelog_error_t
