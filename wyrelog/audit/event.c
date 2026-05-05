@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include "audit/event-private.h"
 #include "wyl-id-private.h"
 
 #ifdef WYL_HAS_AUDIT
@@ -69,6 +70,39 @@ WylAuditEvent *
 wyl_audit_event_new (void)
 {
   return g_object_new (WYL_TYPE_AUDIT_EVENT, NULL);
+}
+
+wyrelog_error_t
+wyl_audit_event_new_from_fields (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    wyl_decision_t decision, WylAuditEvent **out_event)
+{
+  wyl_id_t parsed_id;
+
+  if (out_event == NULL)
+    return WYRELOG_E_INVALID;
+  *out_event = NULL;
+  if (id == NULL || created_at_us < 0)
+    return WYRELOG_E_INVALID;
+  if (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_id_parse (id, &parsed_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylAuditEvent *self = wyl_audit_event_new ();
+  self->id = parsed_id;
+  self->created_at_us = created_at_us;
+  wyl_audit_event_set_subject_id (self, subject_id);
+  wyl_audit_event_set_action (self, action);
+  wyl_audit_event_set_resource_id (self, resource_id);
+  wyl_audit_event_set_deny_reason (self, deny_reason);
+  wyl_audit_event_set_deny_origin (self, deny_origin);
+  wyl_audit_event_set_decision (self, decision);
+
+  *out_event = self;
+  return WYRELOG_E_OK;
 }
 
 gchar *
