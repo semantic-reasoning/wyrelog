@@ -24,6 +24,20 @@ struct _wyl_revoke_req
   gchar *resource_id;
 };
 
+struct _wyl_role_grant_req
+{
+  gchar *subject_id;
+  gchar *role_id;
+  gchar *scope;
+};
+
+struct _wyl_role_revoke_req
+{
+  gchar *subject_id;
+  gchar *role_id;
+  gchar *scope;
+};
+
 wyl_login_req_t *
 wyl_login_req_new (void)
 {
@@ -192,6 +206,133 @@ wyl_revoke_req_get_resource_id (const wyl_revoke_req_t *req)
   return req->resource_id;
 }
 
+wyl_role_grant_req_t *
+wyl_role_grant_req_new (void)
+{
+  return g_new0 (wyl_role_grant_req_t, 1);
+}
+
+void
+wyl_role_grant_req_free (wyl_role_grant_req_t *req)
+{
+  if (req == NULL)
+    return;
+  g_free (req->subject_id);
+  g_free (req->role_id);
+  g_free (req->scope);
+  g_free (req);
+}
+
+void
+wyl_role_grant_req_set_subject_id (wyl_role_grant_req_t *req,
+    const gchar *subject_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->subject_id);
+  req->subject_id = g_strdup (subject_id);
+}
+
+const gchar *
+wyl_role_grant_req_get_subject_id (const wyl_role_grant_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->subject_id;
+}
+
+void
+wyl_role_grant_req_set_role_id (wyl_role_grant_req_t *req, const gchar *role_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->role_id);
+  req->role_id = g_strdup (role_id);
+}
+
+const gchar *
+wyl_role_grant_req_get_role_id (const wyl_role_grant_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->role_id;
+}
+
+void
+wyl_role_grant_req_set_scope (wyl_role_grant_req_t *req, const gchar *scope)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->scope);
+  req->scope = g_strdup (scope);
+}
+
+const gchar *
+wyl_role_grant_req_get_scope (const wyl_role_grant_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->scope;
+}
+
+wyl_role_revoke_req_t *
+wyl_role_revoke_req_new (void)
+{
+  return g_new0 (wyl_role_revoke_req_t, 1);
+}
+
+void
+wyl_role_revoke_req_free (wyl_role_revoke_req_t *req)
+{
+  if (req == NULL)
+    return;
+  g_free (req->subject_id);
+  g_free (req->role_id);
+  g_free (req->scope);
+  g_free (req);
+}
+
+void
+wyl_role_revoke_req_set_subject_id (wyl_role_revoke_req_t *req,
+    const gchar *subject_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->subject_id);
+  req->subject_id = g_strdup (subject_id);
+}
+
+const gchar *
+wyl_role_revoke_req_get_subject_id (const wyl_role_revoke_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->subject_id;
+}
+
+void
+wyl_role_revoke_req_set_role_id (wyl_role_revoke_req_t *req,
+    const gchar *role_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->role_id);
+  req->role_id = g_strdup (role_id);
+}
+
+const gchar *
+wyl_role_revoke_req_get_role_id (const wyl_role_revoke_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->role_id;
+}
+
+void
+wyl_role_revoke_req_set_scope (wyl_role_revoke_req_t *req, const gchar *scope)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->scope);
+  req->scope = g_strdup (scope);
+}
+
+const gchar *
+wyl_role_revoke_req_get_scope (const wyl_role_revoke_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->scope;
+}
+
 static wyrelog_error_t
 update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
     const gchar *action, const gchar *resource_id, gboolean insert)
@@ -222,7 +363,26 @@ update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
 }
 
 static wyrelog_error_t
-reload_direct_permission_snapshot (WylHandle *handle)
+update_role_membership_store (WylHandle *handle, const gchar *subject_id,
+    const gchar *role_id, const gchar *scope, gboolean insert)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = insert
+      ? wyl_policy_store_grant_role_membership (store, subject_id, role_id,
+      scope)
+      : wyl_policy_store_revoke_role_membership (store, subject_id, role_id,
+      scope);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_policy_store_append_role_membership_event (store, subject_id,
+      role_id, scope, insert ? "grant" : "revoke");
+}
+
+static wyrelog_error_t
+reload_policy_snapshot (WylHandle *handle)
 {
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
@@ -247,7 +407,7 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
       wyl_grant_req_get_resource_id (req), TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = reload_direct_permission_snapshot (handle);
+  rc = reload_policy_snapshot (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -283,7 +443,7 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
       wyl_revoke_req_get_resource_id (req), FALSE);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = reload_direct_permission_snapshot (handle);
+  rc = reload_policy_snapshot (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -295,6 +455,72 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
   wyl_audit_event_set_action (ev, "permission_revoke");
   wyl_audit_event_set_resource_id (ev, wyl_revoke_req_get_resource_id (req));
   wyl_audit_event_set_deny_origin (ev, wyl_revoke_req_get_action (req));
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+#endif
+
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
+{
+  if (handle == NULL || req == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_role_grant_req_get_subject_id (req) == NULL
+      || wyl_role_grant_req_get_role_id (req) == NULL
+      || wyl_role_grant_req_get_scope (req) == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = update_role_membership_store (handle,
+      wyl_role_grant_req_get_subject_id (req),
+      wyl_role_grant_req_get_role_id (req), wyl_role_grant_req_get_scope (req),
+      TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reload_policy_snapshot (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, wyl_role_grant_req_get_subject_id (req));
+  wyl_audit_event_set_action (ev, "role_grant");
+  wyl_audit_event_set_resource_id (ev, wyl_role_grant_req_get_scope (req));
+  wyl_audit_event_set_deny_origin (ev, wyl_role_grant_req_get_role_id (req));
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+#endif
+
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
+{
+  if (handle == NULL || req == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_role_revoke_req_get_subject_id (req) == NULL
+      || wyl_role_revoke_req_get_role_id (req) == NULL
+      || wyl_role_revoke_req_get_scope (req) == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = update_role_membership_store (handle,
+      wyl_role_revoke_req_get_subject_id (req),
+      wyl_role_revoke_req_get_role_id (req),
+      wyl_role_revoke_req_get_scope (req), FALSE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reload_policy_snapshot (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, wyl_role_revoke_req_get_subject_id (req));
+  wyl_audit_event_set_action (ev, "role_revoke");
+  wyl_audit_event_set_resource_id (ev, wyl_role_revoke_req_get_scope (req));
+  wyl_audit_event_set_deny_origin (ev, wyl_role_revoke_req_get_role_id (req));
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   (void) wyl_audit_emit (handle, ev);
 #endif

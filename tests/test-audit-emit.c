@@ -971,6 +971,162 @@ check_permission_revoke_emits_audit_row (void)
 }
 
 static gint
+seed_audit_role_permission (WylHandle *handle, const gchar *role_id,
+    const gchar *perm_id)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  if (wyl_policy_store_upsert_role (store, role_id, role_id) != WYRELOG_E_OK)
+    return 1;
+  if (wyl_policy_store_upsert_permission (store, perm_id, perm_id, "basic")
+      != WYRELOG_E_OK)
+    return 2;
+  if (wyl_policy_store_grant_role_permission (store, role_id, perm_id)
+      != WYRELOG_E_OK)
+    return 3;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 4;
+  return 0;
+}
+
+static gint
+check_role_grant_emits_audit_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 140;
+  if (seed_audit_role_permission (handle, "wr.audit-role-grant",
+          "wr.audit-role-grant.read") != 0) {
+    g_object_unref (handle);
+    return 141;
+  }
+
+  g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (grant, "audit-role-grant-user");
+  wyl_role_grant_req_set_role_id (grant, "wr.audit-role-grant");
+  wyl_role_grant_req_set_scope (grant, "audit-role-grant-scope");
+  if (wyl_role_grant (handle, grant) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 142;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "FROM audit_events WHERE action = 'role_grant';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 143;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 144;
+  }
+
+  gint rc = 0;
+  const gchar *subject = duckdb_value_varchar (&result, 0, 0);
+  const gchar *action = duckdb_value_varchar (&result, 1, 0);
+  const gchar *resource = duckdb_value_varchar (&result, 2, 0);
+  const gchar *role = duckdb_value_varchar (&result, 3, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  if (g_strcmp0 (subject, "audit-role-grant-user") != 0)
+    rc = 145;
+  else if (g_strcmp0 (action, "role_grant") != 0)
+    rc = 146;
+  else if (g_strcmp0 (resource, "audit-role-grant-scope") != 0)
+    rc = 147;
+  else if (g_strcmp0 (role, "wr.audit-role-grant") != 0)
+    rc = 148;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 149;
+
+  duckdb_free ((void *) subject);
+  duckdb_free ((void *) action);
+  duckdb_free ((void *) resource);
+  duckdb_free ((void *) role);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
+check_role_revoke_emits_audit_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 150;
+  if (seed_audit_role_permission (handle, "wr.audit-role-revoke",
+          "wr.audit-role-revoke.read") != 0) {
+    g_object_unref (handle);
+    return 151;
+  }
+
+  g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (grant, "audit-role-revoke-user");
+  wyl_role_grant_req_set_role_id (grant, "wr.audit-role-revoke");
+  wyl_role_grant_req_set_scope (grant, "audit-role-revoke-scope");
+  if (wyl_role_grant (handle, grant) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 152;
+  }
+
+  g_autoptr (wyl_role_revoke_req_t) revoke = wyl_role_revoke_req_new ();
+  wyl_role_revoke_req_set_subject_id (revoke, "audit-role-revoke-user");
+  wyl_role_revoke_req_set_role_id (revoke, "wr.audit-role-revoke");
+  wyl_role_revoke_req_set_scope (revoke, "audit-role-revoke-scope");
+  if (wyl_role_revoke (handle, revoke) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 153;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT subject_id, action, resource_id, deny_origin, decision "
+          "FROM audit_events WHERE action = 'role_revoke';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 154;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 155;
+  }
+
+  gint rc = 0;
+  const gchar *subject = duckdb_value_varchar (&result, 0, 0);
+  const gchar *action = duckdb_value_varchar (&result, 1, 0);
+  const gchar *resource = duckdb_value_varchar (&result, 2, 0);
+  const gchar *role = duckdb_value_varchar (&result, 3, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 4, 0);
+  if (g_strcmp0 (subject, "audit-role-revoke-user") != 0)
+    rc = 156;
+  else if (g_strcmp0 (action, "role_revoke") != 0)
+    rc = 157;
+  else if (g_strcmp0 (resource, "audit-role-revoke-scope") != 0)
+    rc = 158;
+  else if (g_strcmp0 (role, "wr.audit-role-revoke") != 0)
+    rc = 159;
+  else if (decision != WYL_DECISION_ALLOW)
+    rc = 160;
+
+  duckdb_free ((void *) subject);
+  duckdb_free ((void *) action);
+  duckdb_free ((void *) resource);
+  duckdb_free ((void *) role);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
 check_emit_rejects_null_args (void)
 {
   WylHandle *handle = NULL;
@@ -1020,6 +1176,10 @@ main (void)
   if ((rc = check_permission_grant_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_permission_revoke_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_role_grant_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_role_revoke_emits_audit_row ()) != 0)
     return rc;
   if ((rc = check_emit_rejects_null_args ()) != 0)
     return rc;
