@@ -12,6 +12,8 @@ typedef struct wyl_policy_store_t wyl_policy_store_t;
 
 typedef wyrelog_error_t (*wyl_policy_role_permission_cb) (const gchar * role_id,
     const gchar * perm_id, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_role_inheritance_cb) (const gchar *
+    child_role_id, const gchar * parent_role_id, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_direct_permission_cb) (const gchar *
     subject_id, const gchar * perm_id, const gchar * scope, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_direct_permission_event_cb) (const gchar *
@@ -51,6 +53,10 @@ wyrelog_error_t wyl_policy_store_grant_role_permission (wyl_policy_store_t *
     store, const gchar * role_id, const gchar * perm_id);
 wyrelog_error_t wyl_policy_store_foreach_role_permission (wyl_policy_store_t *
     store, wyl_policy_role_permission_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_grant_role_inheritance (wyl_policy_store_t *
+    store, const gchar * child_role_id, const gchar * parent_role_id);
+wyrelog_error_t wyl_policy_store_foreach_role_inheritance (wyl_policy_store_t *
+    store, wyl_policy_role_inheritance_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_grant_direct_permission (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id,
     const gchar * scope);

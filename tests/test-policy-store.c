@@ -23,6 +23,7 @@ check_store_creates_authority_schema (void)
     "roles",
     "permissions",
     "role_permissions",
+    "role_inheritances",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",
@@ -66,6 +67,7 @@ check_template_schema_creates_state_tables (void)
     "roles",
     "permissions",
     "role_permissions",
+    "role_inheritances",
     "direct_permissions",
     "direct_permission_events",
     "principal_events",
@@ -233,6 +235,13 @@ typedef struct
   guint matches;
 } RolePermissionExpect;
 
+typedef struct
+{
+  const gchar *child_role_id;
+  const gchar *parent_role_id;
+  guint matches;
+} RoleInheritanceExpect;
+
 static wyrelog_error_t
 role_permission_expect_cb (const gchar *role_id, const gchar *perm_id,
     gpointer user_data)
@@ -241,6 +250,18 @@ role_permission_expect_cb (const gchar *role_id, const gchar *perm_id,
 
   if (g_strcmp0 (role_id, expect->role_id) == 0
       && g_strcmp0 (perm_id, expect->perm_id) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+role_inheritance_expect_cb (const gchar *child_role_id,
+    const gchar *parent_role_id, gpointer user_data)
+{
+  RoleInheritanceExpect *expect = user_data;
+
+  if (g_strcmp0 (child_role_id, expect->child_role_id) == 0
+      && g_strcmp0 (parent_role_id, expect->parent_role_id) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -276,6 +297,56 @@ check_store_grants_role_permission (void)
     return 46;
   if (expect.matches != 1)
     return 47;
+  return 0;
+}
+
+static gint
+check_store_grants_role_inheritance (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 48;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 49;
+  if (wyl_policy_store_upsert_role (store, "wr.child-role", "child role")
+      != WYRELOG_E_OK)
+    return 58;
+  if (wyl_policy_store_upsert_role (store, "wr.parent-role", "parent role")
+      != WYRELOG_E_OK)
+    return 59;
+  if (wyl_policy_store_grant_role_inheritance (store, "wr.child-role",
+          "wr.parent-role") != WYRELOG_E_OK)
+    return 60;
+  if (wyl_policy_store_grant_role_inheritance (store, "wr.child-role",
+          "wr.parent-role") != WYRELOG_E_OK)
+    return 61;
+  if (wyl_policy_store_upsert_permission (store, "wr.inherited.read",
+          "inherited read", "basic") != WYRELOG_E_OK)
+    return 62;
+  if (wyl_policy_store_grant_role_permission (store, "wr.parent-role",
+          "wr.inherited.read") != WYRELOG_E_OK)
+    return 63;
+
+  RoleInheritanceExpect expect = {
+    .child_role_id = "wr.child-role",
+    .parent_role_id = "wr.parent-role",
+  };
+  if (wyl_policy_store_foreach_role_inheritance (store,
+          role_inheritance_expect_cb, &expect) != WYRELOG_E_OK)
+    return 64;
+  if (expect.matches != 1)
+    return 65;
+
+  RolePermissionExpect permission_expect = {
+    .role_id = "wr.child-role",
+    .perm_id = "wr.inherited.read",
+  };
+  if (wyl_policy_store_foreach_role_permission (store,
+          role_permission_expect_cb, &permission_expect) != WYRELOG_E_OK)
+    return 66;
+  if (permission_expect.matches != 1)
+    return 67;
   return 0;
 }
 
@@ -494,6 +565,12 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_role_permission (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 55;
+  if (wyl_policy_store_grant_role_inheritance (store, "missing-child",
+          "missing-parent") != WYRELOG_E_IO)
+    return 58;
+  if (wyl_policy_store_foreach_role_inheritance (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 59;
   if (wyl_policy_store_set_principal_state (store, NULL, "authenticated")
       != WYRELOG_E_INVALID)
     return 56;
@@ -529,6 +606,8 @@ main (void)
   if ((rc = check_handle_owns_policy_store ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_grants_role_inheritance ()) != 0)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
     return rc;

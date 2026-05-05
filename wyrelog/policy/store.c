@@ -115,6 +115,19 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON role_permissions (role_id);"
       "CREATE INDEX IF NOT EXISTS idx_role_permissions_perm_id "
       "  ON role_permissions (perm_id);"
+      "CREATE TABLE IF NOT EXISTS role_inheritances ("
+      "  child_role_id TEXT NOT NULL,"
+      "  parent_role_id TEXT NOT NULL,"
+      "  granted_at INTEGER,"
+      "  granted_by TEXT,"
+      "  PRIMARY KEY (child_role_id, parent_role_id),"
+      "  FOREIGN KEY (child_role_id) REFERENCES roles (role_id),"
+      "  FOREIGN KEY (parent_role_id) REFERENCES roles (role_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_role_inheritances_child "
+      "  ON role_inheritances (child_role_id);"
+      "CREATE INDEX IF NOT EXISTS idx_role_inheritances_parent "
+      "  ON role_inheritances (parent_role_id);"
       "CREATE TABLE IF NOT EXISTS direct_permissions ("
       "  subject_id TEXT NOT NULL,"
       "  perm_id TEXT NOT NULL,"
@@ -680,7 +693,15 @@ wyl_policy_store_foreach_role_permission (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   static const gchar *sql =
-      "SELECT role_id, perm_id FROM role_permissions "
+      "WITH RECURSIVE effective_role_permissions(role_id, perm_id) AS ("
+      "  SELECT role_id, perm_id FROM role_permissions"
+      "  UNION "
+      "  SELECT ri.child_role_id, erp.perm_id "
+      "  FROM role_inheritances ri "
+      "  JOIN effective_role_permissions erp "
+      "    ON erp.role_id = ri.parent_role_id"
+      ") "
+      "SELECT role_id, perm_id FROM effective_role_permissions "
       "ORDER BY role_id, perm_id;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -691,6 +712,67 @@ wyl_policy_store_foreach_role_permission (wyl_policy_store_t *store,
     const gchar *role_id = (const gchar *) sqlite3_column_text (stmt, 0);
     const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
     rc = cb (role_id, perm_id, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_grant_role_inheritance (wyl_policy_store_t *store,
+    const gchar *child_role_id, const gchar *parent_role_id)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || child_role_id == NULL
+      || parent_role_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO role_inheritances "
+      "  (child_role_id, parent_role_id, granted_at) "
+      "VALUES (?, ?, unixepoch()) "
+      "ON CONFLICT(child_role_id, parent_role_id) DO UPDATE SET "
+      "  granted_at = excluded.granted_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, child_role_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, parent_role_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_role_inheritance (wyl_policy_store_t *store,
+    wyl_policy_role_inheritance_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT child_role_id, parent_role_id FROM role_inheritances "
+      "ORDER BY child_role_id, parent_role_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *child_role_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *parent_role_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    rc = cb (child_role_id, parent_role_id, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;
