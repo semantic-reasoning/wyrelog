@@ -347,6 +347,18 @@ check_snippet_present (const gchar *contents, gsize len, const gchar *snippet,
   return 0;
 }
 
+static gchar *
+dup_without_cr (const gchar *contents)
+{
+  g_autoptr (GString) normalized = g_string_new (NULL);
+
+  for (const gchar * p = contents; *p != '\0'; p++) {
+    if (*p != '\r')
+      g_string_append_c (normalized, *p);
+  }
+  return g_string_free (g_steal_pointer (&normalized), FALSE);
+}
+
 static gint
 check_decision_rule_bodies (void)
 {
@@ -393,9 +405,11 @@ check_decision_rule_bodies (void)
         err ? err->message : "?");
     return 180;
   }
+  g_autofree gchar *normalized = dup_without_cr (contents);
+  len = strlen (normalized);
 
   for (gsize i = 0; i < G_N_ELEMENTS (snippets); i++) {
-    gint rc = check_snippet_present (contents, len, snippets[i],
+    gint rc = check_snippet_present (normalized, len, snippets[i],
         (gint) (181 + i));
     if (rc != 0)
       return rc;
