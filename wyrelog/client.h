@@ -50,6 +50,7 @@ wyrelog_error_t wyl_client_audit_query (WylClient * client,
     const gchar * query_filter, WylAuditIter ** out_iter);
 gchar *wyl_audit_iter_dup_query_filter (const WylAuditIter * iter);
 gchar *wyl_audit_iter_dup_request_uri (const WylAuditIter * iter);
+WylAuditEvent *wyl_audit_iter_ref_event (const WylAuditIter * iter);
 wyrelog_error_t wyl_audit_iter_next (WylAuditIter * iter,
     gboolean * out_has_next);
 
