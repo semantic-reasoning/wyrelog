@@ -7,6 +7,20 @@ PRAGMA journal_mode = WAL;
 PRAGMA foreign_keys = ON;
 
 -- ---------------------------------------------------------------------------
+-- Table: wyrelog_config
+-- Runtime policy settings owned by the policy authority.
+-- deployment_mode defaults to production when absent.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS wyrelog_config (
+    config_key   TEXT    PRIMARY KEY,
+    config_value TEXT    NOT NULL CHECK (
+        config_key != 'deployment_mode'
+        OR config_value IN ('production', 'development', 'demo')
+    ),
+    updated_at   INTEGER NOT NULL
+);
+
+-- ---------------------------------------------------------------------------
 -- Table: roles
 -- Defines named roles assignable to users/services.
 -- ---------------------------------------------------------------------------

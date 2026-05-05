@@ -358,7 +358,14 @@ gboolean
 wyl_handle_get_login_skip_mfa_allowed (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
-  return self->login_skip_mfa_allowed;
+  if (self->login_skip_mfa_allowed)
+    return TRUE;
+
+  g_autofree gchar *deployment_mode = NULL;
+  if (wyl_policy_store_get_deployment_mode (self->policy_store,
+          &deployment_mode) != WYRELOG_E_OK)
+    return FALSE;
+  return g_strcmp0 (deployment_mode, "production") != 0;
 }
 
 static GHashTable *

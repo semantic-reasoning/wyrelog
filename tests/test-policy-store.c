@@ -20,6 +20,7 @@ check_store_creates_authority_schema (void)
     return 11;
 
   const gchar *tables[] = {
+    "wyrelog_config",
     "roles",
     "permissions",
     "role_permissions",
@@ -68,6 +69,7 @@ check_template_schema_creates_state_tables (void)
   }
 
   const gchar *tables[] = {
+    "wyrelog_config",
     "roles",
     "permissions",
     "role_permissions",
@@ -113,6 +115,79 @@ check_store_rejects_invalid_args (void)
   if (wyl_policy_store_table_exists (store, "roles", NULL)
       != WYRELOG_E_INVALID)
     return 34;
+  if (wyl_policy_store_set_deployment_mode (NULL, "production")
+      != WYRELOG_E_INVALID)
+    return 35;
+  if (wyl_policy_store_set_deployment_mode (store, NULL) != WYRELOG_E_INVALID)
+    return 36;
+  if (wyl_policy_store_get_deployment_mode (NULL, NULL) != WYRELOG_E_INVALID)
+    return 37;
+  if (wyl_policy_store_get_deployment_mode (store, NULL)
+      != WYRELOG_E_INVALID)
+    return 38;
+  return 0;
+}
+
+static gint
+check_store_gets_default_deployment_mode (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_autofree gchar *mode = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 40;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 41;
+  if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+    return 42;
+  if (g_strcmp0 (mode, "production") != 0)
+    return 43;
+  return 0;
+}
+
+static gint
+check_store_sets_deployment_mode (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_autofree gchar *mode = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 44;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 45;
+  if (wyl_policy_store_set_deployment_mode (store, "development")
+      != WYRELOG_E_OK)
+    return 46;
+  if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+    return 47;
+  if (g_strcmp0 (mode, "development") != 0)
+    return 48;
+
+  g_clear_pointer (&mode, g_free);
+  if (wyl_policy_store_set_deployment_mode (store, "demo") != WYRELOG_E_OK)
+    return 49;
+  if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+    return 50;
+  if (g_strcmp0 (mode, "demo") != 0)
+    return 51;
+  const gchar *bad_modes[] = { "test", "", " demo", "DEMO" };
+  for (gsize i = 0; i < G_N_ELEMENTS (bad_modes); i++) {
+    if (wyl_policy_store_set_deployment_mode (store, bad_modes[i])
+        != WYRELOG_E_POLICY)
+      return 52;
+  }
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE wyrelog_config SET config_value = 'test' "
+          "WHERE config_key = 'deployment_mode';", NULL, NULL, NULL)
+      == SQLITE_OK)
+    return 53;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 54;
+  g_clear_pointer (&mode, g_free);
+  if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+    return 55;
+  if (g_strcmp0 (mode, "demo") != 0)
+    return 56;
   return 0;
 }
 
@@ -1270,6 +1345,10 @@ main (void)
   if ((rc = check_template_schema_creates_state_tables ()) != 0)
     return rc;
   if ((rc = check_store_rejects_invalid_args ()) != 0)
+    return rc;
+  if ((rc = check_store_gets_default_deployment_mode ()) != 0)
+    return rc;
+  if ((rc = check_store_sets_deployment_mode ()) != 0)
     return rc;
   if ((rc = check_handle_owns_policy_store ()) != 0)
     return rc;

@@ -55,8 +55,9 @@ const gchar *wyl_login_req_get_username (const wyl_login_req_t * req);
  * Marks the request as already satisfying the MFA requirement. When TRUE,
  * wyl_session_login may drive the principal FSM through the login_skip_mfa
  * event and record the principal as authenticated. The host-side ingress
- * policy must explicitly allow this path for the WylHandle; otherwise login
- * fails with WYRELOG_E_POLICY. The default for a fresh request is FALSE.
+ * policy must allow this path through an explicit WylHandle override or a
+ * non-production Policy DB deployment mode; otherwise login fails with
+ * WYRELOG_E_POLICY. The default for a fresh request is FALSE.
  */
 void wyl_login_req_set_skip_mfa (wyl_login_req_t * req, gboolean skip_mfa);
 gboolean wyl_login_req_get_skip_mfa (const wyl_login_req_t * req);
