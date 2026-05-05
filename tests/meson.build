@@ -25,7 +25,18 @@ if host_machine.system() != 'windows'
   test('wyrelogd-sigterm', sh,
     args : [
       '-c',
-      '"' + wyrelogd_exe.full_path() + '" --template-dir "' + meson.project_source_root() / 'templates' / 'access' + '" & pid=$!; sleep 1; kill -TERM "$pid"; wait "$pid"',
+      '"' + wyrelogd_exe.full_path() + '" --template-dir "' + meson.project_source_root() / 'templates' / 'access' + '" --listen-port 0 & pid=$!; sleep 1; kill -TERM "$pid"; wait "$pid"',
+    ],
+    depends : wyrelogd_exe,
+  )
+
+  python3 = find_program('python3')
+  test('wyrelogd-healthz', sh,
+    args : [
+      meson.current_source_dir() / 'check-wyrelogd-healthz.sh',
+      wyrelogd_exe.full_path(),
+      meson.project_source_root() / 'templates' / 'access',
+      python3.full_path(),
     ],
     depends : wyrelogd_exe,
   )

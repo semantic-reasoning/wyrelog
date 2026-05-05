@@ -106,12 +106,19 @@ else
   wyrelog_client_dep = disabler()
 endif
 
+wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep]
+wyrelogd_c_args = [
+  '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
+]
+if libsoup_dep.found()
+  wyrelogd_deps += libsoup_dep
+  wyrelogd_c_args += '-DWYL_HAS_DAEMON_HTTP'
+endif
+
 wyrelogd_exe = executable('wyrelogd',
   files('daemon/wyrelogd.c'),
   include_directories : wyrelog_inc,
-  dependencies : [wyrelog_dep, glib_dep, gio_dep],
-  c_args : [
-    '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
-  ],
+  dependencies : wyrelogd_deps,
+  c_args : wyrelogd_c_args,
   install : true,
 )
