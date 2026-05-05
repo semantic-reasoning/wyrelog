@@ -308,6 +308,36 @@ check_head_mirror (void)
   return 0;
 }
 
+static gint
+check_audit_fact_declarations (void)
+{
+  static const gchar *decls[] = {
+    ".decl audit_event(id: symbol, created_at_us: int64, decision: symbol)",
+    ".decl audit_event_subject(id: symbol, subject: symbol)",
+    ".decl audit_event_action(id: symbol, action: symbol)",
+    ".decl audit_event_resource(id: symbol, resource: symbol)",
+    ".decl audit_event_deny_reason(id: symbol, reason: symbol)",
+    ".decl audit_event_deny_origin(id: symbol, origin: symbol)",
+    "audit_event(ID, CreatedAtUs, Decision) :-",
+  };
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+
+  if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &contents,
+          &len, &err)) {
+    g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
+        err ? err->message : "?");
+    return 163;
+  }
+
+  for (gsize i = 0; i < G_N_ELEMENTS (decls); i++) {
+    if (g_strstr_len (contents, (gssize) len, decls[i]) == NULL)
+      return (gint) (164 + i);
+  }
+  return 0;
+}
+
 static void
 append_non_comment_lines (GString *out, const gchar *contents)
 {
@@ -371,6 +401,8 @@ main (void)
   if ((rc = check_origin_tags ()) != 0)
     return rc;
   if ((rc = check_head_mirror ()) != 0)
+    return rc;
+  if ((rc = check_audit_fact_declarations ()) != 0)
     return rc;
   if ((rc = check_legacy_template_matches_canonical ()) != 0)
     return rc;

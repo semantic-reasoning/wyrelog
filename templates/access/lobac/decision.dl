@@ -19,6 +19,20 @@
 //   frozen(scope)
 //   disabled_role_for(user, perm)
 //   policy_violation(kind, user, perm, witness)
+//   audit_event_input(id, created_at_us, decision)
+//   audit_event_subject_input(id, subject)
+//   audit_event_action_input(id, action)
+//   audit_event_resource_input(id, resource)
+//   audit_event_deny_reason_input(id, reason)
+//   audit_event_deny_origin_input(id, origin)
+//
+// Audit fact projections (host-observable):
+//   audit_event(id, created_at_us, decision)
+//   audit_event_subject(id, subject)
+//   audit_event_action(id, action)
+//   audit_event_resource(id, resource)
+//   audit_event_deny_reason(id, reason)
+//   audit_event_deny_origin(id, origin)
 //
 // `has_permission/3` and `armed/3` are IDB rules defined elsewhere
 // (bootstrap.dl and permission_scope.dl respectively); both are
@@ -36,6 +50,18 @@
 .decl disabled_role_for(user: symbol, perm: symbol)
 .decl policy_violation(kind: symbol, user: symbol, perm: symbol,
     witness: symbol)
+.decl audit_event_input(id: symbol, created_at_us: int64, decision: symbol)
+.decl audit_event_subject_input(id: symbol, subject: symbol)
+.decl audit_event_action_input(id: symbol, action: symbol)
+.decl audit_event_resource_input(id: symbol, resource: symbol)
+.decl audit_event_deny_reason_input(id: symbol, reason: symbol)
+.decl audit_event_deny_origin_input(id: symbol, origin: symbol)
+.decl audit_event(id: symbol, created_at_us: int64, decision: symbol)
+.decl audit_event_subject(id: symbol, subject: symbol)
+.decl audit_event_action(id: symbol, action: symbol)
+.decl audit_event_resource(id: symbol, resource: symbol)
+.decl audit_event_deny_reason(id: symbol, reason: symbol)
+.decl audit_event_deny_origin(id: symbol, origin: symbol)
 
 .decl allow(user: symbol, perm: symbol, scope: symbol)
 .decl allow_guard_base(user: symbol, perm: symbol, scope: symbol)
@@ -43,6 +69,26 @@
 .decl allow_bool(user: symbol, perm: symbol, scope: symbol)
 .decl deny_reason(user: symbol, perm: symbol, scope: symbol,
     code: symbol, origin: symbol)
+
+// --- audit fact projection -----------------------------------------
+
+audit_event(ID, CreatedAtUs, Decision) :-
+    audit_event_input(ID, CreatedAtUs, Decision).
+
+audit_event_subject(ID, Subject) :-
+    audit_event_subject_input(ID, Subject).
+
+audit_event_action(ID, Action) :-
+    audit_event_action_input(ID, Action).
+
+audit_event_resource(ID, Resource) :-
+    audit_event_resource_input(ID, Resource).
+
+audit_event_deny_reason(ID, Reason) :-
+    audit_event_deny_reason_input(ID, Reason).
+
+audit_event_deny_origin(ID, Origin) :-
+    audit_event_deny_origin_input(ID, Origin).
 
 // --- allow / allow_bool ----------------------------------------------
 

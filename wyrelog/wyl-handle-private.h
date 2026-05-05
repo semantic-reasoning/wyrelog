@@ -195,6 +195,14 @@ wyrelog_error_t wyl_handle_load_policy_store_session_states (WylHandle * self);
 wyrelog_error_t wyl_handle_load_policy_store_session_events (WylHandle * self);
 
 /*
+ * Loads persisted audit rows from the handle-owned policy authority store into
+ * the read engine as private audit_event* facts. Optional audit fields are
+ * projected through split predicates so NULL values do not need sentinel
+ * symbols. Rejected unless both the store and engine pair are available.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_audit_facts (WylHandle * self);
+
+/*
  * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
  * engine pair is already open.
  */
