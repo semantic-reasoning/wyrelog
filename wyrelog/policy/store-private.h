@@ -76,6 +76,10 @@ wyrelog_error_t wyl_policy_store_grant_role_membership (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_revoke_role_membership (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * role_id,
     const gchar * scope);
+wyrelog_error_t
+wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t * store,
+    const gchar * subject_id, const gchar * role_id, const gchar * scope,
+    gboolean insert);
 wyrelog_error_t wyl_policy_store_role_membership_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * role_id,
     const gchar * scope, gboolean * out_exists);
@@ -94,6 +98,10 @@ wyrelog_error_t wyl_policy_store_grant_direct_permission (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id,
     const gchar * scope);
+wyrelog_error_t
+wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t * store,
+    const gchar * subject_id, const gchar * perm_id, const gchar * scope,
+    gboolean insert);
 wyrelog_error_t wyl_policy_store_direct_permission_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean * out_exists);

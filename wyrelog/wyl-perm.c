@@ -341,25 +341,8 @@ update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
   if (store == NULL)
     return WYRELOG_E_INVALID;
 
-  if (insert) {
-    wyrelog_error_t rc =
-        wyl_policy_store_upsert_permission (store, action, action, "basic");
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_policy_store_grant_direct_permission (store, subject_id,
-        action, resource_id);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    return wyl_policy_store_append_direct_permission_event (store, subject_id,
-        action, resource_id, "grant");
-  }
-
-  wyrelog_error_t rc = wyl_policy_store_revoke_direct_permission (store,
-      subject_id, action, resource_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_policy_store_append_direct_permission_event (store, subject_id,
-      action, resource_id, "revoke");
+  return wyl_policy_store_apply_direct_permission_mutation (store, subject_id,
+      action, resource_id, insert);
 }
 
 static wyrelog_error_t
@@ -370,15 +353,8 @@ update_role_membership_store (WylHandle *handle, const gchar *subject_id,
   if (store == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = insert
-      ? wyl_policy_store_grant_role_membership (store, subject_id, role_id,
-      scope)
-      : wyl_policy_store_revoke_role_membership (store, subject_id, role_id,
-      scope);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_policy_store_append_role_membership_event (store, subject_id,
-      role_id, scope, insert ? "grant" : "revoke");
+  return wyl_policy_store_apply_role_membership_mutation (store, subject_id,
+      role_id, scope, insert);
 }
 
 static wyrelog_error_t

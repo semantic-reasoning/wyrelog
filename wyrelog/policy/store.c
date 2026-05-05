@@ -57,6 +57,31 @@ column_nullable_text_equal (sqlite3_stmt *stmt, int col, const gchar *expected)
       expected) == 0;
 }
 
+static wyrelog_error_t
+begin_mutation_savepoint (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+  return exec_sql (store->db, "SAVEPOINT wyrelog_policy_mutation;");
+}
+
+static wyrelog_error_t
+commit_mutation_savepoint (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+  return exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+}
+
+static void
+rollback_mutation_savepoint (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL)
+    return;
+  (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_policy_mutation;");
+  (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
+}
+
 wyrelog_error_t
 wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
 {
@@ -390,6 +415,47 @@ wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *store,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gboolean insert)
+{
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = begin_mutation_savepoint (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (insert)
+    rc = wyl_policy_store_upsert_permission (store, perm_id, perm_id, "basic");
+  else
+    rc = WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    rc = insert
+        ? wyl_policy_store_grant_direct_permission (store, subject_id, perm_id,
+        scope)
+        : wyl_policy_store_revoke_direct_permission (store, subject_id,
+        perm_id, scope);
+  }
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_append_direct_permission_event (store, subject_id,
+        perm_id, scope, insert ? "grant" : "revoke");
+  }
+  if (rc != WYRELOG_E_OK) {
+    rollback_mutation_savepoint (store);
+    return rc;
+  }
+
+  rc = commit_mutation_savepoint (store);
+  if (rc != WYRELOG_E_OK) {
+    rollback_mutation_savepoint (store);
+    return rc;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -1010,6 +1076,41 @@ wyl_policy_store_revoke_role_membership (wyl_policy_store_t *store,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *role_id, const gchar *scope,
+    gboolean insert)
+{
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || role_id == NULL || scope == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = begin_mutation_savepoint (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = insert
+      ? wyl_policy_store_grant_role_membership (store, subject_id, role_id,
+      scope)
+      : wyl_policy_store_revoke_role_membership (store, subject_id, role_id,
+      scope);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_append_role_membership_event (store, subject_id,
+        role_id, scope, insert ? "grant" : "revoke");
+  }
+  if (rc != WYRELOG_E_OK) {
+    rollback_mutation_savepoint (store);
+    return rc;
+  }
+
+  rc = commit_mutation_savepoint (store);
+  if (rc != WYRELOG_E_OK) {
+    rollback_mutation_savepoint (store);
+    return rc;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

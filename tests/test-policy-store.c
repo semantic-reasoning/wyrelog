@@ -577,6 +577,90 @@ check_store_grants_direct_permission (void)
 }
 
 static gint
+check_role_membership_mutation_rolls_back_on_event_failure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 197;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 198;
+  if (wyl_policy_store_upsert_role (store, "wr.rollback-role",
+          "rollback role") != WYRELOG_E_OK)
+    return 199;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_role_membership_event "
+          "BEFORE INSERT ON role_membership_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 200;
+
+  if (wyl_policy_store_apply_role_membership_mutation (store,
+          "rollback-role-user", "wr.rollback-role", "rollback-role-scope",
+          TRUE) != WYRELOG_E_IO)
+    return 201;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_role_membership_exists (store, "rollback-role-user",
+          "wr.rollback-role", "rollback-role-scope", &exists)
+      != WYRELOG_E_OK)
+    return 202;
+  if (exists)
+    return 203;
+
+  RoleMembershipEventExpect expect = {
+    .subject_id = "rollback-role-user",
+    .role_id = "wr.rollback-role",
+    .scope = "rollback-role-scope",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_role_membership_event (store,
+          role_membership_event_expect_cb, &expect) != WYRELOG_E_OK)
+    return 204;
+  if (expect.matches != 0)
+    return 205;
+  return 0;
+}
+
+static gint
+check_role_membership_revoke_rolls_back_on_event_failure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 206;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 207;
+  if (wyl_policy_store_upsert_role (store, "wr.rollback-role-revoke",
+          "rollback role revoke") != WYRELOG_E_OK)
+    return 208;
+  if (wyl_policy_store_grant_role_membership (store,
+          "rollback-role-revoke-user", "wr.rollback-role-revoke",
+          "rollback-role-revoke-scope") != WYRELOG_E_OK)
+    return 209;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_role_membership_revoke_event "
+          "BEFORE INSERT ON role_membership_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 210;
+
+  if (wyl_policy_store_apply_role_membership_mutation (store,
+          "rollback-role-revoke-user", "wr.rollback-role-revoke",
+          "rollback-role-revoke-scope", FALSE) != WYRELOG_E_IO)
+    return 211;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_role_membership_exists (store,
+          "rollback-role-revoke-user", "wr.rollback-role-revoke",
+          "rollback-role-revoke-scope", &exists) != WYRELOG_E_OK)
+    return 212;
+  if (!exists)
+    return 213;
+  return 0;
+}
+
+static gint
 check_store_appends_direct_permission_event (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -600,6 +684,106 @@ check_store_appends_direct_permission_event (void)
     return 95;
   if (expect.matches != 1)
     return 96;
+  return 0;
+}
+
+static gint
+check_direct_permission_mutation_rolls_back_on_event_failure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 180;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 181;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_direct_permission_event "
+          "BEFORE INSERT ON direct_permission_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 182;
+
+  if (wyl_policy_store_apply_direct_permission_mutation (store,
+          "rollback-user", "wr.rollback-direct", "rollback-scope", TRUE)
+      != WYRELOG_E_IO)
+    return 183;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_direct_permission_exists (store, "rollback-user",
+          "wr.rollback-direct", "rollback-scope", &exists) != WYRELOG_E_OK)
+    return 184;
+  if (exists)
+    return 185;
+
+  DirectPermissionExpect expect = {
+    .subject_id = "rollback-user",
+    .perm_id = "wr.rollback-direct",
+    .scope = "rollback-scope",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_direct_permission_event (store,
+          direct_permission_event_expect_cb, &expect) != WYRELOG_E_OK)
+    return 186;
+  if (expect.matches != 0)
+    return 187;
+
+  gboolean permission_exists = FALSE;
+  if (wyl_policy_store_table_exists (store, "permissions", &permission_exists)
+      != WYRELOG_E_OK || !permission_exists)
+    return 188;
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+          "SELECT 1 FROM permissions WHERE perm_id = ?;", -1, &stmt,
+          NULL) != SQLITE_OK)
+    return 214;
+  if (sqlite3_bind_text (stmt, 1, "wr.rollback-direct", -1,
+          SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return 215;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc == SQLITE_ROW)
+    return 216;
+  if (step_rc != SQLITE_DONE)
+    return 217;
+  return 0;
+}
+
+static gint
+check_direct_permission_revoke_rolls_back_on_event_failure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 189;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 190;
+  if (wyl_policy_store_upsert_permission (store, "wr.rollback-revoke",
+          "rollback revoke", "basic") != WYRELOG_E_OK)
+    return 191;
+  if (wyl_policy_store_grant_direct_permission (store, "rollback-revoke-user",
+          "wr.rollback-revoke", "rollback-revoke-scope") != WYRELOG_E_OK)
+    return 192;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_direct_permission_revoke_event "
+          "BEFORE INSERT ON direct_permission_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 193;
+
+  if (wyl_policy_store_apply_direct_permission_mutation (store,
+          "rollback-revoke-user", "wr.rollback-revoke",
+          "rollback-revoke-scope", FALSE) != WYRELOG_E_IO)
+    return 194;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists (store,
+          "rollback-revoke-user", "wr.rollback-revoke",
+          "rollback-revoke-scope", &exists) != WYRELOG_E_OK)
+    return 195;
+  if (!exists)
+    return 196;
   return 0;
 }
 
@@ -1097,7 +1281,19 @@ main (void)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
     return rc;
+  if ((rc = check_role_membership_mutation_rolls_back_on_event_failure ())
+      != 0)
+    return rc;
+  if ((rc = check_role_membership_revoke_rolls_back_on_event_failure ())
+      != 0)
+    return rc;
   if ((rc = check_store_appends_direct_permission_event ()) != 0)
+    return rc;
+  if ((rc = check_direct_permission_mutation_rolls_back_on_event_failure ())
+      != 0)
+    return rc;
+  if ((rc = check_direct_permission_revoke_rolls_back_on_event_failure ())
+      != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;
