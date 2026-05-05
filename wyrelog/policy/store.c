@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "store-private.h"
 
+#include "wyrelog/wyl-id-private.h"
+
 struct wyl_policy_store_t
 {
   sqlite3 *db;
@@ -44,6 +46,15 @@ bind_nullable_text (sqlite3_stmt *stmt, int index, const gchar *value)
     return WYRELOG_E_OK;
   }
   return bind_text (stmt, index, value);
+}
+
+static gboolean
+column_nullable_text_equal (sqlite3_stmt *stmt, int col, const gchar *expected)
+{
+  if (sqlite3_column_type (stmt, col) == SQLITE_NULL)
+    return expected == NULL;
+  return g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, col),
+      expected) == 0;
 }
 
 wyrelog_error_t
@@ -1115,18 +1126,50 @@ wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
     const gchar *deny_origin, wyl_decision_t decision)
 {
   sqlite3_stmt *stmt = NULL;
+  wyl_id_t parsed_id;
 
   if (store == NULL || store->db == NULL || id == NULL || created_at_us < 0)
     return WYRELOG_E_INVALID;
+  if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
   if (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW)
     return WYRELOG_E_INVALID;
+
+  static const gchar *select_sql =
+      "SELECT created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, decision FROM audit_events WHERE id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, select_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int select_rc = sqlite3_step (stmt);
+  if (select_rc == SQLITE_ROW) {
+    gboolean equal =
+        sqlite3_column_int64 (stmt, 0) == created_at_us
+        && column_nullable_text_equal (stmt, 1, subject_id)
+        && column_nullable_text_equal (stmt, 2, action)
+        && column_nullable_text_equal (stmt, 3, resource_id)
+        && column_nullable_text_equal (stmt, 4, deny_reason)
+        && column_nullable_text_equal (stmt, 5, deny_origin)
+        && sqlite3_column_int (stmt, 6) == (int) decision;
+    sqlite3_finalize (stmt);
+    return equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  }
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (select_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
 
   static const gchar *sql =
       "INSERT INTO audit_events "
       "  (id, created_at_us, subject_id, action, resource_id, "
       "   deny_reason, deny_origin, decision) "
       "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK
@@ -1142,6 +1185,53 @@ wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
   }
 
   int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_audit_event (wyl_policy_store_t *store,
+    wyl_policy_audit_event_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT id, created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, decision "
+      "FROM audit_events ORDER BY created_at_us ASC, id ASC;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *id = (const gchar *) sqlite3_column_text (stmt, 0);
+    gint64 created_at_us = sqlite3_column_int64 (stmt, 1);
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *action = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *resource_id = (const gchar *) sqlite3_column_text (stmt, 4);
+    const gchar *deny_reason = (const gchar *) sqlite3_column_text (stmt, 5);
+    const gchar *deny_origin = (const gchar *) sqlite3_column_text (stmt, 6);
+    int decision = sqlite3_column_int (stmt, 7);
+    wyl_id_t parsed_id;
+
+    if (id == NULL || wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK
+        || created_at_us < 0 || (decision != WYL_DECISION_DENY
+            && decision != WYL_DECISION_ALLOW)) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    rc = cb (id, created_at_us, subject_id, action, resource_id, deny_reason,
+        deny_origin, (wyl_decision_t) decision, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }

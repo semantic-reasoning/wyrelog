@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyrelog.h"
 
+#include <string.h>
+
 #include "wyrelog/engine.h"
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
@@ -227,6 +229,11 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
     g_object_unref (self);
     return rc;
   }
+  rc = wyl_handle_load_policy_store_audit_events (self);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
 #endif
 
   *out_handle = self;
@@ -279,6 +286,57 @@ wyl_handle_get_audit_conn (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return self->audit_conn;
+}
+
+static wyrelog_error_t
+insert_policy_store_audit_event (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    wyl_decision_t decision, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  return wyl_audit_conn_insert_event (self->audit_conn, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, decision);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_audit_events (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->audit_conn == NULL)
+    return WYRELOG_E_INVALID;
+
+  duckdb_connection conn = wyl_audit_conn_get_connection (self->audit_conn);
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+
+  if (duckdb_query (conn, "BEGIN TRANSACTION;", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+
+  wyrelog_error_t rc = wyl_policy_store_foreach_audit_event (self->policy_store,
+      insert_policy_store_audit_event, self);
+  if (rc != WYRELOG_E_OK) {
+    memset (&result, 0, sizeof (result));
+    duckdb_query (conn, "ROLLBACK;", &result);
+    duckdb_destroy_result (&result);
+    return rc;
+  }
+
+  memset (&result, 0, sizeof (result));
+  if (duckdb_query (conn, "COMMIT;", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    memset (&result, 0, sizeof (result));
+    duckdb_query (conn, "ROLLBACK;", &result);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
 }
 #endif
 

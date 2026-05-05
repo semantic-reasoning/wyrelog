@@ -22,6 +22,13 @@ G_BEGIN_DECLS;
  * non-audit builds (and neither does the underlying type).
  */
 wyl_audit_conn_t *wyl_handle_get_audit_conn (WylHandle * self);
+
+/*
+ * Replays persisted policy-store audit rows into the handle-owned runtime
+ * audit connection. This follows the audit connection lifecycle and does not
+ * append the replayed rows back into the policy store.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
 #endif
 
 /*

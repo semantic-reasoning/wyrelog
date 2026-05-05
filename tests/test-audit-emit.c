@@ -414,6 +414,237 @@ check_emit_mirrors_policy_store_row (void)
 }
 
 static gint
+check_policy_store_audit_replay_loads_runtime_query (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 171;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  static const gchar *replay_id = "01890c10-2e3f-7000-8000-000000000003";
+  if (wyl_policy_store_append_audit_event (store, replay_id, 789, NULL,
+          "audit.replay", "replay-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 172;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 173;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 182;
+  }
+
+  duckdb_connection duck_conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result count_result;
+  if (duckdb_query (duck_conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE id = '01890c10-2e3f-7000-8000-000000000003';",
+          &count_result) != DuckDBSuccess) {
+    duckdb_destroy_result (&count_result);
+    g_object_unref (handle);
+    return 183;
+  }
+  if (duckdb_value_int64 (&count_result, 0, 0) != 1) {
+    duckdb_destroy_result (&count_result);
+    g_object_unref (handle);
+    return 184;
+  }
+  duckdb_destroy_result (&count_result);
+
+  g_autofree gchar *json = NULL;
+  if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+          "action(\"audit.replay\")", &json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 174;
+  }
+
+  gint rc = 0;
+  if (g_strstr_len (json, -1,
+          "\"id\":\"01890c10-2e3f-7000-8000-000000000003\"") == NULL)
+    rc = 175;
+  else if (g_strstr_len (json, -1, "\"created_at_us\":789") == NULL)
+    rc = 176;
+  else if (g_strstr_len (json, -1, "\"subject_id\":null") == NULL)
+    rc = 177;
+  else if (g_strstr_len (json, -1, "\"resource_id\":\"replay-resource\"")
+      == NULL)
+    rc = 178;
+  else if (g_strstr_len (json, -1, "\"deny_reason\":null") == NULL)
+    rc = 179;
+  else if (g_strstr_len (json, -1, "\"deny_origin\":null") == NULL)
+    rc = 180;
+  else if (g_strstr_len (json, -1, "\"decision\":1") == NULL)
+    rc = 181;
+
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
+check_audit_conn_insert_event_idempotence (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 185;
+
+  wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
+  static const gchar *id = "01890c10-2e3f-7000-8000-000000000004";
+  if (wyl_audit_conn_insert_event (conn, id, 890, "same-user",
+          "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 186;
+  }
+  if (wyl_audit_conn_insert_event (conn, id, 890, "same-user",
+          "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 187;
+  }
+  if (wyl_audit_conn_insert_event (conn, id, 890, "same-user",
+          "different.action", "same-resource", NULL, NULL,
+          WYL_DECISION_ALLOW) != WYRELOG_E_POLICY) {
+    g_object_unref (handle);
+    return 188;
+  }
+  if (wyl_audit_conn_insert_event (conn, "not-a-uuid", 890, "same-user",
+          "same.action", "same-resource", NULL, NULL, WYL_DECISION_ALLOW)
+      != WYRELOG_E_INVALID) {
+    g_object_unref (handle);
+    return 189;
+  }
+
+  duckdb_connection duck_conn = wyl_audit_conn_get_connection (conn);
+  duckdb_result result;
+  if (duckdb_query (duck_conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE id = '01890c10-2e3f-7000-8000-000000000004';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 190;
+  }
+
+  gint rc = 0;
+  if (duckdb_value_int64 (&result, 0, 0) != 1)
+    rc = 191;
+
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
+check_duplicate_emit_keeps_runtime_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 192;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "duplicate-user");
+  wyl_audit_event_set_action (ev, "duplicate.action");
+  wyl_audit_event_set_resource_id (ev, "duplicate-resource");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
+
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 193;
+  }
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 194;
+  }
+
+  duckdb_connection duck_conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+
+  static const gchar *sql = "SELECT COUNT(*) FROM audit_events WHERE id = ?;";
+  if (duckdb_prepare (duck_conn, sql, &stmt) != DuckDBSuccess) {
+    g_object_unref (handle);
+    return 195;
+  }
+  if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    g_object_unref (handle);
+    return 196;
+  }
+  duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_prepare (&stmt);
+  if (step_rc != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 197;
+  }
+
+  gint rc = 0;
+  if (duckdb_value_int64 (&result, 0, 0) != 1)
+    rc = 198;
+
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
+check_policy_store_audit_replay_rolls_back_corrupt_row (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 199;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  static const gchar *valid_id = "01890c10-2e3f-7000-8000-000000000005";
+  if (wyl_policy_store_append_audit_event (store, valid_id, 901,
+          "valid-user", "valid.action", NULL, NULL, NULL, WYL_DECISION_ALLOW)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 200;
+  }
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO audit_events "
+          "(id, created_at_us, action, decision) "
+          "VALUES ('not-a-uuid', 902, 'bad.action', 1);",
+          NULL, NULL, NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 201;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_POLICY) {
+    g_object_unref (handle);
+    return 202;
+  }
+
+  duckdb_connection duck_conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+  if (duckdb_query (duck_conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE id = '01890c10-2e3f-7000-8000-000000000005';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 203;
+  }
+
+  gint rc = 0;
+  if (duckdb_value_int64 (&result, 0, 0) != 0)
+    rc = 204;
+
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
 check_decide_persists_representative_deny_reason (void)
 {
   WylHandle *handle = NULL;
@@ -1226,6 +1457,14 @@ main (void)
   if ((rc = check_query_events_json_filters_rows ()) != 0)
     return rc;
   if ((rc = check_emit_mirrors_policy_store_row ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_audit_replay_loads_runtime_query ()) != 0)
+    return rc;
+  if ((rc = check_audit_conn_insert_event_idempotence ()) != 0)
+    return rc;
+  if ((rc = check_duplicate_emit_keeps_runtime_row ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_audit_replay_rolls_back_corrupt_row ()) != 0)
     return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
