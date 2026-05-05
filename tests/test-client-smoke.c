@@ -1,9 +1,41 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <string.h>
+
 #include <glib.h>
 
 #include "wyrelog/audit/iter-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/wyl-client-private.h"
+
+typedef struct
+{
+  SoupServer *server;
+  GMainLoop *loop;
+} TestHttpServer;
+
+static gpointer
+test_http_server_thread (gpointer data)
+{
+  TestHttpServer *http = data;
+
+  g_main_loop_run (http->loop);
+  return NULL;
+}
+
+static void
+test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+
+  const gchar *body = "[]";
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      body, strlen (body));
+}
 
 int
 main (void)
@@ -63,6 +95,46 @@ main (void)
       g_uri_to_string (soup_message_get_uri (message));
   if (g_strcmp0 (message_uri, request_uri) != 0)
     return 20;
+
+  TestHttpServer http = { 0 };
+  http.server = soup_server_new (NULL, NULL);
+  http.loop = g_main_loop_new (NULL, FALSE);
+  soup_server_add_handler (http.server, NULL, test_http_server_handler, NULL,
+      NULL);
+  g_autoptr (GError) listen_error = NULL;
+  if (!soup_server_listen_local (http.server, 0, 0, &listen_error))
+    return 21;
+  GThread *thread = g_thread_new ("client-smoke-http",
+      test_http_server_thread, &http);
+
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL)
+    return 22;
+  g_autofree gchar *local_base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  g_autoptr (WylClient) local_client = NULL;
+  if (wyl_client_new (local_base_url, &local_client) != WYRELOG_E_OK)
+    return 23;
+  g_autoptr (WylAuditIter) local_iter = NULL;
+  if (wyl_client_audit_query (local_client, NULL, &local_iter) != WYRELOG_E_OK)
+    return 24;
+  g_autoptr (SoupMessage) local_message =
+      wyl_audit_iter_new_request_message (local_iter);
+  g_autoptr (GBytes) body = NULL;
+  if (wyl_client_send_message (local_client, local_message, &body) !=
+      WYRELOG_E_OK)
+    return 25;
+  gsize body_size = 0;
+  const gchar *body_data = g_bytes_get_data (body, &body_size);
+  if (body_size != 2 || memcmp (body_data, "[]", 2) != 0)
+    return 26;
+
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
 
   gboolean has_next = TRUE;
   if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)

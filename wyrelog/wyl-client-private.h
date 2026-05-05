@@ -7,5 +7,7 @@
 #include "wyrelog/client.h"
 
 SoupSession *wyl_client_get_soup_session (WylClient * client);
+wyrelog_error_t wyl_client_send_message (WylClient * client,
+    SoupMessage * message, GBytes ** out_body);
 
 #endif /* WYL_CLIENT_PRIVATE_H */
