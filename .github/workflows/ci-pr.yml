@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-name: CI
+name: CI PR
 
 on:
   pull_request:
-    branches: [main]
-  push:
     branches: [main]
 
 permissions:
@@ -48,8 +46,8 @@ jobs:
           brew update
           brew install meson ninja pkg-config glib sqlite libsoup libsodium
 
-      - name: Cache meson packagecache
-        uses: actions/cache@v5
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@v5
         with:
           path: subprojects/packagecache
           key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
@@ -61,7 +59,7 @@ jobs:
           meson setup builddir \
             -Denable_tpm=${{ matrix.tpm }} \
             -Denable_audit=enabled \
-            -Dduckdb_source=${{ github.event_name == 'pull_request' && 'prebuilt' || 'subproject' }}
+            -Dduckdb_source=prebuilt
 
       - name: Build and test
         run: meson test -C builddir --print-errorlogs --suite wyrelog
@@ -97,11 +95,11 @@ jobs:
           git clone --depth 1 --branch 2026.04.27 https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
           call "%VCPKG_ROOT%\bootstrap-vcpkg.bat" -disableMetrics
 
-      - name: Cache vcpkg binary packages
-        uses: actions/cache@v5
+      - name: Restore vcpkg binary packages
+        uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-${{ hashFiles('.github/workflows/ci.yml') }}
+          key: vcpkg-windows-2026.04.27-glib-sqlite3-libsodium
           restore-keys: |
             vcpkg-windows-
 
@@ -123,8 +121,8 @@ jobs:
           @echo off
           "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
 
-      - name: Cache meson packagecache
-        uses: actions/cache@v5
+      - name: Restore meson packagecache
+        uses: actions/cache/restore@v5
         with:
           path: subprojects/packagecache
           key: windows-packagecache-${{ hashFiles('subprojects/*.wrap') }}
