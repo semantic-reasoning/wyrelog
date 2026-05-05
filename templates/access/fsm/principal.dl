@@ -23,7 +23,9 @@
 // side without the other will fail the build.
 
 .decl principal_transition(from: symbol, event: symbol, to: symbol)
+.decl principal_event(user: symbol, ev: symbol, from: symbol, to: symbol)
 .decl principal_step(from: symbol, event: symbol, to: symbol)
+.decl principal_fired(user: symbol, from: symbol, ev: symbol, to: symbol)
 
 principal_transition("unverified",    "login_ok",       "mfa_required").
 principal_transition("unverified",    "login_skip_mfa", "authenticated").
@@ -35,3 +37,7 @@ principal_transition("authenticated", "revoke",         "revoked").
 principal_transition("locked",        "unlock",         "unverified").
 
 principal_step(From, Ev, To) :- principal_transition(From, Ev, To).
+
+principal_fired(U, From, Ev, To) :-
+    principal_event(U, Ev, From, To),
+    principal_transition(From, Ev, To).

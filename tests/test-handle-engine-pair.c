@@ -18,6 +18,14 @@ typedef struct
 {
   const gchar *expected_relation;
   const gint64 *expected_row;
+  guint ncols;
+  guint seen;
+} RelationSnapshotExpect;
+
+typedef struct
+{
+  const gchar *expected_relation;
+  const gint64 *expected_row;
   WylDeltaKind expected_kind;
   guint matching;
 } DeltaExpect;
@@ -54,6 +62,23 @@ snapshot_count_cb (const gchar *relation, const gint64 *row, guint ncols,
   (void) ncols;
 
   (*seen)++;
+}
+
+static void
+relation_snapshot_expect_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  RelationSnapshotExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, expect->expected_relation) != 0)
+    return;
+  if (ncols != expect->ncols)
+    return;
+  for (guint i = 0; i < ncols; i++) {
+    if (row[i] != expect->expected_row[i])
+      return;
+  }
+  expect->seen++;
 }
 
 static void
@@ -102,6 +127,22 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
 }
 
 static wyrelog_error_t
+intern4 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
+    const gchar *d, gint64 row[4])
+{
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_intern_engine_symbol (handle, d, &row[3]);
+}
+
+static wyrelog_error_t
 insert1_symbol (WylHandle *handle, const gchar *relation, const gchar *a)
 {
   gint64 row[1];
@@ -142,16 +183,7 @@ insert4_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
     const gchar *b, const gchar *c, const gchar *d)
 {
   gint64 row[4];
-  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, c, &row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, d, &row[3]);
+  wyrelog_error_t rc = intern4 (handle, a, b, c, d, row);
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_engine_insert (handle, relation, row, 4);
@@ -1219,6 +1251,74 @@ check_policy_store_principal_states_require_engine_pair (void)
 }
 
 static gint
+check_policy_store_principal_events_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 390;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_principal_event (store, "event-load-user",
+          "login_ok", "unverified", "mfa_required") != WYRELOG_E_OK)
+    return 391;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 392;
+
+  gint64 fired_row[4];
+  if (intern4 (handle, "event-load-user", "unverified", "login_ok",
+          "mfa_required", fired_row) != WYRELOG_E_OK)
+    return 393;
+  RelationSnapshotExpect fired_expect = {
+    .expected_relation = "principal_fired",
+    .expected_row = fired_row,
+    .ncols = 4,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "principal_fired", relation_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 394;
+  if (fired_expect.seen != 1)
+    return 395;
+  return 0;
+}
+
+static gint
+check_policy_store_principal_events_reject_invalid_edges (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 400;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_principal_event (store, "event-invalid-user",
+          "mfa_ok", "unverified", "authenticated") != WYRELOG_E_OK)
+    return 401;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 402;
+  return 0;
+}
+
+static gint
+check_policy_store_principal_events_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 410;
+  if (wyl_handle_load_policy_store_principal_events (NULL)
+      != WYRELOG_E_INVALID)
+    return 411;
+  if (wyl_handle_load_policy_store_principal_events (handle)
+      != WYRELOG_E_INVALID)
+    return 412;
+  return 0;
+}
+
+static gint
 check_policy_store_session_states_autoload_on_open (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1357,6 +1457,12 @@ main (void)
   if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_principal_states_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_principal_events_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_principal_events_reject_invalid_edges ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_principal_events_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_session_states_autoload_on_open ()) != 0)
     return rc;

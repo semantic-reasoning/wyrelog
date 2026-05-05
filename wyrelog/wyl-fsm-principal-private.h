@@ -73,5 +73,7 @@ const wyl_principal_transition_t *wyl_fsm_principal_table (gsize * out_len);
  * input. */
 const gchar *wyl_principal_state_name (wyl_principal_state_t s);
 const gchar *wyl_principal_event_name (wyl_principal_event_t ev);
+wyl_principal_state_t wyl_principal_state_from_name (const gchar * name);
+wyl_principal_event_t wyl_principal_event_from_name (const gchar * name);
 
 G_END_DECLS;

@@ -166,6 +166,14 @@ wyrelog_error_t wyl_handle_load_policy_store_principal_states (WylHandle *
     self);
 
 /*
+ * Loads principal_event rows from the handle-owned policy authority store into
+ * the attached read/delta engine pair as principal_event/4 facts. Rejected
+ * unless both the store and engine pair are available.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_principal_events (WylHandle *
+    self);
+
+/*
  * Loads session_state rows from the handle-owned policy authority store into
  * the attached read/delta engine pair. Rejected unless both the store and
  * engine pair are available.

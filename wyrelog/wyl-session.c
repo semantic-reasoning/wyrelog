@@ -141,8 +141,36 @@ store_principal_event (WylHandle *handle, const gchar *username,
   if (old_state_name == NULL || event_name == NULL || new_state_name == NULL)
     return WYRELOG_E_INTERNAL;
 
-  return wyl_policy_store_append_principal_event (store, username, event_name,
-      old_state_name, new_state_name);
+  wyl_principal_state_t validated = WYL_PRINCIPAL_STATE_LAST_;
+  wyrelog_error_t validate_rc =
+      wyl_fsm_principal_step (old_state, event, &validated);
+  if (validate_rc != WYRELOG_E_OK)
+    return validate_rc;
+  if (validated != new_state)
+    return WYRELOG_E_POLICY;
+
+  wyrelog_error_t rc = wyl_policy_store_append_principal_event (store,
+      username, event_name, old_state_name, new_state_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (wyl_handle_get_read_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+
+  gint64 row[4];
+  rc = wyl_handle_intern_engine_symbol (handle, username, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, event_name, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, old_state_name, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, new_state_name, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, "principal_event", row, 4);
 }
 
 static wyrelog_error_t
