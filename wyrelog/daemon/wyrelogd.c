@@ -28,6 +28,7 @@ typedef struct
 
 typedef struct
 {
+  WylHandle *handle;
   guint64 inserted;
   guint64 removed;
   gboolean expect_effective_member;
@@ -35,6 +36,57 @@ typedef struct
   gboolean matched_expected_insert;
   gboolean matched_expected_remove;
 } WylDaemonRuntime;
+
+#ifdef WYL_HAS_AUDIT
+static void
+emit_wirelog_effective_member_audit (WylDaemonRuntime *runtime,
+    const gint64 row[3], WylDeltaKind kind)
+{
+  if (runtime == NULL || runtime->handle == NULL)
+    return;
+
+  g_autofree gchar *user =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[0]);
+  g_autofree gchar *role =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[1]);
+  g_autofree gchar *scope =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[2]);
+  if (user == NULL || role == NULL || scope == NULL)
+    return;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, user);
+  wyl_audit_event_set_action (ev, "effective_member_delta");
+  wyl_audit_event_set_resource_id (ev, role);
+  wyl_audit_event_set_deny_reason (ev,
+      kind == WYL_DELTA_INSERT ? "insert" : "remove");
+  wyl_audit_event_set_deny_origin (ev, scope);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (runtime->handle, ev);
+}
+
+static wyrelog_error_t
+check_wirelog_delta_audit_rows (WylHandle *handle)
+{
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'effective_member_delta' "
+          "AND subject_id = 'wyrelogd-check-user' "
+          "AND resource_id = 'wr.viewer' "
+          "AND deny_origin = 'wyrelogd-check-scope';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  gint64 rows = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return rows == 2 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+#endif
 
 static gboolean
 parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
@@ -246,11 +298,16 @@ daemon_delta_cb (const gchar *relation, const gint64 *row, guint ncols,
     runtime->removed++;
   }
 
-  if (!runtime->expect_effective_member)
-    return;
   if (g_strcmp0 (relation, "effective_member") != 0)
     return;
   if ((kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE) || ncols != 3)
+    return;
+
+#ifdef WYL_HAS_AUDIT
+  emit_wirelog_effective_member_audit (runtime, row, kind);
+#endif
+
+  if (!runtime->expect_effective_member)
     return;
   if (row[0] == runtime->expected_row[0]
       && row[1] == runtime->expected_row[1]
@@ -273,6 +330,7 @@ static wyrelog_error_t
 check_wirelog_delta_ready (WylHandle *handle)
 {
   WylDaemonRuntime runtime = {
+    .handle = handle,
     .expect_effective_member = TRUE,
   };
 
@@ -303,6 +361,11 @@ check_wirelog_delta_ready (WylHandle *handle)
     return rc;
   if (runtime.removed == 0 || !runtime.matched_expected_remove)
     return WYRELOG_E_POLICY;
+#ifdef WYL_HAS_AUDIT
+  rc = check_wirelog_delta_audit_rows (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#endif
   return wyl_handle_engine_set_delta_callback (handle, NULL, NULL);
 }
 
@@ -401,7 +464,9 @@ main (int argc, char **argv)
     return 0;
   }
 
-  WylDaemonRuntime runtime = { 0 };
+  WylDaemonRuntime runtime = {
+    .handle = handle,
+  };
   rc = start_wirelog_delta_callbacks (handle, &runtime);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: delta callback setup failed: %s\n",
