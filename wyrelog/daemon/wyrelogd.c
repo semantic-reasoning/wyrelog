@@ -2,6 +2,11 @@
 #include <glib.h>
 #include <signal.h>
 
+#ifdef WYL_HAS_DAEMON_HTTP
+#include <libsoup/soup.h>
+#include <string.h>
+#endif
+
 #ifdef G_OS_UNIX
 #include <glib-unix.h>
 #endif
@@ -16,6 +21,7 @@
 typedef struct
 {
   const gchar *template_dir;
+  gint listen_port;
   gboolean check_only;
   gboolean show_version;
 } WylDaemonOptions;
@@ -37,6 +43,10 @@ parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
   GOptionEntry entries[] = {
     {"template-dir", 0, 0, G_OPTION_ARG_STRING, &opts->template_dir,
         "Access policy template directory", "DIR"},
+#ifdef WYL_HAS_DAEMON_HTTP
+    {"listen-port", 0, 0, G_OPTION_ARG_INT, &opts->listen_port,
+        "HTTP listen port", "PORT"},
+#endif
     {"check", 0, 0, G_OPTION_ARG_NONE, &opts->check_only,
         "Load policy templates and exit", NULL},
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts->show_version,
@@ -68,6 +78,44 @@ check_wirelog_policy_ready (WylHandle *handle)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
+
+#ifdef WYL_HAS_DAEMON_HTTP
+static void
+healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
+    GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+
+  const gchar *body = "ok\n";
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "text/plain", SOUP_MEMORY_COPY, body,
+      strlen (body));
+}
+
+static SoupServer *
+start_http_server (const WylDaemonOptions *opts, GError **error)
+{
+  g_return_val_if_fail (opts != NULL, NULL);
+
+  if (opts->listen_port < 0 || opts->listen_port > 65535) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "listen port must be between 0 and 65535");
+    return NULL;
+  }
+
+  SoupServer *server = soup_server_new (NULL, NULL);
+  soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
+  if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
+    g_object_unref (server);
+    return NULL;
+  }
+
+  return server;
+}
+#endif
 
 static wyrelog_error_t
 check_policy_store_ready (WylHandle *handle)
@@ -242,6 +290,7 @@ main (int argc, char **argv)
 {
   WylDaemonOptions opts = {
     .template_dir = WYL_DEFAULT_TEMPLATE_DIR,
+    .listen_port = 8765,
   };
   g_autoptr (GError) error = NULL;
 
@@ -299,10 +348,21 @@ main (int argc, char **argv)
   }
 
   g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+#ifdef WYL_HAS_DAEMON_HTTP
+  g_autoptr (SoupServer) server = start_http_server (&opts, &error);
+  if (server == NULL) {
+    g_printerr ("wyrelogd: listen failed: %s\n", error->message);
+    return 1;
+  }
+#endif
+
   guint sigint_id = 0;
   guint sigterm_id = 0;
   install_signal_handlers (loop, &sigint_id, &sigterm_id);
   g_main_loop_run (loop);
+#ifdef WYL_HAS_DAEMON_HTTP
+  soup_server_disconnect (server);
+#endif
   remove_signal_handler (&sigterm_id);
   remove_signal_handler (&sigint_id);
   return 0;
