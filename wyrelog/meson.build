@@ -120,7 +120,12 @@ if get_option('enable_audit').allowed()
 endif
 
 wyrelogd_exe = executable('wyrelogd',
-  files('daemon/wyrelogd.c'),
+  files(
+    'daemon/checks.c',
+    'daemon/delta.c',
+    'daemon/http.c',
+    'daemon/wyrelogd.c',
+  ),
   include_directories : wyrelog_inc,
   dependencies : wyrelogd_deps,
   c_args : wyrelogd_c_args,
