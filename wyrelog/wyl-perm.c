@@ -222,42 +222,11 @@ update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
 }
 
 static wyrelog_error_t
-update_direct_permission (WylHandle *handle, const gchar *subject_id,
-    const gchar *action, const gchar *resource_id, gboolean insert)
+reload_direct_permission_snapshot (WylHandle *handle)
 {
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
-  if (insert && wyl_perm_arm_rule_lookup (action) != NULL)
-    return WYRELOG_E_POLICY;
-
-  gint64 row[3];
-  wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, subject_id, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, action, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_intern_engine_symbol (handle, resource_id, &row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  gint64 state_row[4] = { row[0], row[1], row[2], -1 };
-  rc = wyl_handle_intern_engine_symbol (handle, "armed", &state_row[3]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  if (insert) {
-    rc = wyl_handle_engine_insert (handle, "direct_permission", row, 3);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    return wyl_handle_engine_insert (handle, "perm_state", state_row, 4);
-  }
-
-  rc = wyl_handle_engine_remove (handle, "direct_permission", row, 3);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_engine_remove (handle, "perm_state", state_row, 4);
+  return wyl_handle_reload_engine_pair (handle);
 }
 
 wyrelog_error_t
@@ -278,9 +247,7 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
       wyl_grant_req_get_resource_id (req), TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = update_direct_permission (handle, wyl_grant_req_get_subject_id (req),
-      wyl_grant_req_get_action (req), wyl_grant_req_get_resource_id (req),
-      TRUE);
+  rc = reload_direct_permission_snapshot (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -316,9 +283,7 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
       wyl_revoke_req_get_resource_id (req), FALSE);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = update_direct_permission (handle, wyl_revoke_req_get_subject_id (req),
-      wyl_revoke_req_get_action (req), wyl_revoke_req_get_resource_id (req),
-      FALSE);
+  rc = reload_direct_permission_snapshot (handle);
   if (rc != WYRELOG_E_OK)
     return rc;
 
