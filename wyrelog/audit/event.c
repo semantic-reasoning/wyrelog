@@ -215,12 +215,11 @@ wyl_audit_event_get_decision (const WylAuditEvent *self)
 }
 
 wyrelog_error_t
-wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
+wyl_audit_mirror_event (WylHandle *handle, const WylAuditEvent *event)
 {
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
   gchar id_buf[WYL_ID_STRING_BUF];
-  gboolean inserted = FALSE;
 
   if (handle == NULL || event == NULL)
     return WYRELOG_E_INVALID;
@@ -232,10 +231,37 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   if (wyl_id_format (&event->id, id_buf, sizeof id_buf) != WYRELOG_E_OK)
     return WYRELOG_E_INTERNAL;
 
+  return wyl_audit_conn_insert_event (audit_conn, id_buf, event->created_at_us,
+      event->subject_id, event->action, event->resource_id, event->deny_reason,
+      event->deny_origin, event->decision);
+#else
+  (void) handle;
+  (void) event;
+  return WYRELOG_E_INTERNAL;
+#endif
+}
+
+wyrelog_error_t
+wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
+{
+#ifdef WYL_HAS_AUDIT
+  gchar id_buf[WYL_ID_STRING_BUF];
+  gboolean inserted = FALSE;
+
+  if (handle == NULL || event == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (wyl_id_format (&event->id, id_buf, sizeof id_buf) != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+
+  wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);
+  if (audit_conn == NULL)
+    return WYRELOG_E_INTERNAL;
+
   wyrelog_error_t rc = wyl_audit_conn_insert_event_full (audit_conn, id_buf,
-      event->created_at_us,
-      event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->decision, &inserted);
+      event->created_at_us, event->subject_id, event->action,
+      event->resource_id, event->deny_reason, event->deny_origin,
+      event->decision, &inserted);
   if (rc != WYRELOG_E_OK)
     return rc;
 

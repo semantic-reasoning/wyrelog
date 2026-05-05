@@ -418,9 +418,13 @@ wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
-    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
-    gboolean insert)
+    wyl_policy_store_apply_direct_permission_mutation_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, wyl_decision_t audit_decision)
 {
   if (store == NULL || store->db == NULL || subject_id == NULL
       || perm_id == NULL || scope == NULL)
@@ -445,6 +449,12 @@ wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
     rc = wyl_policy_store_append_direct_permission_event (store, subject_id,
         perm_id, scope, insert ? "grant" : "revoke");
   }
+  if (rc == WYRELOG_E_OK && audit_id != NULL) {
+    rc = wyl_policy_store_append_audit_event (store, audit_id,
+        audit_created_at_us, audit_subject_id, audit_action,
+        audit_resource_id, audit_deny_reason, audit_deny_origin,
+        audit_decision);
+  }
   if (rc != WYRELOG_E_OK) {
     rollback_mutation_savepoint (store);
     return rc;
@@ -456,6 +466,16 @@ wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
     return rc;
   }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gboolean insert)
+{
+  return wyl_policy_store_apply_direct_permission_mutation_with_audit (store,
+      subject_id, perm_id, scope, insert, NULL, 0, NULL, NULL, NULL, NULL, NULL,
+      WYL_DECISION_DENY);
 }
 
 wyrelog_error_t
@@ -1079,9 +1099,13 @@ wyl_policy_store_revoke_role_membership (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
-wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
-    const gchar *subject_id, const gchar *role_id, const gchar *scope,
-    gboolean insert)
+    wyl_policy_store_apply_role_membership_mutation_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * role_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, wyl_decision_t audit_decision)
 {
   if (store == NULL || store->db == NULL || subject_id == NULL
       || role_id == NULL || scope == NULL)
@@ -1100,6 +1124,12 @@ wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
     rc = wyl_policy_store_append_role_membership_event (store, subject_id,
         role_id, scope, insert ? "grant" : "revoke");
   }
+  if (rc == WYRELOG_E_OK && audit_id != NULL) {
+    rc = wyl_policy_store_append_audit_event (store, audit_id,
+        audit_created_at_us, audit_subject_id, audit_action,
+        audit_resource_id, audit_deny_reason, audit_deny_origin,
+        audit_decision);
+  }
   if (rc != WYRELOG_E_OK) {
     rollback_mutation_savepoint (store);
     return rc;
@@ -1111,6 +1141,16 @@ wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
     return rc;
   }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *role_id, const gchar *scope,
+    gboolean insert)
+{
+  return wyl_policy_store_apply_role_membership_mutation_with_audit (store,
+      subject_id, role_id, scope, insert, NULL, 0, NULL, NULL, NULL, NULL, NULL,
+      WYL_DECISION_DENY);
 }
 
 wyrelog_error_t

@@ -80,6 +80,14 @@ wyrelog_error_t
 wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t * store,
     const gchar * subject_id, const gchar * role_id, const gchar * scope,
     gboolean insert);
+wyrelog_error_t
+    wyl_policy_store_apply_role_membership_mutation_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * role_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_role_membership_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * role_id,
     const gchar * scope, gboolean * out_exists);
@@ -102,6 +110,14 @@ wyrelog_error_t
 wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t * store,
     const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean insert);
+wyrelog_error_t
+    wyl_policy_store_apply_direct_permission_mutation_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_direct_permission_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean * out_exists);
