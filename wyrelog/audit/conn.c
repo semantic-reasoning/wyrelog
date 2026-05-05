@@ -195,8 +195,63 @@ append_json_member_string (GString *json, const gchar *name,
 }
 
 static gboolean
+parse_filter_key_value (const gchar *filter, gchar **out_key, gchar **out_value)
+{
+  const gchar *eq = strchr (filter, '=');
+  if (eq == NULL)
+    return FALSE;
+  if (eq == filter || eq[1] == '\0')
+    return FALSE;
+
+  *out_key = g_strndup (filter, (gsize) (eq - filter));
+  *out_value = g_strdup (eq + 1);
+  return TRUE;
+}
+
+static gboolean
+parse_filter_compound_term (const gchar *filter, gchar **out_key,
+    gchar **out_value)
+{
+  const gchar *open = strchr (filter, '(');
+  if (open == NULL)
+    return FALSE;
+  if (open == filter)
+    return FALSE;
+
+  const gchar *close = filter + strlen (filter);
+  while (close > open && g_ascii_isspace (close[-1]))
+    close--;
+  if (close <= open + 1 || close[-1] != ')')
+    return FALSE;
+  close--;
+
+  const gchar *value_start = open + 1;
+  const gchar *value_end = close;
+  while (value_start < value_end && g_ascii_isspace (*value_start))
+    value_start++;
+  while (value_end > value_start && g_ascii_isspace (value_end[-1]))
+    value_end--;
+  if (value_start >= value_end)
+    return FALSE;
+
+  if (*value_start == '"') {
+    value_start++;
+    if (value_end <= value_start || value_end[-1] != '"')
+      return FALSE;
+    value_end--;
+  }
+  if (value_start >= value_end)
+    return FALSE;
+
+  *out_key = g_strndup (filter, (gsize) (open - filter));
+  g_strstrip (*out_key);
+  *out_value = g_strndup (value_start, (gsize) (value_end - value_start));
+  return (*out_key)[0] != '\0';
+}
+
+static gboolean
 parse_audit_filter (const gchar *filter, const gchar **out_column,
-    gint16 *out_decision, const gchar **out_string)
+    gint16 *out_decision, gchar **out_string)
 {
   *out_column = NULL;
   *out_string = NULL;
@@ -205,12 +260,11 @@ parse_audit_filter (const gchar *filter, const gchar **out_column,
   if (filter == NULL || filter[0] == '\0')
     return TRUE;
 
-  const gchar *eq = strchr (filter, '=');
-  if (eq == NULL || eq == filter || eq[1] == '\0')
+  g_autofree gchar *key = NULL;
+  g_autofree gchar *value = NULL;
+  if (!parse_filter_key_value (filter, &key, &value)
+      && !parse_filter_compound_term (filter, &key, &value))
     return FALSE;
-
-  g_autofree gchar *key = g_strndup (filter, (gsize) (eq - filter));
-  const gchar *value = eq + 1;
 
   if (g_strcmp0 (key, "decision") == 0) {
     *out_column = "decision";
@@ -237,7 +291,7 @@ parse_audit_filter (const gchar *filter, const gchar **out_column,
     *out_column = "deny_origin";
 
   if (*out_column != NULL) {
-    *out_string = value;
+    *out_string = g_steal_pointer (&value);
     return TRUE;
   }
 
@@ -249,7 +303,7 @@ wyl_audit_conn_query_events_json (wyl_audit_conn_t *conn,
     const gchar *filter, gchar **out_json)
 {
   const gchar *column;
-  const gchar *string_value;
+  g_autofree gchar *string_value = NULL;
   gint16 decision_value;
   duckdb_prepared_statement stmt;
   duckdb_result result;

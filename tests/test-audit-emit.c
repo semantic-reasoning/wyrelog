@@ -280,8 +280,8 @@ check_query_events_json_filters_rows (void)
   }
 
   g_autofree gchar *action_json = NULL;
-  if (wyl_audit_conn_query_events_json (conn, "action=read", &action_json)
-      != WYRELOG_E_OK) {
+  if (wyl_audit_conn_query_events_json (conn, "action(\"read\")",
+          &action_json) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 144;
   }
@@ -314,6 +314,33 @@ check_query_events_json_filters_rows (void)
   if (bad_json != NULL) {
     g_object_unref (handle);
     return 149;
+  }
+
+  g_autofree gchar *bad_compound_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "action()", &bad_compound_json)
+      != WYRELOG_E_INVALID) {
+    g_object_unref (handle);
+    return 152;
+  }
+  if (bad_compound_json != NULL) {
+    g_object_unref (handle);
+    return 153;
+  }
+
+  g_autofree gchar *compound_decision_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "decision(\"allow\")",
+          &compound_decision_json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 150;
+  }
+  if (g_strstr_len (compound_decision_json, -1,
+          "\"subject_id\":\"json-alice\"") == NULL
+      || g_strstr_len (compound_decision_json, -1,
+          "\"subject_id\":\"json-bob\"") != NULL
+      || g_strstr_len (compound_decision_json, -1, "\"decision\":1")
+      == NULL) {
+    g_object_unref (handle);
+    return 151;
   }
 
   g_object_unref (handle);

@@ -31,7 +31,7 @@ main (int argc, char **argv)
 
 #ifdef WYL_TEST_HAS_AUDIT
   g_autoptr (WylAuditIter) start_iter = NULL;
-  if (wyl_client_audit_query (client, "action=daemon_start", &start_iter)
+  if (wyl_client_audit_query (client, "action(\"daemon_start\")", &start_iter)
       != WYRELOG_E_OK)
     return 8;
 
