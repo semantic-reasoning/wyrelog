@@ -224,6 +224,7 @@ check_policy_store_ready (WylHandle *handle)
     "permissions",
     "role_permissions",
     "direct_permissions",
+    "direct_permission_events",
     "principal_events",
     "principal_states",
     "session_states",

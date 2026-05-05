@@ -205,12 +205,20 @@ update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
         wyl_policy_store_upsert_permission (store, action, action, "basic");
     if (rc != WYRELOG_E_OK)
       return rc;
-    return wyl_policy_store_grant_direct_permission (store, subject_id,
+    rc = wyl_policy_store_grant_direct_permission (store, subject_id,
         action, resource_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    return wyl_policy_store_append_direct_permission_event (store, subject_id,
+        action, resource_id, "grant");
   }
 
-  return wyl_policy_store_revoke_direct_permission (store, subject_id,
-      action, resource_id);
+  wyrelog_error_t rc = wyl_policy_store_revoke_direct_permission (store,
+      subject_id, action, resource_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_policy_store_append_direct_permission_event (store, subject_id,
+      action, resource_id, "revoke");
 }
 
 static wyrelog_error_t

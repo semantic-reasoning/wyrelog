@@ -16,6 +16,30 @@
  * enabled, and return WYRELOG_E_OK.
  */
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  const gchar *operation;
+  guint matches;
+} DirectPermissionEventExpect;
+
+static wyrelog_error_t
+direct_permission_event_expect_cb (const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *operation,
+    gpointer user_data)
+{
+  DirectPermissionEventExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0
+      && g_strcmp0 (operation, expect->operation) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
 static gint
 check_grant_returns_ok (void)
 {
@@ -203,6 +227,19 @@ check_grant_persists_direct_permission (void)
     return 72;
   if (!exists)
     return 73;
+
+  DirectPermissionEventExpect expect = {
+    .subject_id = "store-user",
+    .perm_id = "wr.store-direct",
+    .scope = "store-scope",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_direct_permission_event
+      (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
+          &expect) != WYRELOG_E_OK)
+    return 74;
+  if (expect.matches != 1)
+    return 75;
   return 0;
 }
 
@@ -235,6 +272,30 @@ check_revoke_removes_store_grant (void)
     return 83;
   if (exists)
     return 84;
+  DirectPermissionEventExpect grant_expect = {
+    .subject_id = "store-revoke-user",
+    .perm_id = "wr.store-revoke",
+    .scope = "store-revoke-scope",
+    .operation = "grant",
+  };
+  if (wyl_policy_store_foreach_direct_permission_event
+      (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
+          &grant_expect) != WYRELOG_E_OK)
+    return 85;
+  if (grant_expect.matches != 1)
+    return 86;
+  DirectPermissionEventExpect revoke_expect = {
+    .subject_id = "store-revoke-user",
+    .perm_id = "wr.store-revoke",
+    .scope = "store-revoke-scope",
+    .operation = "revoke",
+  };
+  if (wyl_policy_store_foreach_direct_permission_event
+      (wyl_handle_get_policy_store (handle), direct_permission_event_expect_cb,
+          &revoke_expect) != WYRELOG_E_OK)
+    return 87;
+  if (revoke_expect.matches != 1)
+    return 88;
   return 0;
 }
 
