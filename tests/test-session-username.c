@@ -115,6 +115,15 @@ typedef struct
   guint matches;
 } PrincipalEventFactExpect;
 
+typedef struct
+{
+  const gchar *relation;
+  const gint64 *row;
+  guint ncols;
+  WylDeltaKind kind;
+  guint matches;
+} DeltaFactExpect;
+
 static wyrelog_error_t
 principal_state_expect_cb (const gchar *subject_id, const gchar *state,
     gpointer user_data)
@@ -152,6 +161,35 @@ principal_event_fact_expect_cb (const gchar *relation, const gint64 *row,
   if (row[0] == expect->row[0] && row[1] == expect->row[1]
       && row[2] == expect->row[2] && row[3] == expect->row[3])
     expect->matches++;
+}
+
+static void
+delta_fact_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
+    WylDeltaKind kind, gpointer user_data)
+{
+  DeltaFactExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, expect->relation) != 0 || ncols != expect->ncols
+      || kind != expect->kind)
+    return;
+  for (guint i = 0; i < ncols; i++) {
+    if (row[i] != expect->row[i])
+      return;
+  }
+  expect->matches++;
+}
+
+static void
+delta_relation_count_cb (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  guint *matches = user_data;
+
+  (void) row;
+
+  if (g_strcmp0 (relation, "session_fired") == 0 && ncols == 4
+      && kind == WYL_DELTA_INSERT)
+    (*matches)++;
 }
 
 static wyrelog_error_t
@@ -426,6 +464,37 @@ check_mfa_verify_authenticates_engine_principal (void)
 }
 
 static gint
+check_mfa_delta_callback_survives_state_reload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 91;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "mfa-delta-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 92;
+
+  gint64 row[4];
+  if (intern_principal_fired_row (handle, "mfa-delta-user", "mfa_required",
+          "mfa_ok", "authenticated", row) != WYRELOG_E_OK)
+    return 93;
+  DeltaFactExpect expect = {
+    .relation = "principal_fired",
+    .row = row,
+    .ncols = 4,
+    .kind = WYL_DELTA_INSERT,
+  };
+  if (wyl_handle_engine_set_delta_callback (handle, delta_fact_expect_cb,
+          &expect) != WYRELOG_E_OK)
+    return 94;
+  if (wyl_session_mfa_verify (handle, session) != WYRELOG_E_OK)
+    return 95;
+  return expect.matches == 1 ? 0 : 96;
+}
+
+static gint
 check_mfa_verify_rejects_invalid_args (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -543,6 +612,47 @@ check_login_inserts_wirelog_session_fired (void)
     return 138;
   return expect_session_transition (handle, session_id, "idle", "request",
       "active", 139);
+}
+
+static gint
+check_login_delta_callback_survives_state_reload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 141;
+
+  gint64 row[4];
+  if (intern_principal_fired_row (handle, "login-delta-user", "unverified",
+          "login_ok", "mfa_required", row) != WYRELOG_E_OK)
+    return 142;
+  DeltaFactExpect principal_expect = {
+    .relation = "principal_fired",
+    .row = row,
+    .ncols = 4,
+    .kind = WYL_DELTA_INSERT,
+  };
+  if (wyl_handle_engine_set_delta_callback (handle, delta_fact_expect_cb,
+          &principal_expect) != WYRELOG_E_OK)
+    return 143;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "login-delta-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 144;
+  if (principal_expect.matches != 1)
+    return 145;
+
+  guint session_fired = 0;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_relation_count_cb,
+          &session_fired) != WYRELOG_E_OK)
+    return 146;
+  g_autoptr (wyl_login_req_t) second_login = wyl_login_req_new ();
+  wyl_login_req_set_username (second_login, "login-delta-session-user");
+  g_autoptr (WylSession) second_session = NULL;
+  if (wyl_session_login (handle, second_login, &second_session) != WYRELOG_E_OK)
+    return 147;
+  return session_fired == 1 ? 0 : 148;
 }
 
 static gint
@@ -1348,6 +1458,8 @@ main (void)
     return rc;
   if ((rc = check_mfa_verify_authenticates_engine_principal ()) != 0)
     return rc;
+  if ((rc = check_mfa_delta_callback_survives_state_reload ()) != 0)
+    return rc;
   if ((rc = check_mfa_verify_rejects_invalid_args ()) != 0)
     return rc;
   if ((rc = check_login_persists_mfa_required_state ()) != 0)
@@ -1357,6 +1469,8 @@ main (void)
   if ((rc = check_login_persists_active_session_state ()) != 0)
     return rc;
   if ((rc = check_login_inserts_wirelog_session_fired ()) != 0)
+    return rc;
+  if ((rc = check_login_delta_callback_survives_state_reload ()) != 0)
     return rc;
   if ((rc = check_login_session_id_is_active_decision_scope ()) != 0)
     return rc;
