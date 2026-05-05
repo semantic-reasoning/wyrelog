@@ -4,6 +4,7 @@
 #include <glib.h>
 #include <duckdb.h>
 
+#include "wyrelog/decide.h"
 #include "wyrelog/error.h"
 
 G_BEGIN_DECLS;
@@ -92,6 +93,24 @@ wyrelog_error_t wyl_audit_conn_create_schema (wyl_audit_conn_t * conn);
  */
 wyrelog_error_t wyl_audit_conn_table_exists (wyl_audit_conn_t * conn,
     const gchar * table_name, gboolean * out_exists);
+
+/*
+ * Inserts a fully materialised audit row into the runtime DuckDB view.
+ * This is used by both freshly emitted events and policy-store replay;
+ * callers are responsible for deciding whether the source row should
+ * also be persisted elsewhere.
+ */
+wyrelog_error_t wyl_audit_conn_insert_event (wyl_audit_conn_t * conn,
+    const gchar * id, gint64 created_at_us, const gchar * subject_id,
+    const gchar * action, const gchar * resource_id,
+    const gchar * deny_reason, const gchar * deny_origin,
+    wyl_decision_t decision);
+
+wyrelog_error_t wyl_audit_conn_insert_event_full (wyl_audit_conn_t * conn,
+    const gchar * id, gint64 created_at_us, const gchar * subject_id,
+    const gchar * action, const gchar * resource_id,
+    const gchar * deny_reason, const gchar * deny_origin,
+    wyl_decision_t decision, gboolean * out_inserted);
 
 /*
  * Serialises audit_events rows to a compact JSON array ordered by newest

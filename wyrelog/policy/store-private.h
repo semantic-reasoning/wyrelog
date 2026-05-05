@@ -35,6 +35,10 @@ typedef wyrelog_error_t (*wyl_policy_session_state_cb) (const gchar *
 typedef wyrelog_error_t (*wyl_policy_session_event_cb) (const gchar *
     session_id, const gchar * event, const gchar * from_state,
     const gchar * to_state, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_audit_event_cb) (const gchar * id,
+    gint64 created_at_us, const gchar * subject_id, const gchar * action,
+    const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, wyl_decision_t decision, gpointer user_data);
 
 /*
  * Policy authority store lifecycle wrapper.
@@ -124,5 +128,7 @@ wyrelog_error_t wyl_policy_store_append_audit_event (wyl_policy_store_t *
     store, const gchar * id, gint64 created_at_us, const gchar * subject_id,
     const gchar * action, const gchar * resource_id, const gchar * deny_reason,
     const gchar * deny_origin, wyl_decision_t decision);
+wyrelog_error_t wyl_policy_store_foreach_audit_event (wyl_policy_store_t *
+    store, wyl_policy_audit_event_cb cb, gpointer user_data);
 
 G_END_DECLS;

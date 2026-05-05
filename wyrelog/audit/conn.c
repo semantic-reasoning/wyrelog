@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "wyrelog/decide.h"
+#include "wyrelog/wyl-id-private.h"
 
 struct wyl_audit_conn_t
 {
@@ -62,6 +63,82 @@ wyl_audit_conn_get_connection (wyl_audit_conn_t *conn)
     return zero;
   }
   return conn->conn;
+}
+
+static wyrelog_error_t
+bind_nullable_varchar (duckdb_prepared_statement stmt, idx_t index,
+    const gchar *value)
+{
+  if (value == NULL)
+    return duckdb_bind_null (stmt, index) == DuckDBSuccess ?
+        WYRELOG_E_OK : WYRELOG_E_IO;
+  return duckdb_bind_varchar (stmt, index, value) == DuckDBSuccess ?
+      WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static gboolean
+result_nullable_varchar_equal (duckdb_result *result, idx_t col, idx_t row,
+    const gchar *expected)
+{
+  if (duckdb_value_is_null (result, col, row))
+    return expected == NULL;
+
+  gchar *actual = duckdb_value_varchar (result, col, row);
+  gboolean equal = g_strcmp0 (actual, expected) == 0;
+  duckdb_free (actual);
+  return equal;
+}
+
+static wyrelog_error_t
+audit_event_matches_existing (wyl_audit_conn_t *conn, const gchar *id,
+    gint64 created_at_us, const gchar *subject_id, const gchar *action,
+    const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, wyl_decision_t decision, gboolean *out_exists)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, decision " "FROM audit_events WHERE id = ?;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_prepare (&stmt);
+  if (step_rc != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  idx_t rows = duckdb_row_count (&result);
+  if (rows == 0) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_OK;
+  }
+  if (rows != 1) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+
+  *out_exists = TRUE;
+  gboolean equal =
+      duckdb_value_int64 (&result, 0, 0) == created_at_us
+      && result_nullable_varchar_equal (&result, 1, 0, subject_id)
+      && result_nullable_varchar_equal (&result, 2, 0, action)
+      && result_nullable_varchar_equal (&result, 3, 0, resource_id)
+      && result_nullable_varchar_equal (&result, 4, 0, deny_reason)
+      && result_nullable_varchar_equal (&result, 5, 0, deny_origin)
+      && duckdb_value_int64 (&result, 6, 0) == decision;
+
+  duckdb_destroy_result (&result);
+  return equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t
@@ -134,6 +211,80 @@ wyl_audit_conn_table_exists (wyl_audit_conn_t *conn, const gchar *table_name,
   *out_exists = duckdb_value_int64 (&result, 0, 0) > 0;
   duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
+    gint64 created_at_us, const gchar *subject_id, const gchar *action,
+    const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, wyl_decision_t decision, gboolean *out_inserted)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result;
+  duckdb_state step_rc;
+  wyl_id_t parsed_id;
+  gboolean exists = FALSE;
+
+  memset (&result, 0, sizeof (result));
+
+  if (conn == NULL || id == NULL || created_at_us < 0 || out_inserted == NULL)
+    return WYRELOG_E_INVALID;
+  *out_inserted = FALSE;
+  if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  if (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = audit_event_matches_existing (conn, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, decision,
+      &exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (exists)
+    return WYRELOG_E_OK;
+
+  static const gchar *sql =
+      "INSERT INTO audit_events "
+      "(id, created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, decision) " "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess
+      || duckdb_bind_int64 (stmt, 2, created_at_us) != DuckDBSuccess
+      || bind_nullable_varchar (stmt, 3, subject_id) != WYRELOG_E_OK
+      || bind_nullable_varchar (stmt, 4, action) != WYRELOG_E_OK
+      || bind_nullable_varchar (stmt, 5, resource_id) != WYRELOG_E_OK
+      || bind_nullable_varchar (stmt, 6, deny_reason) != WYRELOG_E_OK
+      || bind_nullable_varchar (stmt, 7, deny_origin) != WYRELOG_E_OK
+      || duckdb_bind_int16 (stmt, 8, (int16_t) decision) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  if (step_rc != DuckDBSuccess)
+    return WYRELOG_E_IO;
+
+  *out_inserted = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_audit_conn_insert_event (wyl_audit_conn_t *conn, const gchar *id,
+    gint64 created_at_us, const gchar *subject_id, const gchar *action,
+    const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, wyl_decision_t decision)
+{
+  gboolean inserted = FALSE;
+
+  return wyl_audit_conn_insert_event_full (conn, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, decision,
+      &inserted);
 }
 
 static void
