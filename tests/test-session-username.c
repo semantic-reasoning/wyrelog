@@ -10,71 +10,21 @@
 #endif
 
 static wyrelog_error_t
-intern_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
+store_active_scope (WylHandle *handle, const gchar *scope)
 {
-  return wyl_handle_intern_engine_symbol (handle, symbol, out_id);
+  return wyl_policy_store_set_session_state (wyl_handle_get_policy_store
+      (handle), scope, "active");
 }
 
 static wyrelog_error_t
-insert_symbol_row1 (WylHandle *handle, const gchar *relation,
-    const gchar *value)
+grant_direct (WylHandle *handle, const gchar *subject_id,
+    const gchar *permission, const gchar *scope)
 {
-  gint64 row[1];
-  wyrelog_error_t rc = intern_symbol (handle, value, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 1);
-}
-
-static wyrelog_error_t
-insert_symbol_row2 (WylHandle *handle, const gchar *relation,
-    const gchar *a, const gchar *b)
-{
-  gint64 row[2];
-  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = intern_symbol (handle, b, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 2);
-}
-
-static wyrelog_error_t
-insert_symbol_row3 (WylHandle *handle, const gchar *relation,
-    const gchar *a, const gchar *b, const gchar *c)
-{
-  gint64 row[3];
-  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = intern_symbol (handle, b, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = intern_symbol (handle, c, &row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 3);
-}
-
-static wyrelog_error_t
-insert_symbol_row4 (WylHandle *handle, const gchar *relation,
-    const gchar *a, const gchar *b, const gchar *c, const gchar *d)
-{
-  gint64 row[4];
-  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = intern_symbol (handle, b, &row[1]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = intern_symbol (handle, c, &row[2]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = intern_symbol (handle, d, &row[3]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_engine_insert (handle, relation, row, 4);
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, subject_id);
+  wyl_grant_req_set_action (grant, permission);
+  wyl_grant_req_set_resource_id (grant, scope);
+  return wyl_perm_grant (handle, grant);
 }
 
 typedef struct
@@ -256,20 +206,11 @@ check_login_requires_mfa_before_allow (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 70;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.login-role",
-          "wr.login-permission") != WYRELOG_E_OK)
+  if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 71;
-  if (insert_symbol_row3 (handle, "member_of", "login-user",
-          "wr.login-role", "login-scope") != WYRELOG_E_OK)
+  if (grant_direct (handle, "login-user", "wr.login-permission",
+          "login-scope") != WYRELOG_E_OK)
     return 72;
-  if (insert_symbol_row2 (handle, "session_state", "login-scope", "active")
-      != WYRELOG_E_OK)
-    return 73;
-  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
-    return 74;
-  if (insert_symbol_row4 (handle, "perm_state", "login-user",
-          "wr.login-permission", "login-scope", "armed") != WYRELOG_E_OK)
-    return 75;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "login-user");
@@ -299,20 +240,11 @@ check_mfa_verify_authenticates_engine_principal (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 80;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.login-role",
-          "wr.login-permission") != WYRELOG_E_OK)
+  if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 81;
-  if (insert_symbol_row3 (handle, "member_of", "login-user",
-          "wr.login-role", "login-scope") != WYRELOG_E_OK)
+  if (grant_direct (handle, "login-user", "wr.login-permission",
+          "login-scope") != WYRELOG_E_OK)
     return 82;
-  if (insert_symbol_row2 (handle, "session_state", "login-scope", "active")
-      != WYRELOG_E_OK)
-    return 83;
-  if (insert_symbol_row1 (handle, "session_active", "active") != WYRELOG_E_OK)
-    return 84;
-  if (insert_symbol_row4 (handle, "perm_state", "login-user",
-          "wr.login-permission", "login-scope", "armed") != WYRELOG_E_OK)
-    return 85;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "login-user");
@@ -444,10 +376,6 @@ check_login_session_id_is_active_decision_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.session-id-role",
-          "wr.session-id-permission") != WYRELOG_E_OK)
-    return 141;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "session-id-user");
   g_autoptr (WylSession) session = NULL;
@@ -459,12 +387,9 @@ check_login_session_id_is_active_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 144;
-  if (insert_symbol_row3 (handle, "member_of", "session-id-user",
-          "wr.session-id-role", session_id) != WYRELOG_E_OK)
+  if (grant_direct (handle, "session-id-user", "wr.session-id-permission",
+          session_id) != WYRELOG_E_OK)
     return 145;
-  if (insert_symbol_row4 (handle, "perm_state", "session-id-user",
-          "wr.session-id-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 146;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "session-id-user");
@@ -486,18 +411,11 @@ check_login_skip_mfa_authenticates_principal (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.skip-mfa-role",
-          "wr.skip-mfa-permission") != WYRELOG_E_OK)
+  if (store_active_scope (handle, "skip-mfa-scope") != WYRELOG_E_OK)
     return 151;
-  if (insert_symbol_row3 (handle, "member_of", "skip-mfa-user",
-          "wr.skip-mfa-role", "skip-mfa-scope") != WYRELOG_E_OK)
+  if (grant_direct (handle, "skip-mfa-user", "wr.skip-mfa-permission",
+          "skip-mfa-scope") != WYRELOG_E_OK)
     return 152;
-  if (insert_symbol_row2 (handle, "session_state", "skip-mfa-scope", "active")
-      != WYRELOG_E_OK)
-    return 153;
-  if (insert_symbol_row4 (handle, "perm_state", "skip-mfa-user",
-          "wr.skip-mfa-permission", "skip-mfa-scope", "armed") != WYRELOG_E_OK)
-    return 154;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "skip-mfa-user");
@@ -577,10 +495,6 @@ check_session_close_deactivates_decision_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 170;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.close-role",
-          "wr.close-permission") != WYRELOG_E_OK)
-    return 171;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "close-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
@@ -591,12 +505,9 @@ check_session_close_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 173;
-  if (insert_symbol_row3 (handle, "member_of", "close-user", "wr.close-role",
+  if (grant_direct (handle, "close-user", "wr.close-permission",
           session_id) != WYRELOG_E_OK)
     return 174;
-  if (insert_symbol_row4 (handle, "perm_state", "close-user",
-          "wr.close-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 175;
 
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
     return 176;
@@ -699,10 +610,6 @@ check_elevated_session_remains_active_decision_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 220;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.elevate-role",
-          "wr.elevate-permission") != WYRELOG_E_OK)
-    return 221;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevate-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
@@ -715,12 +622,9 @@ check_elevated_session_remains_active_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 224;
-  if (insert_symbol_row3 (handle, "member_of", "elevate-user",
-          "wr.elevate-role", session_id) != WYRELOG_E_OK)
+  if (grant_direct (handle, "elevate-user", "wr.elevate-permission",
+          session_id) != WYRELOG_E_OK)
     return 225;
-  if (insert_symbol_row4 (handle, "perm_state", "elevate-user",
-          "wr.elevate-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 226;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "elevate-user");
@@ -741,10 +645,6 @@ check_elevated_session_close_deactivates_decision_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 230;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.elevated-close-role",
-          "wr.elevated-close-permission") != WYRELOG_E_OK)
-    return 231;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-close-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
@@ -757,12 +657,9 @@ check_elevated_session_close_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 234;
-  if (insert_symbol_row3 (handle, "member_of", "elevated-close-user",
-          "wr.elevated-close-role", session_id) != WYRELOG_E_OK)
+  if (grant_direct (handle, "elevated-close-user",
+          "wr.elevated-close-permission", session_id) != WYRELOG_E_OK)
     return 235;
-  if (insert_symbol_row4 (handle, "perm_state", "elevated-close-user",
-          "wr.elevated-close-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 236;
 
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
     return 237;
@@ -819,10 +716,6 @@ check_idle_session_deactivates_decision_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 270;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.idle-role",
-          "wr.idle-permission") != WYRELOG_E_OK)
-    return 271;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "idle-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
@@ -833,12 +726,9 @@ check_idle_session_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 273;
-  if (insert_symbol_row3 (handle, "member_of", "idle-user", "wr.idle-role",
+  if (grant_direct (handle, "idle-user", "wr.idle-permission",
           session_id) != WYRELOG_E_OK)
     return 274;
-  if (insert_symbol_row4 (handle, "perm_state", "idle-user",
-          "wr.idle-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 275;
 
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
     return 276;
@@ -865,10 +755,6 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 280;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.elevated-idle-role",
-          "wr.elevated-idle-permission") != WYRELOG_E_OK)
-    return 281;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "elevated-idle-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
@@ -881,12 +767,9 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 284;
-  if (insert_symbol_row3 (handle, "member_of", "elevated-idle-user",
-          "wr.elevated-idle-role", session_id) != WYRELOG_E_OK)
+  if (grant_direct (handle, "elevated-idle-user",
+          "wr.elevated-idle-permission", session_id) != WYRELOG_E_OK)
     return 285;
-  if (insert_symbol_row4 (handle, "perm_state", "elevated-idle-user",
-          "wr.elevated-idle-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 286;
 
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
     return 287;
@@ -943,10 +826,6 @@ check_expiring_session_deactivates_decision_scope (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 310;
 
-  if (insert_symbol_row2 (handle, "role_permission", "wr.expiry-role",
-          "wr.expiry-permission") != WYRELOG_E_OK)
-    return 311;
-
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "expiry-user");
   wyl_login_req_set_skip_mfa (login, TRUE);
@@ -957,12 +836,9 @@ check_expiring_session_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 313;
-  if (insert_symbol_row3 (handle, "member_of", "expiry-user",
-          "wr.expiry-role", session_id) != WYRELOG_E_OK)
+  if (grant_direct (handle, "expiry-user", "wr.expiry-permission",
+          session_id) != WYRELOG_E_OK)
     return 314;
-  if (insert_symbol_row4 (handle, "perm_state", "expiry-user",
-          "wr.expiry-permission", session_id, "armed") != WYRELOG_E_OK)
-    return 315;
 
   if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
     return 316;
