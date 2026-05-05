@@ -95,6 +95,21 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       strlen (body));
 }
 
+static void
+audit_events_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+
+  const gchar *body = "[]";
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
+}
+
 static SoupServer *
 start_http_server (const WylDaemonOptions *opts, GError **error)
 {
@@ -108,6 +123,8 @@ start_http_server (const WylDaemonOptions *opts, GError **error)
 
   SoupServer *server = soup_server_new (NULL, NULL);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
+  soup_server_add_handler (server, "/audit/events", audit_events_handler, NULL,
+      NULL);
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);
     return NULL;

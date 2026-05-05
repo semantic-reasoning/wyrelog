@@ -22,13 +22,17 @@ import time
 import urllib.request
 
 port = sys.argv[1]
-url = f"http://127.0.0.1:{port}/healthz"
+base = f"http://127.0.0.1:{port}"
 last_error = None
 
 for _ in range(50):
     try:
-        body = urllib.request.urlopen(url, timeout=1).read()
-        sys.exit(0 if body == b"ok\n" else 1)
+        health = urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
+        events = urllib.request.urlopen(
+            f"{base}/audit/events?filter=decision%3Ddeny",
+            timeout=1,
+        ).read()
+        sys.exit(0 if health == b"ok\n" and events == b"[]" else 1)
     except Exception as exc:
         last_error = exc
         time.sleep(0.1)
