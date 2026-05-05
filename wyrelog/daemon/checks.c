@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "daemon/checks.h"
 
+#include <glib.h>
+
+#include "daemon/delta.h"
 #include "wyrelog/wyl-handle-private.h"
 
 wyrelog_error_t
@@ -236,4 +239,52 @@ wyl_daemon_emit_start_event (WylHandle *handle)
   (void) handle;
   return WYRELOG_E_OK;
 #endif
+}
+
+int
+wyl_daemon_run_checks (WylHandle *handle)
+{
+  wyrelog_error_t rc = wyl_daemon_check_delta_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: delta readiness check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_wirelog_policy_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: policy readiness check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_policy_store_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: policy store readiness check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_policy_snapshot_reload_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: policy snapshot reload check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_role_permission_snapshot_reload_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: role permission reload check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_audit_sink_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: audit readiness check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  return 0;
 }

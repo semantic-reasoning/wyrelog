@@ -22,29 +22,39 @@ test('wyrelogd-check', wyrelogd_exe,
 
 if host_machine.system() != 'windows'
   sh = find_program('sh')
+  wyrelogd_sigterm_cmd = '"' + wyrelogd_exe.full_path()
+  wyrelogd_sigterm_cmd += '" --template-dir "'
+  wyrelogd_sigterm_cmd += meson.project_source_root() / 'templates' / 'access'
+  wyrelogd_sigterm_cmd += '"'
+  if build_client
+    wyrelogd_sigterm_cmd += ' --listen-port 0'
+  endif
+  wyrelogd_sigterm_cmd += ' & pid=$!; sleep 1; kill -TERM "$pid"; wait "$pid"'
   test('wyrelogd-sigterm', sh,
     args : [
       '-c',
-      '"' + wyrelogd_exe.full_path() + '" --template-dir "' + meson.project_source_root() / 'templates' / 'access' + '" --listen-port 0 & pid=$!; sleep 1; kill -TERM "$pid"; wait "$pid"',
+      wyrelogd_sigterm_cmd,
     ],
     depends : wyrelogd_exe,
   )
 
-  python3 = find_program('python3')
-  wyrelogd_healthz_expect_audit = '0'
-  if get_option('enable_audit').allowed()
-    wyrelogd_healthz_expect_audit = '1'
+  if build_client
+    python3 = find_program('python3')
+    wyrelogd_healthz_expect_audit = '0'
+    if get_option('enable_audit').allowed()
+      wyrelogd_healthz_expect_audit = '1'
+    endif
+    test('wyrelogd-healthz', sh,
+      args : [
+        meson.current_source_dir() / 'check-wyrelogd-healthz.sh',
+        wyrelogd_exe.full_path(),
+        meson.project_source_root() / 'templates' / 'access',
+        python3.full_path(),
+        wyrelogd_healthz_expect_audit,
+      ],
+      depends : wyrelogd_exe,
+    )
   endif
-  test('wyrelogd-healthz', sh,
-    args : [
-      meson.current_source_dir() / 'check-wyrelogd-healthz.sh',
-      wyrelogd_exe.full_path(),
-      meson.project_source_root() / 'templates' / 'access',
-      python3.full_path(),
-      wyrelogd_healthz_expect_audit,
-    ],
-    depends : wyrelogd_exe,
-  )
 endif
 
 test_client_smoke = executable('test-client-smoke',
