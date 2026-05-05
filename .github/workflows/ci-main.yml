@@ -99,10 +99,18 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-v2-2026.04.27-glib-sqlite3-libsodium
+          key: vcpkg-windows-v3-2026.04.27-x64-windows-glib-sqlite3-libsodium
           restore-keys: |
-            vcpkg-windows-v2-
-            vcpkg-windows-
+            vcpkg-windows-v3-2026.04.27-x64-windows-
+            vcpkg-windows-2026.04.27-glib-sqlite3-libsodium
+
+      - name: Cache vcpkg installed tree
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.VCPKG_ROOT }}\installed
+          key: vcpkg-windows-installed-v1-2026.04.27-x64-windows-glib-sqlite3-libsodium
+          restore-keys: |
+            vcpkg-windows-installed-v1-2026.04.27-x64-windows-
 
       - name: Create vcpkg binary cache
         shell: cmd
