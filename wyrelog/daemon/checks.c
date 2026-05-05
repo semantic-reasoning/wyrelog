@@ -87,6 +87,26 @@ wyl_daemon_check_audit_sink_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
+{
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  g_autoptr (WylSession) session = NULL;
+
+  wyl_login_req_set_username (login, "wyrelogd-skip-mfa-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+
+  gboolean allowed = wyl_handle_get_login_skip_mfa_allowed (handle);
+  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  if (!allowed && rc == WYRELOG_E_POLICY)
+    return WYRELOG_E_OK;
+  if (allowed && rc == WYRELOG_E_OK && session != NULL)
+    return WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return WYRELOG_E_POLICY;
+}
+
 static wyrelog_error_t
 login_check_principal (WylHandle *handle, const gchar *username,
     WylSession **out_session)
@@ -292,6 +312,13 @@ wyl_daemon_run_checks (WylHandle *handle)
   rc = wyl_daemon_check_audit_sink_ready (handle);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: audit readiness check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_login_skip_mfa_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: login skip-mfa readiness check failed: %s\n",
         wyrelog_error_string (rc));
     return 1;
   }
