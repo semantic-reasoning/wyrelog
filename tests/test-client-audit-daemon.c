@@ -29,5 +29,24 @@ main (int argc, char **argv)
   if (has_next)
     return 7;
 
+#ifdef WYL_TEST_HAS_AUDIT
+  g_autoptr (WylAuditIter) start_iter = NULL;
+  if (wyl_client_audit_query (client, "action=daemon_start", &start_iter)
+      != WYRELOG_E_OK)
+    return 8;
+
+  has_next = FALSE;
+  if (wyl_audit_iter_next (start_iter, &has_next) != WYRELOG_E_OK)
+    return 9;
+  if (!has_next)
+    return 10;
+
+  has_next = TRUE;
+  if (wyl_audit_iter_next (start_iter, &has_next) != WYRELOG_E_OK)
+    return 11;
+  if (has_next)
+    return 12;
+#endif
+
   return 0;
 }

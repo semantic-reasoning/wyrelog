@@ -49,8 +49,14 @@ test_client_smoke = executable('test-client-smoke',
 
 test('client-smoke', test_client_smoke)
 
+test_client_audit_daemon_c_args = []
+if get_option('enable_audit').allowed()
+  test_client_audit_daemon_c_args += '-DWYL_TEST_HAS_AUDIT'
+endif
+
 test_client_audit_daemon = executable('test-client-audit-daemon',
   'test-client-audit-daemon.c',
+  c_args : test_client_audit_daemon_c_args,
   dependencies : [wyrelog_client_dep],
 )
 
