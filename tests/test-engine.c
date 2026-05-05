@@ -48,7 +48,8 @@ make_tmpdir (void)
 
 /*
  * copy_real_templates_to: copies the 5 real template files from the
- * canonical template dir into dest_dir, creating fsm/ subdirectory.
+ * canonical template dir into dest_dir, creating fsm/ and lobac/
+ * subdirectories.
  * Returns FALSE on any error.
  */
 static gboolean
@@ -59,13 +60,18 @@ copy_real_templates_to (const gchar *dest_dir)
     "fsm/principal.dl",
     "fsm/session.dl",
     "fsm/permission_scope.dl",
-    "decision.dl",
+    "lobac/decision.dl",
   };
 
-  /* Create fsm/ subdir. */
+  /* Create nested subdirs used by the fixed template list. */
   g_autofree gchar *fsm_dir = g_build_filename (dest_dir, "fsm", NULL);
   if (g_mkdir (fsm_dir, 0755) != 0) {
     g_printerr ("copy_real_templates_to: mkdir %s failed\n", fsm_dir);
+    return FALSE;
+  }
+  g_autofree gchar *lobac_dir = g_build_filename (dest_dir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0) {
+    g_printerr ("copy_real_templates_to: mkdir %s failed\n", lobac_dir);
     return FALSE;
   }
 
@@ -144,16 +150,16 @@ test_engine_open_eager_build_surfaces_errors (void)
   if (tmpdir == NULL)
     return 10;
 
-  /* Create fsm/ subdir and copy 4 good files, then overwrite decision.dl
-   * with malformed content. */
+  /* Copy good files, then overwrite lobac/decision.dl with malformed
+   * content. */
   gboolean ok = copy_real_templates_to (tmpdir);
   if (!ok) {
     rmdir_recursive (tmpdir);
     return 11;
   }
 
-  /* Overwrite decision.dl with deliberately malformed content. */
-  if (!write_file_in_dir (tmpdir, "decision.dl",
+  /* Overwrite lobac/decision.dl with deliberately malformed content. */
+  if (!write_file_in_dir (tmpdir, "lobac/decision.dl",
           "this is not valid datalog ((((\n")) {
     rmdir_recursive (tmpdir);
     return 12;
@@ -180,26 +186,22 @@ test_engine_open_eager_build_surfaces_errors (void)
   return 0;
 }
 
-static gint
-test_engine_open_missing_decision_fail_closed (void)
+static gboolean
+copy_partial_templates_without_decision (const gchar *tmpdir)
 {
-  g_autofree gchar *tmpdir = make_tmpdir ();
-  if (tmpdir == NULL)
-    return 20;
-
-  /* Create fsm/ subdir and copy bootstrap + fsm files but omit decision.dl */
+  /* Copy bootstrap + fsm files but omit both decision template paths. */
   g_autofree gchar *fsm_dir = g_build_filename (tmpdir, "fsm", NULL);
-  if (g_mkdir (fsm_dir, 0755) != 0) {
-    rmdir_recursive (tmpdir);
-    return 21;
-  }
+  if (g_mkdir (fsm_dir, 0755) != 0)
+    return FALSE;
+  g_autofree gchar *lobac_dir = g_build_filename (tmpdir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0)
+    return FALSE;
 
   static const char *partial_files[] = {
     "bootstrap.dl",
     "fsm/principal.dl",
     "fsm/session.dl",
     "fsm/permission_scope.dl",
-    /* decision.dl intentionally omitted */
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (partial_files); i++) {
@@ -211,15 +213,26 @@ test_engine_open_missing_decision_fail_closed (void)
     g_autoptr (GError) err = NULL;
 
     if (!g_file_get_contents (src, &contents, &len, &err)) {
-      g_printerr ("test_engine_open_missing_decision_fail_closed: "
+      g_printerr ("copy_partial_templates_without_decision: "
           "cannot read %s: %s\n", src, err ? err->message : "?");
-      rmdir_recursive (tmpdir);
-      return 22;
+      return FALSE;
     }
-    if (!g_file_set_contents (dst, contents, (gssize) len, &err)) {
-      rmdir_recursive (tmpdir);
-      return 23;
-    }
+    if (!g_file_set_contents (dst, contents, (gssize) len, &err))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gint
+test_engine_open_missing_decision_fail_closed (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 20;
+
+  if (!copy_partial_templates_without_decision (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 21;
   }
 
   WylEngine *engine = NULL;
@@ -239,6 +252,107 @@ test_engine_open_missing_decision_fail_closed (void)
         "*out should be NULL on failure\n");
     g_object_unref (engine);
     return 25;
+  }
+  return 0;
+}
+
+static gint
+test_engine_open_legacy_decision_fallback (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 90;
+
+  if (!copy_partial_templates_without_decision (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 91;
+  }
+
+  g_autofree gchar *src =
+      g_build_filename (WYL_TEST_TEMPLATE_DIR, "decision.dl", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (src, &contents, &len, &err)) {
+    g_printerr ("test_engine_open_legacy_decision_fallback: "
+        "cannot read %s: %s\n", src, err ? err->message : "?");
+    rmdir_recursive (tmpdir);
+    return 92;
+  }
+  g_autofree gchar *dst = g_build_filename (tmpdir, "decision.dl", NULL);
+  if (!g_file_set_contents (dst, contents, (gssize) len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 93;
+  }
+
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open (tmpdir, 1, &engine);
+
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_OK || engine == NULL) {
+    g_printerr ("test_engine_open_legacy_decision_fallback: "
+        "expected open success, got %d\n", (int) rc);
+    if (engine != NULL)
+      g_object_unref (engine);
+    return 94;
+  }
+  wyl_engine_close (engine);
+  return 0;
+}
+
+static gint
+test_engine_open_canonical_read_error_beats_legacy (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 100;
+
+  if (!copy_partial_templates_without_decision (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 101;
+  }
+
+  g_autofree gchar *legacy_src =
+      g_build_filename (WYL_TEST_TEMPLATE_DIR, "decision.dl", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (legacy_src, &contents, &len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 102;
+  }
+  g_autofree gchar *legacy_dst = g_build_filename (tmpdir, "decision.dl",
+      NULL);
+  if (!g_file_set_contents (legacy_dst, contents, (gssize) len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 103;
+  }
+
+  g_autofree gchar *canonical_dir =
+      g_build_filename (tmpdir, "lobac", "decision.dl", NULL);
+  if (g_mkdir (canonical_dir, 0755) != 0) {
+    rmdir_recursive (tmpdir);
+    return 104;
+  }
+
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = wyl_engine_open (tmpdir, 1, &engine);
+
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_IO) {
+    g_printerr ("test_engine_open_canonical_read_error_beats_legacy: "
+        "expected WYRELOG_E_IO, got %d\n", (int) rc);
+    if (engine != NULL)
+      g_object_unref (engine);
+    return 105;
+  }
+  if (engine != NULL) {
+    g_printerr ("test_engine_open_canonical_read_error_beats_legacy: "
+        "*out should be NULL on failure\n");
+    g_object_unref (engine);
+    return 106;
   }
   return 0;
 }
@@ -320,11 +434,16 @@ test_engine_concat_with_newline_helper (void)
   if (tmpdir == NULL)
     return 70;
 
-  /* Create fsm/ subdir. */
+  /* Create nested subdirs used by the fixed template list. */
   g_autofree gchar *fsm_dir = g_build_filename (tmpdir, "fsm", NULL);
   if (g_mkdir (fsm_dir, 0755) != 0) {
     rmdir_recursive (tmpdir);
     return 71;
+  }
+  g_autofree gchar *lobac_dir = g_build_filename (tmpdir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0) {
+    rmdir_recursive (tmpdir);
+    return 72;
   }
 
   /* Write a minimal but syntactically acceptable bootstrap.dl (no trailing
@@ -335,7 +454,7 @@ test_engine_concat_with_newline_helper (void)
 
   if (!write_file_in_dir (tmpdir, "bootstrap.dl", bootstrap_content)) {
     rmdir_recursive (tmpdir);
-    return 72;
+    return 73;
   }
 
   /* For the remaining 4 files, write minimal placeholder stubs. */
@@ -343,13 +462,13 @@ test_engine_concat_with_newline_helper (void)
     "fsm/principal.dl",
     "fsm/session.dl",
     "fsm/permission_scope.dl",
-    "decision.dl",
+    "lobac/decision.dl",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (rest); i++) {
     g_autofree gchar *stub = g_strdup_printf ("%% stub for %s\n", rest[i]);
     if (!write_file_in_dir (tmpdir, rest[i], stub)) {
       rmdir_recursive (tmpdir);
-      return (gint) (73 + i);
+      return (gint) (74 + i);
     }
   }
 
@@ -391,11 +510,16 @@ test_engine_open_empty_templates (void)
   if (tmpdir == NULL)
     return 80;
 
-  /* Create fsm/ subdir. */
+  /* Create nested subdirs used by the fixed template list. */
   g_autofree gchar *fsm_dir = g_build_filename (tmpdir, "fsm", NULL);
   if (g_mkdir (fsm_dir, 0755) != 0) {
     rmdir_recursive (tmpdir);
     return 81;
+  }
+  g_autofree gchar *lobac_dir = g_build_filename (tmpdir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0) {
+    rmdir_recursive (tmpdir);
+    return 82;
   }
 
   /* Write all 5 template files as zero-byte files. */
@@ -404,7 +528,7 @@ test_engine_open_empty_templates (void)
     "fsm/principal.dl",
     "fsm/session.dl",
     "fsm/permission_scope.dl",
-    "decision.dl",
+    "lobac/decision.dl",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (all_files); i++) {
     g_autofree gchar *path = g_build_filename (tmpdir, all_files[i], NULL);
@@ -454,6 +578,12 @@ main (void)
     return rc;
 
   if ((rc = test_engine_open_missing_decision_fail_closed ()) != 0)
+    return rc;
+
+  if ((rc = test_engine_open_legacy_decision_fallback ()) != 0)
+    return rc;
+
+  if ((rc = test_engine_open_canonical_read_error_beats_legacy ()) != 0)
     return rc;
 
   if ((rc = test_engine_open_null_template_dir_rejects ()) != 0)

@@ -1,11 +1,8 @@
-// decision.dl - Wyrelog Access Decision Rule Set v0
+// decision.dl - Wyrelog LoBAC Decision Rule Set v0
 //
 // SPDX-License-Identifier: GPL-3.0-or-later
 // Copyright (C) 2026 wyrelog authors. Also available under a separate
 // commercial license; see LICENSE.md at the project root.
-//
-// Legacy compatibility copy. The canonical decision template lives at
-// lobac/decision.dl.
 //
 // Conjunctive access decision plus a six-row deny-reason taxonomy.
 // The decision program produces a boolean projection (allow_bool/3)

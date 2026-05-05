@@ -19,10 +19,13 @@ static const char *const TEMPLATE_FILES[] = {
   "fsm/principal.dl",
   "fsm/session.dl",
   "fsm/permission_scope.dl",
-  "decision.dl",
+  "lobac/decision.dl",
 };
 
 G_STATIC_ASSERT (G_N_ELEMENTS (TEMPLATE_FILES) == WYL_ENGINE_TEMPLATE_COUNT);
+
+#define WYL_ENGINE_LOBAC_DECISION_TEMPLATE "lobac/decision.dl"
+#define WYL_ENGINE_LEGACY_DECISION_TEMPLATE "decision.dl"
 
 typedef struct
 {
@@ -133,13 +136,29 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
   gsize total_content_bytes = 0;
 
   for (gsize i = 0; i < G_N_ELEMENTS (TEMPLATE_FILES); i++) {
+    const gchar *logical_path = TEMPLATE_FILES[i];
     g_autofree gchar *path =
-        g_build_filename (template_dir, TEMPLATE_FILES[i], NULL);
+        g_build_filename (template_dir, logical_path, NULL);
     g_autofree gchar *contents = NULL;
     gsize len = 0;
     g_autoptr (GError) err = NULL;
 
     if (!g_file_get_contents (path, &contents, &len, &err)) {
+      if (g_strcmp0 (logical_path, WYL_ENGINE_LOBAC_DECISION_TEMPLATE) == 0
+          && g_error_matches (err, G_FILE_ERROR, G_FILE_ERROR_NOENT)) {
+        g_clear_error (&err);
+        g_clear_pointer (&path, g_free);
+        path = g_build_filename (template_dir,
+            WYL_ENGINE_LEGACY_DECISION_TEMPLATE, NULL);
+        logical_path = WYL_ENGINE_LEGACY_DECISION_TEMPLATE;
+        if (g_file_get_contents (path, &contents, &len, &err)) {
+          WYL_LOG_INFO (WYL_LOG_SECTION_BOOT,
+              "loaded legacy decision template: %s", logical_path);
+        }
+      }
+    }
+
+    if (contents == NULL) {
       WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
           "missing or unreadable template: %s", TEMPLATE_FILES[i]);
       return WYRELOG_E_IO;

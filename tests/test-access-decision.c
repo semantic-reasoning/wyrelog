@@ -10,10 +10,14 @@
 #error "WYL_TEST_ACCESS_DECISION_DL_PATH must be defined by the build."
 #endif
 
+#ifndef WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH
+#error "WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH must be defined by the build."
+#endif
+
 /* --- Stratification self-check ---------------------------------- */
 
 /*
- * Lifts the rule heads introduced by decision.dl into
+ * Lifts the rule heads introduced by lobac/decision.dl into
  * wyl_dl_rule_t form and asserts the program is stratified. Every
  * negation edge from these rules lands on either an EDB predicate
  * (frozen, disabled_role_for, policy_violation, principal_state,
@@ -195,7 +199,7 @@ check_origin_tags (void)
 /* --- .dl head-signature mirror oracle --------------------------- */
 
 /*
- * Confirms that decision.dl declares exactly one allow/3 head, one
+ * Confirms that lobac/decision.dl declares exactly one allow/3 head, one
  * allow_bool/3 head, and the six deny_reason/5 heads with literal
  * (code, origin) string pairs identical to the C catalogue. Body
  * compound terms are not parsed; the structural body equality is
@@ -304,6 +308,56 @@ check_head_mirror (void)
   return 0;
 }
 
+static void
+append_non_comment_lines (GString *out, const gchar *contents)
+{
+  g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
+
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    g_autofree gchar *line = g_strdup (lines[i]);
+    gchar *trimmed = g_strstrip (line);
+
+    if (trimmed[0] == '\0' || g_str_has_prefix (trimmed, "//"))
+      continue;
+    g_string_append (out, trimmed);
+    g_string_append_c (out, '\n');
+  }
+}
+
+static gint
+check_legacy_template_matches_canonical (void)
+{
+  g_autofree gchar *canonical = NULL;
+  g_autofree gchar *legacy = NULL;
+  gsize canonical_len = 0;
+  gsize legacy_len = 0;
+  g_autoptr (GError) err = NULL;
+
+  if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &canonical,
+          &canonical_len, &err)) {
+    g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
+        err ? err->message : "?");
+    return 170;
+  }
+
+  g_clear_error (&err);
+  if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, &legacy,
+          &legacy_len, &err)) {
+    g_printerr ("cannot read %s: %s\n",
+        WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, err ? err->message : "?");
+    return 171;
+  }
+
+  g_autoptr (GString) canonical_rules = g_string_new (NULL);
+  g_autoptr (GString) legacy_rules = g_string_new (NULL);
+  append_non_comment_lines (canonical_rules, canonical);
+  append_non_comment_lines (legacy_rules, legacy);
+
+  if (g_strcmp0 (canonical_rules->str, legacy_rules->str) != 0)
+    return 172;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -317,6 +371,8 @@ main (void)
   if ((rc = check_origin_tags ()) != 0)
     return rc;
   if ((rc = check_head_mirror ()) != 0)
+    return rc;
+  if ((rc = check_legacy_template_matches_canonical ()) != 0)
     return rc;
   return 0;
 }
