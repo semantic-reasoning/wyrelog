@@ -101,19 +101,48 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) server;
   (void) path;
+
+#ifdef WYL_HAS_AUDIT
+  const gchar *filter = NULL;
+  if (query != NULL)
+    filter = g_hash_table_lookup (query, "filter");
+
+  WylHandle *handle = user_data;
+  g_autofree gchar *body = NULL;
+  wyrelog_error_t rc =
+      wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+      filter, &body);
+  if (rc == WYRELOG_E_INVALID) {
+    const gchar *error_body = "{\"error\":\"invalid_filter\"}";
+    soup_server_message_set_status (msg, 400, NULL);
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, error_body, strlen (error_body));
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    const gchar *error_body = "{\"error\":\"audit_query_failed\"}";
+    soup_server_message_set_status (msg, 500, NULL);
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, error_body, strlen (error_body));
+    return;
+  }
+#else
   (void) query;
   (void) user_data;
-
   const gchar *body = "[]";
+#endif
+
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
 static SoupServer *
-start_http_server (const WylDaemonOptions *opts, GError **error)
+start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
+    GError **error)
 {
   g_return_val_if_fail (opts != NULL, NULL);
+  g_return_val_if_fail (WYL_IS_HANDLE (handle), NULL);
 
   if (opts->listen_port < 0 || opts->listen_port > 65535) {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
@@ -123,8 +152,8 @@ start_http_server (const WylDaemonOptions *opts, GError **error)
 
   SoupServer *server = soup_server_new (NULL, NULL);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
-  soup_server_add_handler (server, "/audit/events", audit_events_handler, NULL,
-      NULL);
+  soup_server_add_handler (server, "/audit/events", audit_events_handler,
+      handle, NULL);
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);
     return NULL;
@@ -366,7 +395,7 @@ main (int argc, char **argv)
 
   g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
 #ifdef WYL_HAS_DAEMON_HTTP
-  g_autoptr (SoupServer) server = start_http_server (&opts, &error);
+  g_autoptr (SoupServer) server = start_http_server (&opts, handle, &error);
   if (server == NULL) {
     g_printerr ("wyrelogd: listen failed: %s\n", error->message);
     return 1;

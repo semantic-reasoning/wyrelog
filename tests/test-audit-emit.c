@@ -239,6 +239,88 @@ check_emit_persists_event_fields (void)
 }
 
 static gint
+check_query_events_json_filters_rows (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 140;
+
+  g_autoptr (WylAuditEvent) denied = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (denied, "json-bob");
+  wyl_audit_event_set_action (denied, "write");
+  wyl_audit_event_set_resource_id (denied, "doc/99");
+  wyl_audit_event_set_deny_reason (denied, "not_armed");
+  wyl_audit_event_set_deny_origin (denied, "perm_state");
+  wyl_audit_event_set_decision (denied, WYL_DECISION_DENY);
+
+  g_autoptr (WylAuditEvent) allowed = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (allowed, "json-alice");
+  wyl_audit_event_set_action (allowed, "read");
+  wyl_audit_event_set_resource_id (allowed, "doc/42");
+  wyl_audit_event_set_decision (allowed, WYL_DECISION_ALLOW);
+
+  if (wyl_audit_emit (handle, denied) != WYRELOG_E_OK
+      || wyl_audit_emit (handle, allowed) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 141;
+  }
+
+  wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
+  g_autofree gchar *deny_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "decision=deny", &deny_json)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 142;
+  }
+  if (g_strstr_len (deny_json, -1, "\"subject_id\":\"json-bob\"") == NULL
+      || g_strstr_len (deny_json, -1, "\"subject_id\":\"json-alice\"")
+      != NULL || g_strstr_len (deny_json, -1, "\"decision\":0") == NULL) {
+    g_object_unref (handle);
+    return 143;
+  }
+
+  g_autofree gchar *action_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "action=read", &action_json)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 144;
+  }
+  if (g_strstr_len (action_json, -1, "\"subject_id\":\"json-alice\"") == NULL
+      || g_strstr_len (action_json, -1, "\"subject_id\":\"json-bob\"")
+      != NULL) {
+    g_object_unref (handle);
+    return 145;
+  }
+
+  g_autofree gchar *all_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, NULL, &all_json)
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 146;
+  }
+  if (g_strstr_len (all_json, -1, "\"subject_id\":\"json-alice\"") == NULL
+      || g_strstr_len (all_json, -1, "\"subject_id\":\"json-bob\"")
+      == NULL) {
+    g_object_unref (handle);
+    return 147;
+  }
+
+  g_autofree gchar *bad_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "decision=maybe", &bad_json)
+      != WYRELOG_E_INVALID) {
+    g_object_unref (handle);
+    return 148;
+  }
+  if (bad_json != NULL) {
+    g_object_unref (handle);
+    return 149;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
 check_decide_persists_representative_deny_reason (void)
 {
   WylHandle *handle = NULL;
@@ -807,6 +889,8 @@ main (void)
   if ((rc = check_emit_inserts_a_row ()) != 0)
     return rc;
   if ((rc = check_emit_persists_event_fields ()) != 0)
+    return rc;
+  if ((rc = check_query_events_json_filters_rows ()) != 0)
     return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;

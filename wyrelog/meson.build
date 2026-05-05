@@ -114,6 +114,10 @@ if libsoup_dep.found()
   wyrelogd_deps += libsoup_dep
   wyrelogd_c_args += '-DWYL_HAS_DAEMON_HTTP'
 endif
+if get_option('enable_audit').allowed()
+  wyrelogd_deps += duckdb_dep
+  wyrelogd_c_args += '-DWYL_HAS_AUDIT'
+endif
 
 wyrelogd_exe = executable('wyrelogd',
   files('daemon/wyrelogd.c'),
