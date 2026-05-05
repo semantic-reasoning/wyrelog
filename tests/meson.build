@@ -49,6 +49,24 @@ test_client_smoke = executable('test-client-smoke',
 
 test('client-smoke', test_client_smoke)
 
+test_client_audit_daemon = executable('test-client-audit-daemon',
+  'test-client-audit-daemon.c',
+  dependencies : [wyrelog_client_dep],
+)
+
+if host_machine.system() != 'windows' and build_client
+  test('client-audit-daemon', sh,
+    args : [
+      meson.current_source_dir() / 'check-client-audit-daemon.sh',
+      wyrelogd_exe.full_path(),
+      test_client_audit_daemon.full_path(),
+      meson.project_source_root() / 'templates' / 'access',
+      python3.full_path(),
+    ],
+    depends : [wyrelogd_exe, test_client_audit_daemon],
+  )
+endif
+
 test_traits_compile = executable('test-traits-compile',
   'test-traits-compile.c',
   dependencies : [wyrelog_dep],
