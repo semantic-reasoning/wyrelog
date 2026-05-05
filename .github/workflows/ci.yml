@@ -81,6 +81,7 @@ jobs:
       VCPKG_ROOT: ${{ github.workspace }}\vcpkg
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-binary-cache,readwrite"
     steps:
       - name: Check out source
         uses: actions/checkout@v5
