@@ -19,6 +19,7 @@ struct _WylHandle
   gint64 created_at_us;
   WylEngine *read_engine;
   WylEngine *delta_engine;
+  GHashTable *engine_symbols_by_id;
   wyl_policy_store_t *policy_store;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
@@ -34,6 +35,7 @@ wyl_handle_finalize (GObject *object)
 
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
+  g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
 #ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
@@ -65,6 +67,8 @@ wyl_handle_init (WylHandle *self)
   if (wyl_id_new (&self->id) != WYRELOG_E_OK)
     g_error ("wyl_handle_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
+  self->engine_symbols_by_id =
+      g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 }
 
 static wyrelog_error_t
@@ -173,6 +177,7 @@ wyl_shutdown (WylHandle *handle)
   g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
+  g_hash_table_remove_all (handle->engine_symbols_by_id);
 }
 
 gchar *
@@ -298,8 +303,26 @@ wyl_handle_intern_engine_symbol (WylHandle *self, const gchar *symbol,
   if (read_id != delta_id)
     return WYRELOG_E_INTERNAL;
 
+  gint64 *key = g_new (gint64, 1);
+  *key = read_id;
+  g_hash_table_replace (self->engine_symbols_by_id, key, g_strdup (symbol));
+
   *out_id = read_id;
   return WYRELOG_E_OK;
+}
+
+gchar *
+wyl_handle_dup_engine_symbol (WylHandle *self, gint64 id)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return NULL;
+  if (self->engine_symbols_by_id == NULL)
+    return NULL;
+
+  const gchar *symbol = g_hash_table_lookup (self->engine_symbols_by_id, &id);
+  if (symbol == NULL)
+    return NULL;
+  return g_strdup (symbol);
 }
 
 static gboolean
