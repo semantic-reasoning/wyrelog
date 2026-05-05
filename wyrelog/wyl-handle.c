@@ -558,6 +558,16 @@ wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
   if (self->read_engine == NULL || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
+  WylHandleEngineInsertFaultOnce *fault = g_object_get_qdata (G_OBJECT (self),
+      wyl_handle_engine_insert_fault_once_quark ());
+  if (fault != NULL && g_strcmp0 (fault->relation, relation) == 0) {
+    wyrelog_error_t fault_rc = fault->rc;
+    g_object_steal_qdata (G_OBJECT (self),
+        wyl_handle_engine_insert_fault_once_quark ());
+    wyl_handle_engine_fault_once_free (fault);
+    return fault_rc;
+  }
+
   wyrelog_error_t rc =
       wyl_engine_insert (self->read_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK)
@@ -938,6 +948,23 @@ insert_policy_store_audit_fact (const gchar *id, gint64 created_at_us,
     wyl_decision_t decision, gpointer user_data)
 {
   WylHandle *self = user_data;
+  return wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
+      action, resource_id, deny_reason, deny_origin, decision);
+}
+
+wyrelog_error_t
+wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
+    gint64 created_at_us, const gchar *subject_id, const gchar *action,
+    const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, wyl_decision_t decision)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (id == NULL || created_at_us < 0)
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_OK;
+
   const gchar *decision_name = decision_symbol (decision);
   if (decision_name == NULL)
     return WYRELOG_E_POLICY;

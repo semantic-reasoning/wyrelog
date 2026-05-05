@@ -1657,6 +1657,206 @@ check_emit_rejects_null_args (void)
 }
 
 static gint
+check_emit_projects_wirelog_facts_immediately (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 193;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "audit-live-user");
+  wyl_audit_event_set_action (ev, "audit-live-action");
+  wyl_audit_event_set_resource_id (ev, "audit-live-resource");
+  wyl_audit_event_set_deny_reason (ev, "not_armed");
+  wyl_audit_event_set_deny_origin (ev, "perm_state");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
+  gint64 created_at_us = wyl_audit_event_get_created_at_us (ev);
+
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 194;
+  }
+
+  gboolean contains = FALSE;
+  if (contains_audit_event_fact (handle, id, created_at_us, "deny", &contains)
+      != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 195;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
+          "audit-live-user", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 196;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
+          "audit-live-action", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 197;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
+          "audit-live-resource", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 198;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason", id,
+          "not_armed", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 199;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin", id,
+          "perm_state", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 200;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_emit_projects_sparse_wirelog_facts_immediately (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 201;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_action (ev, "audit-live-sparse-action");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
+  gint64 created_at_us = wyl_audit_event_get_created_at_us (ev);
+
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 202;
+  }
+
+  gboolean contains = FALSE;
+  if (contains_audit_event_fact (handle, id, created_at_us, "allow", &contains)
+      != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 203;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
+          "audit-live-sparse-action", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 204;
+  }
+
+  static const gchar *relations[] = {
+    "audit_event_subject",
+    "audit_event_resource",
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (relations); i++) {
+    guint count = 0;
+    if (count_audit_attr_facts (handle, relations[i], id, &count)
+        != WYRELOG_E_OK) {
+      g_object_unref (handle);
+      return (gint) (205 + i);
+    }
+    if (count != 0) {
+      g_object_unref (handle);
+      return (gint) (210 + i);
+    }
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_emit_reports_live_projection_failure (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 215;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
+      WYRELOG_E_INTERNAL);
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "audit-live-fail-user");
+  wyl_audit_event_set_action (ev, "audit-live-fail-action");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_INTERNAL) {
+    g_object_unref (handle);
+    return 216;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
+check_denied_login_skip_mfa_projects_audit_fact (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 217;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "audit-live-skip-mfa-denied-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_POLICY) {
+    g_object_unref (handle);
+    return 218;
+  }
+  if (session != NULL) {
+    g_object_unref (handle);
+    return 219;
+  }
+
+  gboolean contains = FALSE;
+  gint64 authenticated[2];
+  if (intern_symbol (handle, "audit-live-skip-mfa-denied-user",
+          &authenticated[0]) != WYRELOG_E_OK
+      || intern_symbol (handle, "authenticated", &authenticated[1])
+      != WYRELOG_E_OK
+      || wyl_handle_engine_contains (handle, "principal_state", authenticated,
+          2, &contains) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 220;
+  }
+  if (contains) {
+    g_object_unref (handle);
+    return 221;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT id FROM audit_events WHERE action = 'login_skip_mfa';",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 222;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 223;
+  }
+  const gchar *audit_id = duckdb_value_varchar (&result, 0, 0);
+  if (contains_audit_event_attr_fact (handle, "audit_event_action",
+          audit_id, "login_skip_mfa", &contains) != WYRELOG_E_OK || !contains) {
+    duckdb_free ((void *) audit_id);
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 224;
+  }
+
+  duckdb_free ((void *) audit_id);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
 check_policy_store_audit_rows_load_wirelog_facts (void)
 {
   WylHandle *handle = NULL;
@@ -1782,6 +1982,12 @@ main (void)
     return rc;
   if ((rc = check_policy_store_audit_replay_rolls_back_corrupt_row ()) != 0)
     return rc;
+  if ((rc = check_emit_projects_wirelog_facts_immediately ()) != 0)
+    return rc;
+  if ((rc = check_emit_projects_sparse_wirelog_facts_immediately ()) != 0)
+    return rc;
+  if ((rc = check_emit_reports_live_projection_failure ()) != 0)
+    return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
   if ((rc = check_decide_fail_closes_on_audit_append_failure ()) != 0)
@@ -1803,6 +2009,8 @@ main (void)
   if ((rc = check_login_skip_mfa_emits_principal_state_audit_row ()) != 0)
     return rc;
   if ((rc = check_denied_login_skip_mfa_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_denied_login_skip_mfa_projects_audit_fact ()) != 0)
     return rc;
   if ((rc = check_permission_grant_emits_audit_row ()) != 0)
     return rc;

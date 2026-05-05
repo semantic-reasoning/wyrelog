@@ -288,6 +288,12 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
     return store_rc;
   }
 
+  rc = wyl_handle_insert_audit_fact (handle, id_buf, event->created_at_us,
+      event->subject_id, event->action, event->resource_id,
+      event->deny_reason, event->deny_origin, event->decision);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   return WYRELOG_E_OK;
 #else
   (void) handle;
