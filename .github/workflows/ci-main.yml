@@ -1,0 +1,154 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: CI Main
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+jobs:
+  build-posix:
+    name: build-${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            tpm: enabled
+          - os: macos-latest
+            tpm: disabled
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config \
+            libglib2.0-dev libsqlite3-dev libsoup-3.0-dev libsodium-dev \
+            libtss2-dev
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew update
+          brew install meson ninja pkg-config glib sqlite libsoup libsodium
+
+      - name: Cache meson packagecache
+        uses: actions/cache@v5
+        with:
+          path: subprojects/packagecache
+          key: ${{ runner.os }}-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            ${{ runner.os }}-packagecache-
+
+      - name: Configure
+        run: |
+          meson setup builddir \
+            -Denable_tpm=${{ matrix.tpm }} \
+            -Denable_audit=enabled \
+            -Dduckdb_source=subproject
+
+      - name: Build and test
+        run: meson test -C builddir --print-errorlogs --suite wyrelog
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: meson-logs-${{ matrix.os }}
+          path: builddir/meson-logs/
+          if-no-files-found: ignore
+
+  build-windows:
+    name: build-windows
+    runs-on: windows-latest
+    env:
+      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
+      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows
+      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
+      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-binary-cache,readwrite"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      - name: Remove system vcpkg
+        shell: bash
+        run: rm -rf "$VCPKG_INSTALLATION_ROOT"
+
+      - name: Bootstrap vendored vcpkg
+        shell: cmd
+        run: |
+          @echo off
+          git clone --depth 1 --branch 2026.04.27 https://github.com/microsoft/vcpkg.git "%VCPKG_ROOT%"
+          call "%VCPKG_ROOT%\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Cache vcpkg binary packages
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
+          key: vcpkg-windows-2026.04.27-glib-sqlite3-libsodium
+          restore-keys: |
+            vcpkg-windows-
+
+      - name: Create vcpkg binary cache
+        shell: cmd
+        run: if not exist "%VCPKG_DEFAULT_BINARY_CACHE%" mkdir "%VCPKG_DEFAULT_BINARY_CACHE%"
+
+      - name: Install meson and ninja
+        shell: cmd
+        run: pip install meson ninja
+
+      - name: Install pkg-config (chocolatey)
+        shell: cmd
+        run: choco install pkgconfiglite -y --allow-empty-checksums
+
+      - name: Install C dependencies (vcpkg)
+        shell: cmd
+        run: |
+          @echo off
+          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
+
+      - name: Cache meson packagecache
+        uses: actions/cache@v5
+        with:
+          path: subprojects/packagecache
+          key: windows-packagecache-${{ hashFiles('subprojects/*.wrap') }}
+          restore-keys: |
+            windows-packagecache-
+
+      - name: Configure (clang-cl)
+        shell: cmd
+        run: |
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
+          set CC=clang-cl
+          meson setup builddir -Denable_tpm=disabled -Denable_client=disabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
+
+      - name: Build and test (clang-cl)
+        shell: cmd
+        run: |
+          @echo off
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          meson test -C builddir --print-errorlogs --suite wyrelog
+
+      - name: Upload meson logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: meson-logs-windows
+          path: builddir/meson-logs/
+          if-no-files-found: ignore
