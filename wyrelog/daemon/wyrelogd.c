@@ -310,6 +310,92 @@ check_policy_snapshot_reload_ready (WylHandle *handle)
 }
 
 static wyrelog_error_t
+insert_symbol_row (WylHandle *handle, const gchar *relation,
+    const gchar *const *symbols, gsize ncols)
+{
+  gint64 row[4];
+
+  if (ncols == 0 || ncols > G_N_ELEMENTS (row))
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < ncols; i++) {
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (handle, symbols[i], &row[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
+  return wyl_handle_engine_insert (handle, relation, row, ncols);
+}
+
+static wyrelog_error_t
+check_role_permission_snapshot_reload_ready (WylHandle *handle)
+{
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "wyrelogd-role-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+
+  g_autoptr (WylSession) session = NULL;
+  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  rc = wyl_policy_store_upsert_role (store, "wr.snapshot-role",
+      "snapshot role");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_upsert_permission (store, "wyrelogd.role.read",
+      "role read", "basic");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_grant_role_permission (store, "wr.snapshot-role",
+      "wyrelogd.role.read");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_reload_engine_pair (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  const gchar *member_row[] = {
+    "wyrelogd-role-user",
+    "wr.snapshot-role",
+    session_id,
+  };
+  rc = insert_symbol_row (handle, "member_of", member_row,
+      G_N_ELEMENTS (member_row));
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  const gchar *perm_state_row[] = {
+    "wyrelogd-role-user",
+    "wyrelogd.role.read",
+    session_id,
+    "armed",
+  };
+  rc = insert_symbol_row (handle, "perm_state", perm_state_row,
+      G_N_ELEMENTS (perm_state_row));
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "wyrelogd-role-user");
+  wyl_decide_req_set_action (decide, "wyrelogd.role.read");
+  wyl_decide_req_set_resource_id (decide, session_id);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  rc = wyl_decide (handle, decide, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
 emit_daemon_start_event (WylHandle *handle)
 {
 #ifdef WYL_HAS_AUDIT
@@ -499,6 +585,12 @@ main (int argc, char **argv)
     rc = check_policy_snapshot_reload_ready (handle);
     if (rc != WYRELOG_E_OK) {
       g_printerr ("wyrelogd: policy snapshot reload check failed: %s\n",
+          wyrelog_error_string (rc));
+      return 1;
+    }
+    rc = check_role_permission_snapshot_reload_ready (handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: role permission reload check failed: %s\n",
           wyrelog_error_string (rc));
       return 1;
     }
