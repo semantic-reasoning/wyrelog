@@ -287,7 +287,7 @@ test('audit-event', test_audit_event)
 test_jwt = executable('test-jwt',
   'test-jwt.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  dependencies : [wyrelog_dep],
+  dependencies : [wyrelog_dep, sodium_dep],
 )
 
 test('jwt', test_jwt)

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <sodium.h>
 #include <string.h>
 
 #include "wyrelog/auth/jwt-private.h"
@@ -226,6 +227,183 @@ check_hs256_signature_fails_closed (void)
   return 0;
 }
 
+static gint
+check_hs256_access_token_claims_and_time (void)
+{
+  static const guint8 secret[] = "test-secret";
+  g_autofree gchar *token = NULL;
+  if (wyl_jwt_sign_hs256 (&valid_input, secret, strlen ((const gchar *) secret),
+          &token) != WYRELOG_E_OK)
+    return 90;
+
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_OK)
+    return 91;
+  if (payload == NULL)
+    return 92;
+
+  g_clear_pointer (&payload, g_bytes_unref);
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1899,
+          &payload) != WYRELOG_E_OK)
+    return 93;
+  g_clear_pointer (&payload, g_bytes_unref);
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "other-issuer", "wyrelog-client",
+          1000, &payload) != WYRELOG_E_POLICY)
+    return 94;
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "other-audience", 1000,
+          &payload) != WYRELOG_E_POLICY)
+    return 95;
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 999,
+          &payload) != WYRELOG_E_POLICY)
+    return 96;
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1900,
+          &payload) != WYRELOG_E_POLICY)
+    return 97;
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_INVALID)
+    return 98;
+  return 0;
+}
+
+static wyrelog_error_t
+sign_custom_payload_bytes (const guint8 *payload, gsize payload_len,
+    const guint8 *secret, gsize secret_len, gchar **out_token)
+{
+  if (payload == NULL || secret == NULL || secret_len == 0 || out_token == NULL)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+  if (sodium_init () < 0)
+    return WYRELOG_E_INTERNAL;
+
+  const gchar *header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+  g_autofree gchar *header_segment = NULL;
+  g_autofree gchar *payload_segment = NULL;
+  wyrelog_error_t rc = wyl_jwt_base64url_encode ((const guint8 *) header,
+      strlen (header), &header_segment);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_jwt_base64url_encode (payload, payload_len, &payload_segment);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *signing_input = g_strdup_printf ("%s.%s", header_segment,
+      payload_segment);
+  guint8 signature[crypto_auth_hmacsha256_BYTES];
+  crypto_auth_hmacsha256_state state;
+  crypto_auth_hmacsha256_init (&state, secret, secret_len);
+  crypto_auth_hmacsha256_update (&state, (const guint8 *) signing_input,
+      strlen (signing_input));
+  crypto_auth_hmacsha256_final (&state, signature);
+
+  g_autofree gchar *signature_segment = NULL;
+  rc = wyl_jwt_base64url_encode (signature, sizeof signature,
+      &signature_segment);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+sign_custom_payload (const gchar *payload, const guint8 *secret,
+    gsize secret_len, gchar **out_token)
+{
+  if (payload == NULL)
+    return WYRELOG_E_INVALID;
+  return sign_custom_payload_bytes ((const guint8 *) payload, strlen (payload),
+      secret, secret_len, out_token);
+}
+
+static gint
+check_hs256_access_token_rejects_ambiguous_claims (void)
+{
+  static const guint8 secret[] = "test-secret";
+  const gchar *duplicate_payload =
+      "{\"jti\":\"jti\",\"sub\":\"alice\",\"iss\":\"wyrelogd\","
+      "\"iss\":\"evil\",\"aud\":\"wyrelog-client\",\"iat\":1000,"
+      "\"nbf\":1000,\"exp\":1900,\"tenant\":\"__wr_default\","
+      "\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"session\"}";
+  g_autofree gchar *duplicate_token = NULL;
+  if (sign_custom_payload (duplicate_payload, secret,
+          strlen ((const gchar *) secret), &duplicate_token) != WYRELOG_E_OK)
+    return 110;
+
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_access_token (duplicate_token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_POLICY)
+    return 111;
+
+  const gchar *nested_payload =
+      "{\"nested\":{\"iss\":\"wyrelogd\",\"aud\":\"wyrelog-client\","
+      "\"nbf\":1000,\"exp\":1900},\"jti\":\"jti\",\"sub\":\"alice\","
+      "\"iss\":\"evil\",\"aud\":\"evil\",\"iat\":1000,\"tenant\":\"t\","
+      "\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"session\"}";
+  g_autofree gchar *nested_token = NULL;
+  if (sign_custom_payload (nested_payload, secret,
+          strlen ((const gchar *) secret), &nested_token) != WYRELOG_E_OK)
+    return 112;
+  if (wyl_jwt_verify_hs256_access_token (nested_token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_POLICY)
+    return 113;
+
+  const gchar *nul_issuer_payload =
+      "{\"jti\":\"jti\",\"sub\":\"alice\",\"iss\":\"wyrelogd\\u0000evil\","
+      "\"aud\":\"wyrelog-client\",\"iat\":1000,\"nbf\":1000,\"exp\":1900,"
+      "\"tenant\":\"t\",\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"session\"}";
+  g_autofree gchar *nul_issuer_token = NULL;
+  if (sign_custom_payload (nul_issuer_payload, secret,
+          strlen ((const gchar *) secret), &nul_issuer_token) != WYRELOG_E_OK)
+    return 114;
+  if (wyl_jwt_verify_hs256_access_token (nul_issuer_token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_POLICY)
+    return 115;
+
+  const gchar *short_escape_payload =
+      "{\"jti\":\"jti\",\"sub\":\"alice\",\"iss\":\"wyrelogd\\u00\","
+      "\"aud\":\"wyrelog-client\",\"iat\":1000,\"nbf\":1000,\"exp\":1900,"
+      "\"tenant\":\"t\",\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"session\"}";
+  g_autofree gchar *short_escape_token = NULL;
+  if (sign_custom_payload (short_escape_payload, secret,
+          strlen ((const gchar *) secret), &short_escape_token)
+      != WYRELOG_E_OK)
+    return 116;
+  if (wyl_jwt_verify_hs256_access_token (short_escape_token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_POLICY)
+    return 117;
+
+  static const guint8 raw_nul_payload[] =
+      "{\"jti\":\"jti\",\"sub\":\"alice\",\"iss\":\"wyrelogd\","
+      "\"aud\":\"wyrelog-client\",\"iat\":1000,\"nbf\":1000,\"exp\":1900,"
+      "\"tenant\":\"t\",\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"session\"}" "\0" "{\"trailing\":\"ignored\"}";
+  g_autofree gchar *raw_nul_token = NULL;
+  if (sign_custom_payload_bytes (raw_nul_payload, sizeof raw_nul_payload - 1,
+          secret, strlen ((const gchar *) secret), &raw_nul_token)
+      != WYRELOG_E_OK)
+    return 118;
+  if (wyl_jwt_verify_hs256_access_token (raw_nul_token, secret,
+          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
+          &payload) != WYRELOG_E_POLICY)
+    return 119;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -246,6 +424,10 @@ main (void)
   if ((rc = check_hs256_token_signature_round_trip ()) != 0)
     return rc;
   if ((rc = check_hs256_signature_fails_closed ()) != 0)
+    return rc;
+  if ((rc = check_hs256_access_token_claims_and_time ()) != 0)
+    return rc;
+  if ((rc = check_hs256_access_token_rejects_ambiguous_claims ()) != 0)
     return rc;
   return 0;
 }

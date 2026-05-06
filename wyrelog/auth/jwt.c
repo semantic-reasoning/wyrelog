@@ -308,3 +308,304 @@ wyl_jwt_verify_hs256_signature (const gchar *token, const guint8 *secret,
   *out_payload_json = g_steal_pointer (&payload);
   return WYRELOG_E_OK;
 }
+
+static gboolean
+hex_value (gchar c, guint *out)
+{
+  if (c >= '0' && c <= '9')
+    *out = (guint) (c - '0');
+  else if (c >= 'a' && c <= 'f')
+    *out = (guint) (c - 'a' + 10);
+  else if (c >= 'A' && c <= 'F')
+    *out = (guint) (c - 'A' + 10);
+  else
+    return FALSE;
+  return TRUE;
+}
+
+static wyrelog_error_t
+parse_json_string (const gchar **cursor, gchar **out_value)
+{
+  if (cursor == NULL || *cursor == NULL || out_value == NULL || **cursor != '"')
+    return WYRELOG_E_INVALID;
+  *out_value = NULL;
+
+  const gchar *p = *cursor + 1;
+  GString *value = g_string_new (NULL);
+  while (*p != '\0' && *p != '"') {
+    if ((guchar) * p < 0x20) {
+      g_string_free (value, TRUE);
+      return WYRELOG_E_POLICY;
+    }
+    if (*p != '\\') {
+      g_string_append_c (value, *p++);
+      continue;
+    }
+
+    p++;
+    switch (*p) {
+      case '"':
+      case '\\':
+      case '/':
+        g_string_append_c (value, *p++);
+        break;
+      case 'b':
+        g_string_append_c (value, '\b');
+        p++;
+        break;
+      case 'f':
+        g_string_append_c (value, '\f');
+        p++;
+        break;
+      case 'n':
+        g_string_append_c (value, '\n');
+        p++;
+        break;
+      case 'r':
+        g_string_append_c (value, '\r');
+        p++;
+        break;
+      case 't':
+        g_string_append_c (value, '\t');
+        p++;
+        break;
+      case 'u':{
+        guint h0, h1, h2, h3;
+        for (guint i = 1; i <= 4; i++) {
+          if (p[i] == '\0') {
+            g_string_free (value, TRUE);
+            return WYRELOG_E_POLICY;
+          }
+        }
+        if (!hex_value (p[1], &h0) || !hex_value (p[2], &h1) ||
+            !hex_value (p[3], &h2) || !hex_value (p[4], &h3)) {
+          g_string_free (value, TRUE);
+          return WYRELOG_E_POLICY;
+        }
+        guint codepoint = (h0 << 12) | (h1 << 8) | (h2 << 4) | h3;
+        if (codepoint < 0x20 || codepoint > 0x7f) {
+          g_string_free (value, TRUE);
+          return WYRELOG_E_POLICY;
+        }
+        g_string_append_c (value, (gchar) codepoint);
+        p += 5;
+        break;
+      }
+      default:
+        g_string_free (value, TRUE);
+        return WYRELOG_E_POLICY;
+    }
+  }
+  if (*p != '"') {
+    g_string_free (value, TRUE);
+    return WYRELOG_E_POLICY;
+  }
+
+  *cursor = p + 1;
+  *out_value = g_string_free (value, FALSE);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+parse_json_uint64 (const gchar **cursor, gint64 *out_value)
+{
+  if (cursor == NULL || *cursor == NULL || out_value == NULL ||
+      !g_ascii_isdigit (**cursor))
+    return WYRELOG_E_INVALID;
+
+  gint64 value = 0;
+  const gchar *p = *cursor;
+  while (g_ascii_isdigit (*p)) {
+    gint digit = *p - '0';
+    if (value > (G_MAXINT64 - digit) / 10)
+      return WYRELOG_E_POLICY;
+    value = value * 10 + digit;
+    p++;
+  }
+
+  *cursor = p;
+  *out_value = value;
+  return WYRELOG_E_OK;
+}
+
+static void
+skip_json_ws (const gchar **cursor)
+{
+  while (g_ascii_isspace (**cursor))
+    (*cursor)++;
+}
+
+typedef struct
+{
+  gchar *issuer;
+  gchar *audience;
+  gint64 not_before;
+  gint64 expires_at;
+  guint seen_mask;
+} ParsedJwtClaims;
+
+enum
+{
+  CLAIM_JTI = 1u << 0,
+  CLAIM_SUB = 1u << 1,
+  CLAIM_ISS = 1u << 2,
+  CLAIM_AUD = 1u << 3,
+  CLAIM_IAT = 1u << 4,
+  CLAIM_NBF = 1u << 5,
+  CLAIM_EXP = 1u << 6,
+  CLAIM_TENANT = 1u << 7,
+  CLAIM_PRINCIPAL_STATE = 1u << 8,
+  CLAIM_SESSION_ID = 1u << 9,
+  CLAIM_REQUIRED_MASK = (1u << 10) - 1,
+};
+
+static void
+parsed_jwt_claims_clear (ParsedJwtClaims *claims)
+{
+  g_free (claims->issuer);
+  g_free (claims->audience);
+  memset (claims, 0, sizeof *claims);
+}
+
+static wyrelog_error_t
+mark_claim_seen (ParsedJwtClaims *claims, guint bit)
+{
+  if ((claims->seen_mask & bit) != 0)
+    return WYRELOG_E_POLICY;
+  claims->seen_mask |= bit;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+parse_string_claim_value (const gchar **cursor, ParsedJwtClaims *claims,
+    guint bit, gchar **out_value)
+{
+  wyrelog_error_t rc = mark_claim_seen (claims, bit);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *value = NULL;
+  rc = parse_json_string (cursor, &value);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (value[0] == '\0')
+    return WYRELOG_E_POLICY;
+  if (out_value != NULL)
+    *out_value = g_steal_pointer (&value);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+parse_int_claim_value (const gchar **cursor, ParsedJwtClaims *claims,
+    guint bit, gint64 *out_value)
+{
+  wyrelog_error_t rc = mark_claim_seen (claims, bit);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return parse_json_uint64 (cursor, out_value);
+}
+
+static wyrelog_error_t
+parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
+{
+  if (payload == NULL || claims == NULL)
+    return WYRELOG_E_INVALID;
+  memset (claims, 0, sizeof *claims);
+
+  const gchar *p = payload;
+  skip_json_ws (&p);
+  if (*p++ != '{')
+    return WYRELOG_E_POLICY;
+  skip_json_ws (&p);
+  while (*p != '}') {
+    g_autofree gchar *key = NULL;
+    wyrelog_error_t rc = parse_json_string (&p, &key);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    skip_json_ws (&p);
+    if (*p++ != ':')
+      return WYRELOG_E_POLICY;
+    skip_json_ws (&p);
+
+    if (g_strcmp0 (key, "jti") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_JTI, NULL);
+    else if (g_strcmp0 (key, "sub") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_SUB, NULL);
+    else if (g_strcmp0 (key, "iss") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_ISS, &claims->issuer);
+    else if (g_strcmp0 (key, "aud") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_AUD, &claims->audience);
+    else if (g_strcmp0 (key, "iat") == 0) {
+      gint64 ignored = 0;
+      rc = parse_int_claim_value (&p, claims, CLAIM_IAT, &ignored);
+    } else if (g_strcmp0 (key, "nbf") == 0)
+      rc = parse_int_claim_value (&p, claims, CLAIM_NBF, &claims->not_before);
+    else if (g_strcmp0 (key, "exp") == 0)
+      rc = parse_int_claim_value (&p, claims, CLAIM_EXP, &claims->expires_at);
+    else if (g_strcmp0 (key, "tenant") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_TENANT, NULL);
+    else if (g_strcmp0 (key, "principal_state_at_issue") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_PRINCIPAL_STATE, NULL);
+    else if (g_strcmp0 (key, "session_id") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_SESSION_ID, NULL);
+    else
+      return WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+
+    skip_json_ws (&p);
+    if (*p == ',') {
+      p++;
+      skip_json_ws (&p);
+      if (*p == '}')
+        return WYRELOG_E_POLICY;
+    } else if (*p != '}') {
+      return WYRELOG_E_POLICY;
+    }
+  }
+  p++;
+  skip_json_ws (&p);
+  if (*p != '\0')
+    return WYRELOG_E_POLICY;
+  if ((claims->seen_mask & CLAIM_REQUIRED_MASK) != CLAIM_REQUIRED_MASK)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_jwt_verify_hs256_access_token (const gchar *token, const guint8 *secret,
+    gsize secret_len, const gchar *expected_issuer,
+    const gchar *expected_audience, gint64 now, GBytes **out_payload_json)
+{
+  if (!non_empty (expected_issuer) || !non_empty (expected_audience) ||
+      now < 0 || out_payload_json == NULL)
+    return WYRELOG_E_INVALID;
+  *out_payload_json = NULL;
+
+  g_autoptr (GBytes) payload = NULL;
+  wyrelog_error_t rc = wyl_jwt_verify_hs256_signature (token, secret,
+      secret_len, &payload);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gsize payload_len = 0;
+  const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
+  if (memchr (payload_data, '\0', payload_len) != NULL)
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
+  ParsedJwtClaims claims = { 0 };
+  rc = parse_jwt_payload_claims (payload_text, &claims);
+  if (rc != WYRELOG_E_OK) {
+    parsed_jwt_claims_clear (&claims);
+    return rc;
+  }
+  gboolean claims_valid = g_strcmp0 (claims.issuer, expected_issuer) == 0
+      && g_strcmp0 (claims.audience, expected_audience) == 0
+      && now >= claims.not_before && now < claims.expires_at;
+  parsed_jwt_claims_clear (&claims);
+  if (!claims_valid)
+    return WYRELOG_E_POLICY;
+
+  *out_payload_json = g_steal_pointer (&payload);
+  return WYRELOG_E_OK;
+}
