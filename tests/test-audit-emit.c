@@ -904,7 +904,7 @@ check_permission_grant_rolls_back_on_store_audit_failure (void)
 
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (req, "audit-grant-rollback-user");
-  wyl_grant_req_set_action (req, "wr.audit-grant-rollback");
+  wyl_grant_req_set_action (req, "site.audit-grant-rollback");
   wyl_grant_req_set_resource_id (req, "audit-grant-rollback-scope");
   if (wyl_perm_grant (handle, req) != WYRELOG_E_IO) {
     g_object_unref (handle);
@@ -913,7 +913,7 @@ check_permission_grant_rolls_back_on_store_audit_failure (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (store,
-          "audit-grant-rollback-user", "wr.audit-grant-rollback",
+          "audit-grant-rollback-user", "site.audit-grant-rollback",
           "audit-grant-rollback-scope", &exists) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 60;
@@ -933,8 +933,8 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 246;
-  if (seed_audit_role_permission (handle, "wr.audit-role-rollback",
-          "wr.audit-role-rollback.read") != 0) {
+  if (seed_audit_role_permission (handle, "site.audit-role-rollback",
+          "site.audit-role-rollback.read") != 0) {
     g_object_unref (handle);
     return 69;
   }
@@ -951,7 +951,7 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
 
   g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (req, "audit-role-rollback-user");
-  wyl_role_grant_req_set_role_id (req, "wr.audit-role-rollback");
+  wyl_role_grant_req_set_role_id (req, "site.audit-role-rollback");
   wyl_role_grant_req_set_scope (req, "audit-role-rollback-scope");
   if (wyl_role_grant (handle, req) != WYRELOG_E_IO) {
     g_object_unref (handle);
@@ -960,7 +960,7 @@ check_role_grant_rolls_back_on_store_audit_failure (void)
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store,
-          "audit-role-rollback-user", "wr.audit-role-rollback",
+          "audit-role-rollback-user", "site.audit-role-rollback",
           "audit-role-rollback-scope", &exists) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 72;
@@ -994,7 +994,7 @@ check_permission_grant_survives_runtime_audit_failure (void)
 
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (req, "audit-grant-runtime-user");
-  wyl_grant_req_set_action (req, "wr.audit-grant-runtime");
+  wyl_grant_req_set_action (req, "site.audit-grant-runtime");
   wyl_grant_req_set_resource_id (req, "audit-grant-runtime-scope");
   if (wyl_perm_grant (handle, req) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1692,7 +1692,7 @@ check_permission_grant_emits_audit_row (void)
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "audit-grant-user");
-  wyl_grant_req_set_action (grant, "wr.audit-grant");
+  wyl_grant_req_set_action (grant, "site.audit-grant");
   wyl_grant_req_set_resource_id (grant, "audit-grant-scope");
   if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1728,7 +1728,7 @@ check_permission_grant_emits_audit_row (void)
     rc = 125;
   else if (g_strcmp0 (resource, "audit-grant-scope") != 0)
     rc = 126;
-  else if (g_strcmp0 (permission, "wr.audit-grant") != 0)
+  else if (g_strcmp0 (permission, "site.audit-grant") != 0)
     rc = 127;
   else if (decision != WYL_DECISION_ALLOW)
     rc = 128;
@@ -1751,7 +1751,7 @@ check_permission_grant_actor_emits_audit_subject (void)
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "audit-grant-target");
-  wyl_grant_req_set_action (grant, "wr.audit-grant-actor");
+  wyl_grant_req_set_action (grant, "site.audit-grant-actor");
   wyl_grant_req_set_resource_id (grant, "audit-grant-actor-scope");
   wyl_grant_req_set_actor_id (grant, "audit-grant-actor");
   if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK) {
@@ -1765,7 +1765,7 @@ check_permission_grant_actor_emits_audit_subject (void)
   if (duckdb_query (conn,
           "SELECT subject_id FROM audit_events "
           "WHERE action = 'permission_grant' "
-          "AND deny_origin = 'wr.audit-grant-actor';", &result)
+          "AND deny_origin = 'site.audit-grant-actor';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -1797,7 +1797,7 @@ check_permission_revoke_emits_audit_row (void)
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "audit-revoke-user");
-  wyl_grant_req_set_action (grant, "wr.audit-revoke");
+  wyl_grant_req_set_action (grant, "site.audit-revoke");
   wyl_grant_req_set_resource_id (grant, "audit-revoke-scope");
   if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1806,7 +1806,7 @@ check_permission_revoke_emits_audit_row (void)
 
   g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
   wyl_revoke_req_set_subject_id (revoke, "audit-revoke-user");
-  wyl_revoke_req_set_action (revoke, "wr.audit-revoke");
+  wyl_revoke_req_set_action (revoke, "site.audit-revoke");
   wyl_revoke_req_set_resource_id (revoke, "audit-revoke-scope");
   if (wyl_perm_revoke (handle, revoke) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1842,7 +1842,7 @@ check_permission_revoke_emits_audit_row (void)
     rc = 136;
   else if (g_strcmp0 (resource, "audit-revoke-scope") != 0)
     rc = 137;
-  else if (g_strcmp0 (permission, "wr.audit-revoke") != 0)
+  else if (g_strcmp0 (permission, "site.audit-revoke") != 0)
     rc = 138;
   else if (decision != WYL_DECISION_ALLOW)
     rc = 139;
@@ -1881,15 +1881,15 @@ check_role_grant_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
-  if (seed_audit_role_permission (handle, "wr.audit-role-grant",
-          "wr.audit-role-grant.read") != 0) {
+  if (seed_audit_role_permission (handle, "site.audit-role-grant",
+          "site.audit-role-grant.read") != 0) {
     g_object_unref (handle);
     return 141;
   }
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (grant, "audit-role-grant-user");
-  wyl_role_grant_req_set_role_id (grant, "wr.audit-role-grant");
+  wyl_role_grant_req_set_role_id (grant, "site.audit-role-grant");
   wyl_role_grant_req_set_scope (grant, "audit-role-grant-scope");
   if (wyl_role_grant (handle, grant) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1925,7 +1925,7 @@ check_role_grant_emits_audit_row (void)
     rc = 146;
   else if (g_strcmp0 (resource, "audit-role-grant-scope") != 0)
     rc = 147;
-  else if (g_strcmp0 (role, "wr.audit-role-grant") != 0)
+  else if (g_strcmp0 (role, "site.audit-role-grant") != 0)
     rc = 148;
   else if (decision != WYL_DECISION_ALLOW)
     rc = 149;
@@ -1945,15 +1945,15 @@ check_role_revoke_emits_audit_row (void)
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 150;
-  if (seed_audit_role_permission (handle, "wr.audit-role-revoke",
-          "wr.audit-role-revoke.read") != 0) {
+  if (seed_audit_role_permission (handle, "site.audit-role-revoke",
+          "site.audit-role-revoke.read") != 0) {
     g_object_unref (handle);
     return 151;
   }
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (grant, "audit-role-revoke-user");
-  wyl_role_grant_req_set_role_id (grant, "wr.audit-role-revoke");
+  wyl_role_grant_req_set_role_id (grant, "site.audit-role-revoke");
   wyl_role_grant_req_set_scope (grant, "audit-role-revoke-scope");
   if (wyl_role_grant (handle, grant) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1962,7 +1962,7 @@ check_role_revoke_emits_audit_row (void)
 
   g_autoptr (wyl_role_revoke_req_t) revoke = wyl_role_revoke_req_new ();
   wyl_role_revoke_req_set_subject_id (revoke, "audit-role-revoke-user");
-  wyl_role_revoke_req_set_role_id (revoke, "wr.audit-role-revoke");
+  wyl_role_revoke_req_set_role_id (revoke, "site.audit-role-revoke");
   wyl_role_revoke_req_set_scope (revoke, "audit-role-revoke-scope");
   if (wyl_role_revoke (handle, revoke) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -1998,7 +1998,7 @@ check_role_revoke_emits_audit_row (void)
     rc = 157;
   else if (g_strcmp0 (resource, "audit-role-revoke-scope") != 0)
     rc = 158;
-  else if (g_strcmp0 (role, "wr.audit-role-revoke") != 0)
+  else if (g_strcmp0 (role, "site.audit-role-revoke") != 0)
     rc = 159;
   else if (decision != WYL_DECISION_ALLOW)
     rc = 160;
