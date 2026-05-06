@@ -982,16 +982,72 @@ check_decide_persists_representative_deny_reason (void)
     g_object_unref (handle);
     return 43;
   }
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0) {
+    g_object_unref (handle);
+    return 3000;
+  }
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0) {
+    g_object_unref (handle);
+    return 3001;
+  }
+
+  sqlite3_stmt *stmt = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  static const gchar *policy_sql =
+      "SELECT id, created_at_us FROM audit_events "
+      "WHERE subject_id = 'audit-user' "
+      "AND action = 'wr.audit-permission' "
+      "AND resource_id = 'audit-scope' "
+      "AND deny_reason = 'not_armed' "
+      "AND deny_origin = 'perm_state' AND decision = 0;";
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), policy_sql, -1,
+          &stmt, NULL) != SQLITE_OK) {
+    g_object_unref (handle);
+    return 3002;
+  }
+  if (sqlite3_step (stmt) != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    g_object_unref (handle);
+    return 3003;
+  }
+  g_autofree gchar *audit_id_copy =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  gint64 created_at_us = sqlite3_column_int64 (stmt, 1);
+  if (sqlite3_step (stmt) != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    g_object_unref (handle);
+    return 3004;
+  }
+  sqlite3_finalize (stmt);
 
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
-  duckdb_result result;
-  if (duckdb_query (conn,
-          "SELECT deny_reason, deny_origin, decision "
-          "FROM audit_events;", &result) != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
+  duckdb_prepared_statement duck_stmt = NULL;
+  duckdb_result result = { 0 };
+  static const gchar *runtime_sql =
+      "SELECT deny_reason, deny_origin, decision "
+      "FROM audit_events WHERE id = ?;";
+  if (duckdb_prepare (conn, runtime_sql, &duck_stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&duck_stmt);
     g_object_unref (handle);
     return 44;
+  }
+  if (duckdb_bind_varchar (duck_stmt, 1, audit_id_copy) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&duck_stmt);
+    g_object_unref (handle);
+    return 3005;
+  }
+  if (duckdb_execute_prepared (duck_stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&duck_stmt);
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 3006;
+  }
+  duckdb_destroy_prepare (&duck_stmt);
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 3007;
   }
 
   gint rc = 0;
@@ -1008,6 +1064,29 @@ check_decide_persists_representative_deny_reason (void)
   duckdb_free ((void *) deny_reason);
   duckdb_free ((void *) deny_origin);
   duckdb_destroy_result (&result);
+  if (rc != 0) {
+    g_object_unref (handle);
+    return rc;
+  }
+
+  gboolean contains = FALSE;
+  if (contains_audit_event_fact (handle, audit_id_copy, created_at_us, "deny",
+          &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 3008;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_deny_reason",
+          audit_id_copy, "not_armed", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 3009;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_deny_origin",
+          audit_id_copy, "perm_state", &contains) != WYRELOG_E_OK
+      || !contains) {
+    g_object_unref (handle);
+    return 3010;
+  }
+
   g_object_unref (handle);
   return rc;
 }
