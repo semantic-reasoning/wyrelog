@@ -39,15 +39,15 @@ expect_audit = sys.argv[2] == "1"
 base = f"http://127.0.0.1:{port}"
 last_error = None
 
-def invalid_filter_is_rejected():
+def audit_endpoint_requires_auth():
     try:
         urllib.request.urlopen(
             f"{base}/audit/events?filter=action%28%29",
             timeout=1,
         ).read()
-        return False
+        return not expect_audit
     except urllib.error.HTTPError as exc:
-        return exc.code == 400
+        return exc.code == 401 if expect_audit else False
 
 def audit_events_match_startup_readiness(payload):
     events = json.loads(payload)
@@ -97,41 +97,26 @@ def decide_denies_unseeded_user():
         and "deny_origin" in body
     )
 
-def decide_audit_event_is_visible():
-    if not expect_audit:
-        return True
-    payload = urllib.request.urlopen(
-        f"{base}/audit/events?filter=action%28%22wr.audit.read%22%29",
-        timeout=1,
-    ).read()
-    events = json.loads(payload)
-    return any(
-        event.get("subject_id") == "healthz-user"
-        and event.get("action") == "wr.audit.read"
-        and event.get("resource_id") == "healthz-scope"
-        and event.get("decision") == 0
-        for event in events
-    )
-
 for _ in range(50):
     try:
         health = urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
-        events = urllib.request.urlopen(
-            f"{base}/audit/events?filter=decision%3Ddeny",
-            timeout=1,
-        ).read()
-        if health != b"ok\n" or not audit_events_match_startup_readiness(
-                events):
+        if health != b"ok\n":
             sys.exit(1)
+        if expect_audit:
+            if not audit_endpoint_requires_auth():
+                sys.exit(1)
+        else:
+            events = urllib.request.urlopen(
+                f"{base}/audit/events?filter=decision%3Ddeny",
+                timeout=1,
+            ).read()
+            if not audit_events_match_startup_readiness(events):
+                sys.exit(1)
         if not invalid_decide_is_rejected():
             sys.exit(1)
         if not decide_requires_post():
             sys.exit(1)
         if not decide_denies_unseeded_user():
-            sys.exit(1)
-        if not decide_audit_event_is_visible():
-            sys.exit(1)
-        if expect_audit and not invalid_filter_is_rejected():
             sys.exit(1)
         sys.exit(0)
     except Exception as exc:

@@ -218,14 +218,75 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
 
 #ifdef WYL_HAS_AUDIT
   const gchar *filter = NULL;
+  const gchar *session_token = NULL;
+  const gchar *guard_timestamp = NULL;
+  const gchar *guard_loc_class = NULL;
+  const gchar *guard_risk = NULL;
   if (query != NULL)
     filter = g_hash_table_lookup (query, "filter");
+  if (query != NULL) {
+    session_token = g_hash_table_lookup (query, "session_token");
+    guard_timestamp = g_hash_table_lookup (query, "guard_timestamp");
+    guard_loc_class = g_hash_table_lookup (query, "guard_loc_class");
+    guard_risk = g_hash_table_lookup (query, "guard_risk");
+  }
+  if (session_token == NULL || session_token[0] == '\0') {
+    set_json_error (msg, 401, "audit_auth_required");
+    return;
+  }
+  if (guard_timestamp == NULL || guard_loc_class == NULL || guard_risk == NULL) {
+    set_json_error (msg, 400, "invalid_audit_auth");
+    return;
+  }
+
+  gint64 timestamp = 0;
+  gint64 risk = 0;
+  if (!parse_int64_query_param (guard_timestamp, &timestamp) ||
+      !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
+      risk < 0 || risk > 100 ||
+      !wyl_guard_loc_class_is_valid (guard_loc_class)) {
+    set_json_error (msg, 400, "invalid_audit_auth");
+    return;
+  }
+
+  g_autoptr (WylSession) session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (session == NULL) {
+    set_json_error (msg, 401, "audit_auth_required");
+    return;
+  }
+
+  g_autofree gchar *username = wyl_session_dup_username (session);
+  if (username == NULL || username[0] == '\0') {
+    set_json_error (msg, 401, "audit_auth_required");
+    return;
+  }
 
   WylDaemonHttpContext *ctx = user_data;
   WylHandle *handle = ctx->handle;
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, username);
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, session_token);
+  wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
+
+  wyrelog_error_t rc = wyl_decide (handle, req, resp);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_audit_auth");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "audit_auth_failed");
+    return;
+  }
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
+    set_json_error (msg, 403, "audit_denied");
+    return;
+  }
+
   g_autofree gchar *body = NULL;
-  wyrelog_error_t rc =
-      wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+  rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
       filter, &body);
   if (rc == WYRELOG_E_INVALID) {
     const gchar *error_body = "{\"error\":\"invalid_filter\"}";
