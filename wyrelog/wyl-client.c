@@ -308,14 +308,29 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
   return TRUE;
 }
 
-wyrelog_error_t
-wyl_client_decide (WylClient *client, const gchar *user, const gchar *perm,
-    const gchar *session_token, gint *out_decision)
+static gboolean
+guard_loc_class_is_valid (const gchar *loc_class)
+{
+  return g_strcmp0 (loc_class, "trusted") == 0 ||
+      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
+      g_strcmp0 (loc_class, "public") == 0 ||
+      g_strcmp0 (loc_class, "untrusted") == 0;
+}
+
+static wyrelog_error_t
+client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
+    const gchar *session_token, gboolean has_guard_context,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gint *out_decision)
 {
   if (client == NULL || !WYL_IS_CLIENT (client) || user == NULL ||
       perm == NULL || session_token == NULL || out_decision == NULL)
     return WYRELOG_E_INVALID;
   *out_decision = WYL_DECISION_DENY;
+  if (has_guard_context &&
+      (guard_loc_class == NULL || guard_timestamp < 0 || guard_risk < 0 ||
+          guard_risk > 100 || !guard_loc_class_is_valid (guard_loc_class)))
+    return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (base_url == NULL)
@@ -327,10 +342,20 @@ wyl_client_decide (WylClient *client, const gchar *user, const gchar *perm,
   g_autofree gchar *escaped_perm = g_uri_escape_string (perm, NULL, TRUE);
   g_autofree gchar *escaped_session_token =
       g_uri_escape_string (session_token, NULL, TRUE);
-  g_autofree gchar *uri =
-      g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s", base_url,
-      escaped_user,
-      escaped_perm, escaped_session_token);
+  g_autofree gchar *escaped_guard_loc_class =
+      has_guard_context ? g_uri_escape_string (guard_loc_class, NULL,
+      TRUE) : NULL;
+  g_autofree gchar *uri = NULL;
+  if (has_guard_context) {
+    uri = g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s"
+        "&guard_timestamp=%" G_GINT64_FORMAT "&guard_loc_class=%s"
+        "&guard_risk=%" G_GINT64_FORMAT, base_url, escaped_user,
+        escaped_perm, escaped_session_token, guard_timestamp,
+        escaped_guard_loc_class, guard_risk);
+  } else {
+    uri = g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s",
+        base_url, escaped_user, escaped_perm, escaped_session_token);
+  }
 
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
   if (message == NULL)
@@ -349,6 +374,23 @@ wyl_client_decide (WylClient *client, const gchar *user, const gchar *perm,
 
   *out_decision = decision;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_decide (WylClient *client, const gchar *user, const gchar *perm,
+    const gchar *session_token, gint *out_decision)
+{
+  return client_decide_request (client, user, perm, session_token, FALSE, 0,
+      NULL, 0, out_decision);
+}
+
+wyrelog_error_t
+wyl_client_decide_with_guard_context (WylClient *client, const gchar *user,
+    const gchar *perm, const gchar *session_token, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, gint *out_decision)
+{
+  return client_decide_request (client, user, perm, session_token, TRUE,
+      guard_timestamp, guard_loc_class, guard_risk, out_decision);
 }
 
 wyrelog_error_t

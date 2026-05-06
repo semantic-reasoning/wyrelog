@@ -405,6 +405,18 @@ main (void)
     return 8;
   if (decision != WYL_DECISION_ALLOW)
     return 9;
+  if (wyl_client_decide_with_guard_context (client, "http-guard-user",
+          "wr.audit.read", "http-guard-scope", 123, "public", 69,
+          &decision) != WYRELOG_E_OK)
+    return 10;
+  if (decision != WYL_DECISION_ALLOW)
+    return 11;
+  if (wyl_client_decide_with_guard_context (client, "http-guard-user",
+          "wr.audit.read", "http-guard-scope", 123, "public", 70,
+          &decision) != WYRELOG_E_OK)
+    return 12;
+  if (decision != WYL_DECISION_DENY)
+    return 13;
 
 #ifdef WYL_HAS_AUDIT
   gint audit_rc = check_audit_event_present (client,
