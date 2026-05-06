@@ -10,12 +10,14 @@
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-id-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 #define WYL_DAEMON_JWT_ISSUER "wyrelogd"
 #define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
 #define WYL_DAEMON_JWT_KEY_LEN 32
+#define WYL_DAEMON_REQUEST_ID_HEADER "X-Wyrelog-Request-Id"
 
 typedef struct
 {
@@ -362,8 +364,22 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
 }
 
 static void
+attach_request_id_header (SoupServerMessage *msg)
+{
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (request_id, sizeof request_id) != WYRELOG_E_OK)
+    return;
+
+  SoupMessageHeaders *headers = soup_server_message_get_response_headers (msg);
+  soup_message_headers_replace (headers, WYL_DAEMON_REQUEST_ID_HEADER,
+      request_id);
+}
+
+static void
 set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
 {
+  attach_request_id_header (msg);
+
   g_autoptr (GString) body = g_string_new ("{\"error\":");
   append_json_string (body, code);
   g_string_append_c (body, '}');
@@ -398,6 +414,7 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) user_data;
 
   const gchar *body = "ok\n";
+  attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "text/plain", SOUP_MEMORY_COPY, body,
       strlen (body));
@@ -535,17 +552,11 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
     rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
         filter, &body);
   if (rc == WYRELOG_E_INVALID) {
-    const gchar *error_body = "{\"error\":\"invalid_filter\"}";
-    soup_server_message_set_status (msg, 400, NULL);
-    soup_server_message_set_response (msg, "application/json",
-        SOUP_MEMORY_COPY, error_body, strlen (error_body));
+    set_json_error (msg, 400, "invalid_filter");
     return;
   }
   if (rc != WYRELOG_E_OK) {
-    const gchar *error_body = "{\"error\":\"audit_query_failed\"}";
-    soup_server_message_set_status (msg, 500, NULL);
-    soup_server_message_set_response (msg, "application/json",
-        SOUP_MEMORY_COPY, error_body, strlen (error_body));
+    set_json_error (msg, 500, "audit_query_failed");
     return;
   }
 #else
@@ -554,6 +565,7 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *body = "[]";
 #endif
 
+  attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
@@ -563,6 +575,7 @@ static void
 set_json_ok (SoupServerMessage *msg)
 {
   const gchar *body = "{\"ok\":true}";
+  attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
@@ -923,6 +936,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 
   g_autofree gchar *body = build_login_json (session_token, username,
       principal_state, access_token);
+  attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
@@ -991,6 +1005,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   const gchar *body = "{\"ok\":true}";
+  attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
@@ -1066,6 +1081,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   g_autofree gchar *body = build_decide_json (resp);
+  attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));

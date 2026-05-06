@@ -11,6 +11,7 @@
 #include "wyrelog/client.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -43,6 +44,18 @@ typedef struct
   const gchar *to_state;
   guint matches;
 } PermissionStateProbe;
+
+static gboolean
+is_request_id_shape (const gchar *request_id)
+{
+  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++) {
+    if (!g_ascii_isalnum (request_id[i]))
+      return FALSE;
+  }
+  return TRUE;
+}
 
 static gpointer
 test_http_server_thread (gpointer data)
@@ -243,6 +256,86 @@ send_raw_decide (SoupSession *session, const gchar *method,
   const gchar *body_data = g_bytes_get_data (body, &body_size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (body_data, body_size);
+  return 0;
+}
+
+static gint
+send_request_id_probe (SoupSession *session, const gchar *method,
+    const gchar *uri, const gchar *inbound_request_id, guint *out_status,
+    gchar **out_request_id)
+{
+  if (out_status == NULL || out_request_id == NULL)
+    return 1800;
+  *out_status = 0;
+  *out_request_id = NULL;
+
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 1801;
+  if (inbound_request_id != NULL) {
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+        "X-Wyrelog-Request-Id", inbound_request_id);
+  }
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) body = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (body == NULL)
+    return 1802;
+  *out_status = soup_message_get_status (msg);
+  const gchar *request_id = soup_message_headers_get_one
+      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+  if (!is_request_id_shape (request_id))
+    return 1803;
+  *out_request_id = g_strdup (request_id);
+  return 0;
+}
+
+static gint
+check_request_id_header_contract (const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  guint status = 0;
+  g_autofree gchar *health_id = NULL;
+  g_autofree gchar *health_uri = g_strdup_printf ("%s/healthz", root);
+  gint rc = send_request_id_probe (session, "GET", health_uri, NULL, &status,
+      &health_id);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 1804;
+
+  g_autofree gchar *bad_decide_id = NULL;
+  g_autofree gchar *bad_decide_uri =
+      g_strdup_printf ("%s/decide?user=request-id-user", root);
+  rc = send_request_id_probe (session, "POST", bad_decide_uri, NULL, &status,
+      &bad_decide_id);
+  if (rc != 0)
+    return rc;
+  if (status != 400)
+    return 1805;
+  if (g_strcmp0 (health_id, bad_decide_id) == 0)
+    return 1806;
+
+  g_autofree gchar *spoofed_id = NULL;
+  g_autofree gchar *deny_uri =
+      build_decide_uri (root, "request-id-user", "wr.audit.read",
+      "request-id-scope", NULL);
+  rc = send_request_id_probe (session, "POST", deny_uri, "attacker", &status,
+      &spoofed_id);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 1807;
+  if (g_strcmp0 (spoofed_id, "attacker") == 0)
+    return 1808;
+  if (g_strcmp0 (bad_decide_id, spoofed_id) == 0)
+    return 1809;
+
   return 0;
 }
 
@@ -1959,6 +2052,10 @@ main (void)
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
     return 5;
+
+  gint request_id_rc = check_request_id_header_contract (base_url);
+  if (request_id_rc != 0)
+    return request_id_rc;
 
   gint raw_rc = check_raw_decide_contract (base_url);
   if (raw_rc != 0)
