@@ -18,9 +18,6 @@
 //                                                   bootstrap.dl
 //   perm_arm_rule(perm, guard_handle)            -- guard(root) side
 //                                                   payload handle
-//   perm_window_guard(perm, window)              -- guarded permission
-//                                                   requires a named
-//                                                   timestamp window
 //   guard_row(handle, root)                      -- guard compound payload
 //                                                   projections
 //   guard_cmp_row(handle, field, op, value)
@@ -36,6 +33,11 @@
 //   guard_context_in_window(user, scope, ts,     -- host-confirmed
 //       window)                                      timestamp window
 //   eval_guard(user, perm, scope, ctx)           -- host guard result
+//
+// Derived schemas:
+//   perm_window_guard(perm, window)              -- guarded permission
+//                                                   requires a named
+//                                                   timestamp window
 //
 // perm_arm_rule rows are runtime-seeded from the C catalogue so the
 // session-local guard-handle column can later move to side-tier
@@ -72,10 +74,24 @@
 // mirror, not an evaluator input yet.
 
 perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).
-perm_window_guard_observed(P, W) :- perm_window_guard(P, W).
 guard_row(H, R) :- __compound_guard_1(H, R).
 guard_cmp_row(H, F, O, V) :- __compound_guard_cmp_3(H, F, O, V).
 guard_and_row(H, L, R) :- __compound_guard_and_2(H, L, R).
+perm_window_guard(P, W) :-
+    perm_arm_rule(P, G),
+    guard_row(G, R),
+    guard_cmp_row(R, "timestamp", "in", W).
+perm_window_guard(P, W) :-
+    perm_arm_rule(P, G),
+    guard_row(G, R),
+    guard_and_row(R, L, _),
+    guard_cmp_row(L, "timestamp", "in", W).
+perm_window_guard(P, W) :-
+    perm_arm_rule(P, G),
+    guard_row(G, R),
+    guard_and_row(R, _, L),
+    guard_cmp_row(L, "timestamp", "in", W).
+perm_window_guard_observed(P, W) :- perm_window_guard(P, W).
 
 // --- guard context field views ---------------------------------------
 

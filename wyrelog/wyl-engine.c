@@ -53,7 +53,9 @@ relation_emits_delta_callback (const char *relation)
 {
   if (g_strcmp0 (relation, "guard_row") == 0
       || g_strcmp0 (relation, "guard_cmp_row") == 0
-      || g_strcmp0 (relation, "guard_and_row") == 0)
+      || g_strcmp0 (relation, "guard_and_row") == 0
+      || g_strcmp0 (relation, "perm_window_guard") == 0
+      || g_strcmp0 (relation, "perm_window_guard_observed") == 0)
     return FALSE;
 
   return TRUE;

@@ -14,12 +14,15 @@
 /* --- Stratification self-check ---------------------------------- */
 
 /*
- * Lifts the two armed/3 rules + the eval_guard host bridge fact
- * into wyl_dl_rule_t form and asserts the program is stratified.
+ * Lifts the window guard derivation rules, the two armed/3 rules,
+ * and the eval_guard host bridge fact into wyl_dl_rule_t form and
+ * asserts the program is stratified.
  * The negation edge in the state-driven rule references
  * \+ perm_arm_rule, and the guarded rule goes through eval_guard /
- * context_now / guard_context. No edge can close a cycle because
- * perm_arm_rule, perm_state, has_permission, context_now,
+ * context_now / guard_context. The window guard rules depend only
+ * on the guard catalogue projection. No edge can close a cycle because
+ * perm_arm_rule, guard_row, guard_cmp_row, guard_and_row,
+ * perm_state, has_permission, context_now,
  * guard_context, guard_context_timestamp,
  * guard_context_loc_class, guard_context_risk,
  * guard_context_in_window and eval_guard are EDB-only.
@@ -27,6 +30,20 @@
 static gint
 check_stratification (void)
 {
+  static const wyl_dl_body_atom_t window_direct_body[] = {
+    {.predicate = "perm_arm_rule",.negated = FALSE},
+    {.predicate = "guard_row",.negated = FALSE},
+    {.predicate = "guard_cmp_row",.negated = FALSE},
+  };
+  static const wyl_dl_body_atom_t window_and_body[] = {
+    {.predicate = "perm_arm_rule",.negated = FALSE},
+    {.predicate = "guard_row",.negated = FALSE},
+    {.predicate = "guard_and_row",.negated = FALSE},
+    {.predicate = "guard_cmp_row",.negated = FALSE},
+  };
+  static const wyl_dl_body_atom_t window_observed_body[] = {
+    {.predicate = "perm_window_guard",.negated = FALSE},
+  };
   static const wyl_dl_body_atom_t rule1_body[] = {
     {.predicate = "perm_state",.negated = FALSE},
     {.predicate = "perm_arm_rule",.negated = TRUE},
@@ -55,6 +72,14 @@ check_stratification (void)
     {.predicate = "eval_guard",.negated = FALSE},
   };
   wyl_dl_rule_t rules[] = {
+    {.head = "perm_window_guard",.body = window_direct_body,.body_len =
+          G_N_ELEMENTS (window_direct_body)},
+    {.head = "perm_window_guard",.body = window_and_body,.body_len =
+          G_N_ELEMENTS (window_and_body)},
+    {.head = "perm_window_guard",.body = window_and_body,.body_len =
+          G_N_ELEMENTS (window_and_body)},
+    {.head = "perm_window_guard_observed",.body = window_observed_body,
+        .body_len = G_N_ELEMENTS (window_observed_body)},
     {.head = "armed",.body = rule1_body,.body_len = G_N_ELEMENTS (rule1_body)},
     {.head = "armed",.body = rule3_body,.body_len = G_N_ELEMENTS (rule3_body)},
     {.head = "armed",.body = rule4_body,.body_len = G_N_ELEMENTS (rule4_body)},
