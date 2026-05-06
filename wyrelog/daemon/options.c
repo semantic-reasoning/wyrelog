@@ -8,6 +8,12 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
   GOptionEntry entries[] = {
     {"template-dir", 0, 0, G_OPTION_ARG_STRING, &opts->template_dir,
         "Access policy template directory", "DIR"},
+    {"policy-db", 0, 0, G_OPTION_ARG_STRING, &opts->policy_store_path,
+        "Policy authority database path", "PATH"},
+#ifdef WYL_HAS_AUDIT
+    {"audit-db", 0, 0, G_OPTION_ARG_STRING, &opts->audit_store_path,
+        "Runtime audit sink database path", "PATH"},
+#endif
 #ifdef WYL_HAS_DAEMON_HTTP
     {"listen-port", 0, 0, G_OPTION_ARG_INT, &opts->listen_port,
         "HTTP listen port", "PORT"},
