@@ -100,6 +100,28 @@ check_golden_trace (void)
   return 0;
 }
 
+/* --- Functional integrity constraint check ---------------------- */
+
+/*
+ * No two table rows may share the same (from, event) pair. If they
+ * do, wyl_fsm_principal_step picks the first match silently, hiding
+ * a spec mistake.
+ */
+static gint
+check_functional_ic (void)
+{
+  gsize n = 0;
+  const wyl_principal_transition_t *table = wyl_fsm_principal_table (&n);
+
+  for (gsize i = 0; i < n; i++) {
+    for (gsize j = i + 1; j < n; j++) {
+      if (table[i].from == table[j].from && table[i].event == table[j].event)
+        return 2;
+    }
+  }
+  return 0;
+}
+
 /* --- Argument validation ---------------------------------------- */
 
 static gint
@@ -240,6 +262,8 @@ main (void)
 {
   gint rc;
   if ((rc = check_stratification ()) != 0)
+    return rc;
+  if ((rc = check_functional_ic ()) != 0)
     return rc;
   if ((rc = check_golden_trace ()) != 0)
     return rc;
