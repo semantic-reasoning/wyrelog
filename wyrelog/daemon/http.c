@@ -7,6 +7,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-permission-scope-private.h"
 
 typedef struct
 {
@@ -193,15 +194,6 @@ parse_int64_query_param (const gchar *value, gint64 *out_value)
   return TRUE;
 }
 
-static gboolean
-guard_loc_class_is_valid (const gchar *loc_class)
-{
-  return g_strcmp0 (loc_class, "trusted") == 0 ||
-      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
-      g_strcmp0 (loc_class, "public") == 0 ||
-      g_strcmp0 (loc_class, "untrusted") == 0;
-}
-
 static void
 healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
@@ -381,7 +373,8 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     gint64 risk = 0;
     if (!parse_int64_query_param (guard_timestamp, &timestamp) ||
         !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
-        risk < 0 || risk > 100 || !guard_loc_class_is_valid (guard_loc_class)) {
+        risk < 0 || risk > 100 ||
+        !wyl_guard_loc_class_is_valid (guard_loc_class)) {
       set_json_error (msg, 400, "invalid_decide_request");
       return;
     }

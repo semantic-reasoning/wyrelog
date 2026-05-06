@@ -77,6 +77,35 @@ check_catalogue_invariants (void)
   return 0;
 }
 
+static gint
+check_loc_class_contract (void)
+{
+  static const gchar *const valid[] = {
+    "trusted",
+    "semi_trusted",
+    "public",
+    "untrusted",
+  };
+  static const gchar *const invalid[] = {
+    NULL,
+    "",
+    "unknown",
+    "Trusted",
+    " trusted",
+    "trusted ",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (valid); i++) {
+    if (!wyl_guard_loc_class_is_valid (valid[i]))
+      return (gint) (70 + i);
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    if (wyl_guard_loc_class_is_valid (invalid[i]))
+      return (gint) (80 + i);
+  }
+  return 0;
+}
+
 /* --- Eval guard fixtures --------------------------------------- */
 
 static const wyl_scope_t scope_trusted_low_risk = {
@@ -431,6 +460,8 @@ main (void)
   if ((rc = check_stratification ()) != 0)
     return rc;
   if ((rc = check_catalogue_invariants ()) != 0)
+    return rc;
+  if ((rc = check_loc_class_contract ()) != 0)
     return rc;
   if ((rc = check_catalogue_derivation ()) != 0)
     return rc;
