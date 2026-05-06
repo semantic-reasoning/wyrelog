@@ -242,17 +242,6 @@ wyl_handle_seed_perm_arm_rules (WylHandle *self)
     rc = wyl_handle_engine_insert (self, "perm_arm_rule", row, 2);
     if (rc != WYRELOG_E_OK)
       return rc;
-
-    const gchar *window = wyl_guard_expr_timestamp_window (guard);
-    if (window != NULL) {
-      gint64 window_row[2] = { row[0], 0 };
-      rc = wyl_handle_intern_engine_symbol (self, window, &window_row[1]);
-      if (rc != WYRELOG_E_OK)
-        return rc;
-      rc = wyl_handle_engine_insert (self, "perm_window_guard", window_row, 2);
-      if (rc != WYRELOG_E_OK)
-        return rc;
-    }
   }
   return WYRELOG_E_OK;
 }

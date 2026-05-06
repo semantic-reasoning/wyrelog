@@ -122,8 +122,8 @@ typedef struct
 
 typedef struct
 {
-  guint guard_deltas;
-} GuardProjectionDeltaExpect;
+  guint internal_deltas;
+} InternalProjectionDeltaExpect;
 
 typedef struct
 {
@@ -501,10 +501,10 @@ delta_count_cb (const gchar *relation, const gint64 *row, guint ncols,
 }
 
 static void
-guard_projection_delta_cb (const gchar *relation, const gint64 *row,
+internal_projection_delta_cb (const gchar *relation, const gint64 *row,
     guint ncols, WylDeltaKind kind, gpointer user_data)
 {
-  GuardProjectionDeltaExpect *expect = user_data;
+  InternalProjectionDeltaExpect *expect = user_data;
 
   (void) row;
   (void) ncols;
@@ -512,8 +512,10 @@ guard_projection_delta_cb (const gchar *relation, const gint64 *row,
 
   if (g_strcmp0 (relation, "guard_row") == 0
       || g_strcmp0 (relation, "guard_cmp_row") == 0
-      || g_strcmp0 (relation, "guard_and_row") == 0)
-    expect->guard_deltas++;
+      || g_strcmp0 (relation, "guard_and_row") == 0
+      || g_strcmp0 (relation, "perm_window_guard") == 0
+      || g_strcmp0 (relation, "perm_window_guard_observed") == 0)
+    expect->internal_deltas++;
 }
 
 static wyrelog_error_t
@@ -1385,7 +1387,7 @@ check_perm_arm_rule_guard_payload_contract_after_reload (void)
 }
 
 static gint
-check_perm_window_guard_seed_contract (void)
+check_perm_window_guard_derivation_contract (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   gint64 stream_perm_id = -1;
@@ -1590,24 +1592,24 @@ check_perm_arm_rule_guard_payload_projection (void)
 }
 
 static gint
-check_guard_projection_rows_skip_delta_callbacks (void)
+check_internal_projection_rows_skip_delta_callbacks (void)
 {
   g_autoptr (WylHandle) handle = NULL;
-  GuardProjectionDeltaExpect expect = { 0 };
+  InternalProjectionDeltaExpect expect = { 0 };
 
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 199;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 200;
-  if (wyl_handle_engine_set_delta_callback (handle, guard_projection_delta_cb,
-          &expect) != WYRELOG_E_OK)
+  if (wyl_handle_engine_set_delta_callback (handle,
+          internal_projection_delta_cb, &expect) != WYRELOG_E_OK)
     return 201;
   for (guint i = 0; i < 8; i++) {
     if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
       return 202;
   }
-  if (expect.guard_deltas != 0)
+  if (expect.internal_deltas != 0)
     return 203;
   if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
       != WYRELOG_E_OK)
@@ -3607,11 +3609,11 @@ main (void)
     return rc;
   if ((rc = check_perm_arm_rule_guard_payload_contract_after_reload ()) != 0)
     return rc;
-  if ((rc = check_perm_window_guard_seed_contract ()) != 0)
+  if ((rc = check_perm_window_guard_derivation_contract ()) != 0)
     return rc;
   if ((rc = check_perm_arm_rule_guard_payload_projection ()) != 0)
     return rc;
-  if ((rc = check_guard_projection_rows_skip_delta_callbacks ()) != 0)
+  if ((rc = check_internal_projection_rows_skip_delta_callbacks ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
