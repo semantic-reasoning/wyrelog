@@ -29,6 +29,7 @@ wyrelog_sources = files(
   'wyl-fsm-session.c',
   'wyl-guard-expr.c',
   'wyl-handle.c',
+  'wyl-request-id.c',
   'wyl-id.c',
   'wyl-keyprovider-dev.c',
   'wyl-log.c',
