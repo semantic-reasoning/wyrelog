@@ -2,6 +2,7 @@
 #include "daemon/http.h"
 
 #ifdef WYL_HAS_DAEMON_HTTP
+#include <errno.h>
 #include <string.h>
 
 #include "wyrelog/wyrelog.h"
@@ -87,6 +88,30 @@ set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+static gboolean
+parse_int64_query_param (const gchar *value, gint64 *out_value)
+{
+  if (value == NULL || value[0] == '\0' || out_value == NULL)
+    return FALSE;
+
+  gchar *end = NULL;
+  errno = 0;
+  gint64 parsed = g_ascii_strtoll (value, &end, 10);
+  if (errno != 0 || end == value || *end != '\0')
+    return FALSE;
+  *out_value = parsed;
+  return TRUE;
+}
+
+static gboolean
+guard_loc_class_is_valid (const gchar *loc_class)
+{
+  return g_strcmp0 (loc_class, "trusted") == 0 ||
+      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
+      g_strcmp0 (loc_class, "public") == 0 ||
+      g_strcmp0 (loc_class, "untrusted") == 0;
+}
+
 static void
 healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
@@ -159,12 +184,26 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *user = NULL;
   const gchar *perm = NULL;
   const gchar *session_token = NULL;
+  const gchar *guard_timestamp = NULL;
+  const gchar *guard_loc_class = NULL;
+  const gchar *guard_risk = NULL;
   if (query != NULL) {
     user = g_hash_table_lookup (query, "user");
     perm = g_hash_table_lookup (query, "perm");
     session_token = g_hash_table_lookup (query, "session_token");
+    guard_timestamp = g_hash_table_lookup (query, "guard_timestamp");
+    guard_loc_class = g_hash_table_lookup (query, "guard_loc_class");
+    guard_risk = g_hash_table_lookup (query, "guard_risk");
   }
   if (user == NULL || perm == NULL || session_token == NULL) {
+    set_json_error (msg, 400, "invalid_decide_request");
+    return;
+  }
+  gboolean has_guard_context =
+      guard_timestamp != NULL || guard_loc_class != NULL || guard_risk != NULL;
+  if (has_guard_context &&
+      (guard_timestamp == NULL || guard_loc_class == NULL ||
+          guard_risk == NULL)) {
     set_json_error (msg, 400, "invalid_decide_request");
     return;
   }
@@ -175,6 +214,17 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   wyl_decide_req_set_subject_id (req, user);
   wyl_decide_req_set_action (req, perm);
   wyl_decide_req_set_resource_id (req, session_token);
+  if (has_guard_context) {
+    gint64 timestamp = 0;
+    gint64 risk = 0;
+    if (!parse_int64_query_param (guard_timestamp, &timestamp) ||
+        !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
+        risk < 0 || risk > 100 || !guard_loc_class_is_valid (guard_loc_class)) {
+      set_json_error (msg, 400, "invalid_decide_request");
+      return;
+    }
+    wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
+  }
 
   wyrelog_error_t rc = wyl_decide (handle, req, resp);
   if (rc == WYRELOG_E_INVALID) {
