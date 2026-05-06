@@ -64,4 +64,24 @@ wyrelog_error_t wyl_engine_map_wirelog_error (wirelog_error_t wl_err);
 wyrelog_error_t wyl_engine_load_templates (const gchar * template_dir,
     gchar ** dl_src_out, gsize * dl_src_len_out);
 
+/*
+ * wyl_engine_make_compound:
+ * @self: A `WylEngine` instance. Must not be NULL.
+ * @functor: Compound functor name. Must not be NULL or empty.
+ * @args: (array length=nargs): Typed compound arguments. Must not be NULL.
+ * @nargs: Compound arity. Must be > 0.
+ * @out_id: (out) Receives a session-local compound handle. Must not be NULL.
+ *
+ * Allocates a wirelog side-tier compound term in @self's evaluator session and
+ * returns its handle. The handle is meaningful only within the owning engine
+ * session and must not be persisted across engine reloads.
+ *
+ * Returns: WYRELOG_E_OK on success; WYRELOG_E_INVALID for invalid arguments
+ * or a sessionless engine; WYRELOG_E_EXEC if the evaluator rejects the
+ * allocation; WYRELOG_E_NOMEM for allocation failure.
+ */
+wyrelog_error_t wyl_engine_make_compound (WylEngine * self,
+    const gchar * functor, const wirelog_compound_arg_t * args, gsize nargs,
+    gint64 * out_id);
+
 G_END_DECLS;
