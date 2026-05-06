@@ -1743,6 +1743,52 @@ check_permission_grant_emits_audit_row (void)
 }
 
 static gint
+check_permission_grant_actor_emits_audit_subject (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1290;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "audit-grant-target");
+  wyl_grant_req_set_action (grant, "wr.audit-grant-actor");
+  wyl_grant_req_set_resource_id (grant, "audit-grant-actor-scope");
+  wyl_grant_req_set_actor_id (grant, "audit-grant-actor");
+  if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 1291;
+  }
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  if (duckdb_query (conn,
+          "SELECT subject_id FROM audit_events "
+          "WHERE action = 'permission_grant' "
+          "AND deny_origin = 'wr.audit-grant-actor';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 1292;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 1293;
+  }
+
+  gint rc = 0;
+  const gchar *subject = duckdb_value_varchar (&result, 0, 0);
+  if (g_strcmp0 (subject, "audit-grant-actor") != 0)
+    rc = 1294;
+
+  duckdb_free ((void *) subject);
+  duckdb_destroy_result (&result);
+  g_object_unref (handle);
+  return rc;
+}
+
+static gint
 check_permission_revoke_emits_audit_row (void)
 {
   WylHandle *handle = NULL;
@@ -2483,6 +2529,8 @@ main (void)
   if ((rc = check_denied_login_skip_mfa_projects_audit_fact ()) != 0)
     return rc;
   if ((rc = check_permission_grant_emits_audit_row ()) != 0)
+    return rc;
+  if ((rc = check_permission_grant_actor_emits_audit_subject ()) != 0)
     return rc;
   if ((rc = check_permission_revoke_emits_audit_row ()) != 0)
     return rc;
