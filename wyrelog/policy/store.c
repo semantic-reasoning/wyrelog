@@ -491,13 +491,25 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
     return WYRELOG_E_POLICY;
 
   static const gchar *role_membership_sod_sql =
-      "SELECT 1 FROM role_memberships privileged "
-      "JOIN role_memberships auditor "
+      "WITH RECURSIVE role_closure(role_id, effective_role_id) AS ("
+      "  SELECT role_id, role_id FROM roles "
+      "  UNION "
+      "  SELECT role_closure.role_id, ri.parent_role_id "
+      "  FROM role_closure "
+      "  JOIN role_inheritances ri "
+      "    ON ri.child_role_id = role_closure.effective_role_id"
+      "), effective_membership(subject_id, scope, effective_role_id) AS ("
+      "  SELECT rm.subject_id, rm.scope, rc.effective_role_id "
+      "  FROM role_memberships rm "
+      "  JOIN role_closure rc ON rc.role_id = rm.role_id"
+      ") "
+      "SELECT 1 FROM effective_membership privileged "
+      "JOIN effective_membership auditor "
       "  ON auditor.subject_id = privileged.subject_id "
       " AND auditor.scope = privileged.scope "
-      "WHERE privileged.role_id IN ("
+      "WHERE privileged.effective_role_id IN ("
       "    'wr.system_admin', 'wr.service_admin', 'wr.break_glass') "
-      "  AND auditor.role_id = 'wr.auditor' " "LIMIT 1;";
+      "  AND auditor.effective_role_id = 'wr.auditor' " "LIMIT 1;";
   rc = query_has_rows (store->db, role_membership_sod_sql, &found);
   if (rc != WYRELOG_E_OK)
     return rc;

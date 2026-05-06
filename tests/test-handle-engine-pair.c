@@ -2630,6 +2630,47 @@ check_policy_store_auditor_admin_cross_scope_allows_open (void)
 }
 
 static gint
+check_policy_store_inherited_auditor_admin_membership_fails_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 514;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.service_admin",
+          "service admin") != WYRELOG_E_OK)
+    return 515;
+  if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
+      != WYRELOG_E_OK)
+    return 516;
+  if (wyl_policy_store_upsert_role (store, "site.admin", "site admin")
+      != WYRELOG_E_OK)
+    return 517;
+  if (wyl_policy_store_upsert_role (store, "site.audit", "site audit")
+      != WYRELOG_E_OK)
+    return 518;
+  if (wyl_policy_store_grant_role_inheritance (store, "site.admin",
+          "wr.service_admin") != WYRELOG_E_OK)
+    return 519;
+  if (wyl_policy_store_grant_role_inheritance (store, "site.audit",
+          "wr.auditor") != WYRELOG_E_OK)
+    return 520;
+  if (wyl_policy_store_grant_role_membership (store, "sod-user",
+          "site.admin", "sod-scope") != WYRELOG_E_OK)
+    return 521;
+  if (wyl_policy_store_grant_role_membership (store, "sod-user",
+          "site.audit", "sod-scope") != WYRELOG_E_OK)
+    return 522;
+
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 523;
+  if (wyl_handle_get_read_engine (handle) != NULL)
+    return 524;
+  return wyl_handle_get_delta_engine (handle) == NULL ? 0 : 525;
+}
+
+static gint
 check_policy_store_audit_facts_reload_failure_preserves_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2832,6 +2873,9 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_policy_store_auditor_admin_cross_scope_allows_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_inherited_auditor_admin_membership_fails_open ())
+      != 0)
     return rc;
   if ((rc = check_policy_store_audit_facts_reload_failure_preserves_pair ())
       != 0)
