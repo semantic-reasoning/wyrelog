@@ -249,7 +249,6 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
 {
 #ifdef WYL_HAS_AUDIT
   gchar id_buf[WYL_ID_STRING_BUF];
-  gboolean inserted = FALSE;
   gboolean store_inserted = FALSE;
 
   if (handle == NULL || event == NULL)
@@ -258,38 +257,17 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   if (wyl_id_format (&event->id, id_buf, sizeof id_buf) != WYRELOG_E_OK)
     return WYRELOG_E_INTERNAL;
 
-  wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);
-  if (audit_conn == NULL)
-    return WYRELOG_E_INTERNAL;
-
-  wyrelog_error_t rc = wyl_audit_conn_create_schema (audit_conn);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_audit_conn_insert_event_full (audit_conn, id_buf,
-      event->created_at_us, event->subject_id, event->action,
-      event->resource_id, event->deny_reason, event->deny_origin,
-      event->decision, &inserted);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
   wyrelog_error_t store_rc =
       wyl_policy_store_append_audit_event_full (wyl_handle_get_policy_store
       (handle), id_buf, event->created_at_us,
       event->subject_id, event->action, event->resource_id,
       event->deny_reason, event->deny_origin, event->decision,
       &store_inserted);
-  if (store_rc != WYRELOG_E_OK) {
-    if (inserted) {
-      wyrelog_error_t cleanup_rc =
-          wyl_audit_conn_delete_event (audit_conn, id_buf);
-      if (cleanup_rc != WYRELOG_E_OK)
-        return cleanup_rc;
-    }
+  if (store_rc != WYRELOG_E_OK)
     return store_rc;
-  }
 
-  rc = wyl_handle_insert_audit_fact (handle, id_buf, event->created_at_us,
+  wyrelog_error_t rc = wyl_handle_insert_audit_fact (handle, id_buf,
+      event->created_at_us,
       event->subject_id, event->action, event->resource_id,
       event->deny_reason, event->deny_origin, event->decision);
   if (rc != WYRELOG_E_OK) {
@@ -300,14 +278,22 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
       if (cleanup_rc != WYRELOG_E_OK)
         return cleanup_rc;
     }
-    if (inserted) {
-      wyrelog_error_t cleanup_rc =
-          wyl_audit_conn_delete_event (audit_conn, id_buf);
-      if (cleanup_rc != WYRELOG_E_OK)
-        return cleanup_rc;
-    }
     return rc;
   }
+
+  wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);
+  if (audit_conn == NULL)
+    return WYRELOG_E_OK;
+
+  rc = wyl_audit_conn_create_schema (audit_conn);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_OK;
+
+  gboolean inserted = FALSE;
+  (void) wyl_audit_conn_insert_event_full (audit_conn, id_buf,
+      event->created_at_us, event->subject_id, event->action,
+      event->resource_id, event->deny_reason, event->deny_origin,
+      event->decision, &inserted);
 
   return WYRELOG_E_OK;
 #else

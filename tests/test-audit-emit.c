@@ -714,6 +714,68 @@ check_policy_store_audit_replay_loads_runtime_query (void)
 }
 
 static gint
+check_emit_replays_runtime_query_after_table_loss (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 432;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result;
+  memset (&result, 0, sizeof (result));
+  if (duckdb_query (conn, "DROP TABLE audit_events;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 433;
+  }
+  duckdb_destroy_result (&result);
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "runtime-replay-user");
+  wyl_audit_event_set_action (ev, "audit.runtime.replay");
+  wyl_audit_event_set_resource_id (ev, "runtime-replay-resource");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
+  if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 434;
+  }
+
+  gint64 count = -1;
+  if (!policy_count_audit_rows (handle, id, &count) || count != 1) {
+    g_object_unref (handle);
+    return 435;
+  }
+  if (wyl_audit_conn_create_schema (wyl_handle_get_audit_conn (handle))
+      != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 436;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 437;
+  }
+
+  g_autofree gchar *json = NULL;
+  if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+          "action(\"audit.runtime.replay\")", &json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 438;
+  }
+  if (g_strstr_len (json, -1, id) == NULL ||
+      g_strstr_len (json, -1, "\"subject_id\":\"runtime-replay-user\"")
+      == NULL) {
+    g_object_unref (handle);
+    return 439;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
 check_audit_conn_insert_event_idempotence (void)
 {
   WylHandle *handle = NULL;
@@ -928,7 +990,7 @@ check_decide_persists_representative_deny_reason (void)
 }
 
 static gint
-check_decide_fail_closes_on_audit_append_failure (void)
+check_decide_allows_when_runtime_audit_projection_fails (void)
 {
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -967,16 +1029,21 @@ check_decide_fail_closes_on_audit_append_failure (void)
     g_object_unref (handle);
     return 53;
   }
-  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY) {
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
     g_object_unref (handle);
     return 54;
   }
-  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
-          "audit_unavailable") != 0) {
+  gint64 count = -1;
+  if (!policy_count_rows (wyl_handle_get_policy_store (handle),
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE subject_id = 'audit-allow-user' "
+          "AND action = 'wr.audit-allow' "
+          "AND resource_id = 'audit-allow-scope' "
+          "AND decision = 1;", &count)) {
     g_object_unref (handle);
     return 55;
   }
-  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "audit_events") != 0) {
+  if (count != 1) {
     g_object_unref (handle);
     return 56;
   }
@@ -2592,6 +2659,8 @@ main (void)
     return rc;
   if ((rc = check_policy_store_audit_replay_loads_runtime_query ()) != 0)
     return rc;
+  if ((rc = check_emit_replays_runtime_query_after_table_loss ()) != 0)
+    return rc;
   if ((rc = check_audit_conn_insert_event_idempotence ()) != 0)
     return rc;
   if ((rc = check_duplicate_emit_keeps_runtime_row ()) != 0)
@@ -2610,7 +2679,7 @@ main (void)
     return rc;
   if ((rc = check_decide_persists_representative_deny_reason ()) != 0)
     return rc;
-  if ((rc = check_decide_fail_closes_on_audit_append_failure ()) != 0)
+  if ((rc = check_decide_allows_when_runtime_audit_projection_fails ()) != 0)
     return rc;
   if ((rc = check_permission_grant_rolls_back_on_store_audit_failure ()) != 0)
     return rc;
