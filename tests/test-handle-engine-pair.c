@@ -2688,7 +2688,7 @@ check_policy_store_direct_permission_sod_fails_reload (void)
           "audit read", "sensitive") != WYRELOG_E_OK)
     return 528;
   if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
-          "policy grant role", "critical") != WYRELOG_E_OK)
+          "policy role grant", "critical") != WYRELOG_E_OK)
     return 529;
   if (wyl_policy_store_grant_direct_permission (store, "direct-sod-user",
           "wr.audit.read", "direct-sod-scope") != WYRELOG_E_OK)
@@ -2809,7 +2809,7 @@ check_policy_store_custom_role_permission_sod_fails_open (void)
           "audit read", "sensitive") != WYRELOG_E_OK)
     return 562;
   if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
-          "policy grant role", "critical") != WYRELOG_E_OK)
+          "policy role grant", "critical") != WYRELOG_E_OK)
     return 563;
   if (wyl_policy_store_grant_role_permission (store, "site.audit-role",
           "wr.audit.read") != WYRELOG_E_OK)
