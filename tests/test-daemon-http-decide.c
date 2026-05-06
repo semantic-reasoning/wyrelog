@@ -5,6 +5,7 @@
 
 #include "daemon/http.h"
 #include "wyrelog/client.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -490,6 +491,199 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   return 0;
 }
 
+static gchar *
+build_policy_mutation_uri (const gchar *base_url, const gchar *path,
+    const gchar *query)
+{
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  if (query == NULL)
+    return g_strdup_printf ("%s%s", root, path);
+  return g_strdup_printf ("%s%s?%s", root, path, query);
+}
+
+static gint
+send_raw_policy_mutation (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    guint *out_status, gchar **out_body)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 120;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 121;
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 122;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static wyrelog_error_t
+grant_policy_write_authority (WylHandle *handle, const gchar *subject,
+    const gchar *scope)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_upsert_permission (store,
+      "wr.policy.write", "policy write", "critical");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_grant_direct_permission (store, subject,
+      "wr.policy.write", scope);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_session_state (store, scope, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
+static gboolean
+direct_permission_exists (WylHandle *handle, const gchar *subject,
+    const gchar *perm, const gchar *scope)
+{
+  gboolean exists = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_direct_permission_exists (store, subject, perm, scope,
+          &exists) != WYRELOG_E_OK)
+    return FALSE;
+  return exists;
+}
+
+static gint
+check_policy_permission_mutation_contract (WylHandle *handle,
+    WylClient *client, const gchar *base_url)
+{
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (client, "http-policy-admin") != WYRELOG_E_OK)
+    return 123;
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+
+  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  if (session_token == NULL)
+    return 124;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.policy.read",
+          "site policy read", "basic") != WYRELOG_E_OK)
+    return 125;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  gint rc = send_raw_policy_mutation (session, "GET", base_url,
+      "/policy/permissions/grant", "subject=target&perm=site.policy.read"
+      "&scope=tenant-a", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 126;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", "perm=site.policy.read&scope=tenant-a",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 127;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", "subject=target&perm=site.policy.read"
+      "&scope=tenant-a&session_token=unknown&guard_timestamp=abc"
+      "&guard_loc_class=public&guard_risk=49", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_auth\"") == NULL)
+    return 128;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", "subject=target&perm=site.policy.read"
+      "&scope=tenant-a&session_token=unknown&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
+    return 129;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *denied_query =
+      g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", denied_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 130;
+  if (direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 131;
+  g_clear_pointer (&body, g_free);
+
+  if (grant_policy_write_authority (handle, "http-policy-admin",
+          "tenant-a") != WYRELOG_E_OK)
+    return 132;
+
+  g_autofree gchar *guard_denied_query =
+      g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=50", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", guard_denied_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 133;
+  if (direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 134;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *grant_query =
+      g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 135;
+  if (!direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 136;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/revoke", grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 137;
+  if (direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 138;
+
+  return 0;
+}
+
 #ifdef WYL_HAS_AUDIT
 static wyrelog_error_t
 grant_audit_read (WylHandle *handle, const gchar *subject_id,
@@ -704,6 +898,10 @@ main (void)
   if (decision != WYL_DECISION_DENY)
     return 13;
 
+  raw_rc = check_policy_permission_mutation_contract (handle, client, base_url);
+  if (raw_rc != 0)
+    return raw_rc;
+
 #ifdef WYL_HAS_AUDIT
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-audit-user") != WYRELOG_E_OK)
@@ -740,6 +938,18 @@ main (void)
   audit_rc = check_audit_event_present (client, "action(\"wr.audit.read\")",
       "http-guard-user", "wr.audit.read", "http-guard-scope",
       WYL_DECISION_ALLOW, NULL, NULL);
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client,
+      "action(\"permission_grant\")",
+      "http-policy-admin", "permission_grant", "tenant-a",
+      WYL_DECISION_ALLOW, NULL, "site.policy.read");
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client,
+      "action(\"permission_revoke\")",
+      "http-policy-admin", "permission_revoke", "tenant-a",
+      WYL_DECISION_ALLOW, NULL, "site.policy.read");
   if (audit_rc != 0)
     return audit_rc;
 #endif

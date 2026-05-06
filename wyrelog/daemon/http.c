@@ -209,7 +209,6 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       strlen (body));
 }
 
-#ifdef WYL_HAS_AUDIT
 static gboolean
 authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
@@ -285,7 +284,6 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     *out_actor = g_steal_pointer (&username);
   return TRUE;
 }
-#endif
 
 static void
 audit_events_handler (SoupServer *server, SoupServerMessage *msg,
@@ -333,6 +331,106 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
+}
+
+static void
+set_json_ok (SoupServerMessage *msg)
+{
+  const gchar *body = "{\"ok\":true}";
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
+}
+
+static const gchar *
+lookup_required_query_string (GHashTable *query, const gchar *name)
+{
+  const gchar *value = NULL;
+  if (query != NULL)
+    value = g_hash_table_lookup (query, name);
+  if (value == NULL || value[0] == '\0')
+    return NULL;
+  return value;
+}
+
+static void
+set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
+{
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 403, "policy_mutation_denied");
+    return;
+  }
+  set_json_error (msg, 500, "policy_mutation_failed");
+}
+
+static void
+direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data, gboolean grant)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *subject = lookup_required_query_string (query, "subject");
+  const gchar *perm = lookup_required_query_string (query, "perm");
+  const gchar *scope = lookup_required_query_string (query, "scope");
+  if (subject == NULL || perm == NULL || scope == NULL) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.policy.write", scope, "policy_auth_required",
+          "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
+    return;
+
+  wyrelog_error_t rc;
+  if (grant) {
+    g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
+    wyl_grant_req_set_subject_id (req, subject);
+    wyl_grant_req_set_action (req, perm);
+    wyl_grant_req_set_resource_id (req, scope);
+    wyl_grant_req_set_actor_id (req, actor);
+    rc = wyl_perm_grant (ctx->handle, req);
+  } else {
+    g_autoptr (wyl_revoke_req_t) req = wyl_revoke_req_new ();
+    wyl_revoke_req_set_subject_id (req, subject);
+    wyl_revoke_req_set_action (req, perm);
+    wyl_revoke_req_set_resource_id (req, scope);
+    wyl_revoke_req_set_actor_id (req, actor);
+    rc = wyl_perm_revoke (ctx->handle, req);
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_policy_mutation_error (msg, rc);
+    return;
+  }
+
+  set_json_ok (msg);
+}
+
+static void
+policy_permission_grant_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  direct_permission_mutation_handler (server, msg, path, query, user_data,
+      TRUE);
+}
+
+static void
+policy_permission_revoke_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  direct_permission_mutation_handler (server, msg, path, query, user_data,
+      FALSE);
 }
 
 static void
@@ -507,6 +605,10 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
   soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
+  soup_server_add_handler (server, "/policy/permissions/grant",
+      policy_permission_grant_handler, ctx, NULL);
+  soup_server_add_handler (server, "/policy/permissions/revoke",
+      policy_permission_revoke_handler, ctx, NULL);
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
       ctx, NULL);
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
