@@ -477,6 +477,33 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
   if (found)
     return WYRELOG_E_POLICY;
 
+  static const gchar *role_permission_sod_sql =
+      "SELECT 1 FROM role_permissions "
+      "WHERE (role_id = 'wr.break_glass' AND perm_id = 'wr.audit.write') "
+      "   OR (role_id = 'wr.system_admin' AND perm_id GLOB 'wr.audit.*') "
+      "   OR (role_id = 'wr.auditor' AND perm_id IN ("
+      "        'wr.policy.write', 'wr.policy.grant_role', "
+      "        'wr.svc.grant_role')) " "LIMIT 1;";
+  rc = query_has_rows (store->db, role_permission_sod_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  static const gchar *role_membership_sod_sql =
+      "SELECT 1 FROM role_memberships privileged "
+      "JOIN role_memberships auditor "
+      "  ON auditor.subject_id = privileged.subject_id "
+      " AND auditor.scope = privileged.scope "
+      "WHERE privileged.role_id IN ("
+      "    'wr.system_admin', 'wr.service_admin', 'wr.break_glass') "
+      "  AND auditor.role_id = 'wr.auditor' " "LIMIT 1;";
+  rc = query_has_rows (store->db, role_membership_sod_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
   return WYRELOG_E_OK;
 }
 
