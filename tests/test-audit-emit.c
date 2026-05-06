@@ -948,6 +948,15 @@ check_decide_fail_closes_on_audit_append_failure (void)
     return 52;
   }
   duckdb_destroy_result (&result);
+  memset (&result, 0, sizeof (result));
+  if (duckdb_query (conn,
+          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_object_unref (handle);
+    return 52;
+  }
+  duckdb_destroy_result (&result);
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (req, "audit-allow-user");
