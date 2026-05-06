@@ -284,6 +284,14 @@ test_audit_event = executable('test-audit-event',
 
 test('audit-event', test_audit_event)
 
+test_jwt = executable('test-jwt',
+  'test-jwt.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep],
+)
+
+test('jwt', test_jwt)
+
 test_handle_id = executable('test-handle-id',
   'test-handle-id.c',
   dependencies : [wyrelog_dep],

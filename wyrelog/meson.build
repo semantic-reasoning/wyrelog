@@ -15,6 +15,7 @@ wyrelog_public_headers = files(
 
 wyrelog_sources = files(
   'access/decision.c',
+  'auth/jwt.c',
   'audit/event.c',
   'policy/store.c',
   'wyl-boot.c',
