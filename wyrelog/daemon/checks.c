@@ -173,7 +173,7 @@ wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
     return WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (!allowed || session == NULL)
+  if (session == NULL)
     return WYRELOG_E_POLICY;
 
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);

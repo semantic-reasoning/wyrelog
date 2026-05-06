@@ -5,6 +5,7 @@
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/audit/conn-private.h"
 #include "wyrelog/engine.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "daemon/checks.h"
 
@@ -112,6 +113,35 @@ check_login_skip_mfa_ready_allows_development_path (void)
 }
 
 static gint
+check_login_skip_mfa_ready_allows_policy_path (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 count = 0;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 40;
+  if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
+          (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login")
+      != WYRELOG_E_OK)
+    return 41;
+  if (wyl_daemon_check_login_skip_mfa_ready (handle) != WYRELOG_E_OK)
+    return 42;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  if (!count_duckdb_rows (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'principal_state' "
+          "AND subject_id = 'wyrelogd-skip-mfa-user' "
+          "AND deny_reason = 'login_skip_mfa' "
+          "AND resource_id = 'authenticated' AND decision = 1;", &count))
+    return 43;
+  if (count != 1)
+    return 44;
+  return 0;
+}
+
+static gint
 check_policy_audit_facts_ready_loads_read_engine (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -180,6 +210,8 @@ main (void)
   if ((rc = check_login_skip_mfa_ready_rejects_production_path ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_ready_allows_development_path ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_ready_allows_policy_path ()) != 0)
     return rc;
   return 0;
 }
