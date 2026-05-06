@@ -73,6 +73,31 @@ test_client_smoke = executable('test-client-smoke',
 
 test('client-smoke', test_client_smoke)
 
+if build_client
+  test_daemon_http_decide_c_args = [
+    '-DWYL_HAS_DAEMON_HTTP',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ]
+  test_daemon_http_decide_deps = [
+    wyrelog_dep,
+    wyrelog_client_dep,
+    libsoup_dep,
+  ]
+  if get_option('enable_audit').allowed()
+    test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
+    test_daemon_http_decide_deps += duckdb_dep
+  endif
+  test_daemon_http_decide = executable('test-daemon-http-decide',
+    'test-daemon-http-decide.c',
+    '../wyrelog/daemon/http.c',
+    c_args : test_daemon_http_decide_c_args,
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_daemon_http_decide_deps,
+  )
+
+  test('daemon-http-decide', test_daemon_http_decide)
+endif
+
 test_client_audit_daemon_c_args = []
 if get_option('enable_audit').allowed()
   test_client_audit_daemon_c_args += '-DWYL_TEST_HAS_AUDIT'
