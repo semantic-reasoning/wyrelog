@@ -190,6 +190,17 @@ wyl_handle_seed_session_transitions (WylHandle *self)
 wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
+  WylHandleOpenOptions opts = {
+    .template_dir = config_path,
+  };
+
+  return wyl_handle_open_with_options (&opts, out_handle);
+}
+
+wyrelog_error_t
+wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
+    WylHandle **out_handle)
+{
   /* Eagerly initialise the log subsystem before any other library code
    * runs so that log sites in boot phases see the correct thresholds
    * and file sink from the very first message. */
@@ -199,9 +210,13 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
     return WYRELOG_E_INVALID;
   *out_handle = NULL;
 
+  if (opts == NULL)
+    return WYRELOG_E_INVALID;
+
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
 
-  wyrelog_error_t rc = wyl_policy_store_open (NULL, &self->policy_store);
+  wyrelog_error_t rc =
+      wyl_policy_store_open (opts->policy_store_path, &self->policy_store);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
     return rc;
@@ -212,17 +227,18 @@ wyl_init (const gchar *config_path, WylHandle **out_handle)
     return rc;
   }
 
-  if (config_path != NULL) {
-    rc = wyl_handle_open_engine_pair (self, config_path);
+  if (opts->template_dir != NULL) {
+    rc = wyl_handle_open_engine_pair (self, opts->template_dir);
     if (rc != WYRELOG_E_OK) {
       g_object_unref (self);
       return rc;
     }
   }
 #ifdef WYL_HAS_AUDIT
-  /* Open an in-memory audit database and create the audit_events
-   * schema. Audit persistence is not wired to config_path yet. */
-  rc = wyl_audit_conn_open (NULL, &self->audit_conn);
+  /* Open the runtime audit sink and replay durable Policy DB audit rows into
+   * it. Public wyl_init() passes NULL and therefore keeps the sink in-memory;
+   * private daemon/test callers may pass a file path through opts. */
+  rc = wyl_audit_conn_open (opts->audit_store_path, &self->audit_conn);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
     return rc;

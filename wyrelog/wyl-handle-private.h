@@ -13,6 +13,24 @@
 
 G_BEGIN_DECLS;
 
+typedef struct
+{
+  const gchar *template_dir;
+  const gchar *policy_store_path;
+#ifdef WYL_HAS_AUDIT
+  const gchar *audit_store_path;
+#endif
+} WylHandleOpenOptions;
+
+/*
+ * Opens a handle with private storage paths. Public wyl_init() keeps its
+ * historical in-memory store contract and delegates here with NULL paths.
+ * A non-NULL template_dir opens the read/delta engine pair after the policy
+ * store is ready, then replays durable rows into wirelog facts.
+ */
+wyrelog_error_t wyl_handle_open_with_options (const WylHandleOpenOptions *
+    opts, WylHandle ** out_handle);
+
 #ifdef WYL_HAS_AUDIT
 /*
  * Returns the borrowed audit connection owned by |self|. Lifetime

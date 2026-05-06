@@ -1,8 +1,10 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <sqlite3.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/audit/conn-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/policy/store-private.h"
 
@@ -24,6 +26,25 @@ policy_count_rows (wyl_policy_store_t *store, const gchar *sql,
   if (ok)
     *out_count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gboolean
+runtime_count_rows (WylHandle *handle, const gchar *sql, gint64 *out_count)
+{
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result = { 0 };
+
+  if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return FALSE;
+  }
+
+  gboolean ok = duckdb_row_count (&result) == 1;
+  if (ok)
+    *out_count = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
   return ok;
 }
 
@@ -487,6 +508,131 @@ check_skip_mfa_login_projects_authority_state (void)
   return 0;
 }
 
+static gint
+check_handle_reopens_persistent_policy_and_audit_paths (void)
+{
+  static const gchar *username = "projection-persistent-user";
+  static const gchar *perm_id = "wr.projection.persistent.read";
+
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyrelog-persist-XXXXXX", &error);
+  if (dir == NULL)
+    return 110;
+
+  g_autofree gchar *policy_path = g_build_filename (dir, "policy.sqlite", NULL);
+  g_autofree gchar *audit_path = g_build_filename (dir, "audit.duckdb", NULL);
+  g_autofree gchar *session_id = NULL;
+  g_autofree gchar *audit_id = NULL;
+  gint64 audit_created_at_us = -1;
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    WylHandleOpenOptions opts = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+      .policy_store_path = policy_path,
+      .audit_store_path = audit_path,
+    };
+    if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
+      return 111;
+    wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+
+    g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+    wyl_login_req_set_username (login, username);
+    wyl_login_req_set_skip_mfa (login, TRUE);
+
+    g_autoptr (WylSession) session = NULL;
+    if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+      return 112;
+    if (session == NULL)
+      return 113;
+    session_id = wyl_session_dup_id_string (session);
+    if (session_id == NULL)
+      return 114;
+
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    if (wyl_policy_store_upsert_permission (store, perm_id,
+            "persistent projection read", "basic") != WYRELOG_E_OK)
+      return 115;
+    if (wyl_policy_store_grant_direct_permission (store, username, perm_id,
+            session_id) != WYRELOG_E_OK)
+      return 116;
+    if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 117;
+    if (!decide_allows (handle, username, perm_id, session_id))
+      return 118;
+
+    if (!policy_select_text_params (store,
+            "SELECT id FROM audit_events "
+            "WHERE subject_id = ? AND action = 'principal_state' "
+            "AND resource_id = 'authenticated' "
+            "AND deny_reason = 'login_skip_mfa';", &username, 1, &audit_id))
+      return 119;
+    const gchar *audit_param[] = { audit_id };
+    if (!policy_select_int64_params (store,
+            "SELECT created_at_us FROM audit_events WHERE id = ?;",
+            audit_param, G_N_ELEMENTS (audit_param), &audit_created_at_us))
+      return 120;
+
+    gint64 runtime_count = -1;
+    if (!runtime_count_rows (handle,
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE action = 'principal_state' "
+            "AND subject_id = 'projection-persistent-user';", &runtime_count))
+      return 121;
+    if (runtime_count != 1)
+      return 122;
+  }
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    WylHandleOpenOptions opts = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+      .policy_store_path = policy_path,
+      .audit_store_path = audit_path,
+    };
+    if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
+      return 123;
+
+    if (!decide_allows (handle, username, perm_id, session_id))
+      return 124;
+    if (!engine_contains_symbol_row2 (handle, "principal_state", username,
+            "authenticated"))
+      return 125;
+    const gchar *session_param[] = { session_id };
+    gint64 state_count = -1;
+    if (!policy_count_rows_params (wyl_handle_get_policy_store (handle),
+            "SELECT COUNT(*) FROM session_states "
+            "WHERE session_id = ? AND state = 'active';",
+            session_param, G_N_ELEMENTS (session_param), &state_count))
+      return 126;
+    if (state_count != 1)
+      return 132;
+    if (!engine_contains_audit_event (handle, audit_id, audit_created_at_us,
+            "allow"))
+      return 127;
+    if (!engine_contains_audit_attr (handle, "audit_event_subject", audit_id,
+            username))
+      return 128;
+    if (!engine_contains_audit_attr (handle, "audit_event_action", audit_id,
+            "principal_state"))
+      return 129;
+
+    gint64 runtime_count = -1;
+    if (!runtime_count_rows (handle,
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE action = 'principal_state' "
+            "AND subject_id = 'projection-persistent-user';", &runtime_count))
+      return 130;
+    if (runtime_count != 1)
+      return 131;
+  }
+
+  g_remove (audit_path);
+  g_remove (policy_path);
+  g_rmdir (dir);
+  return 0;
+}
+
 int
 main (void)
 {
@@ -499,6 +645,8 @@ main (void)
   if ((rc = check_anonymous_login_reload_failure_keeps_session_state ()) != 0)
     return rc;
   if ((rc = check_skip_mfa_login_projects_authority_state ()) != 0)
+    return rc;
+  if ((rc = check_handle_reopens_persistent_policy_and_audit_paths ()) != 0)
     return rc;
   return 0;
 }
