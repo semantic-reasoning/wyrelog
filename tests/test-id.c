@@ -4,6 +4,7 @@
 
 #include <chronoid/ksuid.h>
 
+#include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-id-private.h"
 
 static gint
@@ -369,6 +370,82 @@ check_rng_failure_fail_closed (void)
   return 0;
 }
 
+static gboolean
+is_base62_request_id (const gchar *buf)
+{
+  if (strlen (buf) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++) {
+    if (!g_ascii_isalnum (buf[i]))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gint
+check_request_id_generation (void)
+{
+  gchar buf[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (buf, sizeof buf) != WYRELOG_E_OK)
+    return 250;
+  if (!is_base62_request_id (buf))
+    return 251;
+  return 0;
+}
+
+static gint
+check_request_id_generation_validation (void)
+{
+  gchar buf[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (NULL, sizeof buf) != WYRELOG_E_INVALID)
+    return 260;
+  if (wyl_request_id_new (buf, WYL_REQUEST_ID_STRING_LEN)
+      != WYRELOG_E_INVALID)
+    return 261;
+  return 0;
+}
+
+static gint
+check_request_id_uniqueness (void)
+{
+  GHashTable *seen = g_hash_table_new_full (g_str_hash, g_str_equal,
+      g_free, NULL);
+  for (guint i = 0; i < 1000; i++) {
+    gchar buf[WYL_REQUEST_ID_STRING_BUF];
+    if (wyl_request_id_new (buf, sizeof buf) != WYRELOG_E_OK) {
+      g_hash_table_destroy (seen);
+      return 270;
+    }
+    if (g_hash_table_contains (seen, buf)) {
+      g_hash_table_destroy (seen);
+      return 271;
+    }
+    g_hash_table_add (seen, g_strdup (buf));
+  }
+  g_hash_table_destroy (seen);
+  return 0;
+}
+
+static gint
+check_request_id_rng_failure_fail_closed (void)
+{
+  gchar buf[WYL_REQUEST_ID_STRING_BUF];
+  wyrelog_error_t rc;
+
+  memset (buf, 'x', sizeof buf);
+  chronoid_set_rand (failing_rng, NULL);
+  rc = wyl_request_id_new (buf, sizeof buf);
+  chronoid_set_rand (NULL, NULL);
+
+  if (rc != WYRELOG_E_CRYPTO)
+    return 280;
+  for (gsize i = 0; i < sizeof buf; i++) {
+    if (buf[i] != 'x')
+      return 281;
+  }
+  return 0;
+}
+
 int
 main (void)
 {
@@ -421,6 +498,14 @@ main (void)
   if ((rc = check_compare_null_handling ()) != 0)
     return rc;
   if ((rc = check_rng_failure_fail_closed ()) != 0)
+    return rc;
+  if ((rc = check_request_id_generation ()) != 0)
+    return rc;
+  if ((rc = check_request_id_generation_validation ()) != 0)
+    return rc;
+  if ((rc = check_request_id_uniqueness ()) != 0)
+    return rc;
+  if ((rc = check_request_id_rng_failure_fail_closed ()) != 0)
     return rc;
 
   return 0;
