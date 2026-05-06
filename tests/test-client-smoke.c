@@ -12,6 +12,11 @@ typedef struct
   SoupServer *server;
   GMainLoop *loop;
   const gchar *body;
+  gchar *last_method;
+  gchar *last_path;
+  gchar *last_user;
+  gchar *last_perm;
+  gchar *last_session_token;
 } TestHttpServer;
 
 static const gchar *two_event_body =
@@ -45,9 +50,22 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   (void) server;
-  (void) path;
-  (void) query;
   TestHttpServer *http = user_data;
+
+  g_free (http->last_method);
+  g_free (http->last_path);
+  g_free (http->last_user);
+  g_free (http->last_perm);
+  g_free (http->last_session_token);
+  http->last_method = g_strdup (soup_server_message_get_method (msg));
+  http->last_path = g_strdup (path);
+  http->last_user =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "user")) : NULL;
+  http->last_perm =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "perm")) : NULL;
+  http->last_session_token =
+      query != NULL ? g_strdup (g_hash_table_lookup (query,
+          "session_token")) : NULL;
 
   const gchar *body = http->body != NULL ? http->body : "[]";
   soup_server_message_set_status (msg, 200, NULL);
@@ -149,6 +167,62 @@ main (void)
   if (body_size != 2 || memcmp (body_data, "[]", 2) != 0)
     return 26;
 
+  gint decision = -1;
+  if (wyl_client_decide (NULL, "alice", "read", "doc/42", &decision)
+      != WYRELOG_E_INVALID)
+    return 51;
+  if (wyl_client_decide (local_client, NULL, "read", "doc/42", &decision)
+      != WYRELOG_E_INVALID)
+    return 52;
+  if (wyl_client_decide (local_client, "alice", "read", "doc/42", NULL)
+      != WYRELOG_E_INVALID)
+    return 53;
+
+  http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
+  if (wyl_client_decide (local_client, "alice", "wr.audit.read",
+          "doc/42", &decision) != WYRELOG_E_OK)
+    return 54;
+  if (decision != WYL_DECISION_ALLOW)
+    return 55;
+  if (g_strcmp0 (http.last_method, "POST") != 0)
+    return 56;
+  if (g_strcmp0 (http.last_path, "/decide") != 0)
+    return 57;
+  if (g_strcmp0 (http.last_user, "alice") != 0)
+    return 58;
+  if (g_strcmp0 (http.last_perm, "wr.audit.read") != 0)
+    return 59;
+  if (g_strcmp0 (http.last_session_token, "doc/42") != 0)
+    return 60;
+
+  http.body = "{\"decision\":0,\"deny_reason\":\"missing_grant\","
+      "\"deny_origin\":\"policy\"}";
+  if (wyl_client_decide (local_client, "bob", "write", "doc/43", &decision)
+      != WYRELOG_E_OK)
+    return 61;
+  if (decision != WYL_DECISION_DENY)
+    return 62;
+
+  http.body = "not-json";
+  if (wyl_client_decide (local_client, "bob", "write", "doc/43", &decision)
+      != WYRELOG_E_IO)
+    return 63;
+  if (decision != WYL_DECISION_DENY)
+    return 64;
+  http.body = "{\"decision\":1x,\"deny_reason\":null,\"deny_origin\":null}";
+  if (wyl_client_decide (local_client, "bob", "write", "doc/43", &decision)
+      != WYRELOG_E_IO)
+    return 65;
+  if (decision != WYL_DECISION_DENY)
+    return 66;
+  http.body = "{\"decision\":1}";
+  if (wyl_client_decide (local_client, "bob", "write", "doc/43", &decision)
+      != WYRELOG_E_IO)
+    return 67;
+  if (decision != WYL_DECISION_DENY)
+    return 68;
+  http.body = "[]";
+
   gboolean has_next = TRUE;
   if (wyl_audit_iter_next (local_iter, &has_next) != WYRELOG_E_OK)
     return 7;
@@ -222,6 +296,11 @@ main (void)
   g_thread_join (thread);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
+  g_clear_pointer (&http.last_method, g_free);
+  g_clear_pointer (&http.last_path, g_free);
+  g_clear_pointer (&http.last_user, g_free);
+  g_clear_pointer (&http.last_perm, g_free);
+  g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.loop, g_main_loop_unref);
 
   return 0;
