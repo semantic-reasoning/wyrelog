@@ -6,6 +6,7 @@
 #include "wyrelog/engine.h"
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
+#include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
