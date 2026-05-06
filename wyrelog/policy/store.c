@@ -516,6 +516,23 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
   if (found)
     return WYRELOG_E_POLICY;
 
+  static const gchar *direct_permission_sod_sql =
+      "SELECT 1 FROM direct_permissions audit "
+      "JOIN direct_permissions privileged "
+      "  ON privileged.subject_id = audit.subject_id "
+      " AND privileged.scope = audit.scope "
+      "WHERE audit.perm_id IN ("
+      "    'wr.audit.read', 'wr.audit.explain', 'wr.audit.write') "
+      "  AND privileged.perm_id IN ("
+      "    'wr.sys.admin', 'wr.svc.admin', "
+      "    'wr.policy.write', 'wr.policy.grant_role', "
+      "    'wr.svc.grant_role') " "LIMIT 1;";
+  rc = query_has_rows (store->db, direct_permission_sod_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
   return WYRELOG_E_OK;
 }
 
