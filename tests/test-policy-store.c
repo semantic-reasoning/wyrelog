@@ -129,6 +129,24 @@ check_store_rejects_invalid_args (void)
   if (wyl_policy_store_get_deployment_mode (store, NULL)
       != WYRELOG_E_INVALID)
     return 38;
+  if (wyl_policy_store_apply_permission_state_transition (NULL, "user",
+          "perm", "scope", "grant", NULL) != WYRELOG_E_INVALID)
+    return 39;
+  if (wyl_policy_store_apply_permission_state_transition (store, NULL,
+          "perm", "scope", "grant", NULL) != WYRELOG_E_INVALID)
+    return 56;
+  if (wyl_policy_store_apply_permission_state_transition (store, "user",
+          NULL, "scope", "grant", NULL) != WYRELOG_E_INVALID)
+    return 57;
+  if (wyl_policy_store_apply_permission_state_transition (store, "user",
+          "perm", NULL, "grant", NULL) != WYRELOG_E_INVALID)
+    return 62;
+  if (wyl_policy_store_apply_permission_state_transition (store, "user",
+          "perm", "scope", NULL, NULL) != WYRELOG_E_INVALID)
+    return 63;
+  if (wyl_policy_store_apply_permission_state_transition (store, "user",
+          "perm", "scope", "bogus", NULL) != WYRELOG_E_INVALID)
+    return 64;
   return 0;
 }
 
@@ -1285,6 +1303,320 @@ check_store_appends_permission_state_event (void)
 }
 
 static gint
+check_store_applies_permission_state_transition (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 238;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 239;
+
+  gint64 grant_event_id = -1;
+  if (wyl_policy_store_apply_permission_state_transition (store,
+          "perm-apply-user", "wr.perm.apply", "perm-apply-scope", "grant",
+          &grant_event_id) != WYRELOG_E_OK)
+    return 240;
+  if (grant_event_id <= 0)
+    return 241;
+
+  PermissionStateExpect state_expect = {
+    .subject_id = "perm-apply-user",
+    .perm_id = "wr.perm.apply",
+    .scope = "perm-apply-scope",
+    .state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state (store,
+          permission_state_expect_cb, &state_expect) != WYRELOG_E_OK)
+    return 242;
+  if (state_expect.matches != 1)
+    return 243;
+
+  PermissionStateEventExpect grant_expect = {
+    .event_id = grant_event_id,
+    .subject_id = "perm-apply-user",
+    .perm_id = "wr.perm.apply",
+    .scope = "perm-apply-scope",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &grant_expect) != WYRELOG_E_OK)
+    return 244;
+  if (grant_expect.matches != 1)
+    return 245;
+
+  gint64 revoke_event_id = -1;
+  if (wyl_policy_store_apply_permission_state_transition (store,
+          "perm-apply-user", "wr.perm.apply", "perm-apply-scope", "revoke",
+          &revoke_event_id) != WYRELOG_E_OK)
+    return 246;
+  if (revoke_event_id <= grant_event_id)
+    return 247;
+
+  PermissionStateExpect dormant_expect = {
+    .subject_id = "perm-apply-user",
+    .perm_id = "wr.perm.apply",
+    .scope = "perm-apply-scope",
+    .state = "dormant",
+  };
+  if (wyl_policy_store_foreach_permission_state (store,
+          permission_state_expect_cb, &dormant_expect) != WYRELOG_E_OK)
+    return 248;
+  if (dormant_expect.matches != 1)
+    return 249;
+
+  gint64 trigger_event_id = -1;
+  if (wyl_policy_store_apply_permission_state_transition (store,
+          "perm-trigger-user", "wr.perm.trigger", "perm-trigger-scope",
+          "grant", NULL) != WYRELOG_E_OK)
+    return 279;
+  if (wyl_policy_store_apply_permission_state_transition (store,
+          "perm-trigger-user", "wr.perm.trigger", "perm-trigger-scope",
+          "trigger", &trigger_event_id) != WYRELOG_E_OK)
+    return 280;
+  if (trigger_event_id <= revoke_event_id)
+    return 281;
+
+  PermissionStateExpect firing_expect = {
+    .subject_id = "perm-trigger-user",
+    .perm_id = "wr.perm.trigger",
+    .scope = "perm-trigger-scope",
+    .state = "firing",
+  };
+  if (wyl_policy_store_foreach_permission_state (store,
+          permission_state_expect_cb, &firing_expect) != WYRELOG_E_OK)
+    return 282;
+  if (firing_expect.matches != 1)
+    return 283;
+
+  PermissionStateEventExpect trigger_expect = {
+    .event_id = trigger_event_id,
+    .subject_id = "perm-trigger-user",
+    .perm_id = "wr.perm.trigger",
+    .scope = "perm-trigger-scope",
+    .event = "trigger",
+    .from_state = "armed",
+    .to_state = "firing",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &trigger_expect) != WYRELOG_E_OK)
+    return 284;
+  if (trigger_expect.matches != 1)
+    return 285;
+  return 0;
+}
+
+static gint
+check_store_permission_state_transition_rejects_invalid_edge (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 250;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 251;
+
+  gint64 event_id = 77;
+  if (wyl_policy_store_apply_permission_state_transition (store,
+          "perm-invalid-user", "wr.perm.invalid", "perm-invalid-scope",
+          "revoke", &event_id) != WYRELOG_E_POLICY)
+    return 252;
+  if (event_id != -1)
+    return 253;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_permission_state_exists (store, "perm-invalid-user",
+          "wr.perm.invalid", "perm-invalid-scope", &exists) != WYRELOG_E_OK)
+    return 254;
+  if (exists)
+    return 255;
+
+  PermissionStateEventExpect expect = {
+    .event_id = -1,
+    .subject_id = "perm-invalid-user",
+    .perm_id = "wr.perm.invalid",
+    .scope = "perm-invalid-scope",
+    .event = "revoke",
+    .from_state = "dormant",
+    .to_state = "dormant",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
+    return 256;
+  if (expect.matches != 0)
+    return 257;
+  return 0;
+}
+
+static gint
+check_store_permission_state_transition_rolls_back_event_failure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 258;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 259;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_permission_state_event "
+          "BEFORE INSERT ON permission_state_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail event'); END;",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 260;
+
+  if (wyl_policy_store_apply_permission_state_transition (store,
+          "perm-rollback-user", "wr.perm.rollback", "perm-rollback-scope",
+          "grant", NULL) != WYRELOG_E_IO)
+    return 261;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_permission_state_exists (store, "perm-rollback-user",
+          "wr.perm.rollback", "perm-rollback-scope", &exists)
+      != WYRELOG_E_OK)
+    return 262;
+  if (exists)
+    return 263;
+  return 0;
+}
+
+static gint
+check_store_permission_state_transition_appends_audit (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 264;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 265;
+
+  gint64 event_id = -1;
+  if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
+          "perm-audit-user", "wr.perm.audit", "perm-audit-scope", "grant",
+          &event_id, "01890c10-2e3f-7000-8000-000000000010", 999,
+          "perm-audit-user", "permission_state.grant", "wr.perm.audit",
+          "allowed", "permission_state", WYL_DECISION_ALLOW) != WYRELOG_E_OK)
+    return 266;
+  if (event_id <= 0)
+    return 267;
+
+  AuditEventExpect audit_expect = {
+    .id = "01890c10-2e3f-7000-8000-000000000010",
+    .created_at_us = 999,
+    .subject_id = "perm-audit-user",
+    .action = "permission_state.grant",
+    .resource_id = "wr.perm.audit",
+    .deny_reason = "allowed",
+    .deny_origin = "permission_state",
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
+          &audit_expect) != WYRELOG_E_OK)
+    return 268;
+  if (audit_expect.matches != 1)
+    return 269;
+  return 0;
+}
+
+static gint
+check_store_permission_state_transition_rolls_back_audit_failure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 270;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 271;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "CREATE TRIGGER fail_permission_state_audit "
+          "BEFORE INSERT ON audit_events "
+          "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 272;
+
+  gint64 event_id = 99;
+  if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
+          "perm-audit-rollback-user", "wr.perm.audit.rollback",
+          "perm-audit-rollback-scope", "grant", &event_id,
+          "01890c10-2e3f-7000-8000-000000000011", 1000,
+          "perm-audit-rollback-user", "permission_state.grant",
+          "wr.perm.audit.rollback", "allowed", "permission_state",
+          WYL_DECISION_ALLOW) != WYRELOG_E_IO)
+    return 273;
+  if (event_id != -1)
+    return 274;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_permission_state_exists (store,
+          "perm-audit-rollback-user", "wr.perm.audit.rollback",
+          "perm-audit-rollback-scope", &exists) != WYRELOG_E_OK)
+    return 275;
+  if (exists)
+    return 276;
+
+  PermissionStateEventExpect event_expect = {
+    .subject_id = "perm-audit-rollback-user",
+    .perm_id = "wr.perm.audit.rollback",
+    .scope = "perm-audit-rollback-scope",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+    return 277;
+  if (event_expect.matches != 0)
+    return 278;
+  return 0;
+}
+
+static gint
+check_store_permission_state_transition_rejects_invalid_audit (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 286;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 287;
+
+  gint64 event_id = 101;
+  if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
+          "perm-bad-audit-user", "wr.perm.bad.audit",
+          "perm-bad-audit-scope", "grant", &event_id, "not-a-wyl-id", 1000,
+          "perm-bad-audit-user", "permission_state.grant",
+          "wr.perm.bad.audit", "allowed", "permission_state",
+          WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+    return 288;
+  if (event_id != -1)
+    return 289;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_permission_state_exists (store, "perm-bad-audit-user",
+          "wr.perm.bad.audit", "perm-bad-audit-scope", &exists)
+      != WYRELOG_E_OK)
+    return 290;
+  if (exists)
+    return 291;
+
+  PermissionStateEventExpect event_expect = {
+    .subject_id = "perm-bad-audit-user",
+    .perm_id = "wr.perm.bad.audit",
+    .scope = "perm-bad-audit-scope",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+    return 292;
+  if (event_expect.matches != 0)
+    return 293;
+  return 0;
+}
+
+static gint
 check_store_sets_principal_state (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1883,6 +2215,22 @@ main (void)
   if ((rc = check_store_sets_permission_state ()) != 0)
     return rc;
   if ((rc = check_store_appends_permission_state_event ()) != 0)
+    return rc;
+  if ((rc = check_store_applies_permission_state_transition ()) != 0)
+    return rc;
+  if ((rc = check_store_permission_state_transition_rejects_invalid_edge ())
+      != 0)
+    return rc;
+  if ((rc = check_store_permission_state_transition_rolls_back_event_failure ())
+      != 0)
+    return rc;
+  if ((rc = check_store_permission_state_transition_appends_audit ()) != 0)
+    return rc;
+  if ((rc = check_store_permission_state_transition_rolls_back_audit_failure ())
+      != 0)
+    return rc;
+  if ((rc = check_store_permission_state_transition_rejects_invalid_audit ())
+      != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;

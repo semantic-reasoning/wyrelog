@@ -169,6 +169,19 @@ wyrelog_error_t wyl_policy_store_append_permission_state_event
     (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, const gchar * event,
     const gchar * from_state, const gchar * to_state, gint64 * out_event_id);
+wyrelog_error_t wyl_policy_store_apply_permission_state_transition
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, const gchar * event,
+    gint64 * out_event_id);
+wyrelog_error_t
+    wyl_policy_store_apply_permission_state_transition_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, const gchar * event,
+    gint64 * out_event_id, const gchar * audit_id,
+    gint64 audit_created_at_us, const gchar * audit_subject_id,
+    const gchar * audit_action, const gchar * audit_resource_id,
+    const gchar * audit_deny_reason, const gchar * audit_deny_origin,
+    wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_foreach_permission_state_event
     (wyl_policy_store_t * store, wyl_policy_permission_state_event_cb cb,
     gpointer user_data);
