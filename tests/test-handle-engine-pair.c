@@ -1538,6 +1538,45 @@ check_policy_store_principal_states_autoload_on_open (void)
 }
 
 static gint
+check_policy_store_principal_state_required_for_decide (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 385;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 386;
+
+  if (insert2_symbol (handle, "role_permission", "wr.state-required-role",
+          "wr.state.required") != WYRELOG_E_OK)
+    return 387;
+  if (insert2_symbol (handle, "session_state", "state-required-scope",
+          "active") != WYRELOG_E_OK)
+    return 388;
+  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 389;
+  if (insert3_symbol (handle, "member_of", "state-required-user",
+          "wr.state-required-role", "state-required-scope") != WYRELOG_E_OK)
+    return 390;
+  if (insert4_symbol (handle, "perm_state", "state-required-user",
+          "wr.state.required", "state-required-scope", "armed")
+      != WYRELOG_E_OK)
+    return 391;
+
+  gint64 row[3];
+  if (intern3 (handle, "state-required-user", "wr.state.required",
+          "state-required-scope", row) != WYRELOG_E_OK)
+    return 392;
+  gboolean allowed = TRUE;
+  if (wyl_handle_engine_decide (handle, row, &allowed) != WYRELOG_E_OK)
+    return 393;
+  if (allowed)
+    return 394;
+  return 0;
+}
+
+static gint
 check_policy_store_principal_states_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1966,6 +2005,8 @@ main (void)
   if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_principal_state_required_for_decide ()) != 0)
     return rc;
   if ((rc = check_policy_store_principal_states_require_engine_pair ()) != 0)
     return rc;
