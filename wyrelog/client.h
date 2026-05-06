@@ -86,6 +86,12 @@ wyrelog_error_t wyl_client_policy_permission_revoke (WylClient * client,
     const gchar * perm,
     const gchar * scope,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_policy_permission_transition (WylClient * client,
+    const gchar * subject,
+    const gchar * perm,
+    const gchar * scope,
+    const gchar * event,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
 wyrelog_error_t wyl_client_policy_role_grant (WylClient * client,
     const gchar * subject,
     const gchar * role,

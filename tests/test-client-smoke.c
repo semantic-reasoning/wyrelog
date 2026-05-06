@@ -20,6 +20,7 @@ typedef struct
   gchar *last_perm;
   gchar *last_role;
   gchar *last_scope;
+  gchar *last_event;
   gchar *last_session_token;
   gchar *last_authorization;
   gchar *last_password;
@@ -69,6 +70,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_perm);
   g_free (http->last_role);
   g_free (http->last_scope);
+  g_free (http->last_event);
   g_free (http->last_session_token);
   g_free (http->last_authorization);
   g_free (http->last_password);
@@ -94,6 +96,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
       query != NULL ? g_strdup (g_hash_table_lookup (query, "role")) : NULL;
   http->last_scope =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "scope")) : NULL;
+  http->last_event =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "event")) : NULL;
   http->last_session_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "session_token")) : NULL;
@@ -335,6 +339,30 @@ main (void)
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
           "scope", 123, "unknown", 49) != WYRELOG_E_INVALID)
     return 516;
+  if (wyl_client_policy_permission_transition (NULL, "target", "read",
+          "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 529;
+  if (wyl_client_policy_permission_transition (local_client, NULL, "read",
+          "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 530;
+  if (wyl_client_policy_permission_transition (local_client, "target", NULL,
+          "scope", "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 531;
+  if (wyl_client_policy_permission_transition (local_client, "target", "read",
+          NULL, "grant", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 532;
+  if (wyl_client_policy_permission_transition (local_client, "target", "read",
+          "scope", NULL, 123, "public", 49) != WYRELOG_E_INVALID)
+    return 533;
+  if (wyl_client_policy_permission_transition (local_client, "target", "read",
+          "scope", "", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 534;
+  if (wyl_client_policy_permission_transition (local_client, "target", "read",
+          "scope", "grant", -1, "public", 49) != WYRELOG_E_INVALID)
+    return 535;
+  if (wyl_client_policy_permission_transition (local_client, "target", "read",
+          "scope", "grant", 123, "unknown", 49) != WYRELOG_E_INVALID)
+    return 536;
 
   http.body = "{\"ok\":true}";
   if (wyl_client_policy_permission_grant (local_client, "target user",
@@ -358,6 +386,21 @@ main (void)
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
     return 520;
+  if (wyl_client_policy_permission_transition (local_client, "target user",
+          "site.policy.read", "tenant/a", "grant", 123, "public", 49)
+      != WYRELOG_E_OK)
+    return 537;
+  if (g_strcmp0 (http.last_path, "/policy/permissions/transition") != 0 ||
+      g_strcmp0 (http.last_subject, "target user") != 0 ||
+      g_strcmp0 (http.last_perm, "site.policy.read") != 0 ||
+      g_strcmp0 (http.last_scope, "tenant/a") != 0 ||
+      g_strcmp0 (http.last_event, "grant") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
+      g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
+      g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "49") != 0)
+    return 538;
   if (wyl_client_policy_role_grant (local_client, "target user",
           "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
     return 521;
@@ -656,6 +699,7 @@ main (void)
   g_clear_pointer (&http.last_perm, g_free);
   g_clear_pointer (&http.last_role, g_free);
   g_clear_pointer (&http.last_scope, g_free);
+  g_clear_pointer (&http.last_event, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.last_authorization, g_free);
   g_clear_pointer (&http.last_password, g_free);
