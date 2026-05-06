@@ -305,6 +305,68 @@ wyl_daemon_check_direct_permission_grant_ready (WylHandle *handle)
       WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_daemon_check_permission_state_transition_ready (WylHandle *handle)
+{
+  static const gchar *user = "wyrelogd-perm-state-user";
+  static const gchar *perm = "wyrelogd.perm_state.read";
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  wyrelog_error_t rc = wyl_policy_store_upsert_permission (store, perm,
+      "permission state readiness read", "basic");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (WylSession) session = NULL;
+  rc = login_check_principal (handle, user, &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  rc = wyl_policy_store_grant_direct_permission (store, user, perm, session_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (audit_event, "wyrelogd");
+  wyl_audit_event_set_action (audit_event, "permission_state.grant");
+  wyl_audit_event_set_resource_id (audit_event, perm);
+  wyl_audit_event_set_deny_reason (audit_event, "daemon_check");
+  wyl_audit_event_set_deny_origin (audit_event, "dormant");
+  wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
+
+  gint64 event_id = -1;
+  rc = wyl_handle_apply_permission_state_transition (handle, user, perm,
+      session_id, "grant", audit_event, &event_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (event_id <= 0)
+    return WYRELOG_E_POLICY;
+
+  gboolean found = FALSE;
+  rc = wyl_policy_store_permission_state_exists (store, user, perm, session_id,
+      &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, user);
+  wyl_decide_req_set_action (decide, perm);
+  wyl_decide_req_set_resource_id (decide, session_id);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  rc = wyl_decide (handle, decide, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 static wyrelog_error_t
 insert_symbol_row (WylHandle *handle, const gchar *relation,
     const gchar *const *symbols, gsize ncols)
@@ -453,6 +515,13 @@ wyl_daemon_run_checks (WylHandle *handle)
   rc = wyl_daemon_check_direct_permission_grant_ready (handle);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: direct permission grant check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_permission_state_transition_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: permission state transition check failed: %s\n",
         wyrelog_error_string (rc));
     return 1;
   }
