@@ -550,6 +550,34 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   return seed_builtin_catalog (store->db);
 }
 
+gsize
+wyl_policy_store_builtin_role_count (void)
+{
+  return G_N_ELEMENTS (builtin_roles);
+}
+
+const gchar *
+wyl_policy_store_builtin_role_id (gsize idx)
+{
+  if (idx >= G_N_ELEMENTS (builtin_roles))
+    return NULL;
+  return builtin_roles[idx].id;
+}
+
+gsize
+wyl_policy_store_builtin_permission_count (void)
+{
+  return G_N_ELEMENTS (builtin_permissions);
+}
+
+const gchar *
+wyl_policy_store_builtin_permission_id (gsize idx)
+{
+  if (idx >= G_N_ELEMENTS (builtin_permissions))
+    return NULL;
+  return builtin_permissions[idx].id;
+}
+
 wyrelog_error_t
 wyl_policy_store_set_deployment_mode (wyl_policy_store_t *store,
     const gchar *mode)

@@ -240,7 +240,7 @@ test_template_tree = executable('test-template-tree',
   c_args : [
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
-  dependencies : [glib_dep],
+  dependencies : [wyrelog_dep],
 )
 
 test('template-tree', test_template_tree)
