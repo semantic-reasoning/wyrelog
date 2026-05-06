@@ -32,6 +32,9 @@ typedef guint64 wyl_session_id_t;
  */
 typedef struct _wyl_login_req wyl_login_req_t;
 
+typedef wyrelog_error_t (*WylMfaValidator) (WylHandle * handle,
+    WylSession * session, const gchar * proof, gpointer user_data);
+
 wyl_login_req_t *wyl_login_req_new (void);
 void wyl_login_req_free (wyl_login_req_t * req);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_login_req_t, wyl_login_req_free);
@@ -64,8 +67,23 @@ gboolean wyl_login_req_get_skip_mfa (const wyl_login_req_t * req);
 
 wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);
+
+/*
+ * Trusted host-side transition primitive. This function records that MFA was
+ * already verified by external trusted code; it does not inspect OTP material
+ * and must not be wired directly to user-supplied HTTP or client proof.
+ */
 wyrelog_error_t wyl_session_mfa_verify (WylHandle * handle,
     WylSession * session);
+
+/*
+ * Proof-bearing MFA boundary. The principal transition is applied only after
+ * |validator| accepts |proof|. Missing or empty proof and missing validator
+ * fail before any Policy DB, audit, or read-engine mutation is attempted.
+ */
+wyrelog_error_t wyl_session_mfa_verify_with_proof (WylHandle * handle,
+    WylSession * session, const gchar * proof, WylMfaValidator validator,
+    gpointer user_data);
 wyrelog_error_t wyl_session_elevate (WylHandle * handle, WylSession * session);
 wyrelog_error_t wyl_session_drop_elevation (WylHandle * handle,
     WylSession * session);

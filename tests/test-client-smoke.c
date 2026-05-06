@@ -225,6 +225,12 @@ main (void)
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
+  if (wyl_client_mfa_verify (local_client, NULL) == WYRELOG_E_OK)
+    return 140;
+  if (wyl_client_mfa_verify (local_client, "") == WYRELOG_E_OK)
+    return 141;
+  if (wyl_client_mfa_verify (local_client, "123456") == WYRELOG_E_OK)
+    return 142;
 
   http.body = "{\"session_token\":\"session-1\"}";
   if (wyl_client_login (local_client, "alice", NULL) != WYRELOG_E_IO)
