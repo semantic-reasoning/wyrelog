@@ -249,13 +249,15 @@ wyl_client_mfa_verify (WylClient *client, const gchar *otp)
 static wyrelog_error_t
 client_policy_mutation_request (WylClient *client, const gchar *path,
     const gchar *subject, const gchar *target_name, const gchar *target_value,
-    const gchar *scope, gint64 guard_timestamp, const gchar *guard_loc_class,
-    gint64 guard_risk)
+    const gchar *scope, const gchar *event, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
 {
   if (client == NULL || !WYL_IS_CLIENT (client) || path == NULL ||
       subject == NULL || subject[0] == '\0' || target_name == NULL ||
       target_value == NULL || target_value[0] == '\0' || scope == NULL ||
       scope[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (event != NULL && event[0] == '\0')
     return WYRELOG_E_INVALID;
   if (guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
       guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
@@ -277,24 +279,44 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
   g_autofree gchar *escaped_target =
       g_uri_escape_string (target_value, NULL, TRUE);
   g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
+  g_autofree gchar *escaped_event =
+      event != NULL ? g_uri_escape_string (event, NULL, TRUE) : NULL;
   g_autofree gchar *escaped_loc =
       g_uri_escape_string (guard_loc_class, NULL, TRUE);
   g_autofree gchar *uri = NULL;
   if (use_access_token) {
-    uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s"
-        "&guard_timestamp=%" G_GINT64_FORMAT
-        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-        base_url, path, escaped_subject, target_name, escaped_target,
-        escaped_scope, guard_timestamp, escaped_loc, guard_risk);
+    if (escaped_event != NULL) {
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&event=%s"
+          "&guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+          base_url, path, escaped_subject, target_name, escaped_target,
+          escaped_scope, escaped_event, guard_timestamp, escaped_loc,
+          guard_risk);
+    } else {
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s"
+          "&guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+          base_url, path, escaped_subject, target_name, escaped_target,
+          escaped_scope, guard_timestamp, escaped_loc, guard_risk);
+    }
   } else {
     g_autofree gchar *escaped_session =
         g_uri_escape_string (session_token, NULL, TRUE);
-    uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&session_token=%s"
-        "&guard_timestamp=%" G_GINT64_FORMAT
-        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-        base_url, path, escaped_subject, target_name, escaped_target,
-        escaped_scope, escaped_session, guard_timestamp, escaped_loc,
-        guard_risk);
+    if (escaped_event != NULL) {
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&event=%s"
+          "&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+          base_url, path, escaped_subject, target_name, escaped_target,
+          escaped_scope, escaped_event, escaped_session, guard_timestamp,
+          escaped_loc, guard_risk);
+    } else {
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s"
+          "&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+          base_url, path, escaped_subject, target_name, escaped_target,
+          escaped_scope, escaped_session, guard_timestamp, escaped_loc,
+          guard_risk);
+    }
   }
 
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
@@ -331,7 +353,7 @@ wyl_client_policy_permission_grant (WylClient *client, const gchar *subject,
     const gchar *guard_loc_class, gint64 guard_risk)
 {
   return client_policy_mutation_request (client, "policy/permissions/grant",
-      subject, "perm", perm, scope, guard_timestamp, guard_loc_class,
+      subject, "perm", perm, scope, NULL, guard_timestamp, guard_loc_class,
       guard_risk);
 }
 
@@ -341,8 +363,21 @@ wyl_client_policy_permission_revoke (WylClient *client, const gchar *subject,
     const gchar *guard_loc_class, gint64 guard_risk)
 {
   return client_policy_mutation_request (client, "policy/permissions/revoke",
-      subject, "perm", perm, scope, guard_timestamp, guard_loc_class,
+      subject, "perm", perm, scope, NULL, guard_timestamp, guard_loc_class,
       guard_risk);
+}
+
+wyrelog_error_t
+wyl_client_policy_permission_transition (WylClient *client,
+    const gchar *subject, const gchar *perm, const gchar *scope,
+    const gchar *event, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk)
+{
+  if (event == NULL)
+    return WYRELOG_E_INVALID;
+  return client_policy_mutation_request (client,
+      "policy/permissions/transition", subject, "perm", perm, scope, event,
+      guard_timestamp, guard_loc_class, guard_risk);
 }
 
 wyrelog_error_t
@@ -351,7 +386,7 @@ wyl_client_policy_role_grant (WylClient *client, const gchar *subject,
     const gchar *guard_loc_class, gint64 guard_risk)
 {
   return client_policy_mutation_request (client, "policy/roles/grant",
-      subject, "role", role, scope, guard_timestamp, guard_loc_class,
+      subject, "role", role, scope, NULL, guard_timestamp, guard_loc_class,
       guard_risk);
 }
 
@@ -361,7 +396,7 @@ wyl_client_policy_role_revoke (WylClient *client, const gchar *subject,
     const gchar *guard_loc_class, gint64 guard_risk)
 {
   return client_policy_mutation_request (client, "policy/roles/revoke",
-      subject, "role", role, scope, guard_timestamp, guard_loc_class,
+      subject, "role", role, scope, NULL, guard_timestamp, guard_loc_class,
       guard_risk);
 }
 
