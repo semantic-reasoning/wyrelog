@@ -107,12 +107,18 @@ jobs:
 
       - name: Restore vcpkg installed tree
         id: vcpkg-installed-cache
+        continue-on-error: true
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_ROOT }}\installed
           key: vcpkg-windows-installed-v1-2026.04.27-x64-windows-glib-sqlite3-libsodium
           restore-keys: |
             vcpkg-windows-installed-v1-2026.04.27-x64-windows-
+
+      - name: Clear failed vcpkg installed restore
+        if: steps.vcpkg-installed-cache.outcome == 'failure'
+        shell: bash
+        run: rm -rf "$VCPKG_ROOT/installed"
 
       - name: Create vcpkg binary cache
         shell: cmd
@@ -141,7 +147,7 @@ jobs:
           key: ${{ steps.vcpkg-cache.outputs.cache-primary-key }}
 
       - name: Save vcpkg installed tree
-        if: steps.vcpkg-installed-cache.outputs.cache-hit != 'true'
+        if: steps.vcpkg-installed-cache.outcome == 'success' && steps.vcpkg-installed-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         uses: actions/cache/save@v5
         with:
