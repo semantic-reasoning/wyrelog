@@ -36,6 +36,16 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
   return wyl_handle_open_with_options (&open_opts, out_handle);
 }
 
+static gboolean
+quit_loop_on_early_signal (gpointer user_data)
+{
+  if (!wyl_daemon_early_signal_received ())
+    return G_SOURCE_CONTINUE;
+
+  g_main_loop_quit (user_data);
+  return G_SOURCE_CONTINUE;
+}
+
 int
 wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 {
@@ -108,6 +118,8 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   guint sigint_id = 0;
   guint sigterm_id = 0;
   wyl_daemon_install_signal_handlers (loop, &sigint_id, &sigterm_id);
+  guint early_signal_poll_id =
+      g_timeout_add (100, quit_loop_on_early_signal, loop);
   /* If SIGTERM/SIGINT arrived during readiness or post-readiness setup,
    * the early handler captured it but the GMainLoop's signal source did
    * not. Quit the loop preemptively so we exit cleanly without serving
@@ -118,6 +130,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 #ifdef WYL_HAS_DAEMON_HTTP
   soup_server_disconnect (server);
 #endif
+  wyl_daemon_remove_signal_handler (&early_signal_poll_id);
   wyl_daemon_remove_signal_handler (&sigterm_id);
   wyl_daemon_remove_signal_handler (&sigint_id);
   return 0;
