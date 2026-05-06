@@ -7,6 +7,7 @@ struct _WylClient
   GObject parent_instance;
   gchar *base_url;
   gchar *session_token;
+  gchar *access_token;
   gchar *username;
   gchar *principal_state;
   gchar *session_state;
@@ -17,13 +18,14 @@ G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
 
 static gboolean parse_login_response_json (const gchar * data, gsize size,
     gchar ** out_session_token,
-    gchar ** out_username,
+    gchar ** out_access_token, gchar ** out_username,
     gchar ** out_principal_state, gchar ** out_session_state);
 
 static void
 wyl_client_clear_login_state (WylClient *self)
 {
   g_clear_pointer (&self->session_token, g_free);
+  g_clear_pointer (&self->access_token, g_free);
   g_clear_pointer (&self->username, g_free);
   g_clear_pointer (&self->principal_state, g_free);
   g_clear_pointer (&self->session_state, g_free);
@@ -92,6 +94,13 @@ wyl_client_dup_session_token (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
   return g_strdup (client->session_token);
+}
+
+gchar *
+wyl_client_dup_access_token (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->access_token);
 }
 
 gchar *
@@ -190,17 +199,19 @@ client_login_internal (WylClient *client, const gchar *username,
   gsize body_size = 0;
   const gchar *body_data = g_bytes_get_data (body, &body_size);
   g_autofree gchar *session_token = NULL;
+  g_autofree gchar *access_token = NULL;
   g_autofree gchar *parsed_username = NULL;
   g_autofree gchar *principal_state = NULL;
   g_autofree gchar *session_state = NULL;
   if (!parse_login_response_json (body_data, body_size, &session_token,
-          &parsed_username, &principal_state, &session_state)) {
+          &access_token, &parsed_username, &principal_state, &session_state)) {
     wyl_client_clear_login_state (client);
     return WYRELOG_E_IO;
   }
 
   wyl_client_clear_login_state (client);
   client->session_token = g_steal_pointer (&session_token);
+  client->access_token = g_steal_pointer (&access_token);
   client->username = g_steal_pointer (&parsed_username);
   client->principal_state = g_steal_pointer (&principal_state);
   client->session_state = g_steal_pointer (&session_state);
@@ -524,13 +535,15 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
 
 static gboolean
 parse_login_response_json (const gchar *data, gsize size,
-    gchar **out_session_token, gchar **out_username,
+    gchar **out_session_token, gchar **out_access_token, gchar **out_username,
     gchar **out_principal_state, gchar **out_session_state)
 {
   if (data == NULL || out_session_token == NULL || out_username == NULL ||
-      out_principal_state == NULL || out_session_state == NULL)
+      out_access_token == NULL || out_principal_state == NULL ||
+      out_session_state == NULL)
     return FALSE;
   *out_session_token = NULL;
+  *out_access_token = NULL;
   *out_username = NULL;
   *out_principal_state = NULL;
   *out_session_state = NULL;
@@ -540,6 +553,7 @@ parse_login_response_json (const gchar *data, gsize size,
     return FALSE;
 
   gboolean have_session_token = FALSE;
+  gboolean have_access_token = FALSE;
   gboolean have_username = FALSE;
   gboolean have_principal_state = FALSE;
   gboolean have_session_state = FALSE;
@@ -549,22 +563,37 @@ parse_login_response_json (const gchar *data, gsize size,
 
   while (TRUE) {
     g_autofree gchar *key = NULL;
-    g_autofree gchar *value = NULL;
-    if (!json_parse_string (&cursor, &key) || !json_consume (&cursor, ':') ||
-        !json_parse_string (&cursor, &value))
+    if (!json_parse_string (&cursor, &key) || !json_consume (&cursor, ':'))
       return FALSE;
 
     if (g_strcmp0 (key, "session_token") == 0) {
+      g_autofree gchar *value = NULL;
+      if (!json_parse_string (&cursor, &value))
+        return FALSE;
       if (have_session_token || value[0] == '\0')
         return FALSE;
       have_session_token = TRUE;
       *out_session_token = g_steal_pointer (&value);
+    } else if (g_strcmp0 (key, "access_token") == 0) {
+      g_autofree gchar *value = NULL;
+      if (!json_parse_string (&cursor, &value))
+        return FALSE;
+      if (have_access_token || value[0] == '\0')
+        return FALSE;
+      have_access_token = TRUE;
+      *out_access_token = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "username") == 0) {
+      g_autofree gchar *value = NULL;
+      if (!json_parse_string (&cursor, &value))
+        return FALSE;
       if (have_username || value[0] == '\0')
         return FALSE;
       have_username = TRUE;
       *out_username = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "principal_state") == 0) {
+      g_autofree gchar *value = NULL;
+      if (!json_parse_string (&cursor, &value))
+        return FALSE;
       if (have_principal_state ||
           (g_strcmp0 (value, "mfa_required") != 0 &&
               g_strcmp0 (value, "authenticated") != 0))
@@ -572,6 +601,9 @@ parse_login_response_json (const gchar *data, gsize size,
       have_principal_state = TRUE;
       *out_principal_state = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "session_state") == 0) {
+      g_autofree gchar *value = NULL;
+      if (!json_parse_string (&cursor, &value))
+        return FALSE;
       if (have_session_state || g_strcmp0 (value, "active") != 0)
         return FALSE;
       have_session_state = TRUE;
@@ -596,6 +628,7 @@ parse_login_response_json (const gchar *data, gsize size,
   if (!have_session_token || !have_username || !have_principal_state ||
       !have_session_state || cursor.pos != cursor.size) {
     g_clear_pointer (out_session_token, g_free);
+    g_clear_pointer (out_access_token, g_free);
     g_clear_pointer (out_username, g_free);
     g_clear_pointer (out_principal_state, g_free);
     g_clear_pointer (out_session_state, g_free);
