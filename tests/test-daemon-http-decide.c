@@ -328,6 +328,104 @@ check_raw_decide_contract (const gchar *base_url)
   return 0;
 }
 
+static gint
+send_raw_login (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, guint *out_status,
+    gchar **out_body)
+{
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  g_autofree gchar *uri = NULL;
+  if (query != NULL)
+    uri = g_strdup_printf ("%s/auth/login?%s", root, query);
+  else
+    uri = g_strdup_printf ("%s/auth/login", root);
+
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 1;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 2;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint
+check_raw_login_contract (const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  gint rc = send_raw_login (session, "GET", base_url,
+      "username=login-user", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 470;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 471;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url, "username=", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 472;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 473;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=1", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 474;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&password=secret", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 478;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url, "username=login-user",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"session_token\":\"") == NULL ||
+      strstr (body, "\"username\":\"login-user\"") == NULL ||
+      strstr (body, "\"principal_state\":\"mfa_required\"") == NULL ||
+      strstr (body, "\"session_state\":\"active\"") == NULL)
+    return 475;
+  g_clear_pointer (&body, g_free);
+
+  return 0;
+}
+
 #ifdef WYL_HAS_AUDIT
 static gint
 check_audit_event_present (WylClient *client, const gchar *filter,
@@ -398,7 +496,6 @@ main (void)
   gint raw_rc = check_raw_decide_contract (base_url);
   if (raw_rc != 0)
     return raw_rc;
-
   gint decision = -1;
   if (wyl_client_decide (client, "http-allow-user", "http.allow",
           "http-allow-scope", &decision) != WYRELOG_E_OK)
@@ -441,6 +538,10 @@ main (void)
   if (audit_rc != 0)
     return audit_rc;
 #endif
+
+  raw_rc = check_raw_login_contract (base_url);
+  if (raw_rc != 0)
+    return raw_rc;
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
