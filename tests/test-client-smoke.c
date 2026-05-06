@@ -21,6 +21,7 @@ typedef struct
   gchar *last_role;
   gchar *last_scope;
   gchar *last_session_token;
+  gchar *last_authorization;
   gchar *last_password;
   gchar *last_skip_mfa;
   gchar *last_guard_timestamp;
@@ -69,6 +70,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_role);
   g_free (http->last_scope);
   g_free (http->last_session_token);
+  g_free (http->last_authorization);
   g_free (http->last_password);
   g_free (http->last_skip_mfa);
   g_free (http->last_guard_timestamp);
@@ -95,6 +97,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   http->last_session_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "session_token")) : NULL;
+  http->last_authorization = g_strdup (soup_message_headers_get_one
+      (soup_server_message_get_request_headers (msg), "Authorization"));
   http->last_password =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "password")) : NULL;
   http->last_skip_mfa =
@@ -261,6 +265,27 @@ main (void)
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
+  http.body = "{\"ok\":true}";
+  if (wyl_client_policy_permission_grant (local_client, "fallback target",
+          "site.policy.read", "tenant/fallback", 123, "public", 49)
+      != WYRELOG_E_OK)
+    return 170;
+  if (g_strcmp0 (http.last_session_token, "session-1") != 0 ||
+      http.last_authorization != NULL)
+    return 171;
+  g_autoptr (WylAuditIter) fallback_guarded_audit_iter = NULL;
+  if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
+          "public", 69, &fallback_guarded_audit_iter) != WYRELOG_E_OK)
+    return 173;
+  g_autofree gchar *fallback_guarded_audit_uri =
+      wyl_audit_iter_dup_request_uri (fallback_guarded_audit_iter);
+  if (strstr (fallback_guarded_audit_uri, "session_token=session-1") == NULL)
+    return 174;
+  g_autoptr (SoupMessage) fallback_guarded_audit_message =
+      wyl_audit_iter_new_request_message (fallback_guarded_audit_iter);
+  if (soup_message_headers_get_one (soup_message_get_request_headers
+          (fallback_guarded_audit_message), "Authorization") != NULL)
+    return 175;
 
   http.body = "{\"session_token\":\"session-2\",\"username\":\"alice\","
       "\"principal_state\":\"authenticated\",\"session_state\":\"active\","
@@ -320,7 +345,8 @@ main (void)
       g_strcmp0 (http.last_subject, "target user") != 0 ||
       g_strcmp0 (http.last_perm, "site.policy.read") != 0 ||
       g_strcmp0 (http.last_scope, "tenant/a") != 0 ||
-      g_strcmp0 (http.last_session_token, "session-2") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
       g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
       g_strcmp0 (http.last_guard_risk, "49") != 0)
@@ -328,7 +354,9 @@ main (void)
   if (wyl_client_policy_permission_revoke (local_client, "target user",
           "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
     return 519;
-  if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0)
+  if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
     return 520;
   if (wyl_client_policy_role_grant (local_client, "target user",
           "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
@@ -336,12 +364,16 @@ main (void)
   if (g_strcmp0 (http.last_path, "/policy/roles/grant") != 0 ||
       g_strcmp0 (http.last_role, "site.reader") != 0 ||
       g_strcmp0 (http.last_scope, "tenant/b") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_guard_risk, "29") != 0)
     return 522;
   if (wyl_client_policy_role_revoke (local_client, "target user",
           "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
     return 523;
-  if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0)
+  if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
     return 524;
   http.status = 400;
   if (wyl_client_policy_permission_grant (local_client, "target", "read",
@@ -380,7 +412,7 @@ main (void)
   g_autofree gchar *guarded_audit_uri =
       wyl_audit_iter_dup_request_uri (guarded_audit_iter);
   if (strstr (guarded_audit_uri, "/audit/events?") == NULL ||
-      strstr (guarded_audit_uri, "session_token=session-2") == NULL ||
+      strstr (guarded_audit_uri, "session_token=") != NULL ||
       strstr (guarded_audit_uri, "guard_timestamp=123") == NULL ||
       strstr (guarded_audit_uri, "guard_loc_class=public") == NULL ||
       strstr (guarded_audit_uri, "guard_risk=69") == NULL ||
@@ -392,8 +424,10 @@ main (void)
   if (wyl_client_send_message (local_client, guarded_audit_message, &body) !=
       WYRELOG_E_OK)
     return 156;
-  if (g_strcmp0 (http.last_session_token, "session-2") != 0)
+  if (http.last_session_token != NULL)
     return 157;
+  if (g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
+    return 172;
   if (g_strcmp0 (http.last_guard_timestamp, "123") != 0)
     return 158;
   if (g_strcmp0 (http.last_guard_loc_class, "public") != 0)
@@ -462,6 +496,8 @@ main (void)
     return 59;
   if (g_strcmp0 (http.last_session_token, "doc/42") != 0)
     return 60;
+  if (http.last_authorization != NULL)
+    return 176;
   if (http.last_guard_timestamp != NULL || http.last_guard_loc_class != NULL ||
       http.last_guard_risk != NULL)
     return 69;
@@ -621,6 +657,7 @@ main (void)
   g_clear_pointer (&http.last_role, g_free);
   g_clear_pointer (&http.last_scope, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
+  g_clear_pointer (&http.last_authorization, g_free);
   g_clear_pointer (&http.last_password, g_free);
   g_clear_pointer (&http.last_skip_mfa, g_free);
   g_clear_pointer (&http.last_guard_timestamp, g_free);
