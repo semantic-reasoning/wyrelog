@@ -2,6 +2,7 @@
 #include "store-private.h"
 
 #include "wyrelog/wyl-id-private.h"
+#include "wyrelog/wyl-fsm-permission-scope-private.h"
 
 struct wyl_policy_store_t
 {
@@ -1386,6 +1387,48 @@ wyl_policy_store_permission_state_exists (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+wyl_policy_store_get_permission_state (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gchar **out_state)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || out_state == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_state = NULL;
+  static const gchar *sql =
+      "SELECT state FROM permission_states "
+      "WHERE subject_id = ? AND perm_id = ? AND scope = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *state = (const gchar *) sqlite3_column_text (stmt, 0);
+    if (state == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    *out_state = g_strdup (state);
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_policy_store_foreach_permission_state (wyl_policy_store_t *store,
     wyl_policy_permission_state_cb cb, gpointer user_data)
@@ -1460,6 +1503,94 @@ wyl_policy_store_append_permission_state_event (wyl_policy_store_t *store,
     *out_event_id = event_id;
   }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_policy_store_apply_permission_state_transition_with_audit
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, const gchar * event,
+    gint64 * out_event_id, const gchar * audit_id,
+    gint64 audit_created_at_us, const gchar * audit_subject_id,
+    const gchar * audit_action, const gchar * audit_resource_id,
+    const gchar * audit_deny_reason, const gchar * audit_deny_origin,
+    wyl_decision_t audit_decision)
+{
+  if (out_event_id != NULL)
+    *out_event_id = -1;
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || event == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_perm_event_t ev = wyl_perm_event_from_name (event);
+  if (ev == WYL_PERM_EVENT_LAST_)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *from_state_name = NULL;
+  rc = wyl_policy_store_get_permission_state (store, subject_id, perm_id,
+      scope, &from_state_name);
+  if (rc == WYRELOG_E_OK && from_state_name == NULL)
+    from_state_name = g_strdup (wyl_perm_state_name (WYL_PERM_STATE_DORMANT));
+
+  wyl_perm_state_t from = WYL_PERM_STATE_LAST_;
+  wyl_perm_state_t to = WYL_PERM_STATE_LAST_;
+  const gchar *to_state_name = NULL;
+  if (rc == WYRELOG_E_OK) {
+    from = wyl_perm_state_from_name (from_state_name);
+    if (from == WYL_PERM_STATE_LAST_)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fsm_permission_scope_step (from, ev, &to);
+  if (rc == WYRELOG_E_OK) {
+    to_state_name = wyl_perm_state_name (to);
+    if (to_state_name == NULL)
+      rc = WYRELOG_E_INTERNAL;
+  }
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_set_permission_state (store, subject_id, perm_id,
+        scope, to_state_name);
+  }
+
+  gint64 event_id = -1;
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_append_permission_state_event (store, subject_id,
+        perm_id, scope, event, from_state_name, to_state_name, &event_id);
+  }
+  if (rc == WYRELOG_E_OK && audit_id != NULL) {
+    rc = wyl_policy_store_append_audit_event (store, audit_id,
+        audit_created_at_us, audit_subject_id, audit_action,
+        audit_resource_id, audit_deny_reason, audit_deny_origin,
+        audit_decision);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  if (out_event_id != NULL)
+    *out_event_id = event_id;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_permission_state_transition (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, gint64 *out_event_id)
+{
+  return wyl_policy_store_apply_permission_state_transition_with_audit (store,
+      subject_id, perm_id, scope, event, out_event_id, NULL, 0, NULL, NULL,
+      NULL, NULL, NULL, WYL_DECISION_DENY);
 }
 
 wyrelog_error_t
