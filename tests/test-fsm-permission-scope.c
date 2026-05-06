@@ -452,6 +452,83 @@ check_in_window_callback (void)
   return 0;
 }
 
+static gint
+check_timestamp_window_extraction (void)
+{
+  g_autoptr (wyl_guard_expr_t) direct =
+      wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "off_hours");
+  if (direct == NULL)
+    return 120;
+  if (g_strcmp0 (wyl_guard_expr_timestamp_window (direct), "off_hours") != 0)
+    return 121;
+
+  g_autoptr (wyl_guard_expr_t) and_one =
+      wyl_guard_and (wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT,
+          "50"), wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN,
+          "off_hours"));
+  if (and_one == NULL)
+    return 122;
+  if (g_strcmp0 (wyl_guard_expr_timestamp_window (and_one), "off_hours") != 0)
+    return 123;
+
+  g_autoptr (wyl_guard_expr_t) and_same =
+      wyl_guard_and (wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP,
+          WYL_GUARD_OP_IN, "off_hours"), wyl_guard_cmp
+      (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "off_hours"));
+  if (and_same == NULL)
+    return 124;
+  if (g_strcmp0 (wyl_guard_expr_timestamp_window (and_same), "off_hours") != 0)
+    return 125;
+
+  g_autoptr (wyl_guard_expr_t) risk_only =
+      wyl_guard_cmp (WYL_GUARD_FIELD_RISK, WYL_GUARD_OP_LT, "50");
+  if (risk_only == NULL)
+    return 139;
+  if (wyl_guard_expr_timestamp_window (risk_only) != NULL)
+    return 140;
+
+  g_autoptr (wyl_guard_expr_t) timestamp_order =
+      wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_LT, "1234");
+  if (timestamp_order == NULL)
+    return 141;
+  if (wyl_guard_expr_timestamp_window (timestamp_order) != NULL)
+    return 142;
+
+  g_autoptr (wyl_guard_expr_t) and_conflict =
+      wyl_guard_and (wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP,
+          WYL_GUARD_OP_IN, "off_hours"), wyl_guard_cmp
+      (WYL_GUARD_FIELD_TIMESTAMP, WYL_GUARD_OP_IN, "office_hours"));
+  if (and_conflict == NULL)
+    return 126;
+  if (wyl_guard_expr_timestamp_window (and_conflict) != NULL)
+    return 127;
+
+  g_autoptr (wyl_guard_expr_t) disjunctive =
+      wyl_guard_or (wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP,
+          WYL_GUARD_OP_IN, "off_hours"), wyl_guard_cmp (WYL_GUARD_FIELD_RISK,
+          WYL_GUARD_OP_LT, "50"));
+  if (disjunctive == NULL)
+    return 128;
+  if (wyl_guard_expr_timestamp_window (disjunctive) != NULL)
+    return 129;
+
+  g_autoptr (wyl_guard_expr_t) negated =
+      wyl_guard_not (wyl_guard_cmp (WYL_GUARD_FIELD_TIMESTAMP,
+          WYL_GUARD_OP_IN, "off_hours"));
+  if (negated == NULL)
+    return 135;
+  if (wyl_guard_expr_timestamp_window (negated) != NULL)
+    return 136;
+
+  g_autoptr (wyl_guard_expr_t) tag = wyl_guard_tag ("break_glass");
+  if (tag == NULL)
+    return 137;
+  if (wyl_guard_expr_timestamp_window (tag) != NULL)
+    return 138;
+
+  return 0;
+}
+
 /* --- Argument validation ---------------------------------------- */
 
 static gint
@@ -621,6 +698,8 @@ main (void)
   if ((rc = check_synthetic_fixtures ()) != 0)
     return rc;
   if ((rc = check_in_window_callback ()) != 0)
+    return rc;
+  if ((rc = check_timestamp_window_extraction ()) != 0)
     return rc;
   if ((rc = check_argument_validation ()) != 0)
     return rc;
