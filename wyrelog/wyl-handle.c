@@ -1063,6 +1063,7 @@ wyl_handle_load_policy_store_audit_facts (WylHandle *self)
 typedef struct
 {
   const gchar *relation;
+  const gchar *snapshot_relation;
   const gint64 *row;
   gsize ncols;
   gboolean matched;
@@ -1074,7 +1075,7 @@ wyl_handle_row_snapshot_cb (const gchar *relation, const gint64 *row,
 {
   WylRowProbe *probe = user_data;
 
-  if (g_strcmp0 (relation, probe->relation) != 0)
+  if (g_strcmp0 (relation, probe->snapshot_relation) != 0)
     return;
   if (ncols != probe->ncols)
     return;
@@ -1096,9 +1097,15 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
   if (self->read_engine == NULL || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  WylRowProbe probe = { relation, row, ncols, FALSE };
+  const gchar *snapshot_relation = relation;
+  /* The engine snapshots derived outputs, so principal_state probes use
+   * the template mirror while preserving the handle-level relation name. */
+  if (g_strcmp0 (relation, "principal_state") == 0)
+    snapshot_relation = "principal_state_observed";
+
+  WylRowProbe probe = { relation, snapshot_relation, row, ncols, FALSE };
   wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine,
-      relation, wyl_handle_row_snapshot_cb, &probe);
+      snapshot_relation, wyl_handle_row_snapshot_cb, &probe);
   if (rc != WYRELOG_E_OK)
     return rc;
 

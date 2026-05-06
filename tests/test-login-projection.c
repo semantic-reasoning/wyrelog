@@ -181,6 +181,39 @@ decide_allows (WylHandle *handle, const gchar *subject, const gchar *action,
 }
 
 static gint
+check_login_projects_mfa_required_principal_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 90;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "projection-login-user");
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 91;
+  if (session == NULL)
+    return 92;
+
+  gint64 count = -1;
+  if (!policy_count_rows (wyl_handle_get_policy_store (handle),
+          "SELECT COUNT(*) FROM principal_states "
+          "WHERE subject_id = 'projection-login-user' "
+          "AND state = 'mfa_required';", &count))
+    return 94;
+  if (count != 1) {
+    g_printerr ("store principal state count=%" G_GINT64_FORMAT "\n", count);
+    return 95;
+  }
+  if (!engine_contains_symbol_row2 (handle, "principal_state",
+          "projection-login-user", "mfa_required"))
+    return 93;
+  return 0;
+}
+
+static gint
 check_login_reload_failure_keeps_durable_state_repairable (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -459,6 +492,8 @@ main (void)
 {
   gint rc;
 
+  if ((rc = check_login_projects_mfa_required_principal_state ()) != 0)
+    return rc;
   if ((rc = check_login_reload_failure_keeps_durable_state_repairable ()) != 0)
     return rc;
   if ((rc = check_anonymous_login_reload_failure_keeps_session_state ()) != 0)
