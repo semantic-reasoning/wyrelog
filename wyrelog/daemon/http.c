@@ -91,6 +91,20 @@ wyl_daemon_http_context_store_session (WylDaemonHttpContext *ctx,
   return TRUE;
 }
 
+static gboolean
+wyl_daemon_http_context_remove_session (WylDaemonHttpContext *ctx,
+    const gchar *session_token)
+{
+  if (ctx == NULL || session_token == NULL || session_token[0] == '\0')
+    return FALSE;
+
+  g_mutex_lock (&ctx->lock);
+  gboolean removed = g_hash_table_remove (ctx->sessions_by_token,
+      session_token);
+  g_mutex_unlock (&ctx->lock);
+  return removed;
+}
+
 static WylDaemonHttpContext *
 wyl_daemon_http_get_context (SoupServer *server)
 {
@@ -117,6 +131,16 @@ wyl_daemon_http_ref_session (SoupServer *server, const gchar *session_token)
   g_mutex_unlock (&ctx->lock);
   return session;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+gboolean
+wyl_daemon_http_remove_session_for_test (SoupServer *server,
+    const gchar *session_token)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return wyl_daemon_http_context_remove_session (ctx, session_token);
+}
+#endif
 
 static void
 append_json_string (GString *json, const gchar *value)

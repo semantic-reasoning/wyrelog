@@ -16,5 +16,7 @@ WylSession *wyl_daemon_http_ref_session (SoupServer * server,
 #ifdef WYL_TEST_DAEMON_HTTP
 wyrelog_error_t wyl_daemon_http_copy_access_token_secret (SoupServer * server,
     guint8 * out_secret, gsize out_len);
+gboolean wyl_daemon_http_remove_session_for_test (SoupServer * server,
+    const gchar * session_token);
 #endif
 #endif

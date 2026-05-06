@@ -583,6 +583,14 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_autofree gchar *stored_username = wyl_session_dup_username (stored_session);
   if (g_strcmp0 (stored_username, "login-user") != 0)
     return 479;
+  if (wyl_daemon_http_remove_session_for_test (server, "unknown-session"))
+    return 481;
+  if (!wyl_daemon_http_remove_session_for_test (server, session_token))
+    return 482;
+  g_autoptr (WylSession) removed_session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (removed_session != NULL)
+    return 483;
   g_clear_pointer (&body, g_free);
 
   g_autoptr (WylSession) unknown_session =
