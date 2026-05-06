@@ -260,6 +260,49 @@ wyl_daemon_check_policy_snapshot_reload_ready (WylHandle *handle)
       WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_daemon_check_direct_permission_grant_ready (WylHandle *handle)
+{
+  g_autoptr (WylSession) session = NULL;
+  wyrelog_error_t rc =
+      login_check_principal (handle, "wyrelogd-direct-grant-user", &session);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "wyrelogd-direct-grant-user");
+  wyl_grant_req_set_action (grant, "wyrelogd.direct_grant.read");
+  wyl_grant_req_set_resource_id (grant, session_id);
+  rc = wyl_perm_grant (handle, grant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean found = FALSE;
+  rc = wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
+      (handle), "wyrelogd-direct-grant-user", "wyrelogd.direct_grant.read",
+      session_id, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "wyrelogd-direct-grant-user");
+  wyl_decide_req_set_action (decide, "wyrelogd.direct_grant.read");
+  wyl_decide_req_set_resource_id (decide, session_id);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  rc = wyl_decide (handle, decide, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_decide_resp_get_decision (resp) == WYL_DECISION_ALLOW ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 static wyrelog_error_t
 insert_symbol_row (WylHandle *handle, const gchar *relation,
     const gchar *const *symbols, gsize ncols)
@@ -401,6 +444,13 @@ wyl_daemon_run_checks (WylHandle *handle)
   rc = wyl_daemon_check_policy_snapshot_reload_ready (handle);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: policy snapshot reload check failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+
+  rc = wyl_daemon_check_direct_permission_grant_ready (handle);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyrelogd: direct permission grant check failed: %s\n",
         wyrelog_error_string (rc));
     return 1;
   }
