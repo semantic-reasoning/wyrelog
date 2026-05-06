@@ -2,6 +2,7 @@
 #include "wyrelog/audit/iter-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-permission-scope-private.h"
 
 #include <string.h>
 
@@ -12,6 +13,11 @@ struct _WylAuditIter
   GObject parent_instance;
   WylClient *client;
   gchar *query_filter;
+  gchar *session_token;
+  gboolean has_guard_context;
+  gint64 guard_timestamp;
+  gchar *guard_loc_class;
+  gint64 guard_risk;
   GPtrArray *events;
   guint event_index;
   WylAuditEvent *current_event;
@@ -29,6 +35,8 @@ wyl_audit_iter_finalize (GObject *object)
   g_clear_pointer (&self->events, g_ptr_array_unref);
   g_clear_object (&self->current_event);
   g_free (self->query_filter);
+  g_free (self->session_token);
+  g_free (self->guard_loc_class);
 
   G_OBJECT_CLASS (wyl_audit_iter_parent_class)->finalize (object);
 }
@@ -64,6 +72,36 @@ wyl_client_audit_query (WylClient *client, const gchar *query_filter,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_client_audit_query_with_guard_context (WylClient *client,
+    const gchar *query_filter, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, WylAuditIter **out_iter)
+{
+  if (out_iter == NULL)
+    return WYRELOG_E_INVALID;
+  *out_iter = NULL;
+  if (client == NULL || !WYL_IS_CLIENT (client))
+    return WYRELOG_E_INVALID;
+  if (guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
+      guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  if (session_token == NULL || session_token[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  WylAuditIter *iter = g_object_new (WYL_TYPE_AUDIT_ITER, NULL);
+  iter->client = g_object_ref (client);
+  iter->query_filter = g_strdup (query_filter);
+  iter->session_token = g_steal_pointer (&session_token);
+  iter->has_guard_context = TRUE;
+  iter->guard_timestamp = guard_timestamp;
+  iter->guard_loc_class = g_strdup (guard_loc_class);
+  iter->guard_risk = guard_risk;
+  *out_iter = iter;
+  return WYRELOG_E_OK;
+}
+
 gchar *
 wyl_audit_iter_dup_query_filter (const WylAuditIter *iter)
 {
@@ -80,12 +118,32 @@ wyl_audit_iter_dup_request_uri (const WylAuditIter *iter)
   const gchar *separator = g_str_has_suffix (base_url, "/") ? "" : "/";
   g_autofree gchar *path =
       g_strdup_printf ("%s%saudit/events", base_url, separator);
-  if (iter->query_filter == NULL || iter->query_filter[0] == '\0')
-    return g_steal_pointer (&path);
+  g_autoptr (GString) query = g_string_new (NULL);
+
+  if (iter->has_guard_context) {
+    g_autofree gchar *escaped_session =
+        g_uri_escape_string (iter->session_token, NULL, TRUE);
+    g_autofree gchar *escaped_loc =
+        g_uri_escape_string (iter->guard_loc_class, NULL, TRUE);
+    g_string_append_printf (query,
+        "session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+        escaped_session, iter->guard_timestamp, escaped_loc, iter->guard_risk);
+  }
+
+  if (iter->query_filter == NULL || iter->query_filter[0] == '\0') {
+    if (query->len == 0)
+      return g_steal_pointer (&path);
+    return g_strdup_printf ("%s?%s", path, query->str);
+  }
+
+  if (query->len > 0)
+    g_string_append_c (query, '&');
 
   g_autofree gchar *escaped =
       g_uri_escape_string (iter->query_filter, NULL, TRUE);
-  return g_strdup_printf ("%s?filter=%s", path, escaped);
+  g_string_append_printf (query, "filter=%s", escaped);
+  return g_strdup_printf ("%s?%s", path, query->str);
 }
 
 SoupMessage *

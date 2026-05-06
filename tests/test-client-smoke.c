@@ -210,6 +210,10 @@ main (void)
     return 144;
   if (wyl_client_login_skip_mfa (local_client, "") != WYRELOG_E_INVALID)
     return 145;
+  g_autoptr (WylAuditIter) missing_login_iter = NULL;
+  if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
+          "public", 69, &missing_login_iter) != WYRELOG_E_INVALID)
+    return 153;
 
   http.body = "{\"session_token\":\"session-1\",\"username\":\"alice\","
       "\"principal_state\":\"mfa_required\",\"session_state\":\"active\"}";
@@ -263,6 +267,45 @@ main (void)
       g_strcmp0 (client_principal_state, "authenticated") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 152;
+
+  g_autoptr (WylAuditIter) guarded_audit_iter = NULL;
+  if (wyl_client_audit_query_with_guard_context (local_client,
+          "decision=deny", 123, "public", 69, &guarded_audit_iter)
+      != WYRELOG_E_OK)
+    return 154;
+  g_autoptr (WylAuditIter) invalid_guard_iter = NULL;
+  if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
+          "unknown", 69, &invalid_guard_iter) != WYRELOG_E_INVALID)
+    return 161;
+
+  http.body = "{\"session_token\":\"session-3\",\"username\":\"alice\","
+      "\"principal_state\":\"authenticated\",\"session_state\":\"active\"}";
+  if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
+    return 162;
+
+  g_autofree gchar *guarded_audit_uri =
+      wyl_audit_iter_dup_request_uri (guarded_audit_iter);
+  if (strstr (guarded_audit_uri, "/audit/events?") == NULL ||
+      strstr (guarded_audit_uri, "session_token=session-2") == NULL ||
+      strstr (guarded_audit_uri, "guard_timestamp=123") == NULL ||
+      strstr (guarded_audit_uri, "guard_loc_class=public") == NULL ||
+      strstr (guarded_audit_uri, "guard_risk=69") == NULL ||
+      strstr (guarded_audit_uri, "filter=decision%3Ddeny") == NULL)
+    return 155;
+  g_autoptr (SoupMessage) guarded_audit_message =
+      wyl_audit_iter_new_request_message (guarded_audit_iter);
+  g_clear_pointer (&body, g_bytes_unref);
+  if (wyl_client_send_message (local_client, guarded_audit_message, &body) !=
+      WYRELOG_E_OK)
+    return 156;
+  if (g_strcmp0 (http.last_session_token, "session-2") != 0)
+    return 157;
+  if (g_strcmp0 (http.last_guard_timestamp, "123") != 0)
+    return 158;
+  if (g_strcmp0 (http.last_guard_loc_class, "public") != 0)
+    return 159;
+  if (g_strcmp0 (http.last_guard_risk, "69") != 0)
+    return 160;
 
   if (wyl_client_mfa_verify (local_client, NULL) == WYRELOG_E_OK)
     return 140;
