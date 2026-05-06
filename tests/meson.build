@@ -447,6 +447,14 @@ check_public_headers = find_program(
 
 test('check-public-headers-no-novelty-tokens', check_public_headers)
 
+check_no_derived_fsm_replay = find_program(
+  '../tools/check-no-derived-fsm-replay.sh',
+)
+
+test('check-no-derived-fsm-replay', check_no_derived_fsm_replay,
+  args : [meson.project_source_root()],
+)
+
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
   if host_machine.system() == 'windows' \
