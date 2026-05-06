@@ -5,6 +5,7 @@
 
 #include "wyrelog/handle.h"
 #include "wyrelog/engine.h"
+#include "wyrelog/audit.h"
 #include "policy/store-private.h"
 
 #ifdef WYL_HAS_AUDIT
@@ -63,6 +64,18 @@ wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
  */
 void wyl_handle_set_login_skip_mfa_allowed (WylHandle * self, gboolean allowed);
 gboolean wyl_handle_get_login_skip_mfa_allowed (WylHandle * self);
+
+/*
+ * Applies a permission-state transition to the handle-owned policy store, then
+ * reloads the engine pair so perm_state/4 and perm_state_fired/7 reflect the
+ * durable state. The policy store commit is the source of truth: if reload
+ * fails, the previous engine pair remains installed and the returned error is
+ * the reload failure.
+ */
+wyrelog_error_t wyl_handle_apply_permission_state_transition (WylHandle * self,
+    const gchar * subject_id, const gchar * perm_id, const gchar * scope,
+    const gchar * event, const WylAuditEvent * audit_event,
+    gint64 * out_event_id);
 
 /*
  * Opens the handle-owned policy engine pair from @template_dir.

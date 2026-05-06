@@ -43,6 +43,9 @@ struct _wyl_role_revoke_req
   gchar *actor_id;
 };
 
+static wyrelog_error_t finish_policy_mutation (WylHandle * handle,
+    const WylAuditEvent * audit_event);
+
 wyl_login_req_t *
 wyl_login_req_new (void)
 {
@@ -460,6 +463,43 @@ update_role_membership_store (WylHandle *handle, const gchar *subject_id,
       wyl_audit_event_get_deny_reason (audit_event),
       wyl_audit_event_get_deny_origin (audit_event),
       wyl_audit_event_get_decision (audit_event));
+}
+
+wyrelog_error_t
+wyl_handle_apply_permission_state_transition (WylHandle *handle,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, const WylAuditEvent *audit_event, gint64 *out_event_id)
+{
+  if (handle == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  if (subject_id == NULL || perm_id == NULL || scope == NULL || event == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (audit_event == NULL) {
+    rc = wyl_policy_store_apply_permission_state_transition (store,
+        subject_id, perm_id, scope, event, out_event_id);
+  } else {
+    g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (audit_event);
+    if (audit_id == NULL)
+      return WYRELOG_E_INTERNAL;
+    rc = wyl_policy_store_apply_permission_state_transition_with_audit (store,
+        subject_id, perm_id, scope, event, out_event_id, audit_id,
+        wyl_audit_event_get_created_at_us (audit_event),
+        wyl_audit_event_get_subject_id (audit_event),
+        wyl_audit_event_get_action (audit_event),
+        wyl_audit_event_get_resource_id (audit_event),
+        wyl_audit_event_get_deny_reason (audit_event),
+        wyl_audit_event_get_deny_origin (audit_event),
+        wyl_audit_event_get_decision (audit_event));
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return finish_policy_mutation (handle, audit_event);
 }
 
 static wyrelog_error_t
