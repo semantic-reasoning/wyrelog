@@ -914,6 +914,27 @@ wyl_handle_engine_set_delta_callback (WylHandle *self, WylDeltaCallback cb,
 }
 
 static wyrelog_error_t
+insert_login_skip_mfa_authz_if_allowed (WylHandle *self,
+    const gchar *subject_id, const gchar *scope)
+{
+  if (g_strcmp0 (scope, WYL_LOGIN_SKIP_MFA_SCOPE) != 0)
+    return WYRELOG_E_OK;
+
+  gboolean allowed = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_subject_has_permission
+      (self->policy_store, subject_id, WYL_LOGIN_SKIP_MFA_PERMISSION,
+      WYL_LOGIN_SKIP_MFA_SCOPE, &allowed);
+  if (rc != WYRELOG_E_OK || !allowed)
+    return rc;
+
+  gint64 row[1];
+  rc = wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "login_skip_mfa_authz", row, 1);
+}
+
+static wyrelog_error_t
 insert_policy_store_role_permission (const gchar *role_id,
     const gchar *perm_id, gpointer user_data)
 {
@@ -959,7 +980,10 @@ insert_policy_store_role_membership (const gchar *subject_id,
   rc = wyl_handle_intern_engine_symbol (self, scope, &row[2]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (self, "member_of", row, 3);
+  rc = wyl_handle_engine_insert (self, "member_of", row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_login_skip_mfa_authz_if_allowed (self, subject_id, scope);
 }
 
 wyrelog_error_t
@@ -997,13 +1021,9 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  if (g_strcmp0 (perm_id, WYL_LOGIN_SKIP_MFA_PERMISSION) == 0
-      && g_strcmp0 (scope, WYL_LOGIN_SKIP_MFA_SCOPE) == 0) {
-    gint64 authz_row[1] = { row[0] };
-    rc = wyl_handle_engine_insert (self, "login_skip_mfa_authz", authz_row, 1);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
+  rc = insert_login_skip_mfa_authz_if_allowed (self, subject_id, scope);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   /* Guarded permissions are granted membership only. Their armed state
    * comes from request-local guard evaluation, not persisted perm_state. */
