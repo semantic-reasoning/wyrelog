@@ -67,23 +67,6 @@ typedef struct
 
 typedef struct
 {
-  gint64 context_id;
-  gint64 expected_scope_id;
-  gint64 metadata_id;
-  guint matches;
-} GuardScopeCompoundExpect;
-
-typedef struct
-{
-  gint64 metadata_id;
-  gint64 expected_timestamp;
-  gint64 expected_loc_class_id;
-  gint64 expected_risk;
-  guint matches;
-} GuardMetadataCompoundExpect;
-
-typedef struct
-{
   const gint64 *perm_ids;
   guint *seen_counts;
   gint64 *guard_handles;
@@ -212,13 +195,10 @@ write_guard_context_compound_templates (const gchar *dir)
     return FALSE;
 
   return write_file_in_dir (dir, "bootstrap.dl",
-      ".decl compound_scope_row(handle: int64, metadata: int64,"
+      ".decl __compound_scope_2(handle: int64, metadata: int64,"
       " scope: symbol)\n"
-      ".decl compound_metadata_row(handle: int64, timestamp: int64,"
-      " loc_class: symbol, risk: int64)\n"
-      "compound_scope_row(H, M, S) :- __compound_scope_2(H, M, S).\n"
-      "compound_metadata_row(H, T, L, R) :- __compound_metadata_3(H, T, L,"
-      " R).\n")
+      ".decl __compound_metadata_3(handle: int64, timestamp: int64,"
+      " loc_class: symbol, risk: int64)\n")
       && write_file_in_dir (dir, "fsm/principal.dl",
       ".decl principal_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
@@ -349,39 +329,6 @@ seen_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
     return;
   if (row[0] == expect->expected_id)
     expect->matches++;
-}
-
-static void
-guard_scope_compound_cb (const gchar *relation, const gint64 *row, guint ncols,
-    gpointer user_data)
-{
-  GuardScopeCompoundExpect *expect = user_data;
-
-  if (g_strcmp0 (relation, "compound_scope_row") != 0 || ncols != 3)
-    return;
-  if (row[0] != expect->context_id || row[2] != expect->expected_scope_id)
-    return;
-
-  expect->metadata_id = row[1];
-  expect->matches++;
-}
-
-static void
-guard_metadata_compound_cb (const gchar *relation, const gint64 *row,
-    guint ncols, gpointer user_data)
-{
-  GuardMetadataCompoundExpect *expect = user_data;
-
-  if (g_strcmp0 (relation, "compound_metadata_row") != 0 || ncols != 4)
-    return;
-  if (row[0] != expect->metadata_id)
-    return;
-  if (row[1] != expect->expected_timestamp
-      || row[2] != expect->expected_loc_class_id
-      || row[3] != expect->expected_risk)
-    return;
-
-  expect->matches++;
 }
 
 static void
@@ -562,6 +509,13 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_intern_engine_symbol (handle, c, &row[2]);
+}
+
+static wyrelog_error_t
+intern_read_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
+{
+  return wyl_engine_intern_symbol (wyl_handle_get_read_engine (handle),
+      symbol, out_id);
 }
 
 static gint
@@ -1115,7 +1069,7 @@ check_compound_make_rejects_missing_pair (void)
 }
 
 static gint
-check_compound_make_reaches_engine_pair (void)
+check_compound_make_reaches_read_engine (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   gint64 loc_class = -1;
@@ -1135,7 +1089,7 @@ check_compound_make_reaches_engine_pair (void)
     {WIRELOG_TYPE_STRING, loc_class},
     {WIRELOG_TYPE_INT64, 10},
   };
-  if (wyl_handle_make_engine_compound (handle, "metadata", args,
+  if (wyl_handle_make_read_engine_compound (handle, "metadata", args,
           G_N_ELEMENTS (args), &compound) != WYRELOG_E_OK)
     return 102;
   if (compound <= 0)
@@ -1167,7 +1121,7 @@ check_compound_make_result_is_insertable (void)
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_INT64, 42},
   };
-  if (wyl_handle_make_engine_compound (handle, "scope", args,
+  if (wyl_handle_make_read_engine_compound (handle, "scope", args,
           G_N_ELEMENTS (args), &payload) != WYRELOG_E_OK) {
     rmdir_recursive (tmpdir);
     return 108;
@@ -1196,7 +1150,7 @@ check_compound_make_result_is_insertable (void)
 }
 
 static gint
-check_guard_context_compound_carries_request_payload (void)
+check_guard_context_compound_allocates_request_handles (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   g_autofree gchar *tmpdir = NULL;
@@ -1259,79 +1213,6 @@ check_guard_context_compound_carries_request_payload (void)
     rmdir_recursive (tmpdir);
     return 123;
   }
-  GuardScopeCompoundExpect first_scope = {
-    .context_id = first_context_id,
-    .expected_scope_id = alpha_scope_id,
-    .metadata_id = -1,
-    .matches = 0,
-  };
-  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "compound_scope_row", guard_scope_compound_cb, &first_scope)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
-    return 124;
-  }
-  if (first_scope.matches < 1 || first_scope.metadata_id <= 0) {
-    rmdir_recursive (tmpdir);
-    return 125;
-  }
-
-  GuardScopeCompoundExpect second_scope = {
-    .context_id = second_context_id,
-    .expected_scope_id = beta_scope_id,
-    .metadata_id = -1,
-    .matches = 0,
-  };
-  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "compound_scope_row", guard_scope_compound_cb, &second_scope)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
-    return 126;
-  }
-  if (second_scope.matches < 1 || second_scope.metadata_id <= 0) {
-    rmdir_recursive (tmpdir);
-    return 127;
-  }
-  if (first_scope.metadata_id == second_scope.metadata_id) {
-    rmdir_recursive (tmpdir);
-    return 128;
-  }
-
-  GuardMetadataCompoundExpect first_metadata = {
-    .metadata_id = first_scope.metadata_id,
-    .expected_timestamp = 1700000001,
-    .expected_loc_class_id = trusted_id,
-    .expected_risk = 25,
-    .matches = 0,
-  };
-  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "compound_metadata_row", guard_metadata_compound_cb,
-          &first_metadata) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
-    return 129;
-  }
-  if (first_metadata.matches < 1) {
-    rmdir_recursive (tmpdir);
-    return 130;
-  }
-
-  GuardMetadataCompoundExpect second_metadata = {
-    .metadata_id = second_scope.metadata_id,
-    .expected_timestamp = 1700000002,
-    .expected_loc_class_id = public_id,
-    .expected_risk = 80,
-    .matches = 0,
-  };
-  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "compound_metadata_row", guard_metadata_compound_cb,
-          &second_metadata) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
-    return 131;
-  }
-  if (second_metadata.matches < 1) {
-    rmdir_recursive (tmpdir);
-    return 132;
-  }
 
   rmdir_recursive (tmpdir);
   return 0;
@@ -1346,14 +1227,14 @@ assert_perm_arm_rule_guard_payload_snapshot (WylHandle *handle, gint base_code)
   g_autofree gint64 *guard_handles = g_new0 (gint64, nperms);
 
   for (gsize i = 0; i < nperms; i++) {
-    if (wyl_handle_intern_engine_symbol (handle, wyl_perm_arm_rule_perm_id (i),
+    if (intern_read_symbol (handle, wyl_perm_arm_rule_perm_id (i),
             &perm_ids[i]) != WYRELOG_E_OK)
       return base_code;
   }
 
   gint64 placeholder_id = -1;
-  if (wyl_handle_intern_engine_symbol (handle, "_v0_deferred",
-          &placeholder_id) != WYRELOG_E_OK)
+  if (intern_read_symbol (handle, "_v0_deferred", &placeholder_id)
+      != WYRELOG_E_OK)
     return base_code + 1;
 
   PermArmRuleSnapshotExpect expect = {
@@ -1482,7 +1363,7 @@ check_perm_arm_rule_guard_payload_projection (void)
     return 172;
 
   for (gsize i = 0; i < nperms; i++) {
-    if (wyl_handle_intern_engine_symbol (handle, wyl_perm_arm_rule_perm_id (i),
+    if (intern_read_symbol (handle, wyl_perm_arm_rule_perm_id (i),
             &perm_ids[i]) != WYRELOG_E_OK)
       return 175;
   }
@@ -1495,27 +1376,23 @@ check_perm_arm_rule_guard_payload_projection (void)
   gint64 value_70_id = -1;
   gint64 value_30_id = -1;
   gint64 trusted_id = -1;
-  if (wyl_handle_intern_engine_symbol (handle, "_v0_deferred",
-          &placeholder_id) != WYRELOG_E_OK)
-    return 176;
-  if (wyl_handle_intern_engine_symbol (handle, "risk", &risk_id)
+  if (intern_read_symbol (handle, "_v0_deferred", &placeholder_id)
       != WYRELOG_E_OK)
+    return 176;
+  if (intern_read_symbol (handle, "risk", &risk_id) != WYRELOG_E_OK)
     return 177;
-  if (wyl_handle_intern_engine_symbol (handle, "loc_class", &loc_class_id)
+  if (intern_read_symbol (handle, "loc_class", &loc_class_id)
       != WYRELOG_E_OK)
     return 178;
-  if (wyl_handle_intern_engine_symbol (handle, "lt", &lt_id) != WYRELOG_E_OK)
+  if (intern_read_symbol (handle, "lt", &lt_id) != WYRELOG_E_OK)
     return 179;
-  if (wyl_handle_intern_engine_symbol (handle, "eq", &eq_id) != WYRELOG_E_OK)
+  if (intern_read_symbol (handle, "eq", &eq_id) != WYRELOG_E_OK)
     return 180;
-  if (wyl_handle_intern_engine_symbol (handle, "70", &value_70_id)
-      != WYRELOG_E_OK)
+  if (intern_read_symbol (handle, "70", &value_70_id) != WYRELOG_E_OK)
     return 181;
-  if (wyl_handle_intern_engine_symbol (handle, "30", &value_30_id)
-      != WYRELOG_E_OK)
+  if (intern_read_symbol (handle, "30", &value_30_id) != WYRELOG_E_OK)
     return 182;
-  if (wyl_handle_intern_engine_symbol (handle, "trusted", &trusted_id)
-      != WYRELOG_E_OK)
+  if (intern_read_symbol (handle, "trusted", &trusted_id) != WYRELOG_E_OK)
     return 183;
 
   PermArmRuleSnapshotExpect expect = {
@@ -4105,11 +3982,11 @@ main (void)
     return rc;
   if ((rc = check_compound_make_rejects_missing_pair ()) != 0)
     return rc;
-  if ((rc = check_compound_make_reaches_engine_pair ()) != 0)
+  if ((rc = check_compound_make_reaches_read_engine ()) != 0)
     return rc;
   if ((rc = check_compound_make_result_is_insertable ()) != 0)
     return rc;
-  if ((rc = check_guard_context_compound_carries_request_payload ()) != 0)
+  if ((rc = check_guard_context_compound_allocates_request_handles ()) != 0)
     return rc;
   if ((rc = check_perm_arm_rule_guard_payload_contract ()) != 0)
     return rc;

@@ -86,35 +86,58 @@ wyl_handle_init (WylHandle *self)
 }
 
 static wyrelog_error_t wyl_handle_make_guard_expr_node_compound (WylHandle *
-    self, const wyl_guard_expr_t * expr, gint64 * out_id);
+    self, WylEngine * engine, const wyl_guard_expr_t * expr, gint64 * out_id);
+
+static wyrelog_error_t
+wyl_handle_intern_symbol_on_engine (WylHandle *self, WylEngine *engine,
+    const gchar *symbol, gboolean cache_symbol, gint64 *out_id)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (engine == NULL || symbol == NULL || out_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_engine_intern_symbol (engine, symbol, out_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (cache_symbol) {
+    gint64 *key = g_new (gint64, 1);
+    *key = *out_id;
+    g_hash_table_replace (self->engine_symbols_by_id, key, g_strdup (symbol));
+  }
+  return WYRELOG_E_OK;
+}
 
 static wyrelog_error_t
 wyl_handle_intern_guard_symbol (WylHandle *self, const gchar *symbol,
-    gint64 *out_id)
+    WylEngine *engine, gint64 *out_id)
 {
   if (symbol == NULL)
     return WYRELOG_E_INVALID;
-  return wyl_handle_intern_engine_symbol (self, symbol, out_id);
+  return wyl_handle_intern_symbol_on_engine (self, engine, symbol,
+      engine == self->read_engine, out_id);
 }
 
 static wyrelog_error_t
 wyl_handle_make_guard_cmp_compound (WylHandle *self,
-    const wyl_guard_expr_t *expr, gint64 *out_id)
+    WylEngine *engine, const wyl_guard_expr_t *expr, gint64 *out_id)
 {
   gint64 field_id = 0;
   wyrelog_error_t rc = wyl_handle_intern_guard_symbol (self,
-      wyl_guard_field_name (expr->u.cmp.field), &field_id);
+      wyl_guard_field_name (expr->u.cmp.field), engine, &field_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 op_id = 0;
   rc = wyl_handle_intern_guard_symbol (self,
-      wyl_guard_op_name (expr->u.cmp.op), &op_id);
+      wyl_guard_op_name (expr->u.cmp.op), engine, &op_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 value_id = 0;
-  rc = wyl_handle_intern_guard_symbol (self, expr->u.cmp.value, &value_id);
+  rc = wyl_handle_intern_guard_symbol (self, expr->u.cmp.value, engine,
+      &value_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -123,56 +146,59 @@ wyl_handle_make_guard_cmp_compound (WylHandle *self,
     {WIRELOG_TYPE_STRING, op_id},
     {WIRELOG_TYPE_STRING, value_id},
   };
-  return wyl_handle_make_engine_compound (self, "guard_cmp", args,
+  return wyl_engine_make_compound (engine, "guard_cmp", args,
       G_N_ELEMENTS (args), out_id);
 }
 
 static wyrelog_error_t
 wyl_handle_make_guard_tag_compound (WylHandle *self,
-    const wyl_guard_expr_t *expr, gint64 *out_id)
+    WylEngine *engine, const wyl_guard_expr_t *expr, gint64 *out_id)
 {
   gint64 atom_id = 0;
-  wyrelog_error_t rc =
-      wyl_handle_intern_guard_symbol (self, expr->u.tag.atom, &atom_id);
+  wyrelog_error_t rc = wyl_handle_intern_guard_symbol (self,
+      expr->u.tag.atom, engine, &atom_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_STRING, atom_id},
   };
-  return wyl_handle_make_engine_compound (self, "guard_tag", args,
+  return wyl_engine_make_compound (engine, "guard_tag", args,
       G_N_ELEMENTS (args), out_id);
 }
 
 static wyrelog_error_t
-wyl_handle_make_guard_unary_compound (WylHandle *self, const gchar *functor,
-    const wyl_guard_expr_t *child, gint64 *out_id)
+wyl_handle_make_guard_unary_compound (WylHandle *self, WylEngine *engine,
+    const gchar *functor, const wyl_guard_expr_t *child, gint64 *out_id)
 {
   gint64 child_id = 0;
   wyrelog_error_t rc =
-      wyl_handle_make_guard_expr_node_compound (self, child, &child_id);
+      wyl_handle_make_guard_expr_node_compound (self, engine, child,
+      &child_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_INT64, child_id},
   };
-  return wyl_handle_make_engine_compound (self, functor, args,
-      G_N_ELEMENTS (args), out_id);
+  return wyl_engine_make_compound (engine, functor, args, G_N_ELEMENTS (args),
+      out_id);
 }
 
 static wyrelog_error_t
-wyl_handle_make_guard_binary_compound (WylHandle *self, const gchar *functor,
-    const wyl_guard_expr_t *left, const wyl_guard_expr_t *right, gint64 *out_id)
+wyl_handle_make_guard_binary_compound (WylHandle *self, WylEngine *engine,
+    const gchar *functor, const wyl_guard_expr_t *left,
+    const wyl_guard_expr_t *right, gint64 *out_id)
 {
   gint64 left_id = 0;
   wyrelog_error_t rc =
-      wyl_handle_make_guard_expr_node_compound (self, left, &left_id);
+      wyl_handle_make_guard_expr_node_compound (self, engine, left, &left_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 right_id = 0;
-  rc = wyl_handle_make_guard_expr_node_compound (self, right, &right_id);
+  rc = wyl_handle_make_guard_expr_node_compound (self, engine, right,
+      &right_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -180,12 +206,12 @@ wyl_handle_make_guard_binary_compound (WylHandle *self, const gchar *functor,
     {WIRELOG_TYPE_INT64, left_id},
     {WIRELOG_TYPE_INT64, right_id},
   };
-  return wyl_handle_make_engine_compound (self, functor, args,
-      G_N_ELEMENTS (args), out_id);
+  return wyl_engine_make_compound (engine, functor, args, G_N_ELEMENTS (args),
+      out_id);
 }
 
 static wyrelog_error_t
-wyl_handle_make_guard_expr_node_compound (WylHandle *self,
+wyl_handle_make_guard_expr_node_compound (WylHandle *self, WylEngine *engine,
     const wyl_guard_expr_t *expr, gint64 *out_id)
 {
   if (out_id != NULL)
@@ -195,17 +221,17 @@ wyl_handle_make_guard_expr_node_compound (WylHandle *self,
 
   switch (expr->kind) {
     case WYL_GUARD_KIND_CMP:
-      return wyl_handle_make_guard_cmp_compound (self, expr, out_id);
+      return wyl_handle_make_guard_cmp_compound (self, engine, expr, out_id);
     case WYL_GUARD_KIND_TAG:
-      return wyl_handle_make_guard_tag_compound (self, expr, out_id);
+      return wyl_handle_make_guard_tag_compound (self, engine, expr, out_id);
     case WYL_GUARD_KIND_NOT:
-      return wyl_handle_make_guard_unary_compound (self, "guard_not",
+      return wyl_handle_make_guard_unary_compound (self, engine, "guard_not",
           expr->u.unary.child, out_id);
     case WYL_GUARD_KIND_AND:
-      return wyl_handle_make_guard_binary_compound (self, "guard_and",
+      return wyl_handle_make_guard_binary_compound (self, engine, "guard_and",
           expr->u.binop.left, expr->u.binop.right, out_id);
     case WYL_GUARD_KIND_OR:
-      return wyl_handle_make_guard_binary_compound (self, "guard_or",
+      return wyl_handle_make_guard_binary_compound (self, engine, "guard_or",
           expr->u.binop.left, expr->u.binop.right, out_id);
     case WYL_GUARD_KIND_LAST_:
     default:
@@ -214,36 +240,56 @@ wyl_handle_make_guard_expr_node_compound (WylHandle *self,
 }
 
 static wyrelog_error_t
-wyl_handle_make_guard_expr_compound (WylHandle *self,
+wyl_handle_make_guard_expr_compound (WylHandle *self, WylEngine *engine,
     const wyl_guard_expr_t *expr, gint64 *out_id)
 {
   gint64 root_id = 0;
   wyrelog_error_t rc =
-      wyl_handle_make_guard_expr_node_compound (self, expr, &root_id);
+      wyl_handle_make_guard_expr_node_compound (self, engine, expr, &root_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_INT64, root_id},
   };
-  return wyl_handle_make_engine_compound (self, "guard", args,
-      G_N_ELEMENTS (args), out_id);
+  return wyl_engine_make_compound (engine, "guard", args, G_N_ELEMENTS (args),
+      out_id);
+}
+
+static wyrelog_error_t
+wyl_handle_seed_perm_arm_rule_on_engine (WylHandle *self, WylEngine *engine,
+    const gchar *perm_id, const wyl_guard_expr_t *guard)
+{
+  gint64 row[2];
+  wyrelog_error_t rc = wyl_handle_intern_symbol_on_engine (self, engine,
+      perm_id, engine == self->read_engine, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_handle_make_guard_expr_compound (self, engine, guard, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_engine_insert (engine, "perm_arm_rule", row, 2);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (engine == self->delta_engine)
+    return wyl_engine_step (engine);
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
 wyl_handle_seed_perm_arm_rules (WylHandle *self)
 {
   for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {
-    gint64 row[2];
     const wyl_guard_expr_t *guard = wyl_perm_arm_rule_expr (i);
-    wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self,
-        wyl_perm_arm_rule_perm_id (i), &row[0]);
+    const gchar *perm_id = wyl_perm_arm_rule_perm_id (i);
+    wyrelog_error_t rc = wyl_handle_seed_perm_arm_rule_on_engine (self,
+        self->read_engine, perm_id, guard);
     if (rc != WYRELOG_E_OK)
       return rc;
-    rc = wyl_handle_make_guard_expr_compound (self, guard, &row[1]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_engine_insert (self, "perm_arm_rule", row, 2);
+    rc = wyl_handle_seed_perm_arm_rule_on_engine (self, self->delta_engine,
+        perm_id, guard);
     if (rc != WYRELOG_E_OK)
       return rc;
   }
@@ -808,11 +854,25 @@ wyl_handle_make_read_engine_compound (WylHandle *self, const gchar *functor,
     return WYRELOG_E_INVALID;
   if (nargs == 0 || nargs > G_MAXUINT32)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL)
+  if (self->read_engine == NULL || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  return wyl_engine_make_compound (self->read_engine, functor, args, nargs,
+  gint64 functor_id = 0;
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self, functor,
+      &functor_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_engine_make_compound (self->read_engine, functor, args, nargs,
       out_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Keep the handle-owned engines' intern and side-arena streams aligned.
+   * The returned handle remains read-engine-local and request-scoped. */
+  gint64 delta_id = 0;
+  return wyl_engine_make_compound (self->delta_engine, functor, args, nargs,
+      &delta_id);
 }
 
 wyrelog_error_t
