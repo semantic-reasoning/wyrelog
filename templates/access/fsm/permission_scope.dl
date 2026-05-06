@@ -21,6 +21,10 @@
 //   perm_window_guard(perm, window)              -- guarded permission
 //                                                   requires a named
 //                                                   timestamp window
+//   guard_row(handle, root)                      -- guard compound payload
+//                                                   projections
+//   guard_cmp_row(handle, field, op, value)
+//   guard_and_row(handle, left, right)
 //   context_now(user, scope, ctx)                -- scope(metadata(ts,
 //                                                   loc_class, risk),
 //                                                   scope) activation
@@ -41,6 +45,9 @@
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: int64)
 .decl perm_window_guard(perm: symbol, window: symbol)
+.decl guard_row(handle: int64, root: int64)
+.decl guard_cmp_row(handle: int64, field: symbol, op: symbol, value: symbol)
+.decl guard_and_row(handle: int64, left: int64, right: int64)
 .decl context_now(user: symbol, scope: symbol, ctx: scope/2 side)
 .decl guard_context(ctx: scope/2 side, user: symbol, scope: symbol,
     timestamp: int64, loc_class: symbol, risk: int64)
@@ -66,6 +73,9 @@
 
 perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).
 perm_window_guard_observed(P, W) :- perm_window_guard(P, W).
+guard_row(H, R) :- __compound_guard_1(H, R).
+guard_cmp_row(H, F, O, V) :- __compound_guard_cmp_3(H, F, O, V).
+guard_and_row(H, L, R) :- __compound_guard_and_2(H, L, R).
 
 // --- guard context field views ---------------------------------------
 

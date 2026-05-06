@@ -48,12 +48,26 @@ wyl_engine_tuple_trampoline (const char *relation, const int64_t *row,
   cookie->cb (relation, (const gint64 *) row, (guint) ncols, cookie->user_data);
 }
 
+static gboolean
+relation_emits_delta_callback (const char *relation)
+{
+  if (g_strcmp0 (relation, "guard_row") == 0
+      || g_strcmp0 (relation, "guard_cmp_row") == 0
+      || g_strcmp0 (relation, "guard_and_row") == 0)
+    return FALSE;
+
+  return TRUE;
+}
+
 static void
 wyl_engine_delta_trampoline (const char *relation, const int64_t *row,
     uint32_t ncols, int32_t diff, void *user)
 {
   const WylDeltaCookie *cookie = user;
   WylDeltaKind kind;
+
+  if (!relation_emits_delta_callback (relation))
+    return;
 
   if (diff == 1) {
     kind = WYL_DELTA_INSERT;
