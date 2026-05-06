@@ -17,6 +17,7 @@ typedef struct
   gchar *last_user;
   gchar *last_perm;
   gchar *last_session_token;
+  gchar *last_password;
   gchar *last_guard_timestamp;
   gchar *last_guard_loc_class;
   gchar *last_guard_risk;
@@ -60,18 +61,27 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_user);
   g_free (http->last_perm);
   g_free (http->last_session_token);
+  g_free (http->last_password);
   g_free (http->last_guard_timestamp);
   g_free (http->last_guard_loc_class);
   g_free (http->last_guard_risk);
   http->last_method = g_strdup (soup_server_message_get_method (msg));
   http->last_path = g_strdup (path);
-  http->last_user =
-      query != NULL ? g_strdup (g_hash_table_lookup (query, "user")) : NULL;
+  if (query != NULL) {
+    const gchar *user = g_hash_table_lookup (query, "user");
+    if (user == NULL)
+      user = g_hash_table_lookup (query, "username");
+    http->last_user = g_strdup (user);
+  } else {
+    http->last_user = NULL;
+  }
   http->last_perm =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "perm")) : NULL;
   http->last_session_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "session_token")) : NULL;
+  http->last_password =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "password")) : NULL;
   http->last_guard_timestamp =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "guard_timestamp")) : NULL;
@@ -181,6 +191,33 @@ main (void)
   const gchar *body_data = g_bytes_get_data (body, &body_size);
   if (body_size != 2 || memcmp (body_data, "[]", 2) != 0)
     return 26;
+
+  if (wyl_client_login (NULL, "alice", NULL) != WYRELOG_E_INVALID)
+    return 38;
+  if (wyl_client_login (local_client, NULL, NULL) != WYRELOG_E_INVALID)
+    return 39;
+  if (wyl_client_login (local_client, "", NULL) != WYRELOG_E_INVALID)
+    return 40;
+  if (wyl_client_login (local_client, "alice", "secret") != WYRELOG_E_INVALID)
+    return 41;
+
+  http.body = "{\"session_token\":\"session-1\",\"username\":\"alice\","
+      "\"principal_state\":\"mfa_required\",\"session_state\":\"active\"}";
+  if (wyl_client_login (local_client, "alice", NULL) != WYRELOG_E_OK)
+    return 42;
+  if (g_strcmp0 (http.last_method, "POST") != 0)
+    return 43;
+  if (g_strcmp0 (http.last_path, "/auth/login") != 0)
+    return 44;
+  if (g_strcmp0 (http.last_user, "alice") != 0)
+    return 45;
+  if (http.last_password != NULL)
+    return 46;
+
+  http.body = "{\"session_token\":\"session-1\"}";
+  if (wyl_client_login (local_client, "alice", NULL) != WYRELOG_E_IO)
+    return 47;
+  http.body = "[]";
 
   gint decision = -1;
   if (wyl_client_decide (NULL, "alice", "read", "doc/42", &decision)
@@ -365,6 +402,7 @@ main (void)
   g_clear_pointer (&http.last_user, g_free);
   g_clear_pointer (&http.last_perm, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
+  g_clear_pointer (&http.last_password, g_free);
   g_clear_pointer (&http.last_guard_timestamp, g_free);
   g_clear_pointer (&http.last_guard_loc_class, g_free);
   g_clear_pointer (&http.last_guard_risk, g_free);

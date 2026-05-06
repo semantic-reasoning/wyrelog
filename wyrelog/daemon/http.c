@@ -76,6 +76,22 @@ build_decide_json (const wyl_decide_resp_t *resp)
   return g_string_free (g_steal_pointer (&json), FALSE);
 }
 
+static gchar *
+build_login_json (const gchar *session_token, const gchar *username,
+    const gchar *principal_state)
+{
+  g_autoptr (GString) json = g_string_new ("{");
+
+  g_string_append (json, "\"session_token\":");
+  append_json_string (json, session_token);
+  g_string_append (json, ",\"username\":");
+  append_json_string (json, username);
+  g_string_append (json, ",\"principal_state\":");
+  append_json_string (json, principal_state);
+  g_string_append (json, ",\"session_state\":\"active\"}");
+  return g_string_free (g_steal_pointer (&json), FALSE);
+}
+
 static void
 set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
 {
@@ -170,6 +186,71 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 static void
+login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
+    GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *username = NULL;
+  const gchar *skip_mfa = NULL;
+  const gchar *password = NULL;
+  if (query != NULL) {
+    username = g_hash_table_lookup (query, "username");
+    skip_mfa = g_hash_table_lookup (query, "skip_mfa");
+    password = g_hash_table_lookup (query, "password");
+  }
+  if (username == NULL || username[0] == '\0') {
+    set_json_error (msg, 400, "invalid_login_request");
+    return;
+  }
+  if (password != NULL) {
+    set_json_error (msg, 400, "invalid_login_request");
+    return;
+  }
+  if (skip_mfa != NULL) {
+    set_json_error (msg, 400, "invalid_login_request");
+    return;
+  }
+
+  WylHandle *handle = user_data;
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, username);
+
+  g_autoptr (WylSession) session = NULL;
+  wyrelog_error_t rc = wyl_session_login (handle, login, &session);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_login_request");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 403, "login_denied");
+    return;
+  }
+  if (rc != WYRELOG_E_OK || session == NULL) {
+    set_json_error (msg, 500, "login_failed");
+    return;
+  }
+
+  g_autofree gchar *session_token = wyl_session_dup_id_string (session);
+  if (session_token == NULL) {
+    set_json_error (msg, 500, "login_failed");
+    return;
+  }
+
+  g_autofree gchar *body =
+      build_login_json (session_token, username, "mfa_required");
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
+}
+
+static void
 decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
 {
@@ -257,6 +338,7 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
 
   SoupServer *server = soup_server_new (NULL, NULL);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
+  soup_server_add_handler (server, "/auth/login", login_handler, handle, NULL);
   soup_server_add_handler (server, "/decide", decide_handler, handle, NULL);
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
       handle, NULL);
