@@ -622,6 +622,13 @@ check_policy_store_audit_replay_loads_runtime_query (void)
     g_object_unref (handle);
     return 172;
   }
+  static const gchar *full_replay_id = "01890c10-2e3f-7000-8000-000000000012";
+  if (wyl_policy_store_append_audit_event (store, full_replay_id, 790,
+          "replay-user", "audit.replay.full", "replay-full-resource",
+          "not_armed", "perm_state", WYL_DECISION_DENY) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 205;
+  }
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 173;
@@ -673,6 +680,34 @@ check_policy_store_audit_replay_loads_runtime_query (void)
     rc = 180;
   else if (g_strstr_len (json, -1, "\"decision\":1") == NULL)
     rc = 181;
+  if (rc != 0) {
+    g_object_unref (handle);
+    return rc;
+  }
+
+  g_clear_pointer (&json, g_free);
+  if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+          "action(\"audit.replay.full\")", &json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 206;
+  }
+
+  if (g_strstr_len (json, -1,
+          "\"id\":\"01890c10-2e3f-7000-8000-000000000012\"") == NULL)
+    rc = 207;
+  else if (g_strstr_len (json, -1, "\"created_at_us\":790") == NULL)
+    rc = 208;
+  else if (g_strstr_len (json, -1, "\"subject_id\":\"replay-user\"") == NULL)
+    rc = 209;
+  else if (g_strstr_len (json, -1,
+          "\"resource_id\":\"replay-full-resource\"") == NULL)
+    rc = 210;
+  else if (g_strstr_len (json, -1, "\"deny_reason\":\"not_armed\"") == NULL)
+    rc = 211;
+  else if (g_strstr_len (json, -1, "\"deny_origin\":\"perm_state\"") == NULL)
+    rc = 212;
+  else if (g_strstr_len (json, -1, "\"decision\":0") == NULL)
+    rc = 213;
 
   g_object_unref (handle);
   return rc;
