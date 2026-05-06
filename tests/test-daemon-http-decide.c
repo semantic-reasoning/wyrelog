@@ -7,6 +7,7 @@
 #endif
 
 #include "daemon/http.h"
+#include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -377,6 +378,47 @@ extract_json_string (const gchar *body, const gchar *name)
 }
 
 static gint
+verify_login_access_token (const gchar *body, const gchar *session_token,
+    const gchar *username, const gchar *principal_state, SoupServer *server)
+{
+  g_autofree gchar *access_token = extract_json_string (body, "access_token");
+  if (access_token == NULL)
+    return 530;
+
+  guint8 secret[32];
+  if (wyl_daemon_http_copy_access_token_secret (server, secret, sizeof secret)
+      != WYRELOG_E_OK)
+    return 531;
+
+  g_autoptr (GBytes) payload = NULL;
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  wyrelog_error_t rc = wyl_jwt_verify_hs256_access_token (access_token, secret,
+      sizeof secret, "wyrelogd", "wyrelog-client", now, &payload);
+  memset (secret, 0, sizeof secret);
+  if (rc != WYRELOG_E_OK)
+    return 532;
+
+  gsize payload_len = 0;
+  const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
+  g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
+  g_autofree gchar *expected_sub = g_strdup_printf ("\"sub\":\"%s\"",
+      username);
+  g_autofree gchar *expected_state =
+      g_strdup_printf ("\"principal_state_at_issue\":\"%s\"",
+      principal_state);
+  g_autofree gchar *expected_session =
+      g_strdup_printf ("\"session_id\":\"%s\"", session_token);
+  if (strstr (payload_text, expected_sub) == NULL ||
+      strstr (payload_text, expected_state) == NULL ||
+      strstr (payload_text, expected_session) == NULL)
+    return 533;
+  g_autofree gchar *jti = extract_json_string (payload_text, "jti");
+  if (jti == NULL || g_strcmp0 (jti, session_token) == 0)
+    return 534;
+  return 0;
+}
+
+static gint
 check_raw_login_contract (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
@@ -427,6 +469,14 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       strstr (body, "\"session_token\":\"") == NULL ||
       strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
     return 485;
+  g_autofree gchar *authenticated_session_token =
+      extract_json_string (body, "session_token");
+  if (authenticated_session_token == NULL)
+    return 486;
+  rc = verify_login_access_token (body, authenticated_session_token,
+      "login-user", "authenticated", server);
+  if (rc != 0)
+    return rc;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
@@ -435,7 +485,8 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return rc;
   if (status != 200 ||
       strstr (body, "\"session_token\":\"") == NULL ||
-      strstr (body, "\"principal_state\":\"mfa_required\"") == NULL)
+      strstr (body, "\"principal_state\":\"mfa_required\"") == NULL ||
+      strstr (body, "\"access_token\"") != NULL)
     return 474;
   g_clear_pointer (&body, g_free);
 

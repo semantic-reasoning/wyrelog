@@ -3,18 +3,29 @@
 
 #ifdef WYL_HAS_DAEMON_HTTP
 #include <errno.h>
+#include <sodium.h>
 #include <string.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
+
+#define WYL_DAEMON_JWT_ISSUER "wyrelogd"
+#define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
+#define WYL_DAEMON_JWT_KEY_LEN 32
 
 typedef struct
 {
   WylHandle *handle;
+  guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
+  gboolean access_token_secret_ready;
   GHashTable *sessions_by_token;
   GMutex lock;
 } WylDaemonHttpContext;
+
+static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
 
 static void
 wyl_daemon_http_context_free (gpointer data)
@@ -24,6 +35,7 @@ wyl_daemon_http_context_free (gpointer data)
   if (ctx == NULL)
     return;
 
+  sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   g_hash_table_unref (ctx->sessions_by_token);
   g_mutex_clear (&ctx->lock);
   g_free (ctx);
@@ -35,11 +47,34 @@ wyl_daemon_http_context_new (WylHandle *handle)
   WylDaemonHttpContext *ctx = g_new0 (WylDaemonHttpContext, 1);
 
   ctx->handle = handle;
+  if (sodium_init () >= 0) {
+    randombytes_buf (ctx->access_token_secret, sizeof ctx->access_token_secret);
+    ctx->access_token_secret_ready = TRUE;
+  }
   ctx->sessions_by_token =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
   g_mutex_init (&ctx->lock);
   return ctx;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_copy_access_token_secret (SoupServer *server,
+    guint8 *out_secret, gsize out_len)
+{
+  if (out_secret == NULL || out_len != WYL_DAEMON_JWT_KEY_LEN)
+    return WYRELOG_E_INVALID;
+
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  if (!ctx->access_token_secret_ready)
+    return WYRELOG_E_INTERNAL;
+
+  memcpy (out_secret, ctx->access_token_secret, WYL_DAEMON_JWT_KEY_LEN);
+  return WYRELOG_E_OK;
+}
+#endif
 
 static gboolean
 wyl_daemon_http_context_store_session (WylDaemonHttpContext *ctx,
@@ -153,7 +188,7 @@ build_decide_json (const wyl_decide_resp_t *resp)
 
 static gchar *
 build_login_json (const gchar *session_token, const gchar *username,
-    const gchar *principal_state)
+    const gchar *principal_state, const gchar *access_token)
 {
   g_autoptr (GString) json = g_string_new ("{");
 
@@ -163,8 +198,72 @@ build_login_json (const gchar *session_token, const gchar *username,
   append_json_string (json, username);
   g_string_append (json, ",\"principal_state\":");
   append_json_string (json, principal_state);
-  g_string_append (json, ",\"session_state\":\"active\"}");
+  g_string_append (json, ",\"session_state\":\"active\"");
+  if (access_token != NULL) {
+    g_string_append (json, ",\"access_token\":");
+    append_json_string (json, access_token);
+  }
+  g_string_append_c (json, '}');
   return g_string_free (g_steal_pointer (&json), FALSE);
+}
+
+static wyrelog_error_t
+copy_access_token_secret (WylDaemonHttpContext *ctx,
+    guint8 out_secret[WYL_DAEMON_JWT_KEY_LEN])
+{
+  if (ctx == NULL || out_secret == NULL)
+    return WYRELOG_E_INVALID;
+  if (!ctx->access_token_secret_ready)
+    return WYRELOG_E_INTERNAL;
+  memcpy (out_secret, ctx->access_token_secret, WYL_DAEMON_JWT_KEY_LEN);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
+    const gchar *username, const gchar *principal_state, WylSession *session,
+    gchar **out_token)
+{
+  if (out_token == NULL)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+  if (session_token == NULL || username == NULL || principal_state == NULL ||
+      session == NULL)
+    return WYRELOG_E_INVALID;
+
+  guint8 secret[WYL_DAEMON_JWT_KEY_LEN];
+  wyrelog_error_t rc = copy_access_token_secret (ctx, secret);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_id_t token_id;
+  rc = wyl_id_new (&token_id);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (secret, sizeof secret);
+    return rc;
+  }
+  gchar token_id_buf[WYL_ID_STRING_BUF];
+  rc = wyl_id_format (&token_id, token_id_buf, sizeof token_id_buf);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (secret, sizeof secret);
+    return rc;
+  }
+
+  gint64 issued_at = wyl_session_get_created_at_us (session) / G_USEC_PER_SEC;
+  wyl_jwt_issue_input_t input = {
+    .jti = token_id_buf,
+    .subject = username,
+    .issuer = WYL_DAEMON_JWT_ISSUER,
+    .audience = WYL_DAEMON_JWT_AUDIENCE,
+    .tenant = "__wr_default",
+    .principal_state_at_issue = principal_state,
+    .session_id = session_token,
+    .issued_at = issued_at,
+    .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
+  };
+  rc = wyl_jwt_sign_hs256 (&input, secret, sizeof secret, out_token);
+  sodium_memzero (secret, sizeof secret);
+  return rc;
 }
 
 static void
@@ -619,13 +718,25 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 500, "login_failed");
     return;
   }
+  const gchar *principal_state =
+      skip_mfa_requested ? "authenticated" : "mfa_required";
+  g_autofree gchar *access_token = NULL;
+  if (skip_mfa_requested) {
+    rc = issue_login_access_token (ctx, session_token, username,
+        principal_state, session, &access_token);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "login_failed");
+      return;
+    }
+  }
+
   if (!wyl_daemon_http_context_store_session (ctx, session_token, session)) {
     set_json_error (msg, 500, "login_failed");
     return;
   }
 
   g_autofree gchar *body = build_login_json (session_token, username,
-      skip_mfa_requested ? "authenticated" : "mfa_required");
+      principal_state, access_token);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
