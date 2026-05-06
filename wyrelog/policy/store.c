@@ -8,6 +8,57 @@ struct wyl_policy_store_t
   sqlite3 *db;
 };
 
+typedef struct
+{
+  const gchar *id;
+  const gchar *name;
+} BuiltinRole;
+
+typedef struct
+{
+  const gchar *id;
+  const gchar *name;
+  const gchar *klass;
+} BuiltinPermission;
+
+static const BuiltinRole builtin_roles[] = {
+  {"wr.system_admin", "system admin"},
+  {"wr.auditor", "auditor"},
+  {"wr.system_agent", "system agent"},
+  {"wr.break_glass", "break glass"},
+  {"wr.service_admin", "service admin"},
+  {"wr.operator", "operator"},
+  {"wr.analyst", "analyst"},
+  {"wr.viewer", "viewer"},
+  {"wr.svc_agent", "service agent"},
+  {"wr.security_officer", "security officer"},
+};
+
+static const BuiltinPermission builtin_permissions[] = {
+  {"wr.sys.admin", "system admin", "critical"},
+  {"wr.sys.key_rotate", "system key rotate", "critical"},
+  {"wr.sys.merkle_seal", "system merkle seal", "critical"},
+  {"wr.sys.reload_template", "system template reload", "critical"},
+  {"wr.policy.read", "policy read", "sensitive"},
+  {"wr.policy.write", "policy write", "critical"},
+  {"wr.policy.grant_role", "policy role grant", "critical"},
+  {"wr.stream.read", "stream read", "basic"},
+  {"wr.stream.write_reserved", "reserved stream write", "critical"},
+  {"wr.stream.list", "stream list", "basic"},
+  {"wr.svc.admin", "service admin", "critical"},
+  {"wr.svc.reload", "service reload", "sensitive"},
+  {"wr.svc.flush_cache", "service cache flush", "sensitive"},
+  {"wr.svc.grant_role", "service role grant", "critical"},
+  {"wr.svc.freeze", "service freeze", "critical"},
+  {"wr.svc.unfreeze", "service unfreeze", "critical"},
+  {"wr.svc.read_decision", "service decision read", "basic"},
+  {"wr.explain.read", "explanation read", "sensitive"},
+  {"wr.explain.read_sensitive", "sensitive explanation read", "sensitive"},
+  {"wr.audit.read", "audit read", "sensitive"},
+  {"wr.audit.explain", "audit explanation read", "sensitive"},
+  {"wr.audit.write", "audit write", "critical"},
+};
+
 static wyrelog_error_t
 exec_sql (sqlite3 *db, const gchar *sql)
 {
@@ -85,6 +136,79 @@ query_has_rows (sqlite3 *db, const gchar *sql, gboolean *out_has_rows)
 
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+seed_builtin_roles (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT OR IGNORE INTO roles "
+      "  (role_id, role_name, description, created_at, modified_at) "
+      "VALUES (?, ?, 'built-in', unixepoch(), unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (builtin_roles); i++) {
+    sqlite3_reset (stmt);
+    sqlite3_clear_bindings (stmt);
+    if ((rc = bind_text (stmt, 1, builtin_roles[i].id)) != WYRELOG_E_OK
+        || (rc = bind_text (stmt, 2, builtin_roles[i].name))
+        != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+    if (sqlite3_step (stmt) != SQLITE_DONE) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+seed_builtin_permissions (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT OR IGNORE INTO permissions "
+      "  (perm_id, perm_name, class, created_at) "
+      "VALUES (?, ?, ?, unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (builtin_permissions); i++) {
+    sqlite3_reset (stmt);
+    sqlite3_clear_bindings (stmt);
+    if ((rc = bind_text (stmt, 1, builtin_permissions[i].id)) != WYRELOG_E_OK
+        || (rc = bind_text (stmt, 2, builtin_permissions[i].name))
+        != WYRELOG_E_OK
+        || (rc = bind_text (stmt, 3, builtin_permissions[i].klass))
+        != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+    if (sqlite3_step (stmt) != SQLITE_DONE) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+seed_builtin_catalog (sqlite3 *db)
+{
+  wyrelog_error_t rc = seed_builtin_roles (db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return seed_builtin_permissions (db);
 }
 
 wyrelog_error_t
@@ -329,7 +453,10 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
 
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
-  return exec_sql (store->db, ddl);
+  wyrelog_error_t rc = exec_sql (store->db, ddl);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return seed_builtin_catalog (store->db);
 }
 
 wyrelog_error_t

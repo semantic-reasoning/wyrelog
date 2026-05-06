@@ -213,6 +213,81 @@ check_handle_owns_policy_store (void)
   return 0;
 }
 
+static gint
+count_rows (wyl_policy_store_t *store, const gchar *sql, gint *out_count)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
+          NULL) != SQLITE_OK)
+    return 1;
+
+  int rc = sqlite3_step (stmt);
+  if (rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return 2;
+  }
+
+  *out_count = sqlite3_column_int (stmt, 0);
+  sqlite3_finalize (stmt);
+  return 0;
+}
+
+static gint
+check_store_seeds_builtin_catalog (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 200;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 201;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_role_exists (store, "wr.auditor", &exists)
+      != WYRELOG_E_OK)
+    return 202;
+  if (!exists)
+    return 203;
+  if (wyl_policy_store_permission_exists (store, "wr.audit.read", &exists)
+      != WYRELOG_E_OK)
+    return 204;
+  if (!exists)
+    return 205;
+
+  gint matches = 0;
+  if (count_rows (store, "SELECT COUNT(*) FROM roles "
+          "WHERE role_id = 'wr.auditor';", &matches) != 0)
+    return 206;
+  if (matches != 1)
+    return 207;
+
+  if (count_rows (store, "SELECT COUNT(*) FROM permissions "
+          "WHERE perm_id = 'wr.audit.read';", &matches) != 0)
+    return 208;
+  if (matches != 1)
+    return 209;
+
+  if (wyl_policy_store_upsert_role (store, "site.local-admin",
+          "local admin") != WYRELOG_E_OK)
+    return 210;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 211;
+  if (wyl_policy_store_role_exists (store, "site.local-admin", &exists)
+      != WYRELOG_E_OK)
+    return 212;
+  if (!exists)
+    return 213;
+
+  if (count_rows (store, "SELECT COUNT(*) FROM roles "
+          "WHERE role_id = 'wr.auditor';", &matches) != 0)
+    return 214;
+  if (matches != 1)
+    return 215;
+
+  return 0;
+}
+
 typedef struct
 {
   const gchar *subject_id;
@@ -1403,6 +1478,8 @@ main (void)
   if ((rc = check_store_sets_deployment_mode ()) != 0)
     return rc;
   if ((rc = check_handle_owns_policy_store ()) != 0)
+    return rc;
+  if ((rc = check_store_seeds_builtin_catalog ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_permission ()) != 0)
     return rc;
