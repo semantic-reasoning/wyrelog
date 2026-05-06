@@ -14,6 +14,7 @@ struct _WylAuditIter
   WylClient *client;
   gchar *query_filter;
   gchar *session_token;
+  gchar *access_token;
   gboolean has_guard_context;
   gint64 guard_timestamp;
   gchar *guard_loc_class;
@@ -36,6 +37,7 @@ wyl_audit_iter_finalize (GObject *object)
   g_clear_object (&self->current_event);
   g_free (self->query_filter);
   g_free (self->session_token);
+  g_free (self->access_token);
   g_free (self->guard_loc_class);
 
   G_OBJECT_CLASS (wyl_audit_iter_parent_class)->finalize (object);
@@ -89,11 +91,13 @@ wyl_client_audit_query_with_guard_context (WylClient *client,
   g_autofree gchar *session_token = wyl_client_dup_session_token (client);
   if (session_token == NULL || session_token[0] == '\0')
     return WYRELOG_E_INVALID;
+  g_autofree gchar *access_token = wyl_client_dup_access_token (client);
 
   WylAuditIter *iter = g_object_new (WYL_TYPE_AUDIT_ITER, NULL);
   iter->client = g_object_ref (client);
   iter->query_filter = g_strdup (query_filter);
   iter->session_token = g_steal_pointer (&session_token);
+  iter->access_token = g_steal_pointer (&access_token);
   iter->has_guard_context = TRUE;
   iter->guard_timestamp = guard_timestamp;
   iter->guard_loc_class = g_strdup (guard_loc_class);
@@ -121,14 +125,22 @@ wyl_audit_iter_dup_request_uri (const WylAuditIter *iter)
   g_autoptr (GString) query = g_string_new (NULL);
 
   if (iter->has_guard_context) {
-    g_autofree gchar *escaped_session =
-        g_uri_escape_string (iter->session_token, NULL, TRUE);
     g_autofree gchar *escaped_loc =
         g_uri_escape_string (iter->guard_loc_class, NULL, TRUE);
-    g_string_append_printf (query,
-        "session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
-        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-        escaped_session, iter->guard_timestamp, escaped_loc, iter->guard_risk);
+    if (iter->access_token == NULL) {
+      g_autofree gchar *escaped_session =
+          g_uri_escape_string (iter->session_token, NULL, TRUE);
+      g_string_append_printf (query,
+          "session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+          escaped_session, iter->guard_timestamp, escaped_loc,
+          iter->guard_risk);
+    } else {
+      g_string_append_printf (query,
+          "guard_timestamp=%" G_GINT64_FORMAT
+          "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+          iter->guard_timestamp, escaped_loc, iter->guard_risk);
+    }
   }
 
   if (iter->query_filter == NULL || iter->query_filter[0] == '\0') {
@@ -152,7 +164,14 @@ wyl_audit_iter_new_request_message (WylAuditIter *iter)
   g_return_val_if_fail (WYL_IS_AUDIT_ITER (iter), NULL);
 
   g_autofree gchar *request_uri = wyl_audit_iter_dup_request_uri (iter);
-  return soup_message_new ("GET", request_uri);
+  SoupMessage *message = soup_message_new ("GET", request_uri);
+  if (message != NULL && iter->access_token != NULL) {
+    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+        iter->access_token);
+    soup_message_headers_replace (soup_message_get_request_headers (message),
+        "Authorization", authorization);
+  }
+  return message;
 }
 
 WylAuditEvent *

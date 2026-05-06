@@ -66,9 +66,9 @@ wyrelog_error_t wyl_client_decide_with_guard_context (WylClient * client,
 wyrelog_error_t wyl_client_audit_query (WylClient * client,
     const gchar * query_filter, WylAuditIter ** out_iter);
 /*
- * Builds an audit query that carries the current login session token and a
- * request guard context. Daemons may require this form for guarded audit read
- * authorization.
+ * Builds an audit query that carries the current guarded credential and a
+ * request guard context. The client prefers bearer access-token auth when
+ * available and falls back to the current login session token.
  */
 wyrelog_error_t wyl_client_audit_query_with_guard_context (WylClient * client,
     const gchar * query_filter,
