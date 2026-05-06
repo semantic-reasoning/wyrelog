@@ -150,6 +150,82 @@ check_unsigned_segments_are_base64url (void)
   return 0;
 }
 
+static gint
+check_hs256_token_signature_round_trip (void)
+{
+  static const guint8 secret[] = "test-secret";
+  g_autofree gchar *token = NULL;
+  if (wyl_jwt_sign_hs256 (&valid_input, secret, strlen ((const gchar *) secret),
+          &token) != WYRELOG_E_OK)
+    return 70;
+
+  g_auto (GStrv) parts = g_strsplit (token, ".", 0);
+  if (parts[0] == NULL || parts[1] == NULL || parts[2] == NULL ||
+      parts[3] != NULL)
+    return 71;
+  if (!is_base64url_text (parts[0]) || !is_base64url_text (parts[1]) ||
+      !is_base64url_text (parts[2]))
+    return 72;
+
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_signature (token, secret,
+          strlen ((const gchar *) secret), &payload) != WYRELOG_E_OK)
+    return 73;
+  gsize payload_len = 0;
+  const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
+  g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
+  if (strstr (payload_text, "\"sub\":\"alice\"") == NULL)
+    return 74;
+  return 0;
+}
+
+static gint
+check_hs256_signature_fails_closed (void)
+{
+  static const guint8 secret[] = "test-secret";
+  static const guint8 wrong_secret[] = "wrong-secret";
+  g_autofree gchar *token = NULL;
+  if (wyl_jwt_sign_hs256 (&valid_input, secret, strlen ((const gchar *) secret),
+          &token) != WYRELOG_E_OK)
+    return 80;
+
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_signature (token, wrong_secret,
+          strlen ((const gchar *) wrong_secret), &payload) != WYRELOG_E_POLICY)
+    return 81;
+  if (wyl_jwt_verify_hs256_signature ("a.b", secret,
+          strlen ((const gchar *) secret), &payload) != WYRELOG_E_INVALID)
+    return 82;
+  if (wyl_jwt_sign_hs256 (&valid_input, NULL, 0, &token)
+      != WYRELOG_E_INVALID)
+    return 83;
+
+  g_auto (GStrv) parts = g_strsplit (token, ".", 0);
+  g_autofree gchar *tampered_payload = g_strdup_printf ("%s.%sA.%s",
+      parts[0], parts[1], parts[2]);
+  if (wyl_jwt_verify_hs256_signature (tampered_payload, secret,
+          strlen ((const gchar *) secret), &payload) != WYRELOG_E_POLICY)
+    return 84;
+
+  g_autofree gchar *tampered_signature = g_strdup_printf ("%s.%s.%sA",
+      parts[0], parts[1], parts[2]);
+  if (wyl_jwt_verify_hs256_signature (tampered_signature, secret,
+          strlen ((const gchar *) secret), &payload) != WYRELOG_E_POLICY)
+    return 85;
+
+  const gchar *none_header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
+  g_autofree gchar *none_header_segment = NULL;
+  if (wyl_jwt_base64url_encode ((const guint8 *) none_header,
+          strlen (none_header), &none_header_segment) != WYRELOG_E_OK)
+    return 86;
+  g_autofree gchar *none_token = g_strdup_printf ("%s.%s.%s",
+      none_header_segment, parts[1], parts[2]);
+  if (wyl_jwt_verify_hs256_signature (none_token, secret,
+          strlen ((const gchar *) secret), &payload) != WYRELOG_E_POLICY)
+    return 87;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -166,6 +242,10 @@ main (void)
   if ((rc = check_payload_rejects_missing_claims ()) != 0)
     return rc;
   if ((rc = check_unsigned_segments_are_base64url ()) != 0)
+    return rc;
+  if ((rc = check_hs256_token_signature_round_trip ()) != 0)
+    return rc;
+  if ((rc = check_hs256_signature_fails_closed ()) != 0)
     return rc;
   return 0;
 }
