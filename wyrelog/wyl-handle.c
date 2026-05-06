@@ -722,7 +722,6 @@ insert_policy_store_direct_permission (const gchar *subject_id,
 {
   WylHandle *self = user_data;
   gint64 row[3];
-  gint64 state_row[4];
 
   wyrelog_error_t rc =
       wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
@@ -735,14 +734,20 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  rc = wyl_handle_engine_insert (self, "direct_permission", row, 3);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Guarded permissions are granted membership only. Their armed state
+   * comes from request-local guard evaluation, not persisted perm_state. */
+  if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
+    return WYRELOG_E_OK;
+
+  gint64 state_row[4];
   state_row[0] = row[0];
   state_row[1] = row[1];
   state_row[2] = row[2];
   rc = wyl_handle_intern_engine_symbol (self, "armed", &state_row[3]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  rc = wyl_handle_engine_insert (self, "direct_permission", row, 3);
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_engine_insert (self, "perm_state", state_row, 4);

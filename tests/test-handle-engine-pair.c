@@ -1476,6 +1476,56 @@ check_policy_store_direct_permissions_autoload_on_open (void)
 }
 
 static gint
+check_policy_store_guarded_direct_permissions_do_not_auto_arm (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 365;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 366;
+  if (wyl_policy_store_grant_direct_permission (store, "guarded-load-user",
+          "wr.audit.read", "guarded-load-scope") != WYRELOG_E_OK)
+    return 367;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 368;
+
+  if (insert2_symbol (handle, "principal_state", "guarded-load-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 369;
+  if (insert2_symbol (handle, "session_state", "guarded-load-scope",
+          "active") != WYRELOG_E_OK)
+    return 370;
+  if (insert1_symbol (handle, "session_active", "active") != WYRELOG_E_OK)
+    return 371;
+
+  gint64 state_row[4];
+  if (intern4 (handle, "guarded-load-user", "wr.audit.read",
+          "guarded-load-scope", "armed", state_row) != WYRELOG_E_OK)
+    return 372;
+  gint64 permission_row[3];
+  if (intern3 (handle, "guarded-load-user", "wr.audit.read",
+          "guarded-load-scope", permission_row) != WYRELOG_E_OK)
+    return 373;
+  gboolean found = FALSE;
+  if (wyl_handle_engine_contains (handle, "has_permission", permission_row, 3,
+          &found) != WYRELOG_E_OK)
+    return 374;
+  if (!found)
+    return 375;
+
+  if (wyl_handle_engine_contains (handle, "perm_state", state_row, 4, &found)
+      != WYRELOG_E_OK)
+    return 376;
+  if (found)
+    return 377;
+  return 0;
+}
+
+static gint
 check_policy_store_direct_permissions_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2001,6 +2051,9 @@ main (void)
   if ((rc = check_policy_store_role_memberships_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_direct_permissions_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_guarded_direct_permissions_do_not_auto_arm ())
+      != 0)
     return rc;
   if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
     return rc;
