@@ -358,6 +358,9 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
         runtime.last_audit_error : WYRELOG_E_IO;
     goto cleanup;
   }
+  rc = wyl_handle_load_policy_store_audit_events (handle);
+  if (rc != WYRELOG_E_OK)
+    goto cleanup;
   rc = check_wirelog_delta_audit_rows (handle);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
