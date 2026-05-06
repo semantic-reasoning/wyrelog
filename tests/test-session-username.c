@@ -705,6 +705,120 @@ check_login_session_id_is_active_decision_scope (void)
   return 0;
 }
 
+static wyrelog_error_t
+allow_mfa_validator (WylHandle *handle, WylSession *session,
+    const gchar *proof, gpointer user_data)
+{
+  const gchar *expected_proof = user_data;
+
+  (void) handle;
+
+  g_autofree gchar *username = wyl_session_dup_username (session);
+  if (g_strcmp0 (username, "mfa-proof-user") != 0)
+    return WYRELOG_E_INTERNAL;
+  if (g_strcmp0 (proof, expected_proof) != 0)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+reject_mfa_validator (WylHandle *handle, WylSession *session,
+    const gchar *proof, gpointer user_data)
+{
+  guint *calls = user_data;
+
+  (void) handle;
+  (void) session;
+  (void) proof;
+
+  (*calls)++;
+  return WYRELOG_E_POLICY;
+}
+
+static gint
+check_mfa_verify_with_proof_requires_validator (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 100;
+
+  if (store_active_scope (handle, "mfa-proof-scope") != WYRELOG_E_OK)
+    return 101;
+  if (grant_direct (handle, "mfa-proof-user", "wr.mfa-proof-permission",
+          "mfa-proof-scope") != WYRELOG_E_OK)
+    return 102;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "mfa-proof-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 103;
+
+  if (wyl_session_mfa_verify_with_proof (NULL, session, "123456",
+          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+    return 104;
+  if (wyl_session_mfa_verify_with_proof (handle, NULL, "123456",
+          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+    return 105;
+  if (wyl_session_mfa_verify_with_proof (handle, session, NULL,
+          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+    return 106;
+  if (wyl_session_mfa_verify_with_proof (handle, session, "",
+          allow_mfa_validator, "123456") != WYRELOG_E_INVALID)
+    return 107;
+  if (wyl_session_mfa_verify_with_proof (handle, session, "123456",
+          NULL, "123456") != WYRELOG_E_INVALID)
+    return 108;
+
+  guint reject_calls = 0;
+  if (wyl_session_mfa_verify_with_proof (handle, session, "123456",
+          reject_mfa_validator, &reject_calls) != WYRELOG_E_POLICY)
+    return 109;
+  if (reject_calls != 1)
+    return 110;
+
+  PrincipalStateExpect required = {
+    .subject_id = "mfa-proof-user",
+    .state = "mfa_required",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+          (handle), principal_state_expect_cb, &required) != WYRELOG_E_OK)
+    return 111;
+  if (required.matches != 1)
+    return 112;
+
+  PrincipalStateExpect authenticated = {
+    .subject_id = "mfa-proof-user",
+    .state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+          (handle), principal_state_expect_cb, &authenticated)
+      != WYRELOG_E_OK)
+    return 113;
+  if (authenticated.matches != 0)
+    return 114;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "mfa-proof-user");
+  wyl_decide_req_set_action (decide, "wr.mfa-proof-permission");
+  wyl_decide_req_set_resource_id (decide, "mfa-proof-scope");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 115;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 116;
+
+  if (wyl_session_mfa_verify_with_proof (handle, session, "123456",
+          allow_mfa_validator, "123456") != WYRELOG_E_OK)
+    return 117;
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 118;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 119;
+
+  return 0;
+}
+
 static gint
 check_login_skip_mfa_rejected_by_default (void)
 {
@@ -1536,6 +1650,8 @@ main (void)
   if ((rc = check_mfa_delta_callback_survives_state_reload ()) != 0)
     return rc;
   if ((rc = check_mfa_verify_rejects_invalid_args ()) != 0)
+    return rc;
+  if ((rc = check_mfa_verify_with_proof_requires_validator ()) != 0)
     return rc;
   if ((rc = check_login_persists_mfa_required_state ()) != 0)
     return rc;

@@ -628,8 +628,8 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
+static wyrelog_error_t
+mark_session_mfa_verified (WylHandle *handle, WylSession *session)
 {
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
@@ -644,6 +644,29 @@ wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
 
   return transition_principal_state (handle, session->username,
       WYL_PRINCIPAL_STATE_MFA_REQUIRED, state);
+}
+
+wyrelog_error_t
+wyl_session_mfa_verify (WylHandle *handle, WylSession *session)
+{
+  return mark_session_mfa_verified (handle, session);
+}
+
+wyrelog_error_t
+wyl_session_mfa_verify_with_proof (WylHandle *handle, WylSession *session,
+    const gchar *proof, WylMfaValidator validator, gpointer user_data)
+{
+  if (handle == NULL || session == NULL || !WYL_IS_SESSION (session) ||
+      session->username == NULL)
+    return WYRELOG_E_INVALID;
+  if (proof == NULL || proof[0] == '\0' || validator == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = validator (handle, session, proof, user_data);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return mark_session_mfa_verified (handle, session);
 }
 
 wyrelog_error_t
