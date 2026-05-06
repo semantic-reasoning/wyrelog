@@ -675,6 +675,52 @@ check_role_revoke_removes_engine_membership (void)
   return 0;
 }
 
+static gint
+check_role_grant_rolls_back_invalid_snapshot (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 150;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "site.audit-role",
+          "site audit role") != WYRELOG_E_OK)
+    return 151;
+  if (wyl_policy_store_upsert_role (store, "site.grant-role",
+          "site grant role") != WYRELOG_E_OK)
+    return 152;
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "critical") != WYRELOG_E_OK)
+    return 153;
+  if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
+          "policy grant role", "critical") != WYRELOG_E_OK)
+    return 154;
+  if (wyl_policy_store_grant_role_permission (store, "site.audit-role",
+          "wr.audit.read") != WYRELOG_E_OK)
+    return 155;
+  if (wyl_policy_store_grant_role_permission (store, "site.grant-role",
+          "wr.policy.grant_role") != WYRELOG_E_OK)
+    return 156;
+  if (wyl_policy_store_grant_role_membership (store, "rollback-sod-user",
+          "site.audit-role", "rollback-sod-scope") != WYRELOG_E_OK)
+    return 157;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 158;
+
+  g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
+  wyl_role_grant_req_set_subject_id (grant, "rollback-sod-user");
+  wyl_role_grant_req_set_role_id (grant, "site.grant-role");
+  wyl_role_grant_req_set_scope (grant, "rollback-sod-scope");
+  if (wyl_role_grant (handle, grant) != WYRELOG_E_POLICY)
+    return 159;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_role_membership_exists (store, "rollback-sod-user",
+          "site.grant-role", "rollback-sod-scope", &exists) != WYRELOG_E_OK)
+    return 160;
+  return exists ? 161 : 0;
+}
+
 int
 main (void)
 {
@@ -718,6 +764,8 @@ main (void)
   if ((rc = check_revoke_removes_engine_grant ()) != 0)
     return rc;
   if ((rc = check_role_revoke_removes_engine_membership ()) != 0)
+    return rc;
+  if ((rc = check_role_grant_rolls_back_invalid_snapshot ()) != 0)
     return rc;
   return 0;
 }

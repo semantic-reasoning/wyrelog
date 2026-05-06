@@ -734,6 +734,8 @@ wyrelog_error_t
         audit_resource_id, audit_deny_reason, audit_deny_origin,
         audit_decision);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (store);
   if (rc != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return rc;
@@ -1409,6 +1411,8 @@ wyrelog_error_t
         audit_resource_id, audit_deny_reason, audit_deny_origin,
         audit_decision);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (store);
   if (rc != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return rc;
