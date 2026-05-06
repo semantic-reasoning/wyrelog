@@ -235,6 +235,109 @@ wyl_client_mfa_verify (WylClient *client, const gchar *otp)
   return WYRELOG_E_INTERNAL;
 }
 
+static wyrelog_error_t
+client_policy_mutation_request (WylClient *client, const gchar *path,
+    const gchar *subject, const gchar *target_name, const gchar *target_value,
+    const gchar *scope, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client) || path == NULL ||
+      subject == NULL || subject[0] == '\0' || target_name == NULL ||
+      target_value == NULL || target_value[0] == '\0' || scope == NULL ||
+      scope[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
+      guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  if (session_token == NULL || session_token[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
+  if (base_url == NULL)
+    return WYRELOG_E_INVALID;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+
+  g_autofree gchar *escaped_subject = g_uri_escape_string (subject, NULL, TRUE);
+  g_autofree gchar *escaped_target =
+      g_uri_escape_string (target_value, NULL, TRUE);
+  g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
+  g_autofree gchar *escaped_session =
+      g_uri_escape_string (session_token, NULL, TRUE);
+  g_autofree gchar *escaped_loc =
+      g_uri_escape_string (guard_loc_class, NULL, TRUE);
+  g_autofree gchar *uri =
+      g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&session_token=%s"
+      "&guard_timestamp=%" G_GINT64_FORMAT
+      "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+      base_url, path, escaped_subject, target_name, escaped_target,
+      escaped_scope, escaped_session, guard_timestamp, escaped_loc,
+      guard_risk);
+
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) body =
+      soup_session_send_and_read (client->session, message, NULL, &error);
+  if (body == NULL)
+    return WYRELOG_E_IO;
+
+  guint status = soup_message_get_status (message);
+  if (status >= 200 && status < 300)
+    return WYRELOG_E_OK;
+  if (status == 400)
+    return WYRELOG_E_INVALID;
+  if (status == 401)
+    return WYRELOG_E_AUTH;
+  if (status == 403)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_client_policy_permission_grant (WylClient *client, const gchar *subject,
+    const gchar *perm, const gchar *scope, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
+{
+  return client_policy_mutation_request (client, "policy/permissions/grant",
+      subject, "perm", perm, scope, guard_timestamp, guard_loc_class,
+      guard_risk);
+}
+
+wyrelog_error_t
+wyl_client_policy_permission_revoke (WylClient *client, const gchar *subject,
+    const gchar *perm, const gchar *scope, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
+{
+  return client_policy_mutation_request (client, "policy/permissions/revoke",
+      subject, "perm", perm, scope, guard_timestamp, guard_loc_class,
+      guard_risk);
+}
+
+wyrelog_error_t
+wyl_client_policy_role_grant (WylClient *client, const gchar *subject,
+    const gchar *role, const gchar *scope, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
+{
+  return client_policy_mutation_request (client, "policy/roles/grant",
+      subject, "role", role, scope, guard_timestamp, guard_loc_class,
+      guard_risk);
+}
+
+wyrelog_error_t
+wyl_client_policy_role_revoke (WylClient *client, const gchar *subject,
+    const gchar *role, const gchar *scope, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
+{
+  return client_policy_mutation_request (client, "policy/roles/revoke",
+      subject, "role", role, scope, guard_timestamp, guard_loc_class,
+      guard_risk);
+}
+
 typedef struct
 {
   const gchar *data;
