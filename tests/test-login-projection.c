@@ -378,6 +378,35 @@ check_login_event_projection_failure_is_reported (void)
     return 145;
   if (count != 1)
     return 146;
+  gint64 principal_event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM principal_events "
+          "WHERE subject_id = 'projection-event-fail-user' "
+          "AND event = 'login_ok' "
+          "AND from_state = 'unverified' "
+          "AND to_state = 'mfa_required';", NULL, 0, &principal_event_id))
+    return 147;
+  gint64 session_event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", NULL, 0, &session_event_id))
+    return 148;
+  g_autofree gchar *session_id = NULL;
+  if (!policy_select_text_params (store,
+          "SELECT session_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", NULL, 0, &session_id))
+    return 149;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 155;
+  if (!engine_contains_event_row5 (handle, "principal_fired",
+          principal_event_id, "projection-event-fail-user", "unverified",
+          "login_ok", "mfa_required"))
+    return 156;
+  if (!engine_contains_event_row5 (handle, "session_fired", session_event_id,
+          session_id, "idle", "request", "active"))
+    return 157;
   return 0;
 }
 
@@ -407,6 +436,23 @@ check_anonymous_session_event_projection_failure_is_reported (void)
     return 153;
   if (count != 1)
     return 154;
+  gint64 event_id = -1;
+  if (!policy_select_int64_params (store,
+          "SELECT event_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", NULL, 0, &event_id))
+    return 158;
+  g_autofree gchar *session_id = NULL;
+  if (!policy_select_text_params (store,
+          "SELECT session_id FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", NULL, 0, &session_id))
+    return 159;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 160;
+  if (!engine_contains_event_row5 (handle, "session_fired", event_id,
+          session_id, "idle", "request", "active"))
+    return 161;
   return 0;
 }
 
