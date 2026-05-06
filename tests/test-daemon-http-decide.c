@@ -414,6 +414,21 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 473;
   g_clear_pointer (&body, g_free);
 
+  if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
+          (handle), "login-user", "wr.login.skip_mfa", "login")
+      != WYRELOG_E_OK)
+    return 484;
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"session_token\":\"") == NULL ||
+      strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
+    return 485;
+  g_clear_pointer (&body, g_free);
+
   rc = send_raw_login (session, "POST", base_url,
       "username=login-user&skip_mfa=false", &status, &body);
   if (rc != 0)
