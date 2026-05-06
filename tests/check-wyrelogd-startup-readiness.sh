@@ -6,9 +6,10 @@ set -eu
 WYRELOGD=$1
 TEMPLATE_DIR=$2
 PYTHON=$3
-PORT=$((41000 + $$ % 20000))
+PORT=$((20000 + $$ % 15000))
 TMPDIR=$(mktemp -d)
 PID=
+RC_FILE="$TMPDIR/daemon.rc"
 
 cleanup() {
   if [ -n "$PID" ]; then
@@ -45,27 +46,35 @@ if "$WYRELOGD" --template-dir "$TMPDIR/access" --check; then
   exit 1
 fi
 
-"$WYRELOGD" --template-dir "$TMPDIR/access" --listen-port "$PORT" &
+(
+  set +e
+  "$WYRELOGD" --template-dir "$TMPDIR/access" --listen-port "$PORT"
+  rc=$?
+  printf '%s\n' "$rc" > "$RC_FILE"
+  exit "$rc"
+) &
 PID=$!
 
-if "$PYTHON" - "$PORT" <<'PY'
+i=0
+while [ "$i" -lt 50 ] && [ ! -s "$RC_FILE" ]; do
+  i=$((i + 1))
+  if "$PYTHON" - "$PORT" <<'PY'
 import sys
-import time
 import urllib.request
 
 base = f"http://127.0.0.1:{sys.argv[1]}"
-for _ in range(50):
-    try:
-        urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
-        sys.exit(0)
-    except Exception:
-        time.sleep(0.1)
-sys.exit(1)
+try:
+    urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
+except Exception:
+    sys.exit(1)
+sys.exit(0)
 PY
-then
-  echo "daemon served healthz after readiness failure" >&2
-  exit 1
-fi
+  then
+    echo "daemon served healthz after readiness failure" >&2
+    exit 1
+  fi
+  sleep 0.1
+done
 
 set +e
 wait "$PID"
