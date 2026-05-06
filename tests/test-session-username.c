@@ -32,13 +32,24 @@ grant_role_permission (WylHandle *handle, const gchar *subject_id,
     const gchar *role_id, const gchar *permission, const gchar *scope)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  wyrelog_error_t rc = wyl_policy_store_upsert_role (store, role_id, role_id);
+  gboolean exists = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_role_exists (store, role_id, &exists);
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_policy_store_upsert_permission (store, permission, permission,
-      "basic");
+  if (!exists) {
+    rc = wyl_policy_store_upsert_role (store, role_id, role_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  rc = wyl_policy_store_permission_exists (store, permission, &exists);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (!exists) {
+    rc = wyl_policy_store_upsert_permission (store, permission, permission,
+        "basic");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   rc = wyl_policy_store_grant_role_permission (store, role_id, permission);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -417,7 +428,7 @@ check_login_requires_mfa_before_allow (void)
 
   if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 71;
-  if (grant_direct (handle, "login-user", "wr.login-permission",
+  if (grant_direct (handle, "login-user", "site.login-permission",
           "login-scope") != WYRELOG_E_OK)
     return 72;
 
@@ -431,7 +442,7 @@ check_login_requires_mfa_before_allow (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "login-user");
-  wyl_decide_req_set_action (decide, "wr.login-permission");
+  wyl_decide_req_set_action (decide, "site.login-permission");
   wyl_decide_req_set_resource_id (decide, "login-scope");
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -451,7 +462,7 @@ check_mfa_verify_authenticates_engine_principal (void)
 
   if (store_active_scope (handle, "login-scope") != WYRELOG_E_OK)
     return 81;
-  if (grant_direct (handle, "login-user", "wr.login-permission",
+  if (grant_direct (handle, "login-user", "site.login-permission",
           "login-scope") != WYRELOG_E_OK)
     return 82;
 
@@ -467,7 +478,7 @@ check_mfa_verify_authenticates_engine_principal (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "login-user");
-  wyl_decide_req_set_action (decide, "wr.login-permission");
+  wyl_decide_req_set_action (decide, "site.login-permission");
   wyl_decide_req_set_resource_id (decide, "login-scope");
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -688,13 +699,13 @@ check_login_session_id_is_active_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 144;
-  if (grant_direct (handle, "session-id-user", "wr.session-id-permission",
+  if (grant_direct (handle, "session-id-user", "site.session-id-permission",
           session_id) != WYRELOG_E_OK)
     return 145;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "session-id-user");
-  wyl_decide_req_set_action (decide, "wr.session-id-permission");
+  wyl_decide_req_set_action (decide, "site.session-id-permission");
   wyl_decide_req_set_resource_id (decide, session_id);
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -744,7 +755,7 @@ check_mfa_verify_with_proof_requires_validator (void)
 
   if (store_active_scope (handle, "mfa-proof-scope") != WYRELOG_E_OK)
     return 101;
-  if (grant_direct (handle, "mfa-proof-user", "wr.mfa-proof-permission",
+  if (grant_direct (handle, "mfa-proof-user", "site.mfa-proof-permission",
           "mfa-proof-scope") != WYRELOG_E_OK)
     return 102;
 
@@ -800,7 +811,7 @@ check_mfa_verify_with_proof_requires_validator (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "mfa-proof-user");
-  wyl_decide_req_set_action (decide, "wr.mfa-proof-permission");
+  wyl_decide_req_set_action (decide, "site.mfa-proof-permission");
   wyl_decide_req_set_resource_id (decide, "mfa-proof-scope");
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -858,7 +869,7 @@ check_login_skip_mfa_authenticates_principal (void)
 
   if (store_active_scope (handle, "skip-mfa-scope") != WYRELOG_E_OK)
     return 151;
-  if (grant_direct (handle, "skip-mfa-user", "wr.skip-mfa-permission",
+  if (grant_direct (handle, "skip-mfa-user", "site.skip-mfa-permission",
           "skip-mfa-scope") != WYRELOG_E_OK)
     return 152;
 
@@ -893,7 +904,7 @@ check_login_skip_mfa_authenticates_principal (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "skip-mfa-user");
-  wyl_decide_req_set_action (decide, "wr.skip-mfa-permission");
+  wyl_decide_req_set_action (decide, "site.skip-mfa-permission");
   wyl_decide_req_set_resource_id (decide, "skip-mfa-scope");
 
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -1014,7 +1025,7 @@ check_login_skip_mfa_does_not_bypass_guarded_permission (void)
   if (store_active_scope (handle, "skip-mfa-guarded-scope") != WYRELOG_E_OK)
     return 167;
   if (grant_role_permission (handle, "skip-mfa-guarded-user",
-          "wr.skip-mfa-guarded-role", "wr.audit.read",
+          "site.skip-mfa-guarded-role", "wr.audit.read",
           "skip-mfa-guarded-scope") != WYRELOG_E_OK)
     return 168;
 
@@ -1117,7 +1128,7 @@ check_session_close_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 173;
-  if (grant_direct (handle, "close-user", "wr.close-permission",
+  if (grant_direct (handle, "close-user", "site.close-permission",
           session_id) != WYRELOG_E_OK)
     return 174;
 
@@ -1126,7 +1137,7 @@ check_session_close_deactivates_decision_scope (void)
 
   g_autoptr (wyl_decide_req_t) after = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (after, "close-user");
-  wyl_decide_req_set_action (after, "wr.close-permission");
+  wyl_decide_req_set_action (after, "site.close-permission");
   wyl_decide_req_set_resource_id (after, session_id);
   g_autoptr (wyl_decide_resp_t) after_resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, after, after_resp) != WYRELOG_E_OK)
@@ -1269,13 +1280,13 @@ check_elevated_session_remains_active_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 224;
-  if (grant_direct (handle, "elevate-user", "wr.elevate-permission",
+  if (grant_direct (handle, "elevate-user", "site.elevate-permission",
           session_id) != WYRELOG_E_OK)
     return 225;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "elevate-user");
-  wyl_decide_req_set_action (decide, "wr.elevate-permission");
+  wyl_decide_req_set_action (decide, "site.elevate-permission");
   wyl_decide_req_set_resource_id (decide, session_id);
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -1306,7 +1317,7 @@ check_elevated_session_close_deactivates_decision_scope (void)
   if (session_id == NULL)
     return 234;
   if (grant_direct (handle, "elevated-close-user",
-          "wr.elevated-close-permission", session_id) != WYRELOG_E_OK)
+          "site.elevated-close-permission", session_id) != WYRELOG_E_OK)
     return 235;
 
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
@@ -1314,7 +1325,7 @@ check_elevated_session_close_deactivates_decision_scope (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "elevated-close-user");
-  wyl_decide_req_set_action (decide, "wr.elevated-close-permission");
+  wyl_decide_req_set_action (decide, "site.elevated-close-permission");
   wyl_decide_req_set_resource_id (decide, session_id);
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -1375,7 +1386,7 @@ check_idle_session_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 273;
-  if (grant_direct (handle, "idle-user", "wr.idle-permission",
+  if (grant_direct (handle, "idle-user", "site.idle-permission",
           session_id) != WYRELOG_E_OK)
     return 274;
 
@@ -1384,7 +1395,7 @@ check_idle_session_deactivates_decision_scope (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "idle-user");
-  wyl_decide_req_set_action (decide, "wr.idle-permission");
+  wyl_decide_req_set_action (decide, "site.idle-permission");
   wyl_decide_req_set_resource_id (decide, session_id);
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -1418,7 +1429,7 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   if (session_id == NULL)
     return 284;
   if (grant_direct (handle, "elevated-idle-user",
-          "wr.elevated-idle-permission", session_id) != WYRELOG_E_OK)
+          "site.elevated-idle-permission", session_id) != WYRELOG_E_OK)
     return 285;
 
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
@@ -1426,7 +1437,7 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "elevated-idle-user");
-  wyl_decide_req_set_action (decide, "wr.elevated-idle-permission");
+  wyl_decide_req_set_action (decide, "site.elevated-idle-permission");
   wyl_decide_req_set_resource_id (decide, session_id);
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -1487,7 +1498,7 @@ check_expiring_session_deactivates_decision_scope (void)
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (session_id == NULL)
     return 313;
-  if (grant_direct (handle, "expiry-user", "wr.expiry-permission",
+  if (grant_direct (handle, "expiry-user", "site.expiry-permission",
           session_id) != WYRELOG_E_OK)
     return 314;
 
@@ -1496,7 +1507,7 @@ check_expiring_session_deactivates_decision_scope (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "expiry-user");
-  wyl_decide_req_set_action (decide, "wr.expiry-permission");
+  wyl_decide_req_set_action (decide, "site.expiry-permission");
   wyl_decide_req_set_resource_id (decide, session_id);
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)

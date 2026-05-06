@@ -345,7 +345,7 @@ static gint
 check_skip_mfa_login_projects_authority_state (void)
 {
   static const gchar *username = "projection-skip-mfa-user";
-  static const gchar *perm_id = "wr.projection.skip_mfa.read";
+  static const gchar *perm_id = "site.projection.skip_mfa.read";
   g_autoptr (WylHandle) handle = NULL;
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -512,7 +512,7 @@ static gint
 check_handle_reopens_persistent_policy_and_audit_paths (void)
 {
   static const gchar *username = "projection-persistent-user";
-  static const gchar *perm_id = "wr.projection.persistent.read";
+  static const gchar *perm_id = "site.projection.persistent.read";
 
   g_autoptr (GError) error = NULL;
   g_autofree gchar *dir = g_dir_make_tmp ("wyrelog-persist-XXXXXX", &error);
