@@ -272,6 +272,10 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
       base_code + 13);
   if (rc != 0)
     return rc;
+  rc = check_guard_context_field_absent (handle, "guard_context_in_window",
+      base_code + 15);
+  if (rc != 0)
+    return rc;
 
   return 0;
 }
@@ -352,6 +356,10 @@ check_guard_cleanup_fault_residue (WylHandle *handle, gint base_code)
     return field_check;
   field_check = check_guard_context_field_absent (handle,
       "guard_context_risk", base_code + 11);
+  if (field_check != 0)
+    return field_check;
+  field_check = check_guard_context_field_absent (handle,
+      "guard_context_in_window", base_code + 13);
   if (field_check != 0)
     return field_check;
 
@@ -874,6 +882,50 @@ check_decide_fail_closes_on_guard_cleanup_faults (void)
 }
 
 static gint
+check_window_guard_cleanup_fault (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 310;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 311;
+  if (insert_allow_fixture_state (handle, "cleanup-window-user",
+          "wr.stream.write_reserved", "cleanup-window-resource", FALSE)
+      != WYRELOG_E_OK)
+    return 312;
+
+  WindowExpect expect = {
+    .expected_window = "off_hours",
+    .expected_timestamp = 4242,
+    .answer = TRUE,
+    .calls = 0,
+  };
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "cleanup-window-user");
+  wyl_decide_req_set_action (req, "wr.stream.write_reserved");
+  wyl_decide_req_set_resource_id (req, "cleanup-window-resource");
+  wyl_decide_req_set_guard_context (req, 4242, "trusted", 1);
+  wyl_decide_req_set_guard_window_matcher (req, window_expect_cb, &expect);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_handle_set_engine_remove_fault_once (handle, "guard_context_in_window",
+      WYRELOG_E_INTERNAL);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_INTERNAL)
+    return 313;
+  if (expect.calls != 1)
+    return 314;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 315;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp),
+          "guard_cleanup_failed") != 0)
+    return 316;
+
+  return check_guard_bridge_facts_absent (handle, "cleanup-window-user",
+      "wr.stream.write_reserved", "cleanup-window-resource", 317);
+}
+
+static gint
 check_decide_evaluates_window_guard (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -948,6 +1000,8 @@ main (void)
   if ((rc = check_decide_prioritizes_guarded_blockers ()) != 0)
     return rc;
   if ((rc = check_decide_fail_closes_on_guard_cleanup_faults ()) != 0)
+    return rc;
+  if ((rc = check_window_guard_cleanup_fault ()) != 0)
     return rc;
   if ((rc = check_decide_evaluates_window_guard ()) != 0)
     return rc;

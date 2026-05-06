@@ -97,6 +97,13 @@ const gchar *wyl_perm_arm_rule_perm_id (gsize idx);
 const wyl_guard_expr_t *wyl_perm_arm_rule_expr (gsize idx);
 
 /*
+ * Returns the single timestamp window name required by @e, or NULL
+ * when the guard has no simple timestamp-in window requirement.
+ * The returned string is borrowed from @e.
+ */
+const gchar *wyl_guard_expr_timestamp_window (const wyl_guard_expr_t * e);
+
+/*
  * Returns TRUE iff loc_class belongs to the v0 guard context
  * schema. This is private because the public API should continue
  * to expose loc_class as an opaque string carried by decide and

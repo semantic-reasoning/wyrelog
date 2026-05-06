@@ -35,12 +35,14 @@ typedef struct guard_eval_facts_t
   gint64 guard_context_timestamp[3];
   gint64 guard_context_loc_class[3];
   gint64 guard_context_risk[3];
+  gint64 guard_context_in_window[4];
   gint64 eval_guard[4];
   gboolean context_now_inserted;
   gboolean guard_context_inserted;
   gboolean guard_context_timestamp_inserted;
   gboolean guard_context_loc_class_inserted;
   gboolean guard_context_risk_inserted;
+  gboolean guard_context_in_window_inserted;
   gboolean eval_guard_inserted;
 } guard_eval_facts_t;
 
@@ -300,6 +302,12 @@ remove_guard_eval_facts (WylHandle *handle, const guard_eval_facts_t *facts)
     if (first_rc == WYRELOG_E_OK)
       first_rc = rc;
   }
+  if (facts->guard_context_in_window_inserted) {
+    wyrelog_error_t rc = wyl_handle_engine_remove (handle,
+        "guard_context_in_window", facts->guard_context_in_window, 4);
+    if (first_rc == WYRELOG_E_OK)
+      first_rc = rc;
+  }
   if (facts->guard_context_inserted) {
     wyrelog_error_t rc = wyl_handle_engine_remove (handle, "guard_context",
         facts->guard_context, 6);
@@ -312,7 +320,8 @@ remove_guard_eval_facts (WylHandle *handle, const guard_eval_facts_t *facts)
 
 static wyrelog_error_t
 insert_guard_eval_facts (WylHandle *handle, const gint64 row[3],
-    const wyl_decide_req_t *req, guard_eval_facts_t *facts)
+    const wyl_guard_expr_t *guard, const wyl_decide_req_t *req,
+    guard_eval_facts_t *facts)
 {
   memset (facts, 0, sizeof (*facts));
 
@@ -346,6 +355,18 @@ insert_guard_eval_facts (WylHandle *handle, const gint64 row[3],
   facts->guard_context_risk[0] = row[0];
   facts->guard_context_risk[1] = row[2];
   facts->guard_context_risk[2] = req->guard_risk;
+
+  const gchar *window = wyl_guard_expr_timestamp_window (guard);
+  if (window != NULL) {
+    gint64 window_id = 0;
+    rc = wyl_handle_intern_engine_symbol (handle, window, &window_id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    facts->guard_context_in_window[0] = row[0];
+    facts->guard_context_in_window[1] = row[2];
+    facts->guard_context_in_window[2] = req->guard_timestamp;
+    facts->guard_context_in_window[3] = window_id;
+  }
 
   facts->context_now[0] = row[0];
   facts->context_now[1] = row[2];
@@ -385,6 +406,16 @@ insert_guard_eval_facts (WylHandle *handle, const gint64 row[3],
     return rc;
   }
   facts->guard_context_risk_inserted = TRUE;
+
+  if (window != NULL) {
+    rc = wyl_handle_engine_insert (handle, "guard_context_in_window",
+        facts->guard_context_in_window, 4);
+    if (rc != WYRELOG_E_OK) {
+      (void) remove_guard_eval_facts (handle, facts);
+      return rc;
+    }
+    facts->guard_context_in_window_inserted = TRUE;
+  }
 
   rc = wyl_handle_engine_insert (handle, "context_now", facts->context_now, 3);
   if (rc != WYRELOG_E_OK) {
@@ -536,7 +567,7 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
         goto emit_audit;
       }
-      rc = insert_guard_eval_facts (handle, row, req, &guard_facts);
+      rc = insert_guard_eval_facts (handle, row, guard, req, &guard_facts);
       if (rc != WYRELOG_E_OK)
         return rc;
     }
