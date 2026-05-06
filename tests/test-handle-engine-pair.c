@@ -6,6 +6,7 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-compound-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-permission-scope-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -80,6 +81,16 @@ typedef struct
   gint64 expected_risk;
   guint matches;
 } GuardMetadataCompoundExpect;
+
+typedef struct
+{
+  const gint64 *perm_ids;
+  guint *seen_counts;
+  gsize nperms;
+  gint64 placeholder_id;
+  guint total;
+  guint unexpected_guard_handle;
+} PermArmRuleSnapshotExpect;
 
 static gchar *
 make_tmpdir (void)
@@ -326,6 +337,27 @@ guard_metadata_compound_cb (const gchar *relation, const gint64 *row,
     return;
 
   expect->matches++;
+}
+
+static void
+perm_arm_rule_snapshot_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  PermArmRuleSnapshotExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "perm_arm_rule_observed") != 0 || ncols != 2)
+    return;
+
+  expect->total++;
+  if (row[1] != expect->placeholder_id)
+    expect->unexpected_guard_handle++;
+
+  for (gsize i = 0; i < expect->nperms; i++) {
+    if (row[0] == expect->perm_ids[i]) {
+      expect->seen_counts[i]++;
+      return;
+    }
+  }
 }
 
 static void
@@ -1149,6 +1181,76 @@ check_guard_context_compound_carries_request_payload (void)
 
   rmdir_recursive (tmpdir);
   return 0;
+}
+
+static gint
+assert_perm_arm_rule_placeholder_snapshot (WylHandle *handle, gint base_code)
+{
+  gsize nperms = wyl_perm_arm_rule_count ();
+  g_autofree gint64 *perm_ids = g_new0 (gint64, nperms);
+  g_autofree guint *seen_counts = g_new0 (guint, nperms);
+
+  for (gsize i = 0; i < nperms; i++) {
+    if (wyl_handle_intern_engine_symbol (handle, wyl_perm_arm_rule_perm_id (i),
+            &perm_ids[i]) != WYRELOG_E_OK)
+      return base_code;
+  }
+
+  gint64 placeholder_id = -1;
+  if (wyl_handle_intern_engine_symbol (handle, "_v0_deferred",
+          &placeholder_id) != WYRELOG_E_OK)
+    return base_code + 1;
+
+  PermArmRuleSnapshotExpect expect = {
+    .perm_ids = perm_ids,
+    .seen_counts = seen_counts,
+    .nperms = nperms,
+    .placeholder_id = placeholder_id,
+    .total = 0,
+    .unexpected_guard_handle = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "perm_arm_rule_observed", perm_arm_rule_snapshot_cb, &expect)
+      != WYRELOG_E_OK)
+    return base_code + 2;
+
+  if (expect.unexpected_guard_handle != 0)
+    return base_code + 3;
+  if (expect.total != nperms)
+    return base_code + 4;
+  for (gsize i = 0; i < nperms; i++) {
+    if (seen_counts[i] != 1)
+      return base_code + 5 + (gint) i;
+  }
+  return 0;
+}
+
+static gint
+check_perm_arm_rule_placeholder_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 133;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 134;
+  return assert_perm_arm_rule_placeholder_snapshot (handle, 135);
+}
+
+static gint
+check_perm_arm_rule_placeholder_contract_after_reload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 151;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 152;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 153;
+  return assert_perm_arm_rule_placeholder_snapshot (handle, 154);
 }
 
 static gint
@@ -3138,6 +3240,10 @@ main (void)
   if ((rc = check_compound_make_result_is_insertable ()) != 0)
     return rc;
   if ((rc = check_guard_context_compound_carries_request_payload ()) != 0)
+    return rc;
+  if ((rc = check_perm_arm_rule_placeholder_contract ()) != 0)
+    return rc;
+  if ((rc = check_perm_arm_rule_placeholder_contract_after_reload ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;

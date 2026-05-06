@@ -84,6 +84,9 @@ wyl_handle_init (WylHandle *self)
 static wyrelog_error_t
 wyl_handle_seed_perm_arm_rules (WylHandle *self)
 {
+  /* Compatibility seed: keep the guard-handle column on the
+   * template-documented placeholder until runtime guard AST
+   * compounds become the sole perm_arm_rule source. */
   for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {
     gint64 row[2];
     wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self,
