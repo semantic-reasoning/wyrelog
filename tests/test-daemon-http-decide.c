@@ -373,7 +373,8 @@ extract_json_string (const gchar *body, const gchar *name)
 }
 
 static gint
-check_raw_login_contract (SoupServer *server, const gchar *base_url)
+check_raw_login_contract (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -405,17 +406,51 @@ check_raw_login_contract (SoupServer *server, const gchar *base_url)
       "username=login-user&skip_mfa=true", &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+  if (status != 403 || strstr (body, "\"login_denied\"") == NULL)
     return 473;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=false", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"session_token\":\"") == NULL ||
+      strstr (body, "\"principal_state\":\"mfa_required\"") == NULL)
+    return 474;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=maybe", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 481;
+  g_clear_pointer (&body, g_free);
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"session_token\":\"") == NULL ||
+      strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
+    return 482;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
       "username=login-user&skip_mfa=1", &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
-    return 474;
+  if (status != 200 ||
+      strstr (body, "\"session_token\":\"") == NULL ||
+      strstr (body, "\"principal_state\":\"authenticated\"") == NULL)
+    return 483;
   g_clear_pointer (&body, g_free);
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
 
   rc = send_raw_login (session, "POST", base_url,
       "username=login-user&password=secret", &status, &body);
@@ -568,7 +603,7 @@ main (void)
     return audit_rc;
 #endif
 
-  raw_rc = check_raw_login_contract (http.server, base_url);
+  raw_rc = check_raw_login_contract (http.server, handle, base_url);
   if (raw_rc != 0)
     return raw_rc;
 

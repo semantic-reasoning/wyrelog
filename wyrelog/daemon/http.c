@@ -280,15 +280,22 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 400, "invalid_login_request");
     return;
   }
+  gboolean skip_mfa_requested = FALSE;
   if (skip_mfa != NULL) {
-    set_json_error (msg, 400, "invalid_login_request");
-    return;
+    if (g_strcmp0 (skip_mfa, "true") == 0 || g_strcmp0 (skip_mfa, "1") == 0)
+      skip_mfa_requested = TRUE;
+    else if (g_strcmp0 (skip_mfa, "false") != 0
+        && g_strcmp0 (skip_mfa, "0") != 0) {
+      set_json_error (msg, 400, "invalid_login_request");
+      return;
+    }
   }
 
   WylDaemonHttpContext *ctx = user_data;
   WylHandle *handle = ctx->handle;
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, username);
+  wyl_login_req_set_skip_mfa (login, skip_mfa_requested);
 
   g_autoptr (WylSession) session = NULL;
   wyrelog_error_t rc = wyl_session_login (handle, login, &session);
@@ -315,8 +322,8 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  g_autofree gchar *body =
-      build_login_json (session_token, username, "mfa_required");
+  g_autofree gchar *body = build_login_json (session_token, username,
+      skip_mfa_requested ? "authenticated" : "mfa_required");
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
       SOUP_MEMORY_COPY, body, strlen (body));
