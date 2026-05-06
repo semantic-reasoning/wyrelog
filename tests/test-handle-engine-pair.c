@@ -49,6 +49,12 @@ typedef struct
   guint matching;
 } DeltaRowExpect;
 
+typedef struct
+{
+  const gint64 *row;
+  guint matches;
+} GuardBridgeExpect;
+
 static void
 snapshot_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
     gpointer user_data)
@@ -116,6 +122,43 @@ relation_pair_snapshot_expect_cb (const gchar *relation, const gint64 *row,
     expect->first_seen++;
   if (matches_second)
     expect->second_seen++;
+}
+
+static void
+guard_context_count_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardBridgeExpect *expect = user_data;
+
+  (void) relation;
+
+  if (ncols == 6 && row[1] == expect->row[0] && row[2] == expect->row[2])
+    expect->matches++;
+}
+
+static void
+context_now_count_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardBridgeExpect *expect = user_data;
+
+  (void) relation;
+
+  if (ncols == 3 && row[0] == expect->row[0] && row[1] == expect->row[2])
+    expect->matches++;
+}
+
+static void
+eval_guard_count_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardBridgeExpect *expect = user_data;
+
+  (void) relation;
+
+  if (ncols == 4 && row[0] == expect->row[0] && row[1] == expect->row[1]
+      && row[2] == expect->row[2])
+    expect->matches++;
 }
 
 static void
@@ -190,6 +233,38 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_intern_engine_symbol (handle, c, &row[2]);
+}
+
+static gint
+expect_guard_bridge_absent (WylHandle *handle, const gchar *subject,
+    const gchar *perm, const gchar *scope, gint base_code)
+{
+  gint64 row[3];
+  if (intern3 (handle, subject, perm, scope, row) != WYRELOG_E_OK)
+    return base_code;
+
+  GuardBridgeExpect expect = { row, 0 };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "guard_context", guard_context_count_cb, &expect) != WYRELOG_E_OK)
+    return base_code + 1;
+  if (expect.matches != 0)
+    return base_code + 2;
+
+  expect.matches = 0;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "context_now",
+          context_now_count_cb, &expect) != WYRELOG_E_OK)
+    return base_code + 3;
+  if (expect.matches != 0)
+    return base_code + 4;
+
+  expect.matches = 0;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "eval_guard",
+          eval_guard_count_cb, &expect) != WYRELOG_E_OK)
+    return base_code + 5;
+  if (expect.matches != 0)
+    return base_code + 6;
+
+  return 0;
 }
 
 static wyrelog_error_t
@@ -1526,6 +1601,135 @@ check_policy_store_guarded_direct_permissions_do_not_auto_arm (void)
 }
 
 static gint
+check_policy_store_guarded_direct_permission_decides_with_context (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 378;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 379;
+  if (wyl_policy_store_grant_direct_permission (store, "guarded-decide-user",
+          "wr.audit.read", "guarded-decide-scope") != WYRELOG_E_OK)
+    return 380;
+  if (wyl_policy_store_set_principal_state (store, "guarded-decide-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 381;
+  if (wyl_policy_store_set_session_state (store, "guarded-decide-scope",
+          "active") != WYRELOG_E_OK)
+    return 382;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 383;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "guarded-decide-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "guarded-decide-scope");
+  wyl_decide_req_set_guard_context (req, 123, "public", 69);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 384;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 385;
+  gint residue = expect_guard_bridge_absent (handle, "guarded-decide-user",
+      "wr.audit.read", "guarded-decide-scope", 386);
+  if (residue != 0)
+    return residue;
+  return 0;
+}
+
+static gint
+check_policy_store_guarded_direct_permission_denies_without_context (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 393;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 394;
+  if (wyl_policy_store_grant_direct_permission (store, "guarded-empty-user",
+          "wr.audit.read", "guarded-empty-scope") != WYRELOG_E_OK)
+    return 395;
+  if (wyl_policy_store_set_principal_state (store, "guarded-empty-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 396;
+  if (wyl_policy_store_set_session_state (store, "guarded-empty-scope",
+          "active") != WYRELOG_E_OK)
+    return 397;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 398;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "guarded-empty-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "guarded-empty-scope");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 399;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 400;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 401;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 402;
+  return 0;
+}
+
+static gint
+check_policy_store_guarded_direct_permission_denies_context_miss (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 403;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 404;
+  if (wyl_policy_store_grant_direct_permission (store, "guarded-miss-user",
+          "wr.audit.read", "guarded-miss-scope") != WYRELOG_E_OK)
+    return 405;
+  if (wyl_policy_store_set_principal_state (store, "guarded-miss-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 406;
+  if (wyl_policy_store_set_session_state (store, "guarded-miss-scope",
+          "active") != WYRELOG_E_OK)
+    return 407;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 408;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "guarded-miss-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "guarded-miss-scope");
+  wyl_decide_req_set_guard_context (req, 123, "public", 70);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 409;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 410;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 411;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 412;
+  gint residue = expect_guard_bridge_absent (handle, "guarded-miss-user",
+      "wr.audit.read", "guarded-miss-scope", 413);
+  if (residue != 0)
+    return residue;
+  return 0;
+}
+
+static gint
 check_policy_store_direct_permissions_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2053,6 +2257,18 @@ main (void)
   if ((rc = check_policy_store_direct_permissions_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_guarded_direct_permissions_do_not_auto_arm ())
+      != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_guarded_direct_permission_decides_with_context ())
+      != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_guarded_direct_permission_denies_without_context
+          ())
+      != 0)
+    return rc;
+  if ((rc = check_policy_store_guarded_direct_permission_denies_context_miss ())
       != 0)
     return rc;
   if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
