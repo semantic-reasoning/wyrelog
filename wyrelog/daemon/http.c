@@ -501,11 +501,6 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
 static wyrelog_error_t
 reconcile_audit_query_projection (WylHandle *handle)
 {
-  wyrelog_error_t rc =
-      wyl_audit_conn_create_schema (wyl_handle_get_audit_conn (handle));
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
   return wyl_handle_load_policy_store_audit_events (handle);
 }
 #endif
