@@ -6,10 +6,58 @@
 #include "wyrelog/wyl-permission-scope-private.h"
 #include "wyrelog/wyl-guard-expr-private.h"
 #include "wyrelog/wyl-dl-static-private.h"
+#include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH
 #error "WYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH must be defined by the build."
 #endif
+
+#ifndef WYL_TEST_TEMPLATE_DIR
+#error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
+#endif
+
+static wyrelog_error_t
+intern_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
+{
+  return wyl_handle_intern_engine_symbol (handle, symbol, out_id);
+}
+
+static wyrelog_error_t
+insert_symbol_row4 (WylHandle *handle, const gchar *relation,
+    const gchar *a, const gchar *b, const gchar *c, const gchar *d)
+{
+  gint64 row[4];
+  wyrelog_error_t rc = intern_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, c, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, d, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, relation, row, 4);
+}
+
+static wyrelog_error_t
+contains_armed (WylHandle *handle, const gchar *user, const gchar *perm,
+    const gchar *scope, gboolean *out_contains)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern_symbol (handle, user, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, perm, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, scope, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, "armed", row, 3, out_contains);
+}
 
 /* --- Stratification self-check ---------------------------------- */
 
@@ -43,6 +91,9 @@ check_stratification (void)
   };
   static const wyl_dl_body_atom_t window_observed_body[] = {
     {.predicate = "perm_window_guard",.negated = FALSE},
+  };
+  static const wyl_dl_body_atom_t perm_state_step_body[] = {
+    {.predicate = "perm_state_transition",.negated = FALSE},
   };
   static const wyl_dl_body_atom_t rule1_body[] = {
     {.predicate = "perm_state",.negated = FALSE},
@@ -80,6 +131,8 @@ check_stratification (void)
           G_N_ELEMENTS (window_and_body)},
     {.head = "perm_window_guard_observed",.body = window_observed_body,
         .body_len = G_N_ELEMENTS (window_observed_body)},
+    {.head = "perm_state_step",.body = perm_state_step_body,.body_len =
+          G_N_ELEMENTS (perm_state_step_body)},
     {.head = "armed",.body = rule1_body,.body_len = G_N_ELEMENTS (rule1_body)},
     {.head = "armed",.body = rule3_body,.body_len = G_N_ELEMENTS (rule3_body)},
     {.head = "armed",.body = rule4_body,.body_len = G_N_ELEMENTS (rule4_body)},
@@ -454,8 +507,25 @@ line_is_static_perm_arm_rule_fact (const gchar *line)
   return *p == '"';
 }
 
+static gboolean
+line_is_static_perm_state_transition_fact (const gchar *line)
+{
+  const gchar *prefix = "perm_state_transition";
+  if (!g_str_has_prefix (line, prefix))
+    return FALSE;
+  const gchar *p = line + strlen (prefix);
+  while (*p == ' ' || *p == '\t')
+    p++;
+  if (*p != '(')
+    return FALSE;
+  p++;
+  while (*p == ' ' || *p == '\t')
+    p++;
+  return *p == '"';
+}
+
 static gint
-check_template_omits_static_perm_arm_rule_facts (void)
+check_template_static_fact_guards (void)
 {
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -475,7 +545,64 @@ check_template_omits_static_perm_arm_rule_facts (void)
       continue;
     if (line_is_static_perm_arm_rule_fact (trimmed))
       return 210;
+    if (line_is_static_perm_state_transition_fact (trimmed))
+      return 211;
   }
+  return 0;
+}
+
+static void
+count_rows_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  guint *count = user_data;
+
+  (void) relation;
+  (void) row;
+  (void) ncols;
+
+  (*count)++;
+}
+
+static gint
+check_perm_state_transition_schema_only (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 220;
+
+  static const gchar *relations[] = {
+    "perm_state_transition",
+    "perm_state_step",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (relations); i++) {
+    guint count = 0;
+    if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+            relations[i], count_rows_cb, &count) != WYRELOG_E_OK)
+      return (gint) (221 + i);
+    if (count != 0)
+      return (gint) (230 + i);
+  }
+
+  if (insert_symbol_row4 (handle, "perm_state", "schema-user",
+          "schema-perm", "schema-scope", "armed") != WYRELOG_E_OK)
+    return 240;
+  gboolean found = FALSE;
+  if (contains_armed (handle, "schema-user", "schema-perm", "schema-scope",
+          &found) != WYRELOG_E_OK)
+    return 241;
+  if (!found)
+    return 242;
+
+  if (insert_symbol_row4 (handle, "perm_state", "schema-guard-user",
+          "wr.audit.read", "schema-guard-scope", "armed") != WYRELOG_E_OK)
+    return 243;
+  if (contains_armed (handle, "schema-guard-user", "wr.audit.read",
+          "schema-guard-scope", &found) != WYRELOG_E_OK)
+    return 244;
+  if (found)
+    return 245;
+
   return 0;
 }
 
@@ -497,7 +624,9 @@ main (void)
     return rc;
   if ((rc = check_argument_validation ()) != 0)
     return rc;
-  if ((rc = check_template_omits_static_perm_arm_rule_facts ()) != 0)
+  if ((rc = check_template_static_fact_guards ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_transition_schema_only ()) != 0)
     return rc;
   return 0;
 }
