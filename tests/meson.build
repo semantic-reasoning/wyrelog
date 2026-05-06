@@ -428,7 +428,7 @@ test('engine-intern', test_engine_intern)
 test_engine_io = executable('test-engine-io',
   'test-engine-io.c',
   c_args : [
-    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'tests' / 'fixtures' / 'engine-io-templates' + '"',
   ],
   dependencies : [wyrelog_dep, wirelog_dep],
 )

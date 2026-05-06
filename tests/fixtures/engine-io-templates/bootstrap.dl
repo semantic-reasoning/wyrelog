@@ -1,0 +1,13 @@
+.decl role(id: symbol)
+.decl role_permission(role: symbol, perm: symbol)
+.decl direct_permission(user: symbol, perm: symbol, scope: symbol)
+.decl member_of(user: symbol, role: symbol, scope: symbol)
+.decl effective_member(user: symbol, role: symbol, scope: symbol)
+.decl has_permission(user: symbol, perm: symbol, scope: symbol)
+
+role("wr.viewer").
+effective_member(U, R, S) :- member_of(U, R, S).
+has_permission(U, P, S) :- direct_permission(U, P, S).
+has_permission(U, P, S) :-
+    effective_member(U, R, S),
+    role_permission(R, P).

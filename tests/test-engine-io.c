@@ -32,7 +32,7 @@ typedef struct
 } DeltaExpect;
 
 static WylEngine *
-open_engine_from_real_templates (void)
+open_engine_from_test_templates (void)
 {
   WylEngine *engine = NULL;
   wyrelog_error_t rc = wyl_engine_open (WYL_TEST_TEMPLATE_DIR, 1, &engine);
@@ -216,7 +216,7 @@ delta_expect_reset (DeltaExpect *expect)
 static void
 test_insert_nominal (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3];
 
   build_member_of_row (engine, row);
@@ -228,7 +228,7 @@ test_insert_nominal (void)
 static void
 test_remove_nominal (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3];
 
   build_member_of_row (engine, row);
@@ -242,7 +242,7 @@ test_remove_nominal (void)
 static void
 test_insert_remove_idempotent_remove (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3];
 
   build_member_of_row (engine, row);
@@ -261,7 +261,7 @@ test_insert_remove_idempotent_remove (void)
 static void
 test_step_nominal (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3];
 
   build_member_of_row (engine, row);
@@ -274,10 +274,10 @@ test_step_nominal (void)
 static void
 test_step_after_snapshot_rejected (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   guint seen = 0;
 
-  g_assert_cmpint (wyl_engine_snapshot (engine, "member_of",
+  g_assert_cmpint (wyl_engine_snapshot (engine, "role",
           snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_INVALID);
 }
@@ -285,7 +285,7 @@ test_step_after_snapshot_rejected (void)
 static void
 test_snapshot_after_step_rejected (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_OK);
@@ -296,7 +296,7 @@ test_snapshot_after_step_rejected (void)
 static void
 test_snapshot_observes_inserted_row (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 member_row[3];
   gint64 role_permission_row[2];
   gint64 expected_permission_row[3];
@@ -323,7 +323,7 @@ test_snapshot_observes_inserted_row (void)
 static void
 test_snapshot_observes_direct_permission (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3];
   SnapshotExpect expect;
 
@@ -349,7 +349,7 @@ test_snapshot_observes_direct_permission (void)
 static void
 test_snapshot_observes_removed_row (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 member_row[3];
   gint64 role_permission_row[2];
   gint64 expected_permission_row[3];
@@ -372,7 +372,7 @@ test_snapshot_observes_removed_row (void)
 static void
 test_delta_nominal (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 member_row[3];
   gint64 expected_member_rows[1][3];
   DeltaExpect expect = {
@@ -403,7 +403,7 @@ test_delta_nominal (void)
 static void
 test_delta_remove (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 member_row[3];
   gint64 expected_member_rows[1][3];
   DeltaExpect expect = {
@@ -442,7 +442,7 @@ test_delta_remove (void)
 static void
 test_delta_clear (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 member_row[3];
   gint64 expected_member_rows[1][3];
   DeltaExpect expect = {
@@ -472,7 +472,7 @@ test_delta_clear (void)
 static void
 test_delta_replace (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 member_row[3];
   gint64 expected_member_rows[1][3];
   DeltaExpect expect_a = {
@@ -516,10 +516,10 @@ test_delta_replace (void)
 static void
 test_delta_after_snapshot_rejected (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   guint seen = 0;
 
-  g_assert_cmpint (wyl_engine_snapshot (engine, "member_of",
+  g_assert_cmpint (wyl_engine_snapshot (engine, "role",
           snapshot_count_cb, &seen), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
           NULL), ==, WYRELOG_E_INVALID);
@@ -535,7 +535,7 @@ test_delta_null_self (void)
 static void
 test_delta_after_close (void)
 {
-  WylEngine *engine = open_engine_from_real_templates ();
+  WylEngine *engine = open_engine_from_test_templates ();
 
   wl_easy_close (engine->session);
   engine->session = NULL;
@@ -562,7 +562,7 @@ test_insert_null_self (void)
 static void
 test_insert_null_relation (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
   g_assert_cmpint (wyl_engine_insert (engine, NULL, row, 3),
@@ -572,7 +572,7 @@ test_insert_null_relation (void)
 static void
 test_insert_null_row (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
 
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", NULL, 3),
       ==, WYRELOG_E_INVALID);
@@ -581,7 +581,7 @@ test_insert_null_row (void)
 static void
 test_insert_zero_ncols (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", row, 0),
@@ -591,7 +591,7 @@ test_insert_zero_ncols (void)
 static void
 test_insert_after_close (void)
 {
-  WylEngine *engine = open_engine_from_real_templates ();
+  WylEngine *engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
   wl_easy_close (engine->session);
@@ -616,7 +616,7 @@ test_step_null_self (void)
 static void
 test_step_after_close (void)
 {
-  WylEngine *engine = open_engine_from_real_templates ();
+  WylEngine *engine = open_engine_from_test_templates ();
 
   wl_easy_close (engine->session);
   engine->session = NULL;
@@ -642,7 +642,7 @@ test_snapshot_null_self (void)
 static void
 test_snapshot_null_relation (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, NULL, snapshot_count_cb,
@@ -652,7 +652,7 @@ test_snapshot_null_relation (void)
 static void
 test_snapshot_null_cb (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   guint seen = 0;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "member_of", NULL, &seen),
@@ -662,7 +662,7 @@ test_snapshot_null_cb (void)
 static void
 test_snapshot_after_close (void)
 {
-  WylEngine *engine = open_engine_from_real_templates ();
+  WylEngine *engine = open_engine_from_test_templates ();
   guint seen = 0;
 
   wl_easy_close (engine->session);
@@ -690,7 +690,7 @@ test_remove_null_self (void)
 static void
 test_remove_null_relation (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
   g_assert_cmpint (wyl_engine_remove (engine, NULL, row, 3),
@@ -700,7 +700,7 @@ test_remove_null_relation (void)
 static void
 test_remove_null_row (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
 
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", NULL, 3),
       ==, WYRELOG_E_INVALID);
@@ -709,7 +709,7 @@ test_remove_null_row (void)
 static void
 test_remove_zero_ncols (void)
 {
-  g_autoptr (WylEngine) engine = open_engine_from_real_templates ();
+  g_autoptr (WylEngine) engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", row, 0),
@@ -719,7 +719,7 @@ test_remove_zero_ncols (void)
 static void
 test_remove_after_close (void)
 {
-  WylEngine *engine = open_engine_from_real_templates ();
+  WylEngine *engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
   wl_easy_close (engine->session);
