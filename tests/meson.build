@@ -76,12 +76,14 @@ test('client-smoke', test_client_smoke)
 if build_client
   test_daemon_http_decide_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
+    '-DWYL_TEST_DAEMON_HTTP',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ]
   test_daemon_http_decide_deps = [
     wyrelog_dep,
     wyrelog_client_dep,
     libsoup_dep,
+    sodium_dep,
   ]
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
