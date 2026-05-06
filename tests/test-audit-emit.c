@@ -225,6 +225,62 @@ count_audit_attr_facts (WylHandle *handle, const gchar *relation,
   return WYRELOG_E_OK;
 }
 
+static gint
+check_live_audit_projection_for_action (WylHandle *handle, const gchar *action,
+    const gchar *subject, const gchar *resource, const gchar *origin,
+    gint base_code)
+{
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+
+  static const gchar *sql =
+      "SELECT id, created_at_us FROM audit_events WHERE action = ?;";
+  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess)
+    return base_code;
+  if (duckdb_bind_varchar (stmt, 1, action) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return base_code + 1;
+  }
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return base_code + 2;
+  }
+  duckdb_destroy_prepare (&stmt);
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    return base_code + 3;
+  }
+
+  gchar *id = duckdb_value_varchar (&result, 0, 0);
+  gint64 created_at_us = duckdb_value_int64 (&result, 1, 0);
+  gint rc = 0;
+  gboolean contains = FALSE;
+
+  if (contains_audit_event_fact (handle, id, created_at_us, "allow",
+          &contains) != WYRELOG_E_OK || !contains)
+    rc = base_code + 4;
+  else if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
+          subject, &contains) != WYRELOG_E_OK || !contains)
+    rc = base_code + 5;
+  else if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
+          action, &contains) != WYRELOG_E_OK || !contains)
+    rc = base_code + 6;
+  else if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
+          resource, &contains) != WYRELOG_E_OK || !contains)
+    rc = base_code + 7;
+  else if (contains_audit_event_attr_fact (handle,
+          "audit_event_deny_origin", id, origin, &contains) != WYRELOG_E_OK
+      || !contains)
+    rc = base_code + 8;
+
+  duckdb_free (id);
+  duckdb_destroy_result (&result);
+  return rc;
+}
+
 static wyrelog_error_t
 insert_not_armed_decide_fixture (WylHandle *handle)
 {
@@ -1738,6 +1794,9 @@ check_permission_grant_emits_audit_row (void)
   duckdb_free ((void *) resource);
   duckdb_free ((void *) permission);
   duckdb_destroy_result (&result);
+  if (rc == 0)
+    rc = check_live_audit_projection_for_action (handle, "permission_grant",
+        "audit-grant-user", "audit-grant-scope", "site.audit-grant", 129);
   g_object_unref (handle);
   return rc;
 }
@@ -1852,6 +1911,9 @@ check_permission_revoke_emits_audit_row (void)
   duckdb_free ((void *) resource);
   duckdb_free ((void *) permission);
   duckdb_destroy_result (&result);
+  if (rc == 0)
+    rc = check_live_audit_projection_for_action (handle, "permission_revoke",
+        "audit-revoke-user", "audit-revoke-scope", "site.audit-revoke", 1390);
   g_object_unref (handle);
   return rc;
 }
@@ -1935,6 +1997,10 @@ check_role_grant_emits_audit_row (void)
   duckdb_free ((void *) resource);
   duckdb_free ((void *) role);
   duckdb_destroy_result (&result);
+  if (rc == 0)
+    rc = check_live_audit_projection_for_action (handle, "role_grant",
+        "audit-role-grant-user", "audit-role-grant-scope",
+        "site.audit-role-grant", 1490);
   g_object_unref (handle);
   return rc;
 }
@@ -2008,6 +2074,10 @@ check_role_revoke_emits_audit_row (void)
   duckdb_free ((void *) resource);
   duckdb_free ((void *) role);
   duckdb_destroy_result (&result);
+  if (rc == 0)
+    rc = check_live_audit_projection_for_action (handle, "role_revoke",
+        "audit-role-revoke-user", "audit-role-revoke-scope",
+        "site.audit-role-revoke", 1600);
   g_object_unref (handle);
   return rc;
 }
