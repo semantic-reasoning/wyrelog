@@ -550,6 +550,25 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
+static wyrelog_error_t
+grant_policy_role_authority (WylHandle *handle, const gchar *subject,
+    const gchar *scope)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_upsert_permission (store,
+      "wr.policy.grant_role", "policy grant role", "critical");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_grant_direct_permission (store, subject,
+      "wr.policy.grant_role", scope);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_session_state (store, scope, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
 static gboolean
 direct_permission_exists (WylHandle *handle, const gchar *subject,
     const gchar *perm, const gchar *scope)
@@ -557,6 +576,18 @@ direct_permission_exists (WylHandle *handle, const gchar *subject,
   gboolean exists = FALSE;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_direct_permission_exists (store, subject, perm, scope,
+          &exists) != WYRELOG_E_OK)
+    return FALSE;
+  return exists;
+}
+
+static gboolean
+role_membership_exists (WylHandle *handle, const gchar *subject,
+    const gchar *role, const gchar *scope)
+{
+  gboolean exists = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_role_membership_exists (store, subject, role, scope,
           &exists) != WYRELOG_E_OK)
     return FALSE;
   return exists;
@@ -680,6 +711,67 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 138;
+
+  if (wyl_policy_store_upsert_role (store, "site.reader",
+          "site reader") != WYRELOG_E_OK)
+    return 139;
+
+  g_autofree gchar *role_denied_query =
+      g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=29", session_token);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", role_denied_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 140;
+  if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
+    return 141;
+
+  if (grant_policy_role_authority (handle, "http-policy-admin",
+          "tenant-b") != WYRELOG_E_OK)
+    return 142;
+
+  g_autofree gchar *role_guard_denied_query =
+      g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=30", session_token);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", role_guard_denied_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 143;
+  if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
+    return 144;
+
+  g_autofree gchar *role_grant_query =
+      g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=29", session_token);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", role_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 145;
+  if (!role_membership_exists (handle, "role-target", "site.reader",
+          "tenant-b"))
+    return 146;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/revoke", role_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 147;
+  if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
+    return 148;
 
   return 0;
 }
@@ -950,6 +1042,16 @@ main (void)
       "action(\"permission_revoke\")",
       "http-policy-admin", "permission_revoke", "tenant-a",
       WYL_DECISION_ALLOW, NULL, "site.policy.read");
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client, "action(\"role_grant\")",
+      "http-policy-admin", "role_grant", "tenant-b",
+      WYL_DECISION_ALLOW, NULL, "site.reader");
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client, "action(\"role_revoke\")",
+      "http-policy-admin", "role_revoke", "tenant-b",
+      WYL_DECISION_ALLOW, NULL, "site.reader");
   if (audit_rc != 0)
     return audit_rc;
 #endif
