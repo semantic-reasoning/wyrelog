@@ -18,6 +18,7 @@ typedef struct
   gchar *last_perm;
   gchar *last_session_token;
   gchar *last_password;
+  gchar *last_skip_mfa;
   gchar *last_guard_timestamp;
   gchar *last_guard_loc_class;
   gchar *last_guard_risk;
@@ -62,6 +63,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_perm);
   g_free (http->last_session_token);
   g_free (http->last_password);
+  g_free (http->last_skip_mfa);
   g_free (http->last_guard_timestamp);
   g_free (http->last_guard_loc_class);
   g_free (http->last_guard_risk);
@@ -82,6 +84,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
           "session_token")) : NULL;
   http->last_password =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "password")) : NULL;
+  http->last_skip_mfa =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "skip_mfa")) : NULL;
   http->last_guard_timestamp =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "guard_timestamp")) : NULL;
@@ -200,6 +204,12 @@ main (void)
     return 40;
   if (wyl_client_login (local_client, "alice", "secret") != WYRELOG_E_INVALID)
     return 41;
+  if (wyl_client_login_skip_mfa (NULL, "alice") != WYRELOG_E_INVALID)
+    return 143;
+  if (wyl_client_login_skip_mfa (local_client, NULL) != WYRELOG_E_INVALID)
+    return 144;
+  if (wyl_client_login_skip_mfa (local_client, "") != WYRELOG_E_INVALID)
+    return 145;
 
   http.body = "{\"session_token\":\"session-1\",\"username\":\"alice\","
       "\"principal_state\":\"mfa_required\",\"session_state\":\"active\"}";
@@ -213,6 +223,8 @@ main (void)
     return 45;
   if (http.last_password != NULL)
     return 46;
+  if (http.last_skip_mfa != NULL)
+    return 146;
   g_autofree gchar *client_session_token =
       wyl_client_dup_session_token (local_client);
   g_autofree gchar *client_username = wyl_client_dup_username (local_client);
@@ -225,6 +237,33 @@ main (void)
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
+
+  http.body = "{\"session_token\":\"session-2\",\"username\":\"alice\","
+      "\"principal_state\":\"authenticated\",\"session_state\":\"active\"}";
+  if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
+    return 147;
+  if (g_strcmp0 (http.last_method, "POST") != 0)
+    return 148;
+  if (g_strcmp0 (http.last_path, "/auth/login") != 0)
+    return 149;
+  if (g_strcmp0 (http.last_user, "alice") != 0)
+    return 150;
+  if (g_strcmp0 (http.last_skip_mfa, "true") != 0)
+    return 151;
+  g_clear_pointer (&client_session_token, g_free);
+  g_clear_pointer (&client_username, g_free);
+  g_clear_pointer (&client_principal_state, g_free);
+  g_clear_pointer (&client_session_state, g_free);
+  client_session_token = wyl_client_dup_session_token (local_client);
+  client_username = wyl_client_dup_username (local_client);
+  client_principal_state = wyl_client_dup_principal_state (local_client);
+  client_session_state = wyl_client_dup_session_state (local_client);
+  if (g_strcmp0 (client_session_token, "session-2") != 0 ||
+      g_strcmp0 (client_username, "alice") != 0 ||
+      g_strcmp0 (client_principal_state, "authenticated") != 0 ||
+      g_strcmp0 (client_session_state, "active") != 0)
+    return 152;
+
   if (wyl_client_mfa_verify (local_client, NULL) == WYRELOG_E_OK)
     return 140;
   if (wyl_client_mfa_verify (local_client, "") == WYRELOG_E_OK)
@@ -425,6 +464,7 @@ main (void)
   g_clear_pointer (&http.last_perm, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.last_password, g_free);
+  g_clear_pointer (&http.last_skip_mfa, g_free);
   g_clear_pointer (&http.last_guard_timestamp, g_free);
   g_clear_pointer (&http.last_guard_loc_class, g_free);
   g_clear_pointer (&http.last_guard_risk, g_free);

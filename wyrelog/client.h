@@ -37,6 +37,12 @@ gchar *wyl_client_dup_base_url (const WylClient * client);
 /* Authentication */
 wyrelog_error_t wyl_client_login (WylClient * client,
     const gchar * username, const gchar * password);
+/*
+ * Requests a daemon-side skip-MFA login. The daemon remains authoritative and
+ * may deny this request according to its deployment mode and ingress policy.
+ */
+wyrelog_error_t wyl_client_login_skip_mfa (WylClient * client,
+    const gchar * username);
 gchar *wyl_client_dup_session_token (const WylClient * client);
 gchar *wyl_client_dup_username (const WylClient * client);
 gchar *wyl_client_dup_principal_state (const WylClient * client);
