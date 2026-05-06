@@ -139,6 +139,94 @@ query_has_rows (sqlite3 *db, const gchar *sql, gboolean *out_has_rows)
 }
 
 static wyrelog_error_t
+query_single_text (sqlite3 *db, const gchar *sql, const gchar *id,
+    gchar **out_value)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (db == NULL || sql == NULL || id == NULL || out_value == NULL)
+    return WYRELOG_E_INVALID;
+  *out_value = NULL;
+
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    if (sqlite3_column_type (stmt, 0) == SQLITE_NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    *out_value = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    sqlite3_finalize (stmt);
+    return *out_value == NULL ? WYRELOG_E_IO : WYRELOG_E_OK;
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+validate_builtin_roles (sqlite3 *db)
+{
+  static const gchar *sql = "SELECT role_name FROM roles WHERE role_id = ?;";
+
+  for (gsize i = 0; i < G_N_ELEMENTS (builtin_roles); i++) {
+    g_autofree gchar *name = NULL;
+    wyrelog_error_t rc = query_single_text (db, sql, builtin_roles[i].id,
+        &name);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (g_strcmp0 (name, builtin_roles[i].name) != 0)
+      return WYRELOG_E_POLICY;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_builtin_permissions (sqlite3 *db)
+{
+  static const gchar *name_sql =
+      "SELECT perm_name FROM permissions WHERE perm_id = ?;";
+  static const gchar *class_sql =
+      "SELECT class FROM permissions WHERE perm_id = ?;";
+
+  for (gsize i = 0; i < G_N_ELEMENTS (builtin_permissions); i++) {
+    g_autofree gchar *name = NULL;
+    wyrelog_error_t rc = query_single_text (db, name_sql,
+        builtin_permissions[i].id, &name);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (g_strcmp0 (name, builtin_permissions[i].name) != 0)
+      return WYRELOG_E_POLICY;
+
+    g_autofree gchar *klass = NULL;
+    rc = query_single_text (db, class_sql, builtin_permissions[i].id, &klass);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (g_strcmp0 (klass, builtin_permissions[i].klass) != 0)
+      return WYRELOG_E_POLICY;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_builtin_catalog (sqlite3 *db)
+{
+  wyrelog_error_t rc = validate_builtin_roles (db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return validate_builtin_permissions (db);
+}
+
+static wyrelog_error_t
 seed_builtin_roles (sqlite3 *db)
 {
   sqlite3_stmt *stmt = NULL;
@@ -208,7 +296,10 @@ seed_builtin_catalog (sqlite3 *db)
   wyrelog_error_t rc = seed_builtin_roles (db);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return seed_builtin_permissions (db);
+  rc = seed_builtin_permissions (db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return validate_builtin_catalog (db);
 }
 
 wyrelog_error_t
