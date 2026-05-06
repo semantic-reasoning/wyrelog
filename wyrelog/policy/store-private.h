@@ -61,6 +61,10 @@ void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);
 
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
+gsize wyl_policy_store_builtin_role_count (void);
+const gchar *wyl_policy_store_builtin_role_id (gsize idx);
+gsize wyl_policy_store_builtin_permission_count (void);
+const gchar *wyl_policy_store_builtin_permission_id (gsize idx);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *
