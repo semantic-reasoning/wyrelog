@@ -468,9 +468,11 @@ wyl_jwt_access_claims_clear (wyl_jwt_access_claims_t *claims)
 {
   if (claims == NULL)
     return;
+  g_free (claims->jti);
   g_free (claims->subject);
   g_free (claims->issuer);
   g_free (claims->audience);
+  g_free (claims->tenant);
   g_free (claims->principal_state_at_issue);
   g_free (claims->session_id);
   memset (claims, 0, sizeof *claims);
@@ -537,7 +539,8 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
     skip_json_ws (&p);
 
     if (g_strcmp0 (key, "jti") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_JTI, NULL);
+      rc = parse_string_claim_value (&p, claims, CLAIM_JTI,
+          &claims->claims.jti);
     else if (g_strcmp0 (key, "sub") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_SUB,
           &claims->claims.subject);
@@ -557,7 +560,8 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
       rc = parse_int_claim_value (&p, claims, CLAIM_EXP,
           &claims->claims.expires_at);
     else if (g_strcmp0 (key, "tenant") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_TENANT, NULL);
+      rc = parse_string_claim_value (&p, claims, CLAIM_TENANT,
+          &claims->claims.tenant);
     else if (g_strcmp0 (key, "principal_state_at_issue") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_PRINCIPAL_STATE,
           &claims->claims.principal_state_at_issue);

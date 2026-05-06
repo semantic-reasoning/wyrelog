@@ -243,6 +243,22 @@ check_hs256_access_token_claims_and_time (void)
     return 91;
   if (payload == NULL)
     return 92;
+  wyl_jwt_access_claims_t claims = { 0 };
+  if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
+    return 99;
+  gint claims_rc = 0;
+  if (g_strcmp0 (claims.jti, "01890c10-2e3f-7000-8000-000000000101") != 0)
+    claims_rc = 100;
+  else if (g_strcmp0 (claims.subject, "alice") != 0)
+    claims_rc = 101;
+  else if (g_strcmp0 (claims.tenant, "__wr_default") != 0)
+    claims_rc = 102;
+  else if (g_strcmp0 (claims.session_id,
+          "01890c10-2e3f-7000-8000-000000000102") != 0)
+    claims_rc = 103;
+  wyl_jwt_access_claims_clear (&claims);
+  if (claims_rc != 0)
+    return claims_rc;
 
   g_clear_pointer (&payload, g_bytes_unref);
   if (wyl_jwt_verify_hs256_access_token (token, secret,
