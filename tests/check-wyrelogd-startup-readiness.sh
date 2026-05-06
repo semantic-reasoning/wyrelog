@@ -29,9 +29,9 @@ src = pathlib.Path(sys.argv[1])
 dst = pathlib.Path(sys.argv[2])
 shutil.copytree(src, dst)
 
-old = "guarded_perm(P) :- perm_arm_rule(P, G)."
+old = "guarded_perm(P) :- perm_arm_rule(P, _)."
 new = (
-    'guarded_perm(P) :- perm_arm_rule(P, G), '
+    'guarded_perm(P) :- perm_arm_rule(P, _), '
     'permission("__wyrelog_test_missing_permission").'
 )
 for rel in ("decision.dl", "lobac/decision.dl"):

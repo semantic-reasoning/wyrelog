@@ -81,19 +81,162 @@ wyl_handle_init (WylHandle *self)
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 }
 
+static wyrelog_error_t wyl_handle_make_guard_expr_node_compound (WylHandle *
+    self, const wyl_guard_expr_t * expr, gint64 * out_id);
+
+static wyrelog_error_t
+wyl_handle_intern_guard_symbol (WylHandle *self, const gchar *symbol,
+    gint64 *out_id)
+{
+  if (symbol == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_handle_intern_engine_symbol (self, symbol, out_id);
+}
+
+static wyrelog_error_t
+wyl_handle_make_guard_cmp_compound (WylHandle *self,
+    const wyl_guard_expr_t *expr, gint64 *out_id)
+{
+  gint64 field_id = 0;
+  wyrelog_error_t rc = wyl_handle_intern_guard_symbol (self,
+      wyl_guard_field_name (expr->u.cmp.field), &field_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 op_id = 0;
+  rc = wyl_handle_intern_guard_symbol (self,
+      wyl_guard_op_name (expr->u.cmp.op), &op_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 value_id = 0;
+  rc = wyl_handle_intern_guard_symbol (self, expr->u.cmp.value, &value_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t args[3] = {
+    {WIRELOG_TYPE_STRING, field_id},
+    {WIRELOG_TYPE_STRING, op_id},
+    {WIRELOG_TYPE_STRING, value_id},
+  };
+  return wyl_handle_make_engine_compound (self, "guard_cmp", args,
+      G_N_ELEMENTS (args), out_id);
+}
+
+static wyrelog_error_t
+wyl_handle_make_guard_tag_compound (WylHandle *self,
+    const wyl_guard_expr_t *expr, gint64 *out_id)
+{
+  gint64 atom_id = 0;
+  wyrelog_error_t rc =
+      wyl_handle_intern_guard_symbol (self, expr->u.tag.atom, &atom_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_STRING, atom_id},
+  };
+  return wyl_handle_make_engine_compound (self, "guard_tag", args,
+      G_N_ELEMENTS (args), out_id);
+}
+
+static wyrelog_error_t
+wyl_handle_make_guard_unary_compound (WylHandle *self, const gchar *functor,
+    const wyl_guard_expr_t *child, gint64 *out_id)
+{
+  gint64 child_id = 0;
+  wyrelog_error_t rc =
+      wyl_handle_make_guard_expr_node_compound (self, child, &child_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_INT64, child_id},
+  };
+  return wyl_handle_make_engine_compound (self, functor, args,
+      G_N_ELEMENTS (args), out_id);
+}
+
+static wyrelog_error_t
+wyl_handle_make_guard_binary_compound (WylHandle *self, const gchar *functor,
+    const wyl_guard_expr_t *left, const wyl_guard_expr_t *right, gint64 *out_id)
+{
+  gint64 left_id = 0;
+  wyrelog_error_t rc =
+      wyl_handle_make_guard_expr_node_compound (self, left, &left_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 right_id = 0;
+  rc = wyl_handle_make_guard_expr_node_compound (self, right, &right_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t args[2] = {
+    {WIRELOG_TYPE_INT64, left_id},
+    {WIRELOG_TYPE_INT64, right_id},
+  };
+  return wyl_handle_make_engine_compound (self, functor, args,
+      G_N_ELEMENTS (args), out_id);
+}
+
+static wyrelog_error_t
+wyl_handle_make_guard_expr_node_compound (WylHandle *self,
+    const wyl_guard_expr_t *expr, gint64 *out_id)
+{
+  if (out_id != NULL)
+    *out_id = (gint64) WIRELOG_COMPOUND_HANDLE_NULL;
+  if (expr == NULL || out_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  switch (expr->kind) {
+    case WYL_GUARD_KIND_CMP:
+      return wyl_handle_make_guard_cmp_compound (self, expr, out_id);
+    case WYL_GUARD_KIND_TAG:
+      return wyl_handle_make_guard_tag_compound (self, expr, out_id);
+    case WYL_GUARD_KIND_NOT:
+      return wyl_handle_make_guard_unary_compound (self, "guard_not",
+          expr->u.unary.child, out_id);
+    case WYL_GUARD_KIND_AND:
+      return wyl_handle_make_guard_binary_compound (self, "guard_and",
+          expr->u.binop.left, expr->u.binop.right, out_id);
+    case WYL_GUARD_KIND_OR:
+      return wyl_handle_make_guard_binary_compound (self, "guard_or",
+          expr->u.binop.left, expr->u.binop.right, out_id);
+    case WYL_GUARD_KIND_LAST_:
+    default:
+      return WYRELOG_E_INVALID;
+  }
+}
+
+static wyrelog_error_t
+wyl_handle_make_guard_expr_compound (WylHandle *self,
+    const wyl_guard_expr_t *expr, gint64 *out_id)
+{
+  gint64 root_id = 0;
+  wyrelog_error_t rc =
+      wyl_handle_make_guard_expr_node_compound (self, expr, &root_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_INT64, root_id},
+  };
+  return wyl_handle_make_engine_compound (self, "guard", args,
+      G_N_ELEMENTS (args), out_id);
+}
+
 static wyrelog_error_t
 wyl_handle_seed_perm_arm_rules (WylHandle *self)
 {
-  /* Compatibility seed: keep the guard-handle column on the
-   * template-documented placeholder until runtime guard AST
-   * compounds become the sole perm_arm_rule source. */
   for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {
     gint64 row[2];
     wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self,
         wyl_perm_arm_rule_perm_id (i), &row[0]);
     if (rc != WYRELOG_E_OK)
       return rc;
-    rc = wyl_handle_intern_engine_symbol (self, "_v0_deferred", &row[1]);
+    rc = wyl_handle_make_guard_expr_compound (self,
+        wyl_perm_arm_rule_expr (i), &row[1]);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_handle_engine_insert (self, "perm_arm_rule", row, 2);

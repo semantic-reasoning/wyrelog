@@ -86,11 +86,37 @@ typedef struct
 {
   const gint64 *perm_ids;
   guint *seen_counts;
+  gint64 *guard_handles;
   gsize nperms;
   gint64 placeholder_id;
   guint total;
-  guint unexpected_guard_handle;
+  guint invalid_guard_handle;
+  guint placeholder_guard_handle;
 } PermArmRuleSnapshotExpect;
+
+typedef struct
+{
+  gint64 guard_handle;
+  gint64 root_handle;
+  guint matches;
+} GuardWrapperExpect;
+
+typedef struct
+{
+  gint64 cmp_handle;
+  gint64 field_id;
+  gint64 op_id;
+  gint64 value_id;
+  guint matches;
+} GuardCmpExpect;
+
+typedef struct
+{
+  gint64 and_handle;
+  gint64 left_handle;
+  gint64 right_handle;
+  guint matches;
+} GuardAndExpect;
 
 static gchar *
 make_tmpdir (void)
@@ -154,7 +180,7 @@ write_compound_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      ".decl perm_arm_rule(perm: symbol, guard_handle: symbol)\n")
+      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
@@ -184,7 +210,39 @@ write_guard_context_compound_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      ".decl perm_arm_rule(perm: symbol, guard_handle: symbol)\n")
+      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n")
+      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
+}
+
+static gboolean
+write_guard_payload_templates (const gchar *dir)
+{
+  g_autofree gchar *fsm_dir = g_build_filename (dir, "fsm", NULL);
+  if (g_mkdir (fsm_dir, 0755) != 0)
+    return FALSE;
+  g_autofree gchar *lobac_dir = g_build_filename (dir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0)
+    return FALSE;
+
+  return write_file_in_dir (dir, "bootstrap.dl",
+      ".decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)\n"
+      ".decl guard_row(handle: int64, root: int64)\n"
+      ".decl guard_cmp_row(handle: int64, field: symbol, op: symbol,"
+      " value: symbol)\n"
+      ".decl guard_and_row(handle: int64, left: int64, right: int64)\n"
+      "perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).\n"
+      "guard_row(H, R) :- __compound_guard_1(H, R).\n"
+      "guard_cmp_row(H, F, O, V) :- __compound_guard_cmp_3(H, F, O, V).\n"
+      "guard_and_row(H, L, R) :- __compound_guard_and_2(H, L, R).\n")
+      && write_file_in_dir (dir, "fsm/principal.dl",
+      ".decl principal_transition(from_state: symbol, event: symbol,"
+      " to_state: symbol)\n")
+      && write_file_in_dir (dir, "fsm/session.dl",
+      ".decl session_active(state: symbol)\n"
+      ".decl session_transition(from_state: symbol, event: symbol,"
+      " to_state: symbol)\n")
+      && write_file_in_dir (dir, "fsm/permission_scope.dl",
+      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
@@ -349,15 +407,66 @@ perm_arm_rule_snapshot_cb (const gchar *relation, const gint64 *row,
     return;
 
   expect->total++;
-  if (row[1] != expect->placeholder_id)
-    expect->unexpected_guard_handle++;
+  if (row[1] <= 0)
+    expect->invalid_guard_handle++;
+  if (row[1] == expect->placeholder_id)
+    expect->placeholder_guard_handle++;
 
   for (gsize i = 0; i < expect->nperms; i++) {
     if (row[0] == expect->perm_ids[i]) {
       expect->seen_counts[i]++;
+      expect->guard_handles[i] = row[1];
       return;
     }
   }
+}
+
+static void
+guard_wrapper_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardWrapperExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "guard_row") != 0 || ncols != 2)
+    return;
+  if (row[0] != expect->guard_handle)
+    return;
+
+  expect->root_handle = row[1];
+  expect->matches++;
+}
+
+static void
+guard_cmp_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardCmpExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "guard_cmp_row") != 0 || ncols != 4)
+    return;
+  if (row[0] != expect->cmp_handle)
+    return;
+  if (row[1] != expect->field_id || row[2] != expect->op_id
+      || row[3] != expect->value_id)
+    return;
+
+  expect->matches++;
+}
+
+static void
+guard_and_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardAndExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "guard_and_row") != 0 || ncols != 3)
+    return;
+  if (row[0] != expect->and_handle)
+    return;
+
+  expect->left_handle = row[1];
+  expect->right_handle = row[2];
+  expect->matches++;
 }
 
 static void
@@ -1184,11 +1293,12 @@ check_guard_context_compound_carries_request_payload (void)
 }
 
 static gint
-assert_perm_arm_rule_placeholder_snapshot (WylHandle *handle, gint base_code)
+assert_perm_arm_rule_guard_payload_snapshot (WylHandle *handle, gint base_code)
 {
   gsize nperms = wyl_perm_arm_rule_count ();
   g_autofree gint64 *perm_ids = g_new0 (gint64, nperms);
   g_autofree guint *seen_counts = g_new0 (guint, nperms);
+  g_autofree gint64 *guard_handles = g_new0 (gint64, nperms);
 
   for (gsize i = 0; i < nperms; i++) {
     if (wyl_handle_intern_engine_symbol (handle, wyl_perm_arm_rule_perm_id (i),
@@ -1204,29 +1314,33 @@ assert_perm_arm_rule_placeholder_snapshot (WylHandle *handle, gint base_code)
   PermArmRuleSnapshotExpect expect = {
     .perm_ids = perm_ids,
     .seen_counts = seen_counts,
+    .guard_handles = guard_handles,
     .nperms = nperms,
     .placeholder_id = placeholder_id,
     .total = 0,
-    .unexpected_guard_handle = 0,
+    .invalid_guard_handle = 0,
+    .placeholder_guard_handle = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
           "perm_arm_rule_observed", perm_arm_rule_snapshot_cb, &expect)
       != WYRELOG_E_OK)
     return base_code + 2;
 
-  if (expect.unexpected_guard_handle != 0)
+  if (expect.invalid_guard_handle != 0)
     return base_code + 3;
-  if (expect.total != nperms)
+  if (expect.placeholder_guard_handle != 0)
     return base_code + 4;
+  if (expect.total != nperms)
+    return base_code + 5;
   for (gsize i = 0; i < nperms; i++) {
-    if (seen_counts[i] != 1)
-      return base_code + 5 + (gint) i;
+    if (seen_counts[i] != 1 || guard_handles[i] <= 0)
+      return base_code + 6 + (gint) i;
   }
   return 0;
 }
 
 static gint
-check_perm_arm_rule_placeholder_contract (void)
+check_perm_arm_rule_guard_payload_contract (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
@@ -1235,11 +1349,11 @@ check_perm_arm_rule_placeholder_contract (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 134;
-  return assert_perm_arm_rule_placeholder_snapshot (handle, 135);
+  return assert_perm_arm_rule_guard_payload_snapshot (handle, 135);
 }
 
 static gint
-check_perm_arm_rule_placeholder_contract_after_reload (void)
+check_perm_arm_rule_guard_payload_contract_after_reload (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
@@ -1250,7 +1364,226 @@ check_perm_arm_rule_placeholder_contract_after_reload (void)
     return 152;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 153;
-  return assert_perm_arm_rule_placeholder_snapshot (handle, 154);
+  return assert_perm_arm_rule_guard_payload_snapshot (handle, 154);
+}
+
+static gint
+find_perm_arm_rule_index (const gchar *perm_id)
+{
+  for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {
+    if (g_strcmp0 (wyl_perm_arm_rule_perm_id (i), perm_id) == 0)
+      return (gint) i;
+  }
+  return -1;
+}
+
+static gint
+check_perm_arm_rule_guard_payload_projection (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autofree gchar *tmpdir = NULL;
+  gsize nperms = wyl_perm_arm_rule_count ();
+  g_autofree gint64 *perm_ids = g_new0 (gint64, nperms);
+  g_autofree guint *seen_counts = g_new0 (guint, nperms);
+  g_autofree gint64 *guard_handles = g_new0 (gint64, nperms);
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 171;
+  tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 172;
+  if (!write_guard_payload_templates (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 173;
+  }
+  if (wyl_handle_open_engine_pair (handle, tmpdir) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 174;
+  }
+
+  for (gsize i = 0; i < nperms; i++) {
+    if (wyl_handle_intern_engine_symbol (handle, wyl_perm_arm_rule_perm_id (i),
+            &perm_ids[i]) != WYRELOG_E_OK) {
+      rmdir_recursive (tmpdir);
+      return 175;
+    }
+  }
+
+  gint64 placeholder_id = -1;
+  gint64 risk_id = -1;
+  gint64 loc_class_id = -1;
+  gint64 lt_id = -1;
+  gint64 eq_id = -1;
+  gint64 value_70_id = -1;
+  gint64 value_30_id = -1;
+  gint64 trusted_id = -1;
+  if (wyl_handle_intern_engine_symbol (handle, "_v0_deferred",
+          &placeholder_id) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 176;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "risk", &risk_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 177;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "loc_class", &loc_class_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 178;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "lt", &lt_id) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 179;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "eq", &eq_id) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 180;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "70", &value_70_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 181;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "30", &value_30_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 182;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "trusted", &trusted_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 183;
+  }
+
+  PermArmRuleSnapshotExpect expect = {
+    .perm_ids = perm_ids,
+    .seen_counts = seen_counts,
+    .guard_handles = guard_handles,
+    .nperms = nperms,
+    .placeholder_id = placeholder_id,
+    .total = 0,
+    .invalid_guard_handle = 0,
+    .placeholder_guard_handle = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "perm_arm_rule_observed", perm_arm_rule_snapshot_cb, &expect)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 184;
+  }
+
+  gint audit_idx = find_perm_arm_rule_index ("wr.audit.read");
+  gint admin_idx = find_perm_arm_rule_index ("wr.sys.admin");
+  if (audit_idx < 0 || admin_idx < 0) {
+    rmdir_recursive (tmpdir);
+    return 185;
+  }
+  if (guard_handles[audit_idx] <= 0 || guard_handles[admin_idx] <= 0) {
+    rmdir_recursive (tmpdir);
+    return 186;
+  }
+
+  GuardWrapperExpect audit_wrapper = {
+    .guard_handle = guard_handles[audit_idx],
+    .root_handle = -1,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "guard_row",
+          guard_wrapper_cb, &audit_wrapper) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 187;
+  }
+  if (audit_wrapper.matches < 1 || audit_wrapper.root_handle <= 0) {
+    rmdir_recursive (tmpdir);
+    return 188;
+  }
+
+  GuardCmpExpect audit_cmp = {
+    .cmp_handle = audit_wrapper.root_handle,
+    .field_id = risk_id,
+    .op_id = lt_id,
+    .value_id = value_70_id,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "guard_cmp_row", guard_cmp_cb, &audit_cmp) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 189;
+  }
+  if (audit_cmp.matches < 1) {
+    rmdir_recursive (tmpdir);
+    return 190;
+  }
+
+  GuardWrapperExpect admin_wrapper = {
+    .guard_handle = guard_handles[admin_idx],
+    .root_handle = -1,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "guard_row",
+          guard_wrapper_cb, &admin_wrapper) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 191;
+  }
+  if (admin_wrapper.matches < 1 || admin_wrapper.root_handle <= 0) {
+    rmdir_recursive (tmpdir);
+    return 192;
+  }
+
+  GuardAndExpect admin_and = {
+    .and_handle = admin_wrapper.root_handle,
+    .left_handle = -1,
+    .right_handle = -1,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "guard_and_row", guard_and_cb, &admin_and) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 193;
+  }
+  if (admin_and.matches < 1 || admin_and.left_handle <= 0
+      || admin_and.right_handle <= 0) {
+    rmdir_recursive (tmpdir);
+    return 194;
+  }
+
+  GuardCmpExpect admin_risk = {
+    .cmp_handle = admin_and.left_handle,
+    .field_id = risk_id,
+    .op_id = lt_id,
+    .value_id = value_30_id,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "guard_cmp_row", guard_cmp_cb, &admin_risk) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 195;
+  }
+  if (admin_risk.matches < 1) {
+    rmdir_recursive (tmpdir);
+    return 196;
+  }
+
+  GuardCmpExpect admin_loc = {
+    .cmp_handle = admin_and.right_handle,
+    .field_id = loc_class_id,
+    .op_id = eq_id,
+    .value_id = trusted_id,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "guard_cmp_row", guard_cmp_cb, &admin_loc) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 197;
+  }
+  if (admin_loc.matches < 1) {
+    rmdir_recursive (tmpdir);
+    return 198;
+  }
+
+  rmdir_recursive (tmpdir);
+  return 0;
 }
 
 static gint
@@ -3241,9 +3574,11 @@ main (void)
     return rc;
   if ((rc = check_guard_context_compound_carries_request_payload ()) != 0)
     return rc;
-  if ((rc = check_perm_arm_rule_placeholder_contract ()) != 0)
+  if ((rc = check_perm_arm_rule_guard_payload_contract ()) != 0)
     return rc;
-  if ((rc = check_perm_arm_rule_placeholder_contract_after_reload ()) != 0)
+  if ((rc = check_perm_arm_rule_guard_payload_contract_after_reload ()) != 0)
+    return rc;
+  if ((rc = check_perm_arm_rule_guard_payload_projection ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
