@@ -561,6 +561,18 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON direct_permission_events (subject_id);"
       "CREATE INDEX IF NOT EXISTS idx_direct_permission_events_perm "
       "  ON direct_permission_events (perm_id);"
+      "CREATE TABLE IF NOT EXISTS permission_states ("
+      "  subject_id TEXT NOT NULL,"
+      "  perm_id TEXT NOT NULL,"
+      "  scope TEXT NOT NULL,"
+      "  state TEXT NOT NULL,"
+      "  updated_at INTEGER,"
+      "  PRIMARY KEY (subject_id, perm_id, scope)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_permission_states_state "
+      "  ON permission_states (state);"
+      "CREATE INDEX IF NOT EXISTS idx_permission_states_perm "
+      "  ON permission_states (perm_id);"
       "CREATE TABLE IF NOT EXISTS principal_states ("
       "  subject_id TEXT PRIMARY KEY,"
       "  state TEXT NOT NULL,"
@@ -1278,6 +1290,109 @@ wyl_policy_store_foreach_direct_permission_event (wyl_policy_store_t *store,
     const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
     const gchar *operation = (const gchar *) sqlite3_column_text (stmt, 3);
     rc = cb (subject_id, perm_id, scope, operation, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_set_permission_state (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *state)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || state == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "INSERT INTO permission_states "
+      "  (subject_id, perm_id, scope, state, updated_at) "
+      "VALUES (?, ?, ?, ?, unixepoch()) "
+      "ON CONFLICT(subject_id, perm_id, scope) DO UPDATE SET "
+      "  state = excluded.state," "  updated_at = excluded.updated_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, state)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_permission_state_exists (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gboolean *out_exists)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT 1 FROM permission_states "
+      "WHERE subject_id = ? AND perm_id = ? AND scope = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_permission_state (wyl_policy_store_t *store,
+    wyl_policy_permission_state_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT subject_id, perm_id, scope, state "
+      "FROM permission_states ORDER BY subject_id, perm_id, scope;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *scope = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *state = (const gchar *) sqlite3_column_text (stmt, 3);
+    rc = cb (subject_id, perm_id, scope, state, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;

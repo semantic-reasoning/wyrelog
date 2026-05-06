@@ -603,6 +603,9 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_direct_permissions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_handle_load_policy_store_permission_states (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_handle_load_policy_store_principal_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1066,6 +1069,14 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
     return WYRELOG_E_OK;
 
+  gboolean has_durable_state = FALSE;
+  rc = wyl_policy_store_permission_state_exists (self->policy_store, subject_id,
+      perm_id, scope, &has_durable_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (has_durable_state)
+    return WYRELOG_E_OK;
+
   gint64 state_row[4];
   state_row[0] = row[0];
   state_row[1] = row[1];
@@ -1087,6 +1098,46 @@ wyl_handle_load_policy_store_direct_permissions (WylHandle *self)
 
   return wyl_policy_store_foreach_direct_permission (self->policy_store,
       insert_policy_store_direct_permission, self);
+}
+
+static wyrelog_error_t
+insert_policy_store_permission_state (const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *state,
+    gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[4];
+
+  if (wyl_perm_state_from_name (state) == WYL_PERM_STATE_LAST_)
+    return WYRELOG_E_POLICY;
+
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, perm_id, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, scope, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, state, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "perm_state", row, 4);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_permission_states (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_permission_state (self->policy_store,
+      insert_policy_store_permission_state, self);
 }
 
 static wyrelog_error_t
