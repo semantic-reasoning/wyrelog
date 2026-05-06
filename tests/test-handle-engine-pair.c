@@ -4,6 +4,7 @@
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-handle-compound-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
