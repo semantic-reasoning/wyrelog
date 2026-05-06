@@ -46,6 +46,7 @@
 .decl effective_member(user: symbol, role: symbol, scope: symbol)
 .decl effective_permission(role: symbol, perm: symbol)
 .decl has_permission(user: symbol, perm: symbol, scope: symbol)
+.decl login_skip_mfa_authz(user: symbol)
 .decl is_admin(user: symbol)
 .decl can_read_audit(user: symbol)
 .decl can_manage_role(user: symbol, role: symbol)

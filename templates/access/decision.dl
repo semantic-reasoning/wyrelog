@@ -66,6 +66,8 @@
 .decl audit_event_deny_reason(id: symbol, reason: symbol)
 .decl audit_event_deny_origin(id: symbol, origin: symbol)
 .decl principal_state_observed(user: symbol, state: symbol)
+.decl login_skip_mfa_authz(user: symbol)
+.decl login_skip_mfa_authz_observed(user: symbol)
 
 .decl allow(user: symbol, perm: symbol, scope: symbol)
 .decl allow_guard_base(user: symbol, perm: symbol, scope: symbol)
@@ -96,6 +98,9 @@ audit_event_deny_origin(ID, Origin) :-
 
 principal_state_observed(U, State) :-
     principal_state(U, State).
+
+login_skip_mfa_authz_observed(U) :-
+    login_skip_mfa_authz(U).
 
 // --- allow / allow_bool ----------------------------------------------
 

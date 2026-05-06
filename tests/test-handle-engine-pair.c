@@ -2355,6 +2355,67 @@ check_policy_store_role_inheritances_autoload_on_open (void)
 }
 
 static gint
+check_login_skip_mfa_projection_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 362;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.login.skip_mfa",
+          "login skip mfa", "critical") != WYRELOG_E_OK)
+    return 363;
+  if (wyl_policy_store_grant_direct_permission (store,
+          "skip-mfa-direct-user", "wr.login.skip_mfa", "login")
+      != WYRELOG_E_OK)
+    return 364;
+  if (wyl_policy_store_grant_direct_permission (store,
+          "skip-mfa-wrong-scope-user", "wr.login.skip_mfa", "other")
+      != WYRELOG_E_OK)
+    return 365;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 366;
+
+  struct
+  {
+    const gchar *user;
+    gboolean expected;
+    gint code;
+  } cases[] = {
+    {"skip-mfa-direct-user", TRUE, 367},
+    {"skip-mfa-wrong-scope-user", FALSE, 368},
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    gint64 row[1];
+    gboolean found = FALSE;
+    if (wyl_handle_intern_engine_symbol (handle, cases[i].user, &row[0])
+        != WYRELOG_E_OK)
+      return cases[i].code;
+    if (wyl_handle_engine_contains (handle, "login_skip_mfa_authz",
+            row, 1, &found) != WYRELOG_E_OK)
+      return cases[i].code + 10;
+    if (found != cases[i].expected)
+      return cases[i].code + 20;
+  }
+
+  gint64 decision_row[3];
+  gboolean allowed = TRUE;
+  if (intern3 (handle, "skip-mfa-direct-user", "wr.login.skip_mfa", "login",
+          decision_row) != WYRELOG_E_OK)
+    return 393;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 394;
+  if (allowed)
+    return 395;
+
+  return 0;
+}
+
+static gint
 check_policy_store_role_permissions_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -3662,6 +3723,8 @@ main (void)
   if ((rc = check_policy_store_role_permissions_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_inheritances_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_projection_autoload_on_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
     return rc;

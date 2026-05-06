@@ -13,6 +13,9 @@
 #include "wyl-permission-scope-private.h"
 #include "policy/store-private.h"
 
+#define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
+#define WYL_LOGIN_SKIP_MFA_SCOPE "login"
+
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
 #endif
@@ -994,6 +997,14 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  if (g_strcmp0 (perm_id, WYL_LOGIN_SKIP_MFA_PERMISSION) == 0
+      && g_strcmp0 (scope, WYL_LOGIN_SKIP_MFA_SCOPE) == 0) {
+    gint64 authz_row[1] = { row[0] };
+    rc = wyl_handle_engine_insert (self, "login_skip_mfa_authz", authz_row, 1);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
   /* Guarded permissions are granted membership only. Their armed state
    * comes from request-local guard evaluation, not persisted perm_state. */
   if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
@@ -1358,6 +1369,8 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
    * the template mirror while preserving the handle-level relation name. */
   if (g_strcmp0 (relation, "principal_state") == 0)
     snapshot_relation = "principal_state_observed";
+  else if (g_strcmp0 (relation, "login_skip_mfa_authz") == 0)
+    snapshot_relation = "login_skip_mfa_authz_observed";
 
   WylRowProbe probe = { relation, snapshot_relation, row, ncols, FALSE };
   wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine,
