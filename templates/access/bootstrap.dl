@@ -96,6 +96,9 @@ permission("wr.policy.read").
 permission("wr.policy.write").
 permission("wr.policy.grant_role").
 
+// login family
+permission("wr.login.skip_mfa").
+
 // stream family
 permission("wr.stream.read").
 permission("wr.stream.write_reserved").    // only system_agent
