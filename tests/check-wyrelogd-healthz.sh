@@ -51,6 +51,58 @@ def audit_events_match_startup_readiness(payload):
         for event in events
     )
 
+def invalid_decide_is_rejected():
+    try:
+        urllib.request.urlopen(
+            f"{base}/decide?user=healthz-user&perm=wr.audit.read",
+            data=b"",
+            timeout=1,
+        ).read()
+        return False
+    except urllib.error.HTTPError as exc:
+        return exc.code == 400
+
+def decide_requires_post():
+    try:
+        urllib.request.urlopen(
+            f"{base}/decide?user=healthz-user"
+            "&perm=wr.audit.read&session_token=healthz-scope",
+            timeout=1,
+        ).read()
+        return False
+    except urllib.error.HTTPError as exc:
+        return exc.code == 405
+
+def decide_denies_unseeded_user():
+    payload = urllib.request.urlopen(
+        f"{base}/decide?user=healthz-user"
+        "&perm=wr.audit.read&session_token=healthz-scope",
+        data=b"",
+        timeout=1,
+    ).read()
+    body = json.loads(payload)
+    return (
+        body.get("decision") == 0
+        and "deny_reason" in body
+        and "deny_origin" in body
+    )
+
+def decide_audit_event_is_visible():
+    if not expect_audit:
+        return True
+    payload = urllib.request.urlopen(
+        f"{base}/audit/events?filter=action%28%22wr.audit.read%22%29",
+        timeout=1,
+    ).read()
+    events = json.loads(payload)
+    return any(
+        event.get("subject_id") == "healthz-user"
+        and event.get("action") == "wr.audit.read"
+        and event.get("resource_id") == "healthz-scope"
+        and event.get("decision") == 0
+        for event in events
+    )
+
 for _ in range(50):
     try:
         health = urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
@@ -60,6 +112,14 @@ for _ in range(50):
         ).read()
         if health != b"ok\n" or not audit_events_match_startup_readiness(
                 events):
+            sys.exit(1)
+        if not invalid_decide_is_rejected():
+            sys.exit(1)
+        if not decide_requires_post():
+            sys.exit(1)
+        if not decide_denies_unseeded_user():
+            sys.exit(1)
+        if not decide_audit_event_is_visible():
             sys.exit(1)
         if expect_audit and not invalid_filter_is_rejected():
             sys.exit(1)
