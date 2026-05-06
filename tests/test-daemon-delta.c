@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <string.h>
+
 #include <glib.h>
 #include <duckdb.h>
 
@@ -25,13 +27,22 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
 }
 
 static wyrelog_error_t
-drop_audit_events_table (WylHandle *handle)
+break_audit_events_table (WylHandle *handle)
 {
   duckdb_connection conn =
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   duckdb_result result = { 0 };
 
   if (duckdb_query (conn, "DROP TABLE audit_events;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+
+  memset (&result, 0, sizeof (result));
+  if (duckdb_query (conn,
+          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
@@ -52,7 +63,7 @@ check_delta_callback_counts_audit_failure (void)
   runtime.handle = handle;
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 11;
-  if (drop_audit_events_table (handle) != WYRELOG_E_OK)
+  if (break_audit_events_table (handle) != WYRELOG_E_OK)
     return 12;
   if (intern3 (handle, "daemon-delta-audit-user", "wr.viewer",
           "daemon-delta-audit-scope", row) != WYRELOG_E_OK)
@@ -80,7 +91,7 @@ check_delta_readiness_fails_on_audit_failure (void)
 
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 30;
-  if (drop_audit_events_table (handle) != WYRELOG_E_OK)
+  if (break_audit_events_table (handle) != WYRELOG_E_OK)
     return 31;
   if (wyl_daemon_check_delta_ready (handle) != WYRELOG_E_IO)
     return 32;
