@@ -748,27 +748,22 @@ check_emit_replays_runtime_query_after_table_loss (void)
     g_object_unref (handle);
     return 435;
   }
-  if (wyl_audit_conn_create_schema (wyl_handle_get_audit_conn (handle))
-      != WYRELOG_E_OK) {
-    g_object_unref (handle);
-    return 436;
-  }
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
     g_object_unref (handle);
-    return 437;
+    return 436;
   }
 
   g_autofree gchar *json = NULL;
   if (wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
           "action(\"audit.runtime.replay\")", &json) != WYRELOG_E_OK) {
     g_object_unref (handle);
-    return 438;
+    return 437;
   }
   if (g_strstr_len (json, -1, id) == NULL ||
       g_strstr_len (json, -1, "\"subject_id\":\"runtime-replay-user\"")
       == NULL) {
     g_object_unref (handle);
-    return 439;
+    return 438;
   }
 
   g_object_unref (handle);

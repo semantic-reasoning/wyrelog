@@ -482,6 +482,10 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
   if (self->policy_store == NULL || self->audit_conn == NULL)
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t rc = wyl_audit_conn_create_schema (self->audit_conn);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   duckdb_connection conn = wyl_audit_conn_get_connection (self->audit_conn);
   duckdb_result result;
   memset (&result, 0, sizeof (result));
@@ -492,7 +496,7 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
   }
   duckdb_destroy_result (&result);
 
-  wyrelog_error_t rc = wyl_policy_store_foreach_audit_event (self->policy_store,
+  rc = wyl_policy_store_foreach_audit_event (self->policy_store,
       insert_policy_store_audit_event, self);
   if (rc != WYRELOG_E_OK) {
     memset (&result, 0, sizeof (result));
