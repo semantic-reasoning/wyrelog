@@ -121,6 +121,9 @@ wyl_engine_map_wirelog_error (wirelog_error_t wl_err)
       return WYRELOG_E_NOMEM;
     case WIRELOG_ERR_IO:
       return WYRELOG_E_IO;
+    case WIRELOG_ERR_COMPOUND_SATURATED:
+    case WIRELOG_ERR_COMPOUND_BUSY:
+      return WYRELOG_E_EXEC;
     case WIRELOG_ERR_UNKNOWN:
       return WYRELOG_E_INTERNAL;
     default:
@@ -280,6 +283,44 @@ wyl_engine_intern_symbol (WylEngine *self, const gchar *symbol, gint64 *out_id)
   }
 
   *out_id = id;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_engine_make_compound (WylEngine *self, const gchar *functor,
+    const wirelog_compound_arg_t *args, gsize nargs, gint64 *out_id)
+{
+  if (out_id != NULL)
+    *out_id = (gint64) WIRELOG_COMPOUND_HANDLE_NULL;
+
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (functor == NULL || functor[0] == '\0' || args == NULL || out_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (nargs == 0 || nargs > G_MAXUINT32)
+    return WYRELOG_E_INVALID;
+  if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+
+  uint64_t handle = WIRELOG_COMPOUND_HANDLE_NULL;
+  wirelog_error_t wl_rc =
+      wirelog_easy_make_compound (self->session, functor, (uint32_t) nargs,
+      args, &handle);
+  wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
+  if (rc != WYRELOG_E_OK) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: compound allocation failed for functor '%s/%" G_GSIZE_FORMAT
+        "' (rc=%d)", functor, nargs, (int) rc);
+    return rc;
+  }
+
+  if (handle == WIRELOG_COMPOUND_HANDLE_NULL || handle > (uint64_t) G_MAXINT64) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
+        "engine: compound allocation returned an invalid handle");
+    return WYRELOG_E_INTERNAL;
+  }
+
+  *out_id = (gint64) handle;
   return WYRELOG_E_OK;
 }
 

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
 #include "wyrelog/engine.h"
@@ -26,6 +27,110 @@ static wyrelog_error_t
 open_engine_from_real_templates (WylEngine **out)
 {
   return wyl_engine_open (WYL_TEST_TEMPLATE_DIR, 1, out);
+}
+
+typedef struct
+{
+  gint64 expected_id;
+  guint matches;
+} SeenSnapshotExpect;
+
+static gchar *
+make_tmpdir (void)
+{
+  g_autoptr (GError) err = NULL;
+  gchar *dir = g_dir_make_tmp ("wyl-engine-compound-test-XXXXXX", &err);
+  if (dir == NULL) {
+    g_printerr ("make_tmpdir: %s\n", err ? err->message : "?");
+    return NULL;
+  }
+  return dir;
+}
+
+static gboolean
+write_file_in_dir (const gchar *dir, const gchar *filename,
+    const gchar *contents)
+{
+  g_autofree gchar *path = g_build_filename (dir, filename, NULL);
+  g_autoptr (GError) err = NULL;
+  return g_file_set_contents (path, contents, -1, &err);
+}
+
+static void
+rmdir_recursive (const gchar *dir)
+{
+  g_autoptr (GDir) d = g_dir_open (dir, 0, NULL);
+  if (d == NULL) {
+    g_rmdir (dir);
+    return;
+  }
+
+  const gchar *name;
+  while ((name = g_dir_read_name (d)) != NULL) {
+    g_autofree gchar *path = g_build_filename (dir, name, NULL);
+    if (g_file_test (path, G_FILE_TEST_IS_DIR))
+      rmdir_recursive (path);
+    else
+      g_unlink (path);
+  }
+  g_rmdir (dir);
+}
+
+static gboolean
+write_compound_templates (const gchar *dir)
+{
+  g_autofree gchar *fsm_dir = g_build_filename (dir, "fsm", NULL);
+  if (g_mkdir (fsm_dir, 0755) != 0)
+    return FALSE;
+  g_autofree gchar *lobac_dir = g_build_filename (dir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0)
+    return FALSE;
+
+  return write_file_in_dir (dir, "bootstrap.dl",
+      ".decl event(id: int64, payload: scope_ctx/3 side)\n"
+      ".decl seen(id: int64)\n" "seen(ID) :- event(ID, scope_ctx(_, _, _)).\n")
+      && write_file_in_dir (dir, "fsm/principal.dl", "// principal stub\n")
+      && write_file_in_dir (dir, "fsm/session.dl", "// session stub\n")
+      && write_file_in_dir (dir, "fsm/permission_scope.dl",
+      "// permission scope stub\n")
+      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
+}
+
+static wyrelog_error_t
+open_engine_from_compound_templates (gchar **tmpdir_out, WylEngine **out)
+{
+  *tmpdir_out = NULL;
+  *out = NULL;
+
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return WYRELOG_E_IO;
+  if (!write_compound_templates (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return WYRELOG_E_IO;
+  }
+
+  wyrelog_error_t rc = wyl_engine_open (tmpdir, 1, out);
+  if (rc != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return rc;
+  }
+
+  *tmpdir_out = g_steal_pointer (&tmpdir);
+  return WYRELOG_E_OK;
+}
+
+static void
+seen_snapshot_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  SeenSnapshotExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "seen") != 0 || ncols != 1)
+    return;
+
+  if (row[0] == expect->expected_id)
+    expect->matches++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -267,6 +372,171 @@ test_intern_after_close (void)
   return 0;
 }
 
+static gint
+test_make_compound_invalid_args (void)
+{
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = open_engine_from_real_templates (&engine);
+  if (rc != WYRELOG_E_OK || engine == NULL) {
+    g_printerr ("test_make_compound_invalid_args: open failed: %d\n", (int) rc);
+    return 70;
+  }
+
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_INT64, 123},
+  };
+  gint64 out = -1;
+
+  if (wyl_engine_make_compound (NULL, "ctx", args, 1, &out)
+      != WYRELOG_E_INVALID) {
+    wyl_engine_close (engine);
+    return 71;
+  }
+  if (wyl_engine_make_compound (engine, NULL, args, 1, &out)
+      != WYRELOG_E_INVALID) {
+    wyl_engine_close (engine);
+    return 72;
+  }
+  if (wyl_engine_make_compound (engine, "", args, 1, &out)
+      != WYRELOG_E_INVALID) {
+    wyl_engine_close (engine);
+    return 73;
+  }
+  if (wyl_engine_make_compound (engine, "ctx", NULL, 1, &out)
+      != WYRELOG_E_INVALID) {
+    wyl_engine_close (engine);
+    return 74;
+  }
+  if (wyl_engine_make_compound (engine, "ctx", args, 0, &out)
+      != WYRELOG_E_INVALID) {
+    wyl_engine_close (engine);
+    return 75;
+  }
+  if (wyl_engine_make_compound (engine, "ctx", args, 1, NULL)
+      != WYRELOG_E_INVALID) {
+    wyl_engine_close (engine);
+    return 76;
+  }
+
+  wyl_engine_close (engine);
+  return 0;
+}
+
+static gint
+test_make_compound_side_relation_contract (void)
+{
+  WylEngine *engine = NULL;
+  g_autofree gchar *tmpdir = NULL;
+  wyrelog_error_t rc = open_engine_from_compound_templates (&tmpdir, &engine);
+  if (rc != WYRELOG_E_OK || engine == NULL) {
+    g_printerr ("test_make_compound_side_relation_contract: "
+        "open failed: %d\n", (int) rc);
+    return 80;
+  }
+
+  gint64 loc_class = -1;
+  rc = wyl_engine_intern_symbol (engine, "trusted", &loc_class);
+  if (rc != WYRELOG_E_OK) {
+    wyl_engine_close (engine);
+    rmdir_recursive (tmpdir);
+    return 81;
+  }
+
+  wirelog_compound_arg_t args[3] = {
+    {WIRELOG_TYPE_INT64, 1700000000},
+    {WIRELOG_TYPE_STRING, loc_class},
+    {WIRELOG_TYPE_INT64, 20},
+  };
+  gint64 handle = -1;
+  rc = wyl_engine_make_compound (engine, "scope_ctx", args, 3, &handle);
+  if (rc != WYRELOG_E_OK || handle <= 0) {
+    g_printerr ("test_make_compound_side_relation_contract: "
+        "compound failed: %d handle=%" G_GINT64_FORMAT "\n", (int) rc, handle);
+    wyl_engine_close (engine);
+    rmdir_recursive (tmpdir);
+    return 82;
+  }
+
+  const gint64 row[2] = { 42, handle };
+  rc = wyl_engine_insert (engine, "event", row, G_N_ELEMENTS (row));
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("test_make_compound_side_relation_contract: "
+        "insert failed: %d\n", (int) rc);
+    wyl_engine_close (engine);
+    rmdir_recursive (tmpdir);
+    return 83;
+  }
+
+  SeenSnapshotExpect expect = {
+    .expected_id = row[0],
+    .matches = 0,
+  };
+  rc = wyl_engine_snapshot (engine, "seen", seen_snapshot_cb, &expect);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("test_make_compound_side_relation_contract: "
+        "snapshot failed: %d\n", (int) rc);
+    wyl_engine_close (engine);
+    rmdir_recursive (tmpdir);
+    return 84;
+  }
+
+  wyl_engine_close (engine);
+  rmdir_recursive (tmpdir);
+  if (expect.matches != 1) {
+    g_printerr ("test_make_compound_side_relation_contract: "
+        "matches=%u\n", expect.matches);
+    return 85;
+  }
+
+  return 0;
+}
+
+static gint
+test_make_nested_compound_contract (void)
+{
+  WylEngine *engine = NULL;
+  wyrelog_error_t rc = open_engine_from_real_templates (&engine);
+  if (rc != WYRELOG_E_OK || engine == NULL) {
+    g_printerr ("test_make_nested_compound_contract: open failed: %d\n",
+        (int) rc);
+    return 90;
+  }
+
+  gint64 loc_class = -1;
+  rc = wyl_engine_intern_symbol (engine, "public", &loc_class);
+  if (rc != WYRELOG_E_OK) {
+    wyl_engine_close (engine);
+    return 91;
+  }
+
+  wirelog_compound_arg_t metadata_args[3] = {
+    {WIRELOG_TYPE_INT64, 1700000001},
+    {WIRELOG_TYPE_STRING, loc_class},
+    {WIRELOG_TYPE_INT64, 70},
+  };
+  gint64 metadata = -1;
+  rc = wyl_engine_make_compound (engine, "metadata", metadata_args, 3,
+      &metadata);
+  if (rc != WYRELOG_E_OK || metadata <= 0) {
+    wyl_engine_close (engine);
+    return 92;
+  }
+
+  wirelog_compound_arg_t scope_args[2] = {
+    {WIRELOG_TYPE_INT64, metadata},
+    {WIRELOG_TYPE_INT64, 7},
+  };
+  gint64 scope = -1;
+  rc = wyl_engine_make_compound (engine, "scope", scope_args, 2, &scope);
+  if (rc != WYRELOG_E_OK || scope <= 0 || scope == metadata) {
+    wyl_engine_close (engine);
+    return 93;
+  }
+
+  wyl_engine_close (engine);
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
@@ -295,6 +565,15 @@ main (void)
     return rc;
 
   if ((rc = test_intern_after_close ()) != 0)
+    return rc;
+
+  if ((rc = test_make_compound_invalid_args ()) != 0)
+    return rc;
+
+  if ((rc = test_make_compound_side_relation_contract ()) != 0)
+    return rc;
+
+  if ((rc = test_make_nested_compound_contract ()) != 0)
     return rc;
 
   return 0;
