@@ -319,6 +319,36 @@ check_store_rejects_builtin_catalog_drift (void)
   return 0;
 }
 
+static gint
+check_store_rejects_builtin_catalog_upsert_drift (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 224;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 225;
+
+  if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
+      != WYRELOG_E_OK)
+    return 226;
+  if (wyl_policy_store_upsert_role (store, "wr.auditor", "changed auditor")
+      != WYRELOG_E_POLICY)
+    return 227;
+
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 228;
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "changed audit read", "sensitive") != WYRELOG_E_POLICY)
+    return 229;
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "basic") != WYRELOG_E_POLICY)
+    return 230;
+
+  return 0;
+}
+
 typedef struct
 {
   const gchar *subject_id;
@@ -1513,6 +1543,8 @@ main (void)
   if ((rc = check_store_seeds_builtin_catalog ()) != 0)
     return rc;
   if ((rc = check_store_rejects_builtin_catalog_drift ()) != 0)
+    return rc;
+  if ((rc = check_store_rejects_builtin_catalog_upsert_drift ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_permission ()) != 0)
     return rc;

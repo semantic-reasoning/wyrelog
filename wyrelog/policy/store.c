@@ -59,6 +59,30 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.audit.write", "audit write", "critical"},
 };
 
+static const BuiltinRole *
+find_builtin_role (const gchar *role_id)
+{
+  if (role_id == NULL)
+    return NULL;
+  for (gsize i = 0; i < G_N_ELEMENTS (builtin_roles); i++) {
+    if (g_strcmp0 (builtin_roles[i].id, role_id) == 0)
+      return &builtin_roles[i];
+  }
+  return NULL;
+}
+
+static const BuiltinPermission *
+find_builtin_permission (const gchar *perm_id)
+{
+  if (perm_id == NULL)
+    return NULL;
+  for (gsize i = 0; i < G_N_ELEMENTS (builtin_permissions); i++) {
+    if (g_strcmp0 (builtin_permissions[i].id, perm_id) == 0)
+      return &builtin_permissions[i];
+  }
+  return NULL;
+}
+
 static wyrelog_error_t
 exec_sql (sqlite3 *db, const gchar *sql)
 {
@@ -863,6 +887,10 @@ wyl_policy_store_upsert_role (wyl_policy_store_t *store, const gchar *role_id,
       || role_name == NULL)
     return WYRELOG_E_INVALID;
 
+  const BuiltinRole *builtin = find_builtin_role (role_id);
+  if (builtin != NULL && g_strcmp0 (role_name, builtin->name) != 0)
+    return WYRELOG_E_POLICY;
+
   static const gchar *sql =
       "INSERT INTO roles (role_id, role_name, created_at, modified_at) "
       "VALUES (?, ?, unixepoch(), unixepoch()) "
@@ -959,10 +987,15 @@ wyrelog_error_t
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  if (insert)
-    rc = wyl_policy_store_upsert_permission (store, perm_id, perm_id, "basic");
-  else
+  if (insert) {
+    gboolean exists = FALSE;
+    rc = wyl_policy_store_permission_exists (store, perm_id, &exists);
+    if (rc == WYRELOG_E_OK && !exists)
+      rc = wyl_policy_store_upsert_permission (store, perm_id, perm_id,
+          "basic");
+  } else {
     rc = WYRELOG_E_OK;
+  }
   if (rc == WYRELOG_E_OK) {
     rc = insert
         ? wyl_policy_store_grant_direct_permission (store, subject_id, perm_id,
@@ -1417,6 +1450,11 @@ wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || perm_id == NULL
       || perm_name == NULL || klass == NULL)
     return WYRELOG_E_INVALID;
+
+  const BuiltinPermission *builtin = find_builtin_permission (perm_id);
+  if (builtin != NULL && (g_strcmp0 (perm_name, builtin->name) != 0
+          || g_strcmp0 (klass, builtin->klass) != 0))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO permissions (perm_id, perm_name, class, created_at) "

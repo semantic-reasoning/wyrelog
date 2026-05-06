@@ -690,10 +690,10 @@ check_role_grant_rolls_back_invalid_snapshot (void)
           "site grant role") != WYRELOG_E_OK)
     return 152;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
-          "audit read", "critical") != WYRELOG_E_OK)
+          "audit read", "sensitive") != WYRELOG_E_OK)
     return 153;
   if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
-          "policy grant role", "critical") != WYRELOG_E_OK)
+          "policy role grant", "critical") != WYRELOG_E_OK)
     return 154;
   if (wyl_policy_store_grant_role_permission (store, "site.audit-role",
           "wr.audit.read") != WYRELOG_E_OK)
