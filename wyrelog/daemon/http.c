@@ -266,6 +266,72 @@ issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
   return rc;
 }
 
+static const gchar *
+lookup_bearer_token (SoupServerMessage *msg)
+{
+  SoupMessageHeaders *headers = soup_server_message_get_request_headers (msg);
+  const gchar *authorization = soup_message_headers_get_one (headers,
+      "Authorization");
+  if (authorization == NULL)
+    return NULL;
+  if (!g_str_has_prefix (authorization, "Bearer "))
+    return "";
+  const gchar *token = authorization + strlen ("Bearer ");
+  if (token[0] == '\0')
+    return "";
+  return token;
+}
+
+static wyrelog_error_t
+resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
+    const gchar *token, gchar **out_session_id, gchar **out_actor)
+{
+  if (ctx == NULL || token == NULL || out_session_id == NULL ||
+      out_actor == NULL)
+    return WYRELOG_E_INVALID;
+  *out_session_id = NULL;
+  *out_actor = NULL;
+
+  guint8 secret[WYL_DAEMON_JWT_KEY_LEN];
+  wyrelog_error_t rc = copy_access_token_secret (ctx, secret);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (GBytes) payload = NULL;
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  rc = wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret,
+      WYL_DAEMON_JWT_ISSUER, WYL_DAEMON_JWT_AUDIENCE, now, &payload);
+  sodium_memzero (secret, sizeof secret);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+
+  wyl_jwt_access_claims_t claims = { 0 };
+  rc = wyl_jwt_parse_access_claims_json (payload, &claims);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  if (g_strcmp0 (claims.principal_state_at_issue, "authenticated") != 0) {
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autoptr (WylSession) session =
+      wyl_daemon_http_ref_session (server, claims.session_id);
+  if (session == NULL) {
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
+  g_autofree gchar *live_username = wyl_session_dup_username (session);
+  if (g_strcmp0 (live_username, claims.subject) != 0) {
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
+
+  *out_session_id = g_steal_pointer (&claims.session_id);
+  *out_actor = g_steal_pointer (&claims.subject);
+  wyl_jwt_access_claims_clear (&claims);
+  return WYRELOG_E_OK;
+}
+
 static void
 set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
 {
@@ -325,7 +391,19 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     guard_loc_class = g_hash_table_lookup (query, "guard_loc_class");
     guard_risk = g_hash_table_lookup (query, "guard_risk");
   }
-  if (session_token == NULL || session_token[0] == '\0') {
+  const gchar *bearer_token = lookup_bearer_token (msg);
+  gboolean has_session_token = session_token != NULL
+      && session_token[0] != '\0';
+  gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
+  if (!has_session_token && !has_bearer_token) {
+    set_json_error (msg, 401, auth_required_code);
+    return FALSE;
+  }
+  if (has_session_token && bearer_token != NULL) {
+    set_json_error (msg, 400, invalid_code);
+    return FALSE;
+  }
+  if (bearer_token != NULL && !has_bearer_token) {
     set_json_error (msg, 401, auth_required_code);
     return FALSE;
   }
@@ -344,17 +422,28 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   }
 
-  g_autoptr (WylSession) session =
-      wyl_daemon_http_ref_session (server, session_token);
-  if (session == NULL) {
-    set_json_error (msg, 401, auth_required_code);
-    return FALSE;
-  }
-
-  g_autofree gchar *username = wyl_session_dup_username (session);
-  if (username == NULL || username[0] == '\0') {
-    set_json_error (msg, 401, auth_required_code);
-    return FALSE;
+  g_autofree gchar *auth_session_id = NULL;
+  g_autofree gchar *username = NULL;
+  if (has_session_token) {
+    g_autoptr (WylSession) session =
+        wyl_daemon_http_ref_session (server, session_token);
+    if (session == NULL) {
+      set_json_error (msg, 401, auth_required_code);
+      return FALSE;
+    }
+    username = wyl_session_dup_username (session);
+    auth_session_id = g_strdup (session_token);
+    if (username == NULL || username[0] == '\0') {
+      set_json_error (msg, 401, auth_required_code);
+      return FALSE;
+    }
+  } else {
+    wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
+        bearer_token, &auth_session_id, &username);
+    if (auth_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 401, auth_required_code);
+      return FALSE;
+    }
   }
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -362,7 +451,7 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   wyl_decide_req_set_subject_id (req, username);
   wyl_decide_req_set_action (req, action);
   wyl_decide_req_set_resource_id (req,
-      resource != NULL ? resource : session_token);
+      resource != NULL ? resource : auth_session_id);
   wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
 
   wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);

@@ -22,6 +22,18 @@ typedef struct
   gint64 ttl_seconds;
 } wyl_jwt_issue_input_t;
 
+typedef struct
+{
+  gchar *subject;
+  gchar *issuer;
+  gchar *audience;
+  gchar *principal_state_at_issue;
+  gchar *session_id;
+  gint64 not_before;
+  gint64 expires_at;
+} wyl_jwt_access_claims_t;
+
+void wyl_jwt_access_claims_clear (wyl_jwt_access_claims_t * claims);
 wyrelog_error_t wyl_jwt_base64url_encode (const guint8 * data, gsize len,
     gchar ** out_text);
 wyrelog_error_t wyl_jwt_base64url_decode (const gchar * text,
@@ -35,6 +47,8 @@ wyrelog_error_t wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t * input,
     const guint8 * secret, gsize secret_len, gchar ** out_token);
 wyrelog_error_t wyl_jwt_verify_hs256_signature (const gchar * token,
     const guint8 * secret, gsize secret_len, GBytes ** out_payload_json);
+wyrelog_error_t wyl_jwt_parse_access_claims_json (GBytes * payload_json,
+    wyl_jwt_access_claims_t * out_claims);
 wyrelog_error_t wyl_jwt_verify_hs256_access_token (const gchar * token,
     const guint8 * secret, gsize secret_len, const gchar * expected_issuer,
     const gchar * expected_audience, gint64 now, GBytes ** out_payload_json);

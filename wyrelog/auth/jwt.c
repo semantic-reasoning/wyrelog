@@ -437,10 +437,7 @@ skip_json_ws (const gchar **cursor)
 
 typedef struct
 {
-  gchar *issuer;
-  gchar *audience;
-  gint64 not_before;
-  gint64 expires_at;
+  wyl_jwt_access_claims_t claims;
   guint seen_mask;
 } ParsedJwtClaims;
 
@@ -462,8 +459,20 @@ enum
 static void
 parsed_jwt_claims_clear (ParsedJwtClaims *claims)
 {
+  wyl_jwt_access_claims_clear (&claims->claims);
+  memset (claims, 0, sizeof *claims);
+}
+
+void
+wyl_jwt_access_claims_clear (wyl_jwt_access_claims_t *claims)
+{
+  if (claims == NULL)
+    return;
+  g_free (claims->subject);
   g_free (claims->issuer);
   g_free (claims->audience);
+  g_free (claims->principal_state_at_issue);
+  g_free (claims->session_id);
   memset (claims, 0, sizeof *claims);
 }
 
@@ -530,24 +539,31 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
     if (g_strcmp0 (key, "jti") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_JTI, NULL);
     else if (g_strcmp0 (key, "sub") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_SUB, NULL);
+      rc = parse_string_claim_value (&p, claims, CLAIM_SUB,
+          &claims->claims.subject);
     else if (g_strcmp0 (key, "iss") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_ISS, &claims->issuer);
+      rc = parse_string_claim_value (&p, claims, CLAIM_ISS,
+          &claims->claims.issuer);
     else if (g_strcmp0 (key, "aud") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_AUD, &claims->audience);
+      rc = parse_string_claim_value (&p, claims, CLAIM_AUD,
+          &claims->claims.audience);
     else if (g_strcmp0 (key, "iat") == 0) {
       gint64 ignored = 0;
       rc = parse_int_claim_value (&p, claims, CLAIM_IAT, &ignored);
     } else if (g_strcmp0 (key, "nbf") == 0)
-      rc = parse_int_claim_value (&p, claims, CLAIM_NBF, &claims->not_before);
+      rc = parse_int_claim_value (&p, claims, CLAIM_NBF,
+          &claims->claims.not_before);
     else if (g_strcmp0 (key, "exp") == 0)
-      rc = parse_int_claim_value (&p, claims, CLAIM_EXP, &claims->expires_at);
+      rc = parse_int_claim_value (&p, claims, CLAIM_EXP,
+          &claims->claims.expires_at);
     else if (g_strcmp0 (key, "tenant") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_TENANT, NULL);
     else if (g_strcmp0 (key, "principal_state_at_issue") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_PRINCIPAL_STATE, NULL);
+      rc = parse_string_claim_value (&p, claims, CLAIM_PRINCIPAL_STATE,
+          &claims->claims.principal_state_at_issue);
     else if (g_strcmp0 (key, "session_id") == 0)
-      rc = parse_string_claim_value (&p, claims, CLAIM_SESSION_ID, NULL);
+      rc = parse_string_claim_value (&p, claims, CLAIM_SESSION_ID,
+          &claims->claims.session_id);
     else
       return WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
@@ -573,6 +589,31 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
 }
 
 wyrelog_error_t
+wyl_jwt_parse_access_claims_json (GBytes *payload_json,
+    wyl_jwt_access_claims_t *out_claims)
+{
+  if (payload_json == NULL || out_claims == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_claims, 0, sizeof *out_claims);
+
+  gsize payload_len = 0;
+  const gchar *payload_data = g_bytes_get_data (payload_json, &payload_len);
+  if (memchr (payload_data, '\0', payload_len) != NULL)
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
+  ParsedJwtClaims claims = { 0 };
+  wyrelog_error_t rc = parse_jwt_payload_claims (payload_text, &claims);
+  if (rc != WYRELOG_E_OK) {
+    parsed_jwt_claims_clear (&claims);
+    return rc;
+  }
+
+  *out_claims = claims.claims;
+  memset (&claims, 0, sizeof claims);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_jwt_verify_hs256_access_token (const gchar *token, const guint8 *secret,
     gsize secret_len, const gchar *expected_issuer,
     const gchar *expected_audience, gint64 now, GBytes **out_payload_json)
@@ -588,21 +629,14 @@ wyl_jwt_verify_hs256_access_token (const gchar *token, const guint8 *secret,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  gsize payload_len = 0;
-  const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
-  if (memchr (payload_data, '\0', payload_len) != NULL)
-    return WYRELOG_E_POLICY;
-  g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
-  ParsedJwtClaims claims = { 0 };
-  rc = parse_jwt_payload_claims (payload_text, &claims);
-  if (rc != WYRELOG_E_OK) {
-    parsed_jwt_claims_clear (&claims);
+  wyl_jwt_access_claims_t claims = { 0 };
+  rc = wyl_jwt_parse_access_claims_json (payload, &claims);
+  if (rc != WYRELOG_E_OK)
     return rc;
-  }
   gboolean claims_valid = g_strcmp0 (claims.issuer, expected_issuer) == 0
       && g_strcmp0 (claims.audience, expected_audience) == 0
       && now >= claims.not_before && now < claims.expires_at;
-  parsed_jwt_claims_clear (&claims);
+  wyl_jwt_access_claims_clear (&claims);
   if (!claims_valid)
     return WYRELOG_E_POLICY;
 
