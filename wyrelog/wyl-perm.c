@@ -16,6 +16,7 @@ struct _wyl_grant_req
   gchar *subject_id;
   gchar *action;
   gchar *resource_id;
+  gchar *actor_id;
 };
 
 struct _wyl_revoke_req
@@ -23,6 +24,7 @@ struct _wyl_revoke_req
   gchar *subject_id;
   gchar *action;
   gchar *resource_id;
+  gchar *actor_id;
 };
 
 struct _wyl_role_grant_req
@@ -30,6 +32,7 @@ struct _wyl_role_grant_req
   gchar *subject_id;
   gchar *role_id;
   gchar *scope;
+  gchar *actor_id;
 };
 
 struct _wyl_role_revoke_req
@@ -37,6 +40,7 @@ struct _wyl_role_revoke_req
   gchar *subject_id;
   gchar *role_id;
   gchar *scope;
+  gchar *actor_id;
 };
 
 wyl_login_req_t *
@@ -97,6 +101,7 @@ wyl_grant_req_free (wyl_grant_req_t *req)
   g_free (req->subject_id);
   g_free (req->action);
   g_free (req->resource_id);
+  g_free (req->actor_id);
   g_free (req);
 }
 
@@ -145,6 +150,21 @@ wyl_grant_req_get_resource_id (const wyl_grant_req_t *req)
   return req->resource_id;
 }
 
+void
+wyl_grant_req_set_actor_id (wyl_grant_req_t *req, const gchar *actor_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->actor_id);
+  req->actor_id = g_strdup (actor_id);
+}
+
+const gchar *
+wyl_grant_req_get_actor_id (const wyl_grant_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->actor_id;
+}
+
 wyl_revoke_req_t *
 wyl_revoke_req_new (void)
 {
@@ -159,6 +179,7 @@ wyl_revoke_req_free (wyl_revoke_req_t *req)
   g_free (req->subject_id);
   g_free (req->action);
   g_free (req->resource_id);
+  g_free (req->actor_id);
   g_free (req);
 }
 
@@ -207,6 +228,21 @@ wyl_revoke_req_get_resource_id (const wyl_revoke_req_t *req)
   return req->resource_id;
 }
 
+void
+wyl_revoke_req_set_actor_id (wyl_revoke_req_t *req, const gchar *actor_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->actor_id);
+  req->actor_id = g_strdup (actor_id);
+}
+
+const gchar *
+wyl_revoke_req_get_actor_id (const wyl_revoke_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->actor_id;
+}
+
 wyl_role_grant_req_t *
 wyl_role_grant_req_new (void)
 {
@@ -221,6 +257,7 @@ wyl_role_grant_req_free (wyl_role_grant_req_t *req)
   g_free (req->subject_id);
   g_free (req->role_id);
   g_free (req->scope);
+  g_free (req->actor_id);
   g_free (req);
 }
 
@@ -270,6 +307,22 @@ wyl_role_grant_req_get_scope (const wyl_role_grant_req_t *req)
   return req->scope;
 }
 
+void
+wyl_role_grant_req_set_actor_id (wyl_role_grant_req_t *req,
+    const gchar *actor_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->actor_id);
+  req->actor_id = g_strdup (actor_id);
+}
+
+const gchar *
+wyl_role_grant_req_get_actor_id (const wyl_role_grant_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->actor_id;
+}
+
 wyl_role_revoke_req_t *
 wyl_role_revoke_req_new (void)
 {
@@ -284,6 +337,7 @@ wyl_role_revoke_req_free (wyl_role_revoke_req_t *req)
   g_free (req->subject_id);
   g_free (req->role_id);
   g_free (req->scope);
+  g_free (req->actor_id);
   g_free (req);
 }
 
@@ -332,6 +386,22 @@ wyl_role_revoke_req_get_scope (const wyl_role_revoke_req_t *req)
 {
   g_return_val_if_fail (req != NULL, NULL);
   return req->scope;
+}
+
+void
+wyl_role_revoke_req_set_actor_id (wyl_role_revoke_req_t *req,
+    const gchar *actor_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->actor_id);
+  req->actor_id = g_strdup (actor_id);
+}
+
+const gchar *
+wyl_role_revoke_req_get_actor_id (const wyl_role_revoke_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->actor_id;
 }
 
 static wyrelog_error_t
@@ -433,7 +503,10 @@ wyl_perm_grant (WylHandle *handle, const wyl_grant_req_t *req)
    * part of the policy mutation savepoint. The action column carries
    * operation semantics while deny_origin retains the permission name. */
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, wyl_grant_req_get_subject_id (req));
+  wyl_audit_event_set_subject_id (ev,
+      wyl_grant_req_get_actor_id (req) != NULL
+      ? wyl_grant_req_get_actor_id (req)
+      : wyl_grant_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "permission_grant");
   wyl_audit_event_set_resource_id (ev, wyl_grant_req_get_resource_id (req));
   wyl_audit_event_set_deny_origin (ev, wyl_grant_req_get_action (req));
@@ -462,7 +535,10 @@ wyl_perm_revoke (WylHandle *handle, const wyl_revoke_req_t *req)
 
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, wyl_revoke_req_get_subject_id (req));
+  wyl_audit_event_set_subject_id (ev,
+      wyl_revoke_req_get_actor_id (req) != NULL
+      ? wyl_revoke_req_get_actor_id (req)
+      : wyl_revoke_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "permission_revoke");
   wyl_audit_event_set_resource_id (ev, wyl_revoke_req_get_resource_id (req));
   wyl_audit_event_set_deny_origin (ev, wyl_revoke_req_get_action (req));
@@ -491,7 +567,10 @@ wyl_role_grant (WylHandle *handle, const wyl_role_grant_req_t *req)
 
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, wyl_role_grant_req_get_subject_id (req));
+  wyl_audit_event_set_subject_id (ev,
+      wyl_role_grant_req_get_actor_id (req) != NULL
+      ? wyl_role_grant_req_get_actor_id (req)
+      : wyl_role_grant_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "role_grant");
   wyl_audit_event_set_resource_id (ev, wyl_role_grant_req_get_scope (req));
   wyl_audit_event_set_deny_origin (ev, wyl_role_grant_req_get_role_id (req));
@@ -521,7 +600,10 @@ wyl_role_revoke (WylHandle *handle, const wyl_role_revoke_req_t *req)
 
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  wyl_audit_event_set_subject_id (ev, wyl_role_revoke_req_get_subject_id (req));
+  wyl_audit_event_set_subject_id (ev,
+      wyl_role_revoke_req_get_actor_id (req) != NULL
+      ? wyl_role_revoke_req_get_actor_id (req)
+      : wyl_role_revoke_req_get_subject_id (req));
   wyl_audit_event_set_action (ev, "role_revoke");
   wyl_audit_event_set_resource_id (ev, wyl_role_revoke_req_get_scope (req));
   wyl_audit_event_set_deny_origin (ev, wyl_role_revoke_req_get_role_id (req));
