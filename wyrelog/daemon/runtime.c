@@ -8,6 +8,33 @@
 #include "daemon/http.h"
 #include "daemon/signals.h"
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/wyl-handle-private.h"
+
+static wyrelog_error_t
+open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
+{
+  WylHandleOpenOptions open_opts = {
+    .template_dir = opts->template_dir,
+    .policy_store_path = opts->policy_store_path,
+#ifdef WYL_HAS_AUDIT
+    .audit_store_path = opts->audit_store_path,
+#endif
+  };
+
+  return wyl_handle_open_with_options (&open_opts, out_handle);
+}
+
+static wyrelog_error_t
+open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
+{
+  /* Readiness probes intentionally run against scratch stores: the checks
+   * exercise mutation paths and must not seed configured authority data. */
+  WylHandleOpenOptions open_opts = {
+    .template_dir = opts->template_dir,
+  };
+
+  return wyl_handle_open_with_options (&open_opts, out_handle);
+}
 
 int
 wyl_daemon_run_runtime (const WylDaemonOptions *opts)
@@ -23,7 +50,7 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 
     g_autoptr (WylHandle) readiness_handle = NULL;
     wyrelog_error_t readiness_rc =
-        wyl_init (opts->template_dir, &readiness_handle);
+        open_readiness_handle (opts, &readiness_handle);
     if (readiness_rc != WYRELOG_E_OK) {
       if (wyl_daemon_early_signal_received ())
         return 0;
@@ -40,7 +67,9 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   }
 
   g_autoptr (WylHandle) handle = NULL;
-  wyrelog_error_t rc = wyl_init (opts->template_dir, &handle);
+  wyrelog_error_t rc = opts->check_only ?
+      open_readiness_handle (opts, &handle) : open_runtime_handle (opts,
+      &handle);
   if (rc != WYRELOG_E_OK) {
     g_printerr ("wyrelogd: init failed: %s\n", wyrelog_error_string (rc));
     return 1;

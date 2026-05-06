@@ -8,12 +8,22 @@ TEMPLATE_DIR=$2
 PYTHON=$3
 EXPECT_AUDIT=${4:-0}
 PORT=$((39000 + $$ % 20000))
+TMPDIR=$(mktemp -d)
+POLICY_DB="$TMPDIR/policy.sqlite"
+AUDIT_DB="$TMPDIR/audit.duckdb"
+AUDIT_ARGS=
+if [ "$EXPECT_AUDIT" = "1" ]; then
+  AUDIT_ARGS="--audit-db $AUDIT_DB"
+fi
 
-"$WYRELOGD" --template-dir "$TEMPLATE_DIR" --listen-port "$PORT" &
+# shellcheck disable=SC2086
+"$WYRELOGD" --template-dir "$TEMPLATE_DIR" --policy-db "$POLICY_DB" \
+  $AUDIT_ARGS --listen-port "$PORT" &
 PID=$!
 
 cleanup() {
   kill "$PID" 2>/dev/null || true
+  rm -rf "$TMPDIR"
 }
 trap cleanup EXIT INT TERM
 
@@ -135,3 +145,4 @@ PY
 kill -TERM "$PID"
 wait "$PID"
 trap - EXIT INT TERM
+rm -rf "$TMPDIR"

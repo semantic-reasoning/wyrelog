@@ -10,6 +10,7 @@ PORT=$((20000 + $$ % 15000))
 TMPDIR=$(mktemp -d)
 PID=
 RC_FILE="$TMPDIR/daemon.rc"
+POLICY_DB="$TMPDIR/policy.sqlite"
 
 cleanup() {
   if [ -n "$PID" ]; then
@@ -41,14 +42,16 @@ for rel in ("decision.dl", "lobac/decision.dl"):
     path.write_text(text.replace(old, new))
 PY
 
-if "$WYRELOGD" --template-dir "$TMPDIR/access" --check; then
+if "$WYRELOGD" --template-dir "$TMPDIR/access" --policy-db "$POLICY_DB" \
+    --check; then
   echo "readiness fixture unexpectedly passed --check" >&2
   exit 1
 fi
 
 (
   set +e
-  "$WYRELOGD" --template-dir "$TMPDIR/access" --listen-port "$PORT"
+  "$WYRELOGD" --template-dir "$TMPDIR/access" --policy-db "$POLICY_DB" \
+    --listen-port "$PORT"
   rc=$?
   printf '%s\n' "$rc" > "$RC_FILE"
   exit "$rc"
