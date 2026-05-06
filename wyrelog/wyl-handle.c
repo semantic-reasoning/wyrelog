@@ -231,17 +231,28 @@ wyl_handle_seed_perm_arm_rules (WylHandle *self)
 {
   for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {
     gint64 row[2];
+    const wyl_guard_expr_t *guard = wyl_perm_arm_rule_expr (i);
     wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self,
         wyl_perm_arm_rule_perm_id (i), &row[0]);
     if (rc != WYRELOG_E_OK)
       return rc;
-    rc = wyl_handle_make_guard_expr_compound (self,
-        wyl_perm_arm_rule_expr (i), &row[1]);
+    rc = wyl_handle_make_guard_expr_compound (self, guard, &row[1]);
     if (rc != WYRELOG_E_OK)
       return rc;
     rc = wyl_handle_engine_insert (self, "perm_arm_rule", row, 2);
     if (rc != WYRELOG_E_OK)
       return rc;
+
+    const gchar *window = wyl_guard_expr_timestamp_window (guard);
+    if (window != NULL) {
+      gint64 window_row[2] = { row[0], 0 };
+      rc = wyl_handle_intern_engine_symbol (self, window, &window_row[1]);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      rc = wyl_handle_engine_insert (self, "perm_window_guard", window_row, 2);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
   }
   return WYRELOG_E_OK;
 }

@@ -18,6 +18,9 @@
 //                                                   bootstrap.dl
 //   perm_arm_rule(perm, guard_handle)            -- guard(root) side
 //                                                   payload handle
+//   perm_window_guard(perm, window)              -- guarded permission
+//                                                   requires a named
+//                                                   timestamp window
 //   context_now(user, scope, ctx)                -- scope(metadata(ts,
 //                                                   loc_class, risk),
 //                                                   scope) activation
@@ -26,6 +29,8 @@
 //   guard_context_timestamp(user, scope, ts)     -- context field views
 //   guard_context_loc_class(user, scope, loc)
 //   guard_context_risk(user, scope, risk)
+//   guard_context_in_window(user, scope, ts,     -- host-confirmed
+//       window)                                      timestamp window
 //   eval_guard(user, perm, scope, ctx)           -- host guard result
 //
 // perm_arm_rule rows are runtime-seeded from the C catalogue so the
@@ -35,14 +40,18 @@
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: int64)
+.decl perm_window_guard(perm: symbol, window: symbol)
 .decl context_now(user: symbol, scope: symbol, ctx: scope/2 side)
 .decl guard_context(ctx: scope/2 side, user: symbol, scope: symbol,
     timestamp: int64, loc_class: symbol, risk: int64)
 .decl guard_context_timestamp(user: symbol, scope: symbol, timestamp: int64)
 .decl guard_context_loc_class(user: symbol, scope: symbol, loc_class: symbol)
 .decl guard_context_risk(user: symbol, scope: symbol, risk: int64)
+.decl guard_context_in_window(user: symbol, scope: symbol, timestamp: int64,
+    window: symbol)
 .decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: scope/2 side)
 .decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)
+.decl perm_window_guard_observed(perm: symbol, window: symbol)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
 // --- perm_arm_rule catalogue seed ------------------------------------
@@ -56,6 +65,7 @@
 // mirror, not an evaluator input yet.
 
 perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).
+perm_window_guard_observed(P, W) :- perm_window_guard(P, W).
 
 // --- guard context field views ---------------------------------------
 
@@ -84,4 +94,20 @@ armed(U, P, S) :-
     guard_context_loc_class(U, S, L),
     guard_context_risk(U, S, R),
     perm_arm_rule(P, _),
+    !perm_window_guard(P, _),
+    eval_guard(U, P, S, C).
+
+// rule-4: window-gated permission. The C evaluator still decides
+// the guard; this rule only requires the request-local evidence for
+// the same named timestamp window before arming the permission.
+armed(U, P, S) :-
+    has_permission(U, P, S),
+    context_now(U, S, C),
+    guard_context(C, U, S, T, L, R),
+    guard_context_timestamp(U, S, T),
+    guard_context_loc_class(U, S, L),
+    guard_context_risk(U, S, R),
+    perm_arm_rule(P, _),
+    perm_window_guard(P, W),
+    guard_context_in_window(U, S, T, W),
     eval_guard(U, P, S, C).

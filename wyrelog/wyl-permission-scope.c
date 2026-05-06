@@ -164,6 +164,34 @@ wyl_perm_arm_rule_expr (gsize idx)
   return catalogue_trees[idx];
 }
 
+const gchar *
+wyl_guard_expr_timestamp_window (const wyl_guard_expr_t *e)
+{
+  if (e == NULL)
+    return NULL;
+
+  switch (e->kind) {
+    case WYL_GUARD_KIND_CMP:
+      if (e->u.cmp.field == WYL_GUARD_FIELD_TIMESTAMP
+          && e->u.cmp.op == WYL_GUARD_OP_IN)
+        return e->u.cmp.value;
+      return NULL;
+    case WYL_GUARD_KIND_AND:{
+      const gchar *left = wyl_guard_expr_timestamp_window (e->u.binop.left);
+      const gchar *right = wyl_guard_expr_timestamp_window (e->u.binop.right);
+      if (left != NULL && right != NULL)
+        return g_strcmp0 (left, right) == 0 ? left : NULL;
+      return left != NULL ? left : right;
+    }
+    case WYL_GUARD_KIND_OR:
+    case WYL_GUARD_KIND_NOT:
+    case WYL_GUARD_KIND_TAG:
+    case WYL_GUARD_KIND_LAST_:
+    default:
+      return NULL;
+  }
+}
+
 gboolean
 wyl_guard_loc_class_is_valid (const gchar *loc_class)
 {

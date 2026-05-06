@@ -21,8 +21,8 @@
  * context_now / guard_context. No edge can close a cycle because
  * perm_arm_rule, perm_state, has_permission, context_now,
  * guard_context, guard_context_timestamp,
- * guard_context_loc_class, guard_context_risk and eval_guard are
- * EDB-only.
+ * guard_context_loc_class, guard_context_risk,
+ * guard_context_in_window and eval_guard are EDB-only.
  */
 static gint
 check_stratification (void)
@@ -39,11 +39,25 @@ check_stratification (void)
     {.predicate = "guard_context_loc_class",.negated = FALSE},
     {.predicate = "guard_context_risk",.negated = FALSE},
     {.predicate = "perm_arm_rule",.negated = FALSE},
+    {.predicate = "perm_window_guard",.negated = TRUE},
+    {.predicate = "eval_guard",.negated = FALSE},
+  };
+  static const wyl_dl_body_atom_t rule4_body[] = {
+    {.predicate = "has_permission",.negated = FALSE},
+    {.predicate = "context_now",.negated = FALSE},
+    {.predicate = "guard_context",.negated = FALSE},
+    {.predicate = "guard_context_timestamp",.negated = FALSE},
+    {.predicate = "guard_context_loc_class",.negated = FALSE},
+    {.predicate = "guard_context_risk",.negated = FALSE},
+    {.predicate = "perm_arm_rule",.negated = FALSE},
+    {.predicate = "perm_window_guard",.negated = FALSE},
+    {.predicate = "guard_context_in_window",.negated = FALSE},
     {.predicate = "eval_guard",.negated = FALSE},
   };
   wyl_dl_rule_t rules[] = {
     {.head = "armed",.body = rule1_body,.body_len = G_N_ELEMENTS (rule1_body)},
     {.head = "armed",.body = rule3_body,.body_len = G_N_ELEMENTS (rule3_body)},
+    {.head = "armed",.body = rule4_body,.body_len = G_N_ELEMENTS (rule4_body)},
   };
 
   if (wyl_dl_static_check (rules, G_N_ELEMENTS (rules)) != WYRELOG_E_OK)
@@ -64,6 +78,12 @@ check_catalogue_invariants (void)
     return 13;
   if (wyl_perm_arm_rule_lookup ("wr.sys.admin") == NULL)
     return 14;
+  if (g_strcmp0 (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
+              ("wr.stream.write_reserved")), "off_hours") != 0)
+    return 15;
+  if (wyl_guard_expr_timestamp_window (wyl_perm_arm_rule_lookup
+          ("wr.audit.read")) != NULL)
+    return 16;
   /* The accessor view of the catalogue must agree with the lookup
    * view on every row. */
   for (gsize i = 0; i < wyl_perm_arm_rule_count (); i++) {

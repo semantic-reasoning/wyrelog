@@ -96,6 +96,16 @@ typedef struct
 
 typedef struct
 {
+  gint64 stream_perm_id;
+  gint64 audit_perm_id;
+  gint64 window_id;
+  guint stream_window_matches;
+  guint audit_window_matches;
+  guint total;
+} PermWindowGuardSnapshotExpect;
+
+typedef struct
+{
   gint64 guard_handle;
   gint64 root_handle;
   guint matches;
@@ -180,7 +190,8 @@ write_compound_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n")
+      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n"
+      ".decl perm_window_guard(perm: symbol, window: symbol)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
@@ -210,7 +221,8 @@ write_guard_context_compound_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n")
+      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n"
+      ".decl perm_window_guard(perm: symbol, window: symbol)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
@@ -242,7 +254,8 @@ write_guard_payload_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n")
+      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n"
+      ".decl perm_window_guard(perm: symbol, window: symbol)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
 }
 
@@ -419,6 +432,22 @@ perm_arm_rule_snapshot_cb (const gchar *relation, const gint64 *row,
       return;
     }
   }
+}
+
+static void
+perm_window_guard_snapshot_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  PermWindowGuardSnapshotExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "perm_window_guard_observed") != 0 || ncols != 2)
+    return;
+
+  expect->total++;
+  if (row[0] == expect->stream_perm_id && row[1] == expect->window_id)
+    expect->stream_window_matches++;
+  if (row[0] == expect->audit_perm_id)
+    expect->audit_window_matches++;
 }
 
 static void
@@ -1365,6 +1394,50 @@ check_perm_arm_rule_guard_payload_contract_after_reload (void)
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 153;
   return assert_perm_arm_rule_guard_payload_snapshot (handle, 154);
+}
+
+static gint
+check_perm_window_guard_seed_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 stream_perm_id = -1;
+  gint64 audit_perm_id = -1;
+  gint64 window_id = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 166;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 167;
+  if (wyl_handle_intern_engine_symbol (handle, "wr.stream.write_reserved",
+          &stream_perm_id) != WYRELOG_E_OK)
+    return 168;
+  if (wyl_handle_intern_engine_symbol (handle, "wr.audit.read",
+          &audit_perm_id) != WYRELOG_E_OK)
+    return 169;
+  if (wyl_handle_intern_engine_symbol (handle, "off_hours", &window_id)
+      != WYRELOG_E_OK)
+    return 170;
+
+  PermWindowGuardSnapshotExpect expect = {
+    .stream_perm_id = stream_perm_id,
+    .audit_perm_id = audit_perm_id,
+    .window_id = window_id,
+    .stream_window_matches = 0,
+    .audit_window_matches = 0,
+    .total = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "perm_window_guard_observed", perm_window_guard_snapshot_cb, &expect)
+      != WYRELOG_E_OK)
+    return 171;
+  if (expect.stream_window_matches != 1)
+    return 172;
+  if (expect.audit_window_matches != 0)
+    return 173;
+  if (expect.total != 1)
+    return 174;
+  return 0;
 }
 
 static gint
@@ -3577,6 +3650,8 @@ main (void)
   if ((rc = check_perm_arm_rule_guard_payload_contract ()) != 0)
     return rc;
   if ((rc = check_perm_arm_rule_guard_payload_contract_after_reload ()) != 0)
+    return rc;
+  if ((rc = check_perm_window_guard_seed_contract ()) != 0)
     return rc;
   if ((rc = check_perm_arm_rule_guard_payload_projection ()) != 0)
     return rc;
