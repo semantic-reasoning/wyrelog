@@ -18,11 +18,11 @@ G_BEGIN_DECLS;
  * request-local eval_guard/4 bridge fact to wirelog.
  *
  * The version-0 Datalog bridge carries a request-local context
- * handle: context_now(user, scope, ctx), guard_context(ctx, user,
- * scope, timestamp, loc_class, risk), and eval_guard(user, perm,
- * scope, ctx). The guard expression payload remains in the C
- * catalogue until wirelog compound declarations can carry it
- * directly.
+ * compound: context_now(user, scope, scope(metadata(timestamp,
+ * loc_class, risk), scope)), guard_context(ctx, user, scope,
+ * timestamp, loc_class, risk), and eval_guard(user, perm, scope,
+ * ctx). The guard expression payload remains in the C catalogue
+ * until wirelog compound declarations can carry it directly.
  *
  * Evaluation contract: every uncertain or undefined branch
  * returns FALSE (fail-closed). This includes a NULL expression, a

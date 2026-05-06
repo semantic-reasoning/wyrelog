@@ -299,7 +299,8 @@ insert_guard_eval_facts (WylHandle *handle, const gint64 row[3],
     return rc;
 
   gint64 context_id = 0;
-  rc = wyl_handle_get_guard_context_compound (handle, &context_id);
+  rc = wyl_handle_make_guard_context_compound (handle, req->guard_timestamp,
+      loc_class_id, req->guard_risk, row[2], &context_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 

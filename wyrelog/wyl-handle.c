@@ -24,8 +24,6 @@ struct _WylHandle
   gint64 created_at_us;
   WylEngine *read_engine;
   WylEngine *delta_engine;
-  WylEngine *guard_context_compound_engine;
-  gint64 guard_context_compound_id;
   GHashTable *engine_symbols_by_id;
   gchar *template_dir;
   WylDeltaCallback delta_callback;
@@ -274,8 +272,6 @@ wyl_shutdown (WylHandle *handle)
   g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
-  handle->guard_context_compound_engine = NULL;
-  handle->guard_context_compound_id = 0;
   g_clear_pointer (&handle->template_dir, g_free);
   g_object_set_qdata (G_OBJECT (handle),
       wyl_handle_engine_remove_fault_once_quark (), NULL);
@@ -443,9 +439,6 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
 
   WylEngine *old_read_engine = self->read_engine;
   WylEngine *old_delta_engine = self->delta_engine;
-  WylEngine *old_guard_context_compound_engine =
-      self->guard_context_compound_engine;
-  gint64 old_guard_context_compound_id = self->guard_context_compound_id;
   GHashTable *old_symbols = self->engine_symbols_by_id;
   gchar *old_template_dir = self->template_dir;
 
@@ -463,8 +456,6 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
 
   self->read_engine = new_read_engine;
   self->delta_engine = new_delta_engine;
-  self->guard_context_compound_engine = NULL;
-  self->guard_context_compound_id = 0;
   self->engine_symbols_by_id = new_engine_symbol_map ();
   self->template_dir = g_strdup (template_dir);
 
@@ -476,8 +467,6 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
     g_clear_pointer (&self->template_dir, g_free);
     self->read_engine = old_read_engine;
     self->delta_engine = old_delta_engine;
-    self->guard_context_compound_engine = old_guard_context_compound_engine;
-    self->guard_context_compound_id = old_guard_context_compound_id;
     self->engine_symbols_by_id = old_symbols;
     self->template_dir = old_template_dir;
     return rc;
@@ -492,8 +481,6 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
       g_clear_pointer (&self->template_dir, g_free);
       self->read_engine = old_read_engine;
       self->delta_engine = old_delta_engine;
-      self->guard_context_compound_engine = old_guard_context_compound_engine;
-      self->guard_context_compound_id = old_guard_context_compound_id;
       self->engine_symbols_by_id = old_symbols;
       self->template_dir = old_template_dir;
       return rc;
@@ -635,7 +622,8 @@ wyl_handle_make_read_engine_compound (WylHandle *self, const gchar *functor,
 }
 
 wyrelog_error_t
-wyl_handle_get_guard_context_compound (WylHandle *self, gint64 *out_id)
+wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
+    gint64 loc_class_id, gint64 risk, gint64 scope_id, gint64 *out_id)
 {
   if (out_id != NULL)
     *out_id = (gint64) WIRELOG_COMPOUND_HANDLE_NULL;
@@ -645,43 +633,23 @@ wyl_handle_get_guard_context_compound (WylHandle *self, gint64 *out_id)
   if (self->read_engine == NULL || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  if (self->guard_context_compound_engine == self->read_engine
-      && self->guard_context_compound_id != 0) {
-    *out_id = self->guard_context_compound_id;
-    return WYRELOG_E_OK;
-  }
-
-  gint64 context_symbol = 0;
-  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self,
-      "_request_context", &context_symbol);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
   wirelog_compound_arg_t metadata_args[3] = {
-    {WIRELOG_TYPE_INT64, 0},
-    {WIRELOG_TYPE_STRING, context_symbol},
-    {WIRELOG_TYPE_INT64, 0},
+    {WIRELOG_TYPE_INT64, timestamp},
+    {WIRELOG_TYPE_STRING, loc_class_id},
+    {WIRELOG_TYPE_INT64, risk},
   };
   gint64 metadata_id = 0;
-  rc = wyl_handle_make_read_engine_compound (self, "metadata", metadata_args,
-      G_N_ELEMENTS (metadata_args), &metadata_id);
+  wyrelog_error_t rc = wyl_handle_make_read_engine_compound (self,
+      "metadata", metadata_args, G_N_ELEMENTS (metadata_args), &metadata_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   wirelog_compound_arg_t scope_args[2] = {
     {WIRELOG_TYPE_INT64, metadata_id},
-    {WIRELOG_TYPE_INT64, 0},
+    {WIRELOG_TYPE_STRING, scope_id},
   };
-  gint64 context_id = 0;
-  rc = wyl_handle_make_read_engine_compound (self, "scope", scope_args,
-      G_N_ELEMENTS (scope_args), &context_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  self->guard_context_compound_engine = self->read_engine;
-  self->guard_context_compound_id = context_id;
-  *out_id = context_id;
-  return WYRELOG_E_OK;
+  return wyl_handle_make_read_engine_compound (self, "scope", scope_args,
+      G_N_ELEMENTS (scope_args), out_id);
 }
 
 static gboolean

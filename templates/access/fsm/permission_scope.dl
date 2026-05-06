@@ -8,9 +8,9 @@
 // IDB rule set with no transition lifecycle: the host must inject
 // perm_state(user, perm, scope, "armed") for unguarded permissions
 // that are ready to participate in allow/3. Guarded permissions are
-// armed only when the host injects request-local context_now/3,
-// guard_context/6, and eval_guard/4 bridge facts for a satisfied
-// guard expression.
+// armed only when the host injects a payload-bearing request-local
+// context_now/3 compound, guard_context/6, and eval_guard/4 bridge
+// facts for a satisfied guard expression.
 //
 // EDB schemas (host-populated, no clauses below):
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
@@ -18,8 +18,9 @@
 //                                                   bootstrap.dl
 //   perm_arm_rule(perm, guard_handle)            -- compound guard
 //                                                   payload key
-//   context_now(user, scope, ctx)                -- request context
-//                                                   activation
+//   context_now(user, scope, ctx)                -- scope(metadata(ts,
+//                                                   loc_class, risk),
+//                                                   scope) activation
 //   guard_context(ctx, user, scope, timestamp,   -- structured request
 //                 loc_class, risk)                  context payload
 //   eval_guard(user, perm, scope, ctx)           -- host guard result

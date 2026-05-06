@@ -28,11 +28,14 @@ wyrelog_error_t wyl_handle_make_read_engine_compound (WylHandle * self,
     gint64 * out_id);
 
 /*
- * Returns the cached read-engine guard context compound used as the
- * request-local bridge key for context_now/guard_context/eval_guard facts.
- * The cache is invalidated with the handle-owned engine pair lifecycle.
+ * Allocates the request-local guard context compound used as the bridge key
+ * for context_now/guard_context/eval_guard facts. The returned side-tier
+ * handle is read-engine-local scratch state and encodes:
+ *
+ *   scope(metadata(timestamp, loc_class, risk), scope)
  */
-wyrelog_error_t wyl_handle_get_guard_context_compound (WylHandle * self,
+wyrelog_error_t wyl_handle_make_guard_context_compound (WylHandle * self,
+    gint64 timestamp, gint64 loc_class_id, gint64 risk, gint64 scope_id,
     gint64 * out_id);
 
 G_END_DECLS;
