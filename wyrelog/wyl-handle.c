@@ -606,6 +606,9 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_permission_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = wyl_handle_load_policy_store_permission_state_events (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   rc = wyl_handle_load_policy_store_principal_states (self);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -850,6 +853,7 @@ relation_fans_out_to_delta (const gchar *relation)
       || g_strcmp0 (relation, "principal_transition") == 0
       || g_strcmp0 (relation, "session_transition") == 0
       || g_strcmp0 (relation, "perm_state_transition") == 0
+      || g_strcmp0 (relation, "perm_state_event") == 0
       || g_strcmp0 (relation, "principal_event") == 0
       || g_strcmp0 (relation, "session_event") == 0;
 }
@@ -1138,6 +1142,65 @@ wyl_handle_load_policy_store_permission_states (WylHandle *self)
 
   return wyl_policy_store_foreach_permission_state (self->policy_store,
       insert_policy_store_permission_state, self);
+}
+
+static wyrelog_error_t
+insert_policy_store_permission_state_event (gint64 event_id,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  WylHandle *self = user_data;
+  gint64 row[7];
+  wyl_perm_state_t from = wyl_perm_state_from_name (from_state);
+  wyl_perm_event_t ev = wyl_perm_event_from_name (event);
+  wyl_perm_state_t to = wyl_perm_state_from_name (to_state);
+
+  if (event_id <= 0)
+    return WYRELOG_E_POLICY;
+  if (from == WYL_PERM_STATE_LAST_ || ev == WYL_PERM_EVENT_LAST_
+      || to == WYL_PERM_STATE_LAST_)
+    return WYRELOG_E_POLICY;
+  wyl_perm_state_t validated = WYL_PERM_STATE_LAST_;
+  wyrelog_error_t rc = wyl_fsm_permission_scope_step (from, ev, &validated);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (validated != to)
+    return WYRELOG_E_POLICY;
+
+  row[0] = event_id;
+  rc = wyl_handle_intern_engine_symbol (self, subject_id, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, perm_id, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, scope, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, event, &row[4]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, from_state, &row[5]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, to_state, &row[6]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "perm_state_event", row, 7);
+}
+
+wyrelog_error_t
+wyl_handle_load_policy_store_permission_state_events (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->read_engine == NULL
+      || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  return wyl_policy_store_foreach_permission_state_event (self->policy_store,
+      insert_policy_store_permission_state_event, self);
 }
 
 static wyrelog_error_t
