@@ -143,12 +143,39 @@ check_policy_audit_facts_ready_loads_read_engine (void)
   return 0;
 }
 
+static gint
+check_direct_permission_grant_ready_allows_decide (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 count = 0;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 70;
+  if (wyl_daemon_check_direct_permission_grant_ready (handle) != WYRELOG_E_OK)
+    return 71;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  if (!count_duckdb_rows (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'permission_grant' "
+          "AND subject_id = 'wyrelogd-direct-grant-user' "
+          "AND deny_origin = 'wyrelogd.direct_grant.read' "
+          "AND decision = 1;", &count))
+    return 72;
+  if (count != 1)
+    return 73;
+  return 0;
+}
+
 int
 main (void)
 {
   gint rc;
 
   if ((rc = check_policy_audit_facts_ready_loads_read_engine ()) != 0)
+    return rc;
+  if ((rc = check_direct_permission_grant_ready_allows_decide ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_ready_rejects_production_path ()) != 0)
     return rc;
