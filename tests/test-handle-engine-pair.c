@@ -64,6 +64,23 @@ typedef struct
   guint matches;
 } SeenExpect;
 
+typedef struct
+{
+  gint64 context_id;
+  gint64 expected_scope_id;
+  gint64 metadata_id;
+  guint matches;
+} GuardScopeCompoundExpect;
+
+typedef struct
+{
+  gint64 metadata_id;
+  gint64 expected_timestamp;
+  gint64 expected_loc_class_id;
+  gint64 expected_risk;
+  guint matches;
+} GuardMetadataCompoundExpect;
+
 static gchar *
 make_tmpdir (void)
 {
@@ -118,6 +135,36 @@ write_compound_templates (const gchar *dir)
   return write_file_in_dir (dir, "bootstrap.dl",
       ".decl event(id: int64, payload: scope/1 side)\n"
       ".decl seen(id: int64)\n" "seen(ID) :- event(ID, scope(_)).\n")
+      && write_file_in_dir (dir, "fsm/principal.dl",
+      ".decl principal_transition(from_state: symbol, event: symbol,"
+      " to_state: symbol)\n")
+      && write_file_in_dir (dir, "fsm/session.dl",
+      ".decl session_active(state: symbol)\n"
+      ".decl session_transition(from_state: symbol, event: symbol,"
+      " to_state: symbol)\n")
+      && write_file_in_dir (dir, "fsm/permission_scope.dl",
+      ".decl perm_arm_rule(perm: symbol, guard_handle: symbol)\n")
+      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
+}
+
+static gboolean
+write_guard_context_compound_templates (const gchar *dir)
+{
+  g_autofree gchar *fsm_dir = g_build_filename (dir, "fsm", NULL);
+  if (g_mkdir (fsm_dir, 0755) != 0)
+    return FALSE;
+  g_autofree gchar *lobac_dir = g_build_filename (dir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0)
+    return FALSE;
+
+  return write_file_in_dir (dir, "bootstrap.dl",
+      ".decl compound_scope_row(handle: int64, metadata: int64,"
+      " scope: symbol)\n"
+      ".decl compound_metadata_row(handle: int64, timestamp: int64,"
+      " loc_class: symbol, risk: int64)\n"
+      "compound_scope_row(H, M, S) :- __compound_scope_2(H, M, S).\n"
+      "compound_metadata_row(H, T, L, R) :- __compound_metadata_3(H, T, L,"
+      " R).\n")
       && write_file_in_dir (dir, "fsm/principal.dl",
       ".decl principal_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
@@ -246,6 +293,39 @@ seen_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
     return;
   if (row[0] == expect->expected_id)
     expect->matches++;
+}
+
+static void
+guard_scope_compound_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  GuardScopeCompoundExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "compound_scope_row") != 0 || ncols != 3)
+    return;
+  if (row[0] != expect->context_id || row[2] != expect->expected_scope_id)
+    return;
+
+  expect->metadata_id = row[1];
+  expect->matches++;
+}
+
+static void
+guard_metadata_compound_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  GuardMetadataCompoundExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "compound_metadata_row") != 0 || ncols != 4)
+    return;
+  if (row[0] != expect->metadata_id)
+    return;
+  if (row[1] != expect->expected_timestamp
+      || row[2] != expect->expected_loc_class_id
+      || row[3] != expect->expected_risk)
+    return;
+
+  expect->matches++;
 }
 
 static void
@@ -926,6 +1006,148 @@ check_compound_make_result_is_insertable (void)
   rmdir_recursive (tmpdir);
   if (expect.matches != 1)
     return 111;
+  return 0;
+}
+
+static gint
+check_guard_context_compound_carries_request_payload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autofree gchar *tmpdir = NULL;
+  gint64 trusted_id = -1;
+  gint64 public_id = -1;
+  gint64 alpha_scope_id = -1;
+  gint64 beta_scope_id = -1;
+  gint64 first_context_id = -1;
+  gint64 second_context_id = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 112;
+  tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 113;
+  if (!write_guard_context_compound_templates (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 114;
+  }
+  if (wyl_handle_open_engine_pair (handle, tmpdir) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 115;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "trusted", &trusted_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 116;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "public", &public_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 117;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "scope-alpha", &alpha_scope_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 118;
+  }
+  if (wyl_handle_intern_engine_symbol (handle, "scope-beta", &beta_scope_id)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 119;
+  }
+
+  if (wyl_handle_make_guard_context_compound (handle, 1700000001, trusted_id,
+          25, alpha_scope_id, &first_context_id) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 120;
+  }
+  if (wyl_handle_make_guard_context_compound (handle, 1700000002, public_id,
+          80, beta_scope_id, &second_context_id) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 121;
+  }
+  if (first_context_id <= 0 || second_context_id <= 0) {
+    rmdir_recursive (tmpdir);
+    return 122;
+  }
+  if (first_context_id == second_context_id) {
+    rmdir_recursive (tmpdir);
+    return 123;
+  }
+  GuardScopeCompoundExpect first_scope = {
+    .context_id = first_context_id,
+    .expected_scope_id = alpha_scope_id,
+    .metadata_id = -1,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "compound_scope_row", guard_scope_compound_cb, &first_scope)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 124;
+  }
+  if (first_scope.matches < 1 || first_scope.metadata_id <= 0) {
+    rmdir_recursive (tmpdir);
+    return 125;
+  }
+
+  GuardScopeCompoundExpect second_scope = {
+    .context_id = second_context_id,
+    .expected_scope_id = beta_scope_id,
+    .metadata_id = -1,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "compound_scope_row", guard_scope_compound_cb, &second_scope)
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 126;
+  }
+  if (second_scope.matches < 1 || second_scope.metadata_id <= 0) {
+    rmdir_recursive (tmpdir);
+    return 127;
+  }
+  if (first_scope.metadata_id == second_scope.metadata_id) {
+    rmdir_recursive (tmpdir);
+    return 128;
+  }
+
+  GuardMetadataCompoundExpect first_metadata = {
+    .metadata_id = first_scope.metadata_id,
+    .expected_timestamp = 1700000001,
+    .expected_loc_class_id = trusted_id,
+    .expected_risk = 25,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "compound_metadata_row", guard_metadata_compound_cb,
+          &first_metadata) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 129;
+  }
+  if (first_metadata.matches < 1) {
+    rmdir_recursive (tmpdir);
+    return 130;
+  }
+
+  GuardMetadataCompoundExpect second_metadata = {
+    .metadata_id = second_scope.metadata_id,
+    .expected_timestamp = 1700000002,
+    .expected_loc_class_id = public_id,
+    .expected_risk = 80,
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "compound_metadata_row", guard_metadata_compound_cb,
+          &second_metadata) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 131;
+  }
+  if (second_metadata.matches < 1) {
+    rmdir_recursive (tmpdir);
+    return 132;
+  }
+
+  rmdir_recursive (tmpdir);
   return 0;
 }
 
@@ -2914,6 +3136,8 @@ main (void)
   if ((rc = check_compound_make_reaches_engine_pair ()) != 0)
     return rc;
   if ((rc = check_compound_make_result_is_insertable ()) != 0)
+    return rc;
+  if ((rc = check_guard_context_compound_carries_request_payload ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
