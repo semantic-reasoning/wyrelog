@@ -1034,6 +1034,61 @@ check_login_skip_mfa_uses_policy_permission (void)
 }
 
 static gint
+check_login_skip_mfa_does_not_use_state_without_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 187;
+
+  gint64 event_id = -1;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "skip-mfa-state-only-user", "wr.login.skip_mfa", "login", "grant",
+          NULL, &event_id) != WYRELOG_E_OK)
+    return 188;
+  if (event_id <= 0)
+    return 189;
+
+  g_autoptr (WylSession) session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-state-only-user", &session)
+      != WYRELOG_E_POLICY)
+    return 190;
+  return session == NULL ? 0 : 191;
+}
+
+static gint
+check_login_skip_mfa_policy_permission_ignores_state_lifecycle (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 192;
+
+  if (grant_direct (handle, "skip-mfa-dormant-user", "wr.login.skip_mfa",
+          "login") != WYRELOG_E_OK)
+    return 193;
+
+  gint64 event_id = -1;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "skip-mfa-dormant-user", "wr.login.skip_mfa", "login", "grant",
+          NULL, &event_id) != WYRELOG_E_OK)
+    return 194;
+  if (event_id <= 0)
+    return 195;
+  event_id = -1;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "skip-mfa-dormant-user", "wr.login.skip_mfa", "login", "revoke",
+          NULL, &event_id) != WYRELOG_E_OK)
+    return 196;
+  if (event_id <= 0)
+    return 197;
+
+  g_autoptr (WylSession) session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-dormant-user", &session)
+      != WYRELOG_E_OK)
+    return 198;
+  return session != NULL ? 0 : 199;
+}
+
+static gint
 check_login_skip_mfa_inserts_wirelog_principal_fired (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1741,6 +1796,12 @@ main (void)
   if ((rc = check_login_skip_mfa_uses_deployment_mode ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_uses_policy_permission ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_does_not_use_state_without_permission ())
+      != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_policy_permission_ignores_state_lifecycle ())
+      != 0)
     return rc;
   if ((rc = check_login_skip_mfa_inserts_wirelog_principal_fired ()) != 0)
     return rc;
