@@ -248,12 +248,64 @@ validate_builtin_permissions (sqlite3 *db)
 }
 
 static wyrelog_error_t
+validate_reserved_roles (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT role_id FROM roles WHERE substr(role_id, 1, 3) = 'wr.';";
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *role_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    if (find_builtin_role (role_id) == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+validate_reserved_permissions (sqlite3 *db)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT perm_id FROM permissions WHERE substr(perm_id, 1, 3) = 'wr.';";
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *perm_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    if (find_builtin_permission (perm_id) == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
 validate_builtin_catalog (sqlite3 *db)
 {
   wyrelog_error_t rc = validate_builtin_roles (db);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return validate_builtin_permissions (db);
+  rc = validate_builtin_permissions (db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = validate_reserved_roles (db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return validate_reserved_permissions (db);
 }
 
 static wyrelog_error_t

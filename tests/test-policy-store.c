@@ -316,6 +316,32 @@ check_store_rejects_builtin_catalog_drift (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
     return 223;
 
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 224;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 225;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO roles (role_id, role_name, description, created_at, "
+          "modified_at) VALUES ('wr.unregistered', 'unregistered', "
+          "'raw', unixepoch(), unixepoch());", NULL, NULL, NULL) != SQLITE_OK)
+    return 226;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+    return 227;
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 228;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 229;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO permissions (perm_id, perm_name, class, created_at) "
+          "VALUES ('wr.unregistered.read', 'unregistered read', 'basic', "
+          "unixepoch());", NULL, NULL, NULL) != SQLITE_OK)
+    return 230;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+    return 231;
+
   return 0;
 }
 
@@ -325,35 +351,35 @@ check_store_rejects_builtin_catalog_upsert_drift (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
 
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
-    return 224;
+    return 232;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
-    return 225;
+    return 233;
 
   if (wyl_policy_store_upsert_role (store, "wr.auditor", "auditor")
       != WYRELOG_E_OK)
-    return 226;
+    return 234;
   if (wyl_policy_store_upsert_role (store, "wr.auditor", "changed auditor")
       != WYRELOG_E_POLICY)
-    return 227;
+    return 235;
 
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
           "audit read", "sensitive") != WYRELOG_E_OK)
-    return 228;
+    return 236;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
           "changed audit read", "sensitive") != WYRELOG_E_POLICY)
-    return 229;
+    return 237;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
           "audit read", "basic") != WYRELOG_E_POLICY)
-    return 230;
+    return 238;
   if (wyl_policy_store_upsert_role (store, "wr.unregistered",
           "unregistered") != WYRELOG_E_POLICY)
-    return 231;
+    return 239;
   if (wyl_policy_store_upsert_permission (store, "wr.unregistered.read",
           "unregistered read", "basic") != WYRELOG_E_POLICY)
-    return 232;
+    return 240;
   if (wyl_policy_store_apply_direct_permission_mutation (store, "subject",
           "wr.unregistered.read", "scope", TRUE) != WYRELOG_E_POLICY)
-    return 233;
+    return 241;
 
   return 0;
 }
