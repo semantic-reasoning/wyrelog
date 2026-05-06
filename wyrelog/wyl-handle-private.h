@@ -223,6 +223,14 @@ wyrelog_error_t wyl_handle_load_policy_store_direct_permissions (WylHandle *
     self);
 
 /*
+ * Loads permission_states rows from the handle-owned policy authority store into
+ * the attached read/delta engine pair as perm_state/4 facts. Rejected unless
+ * both the store and engine pair are available.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_permission_states (WylHandle *
+    self);
+
+/*
  * Loads principal_state rows from the handle-owned policy authority store into
  * the attached read/delta engine pair. Rejected unless both the store and
  * engine pair are available.

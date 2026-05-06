@@ -29,6 +29,7 @@ check_store_creates_authority_schema (void)
     "role_membership_events",
     "direct_permissions",
     "direct_permission_events",
+    "permission_states",
     "principal_events",
     "principal_states",
     "session_states",
@@ -78,6 +79,7 @@ check_template_schema_creates_state_tables (void)
     "role_membership_events",
     "direct_permissions",
     "direct_permission_events",
+    "permission_states",
     "principal_events",
     "principal_states",
     "session_states",
@@ -436,6 +438,15 @@ direct_permission_event_expect_cb (const gchar *subject_id,
 typedef struct
 {
   const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  const gchar *state;
+  guint matches;
+} PermissionStateExpect;
+
+typedef struct
+{
+  const gchar *subject_id;
   const gchar *state;
   guint matches;
 } PrincipalStateExpect;
@@ -449,6 +460,20 @@ typedef struct
   const gchar *to_state;
   guint matches;
 } PrincipalEventExpect;
+
+static wyrelog_error_t
+permission_state_expect_cb (const gchar *subject_id, const gchar *perm_id,
+    const gchar *scope, const gchar *state, gpointer user_data)
+{
+  PermissionStateExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0
+      && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
 
 static wyrelog_error_t
 principal_state_expect_cb (const gchar *subject_id, const gchar *state,
@@ -1154,6 +1179,48 @@ check_direct_permission_revoke_rolls_back_on_event_failure (void)
 }
 
 static gint
+check_store_sets_permission_state (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 218;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 219;
+  if (wyl_policy_store_set_permission_state (store, "perm-user",
+          "wr.perm.read", "perm-scope", "armed") != WYRELOG_E_OK)
+    return 220;
+  if (wyl_policy_store_set_permission_state (store, "perm-user",
+          "wr.perm.read", "perm-scope", "dormant") != WYRELOG_E_OK)
+    return 221;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_permission_state_exists (store, "perm-user",
+          "wr.perm.read", "perm-scope", &exists) != WYRELOG_E_OK)
+    return 222;
+  if (!exists)
+    return 223;
+  if (wyl_policy_store_permission_state_exists (store, "perm-user",
+          "wr.perm.read", "missing-scope", &exists) != WYRELOG_E_OK)
+    return 224;
+  if (exists)
+    return 225;
+
+  PermissionStateExpect expect = {
+    .subject_id = "perm-user",
+    .perm_id = "wr.perm.read",
+    .scope = "perm-scope",
+    .state = "dormant",
+  };
+  if (wyl_policy_store_foreach_permission_state (store,
+          permission_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 226;
+  if (expect.matches != 1)
+    return 227;
+  return 0;
+}
+
+static gint
 check_store_sets_principal_state (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1586,6 +1653,34 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_role_membership_event (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 104;
+  if (wyl_policy_store_set_permission_state (store, NULL, "wr.read", "scope",
+          "armed") != WYRELOG_E_INVALID)
+    return 105;
+  if (wyl_policy_store_set_permission_state (store, "user", NULL, "scope",
+          "armed") != WYRELOG_E_INVALID)
+    return 106;
+  if (wyl_policy_store_set_permission_state (store, "user", "wr.read", NULL,
+          "armed") != WYRELOG_E_INVALID)
+    return 107;
+  if (wyl_policy_store_set_permission_state (store, "user", "wr.read", "scope",
+          NULL) != WYRELOG_E_INVALID)
+    return 108;
+  gboolean permission_state_exists = FALSE;
+  if (wyl_policy_store_permission_state_exists (store, NULL, "wr.read", "scope",
+          &permission_state_exists) != WYRELOG_E_INVALID)
+    return 109;
+  if (wyl_policy_store_permission_state_exists (store, "user", NULL, "scope",
+          &permission_state_exists) != WYRELOG_E_INVALID)
+    return 110;
+  if (wyl_policy_store_permission_state_exists (store, "user", "wr.read", NULL,
+          &permission_state_exists) != WYRELOG_E_INVALID)
+    return 111;
+  if (wyl_policy_store_permission_state_exists (store, "user", "wr.read",
+          "scope", NULL) != WYRELOG_E_INVALID)
+    return 112;
+  if (wyl_policy_store_foreach_permission_state (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 113;
   if (wyl_policy_store_set_principal_state (store, NULL, "authenticated")
       != WYRELOG_E_INVALID)
     return 56;
@@ -1674,6 +1769,8 @@ main (void)
     return rc;
   if ((rc = check_direct_permission_revoke_rolls_back_on_event_failure ())
       != 0)
+    return rc;
+  if ((rc = check_store_sets_permission_state ()) != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;

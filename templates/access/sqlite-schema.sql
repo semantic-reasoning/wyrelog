@@ -164,6 +164,25 @@ CREATE INDEX IF NOT EXISTS idx_direct_permission_events_perm
     ON direct_permission_events (perm_id);
 
 -- ---------------------------------------------------------------------------
+-- Table: permission_states
+-- Durable permission lifecycle state mirrored into perm_state/4.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS permission_states (
+    subject_id TEXT    NOT NULL,
+    perm_id    TEXT    NOT NULL,
+    scope      TEXT    NOT NULL,
+    state      TEXT    NOT NULL,
+    updated_at INTEGER,
+    PRIMARY KEY (subject_id, perm_id, scope)
+);
+
+CREATE INDEX IF NOT EXISTS idx_permission_states_state
+    ON permission_states (state);
+
+CREATE INDEX IF NOT EXISTS idx_permission_states_perm
+    ON permission_states (perm_id);
+
+-- ---------------------------------------------------------------------------
 -- Table: principal_states
 -- Durable principal authentication state mirrored into principal_state/2.
 -- ---------------------------------------------------------------------------

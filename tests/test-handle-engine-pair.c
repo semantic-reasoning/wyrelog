@@ -2842,6 +2842,228 @@ check_policy_store_direct_permissions_require_engine_pair (void)
 }
 
 static gint
+check_policy_store_permission_states_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 576;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.permstate.read",
+          "permission state read", "basic") != WYRELOG_E_OK)
+    return 577;
+  if (wyl_policy_store_grant_direct_permission (store, "permstate-user",
+          "site.permstate.read", "permstate-scope") != WYRELOG_E_OK)
+    return 578;
+  if (wyl_policy_store_set_principal_state (store, "permstate-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 579;
+  if (wyl_policy_store_set_session_state (store, "permstate-scope", "active")
+      != WYRELOG_E_OK)
+    return 580;
+  if (wyl_policy_store_set_permission_state (store, "permstate-user",
+          "site.permstate.read", "permstate-scope", "armed") != WYRELOG_E_OK)
+    return 581;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 582;
+
+  gint64 row[3];
+  if (intern3 (handle, "permstate-user", "site.permstate.read",
+          "permstate-scope", row) != WYRELOG_E_OK)
+    return 583;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, row, &allowed) != WYRELOG_E_OK)
+    return 584;
+  return allowed ? 0 : 585;
+}
+
+static gint
+check_policy_store_permission_states_override_auto_arm (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 586;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.permstate.override",
+          "permission state override", "basic") != WYRELOG_E_OK)
+    return 587;
+  if (wyl_policy_store_grant_direct_permission (store,
+          "permstate-override-user", "site.permstate.override",
+          "permstate-override-scope")
+      != WYRELOG_E_OK)
+    return 588;
+  if (wyl_policy_store_set_principal_state (store, "permstate-override-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 589;
+  if (wyl_policy_store_set_session_state (store, "permstate-override-scope",
+          "active") != WYRELOG_E_OK)
+    return 590;
+  if (wyl_policy_store_set_permission_state (store, "permstate-override-user",
+          "site.permstate.override", "permstate-override-scope", "dormant")
+      != WYRELOG_E_OK)
+    return 591;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 592;
+
+  gint64 row[3];
+  if (intern3 (handle, "permstate-override-user", "site.permstate.override",
+          "permstate-override-scope", row) != WYRELOG_E_OK)
+    return 593;
+  gboolean allowed = TRUE;
+  if (wyl_handle_engine_decide (handle, row, &allowed) != WYRELOG_E_OK)
+    return 594;
+  return allowed ? 595 : 0;
+}
+
+static gint
+check_policy_store_permission_states_reject_non_armed (void)
+{
+  static const gchar *const states[] = {
+    "dormant",
+    "firing",
+    "cooldown",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (states); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+    if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+      return (gint) (596 + i);
+
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    g_autofree gchar *user = g_strdup_printf ("permstate-%s-user", states[i]);
+    g_autofree gchar *perm = g_strdup_printf ("site.permstate.%s", states[i]);
+    g_autofree gchar *scope = g_strdup_printf ("permstate-%s-scope", states[i]);
+    if (wyl_policy_store_upsert_permission (store, perm, perm, "basic")
+        != WYRELOG_E_OK)
+      return (gint) (606 + i);
+    if (wyl_policy_store_grant_direct_permission (store, user, perm, scope)
+        != WYRELOG_E_OK)
+      return (gint) (616 + i);
+    if (wyl_policy_store_set_principal_state (store, user, "authenticated")
+        != WYRELOG_E_OK)
+      return (gint) (626 + i);
+    if (wyl_policy_store_set_session_state (store, scope, "active")
+        != WYRELOG_E_OK)
+      return (gint) (636 + i);
+    if (wyl_policy_store_set_permission_state (store, user, perm, scope,
+            states[i]) != WYRELOG_E_OK)
+      return (gint) (646 + i);
+    if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+        != WYRELOG_E_OK)
+      return (gint) (656 + i);
+
+    gint64 row[3];
+    if (intern3 (handle, user, perm, scope, row) != WYRELOG_E_OK)
+      return (gint) (666 + i);
+    gboolean allowed = TRUE;
+    if (wyl_handle_engine_decide (handle, row, &allowed) != WYRELOG_E_OK)
+      return (gint) (676 + i);
+    if (allowed)
+      return (gint) (686 + i);
+  }
+  return 0;
+}
+
+static gint
+check_policy_store_guarded_permission_state_stays_guarded (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 696;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_direct_permission (store, "permstate-guard-user",
+          "wr.audit.read", "permstate-guard-scope") != WYRELOG_E_OK)
+    return 697;
+  if (wyl_policy_store_set_principal_state (store, "permstate-guard-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 698;
+  if (wyl_policy_store_set_session_state (store, "permstate-guard-scope",
+          "active") != WYRELOG_E_OK)
+    return 699;
+  if (wyl_policy_store_set_permission_state (store, "permstate-guard-user",
+          "wr.audit.read", "permstate-guard-scope", "armed") != WYRELOG_E_OK)
+    return 700;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 701;
+
+  gint64 row[3];
+  if (intern3 (handle, "permstate-guard-user", "wr.audit.read",
+          "permstate-guard-scope", row) != WYRELOG_E_OK)
+    return 702;
+  gboolean allowed = TRUE;
+  if (wyl_handle_engine_decide (handle, row, &allowed) != WYRELOG_E_OK)
+    return 703;
+  return allowed ? 704 : 0;
+}
+
+static gint
+check_policy_store_permission_states_reject_unknown_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 705;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_permission_state (store, "permstate-bad-user",
+          "wr.audit.read", "permstate-bad-scope", "missing") != WYRELOG_E_OK)
+    return 706;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 707;
+  return 0;
+}
+
+static gint
+check_policy_store_permission_states_reload_failure_preserves_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 711;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 712;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_permission_state (store, "permstate-reload-user",
+          "wr.audit.read", "permstate-reload-scope", "missing")
+      != WYRELOG_E_OK)
+    return 713;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 714;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 715;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 716;
+}
+
+static gint
+check_policy_store_permission_states_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 708;
+  if (wyl_handle_load_policy_store_permission_states (NULL)
+      != WYRELOG_E_INVALID)
+    return 709;
+  if (wyl_handle_load_policy_store_permission_states (handle)
+      != WYRELOG_E_INVALID)
+    return 710;
+  return 0;
+}
+
+static gint
 check_policy_store_principal_states_autoload_on_open (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -3810,6 +4032,22 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_policy_store_direct_permissions_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_states_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_states_override_auto_arm ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_states_reject_non_armed ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_guarded_permission_state_stays_guarded ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_states_reject_unknown_state ()) != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_permission_states_reload_failure_preserves_pair ())
+      != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_states_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
     return rc;

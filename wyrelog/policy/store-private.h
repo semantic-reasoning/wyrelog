@@ -25,6 +25,9 @@ typedef wyrelog_error_t (*wyl_policy_direct_permission_cb) (const gchar *
 typedef wyrelog_error_t (*wyl_policy_direct_permission_event_cb) (const gchar *
     subject_id, const gchar * perm_id, const gchar * scope,
     const gchar * operation, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_permission_state_cb) (const gchar *
+    subject_id, const gchar * perm_id, const gchar * scope,
+    const gchar * state, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_principal_state_cb) (const gchar *
     subject_id, const gchar * state, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_principal_event_cb) (gint64 event_id,
@@ -150,6 +153,14 @@ wyl_policy_store_append_direct_permission_event (wyl_policy_store_t * store,
 wyrelog_error_t
 wyl_policy_store_foreach_direct_permission_event (wyl_policy_store_t * store,
     wyl_policy_direct_permission_event_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_set_permission_state (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id,
+    const gchar * scope, const gchar * state);
+wyrelog_error_t wyl_policy_store_permission_state_exists (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
+    gboolean * out_exists);
+wyrelog_error_t wyl_policy_store_foreach_permission_state (wyl_policy_store_t *
+    store, wyl_policy_permission_state_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_set_principal_state (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_principal_state (wyl_policy_store_t *
