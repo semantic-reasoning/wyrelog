@@ -44,6 +44,12 @@ wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const gchar * otp);
 wyrelog_error_t wyl_client_decide (WylClient * client,
     const gchar * user,
     const gchar * perm, const gchar * session_token, gint * out_decision);
+wyrelog_error_t wyl_client_decide_with_guard_context (WylClient * client,
+    const gchar * user,
+    const gchar * perm,
+    const gchar * session_token,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk, gint * out_decision);
 
 /* Audit query (iterator) */
 wyrelog_error_t wyl_client_audit_query (WylClient * client,
