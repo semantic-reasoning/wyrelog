@@ -2374,9 +2374,28 @@ check_login_skip_mfa_projection_autoload_on_open (void)
           "skip-mfa-wrong-scope-user", "wr.login.skip_mfa", "other")
       != WYRELOG_E_OK)
     return 365;
+  if (wyl_policy_store_upsert_role (store, "skip-mfa-role",
+          "skip mfa role") != WYRELOG_E_OK)
+    return 366;
+  if (wyl_policy_store_grant_role_permission (store, "skip-mfa-role",
+          "wr.login.skip_mfa") != WYRELOG_E_OK)
+    return 367;
+  if (wyl_policy_store_grant_role_membership (store, "skip-mfa-role-user",
+          "skip-mfa-role", "login") != WYRELOG_E_OK)
+    return 368;
+  if (wyl_policy_store_upsert_role (store, "skip-mfa-child-role",
+          "skip mfa child role") != WYRELOG_E_OK)
+    return 369;
+  if (wyl_policy_store_grant_role_inheritance (store, "skip-mfa-child-role",
+          "skip-mfa-role") != WYRELOG_E_OK)
+    return 370;
+  if (wyl_policy_store_grant_role_membership (store,
+          "skip-mfa-inherited-user", "skip-mfa-child-role", "login")
+      != WYRELOG_E_OK)
+    return 371;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
-    return 366;
+    return 372;
 
   struct
   {
@@ -2384,8 +2403,10 @@ check_login_skip_mfa_projection_autoload_on_open (void)
     gboolean expected;
     gint code;
   } cases[] = {
-    {"skip-mfa-direct-user", TRUE, 367},
-    {"skip-mfa-wrong-scope-user", FALSE, 368},
+    {"skip-mfa-direct-user", TRUE, 373},
+    {"skip-mfa-role-user", TRUE, 374},
+    {"skip-mfa-inherited-user", TRUE, 375},
+    {"skip-mfa-wrong-scope-user", FALSE, 376},
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
