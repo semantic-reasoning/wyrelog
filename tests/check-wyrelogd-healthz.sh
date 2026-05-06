@@ -19,6 +19,7 @@ trap cleanup EXIT INT TERM
 
 "$PYTHON" - "$PORT" "$EXPECT_AUDIT" <<'PY'
 import sys
+import json
 import time
 import urllib.request
 import urllib.error
@@ -38,6 +39,18 @@ def invalid_filter_is_rejected():
     except urllib.error.HTTPError as exc:
         return exc.code == 400
 
+def audit_events_match_startup_readiness(payload):
+    events = json.loads(payload)
+    if not expect_audit or events == []:
+        return events == []
+    return any(
+        event.get("subject_id") == "wyrelogd-skip-mfa-user"
+        and event.get("action") == "login_skip_mfa"
+        and event.get("deny_reason") == "skip_mfa_not_allowed"
+        and event.get("decision") == 0
+        for event in events
+    )
+
 for _ in range(50):
     try:
         health = urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
@@ -45,7 +58,8 @@ for _ in range(50):
             f"{base}/audit/events?filter=decision%3Ddeny",
             timeout=1,
         ).read()
-        if health != b"ok\n" or events != b"[]":
+        if health != b"ok\n" or not audit_events_match_startup_readiness(
+                events):
             sys.exit(1)
         if expect_audit and not invalid_filter_is_rejected():
             sys.exit(1)

@@ -14,6 +14,21 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 {
   g_autoptr (GError) error = NULL;
 
+  if (!opts->check_only) {
+    g_autoptr (WylHandle) readiness_handle = NULL;
+    wyrelog_error_t readiness_rc =
+        wyl_init (opts->template_dir, &readiness_handle);
+    if (readiness_rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: init failed: %s\n",
+          wyrelog_error_string (readiness_rc));
+      return 1;
+    }
+
+    int checks_rc = wyl_daemon_run_checks (readiness_handle);
+    if (checks_rc != 0)
+      return checks_rc;
+  }
+
   g_autoptr (WylHandle) handle = NULL;
   wyrelog_error_t rc = wyl_init (opts->template_dir, &handle);
   if (rc != WYRELOG_E_OK) {
