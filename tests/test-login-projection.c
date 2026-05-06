@@ -342,6 +342,75 @@ check_anonymous_login_reload_failure_keeps_session_state (void)
 }
 
 static gint
+check_login_event_projection_failure_is_reported (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 140;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "principal_event",
+      WYRELOG_E_INTERNAL);
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "projection-event-fail-user");
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_INTERNAL)
+    return 141;
+  if (session != NULL)
+    return 142;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 count = -1;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM principal_events "
+          "WHERE subject_id = 'projection-event-fail-user' "
+          "AND event = 'login_ok' "
+          "AND from_state = 'unverified' "
+          "AND to_state = 'mfa_required';", &count))
+    return 143;
+  if (count != 1)
+    return 144;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", &count))
+    return 145;
+  if (count != 1)
+    return 146;
+  return 0;
+}
+
+static gint
+check_anonymous_session_event_projection_failure_is_reported (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 150;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "session_event",
+      WYRELOG_E_INTERNAL);
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, NULL, &session) != WYRELOG_E_INTERNAL)
+    return 151;
+  if (session != NULL)
+    return 152;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 count = -1;
+  if (!policy_count_rows (store,
+          "SELECT COUNT(*) FROM session_events "
+          "WHERE event = 'request' AND from_state = 'idle' "
+          "AND to_state = 'active';", &count))
+    return 153;
+  if (count != 1)
+    return 154;
+  return 0;
+}
+
+static gint
 check_skip_mfa_login_projects_authority_state (void)
 {
   static const gchar *username = "projection-skip-mfa-user";
@@ -643,6 +712,11 @@ main (void)
   if ((rc = check_login_reload_failure_keeps_durable_state_repairable ()) != 0)
     return rc;
   if ((rc = check_anonymous_login_reload_failure_keeps_session_state ()) != 0)
+    return rc;
+  if ((rc = check_login_event_projection_failure_is_reported ()) != 0)
+    return rc;
+  if ((rc =
+          check_anonymous_session_event_projection_failure_is_reported ()) != 0)
     return rc;
   if ((rc = check_skip_mfa_login_projects_authority_state ()) != 0)
     return rc;
