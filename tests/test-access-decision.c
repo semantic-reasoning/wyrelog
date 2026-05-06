@@ -47,6 +47,9 @@ check_stratification (void)
   static const wyl_dl_body_atom_t allow_bool_body[] = {
     {.predicate = "allow",.negated = FALSE},
   };
+  static const wyl_dl_body_atom_t login_skip_mfa_observed_body[] = {
+    {.predicate = "login_skip_mfa_authz",.negated = FALSE},
+  };
   static const wyl_dl_body_atom_t dr_frozen_body[] = {
     {.predicate = "has_permission",.negated = FALSE},
     {.predicate = "frozen",.negated = FALSE},
@@ -84,6 +87,9 @@ check_stratification (void)
     {.head = "allow",.body = allow_body,.body_len = G_N_ELEMENTS (allow_body)},
     {.head = "allow_bool",.body = allow_bool_body,
         .body_len = G_N_ELEMENTS (allow_bool_body)},
+    {.head = "login_skip_mfa_authz_observed",
+          .body = login_skip_mfa_observed_body,
+        .body_len = G_N_ELEMENTS (login_skip_mfa_observed_body)},
     {.head = "deny_reason",.body = dr_frozen_body,
         .body_len = G_N_ELEMENTS (dr_frozen_body)},
     {.head = "deny_reason",.body = dr_disabled_role_body,
@@ -375,6 +381,9 @@ check_decision_rule_bodies (void)
     "allow(U, P, S) :-\n"
         "    allow_guard_base(U, P, S),\n" "    armed(U, P, S).",
     "allow_bool(U, P, S) :- allow(U, P, S).",
+    ".decl login_skip_mfa_authz(user: symbol)",
+    ".decl login_skip_mfa_authz_observed(user: symbol)",
+    "login_skip_mfa_authz_observed(U) :-\n" "    login_skip_mfa_authz(U).",
     "deny_reason(U, P, S, \"frozen\", \"frozen\") :-\n"
         "    has_permission(U, P, S),\n" "    frozen(S).",
     "deny_reason(U, P, S, \"disabled_role\", \"disabled_role_for\") :-\n"
