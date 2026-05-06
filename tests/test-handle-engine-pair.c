@@ -122,6 +122,11 @@ typedef struct
 
 typedef struct
 {
+  guint guard_deltas;
+} GuardProjectionDeltaExpect;
+
+typedef struct
+{
   gint64 and_handle;
   gint64 left_handle;
   gint64 right_handle;
@@ -213,39 +218,6 @@ write_guard_context_compound_templates (const gchar *dir)
       "compound_scope_row(H, M, S) :- __compound_scope_2(H, M, S).\n"
       "compound_metadata_row(H, T, L, R) :- __compound_metadata_3(H, T, L,"
       " R).\n")
-      && write_file_in_dir (dir, "fsm/principal.dl",
-      ".decl principal_transition(from_state: symbol, event: symbol,"
-      " to_state: symbol)\n")
-      && write_file_in_dir (dir, "fsm/session.dl",
-      ".decl session_active(state: symbol)\n"
-      ".decl session_transition(from_state: symbol, event: symbol,"
-      " to_state: symbol)\n")
-      && write_file_in_dir (dir, "fsm/permission_scope.dl",
-      ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n"
-      ".decl perm_window_guard(perm: symbol, window: symbol)\n")
-      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
-}
-
-static gboolean
-write_guard_payload_templates (const gchar *dir)
-{
-  g_autofree gchar *fsm_dir = g_build_filename (dir, "fsm", NULL);
-  if (g_mkdir (fsm_dir, 0755) != 0)
-    return FALSE;
-  g_autofree gchar *lobac_dir = g_build_filename (dir, "lobac", NULL);
-  if (g_mkdir (lobac_dir, 0755) != 0)
-    return FALSE;
-
-  return write_file_in_dir (dir, "bootstrap.dl",
-      ".decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)\n"
-      ".decl guard_row(handle: int64, root: int64)\n"
-      ".decl guard_cmp_row(handle: int64, field: symbol, op: symbol,"
-      " value: symbol)\n"
-      ".decl guard_and_row(handle: int64, left: int64, right: int64)\n"
-      "perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).\n"
-      "guard_row(H, R) :- __compound_guard_1(H, R).\n"
-      "guard_cmp_row(H, F, O, V) :- __compound_guard_cmp_3(H, F, O, V).\n"
-      "guard_and_row(H, L, R) :- __compound_guard_and_2(H, L, R).\n")
       && write_file_in_dir (dir, "fsm/principal.dl",
       ".decl principal_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
@@ -526,6 +498,22 @@ delta_count_cb (const gchar *relation, const gint64 *row, guint ncols,
   (void) kind;
 
   (*seen)++;
+}
+
+static void
+guard_projection_delta_cb (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  GuardProjectionDeltaExpect *expect = user_data;
+
+  (void) row;
+  (void) ncols;
+  (void) kind;
+
+  if (g_strcmp0 (relation, "guard_row") == 0
+      || g_strcmp0 (relation, "guard_cmp_row") == 0
+      || g_strcmp0 (relation, "guard_and_row") == 0)
+    expect->guard_deltas++;
 }
 
 static wyrelog_error_t
@@ -1454,7 +1442,6 @@ static gint
 check_perm_arm_rule_guard_payload_projection (void)
 {
   g_autoptr (WylHandle) handle = NULL;
-  g_autofree gchar *tmpdir = NULL;
   gsize nperms = wyl_perm_arm_rule_count ();
   g_autofree gint64 *perm_ids = g_new0 (gint64, nperms);
   g_autofree guint *seen_counts = g_new0 (guint, nperms);
@@ -1462,24 +1449,14 @@ check_perm_arm_rule_guard_payload_projection (void)
 
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 171;
-  tmpdir = make_tmpdir ();
-  if (tmpdir == NULL)
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
     return 172;
-  if (!write_guard_payload_templates (tmpdir)) {
-    rmdir_recursive (tmpdir);
-    return 173;
-  }
-  if (wyl_handle_open_engine_pair (handle, tmpdir) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
-    return 174;
-  }
 
   for (gsize i = 0; i < nperms; i++) {
     if (wyl_handle_intern_engine_symbol (handle, wyl_perm_arm_rule_perm_id (i),
-            &perm_ids[i]) != WYRELOG_E_OK) {
-      rmdir_recursive (tmpdir);
+            &perm_ids[i]) != WYRELOG_E_OK)
       return 175;
-    }
   }
 
   gint64 placeholder_id = -1;
@@ -1491,43 +1468,27 @@ check_perm_arm_rule_guard_payload_projection (void)
   gint64 value_30_id = -1;
   gint64 trusted_id = -1;
   if (wyl_handle_intern_engine_symbol (handle, "_v0_deferred",
-          &placeholder_id) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          &placeholder_id) != WYRELOG_E_OK)
     return 176;
-  }
   if (wyl_handle_intern_engine_symbol (handle, "risk", &risk_id)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+      != WYRELOG_E_OK)
     return 177;
-  }
   if (wyl_handle_intern_engine_symbol (handle, "loc_class", &loc_class_id)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+      != WYRELOG_E_OK)
     return 178;
-  }
-  if (wyl_handle_intern_engine_symbol (handle, "lt", &lt_id) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+  if (wyl_handle_intern_engine_symbol (handle, "lt", &lt_id) != WYRELOG_E_OK)
     return 179;
-  }
-  if (wyl_handle_intern_engine_symbol (handle, "eq", &eq_id) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+  if (wyl_handle_intern_engine_symbol (handle, "eq", &eq_id) != WYRELOG_E_OK)
     return 180;
-  }
   if (wyl_handle_intern_engine_symbol (handle, "70", &value_70_id)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+      != WYRELOG_E_OK)
     return 181;
-  }
   if (wyl_handle_intern_engine_symbol (handle, "30", &value_30_id)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+      != WYRELOG_E_OK)
     return 182;
-  }
   if (wyl_handle_intern_engine_symbol (handle, "trusted", &trusted_id)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+      != WYRELOG_E_OK)
     return 183;
-  }
 
   PermArmRuleSnapshotExpect expect = {
     .perm_ids = perm_ids,
@@ -1541,21 +1502,15 @@ check_perm_arm_rule_guard_payload_projection (void)
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
           "perm_arm_rule_observed", perm_arm_rule_snapshot_cb, &expect)
-      != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+      != WYRELOG_E_OK)
     return 184;
-  }
 
   gint audit_idx = find_perm_arm_rule_index ("wr.audit.read");
   gint admin_idx = find_perm_arm_rule_index ("wr.sys.admin");
-  if (audit_idx < 0 || admin_idx < 0) {
-    rmdir_recursive (tmpdir);
+  if (audit_idx < 0 || admin_idx < 0)
     return 185;
-  }
-  if (guard_handles[audit_idx] <= 0 || guard_handles[admin_idx] <= 0) {
-    rmdir_recursive (tmpdir);
+  if (guard_handles[audit_idx] <= 0 || guard_handles[admin_idx] <= 0)
     return 186;
-  }
 
   GuardWrapperExpect audit_wrapper = {
     .guard_handle = guard_handles[audit_idx],
@@ -1563,14 +1518,10 @@ check_perm_arm_rule_guard_payload_projection (void)
     .matches = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "guard_row",
-          guard_wrapper_cb, &audit_wrapper) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          guard_wrapper_cb, &audit_wrapper) != WYRELOG_E_OK)
     return 187;
-  }
-  if (audit_wrapper.matches < 1 || audit_wrapper.root_handle <= 0) {
-    rmdir_recursive (tmpdir);
+  if (audit_wrapper.matches < 1 || audit_wrapper.root_handle <= 0)
     return 188;
-  }
 
   GuardCmpExpect audit_cmp = {
     .cmp_handle = audit_wrapper.root_handle,
@@ -1580,14 +1531,10 @@ check_perm_arm_rule_guard_payload_projection (void)
     .matches = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "guard_cmp_row", guard_cmp_cb, &audit_cmp) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          "guard_cmp_row", guard_cmp_cb, &audit_cmp) != WYRELOG_E_OK)
     return 189;
-  }
-  if (audit_cmp.matches < 1) {
-    rmdir_recursive (tmpdir);
+  if (audit_cmp.matches < 1)
     return 190;
-  }
 
   GuardWrapperExpect admin_wrapper = {
     .guard_handle = guard_handles[admin_idx],
@@ -1595,14 +1542,10 @@ check_perm_arm_rule_guard_payload_projection (void)
     .matches = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "guard_row",
-          guard_wrapper_cb, &admin_wrapper) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          guard_wrapper_cb, &admin_wrapper) != WYRELOG_E_OK)
     return 191;
-  }
-  if (admin_wrapper.matches < 1 || admin_wrapper.root_handle <= 0) {
-    rmdir_recursive (tmpdir);
+  if (admin_wrapper.matches < 1 || admin_wrapper.root_handle <= 0)
     return 192;
-  }
 
   GuardAndExpect admin_and = {
     .and_handle = admin_wrapper.root_handle,
@@ -1611,15 +1554,11 @@ check_perm_arm_rule_guard_payload_projection (void)
     .matches = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "guard_and_row", guard_and_cb, &admin_and) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          "guard_and_row", guard_and_cb, &admin_and) != WYRELOG_E_OK)
     return 193;
-  }
   if (admin_and.matches < 1 || admin_and.left_handle <= 0
-      || admin_and.right_handle <= 0) {
-    rmdir_recursive (tmpdir);
+      || admin_and.right_handle <= 0)
     return 194;
-  }
 
   GuardCmpExpect admin_risk = {
     .cmp_handle = admin_and.left_handle,
@@ -1629,14 +1568,10 @@ check_perm_arm_rule_guard_payload_projection (void)
     .matches = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "guard_cmp_row", guard_cmp_cb, &admin_risk) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          "guard_cmp_row", guard_cmp_cb, &admin_risk) != WYRELOG_E_OK)
     return 195;
-  }
-  if (admin_risk.matches < 1) {
-    rmdir_recursive (tmpdir);
+  if (admin_risk.matches < 1)
     return 196;
-  }
 
   GuardCmpExpect admin_loc = {
     .cmp_handle = admin_and.right_handle,
@@ -1646,16 +1581,37 @@ check_perm_arm_rule_guard_payload_projection (void)
     .matches = 0,
   };
   if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-          "guard_cmp_row", guard_cmp_cb, &admin_loc) != WYRELOG_E_OK) {
-    rmdir_recursive (tmpdir);
+          "guard_cmp_row", guard_cmp_cb, &admin_loc) != WYRELOG_E_OK)
     return 197;
-  }
-  if (admin_loc.matches < 1) {
-    rmdir_recursive (tmpdir);
+  if (admin_loc.matches < 1)
     return 198;
-  }
 
-  rmdir_recursive (tmpdir);
+  return 0;
+}
+
+static gint
+check_guard_projection_rows_skip_delta_callbacks (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  GuardProjectionDeltaExpect expect = { 0 };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 199;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 200;
+  if (wyl_handle_engine_set_delta_callback (handle, guard_projection_delta_cb,
+          &expect) != WYRELOG_E_OK)
+    return 201;
+  for (guint i = 0; i < 8; i++) {
+    if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
+      return 202;
+  }
+  if (expect.guard_deltas != 0)
+    return 203;
+  if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
+      != WYRELOG_E_OK)
+    return 204;
   return 0;
 }
 
@@ -3654,6 +3610,8 @@ main (void)
   if ((rc = check_perm_window_guard_seed_contract ()) != 0)
     return rc;
   if ((rc = check_perm_arm_rule_guard_payload_projection ()) != 0)
+    return rc;
+  if ((rc = check_guard_projection_rows_skip_delta_callbacks ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
