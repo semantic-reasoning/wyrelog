@@ -147,12 +147,14 @@ wyl_client_send_message (WylClient *client, SoupMessage *message,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-wyl_client_login (WylClient *client, const gchar *username,
-    const gchar *password)
+static wyrelog_error_t
+client_login_internal (WylClient *client, const gchar *username,
+    const gchar *password, gboolean skip_mfa)
 {
   if (client == NULL || !WYL_IS_CLIENT (client) || username == NULL ||
       username[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (skip_mfa && password != NULL)
     return WYRELOG_E_INVALID;
   if (password != NULL && password[0] != '\0')
     return WYRELOG_E_INVALID;
@@ -165,9 +167,14 @@ wyl_client_login (WylClient *client, const gchar *username,
 
   g_autofree gchar *escaped_username =
       g_uri_escape_string (username, NULL, TRUE);
-  g_autofree gchar *uri =
-      g_strdup_printf ("%s/auth/login?username=%s", base_url,
-      escaped_username);
+  g_autofree gchar *uri = NULL;
+  if (skip_mfa) {
+    uri = g_strdup_printf ("%s/auth/login?username=%s&skip_mfa=true",
+        base_url, escaped_username);
+  } else {
+    uri = g_strdup_printf ("%s/auth/login?username=%s", base_url,
+        escaped_username);
+  }
 
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
   if (message == NULL)
@@ -198,6 +205,19 @@ wyl_client_login (WylClient *client, const gchar *username,
   client->principal_state = g_steal_pointer (&principal_state);
   client->session_state = g_steal_pointer (&session_state);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_login (WylClient *client, const gchar *username,
+    const gchar *password)
+{
+  return client_login_internal (client, username, password, FALSE);
+}
+
+wyrelog_error_t
+wyl_client_login_skip_mfa (WylClient *client, const gchar *username)
+{
+  return client_login_internal (client, username, NULL, TRUE);
 }
 
 wyrelog_error_t
