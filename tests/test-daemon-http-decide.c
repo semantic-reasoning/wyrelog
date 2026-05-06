@@ -32,6 +32,18 @@ typedef struct
   guint matches;
 } AuditEventProbe;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  const gchar *state;
+  const gchar *event;
+  const gchar *from_state;
+  const gchar *to_state;
+  guint matches;
+} PermissionStateProbe;
+
 static gpointer
 test_http_server_thread (gpointer data)
 {
@@ -1048,6 +1060,38 @@ audit_event_probe_cb (const gchar *id, gint64 created_at_us,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+permission_state_probe_cb (const gchar *subject_id, const gchar *perm_id,
+    const gchar *scope, const gchar *state, gpointer user_data)
+{
+  PermissionStateProbe *probe = user_data;
+
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (perm_id, probe->perm_id) == 0
+      && g_strcmp0 (scope, probe->scope) == 0
+      && g_strcmp0 (state, probe->state) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+permission_state_event_probe_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  (void) event_id;
+  PermissionStateProbe *probe = user_data;
+
+  if (g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (perm_id, probe->perm_id) == 0
+      && g_strcmp0 (scope, probe->scope) == 0
+      && g_strcmp0 (event, probe->event) == 0
+      && g_strcmp0 (from_state, probe->from_state) == 0
+      && g_strcmp0 (to_state, probe->to_state) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 role_membership_exists (WylHandle *handle, const gchar *subject,
     const gchar *role, const gchar *scope)
@@ -1287,6 +1331,74 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (transition_audit.matches != 1)
     return 179;
   g_clear_pointer (&body, g_free);
+
+  if (wyl_policy_store_set_principal_state (store, "client-state-target",
+          "authenticated") != WYRELOG_E_OK)
+    return 180;
+  if (wyl_policy_store_set_session_state (store, "tenant-a", "active")
+      != WYRELOG_E_OK)
+    return 181;
+  if (wyl_client_policy_permission_transition (client, "client-state-target",
+          "site.policy.read", "tenant-a", "grant", 123, "public", 49)
+      != WYRELOG_E_OK)
+    return 182;
+  if (!permission_state_exists (handle, "client-state-target",
+          "site.policy.read", "tenant-a"))
+    return 183;
+  if (direct_permission_exists (handle, "client-state-target",
+          "site.policy.read", "tenant-a"))
+    return 184;
+  PermissionStateProbe state_probe = {
+    .subject_id = "client-state-target",
+    .perm_id = "site.policy.read",
+    .scope = "tenant-a",
+    .state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state (store,
+          permission_state_probe_cb, &state_probe) != WYRELOG_E_OK)
+    return 185;
+  if (state_probe.matches != 1)
+    return 186;
+  PermissionStateProbe event_probe = {
+    .subject_id = "client-state-target",
+    .perm_id = "site.policy.read",
+    .scope = "tenant-a",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_probe_cb, &event_probe) != WYRELOG_E_OK)
+    return 187;
+  if (event_probe.matches != 1)
+    return 188;
+  AuditEventProbe client_transition_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_state.grant",
+    .resource_id = "site.policy.read",
+    .deny_reason = "grant",
+    .deny_origin = "tenant-a",
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &client_transition_audit) != WYRELOG_E_OK)
+    return 194;
+  if (client_transition_audit.matches != 2)
+    return 195;
+  gint client_decision = WYL_DECISION_ALLOW;
+  if (wyl_client_decide (client, "client-state-target", "site.policy.read",
+          "tenant-a", &client_decision) != WYRELOG_E_OK)
+    return 189;
+  if (client_decision != WYL_DECISION_DENY)
+    return 190;
+  if (wyl_client_policy_permission_grant (client, "client-state-target",
+          "site.policy.read", "tenant-a", 123, "public", 49)
+      != WYRELOG_E_OK)
+    return 191;
+  if (wyl_client_decide (client, "client-state-target", "site.policy.read",
+          "tenant-a", &client_decision) != WYRELOG_E_OK)
+    return 192;
+  if (client_decision != WYL_DECISION_ALLOW)
+    return 193;
 
   g_autofree gchar *grant_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
