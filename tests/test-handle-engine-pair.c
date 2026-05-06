@@ -2,6 +2,7 @@
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -2212,6 +2213,35 @@ check_policy_store_session_events_reload_failure_preserves_pair (void)
 }
 
 static gint
+check_policy_store_audit_facts_reload_failure_preserves_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 443;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 444;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO audit_events "
+          "(id, created_at_us, subject_id, action, resource_id, "
+          "deny_reason, deny_origin, decision) "
+          "VALUES ('not-a-wyl-id', 1, 'audit-reload-user', "
+          "'wr.audit.read', 'audit-reload-scope', NULL, NULL, 0);",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 445;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 446;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 447;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 448;
+}
+
+static gint
 check_policy_store_session_events_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2361,6 +2391,9 @@ main (void)
   if ((rc = check_policy_store_session_events_reject_invalid_edges ()) != 0)
     return rc;
   if ((rc = check_policy_store_session_events_reload_failure_preserves_pair ())
+      != 0)
+    return rc;
+  if ((rc = check_policy_store_audit_facts_reload_failure_preserves_pair ())
       != 0)
     return rc;
   if ((rc = check_policy_store_session_events_require_engine_pair ()) != 0)
