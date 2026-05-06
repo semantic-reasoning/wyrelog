@@ -54,6 +54,15 @@ if host_machine.system() != 'windows'
       ],
       depends : wyrelogd_exe,
     )
+    test('wyrelogd-startup-readiness', sh,
+      args : [
+        meson.current_source_dir() / 'check-wyrelogd-startup-readiness.sh',
+        wyrelogd_exe.full_path(),
+        meson.project_source_root() / 'templates' / 'access',
+        python3.full_path(),
+      ],
+      depends : wyrelogd_exe,
+    )
   endif
 endif
 
