@@ -866,17 +866,37 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  if (lookup_bearer_token (msg) != NULL) {
-    set_json_error (msg, 400, "invalid_logout_auth");
-    return;
-  }
-
   const gchar *session_token = NULL;
   if (query != NULL)
     session_token = g_hash_table_lookup (query, "session_token");
-  if (session_token == NULL || session_token[0] == '\0') {
+  gboolean has_session_token = session_token != NULL
+      && session_token[0] != '\0';
+  const gchar *bearer_token = lookup_bearer_token (msg);
+  gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
+  if (!has_session_token && !has_bearer_token) {
     set_json_error (msg, 401, "logout_auth_required");
     return;
+  }
+  if (has_session_token && bearer_token != NULL) {
+    set_json_error (msg, 400, "invalid_logout_auth");
+    return;
+  }
+  if (bearer_token != NULL && !has_bearer_token) {
+    set_json_error (msg, 401, "logout_auth_required");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *bearer_session_token = NULL;
+  g_autofree gchar *bearer_actor = NULL;
+  if (has_bearer_token) {
+    wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
+        bearer_token, &bearer_session_token, &bearer_actor);
+    if (auth_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 401, "logout_auth_required");
+      return;
+    }
+    session_token = bearer_session_token;
   }
 
   g_autoptr (WylSession) session =
@@ -886,7 +906,6 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  WylDaemonHttpContext *ctx = user_data;
   wyrelog_error_t rc = wyl_session_close (ctx->handle, session);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "logout_failed");
