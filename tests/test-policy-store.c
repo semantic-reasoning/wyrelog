@@ -30,6 +30,7 @@ check_store_creates_authority_schema (void)
     "direct_permissions",
     "direct_permission_events",
     "permission_states",
+    "permission_state_events",
     "principal_events",
     "principal_states",
     "session_states",
@@ -80,6 +81,7 @@ check_template_schema_creates_state_tables (void)
     "direct_permissions",
     "direct_permission_events",
     "permission_states",
+    "permission_state_events",
     "principal_events",
     "principal_states",
     "session_states",
@@ -446,6 +448,18 @@ typedef struct
 
 typedef struct
 {
+  gint64 event_id;
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  const gchar *event;
+  const gchar *from_state;
+  const gchar *to_state;
+  guint matches;
+} PermissionStateEventExpect;
+
+typedef struct
+{
   const gchar *subject_id;
   const gchar *state;
   guint matches;
@@ -471,6 +485,24 @@ permission_state_expect_cb (const gchar *subject_id, const gchar *perm_id,
       && g_strcmp0 (perm_id, expect->perm_id) == 0
       && g_strcmp0 (scope, expect->scope) == 0
       && g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+permission_state_event_expect_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  PermissionStateEventExpect *expect = user_data;
+
+  if ((expect->event_id <= 0 || event_id == expect->event_id)
+      && g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0
+      && g_strcmp0 (event, expect->event) == 0
+      && g_strcmp0 (from_state, expect->from_state) == 0
+      && g_strcmp0 (to_state, expect->to_state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -1221,6 +1253,38 @@ check_store_sets_permission_state (void)
 }
 
 static gint
+check_store_appends_permission_state_event (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 228;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 229;
+  gint64 event_id = -1;
+  if (wyl_policy_store_append_permission_state_event (store, "perm-event-user",
+          "wr.perm.event", "perm-event-scope", "grant", "dormant", "armed",
+          &event_id) != WYRELOG_E_OK)
+    return 230;
+
+  PermissionStateEventExpect expect = {
+    .event_id = event_id,
+    .subject_id = "perm-event-user",
+    .perm_id = "wr.perm.event",
+    .scope = "perm-event-scope",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &expect) != WYRELOG_E_OK)
+    return 231;
+  if (expect.matches != 1)
+    return 232;
+  return 0;
+}
+
+static gint
 check_store_sets_principal_state (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1393,6 +1457,31 @@ check_store_distinguishes_duplicate_events (void)
     return 112;
   if (session_expect.matches != 2)
     return 113;
+  gint64 perm_first = -1;
+  gint64 perm_second = -1;
+  if (wyl_policy_store_append_permission_state_event (store, "perm-dup-user",
+          "wr.perm.dup", "perm-dup-scope", "grant", "dormant", "armed",
+          &perm_first) != WYRELOG_E_OK)
+    return 233;
+  if (wyl_policy_store_append_permission_state_event (store, "perm-dup-user",
+          "wr.perm.dup", "perm-dup-scope", "grant", "dormant", "armed",
+          &perm_second) != WYRELOG_E_OK)
+    return 234;
+  if (perm_first <= 0 || perm_second <= perm_first)
+    return 235;
+  PermissionStateEventExpect perm_expect = {
+    .subject_id = "perm-dup-user",
+    .perm_id = "wr.perm.dup",
+    .scope = "perm-dup-scope",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &perm_expect) != WYRELOG_E_OK)
+    return 236;
+  if (perm_expect.matches != 2)
+    return 237;
   return 0;
 }
 
@@ -1681,6 +1770,27 @@ check_store_rejects_bad_role_permission (void)
   if (wyl_policy_store_foreach_permission_state (store, NULL, NULL)
       != WYRELOG_E_INVALID)
     return 113;
+  if (wyl_policy_store_append_permission_state_event (store, NULL, "wr.read",
+          "scope", "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+    return 114;
+  if (wyl_policy_store_append_permission_state_event (store, "user", NULL,
+          "scope", "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+    return 115;
+  if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
+          NULL, "grant", "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+    return 116;
+  if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
+          "scope", NULL, "dormant", "armed", NULL) != WYRELOG_E_INVALID)
+    return 117;
+  if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
+          "scope", "grant", NULL, "armed", NULL) != WYRELOG_E_INVALID)
+    return 118;
+  if (wyl_policy_store_append_permission_state_event (store, "user", "wr.read",
+          "scope", "grant", "dormant", NULL, NULL) != WYRELOG_E_INVALID)
+    return 119;
+  if (wyl_policy_store_foreach_permission_state_event (store, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 120;
   if (wyl_policy_store_set_principal_state (store, NULL, "authenticated")
       != WYRELOG_E_INVALID)
     return 56;
@@ -1771,6 +1881,8 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_store_sets_permission_state ()) != 0)
+    return rc;
+  if ((rc = check_store_appends_permission_state_event ()) != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
     return rc;

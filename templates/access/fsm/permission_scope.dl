@@ -53,6 +53,10 @@
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_state_transition(from: symbol, event: symbol, to: symbol)
 .decl perm_state_step(from: symbol, event: symbol, to: symbol)
+.decl perm_state_event(event_id: int64, user: symbol, perm: symbol,
+    scope: symbol, event: symbol, from_state: symbol, to_state: symbol)
+.decl perm_state_fired(event_id: int64, user: symbol, perm: symbol,
+    scope: symbol, from_state: symbol, event: symbol, to_state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: int64)
 .decl perm_window_guard(perm: symbol, window: symbol)
 .decl guard_row(handle: int64, root: int64)
@@ -81,6 +85,10 @@ perm_state_transition("cooldown", "reset",    "armed").
 perm_state_transition("cooldown", "expire",   "dormant").
 
 perm_state_step(From, Ev, To) :- perm_state_transition(From, Ev, To).
+
+perm_state_fired(EventId, U, P, S, From, Ev, To) :-
+    perm_state_event(EventId, U, P, S, Ev, From, To),
+    perm_state_transition(From, Ev, To).
 
 // --- perm_arm_rule catalogue seed ------------------------------------
 //

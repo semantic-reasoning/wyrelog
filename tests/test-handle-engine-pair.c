@@ -630,6 +630,30 @@ intern_event5 (WylHandle *handle, gint64 event_id, const gchar *a,
 }
 
 static wyrelog_error_t
+intern_event7 (WylHandle *handle, gint64 event_id, const gchar *a,
+    const gchar *b, const gchar *c, const gchar *d, const gchar *e,
+    const gchar *f, gint64 row[7])
+{
+  row[0] = event_id;
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, c, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, d, &row[4]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, e, &row[5]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_intern_engine_symbol (handle, f, &row[6]);
+}
+
+static wyrelog_error_t
 insert1_symbol (WylHandle *handle, const gchar *relation, const gchar *a)
 {
   gint64 row[1];
@@ -3064,6 +3088,151 @@ check_policy_store_permission_states_require_engine_pair (void)
 }
 
 static gint
+check_policy_store_permission_state_events_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 717;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 event_id = -1;
+  if (wyl_policy_store_append_permission_state_event (store,
+          "perm-event-load-user", "wr.perm.event", "perm-event-load-scope",
+          "grant", "dormant", "armed", &event_id) != WYRELOG_E_OK)
+    return 718;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 719;
+
+  gint64 fired_row[7];
+  if (intern_event7 (handle, event_id, "perm-event-load-user", "wr.perm.event",
+          "perm-event-load-scope", "dormant", "grant", "armed", fired_row)
+      != WYRELOG_E_OK)
+    return 720;
+  RelationSnapshotExpect fired_expect = {
+    .expected_relation = "perm_state_fired",
+    .expected_row = fired_row,
+    .ncols = 7,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "perm_state_fired", relation_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 721;
+  return fired_expect.seen == 1 ? 0 : 722;
+}
+
+static gint
+check_policy_store_permission_state_event_duplicates_autoload_on_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 723;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gint64 first_event_id = -1;
+  gint64 second_event_id = -1;
+  if (wyl_policy_store_append_permission_state_event (store,
+          "perm-event-dup-user", "wr.perm.dup", "perm-event-dup-scope",
+          "grant", "dormant", "armed", &first_event_id) != WYRELOG_E_OK)
+    return 724;
+  if (wyl_policy_store_append_permission_state_event (store,
+          "perm-event-dup-user", "wr.perm.dup", "perm-event-dup-scope",
+          "grant", "dormant", "armed", &second_event_id) != WYRELOG_E_OK)
+    return 725;
+  if (second_event_id <= first_event_id)
+    return 726;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 727;
+
+  gint64 first_fired[7];
+  if (intern_event7 (handle, first_event_id, "perm-event-dup-user",
+          "wr.perm.dup", "perm-event-dup-scope", "dormant", "grant", "armed",
+          first_fired) != WYRELOG_E_OK)
+    return 728;
+  gint64 second_fired[7];
+  if (intern_event7 (handle, second_event_id, "perm-event-dup-user",
+          "wr.perm.dup", "perm-event-dup-scope", "dormant", "grant", "armed",
+          second_fired) != WYRELOG_E_OK)
+    return 729;
+  RelationPairSnapshotExpect fired_expect = {
+    .expected_relation = "perm_state_fired",
+    .first_row = first_fired,
+    .second_row = second_fired,
+    .ncols = 7,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "perm_state_fired", relation_pair_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 730;
+  if (fired_expect.first_seen != 1)
+    return 731;
+  return fired_expect.second_seen == 1 ? 0 : 732;
+}
+
+static gint
+check_policy_store_permission_state_events_reject_invalid_edges (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 733;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_permission_state_event (store,
+          "perm-event-invalid-user", "wr.perm.invalid",
+          "perm-event-invalid-scope", "trigger", "dormant", "firing", NULL)
+      != WYRELOG_E_OK)
+    return 734;
+  return wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      == WYRELOG_E_POLICY ? 0 : 735;
+}
+
+static gint
+check_policy_store_permission_state_events_reload_failure_preserves_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 736;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 737;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_permission_state_event (store,
+          "perm-event-reload-user", "wr.perm.reload",
+          "perm-event-reload-scope", "missing", "dormant", "armed", NULL)
+      != WYRELOG_E_OK)
+    return 738;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 739;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 740;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 741;
+}
+
+static gint
+check_policy_store_permission_state_events_require_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 742;
+  if (wyl_handle_load_policy_store_permission_state_events (NULL)
+      != WYRELOG_E_INVALID)
+    return 743;
+  if (wyl_handle_load_policy_store_permission_state_events (handle)
+      != WYRELOG_E_INVALID)
+    return 744;
+  return 0;
+}
+
+static gint
 check_policy_store_principal_states_autoload_on_open (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -4048,6 +4217,23 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_policy_store_permission_states_require_engine_pair ()) != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_permission_state_events_autoload_on_open ()) != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_permission_state_event_duplicates_autoload_on_open
+          ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_state_events_reject_invalid_edges ())
+      != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_permission_state_events_reload_failure_preserves_pair
+          ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_permission_state_events_require_engine_pair ())
+      != 0)
     return rc;
   if ((rc = check_policy_store_principal_states_autoload_on_open ()) != 0)
     return rc;

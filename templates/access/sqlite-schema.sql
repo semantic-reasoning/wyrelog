@@ -183,6 +183,31 @@ CREATE INDEX IF NOT EXISTS idx_permission_states_perm
     ON permission_states (perm_id);
 
 -- ---------------------------------------------------------------------------
+-- Table: permission_state_events
+-- Append-only permission-state FSM transition ledger. Current state is kept in
+-- permission_states; this table preserves the event edge that produced it.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS permission_state_events (
+    event_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id TEXT    NOT NULL,
+    perm_id    TEXT    NOT NULL,
+    scope      TEXT    NOT NULL,
+    event      TEXT    NOT NULL,
+    from_state TEXT    NOT NULL,
+    to_state   TEXT    NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_permission_state_events_subject
+    ON permission_state_events (subject_id);
+
+CREATE INDEX IF NOT EXISTS idx_permission_state_events_perm
+    ON permission_state_events (perm_id);
+
+CREATE INDEX IF NOT EXISTS idx_permission_state_events_event
+    ON permission_state_events (event);
+
+-- ---------------------------------------------------------------------------
 -- Table: principal_states
 -- Durable principal authentication state mirrored into principal_state/2.
 -- ---------------------------------------------------------------------------

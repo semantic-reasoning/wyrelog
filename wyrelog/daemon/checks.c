@@ -39,6 +39,7 @@ wyl_daemon_check_policy_store_ready (WylHandle *handle)
     "direct_permissions",
     "direct_permission_events",
     "permission_states",
+    "permission_state_events",
     "principal_events",
     "principal_states",
     "session_states",

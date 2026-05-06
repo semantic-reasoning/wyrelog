@@ -231,6 +231,14 @@ wyrelog_error_t wyl_handle_load_policy_store_permission_states (WylHandle *
     self);
 
 /*
+ * Loads permission_state_event rows from the handle-owned policy authority
+ * store into the attached read/delta engine pair as perm_state_event/7 facts.
+ * Rejected unless both the store and engine pair are available.
+ */
+wyrelog_error_t wyl_handle_load_policy_store_permission_state_events
+    (WylHandle * self);
+
+/*
  * Loads principal_state rows from the handle-owned policy authority store into
  * the attached read/delta engine pair. Rejected unless both the store and
  * engine pair are available.
