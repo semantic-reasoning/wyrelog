@@ -380,17 +380,17 @@ check_argument_validation (void)
   return 0;
 }
 
-/* --- .dl <-> C name mirror oracle ------------------------------- */
+/* --- .dl static fact guard -------------------------------------- */
 
 /*
- * Parses the perm_arm_rule(...) lines from the .dl source and
- * asserts that the perm-id list matches the C catalogue row by
- * row. Structural equality of the guard expression is deferred to
- * a future bisimulation oracle; this v0 mirror only pins ordering
- * and identity of the perm ids.
+ * perm_arm_rule rows are runtime-seeded from the C catalogue. The
+ * template may declare and reference the relation, but it must not
+ * also carry static facts; otherwise runtime seeding produces
+ * duplicate placeholder rows before guard payload handles are
+ * introduced.
  */
 static gboolean
-extract_perm_id (const gchar *line, gchar **out_id)
+line_is_static_perm_arm_rule_fact (const gchar *line)
 {
   const gchar *prefix = "perm_arm_rule";
   if (!g_str_has_prefix (line, prefix))
@@ -403,18 +403,11 @@ extract_perm_id (const gchar *line, gchar **out_id)
   p++;
   while (*p == ' ' || *p == '\t')
     p++;
-  if (*p != '"')
-    return FALSE;
-  p++;
-  const gchar *end = strchr (p, '"');
-  if (end == NULL)
-    return FALSE;
-  *out_id = g_strndup (p, (gsize) (end - p));
-  return TRUE;
+  return *p == '"';
 }
 
 static gint
-check_name_mirror (void)
+check_template_omits_static_perm_arm_rule_facts (void)
 {
   g_autofree gchar *contents = NULL;
   gsize len = 0;
@@ -426,30 +419,15 @@ check_name_mirror (void)
     return 200;
   }
   g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
-  gsize parsed = 0;
-  gsize expected = wyl_perm_arm_rule_count ();
   for (gsize i = 0; lines[i] != NULL; i++) {
     g_autofree gchar *trimmed = g_strdup (g_strchug (lines[i]));
     if (trimmed[0] == '%' || trimmed[0] == '\0'
         || g_str_has_prefix (trimmed, "//")
         || g_str_has_prefix (trimmed, ".decl"))
       continue;
-    /* Catalogue rows always quote the perm id immediately. The
-     * rule-3 body has `perm_arm_rule(P, G)` which would otherwise
-     * trip the parser; this stricter prefix skips it. */
-    if (!g_str_has_prefix (trimmed, "perm_arm_rule(\""))
-      continue;
-    g_autofree gchar *id = NULL;
-    if (!extract_perm_id (trimmed, &id))
-      return (gint) (210 + parsed);
-    if (parsed >= expected)
-      return 220;
-    if (g_strcmp0 (id, wyl_perm_arm_rule_perm_id (parsed)) != 0)
-      return (gint) (230 + parsed);
-    parsed++;
+    if (line_is_static_perm_arm_rule_fact (trimmed))
+      return 210;
   }
-  if (parsed != expected)
-    return 240;
   return 0;
 }
 
@@ -471,7 +449,7 @@ main (void)
     return rc;
   if ((rc = check_argument_validation ()) != 0)
     return rc;
-  if ((rc = check_name_mirror ()) != 0)
+  if ((rc = check_template_omits_static_perm_arm_rule_facts ()) != 0)
     return rc;
   return 0;
 }

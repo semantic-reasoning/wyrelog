@@ -25,10 +25,10 @@
 //                 loc_class, risk)                  context payload
 //   eval_guard(user, perm, scope, ctx)           -- host guard result
 //
-// Row order in any future perm_arm_rule block will be load-bearing:
-// the test harness compares the perm-id list line by line against
-// the C catalogue, so reordering one side without the other will
-// fail the build.
+// perm_arm_rule rows are runtime-seeded from the C catalogue so the
+// session-local guard-handle column can later move to side-tier
+// compounds without static template handles. Static perm_arm_rule
+// facts are intentionally absent.
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: symbol)
@@ -36,30 +36,21 @@
 .decl guard_context(ctx: scope/2 side, user: symbol, scope: symbol,
     timestamp: int64, loc_class: symbol, risk: int64)
 .decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: scope/2 side)
+.decl perm_arm_rule_observed(perm: symbol, guard_handle: symbol)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
-// --- perm_arm_rule catalogue mirror ----------------------------------
+// --- perm_arm_rule catalogue seed ------------------------------------
 //
-// Row order is load-bearing: the test harness compares the perm-id
-// list line by line against the C catalogue at
-// wyrelog/wyl-permission-scope.c, so reordering one side without the
-// other will fail the build. The second argument is a guard handle —
-// the compound-term guard payload itself lives in the C catalogue,
-// keyed by perm-id; the `_v0_deferred` placeholder pins the row count
-// while the host bridge exposes satisfied guard decisions as
-// eval_guard/4 facts tied to a structured guard_context/6 row.
+// Runtime seed order is load-bearing: the test harness compares the
+// C catalogue at wyrelog/wyl-permission-scope.c against the opened
+// engine snapshot, so missing, duplicate, or variant rows fail the
+// build. The second argument is intentionally `_v0_deferred` in the
+// compatibility seed until perm_arm_rule consumes runtime guard
+// handles. The placeholder pins the row count while the host bridge
+// exposes satisfied guard decisions as eval_guard/4 facts tied to a
+// structured guard_context/6 row.
 
-perm_arm_rule("wr.sys.admin",        "_v0_deferred").
-perm_arm_rule("wr.sys.key_rotate",   "_v0_deferred").
-perm_arm_rule("wr.sys.merkle_seal",  "_v0_deferred").
-perm_arm_rule("wr.policy.write",     "_v0_deferred").
-perm_arm_rule("wr.policy.grant_role","_v0_deferred").
-perm_arm_rule("wr.svc.freeze",       "_v0_deferred").
-perm_arm_rule("wr.svc.unfreeze",     "_v0_deferred").
-perm_arm_rule("wr.svc.grant_role",   "_v0_deferred").
-perm_arm_rule("wr.audit.read",       "_v0_deferred").
-perm_arm_rule("wr.audit.explain",    "_v0_deferred").
-perm_arm_rule("wr.stream.write_reserved", "_v0_deferred").
+perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).
 
 // --- armed/3 derivation ----------------------------------------------
 
