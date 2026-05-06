@@ -3094,6 +3094,144 @@ check_policy_store_permission_state_events_reload_failure_preserves_pair (void)
 }
 
 static gint
+check_handle_permission_state_transition_reloads_snapshot (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 800;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 801;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.perm.transition",
+          "permission transition", "basic") != WYRELOG_E_OK)
+    return 804;
+  if (wyl_policy_store_grant_direct_permission (store, "perm-transition-user",
+          "site.perm.transition", "perm-transition-scope") != WYRELOG_E_OK)
+    return 805;
+  if (wyl_policy_store_set_principal_state (store, "perm-transition-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 806;
+  if (wyl_policy_store_set_session_state (store, "perm-transition-scope",
+          "active") != WYRELOG_E_OK)
+    return 807;
+
+  gint64 event_id = -1;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "perm-transition-user", "site.perm.transition",
+          "perm-transition-scope", "grant", NULL, &event_id) != WYRELOG_E_OK)
+    return 802;
+  if (event_id <= 0)
+    return 803;
+
+  gint64 decision_row[3];
+  if (intern3 (handle, "perm-transition-user", "site.perm.transition",
+          "perm-transition-scope", decision_row) != WYRELOG_E_OK)
+    return 808;
+  gboolean allowed = FALSE;
+  if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+      != WYRELOG_E_OK)
+    return 809;
+  if (!allowed)
+    return 810;
+
+  return 0;
+}
+
+static gint
+check_handle_permission_state_transition_projects_audit_fact (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 810;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 811;
+
+  g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (audit_event, "perm-audit-actor");
+  wyl_audit_event_set_action (audit_event, "permission_state.grant");
+  wyl_audit_event_set_resource_id (audit_event, "site.perm.audit.runtime");
+  wyl_audit_event_set_deny_reason (audit_event, "allowed");
+  wyl_audit_event_set_deny_origin (audit_event, "permission_state");
+  wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
+  g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (audit_event);
+  if (audit_id == NULL)
+    return 812;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.perm.audit.runtime",
+          "runtime audit permission", "basic") != WYRELOG_E_OK)
+    return 819;
+
+  gint64 event_id = -1;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "perm-audit-runtime-user", "site.perm.audit.runtime",
+          "perm-audit-runtime-scope", "grant", audit_event, &event_id)
+      != WYRELOG_E_OK)
+    return 813;
+  if (event_id <= 0)
+    return 814;
+
+  gint64 audit_action_row[2];
+  if (wyl_handle_intern_engine_symbol (handle, audit_id, &audit_action_row[0])
+      != WYRELOG_E_OK)
+    return 815;
+  if (wyl_handle_intern_engine_symbol (handle, "permission_state.grant",
+          &audit_action_row[1]) != WYRELOG_E_OK)
+    return 816;
+  gboolean found = FALSE;
+  if (wyl_handle_engine_contains (handle, "audit_event_action",
+          audit_action_row, 2, &found) != WYRELOG_E_OK)
+    return 817;
+  return found ? 0 : 818;
+}
+
+static gint
+check_handle_permission_state_transition_reload_failure_preserves_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 819;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 820;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "site.perm.transition.fail",
+          "failing transition permission", "basic") != WYRELOG_E_OK)
+    return 827;
+
+  wyl_handle_set_engine_insert_fault_once (handle, "perm_state_event",
+      WYRELOG_E_IO);
+  gint64 event_id = -1;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "perm-transition-fail-user", "site.perm.transition.fail",
+          "perm-transition-fail-scope", "grant", NULL, &event_id)
+      != WYRELOG_E_IO)
+    return 821;
+  if (event_id <= 0)
+    return 822;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 823;
+  if (wyl_handle_get_delta_engine (handle) != delta_engine)
+    return 824;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_permission_state_exists (store,
+          "perm-transition-fail-user", "site.perm.transition.fail",
+          "perm-transition-fail-scope", &exists) != WYRELOG_E_OK)
+    return 825;
+  return exists ? 0 : 826;
+}
+
+static gint
 check_policy_store_permission_state_events_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -4107,6 +4245,15 @@ main (void)
     return rc;
   if ((rc =
           check_policy_store_permission_state_events_reload_failure_preserves_pair
+          ()) != 0)
+    return rc;
+  if ((rc = check_handle_permission_state_transition_reloads_snapshot ()) != 0)
+    return rc;
+  if ((rc =
+          check_handle_permission_state_transition_projects_audit_fact ()) != 0)
+    return rc;
+  if ((rc =
+          check_handle_permission_state_transition_reload_failure_preserves_pair
           ()) != 0)
     return rc;
   if ((rc = check_policy_store_permission_state_events_require_engine_pair ())
