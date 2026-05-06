@@ -8,6 +8,9 @@
 #include "wyl-id-private.h"
 #include "policy/store-private.h"
 
+#define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
+#define WYL_LOGIN_SKIP_MFA_SCOPE "login"
+
 struct _WylSession
 {
   GObject parent_instance;
@@ -60,6 +63,28 @@ reload_session_snapshot (WylHandle *handle)
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
   return wyl_handle_reload_engine_pair (handle);
+}
+
+static wyrelog_error_t
+login_skip_mfa_allowed (WylHandle *handle, const wyl_login_req_t *req,
+    gboolean *out_allowed)
+{
+  if (handle == NULL || req == NULL || out_allowed == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_allowed = FALSE;
+  if (wyl_handle_get_login_skip_mfa_allowed (handle)) {
+    *out_allowed = TRUE;
+    return WYRELOG_E_OK;
+  }
+
+  const gchar *username = wyl_login_req_get_username (req);
+  if (username == NULL || username[0] == '\0')
+    return WYRELOG_E_OK;
+
+  return wyl_policy_store_subject_has_permission (wyl_handle_get_policy_store
+      (handle), username, WYL_LOGIN_SKIP_MFA_PERMISSION,
+      WYL_LOGIN_SKIP_MFA_SCOPE, out_allowed);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -514,15 +539,21 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (handle == NULL)
     return WYRELOG_E_INVALID;
 
-  if (req != NULL && wyl_login_req_get_skip_mfa (req) &&
-      !wyl_handle_get_login_skip_mfa_allowed (handle)) {
+  if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
+    gboolean skip_mfa_allowed = FALSE;
+    wyrelog_error_t rc = login_skip_mfa_allowed (handle, req,
+        &skip_mfa_allowed);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!skip_mfa_allowed) {
 #ifdef WYL_HAS_AUDIT
-    wyrelog_error_t audit_rc = emit_login_skip_mfa_denied_audit (handle,
-        wyl_login_req_get_username (req));
-    if (audit_rc != WYRELOG_E_OK)
-      return audit_rc;
+      wyrelog_error_t audit_rc = emit_login_skip_mfa_denied_audit (handle,
+          wyl_login_req_get_username (req));
+      if (audit_rc != WYRELOG_E_OK)
+        return audit_rc;
 #endif
-    return WYRELOG_E_POLICY;
+      return WYRELOG_E_POLICY;
+    }
   }
 
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);

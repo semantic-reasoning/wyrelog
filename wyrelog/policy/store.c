@@ -1139,6 +1139,60 @@ wyl_policy_store_direct_permission_exists (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+wyl_policy_store_subject_has_permission (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gboolean *out_has_permission)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || perm_id == NULL || scope == NULL || out_has_permission == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_has_permission = FALSE;
+  static const gchar *sql =
+      "WITH RECURSIVE role_closure(role_id, effective_role_id) AS ("
+      "  SELECT role_id, role_id FROM roles"
+      "  UNION"
+      "  SELECT role_closure.role_id, ri.parent_role_id"
+      "  FROM role_closure"
+      "  JOIN role_inheritances ri"
+      "    ON ri.child_role_id = role_closure.effective_role_id"
+      "), role_subject_permission(subject_id, scope, perm_id) AS ("
+      "  SELECT rm.subject_id, rm.scope, rp.perm_id"
+      "  FROM role_memberships rm"
+      "  JOIN role_closure rc ON rc.role_id = rm.role_id"
+      "  JOIN role_permissions rp ON rp.role_id = rc.effective_role_id"
+      "), subject_permission(subject_id, scope, perm_id) AS ("
+      "  SELECT subject_id, scope, perm_id FROM direct_permissions"
+      "  UNION"
+      "  SELECT subject_id, scope, perm_id FROM role_subject_permission"
+      ") "
+      "SELECT 1 FROM subject_permission "
+      "WHERE subject_id = ? AND perm_id = ? AND scope = ? LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_has_permission = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyl_policy_store_foreach_direct_permission (wyl_policy_store_t *store,
     wyl_policy_direct_permission_cb cb, gpointer user_data)
 {

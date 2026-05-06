@@ -976,6 +976,54 @@ check_login_skip_mfa_uses_deployment_mode (void)
 }
 
 static gint
+check_login_skip_mfa_uses_policy_permission (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 173;
+
+  if (grant_direct (handle, "skip-mfa-policy-user", "wr.login.skip_mfa",
+          "login") != WYRELOG_E_OK)
+    return 174;
+
+  g_autoptr (WylSession) policy_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-policy-user", &policy_session)
+      != WYRELOG_E_OK)
+    return 175;
+  if (policy_session == NULL)
+    return 176;
+
+  PrincipalStateExpect expect = {
+    .subject_id = "skip-mfa-policy-user",
+    .state = "authenticated",
+  };
+  if (wyl_policy_store_foreach_principal_state (wyl_handle_get_policy_store
+          (handle), principal_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 177;
+  if (expect.matches != 1)
+    return 178;
+
+  g_autoptr (WylSession) other_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-other-user", &other_session)
+      != WYRELOG_E_POLICY)
+    return 179;
+  if (other_session != NULL)
+    return 180;
+
+  if (grant_direct (handle, "skip-mfa-wrong-scope-user", "wr.login.skip_mfa",
+          "not-login") != WYRELOG_E_OK)
+    return 181;
+  g_autoptr (WylSession) wrong_scope_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-wrong-scope-user",
+          &wrong_scope_session) != WYRELOG_E_POLICY)
+    return 182;
+  if (wrong_scope_session != NULL)
+    return 183;
+
+  return 0;
+}
+
+static gint
 check_login_skip_mfa_inserts_wirelog_principal_fired (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1681,6 +1729,8 @@ main (void)
   if ((rc = check_login_skip_mfa_authenticates_principal ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_uses_deployment_mode ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_uses_policy_permission ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_inserts_wirelog_principal_fired ()) != 0)
     return rc;
