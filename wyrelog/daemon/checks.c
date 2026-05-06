@@ -171,11 +171,36 @@ wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
   wyrelog_error_t rc = wyl_session_login (handle, login, &session);
   if (!allowed && rc == WYRELOG_E_POLICY)
     return WYRELOG_E_OK;
-  if (allowed && rc == WYRELOG_E_OK && session != NULL)
-    return WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK)
     return rc;
-  return WYRELOG_E_POLICY;
+  if (!allowed || session == NULL)
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (session);
+  if (session_id == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "wyrelogd-skip-mfa-user");
+  wyl_grant_req_set_action (grant, "wyrelogd.skip_mfa.ready");
+  wyl_grant_req_set_resource_id (grant, session_id);
+  rc = wyl_perm_grant (handle, grant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "wyrelogd-skip-mfa-user");
+  wyl_decide_req_set_action (decide, "wyrelogd.skip_mfa.ready");
+  wyl_decide_req_set_resource_id (decide, session_id);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  rc = wyl_decide (handle, decide, resp);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return WYRELOG_E_POLICY;
+
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
