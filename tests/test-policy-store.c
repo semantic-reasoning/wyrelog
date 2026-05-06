@@ -887,6 +887,62 @@ check_store_grants_direct_permission (void)
 }
 
 static gint
+check_store_checks_effective_subject_permission (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 233;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 234;
+  if (wyl_policy_store_upsert_permission (store, "site.effective.read",
+          "effective read", "basic") != WYRELOG_E_OK)
+    return 235;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-effective-user",
+          "site.effective.read", "effective-scope") != WYRELOG_E_OK)
+    return 236;
+
+  gboolean has_permission = FALSE;
+  if (wyl_policy_store_subject_has_permission (store, "direct-effective-user",
+          "site.effective.read", "effective-scope", &has_permission)
+      != WYRELOG_E_OK)
+    return 237;
+  if (!has_permission)
+    return 238;
+
+  if (wyl_policy_store_upsert_role (store, "site.effective-role",
+          "effective role") != WYRELOG_E_OK)
+    return 239;
+  if (wyl_policy_store_grant_role_permission (store, "site.effective-role",
+          "site.effective.read") != WYRELOG_E_OK)
+    return 240;
+  if (wyl_policy_store_grant_role_membership (store, "role-effective-user",
+          "site.effective-role", "effective-scope") != WYRELOG_E_OK)
+    return 241;
+
+  has_permission = FALSE;
+  if (wyl_policy_store_subject_has_permission (store, "role-effective-user",
+          "site.effective.read", "effective-scope", &has_permission)
+      != WYRELOG_E_OK)
+    return 242;
+  if (!has_permission)
+    return 243;
+
+  has_permission = TRUE;
+  if (wyl_policy_store_subject_has_permission (store, "role-effective-user",
+          "site.effective.read", "other-scope", &has_permission)
+      != WYRELOG_E_OK)
+    return 244;
+  if (has_permission)
+    return 245;
+  if (wyl_policy_store_subject_has_permission (store, "role-effective-user",
+          "site.effective.read", "effective-scope", NULL)
+      != WYRELOG_E_INVALID)
+    return 246;
+  return 0;
+}
+
+static gint
 check_role_membership_mutation_rolls_back_on_event_failure (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1602,6 +1658,8 @@ main (void)
   if ((rc = check_store_grants_role_membership ()) != 0)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_checks_effective_subject_permission ()) != 0)
     return rc;
   if ((rc = check_role_membership_mutation_rolls_back_on_event_failure ())
       != 0)

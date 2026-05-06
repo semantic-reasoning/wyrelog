@@ -138,6 +138,9 @@ wyrelog_error_t
 wyrelog_error_t wyl_policy_store_direct_permission_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean * out_exists);
+wyrelog_error_t wyl_policy_store_subject_has_permission (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
+    gboolean * out_has_permission);
 wyrelog_error_t wyl_policy_store_foreach_direct_permission (wyl_policy_store_t *
     store, wyl_policy_direct_permission_cb cb, gpointer user_data);
 wyrelog_error_t
