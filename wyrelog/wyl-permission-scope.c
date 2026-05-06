@@ -164,6 +164,15 @@ wyl_perm_arm_rule_expr (gsize idx)
   return catalogue_trees[idx];
 }
 
+gboolean
+wyl_guard_loc_class_is_valid (const gchar *loc_class)
+{
+  return g_strcmp0 (loc_class, "trusted") == 0 ||
+      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
+      g_strcmp0 (loc_class, "public") == 0 ||
+      g_strcmp0 (loc_class, "untrusted") == 0;
+}
+
 /* --- evaluator --------------------------------------------------- */
 
 static gboolean

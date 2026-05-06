@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-permission-scope-private.h"
 
 struct _WylClient
 {
@@ -480,15 +481,6 @@ parse_login_response_json (const gchar *data, gsize size,
   return TRUE;
 }
 
-static gboolean
-guard_loc_class_is_valid (const gchar *loc_class)
-{
-  return g_strcmp0 (loc_class, "trusted") == 0 ||
-      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
-      g_strcmp0 (loc_class, "public") == 0 ||
-      g_strcmp0 (loc_class, "untrusted") == 0;
-}
-
 static wyrelog_error_t
 client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
     const gchar *session_token, gboolean has_guard_context,
@@ -501,7 +493,7 @@ client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
   *out_decision = WYL_DECISION_DENY;
   if (has_guard_context &&
       (guard_loc_class == NULL || guard_timestamp < 0 || guard_risk < 0 ||
-          guard_risk > 100 || !guard_loc_class_is_valid (guard_loc_class)))
+          guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class)))
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);

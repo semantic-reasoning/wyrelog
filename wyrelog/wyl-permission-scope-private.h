@@ -96,4 +96,12 @@ gsize wyl_perm_arm_rule_count (void);
 const gchar *wyl_perm_arm_rule_perm_id (gsize idx);
 const wyl_guard_expr_t *wyl_perm_arm_rule_expr (gsize idx);
 
+/*
+ * Returns TRUE iff loc_class belongs to the v0 guard context
+ * schema. This is private because the public API should continue
+ * to expose loc_class as an opaque string carried by decide and
+ * client requests.
+ */
+gboolean wyl_guard_loc_class_is_valid (const gchar * loc_class);
+
 G_END_DECLS;

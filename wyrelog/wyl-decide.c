@@ -230,22 +230,13 @@ wyl_decide_resp_get_deny_origin (const wyl_decide_resp_t *resp)
 }
 
 static gboolean
-is_valid_guard_loc_class (const gchar *loc_class)
-{
-  return g_strcmp0 (loc_class, "trusted") == 0 ||
-      g_strcmp0 (loc_class, "semi_trusted") == 0 ||
-      g_strcmp0 (loc_class, "public") == 0 ||
-      g_strcmp0 (loc_class, "untrusted") == 0;
-}
-
-static gboolean
 guard_context_is_valid (const wyl_decide_req_t *req)
 {
   if (!req->has_guard_context)
     return TRUE;
   if (req->guard_timestamp < 0)
     return FALSE;
-  if (!is_valid_guard_loc_class (req->guard_loc_class))
+  if (!wyl_guard_loc_class_is_valid (req->guard_loc_class))
     return FALSE;
   return req->guard_risk >= 0 && req->guard_risk <= 100;
 }
