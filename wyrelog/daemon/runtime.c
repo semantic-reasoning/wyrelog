@@ -15,16 +15,26 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   g_autoptr (GError) error = NULL;
 
   if (!opts->check_only) {
+    /* Install early signal handlers so SIGINT/SIGTERM arriving during
+     * the readiness phase (before the GMainLoop and its glib-based
+     * handlers exist) sets a flag we can observe instead of letting
+     * the default disposition terminate the process. */
+    wyl_daemon_install_early_signal_handlers ();
+
     g_autoptr (WylHandle) readiness_handle = NULL;
     wyrelog_error_t readiness_rc =
         wyl_init (opts->template_dir, &readiness_handle);
     if (readiness_rc != WYRELOG_E_OK) {
+      if (wyl_daemon_early_signal_received ())
+        return 0;
       g_printerr ("wyrelogd: init failed: %s\n",
           wyrelog_error_string (readiness_rc));
       return 1;
     }
 
     int checks_rc = wyl_daemon_run_checks (readiness_handle);
+    if (wyl_daemon_early_signal_received ())
+      return 0;
     if (checks_rc != 0)
       return checks_rc;
   }
@@ -69,6 +79,12 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   guint sigint_id = 0;
   guint sigterm_id = 0;
   wyl_daemon_install_signal_handlers (loop, &sigint_id, &sigterm_id);
+  /* If SIGTERM/SIGINT arrived during readiness or post-readiness setup,
+   * the early handler captured it but the GMainLoop's signal source did
+   * not. Quit the loop preemptively so we exit cleanly without serving
+   * a single request. */
+  if (wyl_daemon_early_signal_received ())
+    g_main_loop_quit (loop);
   g_main_loop_run (loop);
 #ifdef WYL_HAS_DAEMON_HTTP
   soup_server_disconnect (server);
