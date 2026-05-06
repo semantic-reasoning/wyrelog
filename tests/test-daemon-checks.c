@@ -34,6 +34,54 @@ typedef struct
   guint matches;
 } AuditActionProbe;
 
+typedef struct
+{
+  guint matches;
+} PermissionStateEventProbe;
+
+typedef struct
+{
+  guint matches;
+} AuditEventProbe;
+
+static wyrelog_error_t
+permission_state_event_probe_cb (gint64 event_id, const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gpointer user_data)
+{
+  (void) event_id;
+  (void) scope;
+  PermissionStateEventProbe *probe = user_data;
+
+  if (g_strcmp0 (subject_id, "wyrelogd-perm-state-user") == 0
+      && g_strcmp0 (perm_id, "wyrelogd.perm_state.read") == 0
+      && g_strcmp0 (event, "grant") == 0
+      && g_strcmp0 (from_state, "dormant") == 0
+      && g_strcmp0 (to_state, "armed") == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+audit_event_probe_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  (void) deny_origin;
+  AuditEventProbe *probe = user_data;
+
+  if (g_strcmp0 (subject_id, "wyrelogd") == 0
+      && g_strcmp0 (action, "permission_state.grant") == 0
+      && g_strcmp0 (resource_id, "wyrelogd.perm_state.read") == 0
+      && g_strcmp0 (deny_reason, "daemon_check") == 0
+      && decision == WYL_DECISION_ALLOW)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
 static void
 count_audit_action_cb (const gchar *relation, const gint64 *row, guint ncols,
     gpointer user_data)
@@ -246,6 +294,47 @@ check_direct_permission_grant_ready_allows_decide (void)
   return 0;
 }
 
+static gint
+check_permission_state_transition_ready_allows_decide (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 count = 0;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 74;
+  if (wyl_daemon_check_permission_state_transition_ready (handle)
+      != WYRELOG_E_OK)
+    return 75;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  PermissionStateEventProbe probe = { 0 };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_probe_cb, &probe) != WYRELOG_E_OK)
+    return 76;
+  if (probe.matches != 1)
+    return 77;
+
+  AuditEventProbe audit_probe = { 0 };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &audit_probe) != WYRELOG_E_OK)
+    return 78;
+  if (audit_probe.matches != 1)
+    return 79;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  if (!count_duckdb_rows (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'permission_state.grant' "
+          "AND subject_id = 'wyrelogd' "
+          "AND resource_id = 'wyrelogd.perm_state.read' "
+          "AND deny_reason = 'daemon_check' " "AND decision = 1;", &count))
+    return 80;
+  if (count != 1)
+    return 81;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -254,6 +343,8 @@ main (void)
   if ((rc = check_policy_audit_facts_ready_loads_read_engine ()) != 0)
     return rc;
   if ((rc = check_direct_permission_grant_ready_allows_decide ()) != 0)
+    return rc;
+  if ((rc = check_permission_state_transition_ready_allows_decide ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_ready_rejects_production_path ()) != 0)
     return rc;
