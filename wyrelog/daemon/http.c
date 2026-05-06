@@ -10,6 +10,7 @@
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-id-private.h"
+#include "wyrelog/wyl-fsm-permission-scope-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 #define WYL_DAEMON_JWT_ISSUER "wyrelogd"
@@ -592,6 +593,16 @@ set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
   set_json_error (msg, 500, "policy_mutation_failed");
 }
 
+static void
+set_policy_transition_error (SoupServerMessage *msg, wyrelog_error_t rc)
+{
+  if (rc == WYRELOG_E_INVALID || rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return;
+  }
+  set_json_error (msg, 500, "policy_mutation_failed");
+}
+
 static gboolean
 ensure_policy_permission_exists (SoupServerMessage *msg,
     WylDaemonHttpContext *ctx, const gchar *perm)
@@ -605,6 +616,16 @@ ensure_policy_permission_exists (SoupServerMessage *msg,
     return FALSE;
   }
   if (!exists) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+ensure_permission_transition_event (SoupServerMessage *msg, const gchar *event)
+{
+  if (wyl_perm_event_from_name (event) == WYL_PERM_EVENT_LAST_) {
     set_json_error (msg, 400, "invalid_policy_mutation");
     return FALSE;
   }
@@ -696,6 +717,59 @@ policy_permission_revoke_handler (SoupServer *server, SoupServerMessage *msg,
 {
   direct_permission_mutation_handler (server, msg, path, query, user_data,
       FALSE);
+}
+
+static void
+policy_permission_transition_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *subject = lookup_required_query_string (query, "subject");
+  const gchar *perm = lookup_required_query_string (query, "perm");
+  const gchar *scope = lookup_required_query_string (query, "scope");
+  const gchar *event = lookup_required_query_string (query, "event");
+  if (subject == NULL || perm == NULL || scope == NULL || event == NULL) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return;
+  }
+  if (!ensure_permission_transition_event (msg, event))
+    return;
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.policy.write", scope, "policy_auth_required",
+          "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
+    return;
+
+  if (!ensure_policy_permission_exists (msg, ctx, perm))
+    return;
+
+  g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (audit_event, actor);
+  g_autofree gchar *audit_action = g_strdup_printf ("permission_state.%s",
+      event);
+  wyl_audit_event_set_action (audit_event, audit_action);
+  wyl_audit_event_set_resource_id (audit_event, perm);
+  wyl_audit_event_set_deny_reason (audit_event, event);
+  wyl_audit_event_set_deny_origin (audit_event, scope);
+  wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
+
+  wyrelog_error_t rc = wyl_handle_apply_permission_state_transition
+      (ctx->handle, subject, perm, scope, event, audit_event, NULL);
+  if (rc != WYRELOG_E_OK) {
+    set_policy_transition_error (msg, rc);
+    return;
+  }
+
+  set_json_ok (msg);
 }
 
 static void
@@ -1022,6 +1096,8 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
       policy_permission_grant_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/permissions/revoke",
       policy_permission_revoke_handler, ctx, NULL);
+  soup_server_add_handler (server, "/policy/permissions/transition",
+      policy_permission_transition_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/roles/grant",
       policy_role_grant_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/roles/revoke",

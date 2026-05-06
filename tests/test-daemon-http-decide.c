@@ -22,6 +22,16 @@ typedef struct
   GMainLoop *loop;
 } TestHttpServer;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *action;
+  const gchar *resource_id;
+  const gchar *deny_reason;
+  const gchar *deny_origin;
+  guint matches;
+} AuditEventProbe;
+
 static gpointer
 test_http_server_thread (gpointer data)
 {
@@ -1007,6 +1017,38 @@ direct_permission_exists (WylHandle *handle, const gchar *subject,
 }
 
 static gboolean
+permission_state_exists (WylHandle *handle, const gchar *subject,
+    const gchar *perm, const gchar *scope)
+{
+  gboolean exists = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_permission_state_exists (store, subject, perm, scope,
+          &exists) != WYRELOG_E_OK)
+    return FALSE;
+  return exists;
+}
+
+static wyrelog_error_t
+audit_event_probe_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    wyl_decision_t decision, gpointer user_data)
+{
+  (void) id;
+  (void) created_at_us;
+  AuditEventProbe *probe = user_data;
+
+  if (decision == WYL_DECISION_ALLOW
+      && g_strcmp0 (subject_id, probe->subject_id) == 0
+      && g_strcmp0 (action, probe->action) == 0
+      && g_strcmp0 (resource_id, probe->resource_id) == 0
+      && g_strcmp0 (deny_reason, probe->deny_reason) == 0
+      && g_strcmp0 (deny_origin, probe->deny_origin) == 0)
+    probe->matches++;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
 role_membership_exists (WylHandle *handle, const gchar *subject,
     const gchar *role, const gchar *scope)
 {
@@ -1052,6 +1094,15 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 126;
   g_clear_pointer (&body, g_free);
 
+  rc = send_raw_policy_mutation (session, "GET", base_url,
+      "/policy/permissions/transition", "subject=state-target"
+      "&perm=site.policy.read&scope=tenant-a&event=grant", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 167;
+  g_clear_pointer (&body, g_free);
+
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/policy/permissions/grant", "perm=site.policy.read&scope=tenant-a",
       &status, &body);
@@ -1059,6 +1110,26 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return rc;
   if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
     return 127;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition",
+      "subject=state-target&perm=site.policy.read&scope=tenant-a",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 168;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition",
+      "subject=state-target&perm=site.policy.read&scope=tenant-a&event=nope",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 169;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
@@ -1106,6 +1177,22 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 131;
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *transition_denied_query =
+      g_strdup_printf ("subject=state-target&perm=site.policy.read"
+      "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition", transition_denied_query, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 170;
+  if (permission_state_exists (handle, "state-target", "site.policy.read",
+          "tenant-a"))
+    return 171;
+  g_clear_pointer (&body, g_free);
+
   g_autofree gchar *missing_perm_grant_query =
       g_strdup_printf ("subject=target&perm=site.missing&scope=tenant-a"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
@@ -1130,6 +1217,35 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 155;
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *missing_perm_transition_query =
+      g_strdup_printf ("subject=state-target&perm=site.missing"
+      "&scope=tenant-a&event=grant&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition", missing_perm_transition_query,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 172;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *invalid_edge_transition_query =
+      g_strdup_printf ("subject=state-target&perm=site.policy.read"
+      "&scope=tenant-a&event=revoke&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition", invalid_edge_transition_query,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 173;
+  if (permission_state_exists (handle, "state-target", "site.policy.read",
+          "tenant-a"))
+    return 174;
+  g_clear_pointer (&body, g_free);
+
   g_autofree gchar *guard_denied_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
@@ -1143,6 +1259,33 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 134;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/transition", transition_denied_query, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 175;
+  if (!permission_state_exists (handle, "state-target", "site.policy.read",
+          "tenant-a"))
+    return 176;
+  if (direct_permission_exists (handle, "state-target", "site.policy.read",
+          "tenant-a"))
+    return 177;
+  AuditEventProbe transition_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_state.grant",
+    .resource_id = "site.policy.read",
+    .deny_reason = "grant",
+    .deny_origin = "tenant-a",
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &transition_audit) != WYRELOG_E_OK)
+    return 178;
+  if (transition_audit.matches != 1)
+    return 179;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *grant_query =
