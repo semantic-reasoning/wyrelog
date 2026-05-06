@@ -299,7 +299,7 @@ check_grant_allows_engine_decide (void)
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "grant-user");
-  wyl_grant_req_set_action (grant, "wr.grant-permission");
+  wyl_grant_req_set_action (grant, "site.grant-permission");
   wyl_grant_req_set_resource_id (grant, "grant-scope");
   if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK)
     return 51;
@@ -330,7 +330,7 @@ check_grant_allows_engine_decide (void)
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "grant-user");
-  wyl_decide_req_set_action (decide, "wr.grant-permission");
+  wyl_decide_req_set_action (decide, "site.grant-permission");
   wyl_decide_req_set_resource_id (decide, "grant-scope");
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -346,13 +346,13 @@ check_role_grant_allows_engine_decide (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 110;
-  if (seed_role_permission (handle, "wr.role-grant-role",
-          "wr.role-grant-permission") != 0)
+  if (seed_role_permission (handle, "site.role-grant-role",
+          "site.role-grant-permission") != 0)
     return 111;
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (grant, "role-grant-user");
-  wyl_role_grant_req_set_role_id (grant, "wr.role-grant-role");
+  wyl_role_grant_req_set_role_id (grant, "site.role-grant-role");
   wyl_role_grant_req_set_scope (grant, "role-grant-scope");
   if (wyl_role_grant (handle, grant) != WYRELOG_E_OK)
     return 112;
@@ -381,12 +381,12 @@ check_role_grant_allows_engine_decide (void)
       != WYRELOG_E_OK)
     return 118;
   if (insert_perm_state (handle, "role-grant-user",
-          "wr.role-grant-permission", "role-grant-scope", "armed") != 0)
+          "site.role-grant-permission", "role-grant-scope", "armed") != 0)
     return 119;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "role-grant-user");
-  wyl_decide_req_set_action (decide, "wr.role-grant-permission");
+  wyl_decide_req_set_action (decide, "site.role-grant-permission");
   wyl_decide_req_set_resource_id (decide, "role-grant-scope");
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
@@ -421,14 +421,14 @@ check_grant_persists_direct_permission (void)
 
   g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (req, "store-user");
-  wyl_grant_req_set_action (req, "wr.store-direct");
+  wyl_grant_req_set_action (req, "site.store-direct");
   wyl_grant_req_set_resource_id (req, "store-scope");
   if (wyl_perm_grant (handle, req) != WYRELOG_E_OK)
     return 71;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
-          (handle), "store-user", "wr.store-direct", "store-scope",
+          (handle), "store-user", "site.store-direct", "store-scope",
           &exists) != WYRELOG_E_OK)
     return 72;
   if (!exists)
@@ -436,7 +436,7 @@ check_grant_persists_direct_permission (void)
 
   DirectPermissionEventExpect expect = {
     .subject_id = "store-user",
-    .perm_id = "wr.store-direct",
+    .perm_id = "site.store-direct",
     .scope = "store-scope",
     .operation = "grant",
   };
@@ -458,21 +458,21 @@ check_revoke_removes_store_grant (void)
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "store-revoke-user");
-  wyl_grant_req_set_action (grant, "wr.store-revoke");
+  wyl_grant_req_set_action (grant, "site.store-revoke");
   wyl_grant_req_set_resource_id (grant, "store-revoke-scope");
   if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK)
     return 81;
 
   g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
   wyl_revoke_req_set_subject_id (revoke, "store-revoke-user");
-  wyl_revoke_req_set_action (revoke, "wr.store-revoke");
+  wyl_revoke_req_set_action (revoke, "site.store-revoke");
   wyl_revoke_req_set_resource_id (revoke, "store-revoke-scope");
   if (wyl_perm_revoke (handle, revoke) != WYRELOG_E_OK)
     return 82;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (wyl_handle_get_policy_store
-          (handle), "store-revoke-user", "wr.store-revoke",
+          (handle), "store-revoke-user", "site.store-revoke",
           "store-revoke-scope", &exists)
       != WYRELOG_E_OK)
     return 83;
@@ -480,7 +480,7 @@ check_revoke_removes_store_grant (void)
     return 84;
   DirectPermissionEventExpect grant_expect = {
     .subject_id = "store-revoke-user",
-    .perm_id = "wr.store-revoke",
+    .perm_id = "site.store-revoke",
     .scope = "store-revoke-scope",
     .operation = "grant",
   };
@@ -492,7 +492,7 @@ check_revoke_removes_store_grant (void)
     return 86;
   DirectPermissionEventExpect revoke_expect = {
     .subject_id = "store-revoke-user",
-    .perm_id = "wr.store-revoke",
+    .perm_id = "site.store-revoke",
     .scope = "store-revoke-scope",
     .operation = "revoke",
   };
@@ -511,20 +511,20 @@ check_role_grant_persists_membership (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 121;
-  if (seed_role_permission (handle, "wr.store-role", "wr.store-role.read")
+  if (seed_role_permission (handle, "site.store-role", "site.store-role.read")
       != 0)
     return 122;
 
   g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (req, "store-role-user");
-  wyl_role_grant_req_set_role_id (req, "wr.store-role");
+  wyl_role_grant_req_set_role_id (req, "site.store-role");
   wyl_role_grant_req_set_scope (req, "store-role-scope");
   if (wyl_role_grant (handle, req) != WYRELOG_E_OK)
     return 123;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_role_membership_exists (wyl_handle_get_policy_store
-          (handle), "store-role-user", "wr.store-role", "store-role-scope",
+          (handle), "store-role-user", "site.store-role", "store-role-scope",
           &exists) != WYRELOG_E_OK)
     return 124;
   if (!exists)
@@ -532,7 +532,7 @@ check_role_grant_persists_membership (void)
 
   RoleMembershipEventExpect expect = {
     .subject_id = "store-role-user",
-    .role_id = "wr.store-role",
+    .role_id = "site.store-role",
     .scope = "store-role-scope",
     .operation = "grant",
   };
@@ -551,34 +551,34 @@ check_role_revoke_removes_store_membership (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 128;
-  if (seed_role_permission (handle, "wr.store-revoke-role",
-          "wr.store-revoke-role.read") != 0)
+  if (seed_role_permission (handle, "site.store-revoke-role",
+          "site.store-revoke-role.read") != 0)
     return 129;
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (grant, "store-role-revoke-user");
-  wyl_role_grant_req_set_role_id (grant, "wr.store-revoke-role");
+  wyl_role_grant_req_set_role_id (grant, "site.store-revoke-role");
   wyl_role_grant_req_set_scope (grant, "store-role-revoke-scope");
   if (wyl_role_grant (handle, grant) != WYRELOG_E_OK)
     return 130;
 
   g_autoptr (wyl_role_revoke_req_t) revoke = wyl_role_revoke_req_new ();
   wyl_role_revoke_req_set_subject_id (revoke, "store-role-revoke-user");
-  wyl_role_revoke_req_set_role_id (revoke, "wr.store-revoke-role");
+  wyl_role_revoke_req_set_role_id (revoke, "site.store-revoke-role");
   wyl_role_revoke_req_set_scope (revoke, "store-role-revoke-scope");
   if (wyl_role_revoke (handle, revoke) != WYRELOG_E_OK)
     return 131;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (wyl_handle_get_policy_store
-          (handle), "store-role-revoke-user", "wr.store-revoke-role",
+          (handle), "store-role-revoke-user", "site.store-revoke-role",
           "store-role-revoke-scope", &exists) != WYRELOG_E_OK)
     return 132;
   if (exists)
     return 133;
   RoleMembershipEventExpect revoke_expect = {
     .subject_id = "store-role-revoke-user",
-    .role_id = "wr.store-revoke-role",
+    .role_id = "site.store-revoke-role",
     .scope = "store-role-revoke-scope",
     .operation = "revoke",
   };
@@ -600,14 +600,14 @@ check_revoke_removes_engine_grant (void)
 
   g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
   wyl_grant_req_set_subject_id (grant, "revoke-user");
-  wyl_grant_req_set_action (grant, "wr.revoke-permission");
+  wyl_grant_req_set_action (grant, "site.revoke-permission");
   wyl_grant_req_set_resource_id (grant, "revoke-scope");
   if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK)
     return 61;
 
   g_autoptr (wyl_revoke_req_t) revoke = wyl_revoke_req_new ();
   wyl_revoke_req_set_subject_id (revoke, "revoke-user");
-  wyl_revoke_req_set_action (revoke, "wr.revoke-permission");
+  wyl_revoke_req_set_action (revoke, "site.revoke-permission");
   wyl_revoke_req_set_resource_id (revoke, "revoke-scope");
   if (wyl_perm_revoke (handle, revoke) != WYRELOG_E_OK)
     return 62;
@@ -616,7 +616,7 @@ check_revoke_removes_engine_grant (void)
   if (wyl_handle_intern_engine_symbol (handle, "revoke-user", &row[0])
       != WYRELOG_E_OK)
     return 63;
-  if (wyl_handle_intern_engine_symbol (handle, "wr.revoke-permission",
+  if (wyl_handle_intern_engine_symbol (handle, "site.revoke-permission",
           &row[1]) != WYRELOG_E_OK)
     return 64;
   if (wyl_handle_intern_engine_symbol (handle, "revoke-scope", &row[2])
@@ -636,32 +636,32 @@ check_role_revoke_removes_engine_membership (void)
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 140;
-  if (seed_role_permission (handle, "wr.role-revoke-role",
-          "wr.role-revoke-permission") != 0)
+  if (seed_role_permission (handle, "site.role-revoke-role",
+          "site.role-revoke-permission") != 0)
     return 141;
 
   g_autoptr (wyl_role_grant_req_t) grant = wyl_role_grant_req_new ();
   wyl_role_grant_req_set_subject_id (grant, "role-revoke-user");
-  wyl_role_grant_req_set_role_id (grant, "wr.role-revoke-role");
+  wyl_role_grant_req_set_role_id (grant, "site.role-revoke-role");
   wyl_role_grant_req_set_scope (grant, "role-revoke-scope");
   if (wyl_role_grant (handle, grant) != WYRELOG_E_OK)
     return 142;
 
   g_autoptr (wyl_role_revoke_req_t) revoke = wyl_role_revoke_req_new ();
   wyl_role_revoke_req_set_subject_id (revoke, "role-revoke-user");
-  wyl_role_revoke_req_set_role_id (revoke, "wr.role-revoke-role");
+  wyl_role_revoke_req_set_role_id (revoke, "site.role-revoke-role");
   wyl_role_revoke_req_set_scope (revoke, "role-revoke-scope");
   if (wyl_role_revoke (handle, revoke) != WYRELOG_E_OK)
     return 143;
   if (insert_perm_state (handle, "role-revoke-user",
-          "wr.role-revoke-permission", "role-revoke-scope", "armed") != 0)
+          "site.role-revoke-permission", "role-revoke-scope", "armed") != 0)
     return 149;
 
   gint64 row[3];
   if (wyl_handle_intern_engine_symbol (handle, "role-revoke-user", &row[0])
       != WYRELOG_E_OK)
     return 144;
-  if (wyl_handle_intern_engine_symbol (handle, "wr.role-revoke-permission",
+  if (wyl_handle_intern_engine_symbol (handle, "site.role-revoke-permission",
           &row[1]) != WYRELOG_E_OK)
     return 145;
   if (wyl_handle_intern_engine_symbol (handle, "role-revoke-scope", &row[2])

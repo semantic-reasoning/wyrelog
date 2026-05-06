@@ -336,11 +336,11 @@ wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
     return WYRELOG_E_INTERNAL;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  rc = wyl_policy_store_upsert_role (store, "wr.snapshot-child",
+  rc = wyl_policy_store_upsert_role (store, "site.snapshot-child",
       "snapshot child");
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_policy_store_upsert_role (store, "wr.snapshot-parent",
+  rc = wyl_policy_store_upsert_role (store, "site.snapshot-parent",
       "snapshot parent");
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -348,12 +348,12 @@ wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
       "role read", "basic");
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_policy_store_grant_role_permission (store, "wr.snapshot-parent",
+  rc = wyl_policy_store_grant_role_permission (store, "site.snapshot-parent",
       "wyrelogd.role.read");
   if (rc != WYRELOG_E_OK)
     return rc;
-  rc = wyl_policy_store_grant_role_inheritance (store, "wr.snapshot-child",
-      "wr.snapshot-parent");
+  rc = wyl_policy_store_grant_role_inheritance (store, "site.snapshot-child",
+      "site.snapshot-parent");
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_reload_engine_pair (handle);
@@ -362,7 +362,7 @@ wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle *handle)
 
   const gchar *member_row[] = {
     "wyrelogd-role-user",
-    "wr.snapshot-child",
+    "site.snapshot-child",
     session_id,
   };
   rc = insert_symbol_row (handle, "member_of", member_row,

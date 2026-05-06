@@ -83,6 +83,12 @@ find_builtin_permission (const gchar *perm_id)
   return NULL;
 }
 
+static gboolean
+is_reserved_catalog_id (const gchar *id)
+{
+  return g_str_has_prefix (id, "wr.");
+}
+
 static wyrelog_error_t
 exec_sql (sqlite3 *db, const gchar *sql)
 {
@@ -890,6 +896,8 @@ wyl_policy_store_upsert_role (wyl_policy_store_t *store, const gchar *role_id,
   const BuiltinRole *builtin = find_builtin_role (role_id);
   if (builtin != NULL && g_strcmp0 (role_name, builtin->name) != 0)
     return WYRELOG_E_POLICY;
+  if (builtin == NULL && is_reserved_catalog_id (role_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO roles (role_id, role_name, created_at, modified_at) "
@@ -990,6 +998,8 @@ wyrelog_error_t
   if (insert) {
     gboolean exists = FALSE;
     rc = wyl_policy_store_permission_exists (store, perm_id, &exists);
+    if (rc == WYRELOG_E_OK && !exists && is_reserved_catalog_id (perm_id))
+      rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK && !exists)
       rc = wyl_policy_store_upsert_permission (store, perm_id, perm_id,
           "basic");
@@ -1454,6 +1464,8 @@ wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
   const BuiltinPermission *builtin = find_builtin_permission (perm_id);
   if (builtin != NULL && (g_strcmp0 (perm_name, builtin->name) != 0
           || g_strcmp0 (klass, builtin->klass) != 0))
+    return WYRELOG_E_POLICY;
+  if (builtin == NULL && is_reserved_catalog_id (perm_id))
     return WYRELOG_E_POLICY;
 
   static const gchar *sql =

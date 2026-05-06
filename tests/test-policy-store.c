@@ -345,6 +345,15 @@ check_store_rejects_builtin_catalog_upsert_drift (void)
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
           "audit read", "basic") != WYRELOG_E_POLICY)
     return 230;
+  if (wyl_policy_store_upsert_role (store, "wr.unregistered",
+          "unregistered") != WYRELOG_E_POLICY)
+    return 231;
+  if (wyl_policy_store_upsert_permission (store, "wr.unregistered.read",
+          "unregistered read", "basic") != WYRELOG_E_POLICY)
+    return 232;
+  if (wyl_policy_store_apply_direct_permission_mutation (store, "subject",
+          "wr.unregistered.read", "scope", TRUE) != WYRELOG_E_POLICY)
+    return 233;
 
   return 0;
 }
@@ -601,22 +610,22 @@ check_store_grants_role_permission (void)
     return 40;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 41;
-  if (wyl_policy_store_upsert_role (store, "wr.test-role", "test role")
+  if (wyl_policy_store_upsert_role (store, "site.test-role", "test role")
       != WYRELOG_E_OK)
     return 42;
-  if (wyl_policy_store_upsert_permission (store, "wr.test.read", "test read",
+  if (wyl_policy_store_upsert_permission (store, "site.test.read", "test read",
           "basic") != WYRELOG_E_OK)
     return 43;
-  if (wyl_policy_store_grant_role_permission (store, "wr.test-role",
-          "wr.test.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.test-role",
+          "site.test.read") != WYRELOG_E_OK)
     return 44;
-  if (wyl_policy_store_grant_role_permission (store, "wr.test-role",
-          "wr.test.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.test-role",
+          "site.test.read") != WYRELOG_E_OK)
     return 45;
 
   RolePermissionExpect expect = {
-    .role_id = "wr.test-role",
-    .perm_id = "wr.test.read",
+    .role_id = "site.test-role",
+    .perm_id = "site.test.read",
   };
   if (wyl_policy_store_foreach_role_permission (store,
           role_permission_expect_cb, &expect) != WYRELOG_E_OK)
@@ -648,31 +657,31 @@ check_store_catalog_existence_probes (void)
   if (exists)
     return 223;
 
-  if (wyl_policy_store_upsert_role (store, "wr.exists-role",
+  if (wyl_policy_store_upsert_role (store, "site.exists-role",
           "exists role") != WYRELOG_E_OK)
     return 224;
-  if (wyl_policy_store_upsert_permission (store, "wr.exists-perm",
+  if (wyl_policy_store_upsert_permission (store, "site.exists-perm",
           "exists perm", "basic") != WYRELOG_E_OK)
     return 225;
 
-  if (wyl_policy_store_role_exists (store, "wr.exists-role", &exists)
+  if (wyl_policy_store_role_exists (store, "site.exists-role", &exists)
       != WYRELOG_E_OK)
     return 226;
   if (!exists)
     return 227;
-  if (wyl_policy_store_permission_exists (store, "wr.exists-perm", &exists)
+  if (wyl_policy_store_permission_exists (store, "site.exists-perm", &exists)
       != WYRELOG_E_OK)
     return 228;
   if (!exists)
     return 229;
 
-  if (wyl_policy_store_role_exists (NULL, "wr.exists-role", &exists)
+  if (wyl_policy_store_role_exists (NULL, "site.exists-role", &exists)
       != WYRELOG_E_INVALID)
     return 230;
   if (wyl_policy_store_permission_exists (store, NULL, &exists)
       != WYRELOG_E_INVALID)
     return 231;
-  if (wyl_policy_store_permission_exists (store, "wr.exists-perm", NULL)
+  if (wyl_policy_store_permission_exists (store, "site.exists-perm", NULL)
       != WYRELOG_E_INVALID)
     return 232;
   return 0;
@@ -687,28 +696,28 @@ check_store_grants_role_inheritance (void)
     return 48;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 49;
-  if (wyl_policy_store_upsert_role (store, "wr.child-role", "child role")
+  if (wyl_policy_store_upsert_role (store, "site.child-role", "child role")
       != WYRELOG_E_OK)
     return 58;
-  if (wyl_policy_store_upsert_role (store, "wr.parent-role", "parent role")
+  if (wyl_policy_store_upsert_role (store, "site.parent-role", "parent role")
       != WYRELOG_E_OK)
     return 59;
-  if (wyl_policy_store_grant_role_inheritance (store, "wr.child-role",
-          "wr.parent-role") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
+          "site.parent-role") != WYRELOG_E_OK)
     return 60;
-  if (wyl_policy_store_grant_role_inheritance (store, "wr.child-role",
-          "wr.parent-role") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
+          "site.parent-role") != WYRELOG_E_OK)
     return 61;
-  if (wyl_policy_store_upsert_permission (store, "wr.inherited.read",
+  if (wyl_policy_store_upsert_permission (store, "site.inherited.read",
           "inherited read", "basic") != WYRELOG_E_OK)
     return 62;
-  if (wyl_policy_store_grant_role_permission (store, "wr.parent-role",
-          "wr.inherited.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.parent-role",
+          "site.inherited.read") != WYRELOG_E_OK)
     return 63;
 
   RoleInheritanceExpect expect = {
-    .child_role_id = "wr.child-role",
-    .parent_role_id = "wr.parent-role",
+    .child_role_id = "site.child-role",
+    .parent_role_id = "site.parent-role",
   };
   if (wyl_policy_store_foreach_role_inheritance (store,
           role_inheritance_expect_cb, &expect) != WYRELOG_E_OK)
@@ -717,8 +726,8 @@ check_store_grants_role_inheritance (void)
     return 65;
 
   RolePermissionExpect permission_expect = {
-    .role_id = "wr.child-role",
-    .perm_id = "wr.inherited.read",
+    .role_id = "site.child-role",
+    .perm_id = "site.inherited.read",
   };
   if (wyl_policy_store_foreach_role_permission (store,
           role_permission_expect_cb, &permission_expect) != WYRELOG_E_OK)
@@ -737,22 +746,22 @@ check_store_grants_role_membership (void)
     return 68;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 69;
-  if (wyl_policy_store_upsert_role (store, "wr.member-role", "member role")
+  if (wyl_policy_store_upsert_role (store, "site.member-role", "member role")
       != WYRELOG_E_OK)
     return 70;
   if (wyl_policy_store_grant_role_membership (store, "member-user",
-          "wr.member-role", "member-scope") != WYRELOG_E_OK)
+          "site.member-role", "member-scope") != WYRELOG_E_OK)
     return 71;
   if (wyl_policy_store_append_role_membership_event (store, "member-user",
-          "wr.member-role", "member-scope", "grant") != WYRELOG_E_OK)
+          "site.member-role", "member-scope", "grant") != WYRELOG_E_OK)
     return 100;
   if (wyl_policy_store_grant_role_membership (store, "member-user",
-          "wr.member-role", "member-scope") != WYRELOG_E_OK)
+          "site.member-role", "member-scope") != WYRELOG_E_OK)
     return 72;
 
   RoleMembershipExpect expect = {
     .subject_id = "member-user",
-    .role_id = "wr.member-role",
+    .role_id = "site.member-role",
     .scope = "member-scope",
   };
   if (wyl_policy_store_foreach_role_membership (store,
@@ -762,14 +771,14 @@ check_store_grants_role_membership (void)
     return 74;
   gboolean exists = FALSE;
   if (wyl_policy_store_role_membership_exists (store, "member-user",
-          "wr.member-role", "member-scope", &exists) != WYRELOG_E_OK)
+          "site.member-role", "member-scope", &exists) != WYRELOG_E_OK)
     return 101;
   if (!exists)
     return 102;
 
   RoleMembershipEventExpect event_expect = {
     .subject_id = "member-user",
-    .role_id = "wr.member-role",
+    .role_id = "site.member-role",
     .scope = "member-scope",
     .operation = "grant",
   };
@@ -779,14 +788,14 @@ check_store_grants_role_membership (void)
   if (event_expect.matches != 1)
     return 104;
   if (wyl_policy_store_revoke_role_membership (store, "member-user",
-          "wr.member-role", "member-scope") != WYRELOG_E_OK)
+          "site.member-role", "member-scope") != WYRELOG_E_OK)
     return 105;
   if (wyl_policy_store_append_role_membership_event (store, "member-user",
-          "wr.member-role", "member-scope", "revoke") != WYRELOG_E_OK)
+          "site.member-role", "member-scope", "revoke") != WYRELOG_E_OK)
     return 106;
   exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "member-user",
-          "wr.member-role", "member-scope", &exists) != WYRELOG_E_OK)
+          "site.member-role", "member-scope", &exists) != WYRELOG_E_OK)
     return 107;
   if (exists)
     return 108;
@@ -802,25 +811,25 @@ check_store_grants_direct_permission (void)
     return 60;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 61;
-  if (wyl_policy_store_upsert_permission (store, "wr.direct.read",
+  if (wyl_policy_store_upsert_permission (store, "site.direct.read",
           "direct read", "basic") != WYRELOG_E_OK)
     return 62;
   if (wyl_policy_store_grant_direct_permission (store, "direct-user",
-          "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
+          "site.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 63;
   if (wyl_policy_store_grant_direct_permission (store, "direct-user",
-          "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
+          "site.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 64;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
-          "wr.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
+          "site.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
     return 65;
   if (!exists)
     return 66;
   DirectPermissionExpect expect = {
     .subject_id = "direct-user",
-    .perm_id = "wr.direct.read",
+    .perm_id = "site.direct.read",
     .scope = "direct-scope",
   };
   if (wyl_policy_store_foreach_direct_permission (store,
@@ -829,10 +838,10 @@ check_store_grants_direct_permission (void)
   if (expect.matches != 1)
     return 79;
   if (wyl_policy_store_revoke_direct_permission (store, "direct-user",
-          "wr.direct.read", "direct-scope") != WYRELOG_E_OK)
+          "site.direct.read", "direct-scope") != WYRELOG_E_OK)
     return 67;
   if (wyl_policy_store_direct_permission_exists (store, "direct-user",
-          "wr.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
+          "site.direct.read", "direct-scope", &exists) != WYRELOG_E_OK)
     return 68;
   if (exists)
     return 69;
@@ -848,7 +857,7 @@ check_role_membership_mutation_rolls_back_on_event_failure (void)
     return 197;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 198;
-  if (wyl_policy_store_upsert_role (store, "wr.rollback-role",
+  if (wyl_policy_store_upsert_role (store, "site.rollback-role",
           "rollback role") != WYRELOG_E_OK)
     return 199;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
@@ -859,13 +868,13 @@ check_role_membership_mutation_rolls_back_on_event_failure (void)
     return 200;
 
   if (wyl_policy_store_apply_role_membership_mutation (store,
-          "rollback-role-user", "wr.rollback-role", "rollback-role-scope",
+          "rollback-role-user", "site.rollback-role", "rollback-role-scope",
           TRUE) != WYRELOG_E_IO)
     return 201;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_role_membership_exists (store, "rollback-role-user",
-          "wr.rollback-role", "rollback-role-scope", &exists)
+          "site.rollback-role", "rollback-role-scope", &exists)
       != WYRELOG_E_OK)
     return 202;
   if (exists)
@@ -873,7 +882,7 @@ check_role_membership_mutation_rolls_back_on_event_failure (void)
 
   RoleMembershipEventExpect expect = {
     .subject_id = "rollback-role-user",
-    .role_id = "wr.rollback-role",
+    .role_id = "site.rollback-role",
     .scope = "rollback-role-scope",
     .operation = "grant",
   };
@@ -894,11 +903,11 @@ check_role_membership_revoke_rolls_back_on_event_failure (void)
     return 206;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 207;
-  if (wyl_policy_store_upsert_role (store, "wr.rollback-role-revoke",
+  if (wyl_policy_store_upsert_role (store, "site.rollback-role-revoke",
           "rollback role revoke") != WYRELOG_E_OK)
     return 208;
   if (wyl_policy_store_grant_role_membership (store,
-          "rollback-role-revoke-user", "wr.rollback-role-revoke",
+          "rollback-role-revoke-user", "site.rollback-role-revoke",
           "rollback-role-revoke-scope") != WYRELOG_E_OK)
     return 209;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
@@ -909,13 +918,13 @@ check_role_membership_revoke_rolls_back_on_event_failure (void)
     return 210;
 
   if (wyl_policy_store_apply_role_membership_mutation (store,
-          "rollback-role-revoke-user", "wr.rollback-role-revoke",
+          "rollback-role-revoke-user", "site.rollback-role-revoke",
           "rollback-role-revoke-scope", FALSE) != WYRELOG_E_IO)
     return 211;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_role_membership_exists (store,
-          "rollback-role-revoke-user", "wr.rollback-role-revoke",
+          "rollback-role-revoke-user", "site.rollback-role-revoke",
           "rollback-role-revoke-scope", &exists) != WYRELOG_E_OK)
     return 212;
   if (!exists)
@@ -933,12 +942,12 @@ check_store_appends_direct_permission_event (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 93;
   if (wyl_policy_store_append_direct_permission_event (store, "direct-user",
-          "wr.direct.read", "direct-scope", "grant") != WYRELOG_E_OK)
+          "site.direct.read", "direct-scope", "grant") != WYRELOG_E_OK)
     return 94;
 
   DirectPermissionExpect expect = {
     .subject_id = "direct-user",
-    .perm_id = "wr.direct.read",
+    .perm_id = "site.direct.read",
     .scope = "direct-scope",
     .operation = "grant",
   };
@@ -967,20 +976,20 @@ check_direct_permission_mutation_rolls_back_on_event_failure (void)
     return 182;
 
   if (wyl_policy_store_apply_direct_permission_mutation (store,
-          "rollback-user", "wr.rollback-direct", "rollback-scope", TRUE)
+          "rollback-user", "site.rollback-direct", "rollback-scope", TRUE)
       != WYRELOG_E_IO)
     return 183;
 
   gboolean exists = TRUE;
   if (wyl_policy_store_direct_permission_exists (store, "rollback-user",
-          "wr.rollback-direct", "rollback-scope", &exists) != WYRELOG_E_OK)
+          "site.rollback-direct", "rollback-scope", &exists) != WYRELOG_E_OK)
     return 184;
   if (exists)
     return 185;
 
   DirectPermissionExpect expect = {
     .subject_id = "rollback-user",
-    .perm_id = "wr.rollback-direct",
+    .perm_id = "site.rollback-direct",
     .scope = "rollback-scope",
     .operation = "grant",
   };
@@ -999,7 +1008,7 @@ check_direct_permission_mutation_rolls_back_on_event_failure (void)
           "SELECT 1 FROM permissions WHERE perm_id = ?;", -1, &stmt,
           NULL) != SQLITE_OK)
     return 214;
-  if (sqlite3_bind_text (stmt, 1, "wr.rollback-direct", -1,
+  if (sqlite3_bind_text (stmt, 1, "site.rollback-direct", -1,
           SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     return 215;
@@ -1022,11 +1031,11 @@ check_direct_permission_revoke_rolls_back_on_event_failure (void)
     return 189;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 190;
-  if (wyl_policy_store_upsert_permission (store, "wr.rollback-revoke",
+  if (wyl_policy_store_upsert_permission (store, "site.rollback-revoke",
           "rollback revoke", "basic") != WYRELOG_E_OK)
     return 191;
   if (wyl_policy_store_grant_direct_permission (store, "rollback-revoke-user",
-          "wr.rollback-revoke", "rollback-revoke-scope") != WYRELOG_E_OK)
+          "site.rollback-revoke", "rollback-revoke-scope") != WYRELOG_E_OK)
     return 192;
   if (sqlite3_exec (wyl_policy_store_get_db (store),
           "CREATE TRIGGER fail_direct_permission_revoke_event "
@@ -1036,13 +1045,13 @@ check_direct_permission_revoke_rolls_back_on_event_failure (void)
     return 193;
 
   if (wyl_policy_store_apply_direct_permission_mutation (store,
-          "rollback-revoke-user", "wr.rollback-revoke",
+          "rollback-revoke-user", "site.rollback-revoke",
           "rollback-revoke-scope", FALSE) != WYRELOG_E_IO)
     return 194;
 
   gboolean exists = FALSE;
   if (wyl_policy_store_direct_permission_exists (store,
-          "rollback-revoke-user", "wr.rollback-revoke",
+          "rollback-revoke-user", "site.rollback-revoke",
           "rollback-revoke-scope", &exists) != WYRELOG_E_OK)
     return 195;
   if (!exists)

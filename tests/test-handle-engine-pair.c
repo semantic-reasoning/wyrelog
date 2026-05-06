@@ -648,19 +648,19 @@ check_reload_loads_policy_store_snapshot (void)
     return 59;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_role (store, "wr.reload-role", "reload role")
+  if (wyl_policy_store_upsert_role (store, "site.reload-role", "reload role")
       != WYRELOG_E_OK)
     return 53;
-  if (wyl_policy_store_upsert_permission (store, "wr.reload.read",
+  if (wyl_policy_store_upsert_permission (store, "site.reload.read",
           "reload read", "basic") != WYRELOG_E_OK)
     return 54;
-  if (wyl_policy_store_grant_role_permission (store, "wr.reload-role",
-          "wr.reload.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.reload-role",
+          "site.reload.read") != WYRELOG_E_OK)
     return 45;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 46;
 
-  if (insert3_symbol (handle, "member_of", "reload-user", "wr.reload-role",
+  if (insert3_symbol (handle, "member_of", "reload-user", "site.reload-role",
           "reload-scope") != WYRELOG_E_OK)
     return 47;
   if (insert2_symbol (handle, "principal_state", "reload-user",
@@ -669,12 +669,12 @@ check_reload_loads_policy_store_snapshot (void)
   if (insert2_symbol (handle, "session_state", "reload-scope", "active")
       != WYRELOG_E_OK)
     return 49;
-  if (insert4_symbol (handle, "perm_state", "reload-user", "wr.reload.read",
+  if (insert4_symbol (handle, "perm_state", "reload-user", "site.reload.read",
           "reload-scope", "armed") != WYRELOG_E_OK)
     return 44;
 
   gint64 decision_row[3];
-  if (intern3 (handle, "reload-user", "wr.reload.read", "reload-scope",
+  if (intern3 (handle, "reload-user", "site.reload.read", "reload-scope",
           decision_row) != WYRELOG_E_OK)
     return 33;
   gboolean allowed = FALSE;
@@ -1169,10 +1169,10 @@ check_role_permission_insert_skips_delta_engine (void)
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 188;
-  if (wyl_handle_intern_engine_symbol (handle, "wr.snapshot-role", &row[0])
+  if (wyl_handle_intern_engine_symbol (handle, "site.snapshot-role", &row[0])
       != WYRELOG_E_OK)
     return 189;
-  if (wyl_handle_intern_engine_symbol (handle, "wr.snapshot-role.read",
+  if (wyl_handle_intern_engine_symbol (handle, "site.snapshot-role.read",
           &row[1]) != WYRELOG_E_OK)
     return 190;
   if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
@@ -1279,7 +1279,7 @@ check_perm_state_insert_skips_delta_engine (void)
   if (drain_delta_callbacks (handle, &deltas) != WYRELOG_E_OK)
     return 219;
   if (insert4_symbol (handle, "perm_state", "snapshot-perm-user",
-          "wr.snapshot-perm", "snapshot-perm-scope", "armed")
+          "site.snapshot-perm", "snapshot-perm-scope", "armed")
       != WYRELOG_E_OK)
     return 216;
   if (wyl_handle_engine_step_delta (handle) != WYRELOG_E_OK)
@@ -1550,21 +1550,21 @@ check_policy_store_role_permissions_load_into_engine (void)
     return 320;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_role (store, "wr.store-role", "store role")
+  if (wyl_policy_store_upsert_role (store, "site.store-role", "store role")
       != WYRELOG_E_OK)
     return 321;
-  if (wyl_policy_store_upsert_permission (store, "wr.store.read",
+  if (wyl_policy_store_upsert_permission (store, "site.store.read",
           "store read", "basic") != WYRELOG_E_OK)
     return 322;
-  if (wyl_policy_store_grant_role_permission (store, "wr.store-role",
-          "wr.store.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.store-role",
+          "site.store.read") != WYRELOG_E_OK)
     return 323;
   if (wyl_handle_load_policy_store_role_permissions (handle) != WYRELOG_E_OK)
     return 324;
 
   gint64 decision_row[3];
-  if (insert_decision_fixture (handle, "store-user", "wr.store-role",
-          "wr.store.read", "store-scope", "authenticated", "active",
+  if (insert_decision_fixture (handle, "store-user", "site.store-role",
+          "site.store.read", "store-scope", "authenticated", "active",
           decision_row) != WYRELOG_E_OK)
     return 325;
   gboolean allowed = FALSE;
@@ -1585,22 +1585,22 @@ check_policy_store_role_permissions_autoload_on_open (void)
     return 340;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_role (store, "wr.autoload-role",
+  if (wyl_policy_store_upsert_role (store, "site.autoload-role",
           "autoload role") != WYRELOG_E_OK)
     return 341;
-  if (wyl_policy_store_upsert_permission (store, "wr.autoload.read",
+  if (wyl_policy_store_upsert_permission (store, "site.autoload.read",
           "autoload read", "basic") != WYRELOG_E_OK)
     return 342;
-  if (wyl_policy_store_grant_role_permission (store, "wr.autoload-role",
-          "wr.autoload.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.autoload-role",
+          "site.autoload.read") != WYRELOG_E_OK)
     return 343;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 344;
 
   gint64 decision_row[3];
-  if (insert_decision_fixture (handle, "autoload-user", "wr.autoload-role",
-          "wr.autoload.read", "autoload-scope", "authenticated", "active",
+  if (insert_decision_fixture (handle, "autoload-user", "site.autoload-role",
+          "site.autoload.read", "autoload-scope", "authenticated", "active",
           decision_row) != WYRELOG_E_OK)
     return 345;
   gboolean allowed = FALSE;
@@ -1621,27 +1621,27 @@ check_policy_store_role_inheritances_autoload_on_open (void)
     return 348;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_role (store, "wr.inherit-child",
+  if (wyl_policy_store_upsert_role (store, "site.inherit-child",
           "inherit child") != WYRELOG_E_OK)
     return 349;
-  if (wyl_policy_store_upsert_role (store, "wr.inherit-parent",
+  if (wyl_policy_store_upsert_role (store, "site.inherit-parent",
           "inherit parent") != WYRELOG_E_OK)
     return 350;
-  if (wyl_policy_store_upsert_permission (store, "wr.inherit.read",
+  if (wyl_policy_store_upsert_permission (store, "site.inherit.read",
           "inherit read", "basic") != WYRELOG_E_OK)
     return 351;
-  if (wyl_policy_store_grant_role_permission (store, "wr.inherit-parent",
-          "wr.inherit.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.inherit-parent",
+          "site.inherit.read") != WYRELOG_E_OK)
     return 352;
-  if (wyl_policy_store_grant_role_inheritance (store, "wr.inherit-child",
-          "wr.inherit-parent") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_inheritance (store, "site.inherit-child",
+          "site.inherit-parent") != WYRELOG_E_OK)
     return 353;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 354;
 
   if (insert3_symbol (handle, "member_of", "inherit-user",
-          "wr.inherit-child", "inherit-scope") != WYRELOG_E_OK)
+          "site.inherit-child", "inherit-scope") != WYRELOG_E_OK)
     return 355;
   if (insert2_symbol (handle, "principal_state", "inherit-user",
           "authenticated") != WYRELOG_E_OK)
@@ -1650,11 +1650,11 @@ check_policy_store_role_inheritances_autoload_on_open (void)
       != WYRELOG_E_OK)
     return 357;
   if (insert4_symbol (handle, "perm_state", "inherit-user",
-          "wr.inherit.read", "inherit-scope", "armed") != WYRELOG_E_OK)
+          "site.inherit.read", "inherit-scope", "armed") != WYRELOG_E_OK)
     return 358;
 
   gint64 decision_row[3];
-  if (intern3 (handle, "inherit-user", "wr.inherit.read", "inherit-scope",
+  if (intern3 (handle, "inherit-user", "site.inherit.read", "inherit-scope",
           decision_row) != WYRELOG_E_OK)
     return 359;
   gboolean allowed = FALSE;
@@ -1691,17 +1691,17 @@ check_policy_store_role_memberships_autoload_on_open (void)
     return 333;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_role (store, "wr.member-load-role",
+  if (wyl_policy_store_upsert_role (store, "site.member-load-role",
           "member load role") != WYRELOG_E_OK)
     return 334;
-  if (wyl_policy_store_upsert_permission (store, "wr.member-load.read",
+  if (wyl_policy_store_upsert_permission (store, "site.member-load.read",
           "member load read", "basic") != WYRELOG_E_OK)
     return 335;
-  if (wyl_policy_store_grant_role_permission (store, "wr.member-load-role",
-          "wr.member-load.read") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_permission (store, "site.member-load-role",
+          "site.member-load.read") != WYRELOG_E_OK)
     return 336;
   if (wyl_policy_store_grant_role_membership (store, "member-load-user",
-          "wr.member-load-role", "member-load-scope") != WYRELOG_E_OK)
+          "site.member-load-role", "member-load-scope") != WYRELOG_E_OK)
     return 337;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
@@ -1714,12 +1714,12 @@ check_policy_store_role_memberships_autoload_on_open (void)
           "active") != WYRELOG_E_OK)
     return 340;
   if (insert4_symbol (handle, "perm_state", "member-load-user",
-          "wr.member-load.read", "member-load-scope", "armed")
+          "site.member-load.read", "member-load-scope", "armed")
       != WYRELOG_E_OK)
     return 341;
 
   gint64 decision_row[3];
-  if (intern3 (handle, "member-load-user", "wr.member-load.read",
+  if (intern3 (handle, "member-load-user", "site.member-load.read",
           "member-load-scope", decision_row) != WYRELOG_E_OK)
     return 342;
   gboolean allowed = FALSE;
@@ -1754,11 +1754,11 @@ check_policy_store_direct_permissions_autoload_on_open (void)
     return 350;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_permission (store, "wr.direct.autoload",
+  if (wyl_policy_store_upsert_permission (store, "site.direct.autoload",
           "direct autoload", "basic") != WYRELOG_E_OK)
     return 351;
   if (wyl_policy_store_grant_direct_permission (store, "direct-load-user",
-          "wr.direct.autoload", "direct-load-scope") != WYRELOG_E_OK)
+          "site.direct.autoload", "direct-load-scope") != WYRELOG_E_OK)
     return 352;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
@@ -1774,7 +1774,7 @@ check_policy_store_direct_permissions_autoload_on_open (void)
     return 356;
 
   gint64 decision_row[3];
-  if (intern3 (handle, "direct-load-user", "wr.direct.autoload",
+  if (intern3 (handle, "direct-load-user", "site.direct.autoload",
           "direct-load-scope", decision_row) != WYRELOG_E_OK)
     return 357;
   gboolean allowed = FALSE;
@@ -2455,17 +2455,17 @@ check_policy_store_inheritance_cycle_fails_open (void)
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
     return 467;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  if (wyl_policy_store_upsert_role (store, "wr.cycle-a", "cycle a")
+  if (wyl_policy_store_upsert_role (store, "site.cycle-a", "cycle a")
       != WYRELOG_E_OK)
     return 468;
-  if (wyl_policy_store_upsert_role (store, "wr.cycle-b", "cycle b")
+  if (wyl_policy_store_upsert_role (store, "site.cycle-b", "cycle b")
       != WYRELOG_E_OK)
     return 469;
-  if (wyl_policy_store_grant_role_inheritance (store, "wr.cycle-a",
-          "wr.cycle-b") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_inheritance (store, "site.cycle-a",
+          "site.cycle-b") != WYRELOG_E_OK)
     return 470;
-  if (wyl_policy_store_grant_role_inheritance (store, "wr.cycle-b",
-          "wr.cycle-a") != WYRELOG_E_OK)
+  if (wyl_policy_store_grant_role_inheritance (store, "site.cycle-b",
+          "site.cycle-a") != WYRELOG_E_OK)
     return 471;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_POLICY)
@@ -2490,15 +2490,15 @@ check_policy_store_inheritance_depth_fails_reload_and_preserves_pair (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   for (guint i = 0; i < 5; i++) {
-    g_autofree gchar *role_id = g_strdup_printf ("wr.depth-%u", i);
+    g_autofree gchar *role_id = g_strdup_printf ("site.depth-%u", i);
     g_autofree gchar *role_name = g_strdup_printf ("depth %u", i);
     if (wyl_policy_store_upsert_role (store, role_id, role_name)
         != WYRELOG_E_OK)
       return 477;
   }
   for (guint i = 0; i < 4; i++) {
-    g_autofree gchar *child = g_strdup_printf ("wr.depth-%u", i);
-    g_autofree gchar *parent = g_strdup_printf ("wr.depth-%u", i + 1);
+    g_autofree gchar *child = g_strdup_printf ("site.depth-%u", i);
+    g_autofree gchar *parent = g_strdup_printf ("site.depth-%u", i + 1);
     if (wyl_policy_store_grant_role_inheritance (store, child, parent)
         != WYRELOG_E_OK)
       return 478;
