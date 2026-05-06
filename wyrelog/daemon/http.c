@@ -8,6 +8,80 @@
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
 
+typedef struct
+{
+  WylHandle *handle;
+  GHashTable *sessions_by_token;
+  GMutex lock;
+} WylDaemonHttpContext;
+
+static void
+wyl_daemon_http_context_free (gpointer data)
+{
+  WylDaemonHttpContext *ctx = data;
+
+  if (ctx == NULL)
+    return;
+
+  g_hash_table_unref (ctx->sessions_by_token);
+  g_mutex_clear (&ctx->lock);
+  g_free (ctx);
+}
+
+static WylDaemonHttpContext *
+wyl_daemon_http_context_new (WylHandle *handle)
+{
+  WylDaemonHttpContext *ctx = g_new0 (WylDaemonHttpContext, 1);
+
+  ctx->handle = handle;
+  ctx->sessions_by_token =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
+  g_mutex_init (&ctx->lock);
+  return ctx;
+}
+
+static gboolean
+wyl_daemon_http_context_store_session (WylDaemonHttpContext *ctx,
+    const gchar *session_token, WylSession *session)
+{
+  if (ctx == NULL || session_token == NULL || session_token[0] == '\0' ||
+      session == NULL || !WYL_IS_SESSION (session))
+    return FALSE;
+
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_replace (ctx->sessions_by_token, g_strdup (session_token),
+      g_object_ref (session));
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+}
+
+static WylDaemonHttpContext *
+wyl_daemon_http_get_context (SoupServer *server)
+{
+  if (server == NULL || !SOUP_IS_SERVER (server))
+    return NULL;
+  return g_object_get_data (G_OBJECT (server), "wyl-daemon-http-context");
+}
+
+WylSession *
+wyl_daemon_http_ref_session (SoupServer *server, const gchar *session_token)
+{
+  if (session_token == NULL || session_token[0] == '\0')
+    return NULL;
+
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return NULL;
+
+  g_mutex_lock (&ctx->lock);
+  WylSession *session = g_hash_table_lookup (ctx->sessions_by_token,
+      session_token);
+  if (session != NULL)
+    g_object_ref (session);
+  g_mutex_unlock (&ctx->lock);
+  return session;
+}
+
 static void
 append_json_string (GString *json, const gchar *value)
 {
@@ -155,7 +229,8 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
   if (query != NULL)
     filter = g_hash_table_lookup (query, "filter");
 
-  WylHandle *handle = user_data;
+  WylDaemonHttpContext *ctx = user_data;
+  WylHandle *handle = ctx->handle;
   g_autofree gchar *body = NULL;
   wyrelog_error_t rc =
       wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
@@ -218,7 +293,8 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  WylHandle *handle = user_data;
+  WylDaemonHttpContext *ctx = user_data;
+  WylHandle *handle = ctx->handle;
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, username);
 
@@ -239,6 +315,10 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 
   g_autofree gchar *session_token = wyl_session_dup_id_string (session);
   if (session_token == NULL) {
+    set_json_error (msg, 500, "login_failed");
+    return;
+  }
+  if (!wyl_daemon_http_context_store_session (ctx, session_token, session)) {
     set_json_error (msg, 500, "login_failed");
     return;
   }
@@ -289,7 +369,8 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  WylHandle *handle = user_data;
+  WylDaemonHttpContext *ctx = user_data;
+  WylHandle *handle = ctx->handle;
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
   wyl_decide_req_set_subject_id (req, user);
@@ -337,11 +418,14 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
   }
 
   SoupServer *server = soup_server_new (NULL, NULL);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_context_new (handle);
+  g_object_set_data_full (G_OBJECT (server), "wyl-daemon-http-context", ctx,
+      wyl_daemon_http_context_free);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
-  soup_server_add_handler (server, "/auth/login", login_handler, handle, NULL);
-  soup_server_add_handler (server, "/decide", decide_handler, handle, NULL);
+  soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
+  soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
-      handle, NULL);
+      ctx, NULL);
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);
     return NULL;

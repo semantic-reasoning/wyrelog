@@ -5,12 +5,28 @@ struct _WylClient
 {
   GObject parent_instance;
   gchar *base_url;
+  gchar *session_token;
+  gchar *username;
+  gchar *principal_state;
+  gchar *session_state;
   SoupSession *session;
 };
 
 G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
 
-static gboolean parse_login_response_json (const gchar * data, gsize size);
+static gboolean parse_login_response_json (const gchar * data, gsize size,
+    gchar ** out_session_token,
+    gchar ** out_username,
+    gchar ** out_principal_state, gchar ** out_session_state);
+
+static void
+wyl_client_clear_login_state (WylClient *self)
+{
+  g_clear_pointer (&self->session_token, g_free);
+  g_clear_pointer (&self->username, g_free);
+  g_clear_pointer (&self->principal_state, g_free);
+  g_clear_pointer (&self->session_state, g_free);
+}
 
 static void
 wyl_client_finalize (GObject *object)
@@ -18,6 +34,7 @@ wyl_client_finalize (GObject *object)
   WylClient *self = WYL_CLIENT (object);
 
   g_free (self->base_url);
+  wyl_client_clear_login_state (self);
   g_clear_object (&self->session);
 
   G_OBJECT_CLASS (wyl_client_parent_class)->finalize (object);
@@ -67,6 +84,34 @@ wyl_client_dup_base_url (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
   return g_strdup (client->base_url);
+}
+
+gchar *
+wyl_client_dup_session_token (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->session_token);
+}
+
+gchar *
+wyl_client_dup_username (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->username);
+}
+
+gchar *
+wyl_client_dup_principal_state (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->principal_state);
+}
+
+gchar *
+wyl_client_dup_session_state (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->session_state);
 }
 
 SoupSession *
@@ -129,13 +174,29 @@ wyl_client_login (WylClient *client, const gchar *username,
 
   g_autoptr (GBytes) body = NULL;
   wyrelog_error_t rc = wyl_client_send_message (client, message, &body);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    wyl_client_clear_login_state (client);
     return rc;
+  }
 
   gsize body_size = 0;
   const gchar *body_data = g_bytes_get_data (body, &body_size);
-  return parse_login_response_json (body_data, body_size) ?
-      WYRELOG_E_OK : WYRELOG_E_IO;
+  g_autofree gchar *session_token = NULL;
+  g_autofree gchar *parsed_username = NULL;
+  g_autofree gchar *principal_state = NULL;
+  g_autofree gchar *session_state = NULL;
+  if (!parse_login_response_json (body_data, body_size, &session_token,
+          &parsed_username, &principal_state, &session_state)) {
+    wyl_client_clear_login_state (client);
+    return WYRELOG_E_IO;
+  }
+
+  wyl_client_clear_login_state (client);
+  client->session_token = g_steal_pointer (&session_token);
+  client->username = g_steal_pointer (&parsed_username);
+  client->principal_state = g_steal_pointer (&principal_state);
+  client->session_state = g_steal_pointer (&session_state);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -338,10 +399,17 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
 }
 
 static gboolean
-parse_login_response_json (const gchar *data, gsize size)
+parse_login_response_json (const gchar *data, gsize size,
+    gchar **out_session_token, gchar **out_username,
+    gchar **out_principal_state, gchar **out_session_state)
 {
-  if (data == NULL)
+  if (data == NULL || out_session_token == NULL || out_username == NULL ||
+      out_principal_state == NULL || out_session_state == NULL)
     return FALSE;
+  *out_session_token = NULL;
+  *out_username = NULL;
+  *out_principal_state = NULL;
+  *out_session_state = NULL;
 
   JsonCursor cursor = { data, size, 0 };
   if (!json_consume (&cursor, '{'))
@@ -366,20 +434,24 @@ parse_login_response_json (const gchar *data, gsize size)
       if (have_session_token || value[0] == '\0')
         return FALSE;
       have_session_token = TRUE;
+      *out_session_token = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "username") == 0) {
       if (have_username || value[0] == '\0')
         return FALSE;
       have_username = TRUE;
+      *out_username = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "principal_state") == 0) {
       if (have_principal_state ||
           (g_strcmp0 (value, "mfa_required") != 0 &&
               g_strcmp0 (value, "authenticated") != 0))
         return FALSE;
       have_principal_state = TRUE;
+      *out_principal_state = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "session_state") == 0) {
       if (have_session_state || g_strcmp0 (value, "active") != 0)
         return FALSE;
       have_session_state = TRUE;
+      *out_session_state = g_steal_pointer (&value);
     } else {
       return FALSE;
     }
@@ -397,8 +469,15 @@ parse_login_response_json (const gchar *data, gsize size)
   }
 
   json_skip_ws (&cursor);
-  return have_session_token && have_username && have_principal_state &&
-      have_session_state && cursor.pos == cursor.size;
+  if (!have_session_token || !have_username || !have_principal_state ||
+      !have_session_state || cursor.pos != cursor.size) {
+    g_clear_pointer (out_session_token, g_free);
+    g_clear_pointer (out_username, g_free);
+    g_clear_pointer (out_principal_state, g_free);
+    g_clear_pointer (out_session_state, g_free);
+    return FALSE;
+  }
+  return TRUE;
 }
 
 static gboolean
