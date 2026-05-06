@@ -2671,6 +2671,69 @@ check_policy_store_inherited_auditor_admin_membership_fails_open (void)
 }
 
 static gint
+check_policy_store_direct_permission_sod_fails_reload (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 526;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 527;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 528;
+  if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
+          "policy grant role", "critical") != WYRELOG_E_OK)
+    return 529;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-sod-user",
+          "wr.audit.read", "direct-sod-scope") != WYRELOG_E_OK)
+    return 530;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-sod-user",
+          "wr.policy.grant_role", "direct-sod-scope") != WYRELOG_E_OK)
+    return 531;
+
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 532;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 533;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 534;
+}
+
+static gint
+check_policy_store_direct_audit_write_sod_fails_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 535;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.write",
+          "audit write", "critical") != WYRELOG_E_OK)
+    return 536;
+  if (wyl_policy_store_upsert_permission (store, "wr.policy.write",
+          "policy write", "critical") != WYRELOG_E_OK)
+    return 537;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-write-user",
+          "wr.audit.write", "direct-write-scope") != WYRELOG_E_OK)
+    return 538;
+  if (wyl_policy_store_grant_direct_permission (store, "direct-write-user",
+          "wr.policy.write", "direct-write-scope") != WYRELOG_E_OK)
+    return 539;
+
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 540;
+  if (wyl_handle_get_read_engine (handle) != NULL)
+    return 541;
+  return wyl_handle_get_delta_engine (handle) == NULL ? 0 : 542;
+}
+
+static gint
 check_policy_store_audit_facts_reload_failure_preserves_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2876,6 +2939,10 @@ main (void)
     return rc;
   if ((rc = check_policy_store_inherited_auditor_admin_membership_fails_open ())
       != 0)
+    return rc;
+  if ((rc = check_policy_store_direct_permission_sod_fails_reload ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_direct_audit_write_sod_fails_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_audit_facts_reload_failure_preserves_pair ())
       != 0)
