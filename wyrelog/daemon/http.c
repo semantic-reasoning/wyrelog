@@ -367,6 +367,43 @@ set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
   set_json_error (msg, 500, "policy_mutation_failed");
 }
 
+static gboolean
+ensure_policy_permission_exists (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, const gchar *perm)
+{
+  gboolean exists = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  wyrelog_error_t rc =
+      wyl_policy_store_permission_exists (store, perm, &exists);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_mutation_failed");
+    return FALSE;
+  }
+  if (!exists) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+ensure_policy_role_exists (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
+    const gchar *role)
+{
+  gboolean exists = FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  wyrelog_error_t rc = wyl_policy_store_role_exists (store, role, &exists);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "policy_mutation_failed");
+    return FALSE;
+  }
+  if (!exists) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static void
 direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data, gboolean grant)
@@ -391,6 +428,9 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   if (!authorize_guarded_session_action (server, msg, query, ctx,
           "wr.policy.write", scope, "policy_auth_required",
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
+    return;
+
+  if (!ensure_policy_permission_exists (msg, ctx, perm))
     return;
 
   wyrelog_error_t rc;
@@ -457,6 +497,9 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   if (!authorize_guarded_session_action (server, msg, query, ctx,
           "wr.policy.grant_role", scope, "policy_auth_required",
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
+    return;
+
+  if (!ensure_policy_role_exists (msg, ctx, role))
     return;
 
   wyrelog_error_t rc;

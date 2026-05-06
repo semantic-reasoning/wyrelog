@@ -653,6 +653,16 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 129;
   g_clear_pointer (&body, g_free);
 
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", "subject=target&perm=site.missing"
+      "&scope=tenant-a&session_token=unknown&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
+    return 153;
+  g_clear_pointer (&body, g_free);
+
   g_autofree gchar *denied_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
@@ -668,9 +678,29 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 131;
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *missing_perm_grant_query =
+      g_strdup_printf ("subject=target&perm=site.missing&scope=tenant-a"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 154;
+  g_clear_pointer (&body, g_free);
+
   if (grant_policy_write_authority (handle, "http-policy-admin",
           "tenant-a") != WYRELOG_E_OK)
     return 132;
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 155;
+  g_clear_pointer (&body, g_free);
 
   g_autofree gchar *guard_denied_query =
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
@@ -712,9 +742,31 @@ check_policy_permission_mutation_contract (WylHandle *handle,
           "tenant-a"))
     return 138;
 
+  g_autofree gchar *missing_perm_revoke_query =
+      g_strdup_printf ("subject=target&perm=site.missing&scope=tenant-a"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=49", session_token);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/revoke", missing_perm_revoke_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 149;
+
   if (wyl_policy_store_upsert_role (store, "site.reader",
           "site reader") != WYRELOG_E_OK)
     return 139;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", "subject=role-target&role=site.missing"
+      "&scope=tenant-b&session_token=unknown&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=29", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
+    return 150;
 
   g_autofree gchar *role_denied_query =
       g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
@@ -730,9 +782,29 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (role_membership_exists (handle, "role-target", "site.reader", "tenant-b"))
     return 141;
 
+  g_autofree gchar *role_missing_denied_query =
+      g_strdup_printf ("subject=role-target&role=site.missing&scope=tenant-b"
+      "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=29", session_token);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", role_missing_denied_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
+    return 151;
+
   if (grant_policy_role_authority (handle, "http-policy-admin",
           "tenant-b") != WYRELOG_E_OK)
     return 142;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", role_missing_denied_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_mutation\"") == NULL)
+    return 152;
 
   g_autofree gchar *role_guard_denied_query =
       g_strdup_printf ("subject=role-target&role=site.reader&scope=tenant-b"
