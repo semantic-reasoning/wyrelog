@@ -24,9 +24,11 @@ typedef struct
 
 typedef struct
 {
+  gchar *jti;
   gchar *subject;
   gchar *issuer;
   gchar *audience;
+  gchar *tenant;
   gchar *principal_state_at_issue;
   gchar *session_id;
   gint64 not_before;
