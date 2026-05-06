@@ -254,8 +254,10 @@ wyrelog_error_t wyl_handle_insert_audit_fact (WylHandle * self,
     wyl_decision_t decision);
 
 /*
- * Probes the read engine for an exact EDB/IDB row match. Rejected unless the
- * engine pair is already open.
+ * Probes the read engine for an exact snapshot-visible row match. Rejected
+ * unless the engine pair is already open. Durable authority rows should be
+ * verified through the policy store, and LoBAC visibility should be verified
+ * through decision relations.
  */
 wyrelog_error_t wyl_handle_engine_contains (WylHandle * self,
     const gchar * relation, const gint64 * row, gsize ncols,
