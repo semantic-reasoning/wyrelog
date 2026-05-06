@@ -337,6 +337,10 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     wyl_jwt_access_claims_clear (&claims);
     return WYRELOG_E_POLICY;
   }
+  if (g_strcmp0 (claims.jti, claims.session_id) == 0) {
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
 
   g_autoptr (WylSession) session =
       wyl_daemon_http_ref_session (server, claims.session_id);

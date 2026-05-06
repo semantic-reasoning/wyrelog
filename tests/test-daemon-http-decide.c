@@ -420,9 +420,10 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
 
 #ifdef WYL_HAS_AUDIT
 static wyrelog_error_t
-sign_test_access_token (SoupServer *server, const gchar *session_id,
-    const gchar *subject, const gchar *principal_state, const gchar *issuer,
-    const gchar *audience, gint64 issued_at, gchar **out_token)
+sign_test_access_token_with_jti (SoupServer *server, const gchar *jti,
+    const gchar *session_id, const gchar *subject,
+    const gchar *principal_state, const gchar *issuer, const gchar *audience,
+    gint64 issued_at, gchar **out_token)
 {
   if (out_token == NULL)
     return WYRELOG_E_INVALID;
@@ -435,7 +436,7 @@ sign_test_access_token (SoupServer *server, const gchar *session_id,
     return rc;
 
   wyl_jwt_issue_input_t input = {
-    .jti = "test-access-token",
+    .jti = jti,
     .subject = subject,
     .issuer = issuer,
     .audience = audience,
@@ -448,6 +449,16 @@ sign_test_access_token (SoupServer *server, const gchar *session_id,
   rc = wyl_jwt_sign_hs256 (&input, secret, sizeof secret, out_token);
   memset (secret, 0, sizeof secret);
   return rc;
+}
+
+static wyrelog_error_t
+sign_test_access_token (SoupServer *server, const gchar *session_id,
+    const gchar *subject, const gchar *principal_state, const gchar *issuer,
+    const gchar *audience, gint64 issued_at, gchar **out_token)
+{
+  return sign_test_access_token_with_jti (server, "test-access-token",
+      session_id, subject, principal_state, issuer, audience, issued_at,
+      out_token);
 }
 #endif
 
@@ -1581,6 +1592,21 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
     if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
       return invalid_tokens[i].failure_code;
   }
+
+  g_autofree gchar *session_jti_token = NULL;
+  if (sign_test_access_token_with_jti (server, session_token, session_token,
+          "http-audit-user", "authenticated", "wyrelogd", "wyrelog-client",
+          now, &session_jti_token) != WYRELOG_E_OK)
+    return 158;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit_bearer (session, base_url,
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      session_jti_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+    return 159;
 
   g_autoptr (WylAuditIter) invalid_filter = NULL;
   if (wyl_client_audit_query_with_guard_context (client, "action()", 123,
