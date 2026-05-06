@@ -2792,6 +2792,47 @@ check_policy_store_auditor_role_direct_admin_sod_fails_open (void)
 }
 
 static gint
+check_policy_store_custom_role_permission_sod_fails_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 559;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "site.audit-role",
+          "site audit role") != WYRELOG_E_OK)
+    return 560;
+  if (wyl_policy_store_upsert_role (store, "site.grant-role",
+          "site grant role") != WYRELOG_E_OK)
+    return 561;
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 562;
+  if (wyl_policy_store_upsert_permission (store, "wr.policy.grant_role",
+          "policy grant role", "critical") != WYRELOG_E_OK)
+    return 563;
+  if (wyl_policy_store_grant_role_permission (store, "site.audit-role",
+          "wr.audit.read") != WYRELOG_E_OK)
+    return 564;
+  if (wyl_policy_store_grant_role_permission (store, "site.grant-role",
+          "wr.policy.grant_role") != WYRELOG_E_OK)
+    return 565;
+  if (wyl_policy_store_grant_role_membership (store, "custom-sod-user",
+          "site.audit-role", "custom-scope") != WYRELOG_E_OK)
+    return 566;
+  if (wyl_policy_store_grant_role_membership (store, "custom-sod-user",
+          "site.grant-role", "custom-scope") != WYRELOG_E_OK)
+    return 567;
+
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 568;
+  if (wyl_handle_get_read_engine (handle) != NULL)
+    return 569;
+  return wyl_handle_get_delta_engine (handle) == NULL ? 0 : 570;
+}
+
+static gint
 check_policy_store_audit_facts_reload_failure_preserves_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -3006,6 +3047,8 @@ main (void)
     return rc;
   if ((rc = check_policy_store_auditor_role_direct_admin_sod_fails_open ())
       != 0)
+    return rc;
+  if ((rc = check_policy_store_custom_role_permission_sod_fails_open ()) != 0)
     return rc;
   if ((rc = check_policy_store_audit_facts_reload_failure_preserves_pair ())
       != 0)

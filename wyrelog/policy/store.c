@@ -570,6 +570,40 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
   if (found)
     return WYRELOG_E_POLICY;
 
+  static const gchar *effective_permission_sod_sql =
+      "WITH RECURSIVE role_closure(role_id, effective_role_id) AS ("
+      "  SELECT role_id, role_id FROM roles "
+      "  UNION "
+      "  SELECT role_closure.role_id, ri.parent_role_id "
+      "  FROM role_closure "
+      "  JOIN role_inheritances ri "
+      "    ON ri.child_role_id = role_closure.effective_role_id"
+      "), role_subject_permission(subject_id, scope, perm_id) AS ("
+      "  SELECT rm.subject_id, rm.scope, rp.perm_id "
+      "  FROM role_memberships rm "
+      "  JOIN role_closure rc ON rc.role_id = rm.role_id "
+      "  JOIN role_permissions rp ON rp.role_id = rc.effective_role_id"
+      "), subject_permission(subject_id, scope, perm_id) AS ("
+      "  SELECT subject_id, scope, perm_id FROM direct_permissions "
+      "  UNION "
+      "  SELECT subject_id, scope, perm_id FROM role_subject_permission"
+      ") "
+      "SELECT 1 FROM subject_permission audit "
+      "JOIN subject_permission privileged "
+      "  ON privileged.subject_id = audit.subject_id "
+      " AND privileged.scope = audit.scope "
+      "WHERE audit.perm_id IN ("
+      "    'wr.audit.read', 'wr.audit.explain', 'wr.audit.write') "
+      "  AND privileged.perm_id IN ("
+      "    'wr.sys.admin', 'wr.svc.admin', "
+      "    'wr.policy.write', 'wr.policy.grant_role', "
+      "    'wr.svc.grant_role') " "LIMIT 1;";
+  rc = query_has_rows (store->db, effective_permission_sod_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
   return WYRELOG_E_OK;
 }
 
