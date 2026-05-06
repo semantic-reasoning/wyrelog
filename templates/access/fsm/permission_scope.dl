@@ -16,8 +16,8 @@
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
 //   has_permission(user, perm, scope)            -- declared in
 //                                                   bootstrap.dl
-//   perm_arm_rule(perm, guard_handle)            -- compound guard
-//                                                   payload key
+//   perm_arm_rule(perm, guard_handle)            -- guard(root) side
+//                                                   payload handle
 //   context_now(user, scope, ctx)                -- scope(metadata(ts,
 //                                                   loc_class, risk),
 //                                                   scope) activation
@@ -31,12 +31,12 @@
 // facts are intentionally absent.
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
-.decl perm_arm_rule(perm: symbol, guard_handle: symbol)
+.decl perm_arm_rule(perm: symbol, guard_handle: int64)
 .decl context_now(user: symbol, scope: symbol, ctx: scope/2 side)
 .decl guard_context(ctx: scope/2 side, user: symbol, scope: symbol,
     timestamp: int64, loc_class: symbol, risk: int64)
 .decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: scope/2 side)
-.decl perm_arm_rule_observed(perm: symbol, guard_handle: symbol)
+.decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
 // --- perm_arm_rule catalogue seed ------------------------------------
@@ -44,11 +44,10 @@
 // Runtime seed order is load-bearing: the test harness compares the
 // C catalogue at wyrelog/wyl-permission-scope.c against the opened
 // engine snapshot, so missing, duplicate, or variant rows fail the
-// build. The second argument is intentionally `_v0_deferred` in the
-// compatibility seed until perm_arm_rule consumes runtime guard
-// handles. The placeholder pins the row count while the host bridge
-// exposes satisfied guard decisions as eval_guard/4 facts tied to a
-// structured guard_context/6 row.
+// build. The host still evaluates guard expressions in C and exposes
+// satisfied guard decisions as eval_guard/4 facts tied to a structured
+// guard_context/6 row; the guard compound payload is an observable
+// mirror, not an evaluator input yet.
 
 perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).
 

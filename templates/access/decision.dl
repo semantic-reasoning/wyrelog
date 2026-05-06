@@ -108,7 +108,7 @@ allow_guard_base(U, P, S) :-
     !disabled_role_for(U, P),
     !policy_violation("sod", U, P, _).
 
-guarded_perm(P) :- perm_arm_rule(P, G).
+guarded_perm(P) :- perm_arm_rule(P, _).
 
 allow(U, P, S) :-
     allow_guard_base(U, P, S),

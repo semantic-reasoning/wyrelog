@@ -371,7 +371,7 @@ check_decision_rule_bodies (void)
         "    !frozen(S),\n"
         "    !disabled_role_for(U, P),\n"
         "    !policy_violation(\"sod\", U, P, _).",
-    "guarded_perm(P) :- perm_arm_rule(P, G).",
+    "guarded_perm(P) :- perm_arm_rule(P, _).",
     "allow(U, P, S) :-\n"
         "    allow_guard_base(U, P, S),\n" "    armed(U, P, S).",
     "allow_bool(U, P, S) :- allow(U, P, S).",
