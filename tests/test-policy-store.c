@@ -491,6 +491,58 @@ check_store_grants_role_permission (void)
 }
 
 static gint
+check_store_catalog_existence_probes (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 218;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 219;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_role_exists (store, "wr.missing-role", &exists)
+      != WYRELOG_E_OK)
+    return 220;
+  if (exists)
+    return 221;
+  if (wyl_policy_store_permission_exists (store, "wr.missing-perm", &exists)
+      != WYRELOG_E_OK)
+    return 222;
+  if (exists)
+    return 223;
+
+  if (wyl_policy_store_upsert_role (store, "wr.exists-role",
+          "exists role") != WYRELOG_E_OK)
+    return 224;
+  if (wyl_policy_store_upsert_permission (store, "wr.exists-perm",
+          "exists perm", "basic") != WYRELOG_E_OK)
+    return 225;
+
+  if (wyl_policy_store_role_exists (store, "wr.exists-role", &exists)
+      != WYRELOG_E_OK)
+    return 226;
+  if (!exists)
+    return 227;
+  if (wyl_policy_store_permission_exists (store, "wr.exists-perm", &exists)
+      != WYRELOG_E_OK)
+    return 228;
+  if (!exists)
+    return 229;
+
+  if (wyl_policy_store_role_exists (NULL, "wr.exists-role", &exists)
+      != WYRELOG_E_INVALID)
+    return 230;
+  if (wyl_policy_store_permission_exists (store, NULL, &exists)
+      != WYRELOG_E_INVALID)
+    return 231;
+  if (wyl_policy_store_permission_exists (store, "wr.exists-perm", NULL)
+      != WYRELOG_E_INVALID)
+    return 232;
+  return 0;
+}
+
+static gint
 check_store_grants_role_inheritance (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -1353,6 +1405,8 @@ main (void)
   if ((rc = check_handle_owns_policy_store ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_catalog_existence_probes ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_inheritance ()) != 0)
     return rc;
