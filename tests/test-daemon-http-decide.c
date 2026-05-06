@@ -148,9 +148,34 @@ insert_not_armed_fixture (WylHandle *handle)
   return insert_symbol_row1 (handle, "session_active", "active");
 }
 
+static wyrelog_error_t
+insert_guarded_fixture (WylHandle *handle)
+{
+  const gchar *subject = "http-guard-user";
+  const gchar *action = "wr.audit.read";
+  const gchar *resource = "http-guard-scope";
+
+  wyrelog_error_t rc =
+      insert_symbol_row2 (handle, "role_permission", "wr.http-guard-role",
+      action);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", subject, "wr.http-guard-role",
+      resource);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "principal_state", subject, "authenticated");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", resource, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row1 (handle, "session_active", "active");
+}
+
 static gchar *
 build_decide_uri (const gchar *base_url, const gchar *user, const gchar *perm,
-    const gchar *scope)
+    const gchar *scope, const gchar *extra_query)
 {
   g_autofree gchar *base = g_strdup (base_url);
   while (base[0] != '\0' && g_str_has_suffix (base, "/"))
@@ -159,21 +184,24 @@ build_decide_uri (const gchar *base_url, const gchar *user, const gchar *perm,
   g_autofree gchar *escaped_perm = g_uri_escape_string (perm, NULL, TRUE);
   g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
 
-  return g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s",
-      base, escaped_user, escaped_perm, escaped_scope);
+  return g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s%s%s",
+      base, escaped_user, escaped_perm, escaped_scope,
+      extra_query != NULL ? "&" : "", extra_query != NULL ? extra_query : "");
 }
 
 static gint
 send_raw_decide (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *user, const gchar *perm,
-    const gchar *scope, guint *out_status, gchar **out_body)
+    const gchar *scope, const gchar *extra_query, guint *out_status,
+    gchar **out_body)
 {
   if (out_status == NULL || out_body == NULL)
     return 30;
   *out_status = 0;
   *out_body = NULL;
 
-  g_autofree gchar *uri = build_decide_uri (base_url, user, perm, scope);
+  g_autofree gchar *uri =
+      build_decide_uri (base_url, user, perm, scope, extra_query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 31;
@@ -199,7 +227,7 @@ check_raw_decide_contract (const gchar *base_url)
   g_autofree gchar *body = NULL;
 
   gint rc = send_raw_decide (session, "GET", base_url, "http-deny-user",
-      "http.not_armed", "http-deny-scope", &status, &body);
+      "http.not_armed", "http-deny-scope", NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 405 || strstr (body, "\"error\":\"method_not_allowed\"")
@@ -208,7 +236,7 @@ check_raw_decide_contract (const gchar *base_url)
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide (session, "POST", base_url, "http-deny-user",
-      "http.not_armed", "http-deny-scope", &status, &body);
+      "http.not_armed", "http-deny-scope", NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -220,12 +248,89 @@ check_raw_decide_contract (const gchar *base_url)
   if (strstr (body, "\"deny_origin\":\"perm_state\"") == NULL)
     return 37;
 
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope", NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"decision\":0") == NULL)
+    return 38;
+  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL)
+    return 39;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 40;
+  if (strstr (body, "\"decision\":1") == NULL)
+    return 41;
+  if (strstr (body, "\"deny_reason\":null") == NULL)
+    return 42;
+  if (strstr (body, "\"deny_origin\":null") == NULL)
+    return 43;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=70",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"decision\":0") == NULL)
+    return 44;
+  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL)
+    return 45;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "guard_timestamp=123&guard_loc_class=public", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400)
+    return 46;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=101",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400)
+    return 47;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400)
+    return 48;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "guard_timestamp=123&guard_loc_class=unknown&guard_risk=69",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400)
+    return 49;
+
   return 0;
 }
 
 #ifdef WYL_HAS_AUDIT
 static gint
-check_audit_event (WylClient *client, const gchar *filter,
+check_audit_event_present (WylClient *client, const gchar *filter,
     const gchar *subject, const gchar *action, const gchar *resource,
     wyl_decision_t decision, const gchar *deny_reason, const gchar *deny_origin)
 {
@@ -233,34 +338,24 @@ check_audit_event (WylClient *client, const gchar *filter,
   if (wyl_client_audit_query (client, filter, &iter) != WYRELOG_E_OK)
     return 80;
 
-  gboolean has_next = FALSE;
-  if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
-    return 81;
-  if (!has_next)
-    return 82;
+  while (TRUE) {
+    gboolean has_next = FALSE;
+    if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
+      return 81;
+    if (!has_next)
+      return 82;
 
-  g_autoptr (WylAuditEvent) event = wyl_audit_iter_ref_event (iter);
-  if (event == NULL)
-    return 83;
-  if (g_strcmp0 (wyl_audit_event_get_subject_id (event), subject) != 0)
-    return 84;
-  if (g_strcmp0 (wyl_audit_event_get_action (event), action) != 0)
-    return 85;
-  if (g_strcmp0 (wyl_audit_event_get_resource_id (event), resource) != 0)
-    return 86;
-  if (wyl_audit_event_get_decision (event) != decision)
-    return 87;
-  if (g_strcmp0 (wyl_audit_event_get_deny_reason (event), deny_reason) != 0)
-    return 90;
-  if (g_strcmp0 (wyl_audit_event_get_deny_origin (event), deny_origin) != 0)
-    return 91;
-
-  has_next = TRUE;
-  if (wyl_audit_iter_next (iter, &has_next) != WYRELOG_E_OK)
-    return 88;
-  if (has_next)
-    return 89;
-  return 0;
+    g_autoptr (WylAuditEvent) event = wyl_audit_iter_ref_event (iter);
+    if (event == NULL)
+      return 83;
+    if (g_strcmp0 (wyl_audit_event_get_subject_id (event), subject) == 0 &&
+        g_strcmp0 (wyl_audit_event_get_action (event), action) == 0 &&
+        g_strcmp0 (wyl_audit_event_get_resource_id (event), resource) == 0 &&
+        wyl_audit_event_get_decision (event) == decision &&
+        g_strcmp0 (wyl_audit_event_get_deny_reason (event), deny_reason) == 0 &&
+        g_strcmp0 (wyl_audit_event_get_deny_origin (event), deny_origin) == 0)
+      return 0;
+  }
 }
 #endif
 
@@ -274,6 +369,8 @@ main (void)
     return 2;
   if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
     return 10;
+  if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 11;
 
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
@@ -310,13 +407,24 @@ main (void)
     return 9;
 
 #ifdef WYL_HAS_AUDIT
-  gint audit_rc = check_audit_event (client, "action(\"http.not_armed\")",
+  gint audit_rc = check_audit_event_present (client,
+      "action(\"http.not_armed\")",
       "http-deny-user", "http.not_armed", "http-deny-scope",
       WYL_DECISION_DENY, "not_armed", "perm_state");
   if (audit_rc != 0)
     return audit_rc;
-  audit_rc = check_audit_event (client, "action(\"http.allow\")",
+  audit_rc = check_audit_event_present (client, "action(\"http.allow\")",
       "http-allow-user", "http.allow", "http-allow-scope",
+      WYL_DECISION_ALLOW, NULL, NULL);
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client, "action(\"wr.audit.read\")",
+      "http-guard-user", "wr.audit.read", "http-guard-scope",
+      WYL_DECISION_DENY, "not_armed", "perm_state");
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client, "action(\"wr.audit.read\")",
+      "http-guard-user", "wr.audit.read", "http-guard-scope",
       WYL_DECISION_ALLOW, NULL, NULL);
   if (audit_rc != 0)
     return audit_rc;
