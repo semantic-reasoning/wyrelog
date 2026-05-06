@@ -8,9 +8,6 @@
 #include "wyl-id-private.h"
 #include "policy/store-private.h"
 
-#define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
-#define WYL_LOGIN_SKIP_MFA_SCOPE "login"
-
 struct _WylSession
 {
   GObject parent_instance;
@@ -82,9 +79,29 @@ login_skip_mfa_allowed (WylHandle *handle, const wyl_login_req_t *req,
   if (username == NULL || username[0] == '\0')
     return WYRELOG_E_OK;
 
-  return wyl_policy_store_subject_has_permission (wyl_handle_get_policy_store
-      (handle), username, WYL_LOGIN_SKIP_MFA_PERMISSION,
-      WYL_LOGIN_SKIP_MFA_SCOPE, out_allowed);
+  if (wyl_handle_get_read_engine (handle) == NULL
+      || wyl_handle_get_delta_engine (handle) == NULL)
+    return WYRELOG_E_OK;
+
+  wyrelog_error_t rc = reload_session_snapshot (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 row[1];
+  rc = wyl_handle_intern_engine_symbol (handle, username, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_OK;
+
+  rc = wyl_handle_engine_contains (handle, "login_skip_mfa_authz", row, 1,
+      out_allowed);
+  wyrelog_error_t reload_rc = reload_session_snapshot (handle);
+  if (reload_rc != WYRELOG_E_OK)
+    return reload_rc;
+  if (rc != WYRELOG_E_OK) {
+    *out_allowed = FALSE;
+    return WYRELOG_E_OK;
+  }
+  return WYRELOG_E_OK;
 }
 
 #ifdef WYL_HAS_AUDIT
