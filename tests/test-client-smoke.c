@@ -12,10 +12,14 @@ typedef struct
   SoupServer *server;
   GMainLoop *loop;
   const gchar *body;
+  guint status;
   gchar *last_method;
   gchar *last_path;
   gchar *last_user;
+  gchar *last_subject;
   gchar *last_perm;
+  gchar *last_role;
+  gchar *last_scope;
   gchar *last_session_token;
   gchar *last_password;
   gchar *last_skip_mfa;
@@ -60,7 +64,10 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_method);
   g_free (http->last_path);
   g_free (http->last_user);
+  g_free (http->last_subject);
   g_free (http->last_perm);
+  g_free (http->last_role);
+  g_free (http->last_scope);
   g_free (http->last_session_token);
   g_free (http->last_password);
   g_free (http->last_skip_mfa);
@@ -77,8 +84,14 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   } else {
     http->last_user = NULL;
   }
+  http->last_subject =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "subject")) : NULL;
   http->last_perm =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "perm")) : NULL;
+  http->last_role =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "role")) : NULL;
+  http->last_scope =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "scope")) : NULL;
   http->last_session_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "session_token")) : NULL;
@@ -97,7 +110,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
           "guard_risk")) : NULL;
 
   const gchar *body = http->body != NULL ? http->body : "[]";
-  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_status (msg, http->status != 0 ? http->status : 200,
+      NULL);
   soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
       body, strlen (body));
 }
@@ -214,6 +228,9 @@ main (void)
   if (wyl_client_audit_query_with_guard_context (local_client, NULL, 123,
           "public", 69, &missing_login_iter) != WYRELOG_E_INVALID)
     return 153;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 510;
 
   http.body = "{\"session_token\":\"session-1\",\"username\":\"alice\","
       "\"principal_state\":\"mfa_required\",\"session_state\":\"active\"}";
@@ -267,6 +284,75 @@ main (void)
       g_strcmp0 (client_principal_state, "authenticated") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 152;
+
+  if (wyl_client_policy_permission_grant (NULL, "target", "read", "scope",
+          123, "public", 49) != WYRELOG_E_INVALID)
+    return 511;
+  if (wyl_client_policy_permission_grant (local_client, NULL, "read",
+          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 512;
+  if (wyl_client_policy_permission_grant (local_client, "target", NULL,
+          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 513;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          NULL, 123, "public", 49) != WYRELOG_E_INVALID)
+    return 514;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", -1, "public", 49) != WYRELOG_E_INVALID)
+    return 515;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", 123, "unknown", 49) != WYRELOG_E_INVALID)
+    return 516;
+
+  http.body = "{\"ok\":true}";
+  if (wyl_client_policy_permission_grant (local_client, "target user",
+          "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
+    return 517;
+  if (g_strcmp0 (http.last_method, "POST") != 0 ||
+      g_strcmp0 (http.last_path, "/policy/permissions/grant") != 0 ||
+      g_strcmp0 (http.last_subject, "target user") != 0 ||
+      g_strcmp0 (http.last_perm, "site.policy.read") != 0 ||
+      g_strcmp0 (http.last_scope, "tenant/a") != 0 ||
+      g_strcmp0 (http.last_session_token, "session-2") != 0 ||
+      g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
+      g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "49") != 0)
+    return 518;
+  if (wyl_client_policy_permission_revoke (local_client, "target user",
+          "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
+    return 519;
+  if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0)
+    return 520;
+  if (wyl_client_policy_role_grant (local_client, "target user",
+          "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
+    return 521;
+  if (g_strcmp0 (http.last_path, "/policy/roles/grant") != 0 ||
+      g_strcmp0 (http.last_role, "site.reader") != 0 ||
+      g_strcmp0 (http.last_scope, "tenant/b") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "29") != 0)
+    return 522;
+  if (wyl_client_policy_role_revoke (local_client, "target user",
+          "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
+    return 523;
+  if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0)
+    return 524;
+  http.status = 400;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", 123, "public", 49) != WYRELOG_E_INVALID)
+    return 525;
+  http.status = 401;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", 123, "public", 49) != WYRELOG_E_AUTH)
+    return 526;
+  http.status = 403;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", 123, "public", 49) != WYRELOG_E_POLICY)
+    return 527;
+  http.status = 500;
+  if (wyl_client_policy_permission_grant (local_client, "target", "read",
+          "scope", 123, "public", 49) != WYRELOG_E_IO)
+    return 528;
+  http.status = 0;
 
   g_autoptr (WylAuditIter) guarded_audit_iter = NULL;
   if (wyl_client_audit_query_with_guard_context (local_client,
@@ -504,7 +590,10 @@ main (void)
   g_clear_pointer (&http.last_method, g_free);
   g_clear_pointer (&http.last_path, g_free);
   g_clear_pointer (&http.last_user, g_free);
+  g_clear_pointer (&http.last_subject, g_free);
   g_clear_pointer (&http.last_perm, g_free);
+  g_clear_pointer (&http.last_role, g_free);
+  g_clear_pointer (&http.last_scope, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.last_password, g_free);
   g_clear_pointer (&http.last_skip_mfa, g_free);

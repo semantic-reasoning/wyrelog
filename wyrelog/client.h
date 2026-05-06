@@ -73,6 +73,29 @@ wyrelog_error_t wyl_client_audit_query_with_guard_context (WylClient * client,
     const gchar * query_filter,
     gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk, WylAuditIter ** out_iter);
+
+/* Policy mutation */
+wyrelog_error_t wyl_client_policy_permission_grant (WylClient * client,
+    const gchar * subject,
+    const gchar * perm,
+    const gchar * scope,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_policy_permission_revoke (WylClient * client,
+    const gchar * subject,
+    const gchar * perm,
+    const gchar * scope,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_policy_role_grant (WylClient * client,
+    const gchar * subject,
+    const gchar * role,
+    const gchar * scope,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_policy_role_revoke (WylClient * client,
+    const gchar * subject,
+    const gchar * role,
+    const gchar * scope,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+
 gchar *wyl_audit_iter_dup_query_filter (const WylAuditIter * iter);
 gchar *wyl_audit_iter_dup_request_uri (const WylAuditIter * iter);
 WylAuditEvent *wyl_audit_iter_ref_event (const WylAuditIter * iter);
