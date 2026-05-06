@@ -1192,6 +1192,54 @@ wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
+static wyrelog_error_t
+catalog_row_exists (wyl_policy_store_t *store, const gchar *table,
+    const gchar *column, const gchar *value, gboolean *out_exists)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || table == NULL || column == NULL ||
+      value == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  g_autofree gchar *sql =
+      g_strdup_printf ("SELECT 1 FROM %s WHERE %s = ?;", table, column);
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, value)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_role_exists (wyl_policy_store_t *store, const gchar *role_id,
+    gboolean *out_exists)
+{
+  return catalog_row_exists (store, "roles", "role_id", role_id, out_exists);
+}
+
+wyrelog_error_t
+wyl_policy_store_permission_exists (wyl_policy_store_t *store,
+    const gchar *perm_id, gboolean *out_exists)
+{
+  return catalog_row_exists (store, "permissions", "perm_id", perm_id,
+      out_exists);
+}
+
 wyrelog_error_t
 wyl_policy_store_grant_role_permission (wyl_policy_store_t *store,
     const gchar *role_id, const gchar *perm_id)

@@ -71,6 +71,10 @@ wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
     const gchar * role_id, const gchar * role_name);
 wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,
     const gchar * perm_id, const gchar * perm_name, const gchar * klass);
+wyrelog_error_t wyl_policy_store_role_exists (wyl_policy_store_t * store,
+    const gchar * role_id, gboolean * out_exists);
+wyrelog_error_t wyl_policy_store_permission_exists (wyl_policy_store_t * store,
+    const gchar * perm_id, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_grant_role_permission (wyl_policy_store_t *
     store, const gchar * role_id, const gchar * perm_id);
 wyrelog_error_t wyl_policy_store_foreach_role_permission (wyl_policy_store_t *
