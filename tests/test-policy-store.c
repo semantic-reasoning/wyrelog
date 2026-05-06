@@ -288,6 +288,37 @@ check_store_seeds_builtin_catalog (void)
   return 0;
 }
 
+static gint
+check_store_rejects_builtin_catalog_drift (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 216;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 217;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE roles SET role_name = 'changed auditor' "
+          "WHERE role_id = 'wr.auditor';", NULL, NULL, NULL) != SQLITE_OK)
+    return 218;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+    return 219;
+
+  g_clear_pointer (&store, wyl_policy_store_close);
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 220;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 221;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE permissions SET class = 'basic' "
+          "WHERE perm_id = 'wr.audit.read';", NULL, NULL, NULL) != SQLITE_OK)
+    return 222;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_POLICY)
+    return 223;
+
+  return 0;
+}
+
 typedef struct
 {
   const gchar *subject_id;
@@ -1480,6 +1511,8 @@ main (void)
   if ((rc = check_handle_owns_policy_store ()) != 0)
     return rc;
   if ((rc = check_store_seeds_builtin_catalog ()) != 0)
+    return rc;
+  if ((rc = check_store_rejects_builtin_catalog_drift ()) != 0)
     return rc;
   if ((rc = check_store_grants_role_permission ()) != 0)
     return rc;
