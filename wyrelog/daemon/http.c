@@ -434,6 +434,70 @@ policy_permission_revoke_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 static void
+role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data, gboolean grant)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *subject = lookup_required_query_string (query, "subject");
+  const gchar *role = lookup_required_query_string (query, "role");
+  const gchar *scope = lookup_required_query_string (query, "scope");
+  if (subject == NULL || role == NULL || scope == NULL) {
+    set_json_error (msg, 400, "invalid_policy_mutation");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.policy.grant_role", scope, "policy_auth_required",
+          "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
+    return;
+
+  wyrelog_error_t rc;
+  if (grant) {
+    g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
+    wyl_role_grant_req_set_subject_id (req, subject);
+    wyl_role_grant_req_set_role_id (req, role);
+    wyl_role_grant_req_set_scope (req, scope);
+    wyl_role_grant_req_set_actor_id (req, actor);
+    rc = wyl_role_grant (ctx->handle, req);
+  } else {
+    g_autoptr (wyl_role_revoke_req_t) req = wyl_role_revoke_req_new ();
+    wyl_role_revoke_req_set_subject_id (req, subject);
+    wyl_role_revoke_req_set_role_id (req, role);
+    wyl_role_revoke_req_set_scope (req, scope);
+    wyl_role_revoke_req_set_actor_id (req, actor);
+    rc = wyl_role_revoke (ctx->handle, req);
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_policy_mutation_error (msg, rc);
+    return;
+  }
+
+  set_json_ok (msg);
+}
+
+static void
+policy_role_grant_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  role_membership_mutation_handler (server, msg, path, query, user_data, TRUE);
+}
+
+static void
+policy_role_revoke_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  role_membership_mutation_handler (server, msg, path, query, user_data, FALSE);
+}
+
+static void
 login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
 {
@@ -609,6 +673,10 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
       policy_permission_grant_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/permissions/revoke",
       policy_permission_revoke_handler, ctx, NULL);
+  soup_server_add_handler (server, "/policy/roles/grant",
+      policy_role_grant_handler, ctx, NULL);
+  soup_server_add_handler (server, "/policy/roles/revoke",
+      policy_role_revoke_handler, ctx, NULL);
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
       ctx, NULL);
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
