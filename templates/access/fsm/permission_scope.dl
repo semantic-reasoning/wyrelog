@@ -23,6 +23,9 @@
 //                                                   scope) activation
 //   guard_context(ctx, user, scope, timestamp,   -- structured request
 //                 loc_class, risk)                  context payload
+//   guard_context_timestamp(user, scope, ts)     -- context field views
+//   guard_context_loc_class(user, scope, loc)
+//   guard_context_risk(user, scope, risk)
 //   eval_guard(user, perm, scope, ctx)           -- host guard result
 //
 // perm_arm_rule rows are runtime-seeded from the C catalogue so the
@@ -35,6 +38,9 @@
 .decl context_now(user: symbol, scope: symbol, ctx: scope/2 side)
 .decl guard_context(ctx: scope/2 side, user: symbol, scope: symbol,
     timestamp: int64, loc_class: symbol, risk: int64)
+.decl guard_context_timestamp(user: symbol, scope: symbol, timestamp: int64)
+.decl guard_context_loc_class(user: symbol, scope: symbol, loc_class: symbol)
+.decl guard_context_risk(user: symbol, scope: symbol, risk: int64)
 .decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: scope/2 side)
 .decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
@@ -50,6 +56,12 @@
 // mirror, not an evaluator input yet.
 
 perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).
+
+// --- guard context field views ---------------------------------------
+
+// The host inserts and removes these request-local rows alongside
+// guard_context/6. Keeping them EDB-only preserves cleanup semantics
+// for the embedded incremental evaluator.
 
 // --- armed/3 derivation ----------------------------------------------
 
@@ -67,6 +79,9 @@ armed(U, P, S) :-
 armed(U, P, S) :-
     has_permission(U, P, S),
     context_now(U, S, C),
-    guard_context(C, U, S, _, _, _),
+    guard_context(C, U, S, T, L, R),
+    guard_context_timestamp(U, S, T),
+    guard_context_loc_class(U, S, L),
+    guard_context_risk(U, S, R),
     perm_arm_rule(P, _),
     eval_guard(U, P, S, C).

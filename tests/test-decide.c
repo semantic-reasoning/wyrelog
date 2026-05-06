@@ -194,6 +194,33 @@ count_guard_context_cb (const gchar *relation, const gint64 *row, guint ncols,
     expect->matches++;
 }
 
+static void
+count_any_guard_context_field_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  guint *seen = user_data;
+
+  (void) relation;
+  (void) row;
+  (void) ncols;
+
+  (*seen)++;
+}
+
+static gint
+check_guard_context_field_absent (WylHandle *handle, const gchar *relation,
+    gint base_code)
+{
+  guint seen = 0;
+  wyrelog_error_t rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+      relation, count_any_guard_context_field_cb, &seen);
+  if (rc != WYRELOG_E_OK)
+    return base_code;
+  if (seen != 0)
+    return base_code + 1;
+  return 0;
+}
+
 static gint
 check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
     const gchar *action, const gchar *resource, gint base_code)
@@ -232,6 +259,19 @@ check_guard_bridge_facts_absent (WylHandle *handle, const gchar *subject,
     return base_code + 7;
   if (expect.matches != 0)
     return base_code + 8;
+
+  rc = check_guard_context_field_absent (handle, "guard_context_timestamp",
+      base_code + 9);
+  if (rc != 0)
+    return rc;
+  rc = check_guard_context_field_absent (handle, "guard_context_loc_class",
+      base_code + 11);
+  if (rc != 0)
+    return rc;
+  rc = check_guard_context_field_absent (handle, "guard_context_risk",
+      base_code + 13);
+  if (rc != 0)
+    return rc;
 
   return 0;
 }
@@ -301,6 +341,19 @@ check_guard_cleanup_fault_residue (WylHandle *handle, gint base_code)
 
   if (eval_guard != 0 || context_now != 0 || guard_context != 0)
     return base_code + 6;
+
+  gint field_check = check_guard_context_field_absent (handle,
+      "guard_context_timestamp", base_code + 7);
+  if (field_check != 0)
+    return field_check;
+  field_check = check_guard_context_field_absent (handle,
+      "guard_context_loc_class", base_code + 9);
+  if (field_check != 0)
+    return field_check;
+  field_check = check_guard_context_field_absent (handle,
+      "guard_context_risk", base_code + 11);
+  if (field_check != 0)
+    return field_check;
 
   return 0;
 }
@@ -808,7 +861,16 @@ check_decide_fail_closes_on_guard_cleanup_faults (void)
   rc = check_guard_cleanup_fault ("context_now", 160);
   if (rc != 0)
     return rc;
-  return check_guard_cleanup_fault ("guard_context", 190);
+  rc = check_guard_cleanup_fault ("guard_context_timestamp", 190);
+  if (rc != 0)
+    return rc;
+  rc = check_guard_cleanup_fault ("guard_context_loc_class", 220);
+  if (rc != 0)
+    return rc;
+  rc = check_guard_cleanup_fault ("guard_context_risk", 250);
+  if (rc != 0)
+    return rc;
+  return check_guard_cleanup_fault ("guard_context", 280);
 }
 
 static gint

@@ -20,9 +20,9 @@
  * \+ perm_arm_rule, and the guarded rule goes through eval_guard /
  * context_now / guard_context. No edge can close a cycle because
  * perm_arm_rule, perm_state, has_permission, context_now,
- * guard_context and eval_guard are
- * EDB-only — none of them appears as a head predicate in the
- * lifted rule set.
+ * guard_context, guard_context_timestamp,
+ * guard_context_loc_class, guard_context_risk and eval_guard are
+ * EDB-only.
  */
 static gint
 check_stratification (void)
@@ -35,6 +35,9 @@ check_stratification (void)
     {.predicate = "has_permission",.negated = FALSE},
     {.predicate = "context_now",.negated = FALSE},
     {.predicate = "guard_context",.negated = FALSE},
+    {.predicate = "guard_context_timestamp",.negated = FALSE},
+    {.predicate = "guard_context_loc_class",.negated = FALSE},
+    {.predicate = "guard_context_risk",.negated = FALSE},
     {.predicate = "perm_arm_rule",.negated = FALSE},
     {.predicate = "eval_guard",.negated = FALSE},
   };
