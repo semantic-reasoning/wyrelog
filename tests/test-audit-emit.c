@@ -1028,19 +1028,63 @@ check_decide_allows_when_runtime_audit_projection_fails (void)
     g_object_unref (handle);
     return 54;
   }
-  gint64 count = -1;
-  if (!policy_count_rows (wyl_handle_get_policy_store (handle),
-          "SELECT COUNT(*) FROM audit_events "
-          "WHERE subject_id = 'audit-allow-user' "
-          "AND action = 'wr.audit-allow' "
-          "AND resource_id = 'audit-allow-scope' "
-          "AND decision = 1;", &count)) {
+  static const gchar *audit_sql =
+      "SELECT id, created_at_us FROM audit_events "
+      "WHERE action = ? AND subject_id = ? "
+      "AND resource_id = ? AND decision = ?;";
+  sqlite3_stmt *stmt = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), audit_sql, -1,
+          &stmt, NULL) != SQLITE_OK) {
     g_object_unref (handle);
     return 55;
   }
-  if (count != 1) {
+  if (sqlite3_bind_text (stmt, 1, "wr.audit-allow", -1, SQLITE_TRANSIENT)
+      != SQLITE_OK
+      || sqlite3_bind_text (stmt, 2, "audit-allow-user", -1, SQLITE_TRANSIENT)
+      != SQLITE_OK
+      || sqlite3_bind_text (stmt, 3, "audit-allow-scope", -1,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_int (stmt, 4, WYL_DECISION_ALLOW) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    g_object_unref (handle);
+    return 304;
+  }
+  if (sqlite3_step (stmt) != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
     g_object_unref (handle);
     return 56;
+  }
+  g_autofree gchar *id =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  gint64 created_at_us = sqlite3_column_int64 (stmt, 1);
+  if (sqlite3_step (stmt) != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    g_object_unref (handle);
+    return 301;
+  }
+  sqlite3_finalize (stmt);
+
+  gboolean contains = FALSE;
+  if (contains_audit_event_fact (handle, id, created_at_us, "allow",
+          &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 302;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", id,
+          "wr.audit-allow", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 303;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_subject", id,
+          "audit-allow-user", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 305;
+  }
+  if (contains_audit_event_attr_fact (handle, "audit_event_resource", id,
+          "audit-allow-scope", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 306;
   }
 
   g_object_unref (handle);
