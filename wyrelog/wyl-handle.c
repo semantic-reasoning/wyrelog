@@ -4,6 +4,7 @@
 #include <string.h>
 
 #include "wyrelog/engine.h"
+#include "wyl-fsm-permission-scope-private.h"
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
 #include "wyl-handle-compound-private.h"
@@ -334,6 +335,37 @@ wyl_handle_seed_session_transitions (WylHandle *self)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+wyl_handle_seed_perm_state_transitions (WylHandle *self)
+{
+  gsize n = 0;
+  const wyl_perm_transition_t *table = wyl_fsm_permission_scope_table (&n);
+
+  for (gsize i = 0; i < n; i++) {
+    gint64 row[3];
+    const gchar *from_name = wyl_perm_state_name (table[i].from);
+    const gchar *event_name = wyl_perm_event_name (table[i].event);
+    const gchar *to_name = wyl_perm_state_name (table[i].to);
+    if (from_name == NULL || event_name == NULL || to_name == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc =
+        wyl_handle_intern_engine_symbol (self, from_name, &row[0]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, event_name, &row[1]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_intern_engine_symbol (self, to_name, &row[2]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_engine_insert (self, "perm_state_transition", row, 3);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
@@ -557,6 +589,9 @@ load_current_engine_pair (WylHandle *self)
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_seed_session_transitions (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_seed_perm_state_transitions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_load_policy_store_role_permissions (self);
@@ -811,6 +846,7 @@ relation_fans_out_to_delta (const gchar *relation)
   return g_strcmp0 (relation, "member_of") == 0
       || g_strcmp0 (relation, "principal_transition") == 0
       || g_strcmp0 (relation, "session_transition") == 0
+      || g_strcmp0 (relation, "perm_state_transition") == 0
       || g_strcmp0 (relation, "principal_event") == 0
       || g_strcmp0 (relation, "session_event") == 0;
 }

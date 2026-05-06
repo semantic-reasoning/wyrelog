@@ -12,10 +12,11 @@
 // context_now/3 compound, guard_context/6, and eval_guard/4 bridge
 // facts for a satisfied guard expression.
 //
-// v0 still declares the permission-state transition schema so downstream
-// tools can depend on a stable FSM surface. No transition facts are present;
-// perm_state_step/3 is therefore intentionally empty until a later lifecycle
-// phase defines concrete dormant/armed/firing/cooldown transitions.
+// v0 defines the permission-state transition surface for host mutation
+// code and downstream tooling. The transition table is intentionally
+// small: only "armed" participates in allow/3, while "dormant",
+// "firing", and "cooldown" remain non-armed states until explicit host
+// events move them.
 //
 // EDB schemas (host-populated, no clauses below):
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
@@ -71,6 +72,13 @@
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
 // --- permission-state FSM schema -------------------------------------
+
+perm_state_transition("dormant",  "grant",    "armed").
+perm_state_transition("armed",    "revoke",   "dormant").
+perm_state_transition("armed",    "trigger",  "firing").
+perm_state_transition("firing",   "complete", "cooldown").
+perm_state_transition("cooldown", "reset",    "armed").
+perm_state_transition("cooldown", "expire",   "dormant").
 
 perm_state_step(From, Ev, To) :- perm_state_transition(From, Ev, To).
 

@@ -4,6 +4,7 @@
 #include <stdio.h>
 
 #include "wyrelog/wyl-permission-scope-private.h"
+#include "wyrelog/wyl-fsm-permission-scope-private.h"
 #include "wyrelog/wyl-guard-expr-private.h"
 #include "wyrelog/wyl-dl-static-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -584,23 +585,6 @@ line_is_static_perm_arm_rule_fact (const gchar *line)
   return *p == '"';
 }
 
-static gboolean
-line_is_static_perm_state_transition_fact (const gchar *line)
-{
-  const gchar *prefix = "perm_state_transition";
-  if (!g_str_has_prefix (line, prefix))
-    return FALSE;
-  const gchar *p = line + strlen (prefix);
-  while (*p == ' ' || *p == '\t')
-    p++;
-  if (*p != '(')
-    return FALSE;
-  p++;
-  while (*p == ' ' || *p == '\t')
-    p++;
-  return *p == '"';
-}
-
 static gint
 check_template_static_fact_guards (void)
 {
@@ -622,8 +606,6 @@ check_template_static_fact_guards (void)
       continue;
     if (line_is_static_perm_arm_rule_fact (trimmed))
       return 210;
-    if (line_is_static_perm_state_transition_fact (trimmed))
-      return 211;
   }
   return 0;
 }
@@ -642,43 +624,259 @@ count_rows_cb (const gchar *relation, const gint64 *row, guint ncols,
 }
 
 static gint
-check_perm_state_transition_schema_only (void)
+expect_engine_row_count (WylEngine *engine, const gchar *relation,
+    guint expected, gint error_base)
+{
+  guint count = 0;
+  if (wyl_engine_snapshot (engine, relation, count_rows_cb, &count)
+      != WYRELOG_E_OK)
+    return error_base;
+  if (count != expected)
+    return error_base + 1;
+  return 0;
+}
+
+typedef struct
+{
+  wyl_perm_state_t from;
+  wyl_perm_event_t event;
+  wyrelog_error_t expected_rc;
+  wyl_perm_state_t expected_to;
+} perm_step_case_t;
+
+static gint
+check_perm_state_golden_trace (void)
+{
+  static const perm_step_case_t cases[] = {
+    {WYL_PERM_STATE_DORMANT, WYL_PERM_EVENT_GRANT, WYRELOG_E_OK,
+        WYL_PERM_STATE_ARMED},
+    {WYL_PERM_STATE_ARMED, WYL_PERM_EVENT_TRIGGER, WYRELOG_E_OK,
+        WYL_PERM_STATE_FIRING},
+    {WYL_PERM_STATE_FIRING, WYL_PERM_EVENT_COMPLETE, WYRELOG_E_OK,
+        WYL_PERM_STATE_COOLDOWN},
+    {WYL_PERM_STATE_COOLDOWN, WYL_PERM_EVENT_RESET, WYRELOG_E_OK,
+        WYL_PERM_STATE_ARMED},
+    {WYL_PERM_STATE_ARMED, WYL_PERM_EVENT_REVOKE, WYRELOG_E_OK,
+        WYL_PERM_STATE_DORMANT},
+    {WYL_PERM_STATE_COOLDOWN, WYL_PERM_EVENT_EXPIRE, WYRELOG_E_OK,
+        WYL_PERM_STATE_DORMANT},
+    {WYL_PERM_STATE_DORMANT, WYL_PERM_EVENT_TRIGGER, WYRELOG_E_POLICY,
+        WYL_PERM_STATE_DORMANT /* unused */ },
+    {WYL_PERM_STATE_COOLDOWN, WYL_PERM_EVENT_TRIGGER, WYRELOG_E_POLICY,
+        WYL_PERM_STATE_COOLDOWN /* unused */ },
+    {WYL_PERM_STATE_FIRING, WYL_PERM_EVENT_REVOKE, WYRELOG_E_POLICY,
+        WYL_PERM_STATE_FIRING /* unused */ },
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    wyl_perm_state_t to = WYL_PERM_STATE_LAST_;
+    wyrelog_error_t rc =
+        wyl_fsm_permission_scope_step (cases[i].from, cases[i].event, &to);
+    if (rc != cases[i].expected_rc)
+      return (gint) (220 + i);
+    if (rc == WYRELOG_E_OK && to != cases[i].expected_to)
+      return (gint) (240 + i);
+  }
+  return 0;
+}
+
+static gint
+check_perm_state_functional_ic (void)
+{
+  gsize n = 0;
+  const wyl_perm_transition_t *table = wyl_fsm_permission_scope_table (&n);
+
+  for (gsize i = 0; i < n; i++) {
+    for (gsize j = i + 1; j < n; j++) {
+      if (table[i].from == table[j].from && table[i].event == table[j].event)
+        return 260;
+    }
+  }
+  return 0;
+}
+
+static gint
+check_perm_state_name_roundtrip (void)
+{
+  for (guint s = 0; s < WYL_PERM_STATE_LAST_; s++) {
+    const gchar *name = wyl_perm_state_name ((wyl_perm_state_t) s);
+    if (name == NULL)
+      return 270;
+    if (wyl_perm_state_from_name (name) != (wyl_perm_state_t) s)
+      return 271;
+  }
+  if (wyl_perm_state_name (WYL_PERM_STATE_LAST_) != NULL)
+    return 272;
+  if (wyl_perm_state_from_name (NULL) != WYL_PERM_STATE_LAST_)
+    return 273;
+  if (wyl_perm_state_from_name ("missing") != WYL_PERM_STATE_LAST_)
+    return 274;
+
+  for (guint ev = 0; ev < WYL_PERM_EVENT_LAST_; ev++) {
+    const gchar *name = wyl_perm_event_name ((wyl_perm_event_t) ev);
+    if (name == NULL)
+      return 275;
+    if (wyl_perm_event_from_name (name) != (wyl_perm_event_t) ev)
+      return 276;
+  }
+  if (wyl_perm_event_name (WYL_PERM_EVENT_LAST_) != NULL)
+    return 277;
+  if (wyl_perm_event_from_name (NULL) != WYL_PERM_EVENT_LAST_)
+    return 278;
+  if (wyl_perm_event_from_name ("missing") != WYL_PERM_EVENT_LAST_)
+    return 279;
+  return 0;
+}
+
+static gchar *
+strip_dl_symbol (const gchar *raw)
+{
+  g_autofree gchar *s = g_strstrip (g_strdup (raw));
+  gsize n = strlen (s);
+  if (n >= 2 && s[0] == '"' && s[n - 1] == '"') {
+    s[n - 1] = '\0';
+    return g_strdup (s + 1);
+  }
+  return g_steal_pointer (&s);
+}
+
+static gboolean
+parse_perm_transition_row (const gchar *line, gchar **out_from,
+    gchar **out_event, gchar **out_to)
+{
+  const gchar *prefix = "perm_state_transition";
+  if (!g_str_has_prefix (line, prefix))
+    return FALSE;
+  const gchar *p = line + strlen (prefix);
+  while (*p == ' ' || *p == '\t')
+    p++;
+  if (*p != '(')
+    return FALSE;
+  p++;
+
+  const gchar *close = strchr (p, ')');
+  if (close == NULL)
+    return FALSE;
+  g_autofree gchar *inner = g_strndup (p, (gsize) (close - p));
+  if (strchr (inner, '(') != NULL)
+    return FALSE;
+  g_auto (GStrv) fields = g_strsplit (inner, ",", -1);
+  if (g_strv_length (fields) != 3)
+    return FALSE;
+
+  *out_from = strip_dl_symbol (fields[0]);
+  *out_event = strip_dl_symbol (fields[1]);
+  *out_to = strip_dl_symbol (fields[2]);
+  return TRUE;
+}
+
+static gint
+check_perm_state_text_mirror (void)
+{
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (WYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH, &contents,
+          &len, &err))
+    return 280;
+
+  g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
+  gsize parsed_n = 0;
+  gsize table_n = 0;
+  const wyl_perm_transition_t *table =
+      wyl_fsm_permission_scope_table (&table_n);
+
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    g_autofree gchar *trimmed = g_strdup (g_strchug (lines[i]));
+    if (trimmed[0] == '%' || trimmed[0] == '\0'
+        || g_str_has_prefix (trimmed, "//")
+        || g_str_has_prefix (trimmed, ".decl"))
+      continue;
+    if (!g_str_has_prefix (trimmed, "perm_state_transition"))
+      continue;
+    if (strstr (trimmed, ":-") != NULL || strchr (trimmed, '"') == NULL)
+      continue;
+
+    g_autofree gchar *from = NULL;
+    g_autofree gchar *event = NULL;
+    g_autofree gchar *to = NULL;
+    if (!parse_perm_transition_row (trimmed, &from, &event, &to))
+      return (gint) (290 + parsed_n);
+    if (parsed_n >= table_n)
+      return 310;
+
+    const gchar *expect_from = wyl_perm_state_name (table[parsed_n].from);
+    const gchar *expect_event = wyl_perm_event_name (table[parsed_n].event);
+    const gchar *expect_to = wyl_perm_state_name (table[parsed_n].to);
+    if (g_strcmp0 (from, expect_from) != 0)
+      return (gint) (320 + parsed_n);
+    if (g_strcmp0 (event, expect_event) != 0)
+      return (gint) (340 + parsed_n);
+    if (g_strcmp0 (to, expect_to) != 0)
+      return (gint) (360 + parsed_n);
+    parsed_n++;
+  }
+
+  if (parsed_n != table_n)
+    return 380;
+  return 0;
+}
+
+static gint
+check_perm_state_transition_engine_rows (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
-    return 220;
+    return 400;
 
-  static const gchar *relations[] = {
-    "perm_state_transition",
-    "perm_state_step",
-  };
-  for (gsize i = 0; i < G_N_ELEMENTS (relations); i++) {
-    guint count = 0;
-    if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
-            relations[i], count_rows_cb, &count) != WYRELOG_E_OK)
-      return (gint) (221 + i);
-    if (count != 0)
-      return (gint) (230 + i);
-  }
+  gsize table_n = 0;
+  (void) wyl_fsm_permission_scope_table (&table_n);
+
+  if (table_n > G_MAXUINT)
+    return 401;
+  guint expected = (guint) table_n;
+
+  gint rc = expect_engine_row_count (wyl_handle_get_read_engine (handle),
+      "perm_state_step", expected, 410);
+  if (rc != 0)
+    return rc;
 
   if (insert_symbol_row4 (handle, "perm_state", "schema-user",
           "schema-perm", "schema-scope", "armed") != WYRELOG_E_OK)
-    return 240;
+    return 450;
   gboolean found = FALSE;
   if (contains_armed (handle, "schema-user", "schema-perm", "schema-scope",
           &found) != WYRELOG_E_OK)
-    return 241;
+    return 451;
   if (!found)
-    return 242;
+    return 452;
+
+  static const gchar *const non_armed_states[] = {
+    "dormant",
+    "firing",
+    "cooldown",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (non_armed_states); i++) {
+    g_autofree gchar *user = g_strdup_printf ("schema-%s-user",
+        non_armed_states[i]);
+    if (insert_symbol_row4 (handle, "perm_state", user, "schema-perm",
+            "schema-scope", non_armed_states[i]) != WYRELOG_E_OK)
+      return (gint) (460 + i);
+    if (contains_armed (handle, user, "schema-perm", "schema-scope", &found)
+        != WYRELOG_E_OK)
+      return (gint) (470 + i);
+    if (found)
+      return (gint) (480 + i);
+  }
 
   if (insert_symbol_row4 (handle, "perm_state", "schema-guard-user",
           "wr.audit.read", "schema-guard-scope", "armed") != WYRELOG_E_OK)
-    return 243;
+    return 490;
   if (contains_armed (handle, "schema-guard-user", "wr.audit.read",
           "schema-guard-scope", &found) != WYRELOG_E_OK)
-    return 244;
+    return 491;
   if (found)
-    return 245;
+    return 492;
 
   return 0;
 }
@@ -705,7 +903,15 @@ main (void)
     return rc;
   if ((rc = check_template_static_fact_guards ()) != 0)
     return rc;
-  if ((rc = check_perm_state_transition_schema_only ()) != 0)
+  if ((rc = check_perm_state_golden_trace ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_functional_ic ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_name_roundtrip ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_text_mirror ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_transition_engine_rows ()) != 0)
     return rc;
   return 0;
 }

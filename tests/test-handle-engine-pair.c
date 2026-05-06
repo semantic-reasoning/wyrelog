@@ -195,6 +195,7 @@ write_compound_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
+      ".decl perm_state_transition(from: symbol, event: symbol, to: symbol)\n"
       ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n"
       ".decl perm_window_guard(perm: symbol, window: symbol)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
@@ -226,6 +227,7 @@ write_guard_context_compound_templates (const gchar *dir)
       ".decl session_transition(from_state: symbol, event: symbol,"
       " to_state: symbol)\n")
       && write_file_in_dir (dir, "fsm/permission_scope.dl",
+      ".decl perm_state_transition(from: symbol, event: symbol, to: symbol)\n"
       ".decl perm_arm_rule(perm: symbol, guard_handle: int64)\n"
       ".decl perm_window_guard(perm: symbol, window: symbol)\n")
       && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
@@ -1684,6 +1686,37 @@ check_insert_fanout_reaches_delta_engine (void)
     return 104;
   if (expect.matching == 0)
     return 105;
+  return 0;
+}
+
+static gint
+check_perm_state_transition_fanout_reaches_delta_engine (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 transition_row[3];
+  DeltaExpect expect = {
+    "perm_state_step",
+    transition_row,
+    WYL_DELTA_INSERT,
+    0,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 106;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 107;
+  if (intern3 (handle, "fanout-dormant", "fanout-grant", "fanout-armed",
+          transition_row) != WYRELOG_E_OK)
+    return 108;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_expect_cb, &expect)
+      != WYRELOG_E_OK)
+    return 109;
+  if (wyl_handle_engine_insert (handle, "perm_state_transition",
+          transition_row, 3) != WYRELOG_E_OK)
+    return 110;
+  if (expect.matching == 0)
+    return 111;
   return 0;
 }
 
@@ -3700,6 +3733,8 @@ main (void)
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_delta_engine ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_transition_fanout_reaches_delta_engine ()) != 0)
     return rc;
   if ((rc = check_principal_event_fanout_derives_delta ()) != 0)
     return rc;
