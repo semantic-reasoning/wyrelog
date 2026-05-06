@@ -213,10 +213,26 @@ main (void)
     return 45;
   if (http.last_password != NULL)
     return 46;
+  g_autofree gchar *client_session_token =
+      wyl_client_dup_session_token (local_client);
+  g_autofree gchar *client_username = wyl_client_dup_username (local_client);
+  g_autofree gchar *client_principal_state =
+      wyl_client_dup_principal_state (local_client);
+  g_autofree gchar *client_session_state =
+      wyl_client_dup_session_state (local_client);
+  if (g_strcmp0 (client_session_token, "session-1") != 0 ||
+      g_strcmp0 (client_username, "alice") != 0 ||
+      g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
+      g_strcmp0 (client_session_state, "active") != 0)
+    return 138;
 
   http.body = "{\"session_token\":\"session-1\"}";
   if (wyl_client_login (local_client, "alice", NULL) != WYRELOG_E_IO)
     return 47;
+  g_clear_pointer (&client_session_token, g_free);
+  client_session_token = wyl_client_dup_session_token (local_client);
+  if (client_session_token != NULL)
+    return 139;
   http.body = "[]";
 
   gint decision = -1;

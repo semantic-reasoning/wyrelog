@@ -37,6 +37,10 @@ gchar *wyl_client_dup_base_url (const WylClient * client);
 /* Authentication */
 wyrelog_error_t wyl_client_login (WylClient * client,
     const gchar * username, const gchar * password);
+gchar *wyl_client_dup_session_token (const WylClient * client);
+gchar *wyl_client_dup_username (const WylClient * client);
+gchar *wyl_client_dup_principal_state (const WylClient * client);
+gchar *wyl_client_dup_session_state (const WylClient * client);
 wyrelog_error_t wyl_client_token_refresh (WylClient * client);
 wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const gchar * otp);
 

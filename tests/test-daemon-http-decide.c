@@ -358,8 +358,22 @@ send_raw_login (SoupSession *session, const gchar *method,
   return 0;
 }
 
+static gchar *
+extract_json_string (const gchar *body, const gchar *name)
+{
+  g_autofree gchar *prefix = g_strdup_printf ("\"%s\":\"", name);
+  const gchar *start = strstr (body, prefix);
+  if (start == NULL)
+    return NULL;
+  start += strlen (prefix);
+  const gchar *end = strchr (start, '"');
+  if (end == NULL)
+    return NULL;
+  return g_strndup (start, (gsize) (end - start));
+}
+
 static gint
-check_raw_login_contract (const gchar *base_url)
+check_raw_login_contract (SoupServer *server, const gchar *base_url)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -421,7 +435,22 @@ check_raw_login_contract (const gchar *base_url)
       strstr (body, "\"principal_state\":\"mfa_required\"") == NULL ||
       strstr (body, "\"session_state\":\"active\"") == NULL)
     return 475;
+  g_autofree gchar *session_token = extract_json_string (body, "session_token");
+  if (session_token == NULL)
+    return 476;
+  g_autoptr (WylSession) stored_session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (stored_session == NULL)
+    return 477;
+  g_autofree gchar *stored_username = wyl_session_dup_username (stored_session);
+  if (g_strcmp0 (stored_username, "login-user") != 0)
+    return 479;
   g_clear_pointer (&body, g_free);
+
+  g_autoptr (WylSession) unknown_session =
+      wyl_daemon_http_ref_session (server, "unknown-session");
+  if (unknown_session != NULL)
+    return 480;
 
   return 0;
 }
@@ -539,7 +568,7 @@ main (void)
     return audit_rc;
 #endif
 
-  raw_rc = check_raw_login_contract (base_url);
+  raw_rc = check_raw_login_contract (http.server, base_url);
   if (raw_rc != 0)
     return raw_rc;
 
