@@ -418,6 +418,39 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
   return 0;
 }
 
+#ifdef WYL_HAS_AUDIT
+static wyrelog_error_t
+sign_test_access_token (SoupServer *server, const gchar *session_id,
+    const gchar *subject, const gchar *principal_state, const gchar *issuer,
+    const gchar *audience, gint64 issued_at, gchar **out_token)
+{
+  if (out_token == NULL)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+
+  guint8 secret[32];
+  wyrelog_error_t rc =
+      wyl_daemon_http_copy_access_token_secret (server, secret, sizeof secret);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_jwt_issue_input_t input = {
+    .jti = "test-access-token",
+    .subject = subject,
+    .issuer = issuer,
+    .audience = audience,
+    .tenant = "__wr_default",
+    .principal_state_at_issue = principal_state,
+    .session_id = session_id,
+    .issued_at = issued_at,
+    .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
+  };
+  rc = wyl_jwt_sign_hs256 (&input, secret, sizeof secret, out_token);
+  memset (secret, 0, sizeof secret);
+  return rc;
+}
+#endif
+
 static gint
 check_raw_login_contract (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
@@ -600,6 +633,39 @@ send_raw_policy_mutation (SoupSession *session, const gchar *method,
   return 0;
 }
 
+static gint
+send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    const gchar *access_token, guint *out_status, gchar **out_body)
+{
+  if (access_token == NULL)
+    return 164;
+  if (out_status == NULL || out_body == NULL)
+    return 120;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 121;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  soup_message_headers_replace (soup_message_get_request_headers (msg),
+      "Authorization", authorization);
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 122;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
 static wyrelog_error_t
 grant_policy_write_authority (WylHandle *handle, const gchar *subject,
     const gchar *scope)
@@ -664,8 +730,11 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
 
   g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  g_autofree gchar *access_token = wyl_client_dup_access_token (client);
   if (session_token == NULL)
     return 124;
+  if (access_token == NULL)
+    return 164;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.policy.read",
@@ -791,6 +860,20 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 136;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
+      "/policy/permissions/grant",
+      "subject=bearer-target&perm=site.policy.read&scope=tenant-a"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      access_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 165;
+  if (!direct_permission_exists (handle, "bearer-target", "site.policy.read",
+          "tenant-a"))
+    return 166;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *builtin_grant_query =
@@ -1024,6 +1107,35 @@ send_raw_audit (SoupSession *session, const gchar *base_url,
 }
 
 static gint
+send_raw_audit_bearer (SoupSession *session, const gchar *base_url,
+    const gchar *query, const gchar *access_token, guint *out_status,
+    gchar **out_body)
+{
+  if (access_token == NULL)
+    return 89;
+
+  g_autofree gchar *uri = build_audit_uri (base_url, query);
+  g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
+  if (msg == NULL)
+    return 91;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  soup_message_headers_replace (soup_message_get_request_headers (msg),
+      "Authorization", authorization);
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 92;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint
 runtime_audit_events_table_exists (WylHandle *handle, gboolean *out_exists)
 {
   if (handle == NULL || out_exists == NULL)
@@ -1041,8 +1153,9 @@ runtime_audit_events_table_exists (WylHandle *handle, gboolean *out_exists)
 }
 
 static gint
-check_raw_audit_contract (WylHandle *handle, WylClient *client,
-    const gchar *base_url, const gchar *session_token)
+check_raw_audit_contract (SoupServer *server, WylHandle *handle,
+    WylClient *client, const gchar *base_url, const gchar *session_token,
+    const gchar *access_token)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -1098,6 +1211,91 @@ check_raw_audit_contract (WylHandle *handle, WylClient *client,
     return rc;
   if (status != 403 || strstr (body, "\"audit_denied\"") == NULL)
     return 98;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *bearer_allowed =
+      g_strdup_printf ("guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69");
+  rc = send_raw_audit_bearer (session, base_url, bearer_allowed, access_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "[") == NULL)
+    return 106;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *mixed =
+      g_strdup_printf ("session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=69", session_token);
+  rc = send_raw_audit_bearer (session, base_url, mixed, access_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
+    return 107;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit_bearer (session, base_url,
+      "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
+      "malformed.jwt", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
+    return 108;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit_bearer (session, base_url,
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      "malformed.jwt", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+    return 109;
+
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  const struct
+  {
+    const gchar *session_id;
+    const gchar *subject;
+    const gchar *principal_state;
+    const gchar *issuer;
+    const gchar *audience;
+    gint64 issued_at_delta;
+    gint failure_code;
+  } invalid_tokens[] = {
+    {"unknown-session", "http-audit-user", "authenticated", "wyrelogd",
+        "wyrelog-client", 0, 110},
+    {session_token, "other-user", "authenticated", "wyrelogd",
+        "wyrelog-client", 0, 111},
+    {session_token, "http-audit-user", "mfa_required", "wyrelogd",
+        "wyrelog-client", 0, 112},
+    {session_token, "http-audit-user", "authenticated", "wyrelogd",
+        "other-audience", 0, 113},
+    {session_token, "http-audit-user", "authenticated", "other-issuer",
+        "wyrelog-client", 0, 116},
+    {session_token, "http-audit-user", "authenticated", "wyrelogd",
+        "wyrelog-client", -1000, 114},
+    {session_token, "http-audit-user", "authenticated", "wyrelogd",
+        "wyrelog-client", 60, 115},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_tokens); i++) {
+    g_autofree gchar *bad_token = NULL;
+    if (sign_test_access_token (server, invalid_tokens[i].session_id,
+            invalid_tokens[i].subject, invalid_tokens[i].principal_state,
+            invalid_tokens[i].issuer, invalid_tokens[i].audience,
+            now + invalid_tokens[i].issued_at_delta, &bad_token)
+        != WYRELOG_E_OK)
+      return invalid_tokens[i].failure_code + 40;
+
+    g_clear_pointer (&body, g_free);
+    rc = send_raw_audit_bearer (session, base_url,
+        "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+        bad_token, &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+      return invalid_tokens[i].failure_code;
+  }
 
   g_autoptr (WylAuditIter) invalid_filter = NULL;
   if (wyl_client_audit_query_with_guard_context (client, "action()", 123,
@@ -1225,8 +1423,11 @@ main (void)
   if (wyl_client_login_skip_mfa (client, "http-audit-user") != WYRELOG_E_OK)
     return 84;
   g_autofree gchar *audit_session_token = wyl_client_dup_session_token (client);
+  g_autofree gchar *audit_access_token = wyl_client_dup_access_token (client);
   if (audit_session_token == NULL)
     return 85;
+  if (audit_access_token == NULL)
+    return 89;
   if (grant_audit_read (handle, "http-audit-user", audit_session_token) !=
       WYRELOG_E_OK)
     return 86;
@@ -1235,8 +1436,8 @@ main (void)
   if (drop_runtime_audit_events_table (handle) != WYRELOG_E_OK)
     return 87;
 
-  gint audit_auth_rc = check_raw_audit_contract (handle, client, base_url,
-      audit_session_token);
+  gint audit_auth_rc = check_raw_audit_contract (http.server, handle, client,
+      base_url, audit_session_token, audit_access_token);
   if (audit_auth_rc != 0)
     return audit_auth_rc;
 
