@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <string.h>
 
 #include "wyrelog/policy/store-private.h"
 
@@ -53,6 +54,19 @@ collect_template_facts (const gchar *contents, const gchar *prefix,
   return 0;
 }
 
+static guint
+count_substring (const gchar *haystack, const gchar *needle)
+{
+  guint count = 0;
+  const gchar *p = haystack;
+
+  while ((p = strstr (p, needle)) != NULL) {
+    count++;
+    p += strlen (needle);
+  }
+  return count;
+}
+
 static gint
 check_seed_list (GHashTable *template_ids, gsize count,
     const gchar *(*id_at) (gsize))
@@ -82,6 +96,8 @@ check_bootstrap_seed_consistency (void)
 
   if (!g_file_get_contents (path, &contents, &len, &error))
     return 30;
+  if (count_substring (contents, "\"wr.login.skip_mfa\"") != 1)
+    return 33;
 
   g_autoptr (GHashTable) roles = g_hash_table_new_full (g_str_hash,
       g_str_equal, g_free, NULL);

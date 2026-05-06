@@ -267,23 +267,29 @@ check_store_seeds_builtin_catalog (void)
     return 208;
   if (matches != 1)
     return 209;
+  if (count_rows (store, "SELECT COUNT(*) FROM permissions "
+          "WHERE perm_id = 'wr.login.skip_mfa' "
+          "AND class = 'critical';", &matches) != 0)
+    return 210;
+  if (matches != 1)
+    return 211;
 
   if (wyl_policy_store_upsert_role (store, "site.local-admin",
           "local admin") != WYRELOG_E_OK)
-    return 210;
+    return 212;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
-    return 211;
+    return 213;
   if (wyl_policy_store_role_exists (store, "site.local-admin", &exists)
       != WYRELOG_E_OK)
-    return 212;
+    return 214;
   if (!exists)
-    return 213;
+    return 215;
 
   if (count_rows (store, "SELECT COUNT(*) FROM roles "
           "WHERE role_id = 'wr.auditor';", &matches) != 0)
-    return 214;
+    return 216;
   if (matches != 1)
-    return 215;
+    return 217;
 
   return 0;
 }
@@ -368,6 +374,12 @@ check_store_rejects_builtin_catalog_upsert_drift (void)
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
           "changed audit read", "sensitive") != WYRELOG_E_POLICY)
     return 237;
+  if (wyl_policy_store_upsert_permission (store, "wr.login.skip_mfa",
+          "login skip mfa", "critical") != WYRELOG_E_OK)
+    return 242;
+  if (wyl_policy_store_upsert_permission (store, "wr.login.skip_mfa",
+          "login skip mfa", "sensitive") != WYRELOG_E_POLICY)
+    return 243;
   if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
           "audit read", "basic") != WYRELOG_E_POLICY)
     return 238;
