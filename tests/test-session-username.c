@@ -1020,6 +1020,16 @@ check_login_skip_mfa_uses_policy_permission (void)
   if (wrong_scope_session != NULL)
     return 183;
 
+  if (grant_role_permission (handle, "skip-mfa-role-user",
+          "site.skip-mfa-role", "wr.login.skip_mfa", "login") != WYRELOG_E_OK)
+    return 184;
+  g_autoptr (WylSession) role_session = NULL;
+  if (login_skip_mfa_user (handle, "skip-mfa-role-user", &role_session)
+      != WYRELOG_E_OK)
+    return 185;
+  if (role_session == NULL)
+    return 186;
+
   return 0;
 }
 
