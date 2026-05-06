@@ -31,5 +31,9 @@ wyrelog_error_t wyl_jwt_build_payload_json (const wyl_jwt_issue_input_t *
     input, gchar ** out_json);
 wyrelog_error_t wyl_jwt_build_unsigned_segments (const wyl_jwt_issue_input_t *
     input, gchar ** out_header_segment, gchar ** out_payload_segment);
+wyrelog_error_t wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t * input,
+    const guint8 * secret, gsize secret_len, gchar ** out_token);
+wyrelog_error_t wyl_jwt_verify_hs256_signature (const gchar * token,
+    const guint8 * secret, gsize secret_len, GBytes ** out_payload_json);
 
 G_END_DECLS;

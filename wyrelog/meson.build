@@ -37,7 +37,14 @@ wyrelog_sources = files(
   'wyl-version.c',
 )
 
-wyrelog_deps = [glib_dep, gio_dep, libchronoid_dep, sqlite_dep, wirelog_dep]
+wyrelog_deps = [
+  glib_dep,
+  gio_dep,
+  libchronoid_dep,
+  sodium_dep,
+  sqlite_dep,
+  wirelog_dep,
+]
 
 wyrelog_log_levels = {
   'none' : 0,

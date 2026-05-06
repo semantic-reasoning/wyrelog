@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "auth/jwt-private.h"
 
+#include <sodium.h>
 #include <string.h>
 
 static gboolean
@@ -195,4 +196,115 @@ wyl_jwt_build_unsigned_segments (const wyl_jwt_issue_input_t *input,
   if (rc != WYRELOG_E_OK)
     g_clear_pointer (out_header_segment, g_free);
   return rc;
+}
+
+static wyrelog_error_t
+signing_secret_valid (const guint8 *secret, gsize secret_len)
+{
+  if (secret == NULL || secret_len == 0)
+    return WYRELOG_E_INVALID;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+sign_hs256_input (const gchar *signing_input, const guint8 *secret,
+    gsize secret_len, guint8 out_signature[crypto_auth_hmacsha256_BYTES])
+{
+  if (signing_input == NULL || signing_secret_valid (secret, secret_len)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  if (sodium_init () < 0)
+    return WYRELOG_E_INTERNAL;
+
+  crypto_auth_hmacsha256_state state;
+  crypto_auth_hmacsha256_init (&state, secret, secret_len);
+  crypto_auth_hmacsha256_update (&state, (const guint8 *) signing_input,
+      strlen (signing_input));
+  crypto_auth_hmacsha256_final (&state, out_signature);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t *input,
+    const guint8 *secret, gsize secret_len, gchar **out_token)
+{
+  if (out_token == NULL || signing_secret_valid (secret, secret_len)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+
+  g_autofree gchar *header_segment = NULL;
+  g_autofree gchar *payload_segment = NULL;
+  wyrelog_error_t rc = wyl_jwt_build_unsigned_segments (input,
+      &header_segment, &payload_segment);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
+      header_segment, payload_segment);
+  guint8 signature[crypto_auth_hmacsha256_BYTES];
+  rc = sign_hs256_input (signing_input, secret, secret_len, signature);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *signature_segment = NULL;
+  rc = wyl_jwt_base64url_encode (signature, sizeof signature,
+      &signature_segment);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_jwt_verify_hs256_signature (const gchar *token, const guint8 *secret,
+    gsize secret_len, GBytes **out_payload_json)
+{
+  if (token == NULL || out_payload_json == NULL ||
+      signing_secret_valid (secret, secret_len) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  *out_payload_json = NULL;
+
+  g_auto (GStrv) parts = g_strsplit (token, ".", 0);
+  if (parts[0] == NULL || parts[1] == NULL || parts[2] == NULL ||
+      parts[3] != NULL || parts[0][0] == '\0' || parts[1][0] == '\0' ||
+      parts[2][0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (GBytes) header = NULL;
+  wyrelog_error_t rc = wyl_jwt_base64url_decode (parts[0], &header);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize header_len = 0;
+  const gchar *header_data = g_bytes_get_data (header, &header_len);
+  if (header_len != strlen ("{\"alg\":\"HS256\",\"typ\":\"JWT\"}") ||
+      memcmp (header_data, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+          header_len) != 0)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (GBytes) signature = NULL;
+  rc = wyl_jwt_base64url_decode (parts[2], &signature);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize signature_len = 0;
+  const guint8 *signature_data = g_bytes_get_data (signature, &signature_len);
+  if (signature_len != crypto_auth_hmacsha256_BYTES)
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
+      parts[0], parts[1]);
+  guint8 expected[crypto_auth_hmacsha256_BYTES];
+  rc = sign_hs256_input (signing_input, secret, secret_len, expected);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sodium_memcmp (signature_data, expected, sizeof expected) != 0)
+    return WYRELOG_E_POLICY;
+
+  g_autoptr (GBytes) payload = NULL;
+  rc = wyl_jwt_base64url_decode (parts[1], &payload);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_payload_json = g_steal_pointer (&payload);
+  return WYRELOG_E_OK;
 }
