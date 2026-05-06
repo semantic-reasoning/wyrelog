@@ -973,18 +973,39 @@ send_raw_audit (SoupSession *session, const gchar *base_url,
 }
 
 static gint
-check_raw_audit_contract (WylClient *client, const gchar *base_url,
-    const gchar *session_token)
+runtime_audit_events_table_exists (WylHandle *handle, gboolean *out_exists)
+{
+  if (handle == NULL || out_exists == NULL)
+    return 102;
+
+  *out_exists = FALSE;
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result = { 0 };
+  duckdb_state rc = duckdb_query (conn,
+      "SELECT COUNT(*) FROM audit_events;", &result);
+  duckdb_destroy_result (&result);
+  *out_exists = rc == DuckDBSuccess;
+  return 0;
+}
+
+static gint
+check_raw_audit_contract (WylHandle *handle, WylClient *client,
+    const gchar *base_url, const gchar *session_token)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
+  gboolean audit_table_exists = TRUE;
 
   gint rc = send_raw_audit (session, base_url, NULL, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
     return 93;
+  if (runtime_audit_events_table_exists (handle, &audit_table_exists) != 0
+      || audit_table_exists)
+    return 103;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit (session, base_url,
@@ -994,6 +1015,9 @@ check_raw_audit_contract (WylClient *client, const gchar *base_url,
     return rc;
   if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
     return 94;
+  if (runtime_audit_events_table_exists (handle, &audit_table_exists) != 0
+      || audit_table_exists)
+    return 104;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_audit (session, base_url,
@@ -1160,7 +1184,7 @@ main (void)
   if (drop_runtime_audit_events_table (handle) != WYRELOG_E_OK)
     return 87;
 
-  gint audit_auth_rc = check_raw_audit_contract (client, base_url,
+  gint audit_auth_rc = check_raw_audit_contract (handle, client, base_url,
       audit_session_token);
   if (audit_auth_rc != 0)
     return audit_auth_rc;
