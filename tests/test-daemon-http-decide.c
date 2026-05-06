@@ -1740,6 +1740,18 @@ main (void)
       WYL_DECISION_ALLOW, NULL, NULL);
   if (audit_rc != 0)
     return audit_rc;
+  audit_rc = check_audit_event_present (client,
+      "deny_reason(\"not_armed\")",
+      "http-deny-user", "http.not_armed", "http-deny-scope",
+      WYL_DECISION_DENY, "not_armed", "perm_state");
+  if (audit_rc != 0)
+    return audit_rc;
+  audit_rc = check_audit_event_present (client,
+      "deny_origin(\"perm_state\")",
+      "http-deny-user", "http.not_armed", "http-deny-scope",
+      WYL_DECISION_DENY, "not_armed", "perm_state");
+  if (audit_rc != 0)
+    return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"wr.audit.read\")",
       "http-guard-user", "wr.audit.read", "http-guard-scope",
       WYL_DECISION_DENY, "not_armed", "perm_state");
