@@ -491,13 +491,138 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 }
 
 #ifdef WYL_HAS_AUDIT
+static wyrelog_error_t
+grant_audit_read (WylHandle *handle, const gchar *subject_id,
+    const gchar *scope)
+{
+  wyrelog_error_t rc =
+      insert_symbol_row2 (handle, "role_permission", "wr.http-audit-role",
+      "wr.audit.read");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row3 (handle, "member_of", subject_id,
+      "wr.http-audit-role", scope);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "principal_state", subject_id,
+      "authenticated");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_symbol_row2 (handle, "session_state", scope, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return insert_symbol_row1 (handle, "session_active", "active");
+}
+
+static gchar *
+build_audit_uri (const gchar *base_url, const gchar *query)
+{
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  if (query == NULL)
+    return g_strdup_printf ("%s/audit/events", root);
+  return g_strdup_printf ("%s/audit/events?%s", root, query);
+}
+
+static gint
+send_raw_audit (SoupSession *session, const gchar *base_url,
+    const gchar *query, guint *out_status, gchar **out_body)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 90;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *uri = build_audit_uri (base_url, query);
+  g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
+  if (msg == NULL)
+    return 91;
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 92;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint
+check_raw_audit_contract (WylClient *client, const gchar *base_url,
+    const gchar *session_token)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  gint rc = send_raw_audit (session, base_url, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+    return 93;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit (session, base_url,
+      "session_token=unknown&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+    return 94;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit (session, base_url,
+      "session_token=unknown&guard_timestamp=abc&guard_loc_class=public"
+      "&guard_risk=69", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
+    return 101;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *malformed =
+      g_strdup_printf ("session_token=%s&guard_timestamp=abc"
+      "&guard_loc_class=public&guard_risk=69", session_token);
+  rc = send_raw_audit (session, base_url, malformed, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
+    return 95;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *denied =
+      g_strdup_printf ("session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=70", session_token);
+  rc = send_raw_audit (session, base_url, denied, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"audit_denied\"") == NULL)
+    return 98;
+
+  g_autoptr (WylAuditIter) invalid_filter = NULL;
+  if (wyl_client_audit_query_with_guard_context (client, "action()", 123,
+          "public", 69, &invalid_filter) != WYRELOG_E_OK)
+    return 99;
+  gboolean has_next = FALSE;
+  if (wyl_audit_iter_next (invalid_filter, &has_next) != WYRELOG_E_IO)
+    return 100;
+
+  return 0;
+}
+
 static gint
 check_audit_event_present (WylClient *client, const gchar *filter,
     const gchar *subject, const gchar *action, const gchar *resource,
     wyl_decision_t decision, const gchar *deny_reason, const gchar *deny_origin)
 {
   g_autoptr (WylAuditIter) iter = NULL;
-  if (wyl_client_audit_query (client, filter, &iter) != WYRELOG_E_OK)
+  if (wyl_client_audit_query_with_guard_context (client, filter, 123,
+          "public", 69, &iter) != WYRELOG_E_OK)
     return 80;
 
   while (TRUE) {
@@ -580,6 +705,22 @@ main (void)
     return 13;
 
 #ifdef WYL_HAS_AUDIT
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (client, "http-audit-user") != WYRELOG_E_OK)
+    return 84;
+  g_autofree gchar *audit_session_token = wyl_client_dup_session_token (client);
+  if (audit_session_token == NULL)
+    return 85;
+  if (grant_audit_read (handle, "http-audit-user", audit_session_token) !=
+      WYRELOG_E_OK)
+    return 86;
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+
+  gint audit_auth_rc = check_raw_audit_contract (client, base_url,
+      audit_session_token);
+  if (audit_auth_rc != 0)
+    return audit_auth_rc;
+
   gint audit_rc = check_audit_event_present (client,
       "action(\"http.not_armed\")",
       "http-deny-user", "http.not_armed", "http-deny-scope",
