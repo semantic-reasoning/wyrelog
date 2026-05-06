@@ -601,6 +601,8 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
           (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 484;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 487;
 
   rc = send_raw_login (session, "POST", base_url,
       "username=login-user&skip_mfa=true", &status, &body);

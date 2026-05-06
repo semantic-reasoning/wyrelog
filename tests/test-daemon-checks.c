@@ -124,6 +124,8 @@ check_login_skip_mfa_ready_allows_policy_path (void)
           (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 41;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 45;
   if (wyl_daemon_check_login_skip_mfa_ready (handle) != WYRELOG_E_OK)
     return 42;
 
@@ -138,6 +140,52 @@ check_login_skip_mfa_ready_allows_policy_path (void)
     return 43;
   if (count != 1)
     return 44;
+  return 0;
+}
+
+static gint
+check_login_skip_mfa_ready_allows_role_policy_path (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 count = 0;
+  wyl_policy_store_t *store = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 46;
+  store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wyrelogd-skip-mfa-role",
+          "skip mfa role") != WYRELOG_E_OK)
+    return 47;
+  if (wyl_policy_store_grant_role_permission (store,
+          "wyrelogd-skip-mfa-role", "wr.login.skip_mfa") != WYRELOG_E_OK)
+    return 48;
+  if (wyl_policy_store_grant_role_membership (store,
+          "wyrelogd-skip-mfa-user", "wyrelogd-skip-mfa-role", "login")
+      != WYRELOG_E_OK)
+    return 49;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 60;
+
+  g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
+  g_autoptr (WylSession) session = NULL;
+  wyl_login_req_set_username (login, "wyrelogd-skip-mfa-user");
+  wyl_login_req_set_skip_mfa (login, TRUE);
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_OK)
+    return 61;
+  if (session == NULL)
+    return 64;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  if (!count_duckdb_rows (conn,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'principal_state' "
+          "AND subject_id = 'wyrelogd-skip-mfa-user' "
+          "AND deny_reason = 'login_skip_mfa' "
+          "AND resource_id = 'authenticated' AND decision = 1;", &count))
+    return 62;
+  if (count != 1)
+    return 63;
   return 0;
 }
 
@@ -212,6 +260,8 @@ main (void)
   if ((rc = check_login_skip_mfa_ready_allows_development_path ()) != 0)
     return rc;
   if ((rc = check_login_skip_mfa_ready_allows_policy_path ()) != 0)
+    return rc;
+  if ((rc = check_login_skip_mfa_ready_allows_role_policy_path ()) != 0)
     return rc;
   return 0;
 }
