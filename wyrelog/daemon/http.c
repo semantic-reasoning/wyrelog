@@ -856,6 +856,55 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 }
 
 static void
+logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
+    GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  if (lookup_bearer_token (msg) != NULL) {
+    set_json_error (msg, 400, "invalid_logout_auth");
+    return;
+  }
+
+  const gchar *session_token = NULL;
+  if (query != NULL)
+    session_token = g_hash_table_lookup (query, "session_token");
+  if (session_token == NULL || session_token[0] == '\0') {
+    set_json_error (msg, 401, "logout_auth_required");
+    return;
+  }
+
+  g_autoptr (WylSession) session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (session == NULL) {
+    set_json_error (msg, 401, "logout_auth_required");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  wyrelog_error_t rc = wyl_session_close (ctx->handle, session);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "logout_failed");
+    return;
+  }
+
+  if (!wyl_daemon_http_context_remove_session (ctx, session_token)) {
+    set_json_error (msg, 401, "logout_auth_required");
+    return;
+  }
+
+  const gchar *body = "{\"ok\":true}";
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
+}
+
+static void
 decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
 {
@@ -949,6 +998,7 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
       wyl_daemon_http_context_free);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
+  soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
   soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/permissions/grant",
       policy_permission_grant_handler, ctx, NULL);

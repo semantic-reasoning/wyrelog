@@ -452,6 +452,99 @@ sign_test_access_token (SoupServer *server, const gchar *session_id,
 #endif
 
 static gint
+send_raw_logout (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, guint *out_status,
+    gchar **out_body)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 484;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  g_autofree gchar *uri = query != NULL ?
+      g_strdup_printf ("%s/auth/logout?%s", root, query) :
+      g_strdup_printf ("%s/auth/logout", root);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 485;
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 486;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint
+send_raw_logout_authorization (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, const gchar *authorization,
+    guint *out_status, gchar **out_body)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 484;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  g_autofree gchar *uri = query != NULL ?
+      g_strdup_printf ("%s/auth/logout?%s", root, query) :
+      g_strdup_printf ("%s/auth/logout", root);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 485;
+  soup_message_headers_replace (soup_message_get_request_headers (msg),
+      "Authorization", authorization);
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 486;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint send_raw_policy_mutation (SoupSession * session,
+    const gchar * method, const gchar * base_url, const gchar * path,
+    const gchar * query, guint * out_status, gchar ** out_body);
+static wyrelog_error_t grant_policy_write_authority (WylHandle * handle,
+    const gchar * subject, const gchar * scope);
+
+typedef struct
+{
+  const gchar *session_id;
+  const gchar *state;
+  guint matches;
+} SessionStateExpect;
+
+static wyrelog_error_t
+session_state_expect_cb (const gchar *session_id, const gchar *state,
+    gpointer user_data)
+{
+  SessionStateExpect *expect = user_data;
+
+  if (g_strcmp0 (session_id, expect->session_id) == 0 &&
+      g_strcmp0 (state, expect->state) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static gint
 check_raw_login_contract (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
@@ -597,6 +690,96 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       wyl_daemon_http_ref_session (server, "unknown-session");
   if (unknown_session != NULL)
     return 480;
+
+  rc = send_raw_logout (session, "GET", base_url, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 487;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_logout (session, "POST", base_url, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
+    return 488;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_logout (session, "POST", base_url, "session_token=unknown",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
+    return 489;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url, "username=logout-user",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 490;
+  g_autofree gchar *logout_session_token =
+      extract_json_string (body, "session_token");
+  if (logout_session_token == NULL)
+    return 491;
+  g_clear_pointer (&body, g_free);
+  if (grant_policy_write_authority (handle, "logout-user",
+          logout_session_token) != WYRELOG_E_OK)
+    return 492;
+  if (wyl_policy_store_upsert_permission (wyl_handle_get_policy_store (handle),
+          "site.policy.read", "site policy read", "basic") != WYRELOG_E_OK)
+    return 493;
+
+  g_autofree gchar *logout_query = g_strdup_printf ("session_token=%s",
+      logout_session_token);
+  rc = send_raw_logout_authorization (session, "POST", base_url, logout_query,
+      "Bearer ignored", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_logout_auth\"") == NULL)
+    return 494;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_logout (session, "POST", base_url, logout_query, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 495;
+  g_autoptr (WylSession) logged_out_session =
+      wyl_daemon_http_ref_session (server, logout_session_token);
+  if (logged_out_session != NULL)
+    return 496;
+  SessionStateExpect closed_expect = {
+    .session_id = logout_session_token,
+    .state = "closed",
+  };
+  if (wyl_policy_store_foreach_session_state (wyl_handle_get_policy_store
+          (handle), session_state_expect_cb, &closed_expect) != WYRELOG_E_OK)
+    return 497;
+  if (closed_expect.matches != 1)
+    return 498;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *guarded_query = g_strdup_printf ("session_token=%s"
+      "&subject=after-logout&perm=site.policy.read&scope=after-logout"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      logout_session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", guarded_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"policy_auth_required\"") == NULL)
+    return 499;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_logout (session, "POST", base_url, logout_query, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"logout_auth_required\"") == NULL)
+    return 500;
 
   return 0;
 }
