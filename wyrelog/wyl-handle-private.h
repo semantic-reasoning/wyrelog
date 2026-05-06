@@ -4,7 +4,7 @@
 #include <glib.h>
 
 #include "wyrelog/handle.h"
-#include "wyrelog/engine.h"
+#include "wyl-engine-private.h"
 #include "policy/store-private.h"
 
 #ifdef WYL_HAS_AUDIT
@@ -68,6 +68,16 @@ wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
 wyrelog_error_t wyl_handle_intern_engine_symbol (WylHandle * self,
     const gchar * symbol, gint64 * out_id);
 gchar *wyl_handle_dup_engine_symbol (WylHandle * self, gint64 id);
+
+/*
+ * Allocates the same side-tier compound term in both handle-owned policy
+ * engines and returns the shared handle. Rejected unless both engines are
+ * open and both evaluators return the same session-local handle id. The
+ * returned id is pair-local scratch state and must not be persisted.
+ */
+wyrelog_error_t wyl_handle_make_engine_compound (WylHandle * self,
+    const gchar * functor, const wirelog_compound_arg_t * args, gsize nargs,
+    gint64 * out_id);
 
 /*
  * Applies an EDB row update to both handle-owned policy engines. Rejected

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
@@ -55,6 +56,78 @@ typedef struct
   const gint64 *row;
   guint matches;
 } GuardBridgeExpect;
+
+typedef struct
+{
+  gint64 expected_id;
+  guint matches;
+} SeenExpect;
+
+static gchar *
+make_tmpdir (void)
+{
+  g_autoptr (GError) err = NULL;
+  gchar *dir = g_dir_make_tmp ("wyl-handle-compound-test-XXXXXX", &err);
+  if (dir == NULL) {
+    g_printerr ("make_tmpdir: %s\n", err ? err->message : "?");
+    return NULL;
+  }
+  return dir;
+}
+
+static gboolean
+write_file_in_dir (const gchar *dir, const gchar *filename,
+    const gchar *contents)
+{
+  g_autofree gchar *path = g_build_filename (dir, filename, NULL);
+  g_autoptr (GError) err = NULL;
+  return g_file_set_contents (path, contents, -1, &err);
+}
+
+static void
+rmdir_recursive (const gchar *dir)
+{
+  g_autoptr (GDir) d = g_dir_open (dir, 0, NULL);
+  if (d == NULL) {
+    g_rmdir (dir);
+    return;
+  }
+
+  const gchar *name;
+  while ((name = g_dir_read_name (d)) != NULL) {
+    g_autofree gchar *path = g_build_filename (dir, name, NULL);
+    if (g_file_test (path, G_FILE_TEST_IS_DIR))
+      rmdir_recursive (path);
+    else
+      g_unlink (path);
+  }
+  g_rmdir (dir);
+}
+
+static gboolean
+write_compound_templates (const gchar *dir)
+{
+  g_autofree gchar *fsm_dir = g_build_filename (dir, "fsm", NULL);
+  if (g_mkdir (fsm_dir, 0755) != 0)
+    return FALSE;
+  g_autofree gchar *lobac_dir = g_build_filename (dir, "lobac", NULL);
+  if (g_mkdir (lobac_dir, 0755) != 0)
+    return FALSE;
+
+  return write_file_in_dir (dir, "bootstrap.dl",
+      ".decl event(id: int64, payload: scope/1 side)\n"
+      ".decl seen(id: int64)\n" "seen(ID) :- event(ID, scope(_)).\n")
+      && write_file_in_dir (dir, "fsm/principal.dl",
+      ".decl principal_transition(from_state: symbol, event: symbol,"
+      " to_state: symbol)\n")
+      && write_file_in_dir (dir, "fsm/session.dl",
+      ".decl session_active(state: symbol)\n"
+      ".decl session_transition(from_state: symbol, event: symbol,"
+      " to_state: symbol)\n")
+      && write_file_in_dir (dir, "fsm/permission_scope.dl",
+      ".decl perm_arm_rule(perm: symbol, guard_handle: symbol)\n")
+      && write_file_in_dir (dir, "lobac/decision.dl", "// decision stub\n");
+}
 
 static void
 snapshot_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
@@ -159,6 +232,18 @@ eval_guard_count_cb (const gchar *relation, const gint64 *row, guint ncols,
 
   if (ncols == 4 && row[0] == expect->row[0] && row[1] == expect->row[1]
       && row[2] == expect->row[2])
+    expect->matches++;
+}
+
+static void
+seen_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
+    gpointer user_data)
+{
+  SeenExpect *expect = user_data;
+
+  if (g_strcmp0 (relation, "seen") != 0 || ncols != 1)
+    return;
+  if (row[0] == expect->expected_id)
     expect->matches++;
 }
 
@@ -691,6 +776,155 @@ check_symbol_intern_rejects_missing_pair (void)
     return 81;
   if (id != -1)
     return 82;
+  return 0;
+}
+
+static gint
+check_compound_make_rejects_invalid_args (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 id = -1;
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_INT64, 123},
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 83;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 84;
+  if (wyl_handle_make_engine_compound (NULL, "scope", args, 1, &id)
+      != WYRELOG_E_INVALID)
+    return 85;
+  if (id != 0)
+    return 86;
+  id = -1;
+  if (wyl_handle_make_engine_compound (handle, NULL, args, 1, &id)
+      != WYRELOG_E_INVALID)
+    return 87;
+  if (id != 0)
+    return 88;
+  id = -1;
+  if (wyl_handle_make_engine_compound (handle, "", args, 1, &id)
+      != WYRELOG_E_INVALID)
+    return 89;
+  if (id != 0)
+    return 90;
+  id = -1;
+  if (wyl_handle_make_engine_compound (handle, "scope", NULL, 1, &id)
+      != WYRELOG_E_INVALID)
+    return 91;
+  if (id != 0)
+    return 92;
+  id = -1;
+  if (wyl_handle_make_engine_compound (handle, "scope", args, 0, &id)
+      != WYRELOG_E_INVALID)
+    return 93;
+  if (id != 0)
+    return 94;
+  if (wyl_handle_make_engine_compound (handle, "scope", args, 1, NULL)
+      != WYRELOG_E_INVALID)
+    return 95;
+  return 0;
+}
+
+static gint
+check_compound_make_rejects_missing_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 id = -1;
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_INT64, 123},
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 96;
+  if (wyl_handle_make_engine_compound (handle, "scope", args, 1, &id)
+      != WYRELOG_E_INVALID)
+    return 97;
+  if (id != 0)
+    return 98;
+  return 0;
+}
+
+static gint
+check_compound_make_reaches_engine_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 loc_class = -1;
+  gint64 compound = -1;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 99;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 100;
+  if (wyl_handle_intern_engine_symbol (handle, "trusted", &loc_class)
+      != WYRELOG_E_OK)
+    return 101;
+
+  wirelog_compound_arg_t args[3] = {
+    {WIRELOG_TYPE_INT64, 1700000000},
+    {WIRELOG_TYPE_STRING, loc_class},
+    {WIRELOG_TYPE_INT64, 10},
+  };
+  if (wyl_handle_make_engine_compound (handle, "metadata", args,
+          G_N_ELEMENTS (args), &compound) != WYRELOG_E_OK)
+    return 102;
+  if (compound <= 0)
+    return 103;
+  return 0;
+}
+
+static gint
+check_compound_make_result_is_insertable (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autofree gchar *tmpdir = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 104;
+  tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 105;
+  if (!write_compound_templates (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 106;
+  }
+  if (wyl_handle_open_engine_pair (handle, tmpdir) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 107;
+  }
+
+  gint64 payload = -1;
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_INT64, 42},
+  };
+  if (wyl_handle_make_engine_compound (handle, "scope", args,
+          G_N_ELEMENTS (args), &payload) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 108;
+  }
+
+  const gint64 row[2] = { 7, payload };
+  if (wyl_handle_engine_insert (handle, "event", row, G_N_ELEMENTS (row))
+      != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 109;
+  }
+
+  SeenExpect expect = {
+    .expected_id = row[0],
+    .matches = 0,
+  };
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle), "seen",
+          seen_expect_cb, &expect) != WYRELOG_E_OK) {
+    rmdir_recursive (tmpdir);
+    return 110;
+  }
+  rmdir_recursive (tmpdir);
+  if (expect.matches != 1)
+    return 111;
   return 0;
 }
 
@@ -2286,6 +2520,14 @@ main (void)
   if ((rc = check_symbol_intern_can_be_reversed ()) != 0)
     return rc;
   if ((rc = check_symbol_intern_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_compound_make_rejects_invalid_args ()) != 0)
+    return rc;
+  if ((rc = check_compound_make_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_compound_make_reaches_engine_pair ()) != 0)
+    return rc;
+  if ((rc = check_compound_make_result_is_insertable ()) != 0)
     return rc;
   if ((rc = check_insert_fanout_reaches_read_engine ()) != 0)
     return rc;

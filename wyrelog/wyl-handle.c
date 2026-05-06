@@ -546,6 +546,40 @@ wyl_handle_dup_engine_symbol (WylHandle *self, gint64 id)
   return g_strdup (symbol);
 }
 
+wyrelog_error_t
+wyl_handle_make_engine_compound (WylHandle *self, const gchar *functor,
+    const wirelog_compound_arg_t *args, gsize nargs, gint64 *out_id)
+{
+  if (out_id != NULL)
+    *out_id = (gint64) WIRELOG_COMPOUND_HANDLE_NULL;
+
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (functor == NULL || functor[0] == '\0' || args == NULL || out_id == NULL)
+    return WYRELOG_E_INVALID;
+  if (nargs == 0 || nargs > G_MAXUINT32)
+    return WYRELOG_E_INVALID;
+  if (self->read_engine == NULL || self->delta_engine == NULL)
+    return WYRELOG_E_INVALID;
+
+  gint64 read_id = 0;
+  wyrelog_error_t rc = wyl_engine_make_compound (self->read_engine,
+      functor, args, nargs, &read_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 delta_id = 0;
+  rc = wyl_engine_make_compound (self->delta_engine, functor, args, nargs,
+      &delta_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (read_id != delta_id)
+    return WYRELOG_E_INTERNAL;
+
+  *out_id = read_id;
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 relation_fans_out_to_delta (const gchar *relation)
 {
