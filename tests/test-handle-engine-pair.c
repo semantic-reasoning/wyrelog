@@ -2448,6 +2448,70 @@ check_policy_store_session_events_reload_failure_preserves_pair (void)
 }
 
 static gint
+check_policy_store_inheritance_cycle_fails_open (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 467;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_role (store, "wr.cycle-a", "cycle a")
+      != WYRELOG_E_OK)
+    return 468;
+  if (wyl_policy_store_upsert_role (store, "wr.cycle-b", "cycle b")
+      != WYRELOG_E_OK)
+    return 469;
+  if (wyl_policy_store_grant_role_inheritance (store, "wr.cycle-a",
+          "wr.cycle-b") != WYRELOG_E_OK)
+    return 470;
+  if (wyl_policy_store_grant_role_inheritance (store, "wr.cycle-b",
+          "wr.cycle-a") != WYRELOG_E_OK)
+    return 471;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_POLICY)
+    return 472;
+  if (wyl_handle_get_read_engine (handle) != NULL)
+    return 473;
+  return wyl_handle_get_delta_engine (handle) == NULL ? 0 : 474;
+}
+
+static gint
+check_policy_store_inheritance_depth_fails_reload_and_preserves_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 475;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 476;
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  for (guint i = 0; i < 5; i++) {
+    g_autofree gchar *role_id = g_strdup_printf ("wr.depth-%u", i);
+    g_autofree gchar *role_name = g_strdup_printf ("depth %u", i);
+    if (wyl_policy_store_upsert_role (store, role_id, role_name)
+        != WYRELOG_E_OK)
+      return 477;
+  }
+  for (guint i = 0; i < 4; i++) {
+    g_autofree gchar *child = g_strdup_printf ("wr.depth-%u", i);
+    g_autofree gchar *parent = g_strdup_printf ("wr.depth-%u", i + 1);
+    if (wyl_policy_store_grant_role_inheritance (store, child, parent)
+        != WYRELOG_E_OK)
+      return 478;
+  }
+
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_POLICY)
+    return 479;
+  if (wyl_handle_get_read_engine (handle) != read_engine)
+    return 480;
+  return wyl_handle_get_delta_engine (handle) == delta_engine ? 0 : 481;
+}
+
+static gint
 check_policy_store_audit_facts_reload_failure_preserves_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2635,6 +2699,12 @@ main (void)
     return rc;
   if ((rc = check_policy_store_session_events_reload_failure_preserves_pair ())
       != 0)
+    return rc;
+  if ((rc = check_policy_store_inheritance_cycle_fails_open ()) != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_inheritance_depth_fails_reload_and_preserves_pair
+          ()) != 0)
     return rc;
   if ((rc = check_policy_store_audit_facts_reload_failure_preserves_pair ())
       != 0)
