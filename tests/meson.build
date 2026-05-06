@@ -211,6 +211,7 @@ test_fsm_permission_scope = executable('test-fsm-permission-scope',
   'test-fsm-permission-scope.c',
   c_args : [
     '-DWYL_TEST_FSM_PERMISSION_SCOPE_DL_PATH="' + fsm_permission_scope_dl_path + '"',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
   ],
   dependencies : [wyrelog_dep],
 )

@@ -12,6 +12,11 @@
 // context_now/3 compound, guard_context/6, and eval_guard/4 bridge
 // facts for a satisfied guard expression.
 //
+// v0 still declares the permission-state transition schema so downstream
+// tools can depend on a stable FSM surface. No transition facts are present;
+// perm_state_step/3 is therefore intentionally empty until a later lifecycle
+// phase defines concrete dormant/armed/firing/cooldown transitions.
+//
 // EDB schemas (host-populated, no clauses below):
 //   perm_state(user, perm, scope, state)        -- v0 row count = 0
 //   has_permission(user, perm, scope)            -- declared in
@@ -45,6 +50,8 @@
 // facts are intentionally absent.
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
+.decl perm_state_transition(from: symbol, event: symbol, to: symbol)
+.decl perm_state_step(from: symbol, event: symbol, to: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: int64)
 .decl perm_window_guard(perm: symbol, window: symbol)
 .decl guard_row(handle: int64, root: int64)
@@ -62,6 +69,10 @@
 .decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)
 .decl perm_window_guard_observed(perm: symbol, window: symbol)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
+
+// --- permission-state FSM schema -------------------------------------
+
+perm_state_step(From, Ev, To) :- perm_state_transition(From, Ev, To).
 
 // --- perm_arm_rule catalogue seed ------------------------------------
 //
