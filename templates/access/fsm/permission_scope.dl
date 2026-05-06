@@ -31,10 +31,10 @@
 
 .decl perm_state(user: symbol, perm: symbol, scope: symbol, state: symbol)
 .decl perm_arm_rule(perm: symbol, guard_handle: symbol)
-.decl context_now(user: symbol, scope: symbol, ctx: symbol)
-.decl guard_context(ctx: symbol, user: symbol, scope: symbol,
+.decl context_now(user: symbol, scope: symbol, ctx: scope/2 side)
+.decl guard_context(ctx: scope/2 side, user: symbol, scope: symbol,
     timestamp: int64, loc_class: symbol, risk: int64)
-.decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: symbol)
+.decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: scope/2 side)
 .decl armed(user: symbol, perm: symbol, scope: symbol)
 
 // --- perm_arm_rule catalogue mirror ----------------------------------

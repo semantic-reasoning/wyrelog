@@ -4,6 +4,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "access/decision-private.h"
+#include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-permission-scope-private.h"
 
@@ -258,16 +259,6 @@ guard_is_satisfied (const wyl_guard_expr_t *guard, const wyl_decide_req_t *req)
   return wyl_eval_guard (guard, &scope);
 }
 
-static gchar *
-build_guard_context_symbol (const wyl_decide_req_t *req)
-{
-  static gint next_id = 0;
-  gint id = g_atomic_int_add (&next_id, 1) + 1;
-  return g_strdup_printf ("scope(metadata(%" G_GINT64_FORMAT ",%s,%"
-      G_GINT64_FORMAT "),request(%d))", req->guard_timestamp,
-      req->guard_loc_class, req->guard_risk, id);
-}
-
 static wyrelog_error_t
 remove_guard_eval_facts (WylHandle *handle, const guard_eval_facts_t *facts)
 {
@@ -301,16 +292,14 @@ insert_guard_eval_facts (WylHandle *handle, const gint64 row[3],
 {
   memset (facts, 0, sizeof (*facts));
 
-  g_autofree gchar *context_symbol = build_guard_context_symbol (req);
-  gint64 context_id = 0;
-  wyrelog_error_t rc =
-      wyl_handle_intern_engine_symbol (handle, context_symbol, &context_id);
+  gint64 loc_class_id = 0;
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle,
+      req->guard_loc_class, &loc_class_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  gint64 loc_class_id = 0;
-  rc = wyl_handle_intern_engine_symbol (handle, req->guard_loc_class,
-      &loc_class_id);
+  gint64 context_id = 0;
+  rc = wyl_handle_get_guard_context_compound (handle, &context_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
