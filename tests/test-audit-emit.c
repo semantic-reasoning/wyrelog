@@ -487,6 +487,34 @@ check_query_events_json_filters_rows (void)
     return 145;
   }
 
+  g_autofree gchar *reason_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "deny_reason(\"not_armed\")",
+          &reason_json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 1540;
+  }
+  if (g_strstr_len (reason_json, -1, "\"subject_id\":\"json-bob\"") == NULL
+      || g_strstr_len (reason_json, -1, "\"subject_id\":\"json-alice\"")
+      != NULL || g_strstr_len (reason_json, -1,
+          "\"deny_origin\":\"perm_state\"") == NULL) {
+    g_object_unref (handle);
+    return 1541;
+  }
+
+  g_autofree gchar *origin_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "deny_origin(\"perm_state\")",
+          &origin_json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 1542;
+  }
+  if (g_strstr_len (origin_json, -1, "\"subject_id\":\"json-bob\"") == NULL
+      || g_strstr_len (origin_json, -1, "\"subject_id\":\"json-alice\"")
+      != NULL || g_strstr_len (origin_json, -1,
+          "\"deny_reason\":\"not_armed\"") == NULL) {
+    g_object_unref (handle);
+    return 1543;
+  }
+
   g_autofree gchar *all_json = NULL;
   if (wyl_audit_conn_query_events_json (conn, NULL, &all_json)
       != WYRELOG_E_OK) {
