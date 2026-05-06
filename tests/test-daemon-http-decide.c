@@ -2,6 +2,9 @@
 #include <string.h>
 
 #include <glib.h>
+#ifdef WYL_HAS_AUDIT
+#include <duckdb.h>
+#endif
 
 #include "daemon/http.h"
 #include "wyrelog/client.h"
@@ -1017,6 +1020,23 @@ check_raw_audit_contract (WylClient *client, const gchar *base_url,
   return 0;
 }
 
+static wyrelog_error_t
+drop_runtime_audit_events_table (WylHandle *handle)
+{
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result = { 0 };
+
+  if (duckdb_query (conn, "DROP TABLE audit_events;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
 static gint
 check_audit_event_present (WylClient *client, const gchar *filter,
     const gchar *subject, const gchar *action, const gchar *resource,
@@ -1122,10 +1142,16 @@ main (void)
     return 86;
   wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
 
+  if (drop_runtime_audit_events_table (handle) != WYRELOG_E_OK)
+    return 87;
+
   gint audit_auth_rc = check_raw_audit_contract (client, base_url,
       audit_session_token);
   if (audit_auth_rc != 0)
     return audit_auth_rc;
+
+  if (drop_runtime_audit_events_table (handle) != WYRELOG_E_OK)
+    return 88;
 
   gint audit_rc = check_audit_event_present (client,
       "action(\"http.not_armed\")",

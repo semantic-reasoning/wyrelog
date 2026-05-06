@@ -285,6 +285,19 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   return TRUE;
 }
 
+#ifdef WYL_HAS_AUDIT
+static wyrelog_error_t
+reconcile_audit_query_projection (WylHandle *handle)
+{
+  wyrelog_error_t rc =
+      wyl_audit_conn_create_schema (wyl_handle_get_audit_conn (handle));
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  return wyl_handle_load_policy_store_audit_events (handle);
+}
+#endif
+
 static void
 audit_events_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -305,9 +318,10 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
 
   WylHandle *handle = ctx->handle;
   g_autofree gchar *body = NULL;
-  wyrelog_error_t rc =
-      wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
-      filter, &body);
+  wyrelog_error_t rc = reconcile_audit_query_projection (handle);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+        filter, &body);
   if (rc == WYRELOG_E_INVALID) {
     const gchar *error_body = "{\"error\":\"invalid_filter\"}";
     soup_server_message_set_status (msg, 400, NULL);
