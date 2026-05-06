@@ -536,11 +536,7 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
     const gchar *scope)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  wyrelog_error_t rc = wyl_policy_store_upsert_permission (store,
-      "wr.policy.write", "policy write", "critical");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_grant_direct_permission (store, subject,
+  wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
       "wr.policy.write", scope);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -555,11 +551,7 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
     const gchar *scope)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  wyrelog_error_t rc = wyl_policy_store_upsert_permission (store,
-      "wr.policy.grant_role", "policy grant role", "critical");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_grant_direct_permission (store, subject,
+  wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
       "wr.policy.grant_role", scope);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -732,6 +724,32 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 136;
   g_clear_pointer (&body, g_free);
 
+  g_autofree gchar *builtin_grant_query =
+      g_strdup_printf ("subject=builtin-target&perm=wr.stream.read"
+      "&scope=tenant-a&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", builtin_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 156;
+  if (!direct_permission_exists (handle, "builtin-target", "wr.stream.read",
+          "tenant-a"))
+    return 157;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/revoke", builtin_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 158;
+  if (direct_permission_exists (handle, "builtin-target", "wr.stream.read",
+          "tenant-a"))
+    return 159;
+  g_clear_pointer (&body, g_free);
+
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/policy/permissions/revoke", grant_query, &status, &body);
   if (rc != 0)
@@ -834,6 +852,32 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!role_membership_exists (handle, "role-target", "site.reader",
           "tenant-b"))
     return 146;
+
+  g_autofree gchar *builtin_role_query =
+      g_strdup_printf ("subject=builtin-role-target&role=wr.auditor"
+      "&scope=tenant-b&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=29", session_token);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/grant", builtin_role_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 160;
+  if (!role_membership_exists (handle, "builtin-role-target", "wr.auditor",
+          "tenant-b"))
+    return 161;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/roles/revoke", builtin_role_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 162;
+  if (role_membership_exists (handle, "builtin-role-target", "wr.auditor",
+          "tenant-b"))
+    return 163;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_policy_mutation (session, "POST", base_url,
