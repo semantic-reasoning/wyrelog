@@ -437,6 +437,10 @@ load_current_engine_pair (WylHandle *self)
 static wyrelog_error_t
 replace_engine_pair (WylHandle *self, const gchar *template_dir)
 {
+  wyrelog_error_t rc = wyl_policy_store_validate_snapshot (self->policy_store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   WylEngine *old_read_engine = self->read_engine;
   WylEngine *old_delta_engine = self->delta_engine;
   WylEngine *old_guard_context_compound_engine =
@@ -446,7 +450,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   gchar *old_template_dir = self->template_dir;
 
   WylEngine *new_read_engine = NULL;
-  wyrelog_error_t rc = wyl_engine_open (template_dir, 1, &new_read_engine);
+  rc = wyl_engine_open (template_dir, 1, &new_read_engine);
   if (rc != WYRELOG_E_OK)
     return rc;
 

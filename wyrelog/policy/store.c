@@ -64,6 +64,29 @@ deployment_mode_is_valid (const gchar *mode)
       || g_strcmp0 (mode, "development") == 0 || g_strcmp0 (mode, "demo") == 0;
 }
 
+static wyrelog_error_t
+query_has_rows (sqlite3 *db, const gchar *sql, gboolean *out_has_rows)
+{
+  if (db == NULL || sql == NULL || out_has_rows == NULL)
+    return WYRELOG_E_INVALID;
+  *out_has_rows = FALSE;
+
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    *out_has_rows = TRUE;
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_OK;
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
 wyrelog_error_t
 wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {
@@ -405,6 +428,55 @@ wyl_policy_store_table_exists (wyl_policy_store_t *store,
   }
 
   sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+
+  gboolean found = FALSE;
+  static const gchar *cycle_sql =
+      "WITH RECURSIVE walk(root, node, depth, path) AS ("
+      "  SELECT child_role_id, parent_role_id, 1,"
+      "    '|' || child_role_id || '|' || parent_role_id || '|' "
+      "  FROM role_inheritances"
+      "  UNION ALL "
+      "  SELECT walk.root, ri.parent_role_id, walk.depth + 1,"
+      "    walk.path || ri.parent_role_id || '|' "
+      "  FROM walk "
+      "  JOIN role_inheritances ri ON ri.child_role_id = walk.node "
+      "  WHERE walk.depth < 32 "
+      "    AND instr(walk.path, '|' || ri.parent_role_id || '|') = 0"
+      ") "
+      "SELECT 1 FROM walk WHERE root = node "
+      "UNION ALL "
+      "SELECT 1 FROM walk "
+      "JOIN role_inheritances ri ON ri.child_role_id = walk.node "
+      "WHERE ri.parent_role_id = walk.root " "LIMIT 1;";
+  wyrelog_error_t rc = query_has_rows (store->db, cycle_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  static const gchar *depth_sql =
+      "WITH RECURSIVE walk(child, parent, depth) AS ("
+      "  SELECT child_role_id, parent_role_id, 1 FROM role_inheritances"
+      "  UNION ALL "
+      "  SELECT walk.child, ri.parent_role_id, walk.depth + 1 "
+      "  FROM walk "
+      "  JOIN role_inheritances ri ON ri.child_role_id = walk.parent "
+      "  WHERE walk.depth < 4"
+      ") " "SELECT 1 FROM walk WHERE depth > 3 LIMIT 1;";
+  rc = query_has_rows (store->db, depth_sql, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
   return WYRELOG_E_OK;
 }
 
