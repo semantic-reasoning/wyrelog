@@ -1643,6 +1643,63 @@ check_policy_store_guarded_direct_permission_decides_with_context (void)
 }
 
 static gint
+check_policy_store_guarded_direct_permission_tags_miss_after_allow (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 420;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_upsert_permission (store, "wr.audit.read",
+          "audit read", "sensitive") != WYRELOG_E_OK)
+    return 421;
+  if (wyl_policy_store_grant_direct_permission (store, "guarded-seq-user",
+          "wr.audit.read", "guarded-seq-scope") != WYRELOG_E_OK)
+    return 422;
+  if (wyl_policy_store_set_principal_state (store, "guarded-seq-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 423;
+  if (wyl_policy_store_set_session_state (store, "guarded-seq-scope",
+          "active") != WYRELOG_E_OK)
+    return 424;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 425;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "guarded-seq-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "guarded-seq-scope");
+  wyl_decide_req_set_guard_context (req, 123, "public", 69);
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 426;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 427;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 428;
+  if (wyl_decide_resp_get_deny_origin (resp) != NULL)
+    return 429;
+
+  wyl_decide_req_set_guard_context (req, 123, "public", 70);
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_ALLOW);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 430;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 431;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 432;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 433;
+  gint residue = expect_guard_bridge_absent (handle, "guarded-seq-user",
+      "wr.audit.read", "guarded-seq-scope", 434);
+  if (residue != 0)
+    return residue;
+  return 0;
+}
+
+static gint
 check_policy_store_guarded_direct_permission_denies_without_context (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2261,6 +2318,10 @@ main (void)
     return rc;
   if ((rc =
           check_policy_store_guarded_direct_permission_decides_with_context ())
+      != 0)
+    return rc;
+  if ((rc =
+          check_policy_store_guarded_direct_permission_tags_miss_after_allow ())
       != 0)
     return rc;
   if ((rc =

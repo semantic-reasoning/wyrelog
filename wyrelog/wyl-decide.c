@@ -409,6 +409,29 @@ find_deny_reason (WylHandle *handle, const gint64 row[3],
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+fill_guard_miss_deny_reason (WylHandle *handle, const gint64 row[3],
+    const gint64 names[WYL_DENY_REASON_LAST_],
+    const gint64 origins[WYL_DENY_REASON_LAST_],
+    wyl_deny_reason_code_t *out_code)
+{
+  if (out_code == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = find_deny_reason (handle, row, names, origins, out_code);
+  if (rc != WYRELOG_E_OK || *out_code != WYL_DENY_REASON_LAST_)
+    return rc;
+
+  gboolean base_allowed = FALSE;
+  rc = wyl_handle_engine_contains (handle, "allow_guard_base", row, 3,
+      &base_allowed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (base_allowed)
+    *out_code = WYL_DENY_REASON_NOT_ARMED;
+  return WYRELOG_E_OK;
+}
+
 #ifdef WYL_HAS_AUDIT
 static void
 fail_closed_for_audit (wyl_decide_resp_t *resp)
@@ -463,8 +486,8 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     if (guard != NULL) {
       if (!guard_is_satisfied (guard, req)) {
         wyl_deny_reason_code_t code = WYL_DENY_REASON_LAST_;
-        rc = find_deny_reason (handle, row, reason_names, reason_origins,
-            &code);
+        rc = fill_guard_miss_deny_reason (handle, row, reason_names,
+            reason_origins, &code);
         if (rc != WYRELOG_E_OK)
           return rc;
         deny_reason = wyl_deny_reason_name (code);
