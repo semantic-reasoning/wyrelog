@@ -112,8 +112,16 @@ if build_client
     include_directories : wyrelog_inc,
     dependencies : [wyrelog_dep, glib_dep, gio_dep],
   )
+
+  wyctl_exe = executable('wyctl',
+    files('wyctl/wyctl.c'),
+    include_directories : wyrelog_inc,
+    dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep],
+    install : true,
+  )
 else
   wyrelog_client_dep = disabler()
+  wyctl_exe = disabler()
 endif
 
 wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep]
