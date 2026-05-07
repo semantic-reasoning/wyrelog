@@ -1251,6 +1251,40 @@ wyl_handle_load_policy_store_role_memberships (WylHandle *self)
 }
 
 static wyrelog_error_t
+direct_permission_should_synthesize_armed_state (WylHandle *self,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    gboolean *out_synthesize)
+{
+  if (out_synthesize != NULL)
+    *out_synthesize = FALSE;
+  if (self == NULL || !WYL_IS_HANDLE (self) || out_synthesize == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL)
+    return WYRELOG_E_INVALID;
+
+  /*
+   * Direct permissions grant authority membership. Unguarded legacy
+   * decisions also need an armed lifecycle fact, but only as a replay
+   * compatibility projection when the durable Policy Store has no
+   * permission_states row for this tuple.
+   *
+   * Guarded permissions never use persisted perm_state as their arming
+   * source; they are armed by request-local guard evidence instead.
+   */
+  if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
+    return WYRELOG_E_OK;
+
+  gboolean has_durable_state = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_permission_state_exists
+      (self->policy_store, subject_id, perm_id, scope, &has_durable_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_synthesize = !has_durable_state;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 insert_policy_store_direct_permission (const gchar *subject_id,
     const gchar *perm_id, const gchar *scope, gpointer user_data)
 {
@@ -1276,17 +1310,12 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  /* Guarded permissions are granted membership only. Their armed state
-   * comes from request-local guard evaluation, not persisted perm_state. */
-  if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
-    return WYRELOG_E_OK;
-
-  gboolean has_durable_state = FALSE;
-  rc = wyl_policy_store_permission_state_exists (self->policy_store, subject_id,
-      perm_id, scope, &has_durable_state);
+  gboolean synthesize_armed = FALSE;
+  rc = direct_permission_should_synthesize_armed_state (self, subject_id,
+      perm_id, scope, &synthesize_armed);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (has_durable_state)
+  if (!synthesize_armed)
     return WYRELOG_E_OK;
 
   gint64 state_row[4];
