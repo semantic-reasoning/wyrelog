@@ -527,6 +527,7 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   wyl_decide_req_set_resource_id (req,
       resource != NULL ? resource : auth_session_id);
   wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
+  wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
 
   wyrelog_error_t rc = wyl_decide (ctx->handle, req, resp);
   if (rc == WYRELOG_E_INVALID) {
