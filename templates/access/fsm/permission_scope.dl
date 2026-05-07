@@ -4,13 +4,14 @@
 // Copyright (C) 2026 wyrelog authors. Also available under a separate
 // commercial license; see LICENSE.md at the project root.
 //
-// Stateless armed/3 derivation. The version-0 perm-scope is a pure
-// IDB rule set with no transition lifecycle: the host must inject
-// perm_state(user, perm, scope, "armed") for unguarded permissions
-// that are ready to participate in allow/3. Guarded permissions are
-// armed only when the host injects a payload-bearing request-local
-// context_now/3 compound, guard_context/6, and eval_guard/4 bridge
-// facts for a satisfied guard expression.
+// Stateful armed/3 derivation. The version-0 perm-scope keeps the
+// durable permission-state lifecycle in the host policy store, then
+// replays the current snapshot as perm_state/4 and the transition
+// ledger as perm_state_event/7. Unguarded permissions participate in
+// allow/3 only when the current state is "armed". Guarded permissions
+// still require a payload-bearing request-local context_now/3
+// compound, guard_context/6, and eval_guard/4 bridge facts for a
+// satisfied guard expression.
 //
 // v0 defines the permission-state transition surface for host mutation
 // code and downstream tooling. The transition table is intentionally
@@ -19,7 +20,10 @@
 // events move them.
 //
 // EDB schemas (host-populated, no clauses below):
-//   perm_state(user, perm, scope, state)        -- v0 row count = 0
+//   perm_state(user, perm, scope, state)        -- current durable
+//                                                   lifecycle state
+//   perm_state_event(event_id, user, perm,     -- append-only durable
+//       scope, event, from_state, to_state)        transition ledger
 //   has_permission(user, perm, scope)            -- declared in
 //                                                   bootstrap.dl
 //   perm_arm_rule(perm, guard_handle)            -- guard(root) side

@@ -12,11 +12,12 @@
  * agree on the destination, undefined transitions agree on the
  * rejection.
  *
- * permission_scope is intentionally NOT bisimulated: the v0
- * permission scope is stateless armed/3 derivation, not a
- * Mealy-style transition table. The guard expression depth/atom
- * limits and the perm_arm_rule mirror oracle already cover its
- * semantics in earlier test files.
+ * permission_scope is covered by tests/test-fsm-permission-scope.c.
+ * That suite compares the Datalog transition rows against the C
+ * reference table and checks armed/3 projection from current
+ * perm_state/4 rows plus request-local guard context. Keeping it out
+ * of this bisimulation harness avoids mixing table-driven FSM tests
+ * with permission-scope projection tests.
  */
 #include <glib.h>
 #include <glib/gstdio.h>
