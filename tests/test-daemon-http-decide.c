@@ -1756,6 +1756,9 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 136;
+  if (permission_state_exists (handle, "target", "site.policy.read",
+          "tenant-a"))
+    return 204;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe grant_audit = {
     .subject_id = "http-policy-admin",
