@@ -7,7 +7,14 @@ WYRELOGD=$1
 CLIENT_TEST=$2
 TEMPLATE_DIR=$3
 PYTHON=$4
-PORT=$((39000 + $$ % 20000))
+PORT=$("$PYTHON" - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
 
 "$WYRELOGD" --template-dir "$TEMPLATE_DIR" --listen-port "$PORT" &
 PID=$!
@@ -26,7 +33,7 @@ port = sys.argv[1]
 url = f"http://127.0.0.1:{port}/healthz"
 last_error = None
 
-for _ in range(50):
+for _ in range(150):
     try:
         urllib.request.urlopen(url, timeout=1).read()
         sys.exit(0)

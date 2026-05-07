@@ -6,7 +6,14 @@ set -eu
 WYRELOGD=$1
 TEMPLATE_DIR=$2
 PYTHON=$3
-PORT=$((20000 + $$ % 15000))
+PORT=$("$PYTHON" - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
 TMPDIR=$(mktemp -d)
 PID=
 RC_FILE="$TMPDIR/daemon.rc"
