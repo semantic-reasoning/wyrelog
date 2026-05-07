@@ -242,6 +242,8 @@ check_delta_callback_ignores_runtime_projection_failure (void)
   runtime.handle = handle;
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 11;
+  if (!runtime.delta_session_live)
+    return 26;
   if (malform_audit_events_table (handle) != WYRELOG_E_OK)
     return 12;
   if (intern3 (handle, "daemon-delta-audit-user", "wr.viewer",
@@ -252,8 +254,12 @@ check_delta_callback_ignores_runtime_projection_failure (void)
     return 14;
   if (runtime.inserted == 0)
     return 15;
+  if (runtime.delta_events_seen == 0 || runtime.last_delta_event_us <= 0)
+    return 27;
   if (runtime.audit_errors != 0)
     return 16;
+  if (runtime.audit_degraded)
+    return 28;
   if (runtime.last_audit_error != WYRELOG_E_OK)
     return 17;
 
@@ -301,6 +307,8 @@ check_perm_state_delta_persists_audit_rows (void)
   runtime.handle = handle;
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 51;
+  if (!runtime.delta_session_live)
+    return 64;
   if (intern_perm_event7 (handle, 701, "daemon-delta-perm-user",
           "site.daemon-delta.perm", "daemon-delta-perm-scope", "grant",
           "dormant", "armed", event_row) != WYRELOG_E_OK)
@@ -311,16 +319,24 @@ check_perm_state_delta_persists_audit_rows (void)
     return 53;
   if (runtime.inserted == 0)
     return 54;
+  if (runtime.delta_events_seen == 0 || runtime.last_delta_event_us <= 0)
+    return 65;
   if (runtime.audit_errors != 0)
     return 55;
+  if (runtime.audit_degraded)
+    return 66;
 
   if (wyl_handle_engine_remove (handle, "perm_state_event", event_row, 7)
       != WYRELOG_E_OK)
     return 56;
   if (runtime.removed == 0)
     return 57;
+  if (runtime.delta_events_seen < 2)
+    return 67;
   if (runtime.audit_errors != 0)
     return 58;
+  if (runtime.audit_degraded)
+    return 68;
 
   g_autofree gchar *insert_id = NULL;
   gint64 insert_created_at_us = -1;
@@ -365,6 +381,8 @@ check_invalid_perm_state_delta_skips_audit_rows (void)
   runtime.handle = handle;
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 71;
+  if (!runtime.delta_session_live)
+    return 79;
   if (intern_perm_event7 (handle, 702, "daemon-delta-invalid-user",
           "site.daemon-delta.invalid", "daemon-delta-invalid-scope", "grant",
           "armed", "dormant", event_row) != WYRELOG_E_OK)
@@ -375,8 +393,12 @@ check_invalid_perm_state_delta_skips_audit_rows (void)
     return 73;
   if (runtime.inserted != 0 || runtime.removed != 0)
     return 74;
+  if (runtime.delta_events_seen != 0 || runtime.last_delta_event_us != 0)
+    return 80;
   if (runtime.audit_errors != 0)
     return 75;
+  if (runtime.audit_degraded)
+    return 81;
 
   guint matches = 0;
   if (!count_policy_audit_rows (handle, "perm_state_fired_delta_insert",
