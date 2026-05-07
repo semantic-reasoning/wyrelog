@@ -47,6 +47,12 @@ typedef wyrelog_error_t (*wyl_policy_audit_event_cb) (const gchar * id,
     const gchar * resource_id, const gchar * deny_reason,
     const gchar * deny_origin, const gchar * request_id,
     wyl_decision_t decision, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_audit_intention_cb) (const gchar * id,
+    gint64 created_at_us, const gchar * subject_id, const gchar * action,
+    const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, const gchar * request_id,
+    wyl_decision_t decision, const gchar * state, gint64 attempt_count,
+    const gchar * last_error, gpointer user_data);
 
 /*
  * Policy authority store lifecycle wrapper.
@@ -220,6 +226,19 @@ wyrelog_error_t wyl_policy_store_append_audit_event_full (wyl_policy_store_t *
     const gchar * action, const gchar * resource_id,
     const gchar * deny_reason, const gchar * deny_origin,
     const gchar * request_id, wyl_decision_t decision, gboolean * out_inserted);
+wyrelog_error_t wyl_policy_store_record_audit_intention_full
+    (wyl_policy_store_t * store, const gchar * id, gint64 created_at_us,
+    const gchar * subject_id, const gchar * action,
+    const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, const gchar * request_id,
+    wyl_decision_t decision, gboolean * out_inserted);
+wyrelog_error_t wyl_policy_store_mark_audit_intention_committed
+    (wyl_policy_store_t * store, const gchar * id);
+wyrelog_error_t wyl_policy_store_mark_audit_intention_failed
+    (wyl_policy_store_t * store, const gchar * id, const gchar * last_error);
+wyrelog_error_t wyl_policy_store_foreach_audit_intention
+    (wyl_policy_store_t * store, const gchar * state,
+    wyl_policy_audit_intention_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_delete_audit_event (wyl_policy_store_t *
     store, const gchar * id);
 wyrelog_error_t wyl_policy_store_foreach_audit_event (wyl_policy_store_t *

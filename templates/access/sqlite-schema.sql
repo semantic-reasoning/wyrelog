@@ -311,6 +311,42 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_request_id
     ON audit_events (request_id);
 
 -- ---------------------------------------------------------------------------
+-- Table: audit_intentions
+-- Durable audit append lifecycle. SQLite is the source of truth; this ledger
+-- lets boot/query reconciliation distinguish pending runtime projection work
+-- from fully committed audit rows while reserving chain/anchor metadata hooks.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS audit_intentions (
+    audit_id        TEXT    PRIMARY KEY,
+    created_at_us   INTEGER NOT NULL,
+    subject_id      TEXT,
+    action          TEXT,
+    resource_id     TEXT,
+    deny_reason     TEXT,
+    deny_origin     TEXT,
+    request_id      TEXT,
+    decision        INTEGER NOT NULL CHECK (decision IN (0, 1)),
+    state           TEXT    NOT NULL CHECK
+        (state IN ('pending', 'committed', 'failed')),
+    created_at      INTEGER NOT NULL,
+    updated_at      INTEGER NOT NULL,
+    attempt_count   INTEGER NOT NULL DEFAULT 0,
+    last_error      TEXT,
+    chain_prev      TEXT,
+    chain_hash      TEXT,
+    anchor_batch_id TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_intentions_state
+    ON audit_intentions (state);
+
+CREATE INDEX IF NOT EXISTS idx_audit_intentions_action
+    ON audit_intentions (action);
+
+CREATE INDEX IF NOT EXISTS idx_audit_intentions_updated
+    ON audit_intentions (updated_at);
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically
