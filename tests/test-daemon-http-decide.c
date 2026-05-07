@@ -30,6 +30,7 @@ typedef struct
   const gchar *resource_id;
   const gchar *deny_reason;
   const gchar *deny_origin;
+  const gchar *request_id;
   guint matches;
 } AuditEventProbe;
 
@@ -1043,14 +1044,16 @@ build_policy_mutation_uri (const gchar *base_url, const gchar *path,
 }
 
 static gint
-send_raw_policy_mutation (SoupSession *session, const gchar *method,
+send_raw_policy_mutation_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *path, const gchar *query,
-    guint *out_status, gchar **out_body)
+    guint *out_status, gchar **out_body, gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 120;
   *out_status = 0;
   *out_body = NULL;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
 
   g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
@@ -1065,11 +1068,25 @@ send_raw_policy_mutation (SoupSession *session, const gchar *method,
   gint rc = check_response_request_id_header (msg, 177);
   if (rc != 0)
     return rc;
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_policy_mutation (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    guint *out_status, gchar **out_body)
+{
+  return send_raw_policy_mutation_full (session, method, base_url, path, query,
+      out_status, out_body, NULL);
 }
 
 static gint
@@ -1170,7 +1187,6 @@ audit_event_probe_cb (const gchar *id, gint64 created_at_us,
 {
   (void) id;
   (void) created_at_us;
-  (void) request_id;
   AuditEventProbe *probe = user_data;
 
   if (decision == WYL_DECISION_ALLOW
@@ -1178,8 +1194,11 @@ audit_event_probe_cb (const gchar *id, gint64 created_at_us,
       && g_strcmp0 (action, probe->action) == 0
       && g_strcmp0 (resource_id, probe->resource_id) == 0
       && g_strcmp0 (deny_reason, probe->deny_reason) == 0
-      && g_strcmp0 (deny_origin, probe->deny_origin) == 0)
-    probe->matches++;
+      && g_strcmp0 (deny_origin, probe->deny_origin) == 0) {
+    if (probe->request_id == NULL
+        || g_strcmp0 (request_id, probe->request_id) == 0)
+      probe->matches++;
+  }
   return WYRELOG_E_OK;
 }
 
@@ -1428,9 +1447,10 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 134;
   g_clear_pointer (&body, g_free);
 
-  rc = send_raw_policy_mutation (session, "POST", base_url,
+  g_autofree gchar *transition_request_id = NULL;
+  rc = send_raw_policy_mutation_full (session, "POST", base_url,
       "/policy/permissions/transition", transition_denied_query, &status,
-      &body);
+      &body, &transition_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -1447,6 +1467,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     .resource_id = "site.policy.read",
     .deny_reason = "grant",
     .deny_origin = "tenant-a",
+    .request_id = transition_request_id,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
           &transition_audit) != WYRELOG_E_OK)

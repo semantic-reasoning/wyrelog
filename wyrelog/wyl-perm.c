@@ -433,6 +433,7 @@ update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
       wyl_audit_event_get_resource_id (audit_event),
       wyl_audit_event_get_deny_reason (audit_event),
       wyl_audit_event_get_deny_origin (audit_event),
+      wyl_audit_event_get_request_id (audit_event),
       wyl_audit_event_get_decision (audit_event));
 }
 
@@ -462,6 +463,7 @@ update_role_membership_store (WylHandle *handle, const gchar *subject_id,
       wyl_audit_event_get_resource_id (audit_event),
       wyl_audit_event_get_deny_reason (audit_event),
       wyl_audit_event_get_deny_origin (audit_event),
+      wyl_audit_event_get_request_id (audit_event),
       wyl_audit_event_get_decision (audit_event));
 }
 
@@ -495,6 +497,7 @@ wyl_handle_apply_permission_state_transition (WylHandle *handle,
         wyl_audit_event_get_resource_id (audit_event),
         wyl_audit_event_get_deny_reason (audit_event),
         wyl_audit_event_get_deny_origin (audit_event),
+        wyl_audit_event_get_request_id (audit_event),
         wyl_audit_event_get_decision (audit_event));
   }
   if (rc != WYRELOG_E_OK)
