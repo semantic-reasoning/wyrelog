@@ -1,0 +1,5 @@
+# Copyright 2026 wyrelog authors
+name: Wyrelog CodeQL
+paths:
+  - tests
+  - wyrelog
