@@ -1803,6 +1803,241 @@ check_session_event_fanout_derives_delta (void)
 }
 
 static gint
+check_insert_fanout_delta_insert_failure_repairs_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[5];
+  gint64 fired_row[5];
+  RelationSnapshotExpect fired_expect = {
+    .expected_relation = "session_fired",
+    .expected_row = fired_row,
+    .ncols = 5,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 156;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 157;
+  if (intern_event5 (handle, 231, "delta-insert-fail-session",
+          "elevate_grant", "active", "elevated", event_row) != WYRELOG_E_OK)
+    return 158;
+
+  wyl_handle_set_engine_delta_insert_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_IO)
+    return 159;
+
+  if (intern_event5 (handle, 231, "delta-insert-fail-session", "active",
+          "elevate_grant", "elevated", fired_row) != WYRELOG_E_OK)
+    return 160;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "session_fired", relation_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 161;
+  return fired_expect.seen == 0 ? 0 : 162;
+}
+
+static gint
+check_insert_fanout_delta_step_failure_repairs_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[5];
+  gint64 fired_row[5];
+  RelationSnapshotExpect fired_expect = {
+    .expected_relation = "session_fired",
+    .expected_row = fired_row,
+    .ncols = 5,
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 163;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 164;
+  if (intern_event5 (handle, 232, "delta-step-fail-session", "elevate_grant",
+          "active", "elevated", event_row) != WYRELOG_E_OK)
+    return 165;
+
+  wyl_handle_set_engine_delta_step_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_IO)
+    return 166;
+
+  if (intern_event5 (handle, 232, "delta-step-fail-session", "active",
+          "elevate_grant", "elevated", fired_row) != WYRELOG_E_OK)
+    return 167;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "session_fired", relation_snapshot_expect_cb, &fired_expect)
+      != WYRELOG_E_OK)
+    return 168;
+  return fired_expect.seen == 0 ? 0 : 169;
+}
+
+static gint
+check_insert_fanout_delta_step_failure_suppresses_callback (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[5];
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 230;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 231;
+  if (intern_event5 (handle, 234, "delta-step-callback-session",
+          "elevate_grant", "active", "elevated", event_row) != WYRELOG_E_OK)
+    return 232;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 233;
+
+  wyl_handle_set_engine_delta_step_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_IO)
+    return 234;
+  return deltas == 0 ? 0 : 235;
+}
+
+static gint
+check_remove_fanout_delta_remove_failure_repairs_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[5];
+  gint64 next_event_row[5];
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 236;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 237;
+  if (intern_event5 (handle, 235, "delta-remove-fail-session",
+          "elevate_grant", "active", "elevated", event_row) != WYRELOG_E_OK)
+    return 238;
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_OK)
+    return 239;
+
+  wyl_handle_set_engine_delta_remove_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_handle_engine_remove (handle, "session_event", event_row, 5)
+      != WYRELOG_E_IO)
+    return 240;
+
+  if (intern_event5 (handle, 236, "delta-remove-fail-session",
+          "idle_timeout", "active", "idle", next_event_row) != WYRELOG_E_OK)
+    return 241;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 242;
+  if (wyl_handle_engine_insert (handle, "session_event", next_event_row, 5)
+      != WYRELOG_E_OK)
+    return 243;
+  return deltas > 0 ? 0 : 244;
+}
+
+static gint
+check_remove_fanout_delta_step_failure_suppresses_callback (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[5];
+  guint deltas = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 245;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 246;
+  if (intern_event5 (handle, 237, "delta-remove-step-session",
+          "elevate_grant", "active", "elevated", event_row) != WYRELOG_E_OK)
+    return 247;
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_OK)
+    return 248;
+  if (wyl_handle_engine_set_delta_callback (handle, delta_count_cb, &deltas)
+      != WYRELOG_E_OK)
+    return 249;
+
+  wyl_handle_set_engine_delta_step_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_handle_engine_remove (handle, "session_event", event_row, 5)
+      != WYRELOG_E_IO)
+    return 250;
+  return deltas == 0 ? 0 : 251;
+}
+
+static gint
+check_insert_fanout_repair_failure_poisons_pair (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[5];
+  gint64 fired_row[5];
+  gboolean found = TRUE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 170;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 171;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_append_session_event (store, "poison-reload-session",
+          "missing", "active", "idle", NULL) != WYRELOG_E_OK)
+    return 172;
+  if (intern_event5 (handle, 233, "poison-live-session", "elevate_grant",
+          "active", "elevated", event_row) != WYRELOG_E_OK)
+    return 173;
+
+  wyl_handle_set_engine_delta_step_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_handle_engine_insert (handle, "session_event", event_row, 5)
+      != WYRELOG_E_POLICY)
+    return 174;
+  if (wyl_handle_get_read_engine (handle) != NULL)
+    return 175;
+  if (wyl_handle_get_delta_engine (handle) != NULL)
+    return 176;
+  if (intern_event5 (handle, 233, "poison-live-session", "active",
+          "elevate_grant", "elevated", fired_row) == WYRELOG_E_OK)
+    return 177;
+  return wyl_handle_engine_contains (handle, "session_fired", fired_row, 5,
+      &found) == WYRELOG_E_INVALID ? 0 : 178;
+}
+
+static gint
+check_durable_session_event_fanout_failure_reloads_committed_event (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (wyl_login_req_t) login = NULL;
+  WylSession *session = NULL;
+  guint seen = 0;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 179;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 180;
+
+  login = wyl_login_req_new ();
+  wyl_login_req_set_username (login, "durable-fanout-fail-user");
+  wyl_handle_set_engine_delta_step_fault_once (handle, "session_event",
+      WYRELOG_E_IO);
+  if (wyl_session_login (handle, login, &session) != WYRELOG_E_IO)
+    return 181;
+  if (session != NULL)
+    return 182;
+  if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+          "session_fired", snapshot_count_cb, &seen) != WYRELOG_E_OK)
+    return 183;
+  return seen > 0 ? 0 : 184;
+}
+
+static gint
 check_delta_callback_survives_reload (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -4542,6 +4777,24 @@ main (void)
   if ((rc = check_principal_event_fanout_derives_delta ()) != 0)
     return rc;
   if ((rc = check_session_event_fanout_derives_delta ()) != 0)
+    return rc;
+  if ((rc = check_insert_fanout_delta_insert_failure_repairs_pair ()) != 0)
+    return rc;
+  if ((rc = check_insert_fanout_delta_step_failure_repairs_pair ()) != 0)
+    return rc;
+  if ((rc = check_insert_fanout_delta_step_failure_suppresses_callback ())
+      != 0)
+    return rc;
+  if ((rc = check_remove_fanout_delta_remove_failure_repairs_pair ()) != 0)
+    return rc;
+  if ((rc = check_remove_fanout_delta_step_failure_suppresses_callback ())
+      != 0)
+    return rc;
+  if ((rc = check_insert_fanout_repair_failure_poisons_pair ()) != 0)
+    return rc;
+  if ((rc =
+          check_durable_session_event_fanout_failure_reloads_committed_event ())
+      != 0)
     return rc;
   if ((rc = check_delta_callback_survives_reload ()) != 0)
     return rc;
