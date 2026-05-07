@@ -14,6 +14,7 @@ struct _WylSession
   wyl_id_t id;
   gint64 created_at_us;
   gchar *username;
+  gchar *tenant;
   wyl_session_state_t state;
 };
 
@@ -25,6 +26,7 @@ wyl_session_finalize (GObject *object)
   WylSession *self = WYL_SESSION (object);
 
   g_free (self->username);
+  g_free (self->tenant);
 
   G_OBJECT_CLASS (wyl_session_parent_class)->finalize (object);
 }
@@ -60,6 +62,12 @@ reload_session_snapshot (WylHandle *handle)
   if (wyl_handle_get_read_engine (handle) == NULL)
     return WYRELOG_E_OK;
   return wyl_handle_reload_engine_pair (handle);
+}
+
+static gboolean
+login_tenant_is_valid (const gchar *tenant)
+{
+  return tenant != NULL && g_strcmp0 (tenant, "__wr_default") == 0;
 }
 
 static wyrelog_error_t
@@ -569,6 +577,12 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (handle == NULL)
     return WYRELOG_E_INVALID;
 
+  const gchar *tenant = "__wr_default";
+  if (req != NULL && wyl_login_req_get_tenant (req) != NULL)
+    tenant = wyl_login_req_get_tenant (req);
+  if (!login_tenant_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+
   if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
     gboolean skip_mfa_allowed = FALSE;
     wyrelog_error_t rc = login_skip_mfa_allowed (handle, req,
@@ -592,6 +606,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     username = wyl_login_req_get_username (req);
     session->username = g_strdup (username);
   }
+  session->tenant = g_strdup (tenant);
 
   g_autofree gchar *session_id = wyl_session_dup_id_string (session);
   if (username != NULL) {
@@ -878,4 +893,13 @@ wyl_session_dup_username (const WylSession *self)
   if (self->username == NULL)
     return NULL;
   return g_strdup (self->username);
+}
+
+gchar *
+wyl_session_dup_tenant (const WylSession *self)
+{
+  g_return_val_if_fail (WYL_IS_SESSION (self), NULL);
+  if (self->tenant == NULL)
+    return NULL;
+  return g_strdup (self->tenant);
 }

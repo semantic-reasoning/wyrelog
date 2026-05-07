@@ -16,6 +16,8 @@ check_default_username_is_null (void)
     return 12;
   if (wyl_login_req_get_request_id (req) != NULL)
     return 13;
+  if (wyl_login_req_get_tenant (req) != NULL)
+    return 14;
   return 0;
 }
 
@@ -80,6 +82,8 @@ check_get_null_request (void)
     return 60;
   if (wyl_login_req_get_request_id (NULL) != NULL)
     return 61;
+  if (wyl_login_req_get_tenant (NULL) != NULL)
+    return 62;
   return 0;
 }
 
@@ -124,6 +128,19 @@ check_request_id_set_then_get (void)
   return 0;
 }
 
+static gint
+check_tenant_set_then_get (void)
+{
+  g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
+  wyl_login_req_set_tenant (req, "__wr_default");
+  if (g_strcmp0 (wyl_login_req_get_tenant (req), "__wr_default") != 0)
+    return 110;
+  wyl_login_req_set_tenant (req, NULL);
+  if (wyl_login_req_get_tenant (req) != NULL)
+    return 111;
+  return 0;
+}
+
 int
 main (void)
 {
@@ -148,6 +165,8 @@ main (void)
   if ((rc = check_skip_mfa_null_request ()) != 0)
     return rc;
   if ((rc = check_request_id_set_then_get ()) != 0)
+    return rc;
+  if ((rc = check_tenant_set_then_get ()) != 0)
     return rc;
 
   return 0;

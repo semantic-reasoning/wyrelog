@@ -9,6 +9,7 @@ struct _WylClient
   gchar *session_token;
   gchar *access_token;
   gchar *username;
+  gchar *tenant;
   gchar *principal_state;
   gchar *session_state;
   SoupSession *session;
@@ -19,7 +20,8 @@ G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
 static gboolean parse_login_response_json (const gchar * data, gsize size,
     gchar ** out_session_token,
     gchar ** out_access_token, gchar ** out_username,
-    gchar ** out_principal_state, gchar ** out_session_state);
+    gchar ** out_tenant, gchar ** out_principal_state,
+    gchar ** out_session_state);
 
 static void
 wyl_client_clear_login_state (WylClient *self)
@@ -27,6 +29,7 @@ wyl_client_clear_login_state (WylClient *self)
   g_clear_pointer (&self->session_token, g_free);
   g_clear_pointer (&self->access_token, g_free);
   g_clear_pointer (&self->username, g_free);
+  g_clear_pointer (&self->tenant, g_free);
   g_clear_pointer (&self->principal_state, g_free);
   g_clear_pointer (&self->session_state, g_free);
 }
@@ -108,6 +111,13 @@ wyl_client_dup_username (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
   return g_strdup (client->username);
+}
+
+gchar *
+wyl_client_dup_tenant (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->tenant);
 }
 
 gchar *
@@ -201,10 +211,12 @@ client_login_internal (WylClient *client, const gchar *username,
   g_autofree gchar *session_token = NULL;
   g_autofree gchar *access_token = NULL;
   g_autofree gchar *parsed_username = NULL;
+  g_autofree gchar *tenant = NULL;
   g_autofree gchar *principal_state = NULL;
   g_autofree gchar *session_state = NULL;
   if (!parse_login_response_json (body_data, body_size, &session_token,
-          &access_token, &parsed_username, &principal_state, &session_state)) {
+          &access_token, &parsed_username, &tenant, &principal_state,
+          &session_state)) {
     wyl_client_clear_login_state (client);
     return WYRELOG_E_IO;
   }
@@ -213,6 +225,7 @@ client_login_internal (WylClient *client, const gchar *username,
   client->session_token = g_steal_pointer (&session_token);
   client->access_token = g_steal_pointer (&access_token);
   client->username = g_steal_pointer (&parsed_username);
+  client->tenant = g_steal_pointer (&tenant);
   client->principal_state = g_steal_pointer (&principal_state);
   client->session_state = g_steal_pointer (&session_state);
   return WYRELOG_E_OK;
@@ -587,15 +600,16 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
 static gboolean
 parse_login_response_json (const gchar *data, gsize size,
     gchar **out_session_token, gchar **out_access_token, gchar **out_username,
-    gchar **out_principal_state, gchar **out_session_state)
+    gchar **out_tenant, gchar **out_principal_state, gchar **out_session_state)
 {
   if (data == NULL || out_session_token == NULL || out_username == NULL ||
-      out_access_token == NULL || out_principal_state == NULL ||
-      out_session_state == NULL)
+      out_access_token == NULL || out_tenant == NULL ||
+      out_principal_state == NULL || out_session_state == NULL)
     return FALSE;
   *out_session_token = NULL;
   *out_access_token = NULL;
   *out_username = NULL;
+  *out_tenant = NULL;
   *out_principal_state = NULL;
   *out_session_state = NULL;
 
@@ -606,6 +620,7 @@ parse_login_response_json (const gchar *data, gsize size,
   gboolean have_session_token = FALSE;
   gboolean have_access_token = FALSE;
   gboolean have_username = FALSE;
+  gboolean have_tenant = FALSE;
   gboolean have_principal_state = FALSE;
   gboolean have_session_state = FALSE;
   json_skip_ws (&cursor);
@@ -641,6 +656,14 @@ parse_login_response_json (const gchar *data, gsize size,
         return FALSE;
       have_username = TRUE;
       *out_username = g_steal_pointer (&value);
+    } else if (g_strcmp0 (key, "tenant") == 0) {
+      g_autofree gchar *value = NULL;
+      if (!json_parse_string (&cursor, &value))
+        return FALSE;
+      if (have_tenant || value[0] == '\0')
+        return FALSE;
+      have_tenant = TRUE;
+      *out_tenant = g_steal_pointer (&value);
     } else if (g_strcmp0 (key, "principal_state") == 0) {
       g_autofree gchar *value = NULL;
       if (!json_parse_string (&cursor, &value))
@@ -676,11 +699,13 @@ parse_login_response_json (const gchar *data, gsize size,
   }
 
   json_skip_ws (&cursor);
-  if (!have_session_token || !have_username || !have_principal_state ||
-      !have_session_state || cursor.pos != cursor.size) {
+  if (!have_session_token || !have_username || !have_tenant ||
+      !have_principal_state || !have_session_state ||
+      cursor.pos != cursor.size) {
     g_clear_pointer (out_session_token, g_free);
     g_clear_pointer (out_access_token, g_free);
     g_clear_pointer (out_username, g_free);
+    g_clear_pointer (out_tenant, g_free);
     g_clear_pointer (out_principal_state, g_free);
     g_clear_pointer (out_session_state, g_free);
     return FALSE;

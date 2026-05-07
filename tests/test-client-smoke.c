@@ -243,7 +243,8 @@ main (void)
     return 510;
 
   http.body = "{\"session_token\":\"session-1\",\"username\":\"alice\","
-      "\"principal_state\":\"mfa_required\",\"session_state\":\"active\"}";
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"mfa_required\","
+      "\"session_state\":\"active\"}";
   if (wyl_client_login (local_client, "alice", NULL) != WYRELOG_E_OK)
     return 42;
   if (g_strcmp0 (http.last_method, "POST") != 0)
@@ -261,6 +262,7 @@ main (void)
   g_autofree gchar *client_access_token =
       wyl_client_dup_access_token (local_client);
   g_autofree gchar *client_username = wyl_client_dup_username (local_client);
+  g_autofree gchar *client_tenant = wyl_client_dup_tenant (local_client);
   g_autofree gchar *client_principal_state =
       wyl_client_dup_principal_state (local_client);
   g_autofree gchar *client_session_state =
@@ -268,6 +270,7 @@ main (void)
   if (g_strcmp0 (client_session_token, "session-1") != 0 ||
       client_access_token != NULL ||
       g_strcmp0 (client_username, "alice") != 0 ||
+      g_strcmp0 (client_tenant, "__wr_default") != 0 ||
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
@@ -294,8 +297,8 @@ main (void)
     return 175;
 
   http.body = "{\"session_token\":\"session-2\",\"username\":\"alice\","
-      "\"principal_state\":\"authenticated\",\"session_state\":\"active\","
-      "\"access_token\":\"access-2\"}";
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-2\"}";
   if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
     return 147;
   if (g_strcmp0 (http.last_method, "POST") != 0)
@@ -309,16 +312,19 @@ main (void)
   g_clear_pointer (&client_session_token, g_free);
   g_clear_pointer (&client_access_token, g_free);
   g_clear_pointer (&client_username, g_free);
+  g_clear_pointer (&client_tenant, g_free);
   g_clear_pointer (&client_principal_state, g_free);
   g_clear_pointer (&client_session_state, g_free);
   client_session_token = wyl_client_dup_session_token (local_client);
   client_access_token = wyl_client_dup_access_token (local_client);
   client_username = wyl_client_dup_username (local_client);
+  client_tenant = wyl_client_dup_tenant (local_client);
   client_principal_state = wyl_client_dup_principal_state (local_client);
   client_session_state = wyl_client_dup_session_state (local_client);
   if (g_strcmp0 (client_session_token, "session-2") != 0 ||
       g_strcmp0 (client_access_token, "access-2") != 0 ||
       g_strcmp0 (client_username, "alice") != 0 ||
+      g_strcmp0 (client_tenant, "__wr_default") != 0 ||
       g_strcmp0 (client_principal_state, "authenticated") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 152;
@@ -449,8 +455,8 @@ main (void)
     return 161;
 
   http.body = "{\"session_token\":\"session-3\",\"username\":\"alice\","
-      "\"principal_state\":\"authenticated\",\"session_state\":\"active\","
-      "\"access_token\":\"access-3\"}";
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-3\"}";
   if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
     return 162;
 
@@ -488,20 +494,21 @@ main (void)
     return 142;
 
   http.body = "{\"session_token\":\"session-bad\",\"username\":\"alice\","
-      "\"principal_state\":\"authenticated\",\"session_state\":\"active\","
-      "\"access_token\":\"\"}";
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"\"}";
   if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_IO)
     return 163;
 
   http.body = "{\"session_token\":\"session-bad\",\"username\":\"alice\","
-      "\"principal_state\":\"authenticated\",\"session_state\":\"active\","
-      "\"access_token\":null}";
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":null}";
   if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_IO)
     return 165;
 
   http.body = "{\"session_token\":\"session-bad\",\"username\":\"alice\","
-      "\"principal_state\":\"authenticated\",\"session_state\":\"active\","
-      "\"access_token\":\"access-a\",\"access_token\":\"access-b\"}";
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-a\","
+      "\"access_token\":\"access-b\"}";
   if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_IO)
     return 164;
 
