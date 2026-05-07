@@ -28,6 +28,7 @@ typedef struct
   gboolean access_token_secret_ready;
   GHashTable *sessions_by_token;
   GMutex lock;
+  GMutex policy_mutation_lock;
 } WylDaemonHttpContext;
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
@@ -43,6 +44,7 @@ wyl_daemon_http_context_free (gpointer data)
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   g_hash_table_unref (ctx->sessions_by_token);
   g_mutex_clear (&ctx->lock);
+  g_mutex_clear (&ctx->policy_mutation_lock);
   g_free (ctx);
 }
 
@@ -59,6 +61,7 @@ wyl_daemon_http_context_new (WylHandle *handle)
   ctx->sessions_by_token =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
   g_mutex_init (&ctx->lock);
+  g_mutex_init (&ctx->policy_mutation_lock);
   return ctx;
 }
 
