@@ -131,9 +131,18 @@ read_template_file (const gchar *relative_path, gchar **out_contents,
   g_autofree gchar *path =
       g_build_filename (WYL_TEST_TEMPLATE_DIR, relative_path, NULL);
   g_autoptr (GError) error = NULL;
+  g_autofree gchar *raw = NULL;
+  gsize raw_len = 0;
 
-  if (!g_file_get_contents (path, out_contents, out_len, &error))
+  if (!g_file_get_contents (path, &raw, &raw_len, &error))
     return 90;
+  g_autoptr (GString) normalized = g_string_sized_new (raw_len);
+  for (const gchar * p = raw; *p != '\0'; p++) {
+    if (*p != '\r')
+      g_string_append_c (normalized, *p);
+  }
+  *out_contents = g_string_free (g_steal_pointer (&normalized), FALSE);
+  *out_len = strlen (*out_contents);
   return 0;
 }
 
