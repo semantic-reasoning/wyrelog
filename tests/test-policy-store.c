@@ -1654,6 +1654,70 @@ check_store_permission_state_transition_rejects_invalid_audit (void)
 }
 
 static gint
+check_store_permission_state_transition_rolls_back_audit_conflict (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  static const gchar *id = "01890c10-2e3f-7000-8000-000000000012";
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 294;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 295;
+  if (wyl_policy_store_append_audit_event (store, id, 1001,
+          "existing-audit-user", "existing.action", "existing-resource",
+          NULL, NULL, WYL_DECISION_ALLOW) != WYRELOG_E_OK)
+    return 296;
+
+  gint64 event_id = 102;
+  if (wyl_policy_store_apply_permission_state_transition_with_audit (store,
+          "perm-audit-conflict-user", "wr.perm.audit.conflict",
+          "perm-audit-conflict-scope", "grant", &event_id, id, 1001,
+          "perm-audit-conflict-user", "permission_state.grant",
+          "wr.perm.audit.conflict", "allowed", "permission_state",
+          NULL, WYL_DECISION_ALLOW) != WYRELOG_E_POLICY)
+    return 297;
+  if (event_id != -1)
+    return 298;
+
+  gboolean exists = TRUE;
+  if (wyl_policy_store_permission_state_exists (store,
+          "perm-audit-conflict-user", "wr.perm.audit.conflict",
+          "perm-audit-conflict-scope", &exists) != WYRELOG_E_OK)
+    return 299;
+  if (exists)
+    return 300;
+
+  PermissionStateEventExpect event_expect = {
+    .subject_id = "perm-audit-conflict-user",
+    .perm_id = "wr.perm.audit.conflict",
+    .scope = "perm-audit-conflict-scope",
+    .event = "grant",
+    .from_state = "dormant",
+    .to_state = "armed",
+  };
+  if (wyl_policy_store_foreach_permission_state_event (store,
+          permission_state_event_expect_cb, &event_expect) != WYRELOG_E_OK)
+    return 301;
+  if (event_expect.matches != 0)
+    return 302;
+
+  AuditEventExpect audit_expect = {
+    .id = id,
+    .created_at_us = 1001,
+    .subject_id = "existing-audit-user",
+    .action = "existing.action",
+    .resource_id = "existing-resource",
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,
+          &audit_expect) != WYRELOG_E_OK)
+    return 303;
+  if (audit_expect.matches != 1)
+    return 304;
+  return 0;
+}
+
+static gint
 check_store_sets_principal_state (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -2275,6 +2339,10 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_store_permission_state_transition_rejects_invalid_audit ())
+      != 0)
+    return rc;
+  if ((rc =
+          check_store_permission_state_transition_rolls_back_audit_conflict ())
       != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
