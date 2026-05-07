@@ -36,6 +36,15 @@ typedef struct
   guint matches;
 } RoleMembershipEventExpect;
 
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *perm_id;
+  const gchar *scope;
+  const gchar *state;
+  guint matches;
+} PermissionStateExpect;
+
 static wyrelog_error_t
 direct_permission_event_expect_cb (const gchar *subject_id,
     const gchar *perm_id, const gchar *scope, const gchar *operation,
@@ -62,6 +71,20 @@ role_membership_event_expect_cb (const gchar *subject_id,
       && g_strcmp0 (role_id, expect->role_id) == 0
       && g_strcmp0 (scope, expect->scope) == 0
       && g_strcmp0 (operation, expect->operation) == 0)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+permission_state_expect_cb (const gchar *subject_id, const gchar *perm_id,
+    const gchar *scope, const gchar *state, gpointer user_data)
+{
+  PermissionStateExpect *expect = user_data;
+
+  if (g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (perm_id, expect->perm_id) == 0
+      && g_strcmp0 (scope, expect->scope) == 0
+      && g_strcmp0 (state, expect->state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -339,6 +362,68 @@ check_direct_grant_compat_allows_engine_decide (void)
     return 57;
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return 58;
+  return 0;
+}
+
+static gint
+check_direct_grant_preserves_dormant_permission_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 200;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_principal_state (store, "grant-dormant-user",
+          "authenticated") != WYRELOG_E_OK)
+    return 201;
+  if (wyl_policy_store_set_session_state (store, "grant-dormant-scope",
+          "active") != WYRELOG_E_OK)
+    return 202;
+  if (wyl_policy_store_set_permission_state (store, "grant-dormant-user",
+          "site.grant-dormant", "grant-dormant-scope", "dormant")
+      != WYRELOG_E_OK)
+    return 203;
+
+  g_autoptr (wyl_grant_req_t) grant = wyl_grant_req_new ();
+  wyl_grant_req_set_subject_id (grant, "grant-dormant-user");
+  wyl_grant_req_set_action (grant, "site.grant-dormant");
+  wyl_grant_req_set_resource_id (grant, "grant-dormant-scope");
+  if (wyl_perm_grant (handle, grant) != WYRELOG_E_OK)
+    return 204;
+
+  gboolean exists = FALSE;
+  if (wyl_policy_store_direct_permission_exists (store,
+          "grant-dormant-user", "site.grant-dormant",
+          "grant-dormant-scope", &exists) != WYRELOG_E_OK)
+    return 205;
+  if (!exists)
+    return 206;
+
+  PermissionStateExpect expect = {
+    .subject_id = "grant-dormant-user",
+    .perm_id = "site.grant-dormant",
+    .scope = "grant-dormant-scope",
+    .state = "dormant",
+  };
+  if (wyl_policy_store_foreach_permission_state (store,
+          permission_state_expect_cb, &expect) != WYRELOG_E_OK)
+    return 207;
+  if (expect.matches != 1)
+    return 208;
+
+  g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (decide, "grant-dormant-user");
+  wyl_decide_req_set_action (decide, "site.grant-dormant");
+  wyl_decide_req_set_resource_id (decide, "grant-dormant-scope");
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, decide, resp) != WYRELOG_E_OK)
+    return 209;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 210;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 211;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 212;
   return 0;
 }
 
@@ -750,6 +835,8 @@ main (void)
   if ((rc = check_role_grant_requires_existing_role ()) != 0)
     return rc;
   if ((rc = check_direct_grant_compat_allows_engine_decide ()) != 0)
+    return rc;
+  if ((rc = check_direct_grant_preserves_dormant_permission_state ()) != 0)
     return rc;
   if ((rc = check_role_grant_with_armed_state_allows_engine_decide ()) != 0)
     return rc;
