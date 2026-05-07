@@ -253,9 +253,10 @@ check_policy_audit_facts_ready_loads_read_engine (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
           "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'policy_audit_reload_check';", &count))
+          "WHERE action = 'policy_audit_reload_check' "
+          "AND request_id = 'wyrelogd-readiness-request';", &count))
     return 52;
-  if (count != 0)
+  if (count != 1)
     return 53;
 
   AuditActionProbe probe = { 0 };

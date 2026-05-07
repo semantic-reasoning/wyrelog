@@ -2,7 +2,11 @@
 #include "daemon/checks.h"
 
 #include <glib.h>
+#include <string.h>
 
+#ifdef WYL_HAS_AUDIT
+#include "audit/conn-private.h"
+#endif
 #include "daemon/delta.h"
 #include "wyrelog/wyl-handle-private.h"
 
@@ -86,6 +90,7 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
   wyl_audit_event_set_resource_id (ev, "audit_event");
   wyl_audit_event_set_deny_reason (ev, "readiness");
   wyl_audit_event_set_deny_origin (ev, "policy_store");
+  wyl_audit_event_set_request_id (ev, "wyrelogd-readiness-request");
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
 
   g_autofree gchar *audit_id = wyl_audit_event_dup_id_string (ev);
@@ -93,13 +98,16 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
     return WYRELOG_E_INTERNAL;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  wyrelog_error_t rc = wyl_policy_store_append_audit_event (store, audit_id,
+  gboolean inserted = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_append_audit_event_full (store,
+      audit_id,
       wyl_audit_event_get_created_at_us (ev),
       wyl_audit_event_get_subject_id (ev), wyl_audit_event_get_action (ev),
       wyl_audit_event_get_resource_id (ev),
       wyl_audit_event_get_deny_reason (ev),
       wyl_audit_event_get_deny_origin (ev),
-      wyl_audit_event_get_decision (ev));
+      wyl_audit_event_get_request_id (ev),
+      wyl_audit_event_get_decision (ev), &inserted);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -128,6 +136,28 @@ wyl_daemon_check_policy_audit_facts_ready (WylHandle *handle)
     return rc;
   if (!found)
     return WYRELOG_E_POLICY;
+
+  rc = contains_symbol_row2 (handle, "audit_event_request_id", audit_id,
+      "wyrelogd-readiness-request", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_POLICY;
+
+#ifdef WYL_HAS_AUDIT
+  rc = wyl_handle_load_policy_store_audit_events (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *json = NULL;
+  rc = wyl_audit_conn_query_events_json (wyl_handle_get_audit_conn (handle),
+      "request_id(\"wyrelogd-readiness-request\")", &json);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (json == NULL || strstr (json, "policy_audit_reload_check") == NULL
+      || strstr (json, "wyrelogd-readiness-request") == NULL)
+    return WYRELOG_E_POLICY;
+#endif
 
   return WYRELOG_E_OK;
 }
