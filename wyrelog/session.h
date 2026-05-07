@@ -64,6 +64,9 @@ const gchar *wyl_login_req_get_username (const wyl_login_req_t * req);
  */
 void wyl_login_req_set_skip_mfa (wyl_login_req_t * req, gboolean skip_mfa);
 gboolean wyl_login_req_get_skip_mfa (const wyl_login_req_t * req);
+void wyl_login_req_set_request_id (wyl_login_req_t * req,
+    const gchar * request_id);
+const gchar *wyl_login_req_get_request_id (const wyl_login_req_t * req);
 
 wyrelog_error_t wyl_session_login (WylHandle * handle,
     const wyl_login_req_t * req, WylSession ** out_session);

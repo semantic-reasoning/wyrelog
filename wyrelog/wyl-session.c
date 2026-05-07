@@ -106,7 +106,7 @@ login_skip_mfa_allowed (WylHandle *handle, const wyl_login_req_t *req,
 
 #ifdef WYL_HAS_AUDIT
 static WylAuditEvent *
-new_login_skip_mfa_denied_audit (const gchar *username)
+new_login_skip_mfa_denied_audit (const gchar *username, const gchar *request_id)
 {
   WylAuditEvent *ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, username);
@@ -114,20 +114,24 @@ new_login_skip_mfa_denied_audit (const gchar *username)
   wyl_audit_event_set_resource_id (ev, "principal_state");
   wyl_audit_event_set_deny_reason (ev, "skip_mfa_not_allowed");
   wyl_audit_event_set_deny_origin (ev, "login_ingress");
+  wyl_audit_event_set_request_id (ev, request_id);
   wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
   return ev;
 }
 
 static wyrelog_error_t
-emit_login_skip_mfa_denied_audit (WylHandle *handle, const gchar *username)
+emit_login_skip_mfa_denied_audit (WylHandle *handle, const gchar *username,
+    const gchar *request_id)
 {
-  g_autoptr (WylAuditEvent) ev = new_login_skip_mfa_denied_audit (username);
+  g_autoptr (WylAuditEvent) ev =
+      new_login_skip_mfa_denied_audit (username, request_id);
   return wyl_audit_emit (handle, ev);
 }
 
 static WylAuditEvent *
 new_principal_state_audit (const gchar *username,
-    const gchar *old_state, const gchar *new_state, const gchar *event)
+    const gchar *old_state, const gchar *new_state, const gchar *event,
+    const gchar *request_id)
 {
   WylAuditEvent *ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, username);
@@ -135,10 +139,28 @@ new_principal_state_audit (const gchar *username,
   wyl_audit_event_set_resource_id (ev, new_state);
   wyl_audit_event_set_deny_reason (ev, event);
   wyl_audit_event_set_deny_origin (ev, old_state);
+  wyl_audit_event_set_request_id (ev, request_id);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   return ev;
 }
 #endif
+
+static wyrelog_error_t
+append_policy_audit_event (wyl_policy_store_t *store, const gchar *audit_id,
+    const WylAuditEvent *event)
+{
+  gboolean inserted = FALSE;
+
+  return wyl_policy_store_append_audit_event_full (store, audit_id,
+      wyl_audit_event_get_created_at_us (event),
+      wyl_audit_event_get_subject_id (event),
+      wyl_audit_event_get_action (event),
+      wyl_audit_event_get_resource_id (event),
+      wyl_audit_event_get_deny_reason (event),
+      wyl_audit_event_get_deny_origin (event),
+      wyl_audit_event_get_request_id (event),
+      wyl_audit_event_get_decision (event), &inserted);
+}
 
 static wyrelog_error_t
 insert_principal_event_fact (WylHandle *handle, gint64 event_id,
@@ -219,14 +241,7 @@ apply_principal_state_mutation (WylHandle *handle, const gchar *username,
         event_name, old_state_name, new_state_name, &event_id);
   }
   if (rc == WYRELOG_E_OK && audit_event != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, audit_id,
-        wyl_audit_event_get_created_at_us (audit_event),
-        wyl_audit_event_get_subject_id (audit_event),
-        wyl_audit_event_get_action (audit_event),
-        wyl_audit_event_get_resource_id (audit_event),
-        wyl_audit_event_get_deny_reason (audit_event),
-        wyl_audit_event_get_deny_origin (audit_event),
-        wyl_audit_event_get_decision (audit_event));
+    rc = append_policy_audit_event (store, audit_id, audit_event);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_commit_mutation (store);
@@ -270,7 +285,8 @@ transition_principal_state (WylHandle *handle, const gchar *username,
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = new_principal_state_audit (username,
       old_state_name,
-      new_state_name, wyl_principal_event_name (WYL_PRINCIPAL_EVENT_MFA_OK));
+      new_state_name, wyl_principal_event_name (WYL_PRINCIPAL_EVENT_MFA_OK),
+      NULL);
 #else
   WylAuditEvent *ev = NULL;
 #endif
@@ -289,13 +305,14 @@ transition_principal_state (WylHandle *handle, const gchar *username,
 #ifdef WYL_HAS_AUDIT
 static WylAuditEvent *
 new_session_state_audit (const gchar *session_id,
-    const gchar *old_state, const gchar *new_state)
+    const gchar *old_state, const gchar *new_state, const gchar *request_id)
 {
   WylAuditEvent *ev = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (ev, session_id);
   wyl_audit_event_set_action (ev, "session_state");
   wyl_audit_event_set_resource_id (ev, new_state);
   wyl_audit_event_set_deny_origin (ev, old_state);
+  wyl_audit_event_set_request_id (ev, request_id);
   wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
   return ev;
 }
@@ -380,14 +397,7 @@ apply_session_state_mutation (WylHandle *handle, const gchar *session_id,
         event_name, old_state_name, new_state_name, &event_id);
   }
   if (rc == WYRELOG_E_OK && audit_event != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, audit_id,
-        wyl_audit_event_get_created_at_us (audit_event),
-        wyl_audit_event_get_subject_id (audit_event),
-        wyl_audit_event_get_action (audit_event),
-        wyl_audit_event_get_resource_id (audit_event),
-        wyl_audit_event_get_deny_reason (audit_event),
-        wyl_audit_event_get_deny_origin (audit_event),
-        wyl_audit_event_get_decision (audit_event));
+    rc = append_policy_audit_event (store, audit_id, audit_event);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_commit_mutation (store);
@@ -475,14 +485,8 @@ apply_login_state_mutation (WylHandle *handle, const gchar *username,
         &principal_event_id);
   }
   if (rc == WYRELOG_E_OK && principal_audit_event != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, principal_audit_id,
-        wyl_audit_event_get_created_at_us (principal_audit_event),
-        wyl_audit_event_get_subject_id (principal_audit_event),
-        wyl_audit_event_get_action (principal_audit_event),
-        wyl_audit_event_get_resource_id (principal_audit_event),
-        wyl_audit_event_get_deny_reason (principal_audit_event),
-        wyl_audit_event_get_deny_origin (principal_audit_event),
-        wyl_audit_event_get_decision (principal_audit_event));
+    rc = append_policy_audit_event (store, principal_audit_id,
+        principal_audit_event);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_set_session_state (store, session_id,
@@ -493,14 +497,8 @@ apply_login_state_mutation (WylHandle *handle, const gchar *username,
         &session_event_id);
   }
   if (rc == WYRELOG_E_OK && session_audit_event != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, session_audit_id,
-        wyl_audit_event_get_created_at_us (session_audit_event),
-        wyl_audit_event_get_subject_id (session_audit_event),
-        wyl_audit_event_get_action (session_audit_event),
-        wyl_audit_event_get_resource_id (session_audit_event),
-        wyl_audit_event_get_deny_reason (session_audit_event),
-        wyl_audit_event_get_deny_origin (session_audit_event),
-        wyl_audit_event_get_decision (session_audit_event));
+    rc = append_policy_audit_event (store, session_audit_id,
+        session_audit_event);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_commit_mutation (store);
@@ -528,7 +526,7 @@ transition_session_state (WylHandle *handle, WylSession *session,
 
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = new_session_state_audit (session_id,
-      old_state_name, new_state_name);
+      old_state_name, new_state_name, NULL);
 #else
   WylAuditEvent *ev = NULL;
 #endif
@@ -567,7 +565,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     if (!skip_mfa_allowed) {
 #ifdef WYL_HAS_AUDIT
       wyrelog_error_t audit_rc = emit_login_skip_mfa_denied_audit (handle,
-          wyl_login_req_get_username (req));
+          wyl_login_req_get_username (req), wyl_login_req_get_request_id (req));
       if (audit_rc != WYRELOG_E_OK)
         return audit_rc;
 #endif
@@ -601,10 +599,12 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     g_autoptr (WylAuditEvent) principal_ev =
         new_principal_state_audit (username,
         wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-        wyl_principal_state_name (state), wyl_principal_event_name (event));
+        wyl_principal_state_name (state), wyl_principal_event_name (event),
+        wyl_login_req_get_request_id (req));
     g_autoptr (WylAuditEvent) session_ev =
         new_session_state_audit (session_id,
-        wyl_session_state_name (session->state), "active");
+        wyl_session_state_name (session->state), "active",
+        wyl_login_req_get_request_id (req));
 #else
     WylAuditEvent *principal_ev = NULL;
     WylAuditEvent *session_ev = NULL;
@@ -648,7 +648,8 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   }
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = new_session_state_audit (session_id,
-      wyl_session_state_name (session->state), "active");
+      wyl_session_state_name (session->state), "active",
+      req != NULL ? wyl_login_req_get_request_id (req) : NULL);
 #else
   WylAuditEvent *ev = NULL;
 #endif

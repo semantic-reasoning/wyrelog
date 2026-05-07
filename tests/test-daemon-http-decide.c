@@ -31,6 +31,8 @@ typedef struct
   const gchar *deny_reason;
   const gchar *deny_origin;
   const gchar *request_id;
+  gboolean check_decision;
+  wyl_decision_t decision;
   guint matches;
 } AuditEventProbe;
 
@@ -505,10 +507,12 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
 }
 
 static gint
-send_raw_login (SoupSession *session, const gchar *method,
+send_raw_login_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, guint *out_status,
-    gchar **out_body)
+    gchar **out_body, gchar **out_request_id)
 {
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
     root[strlen (root) - 1] = '\0';
@@ -534,7 +538,21 @@ send_raw_login (SoupSession *session, const gchar *method,
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   return 0;
+}
+
+static gint
+send_raw_login (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, guint *out_status,
+    gchar **out_body)
+{
+  return send_raw_login_full (session, method, base_url, query, out_status,
+      out_body, NULL);
 }
 
 static gchar *
@@ -769,12 +787,31 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 472;
   g_clear_pointer (&body, g_free);
 
-  rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&skip_mfa=true", &status, &body);
+  g_autofree gchar *denied_skip_request_id = NULL;
+  rc = send_raw_login_full (session, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body,
+      &denied_skip_request_id);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"login_denied\"") == NULL)
     return 473;
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe denied_skip_audit = {
+    .subject_id = "login-user",
+    .action = "login_skip_mfa",
+    .resource_id = "principal_state",
+    .deny_reason = "skip_mfa_not_allowed",
+    .deny_origin = "login_ingress",
+    .request_id = denied_skip_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_DENY,
+  };
+  if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), audit_event_probe_cb, &denied_skip_audit) != WYRELOG_E_OK)
+    return 1812;
+  if (denied_skip_audit.matches != 1)
+    return 1813;
+#endif
   g_clear_pointer (&body, g_free);
 
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
@@ -784,8 +821,10 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 487;
 
-  rc = send_raw_login (session, "POST", base_url,
-      "username=login-user&skip_mfa=true", &status, &body);
+  g_autofree gchar *skip_success_request_id = NULL;
+  rc = send_raw_login_full (session, "POST", base_url,
+      "username=login-user&skip_mfa=true", &status, &body,
+      &skip_success_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 ||
@@ -796,6 +835,38 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       extract_json_string (body, "session_token");
   if (authenticated_session_token == NULL)
     return 486;
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe principal_skip_audit = {
+    .subject_id = "login-user",
+    .action = "principal_state",
+    .resource_id = "authenticated",
+    .deny_reason = "login_skip_mfa",
+    .deny_origin = "unverified",
+    .request_id = skip_success_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), audit_event_probe_cb, &principal_skip_audit)
+      != WYRELOG_E_OK)
+    return 1814;
+  if (principal_skip_audit.matches != 1)
+    return 1815;
+  AuditEventProbe session_skip_audit = {
+    .subject_id = authenticated_session_token,
+    .action = "session_state",
+    .resource_id = "active",
+    .deny_origin = "idle",
+    .request_id = skip_success_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), audit_event_probe_cb, &session_skip_audit) != WYRELOG_E_OK)
+    return 1816;
+  if (session_skip_audit.matches != 1)
+    return 1817;
+#endif
   rc = verify_login_access_token (body, authenticated_session_token,
       "login-user", "authenticated", server);
   if (rc != 0)
@@ -1230,7 +1301,7 @@ audit_event_probe_cb (const gchar *id, gint64 created_at_us,
   (void) created_at_us;
   AuditEventProbe *probe = user_data;
 
-  if (decision == WYL_DECISION_ALLOW
+  if ((!probe->check_decision || decision == probe->decision)
       && g_strcmp0 (subject_id, probe->subject_id) == 0
       && g_strcmp0 (action, probe->action) == 0
       && g_strcmp0 (resource_id, probe->resource_id) == 0
