@@ -9,8 +9,13 @@
 #ifdef WYL_HAS_DAEMON_HTTP
 #include <libsoup/soup.h>
 
+#include "daemon/delta.h"
+
 SoupServer *wyl_daemon_start_http_server (const WylDaemonOptions * opts,
     WylHandle * handle, GError ** error);
+SoupServer *wyl_daemon_start_http_server_with_runtime
+    (const WylDaemonOptions * opts, WylHandle * handle,
+    WylDaemonRuntime * runtime, GError ** error);
 WylSession *wyl_daemon_http_ref_session (SoupServer * server,
     const gchar * session_token);
 #ifdef WYL_TEST_DAEMON_HTTP

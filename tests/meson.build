@@ -92,6 +92,7 @@ if build_client
   test_daemon_http_decide = executable('test-daemon-http-decide',
     'test-daemon-http-decide.c',
     '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
     c_args : test_daemon_http_decide_c_args,
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_daemon_http_decide_deps,

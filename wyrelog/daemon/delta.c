@@ -13,7 +13,7 @@ record_daemon_audit_result (WylDaemonRuntime *runtime, wyrelog_error_t rc)
   if (runtime == NULL || rc == WYRELOG_E_OK)
     return;
 
-  runtime->audit_degraded = TRUE;
+  g_atomic_int_set (&runtime->audit_degraded, TRUE);
   runtime->audit_errors++;
   runtime->last_audit_error = rc;
 }
@@ -381,7 +381,7 @@ wyl_daemon_start_delta_callbacks (WylHandle *handle, WylDaemonRuntime *runtime)
   wyrelog_error_t rc =
       wyl_handle_engine_set_delta_callback (handle, daemon_delta_cb, runtime);
   runtime->last_delta_error = rc;
-  runtime->delta_session_live = rc == WYRELOG_E_OK;
+  g_atomic_int_set (&runtime->delta_session_live, rc == WYRELOG_E_OK);
   return rc;
 }
 

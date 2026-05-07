@@ -108,7 +108,8 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
 #ifdef WYL_HAS_DAEMON_HTTP
   g_autoptr (SoupServer) server =
-      wyl_daemon_start_http_server (opts, handle, &error);
+      wyl_daemon_start_http_server_with_runtime (opts, handle, &runtime,
+      &error);
   if (server == NULL) {
     g_printerr ("wyrelogd: listen failed: %s\n", error->message);
     return 1;
