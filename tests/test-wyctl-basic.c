@@ -274,6 +274,274 @@ test_policy_help (void)
 }
 
 static void
+test_audit_help (void)
+{
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "audit",
+    "query",
+    "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--access-token-file"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-timestamp"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-loc-class"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-risk"));
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+
+static void
+test_audit_validation (void)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-audit-token-XXXXXX", &token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  gchar *missing_daemon_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *invalid_daemon_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "file:///tmp/wyrelog",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *missing_timestamp_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *invalid_loc_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "unknown",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *invalid_risk_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "101",
+    NULL,
+  };
+  gchar *invalid_limit_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    "--limit",
+    "0",
+    NULL,
+  };
+  gchar *missing_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *extra_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    "extra",
+    NULL,
+  };
+  gchar *valid_scaffold_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    "--filter",
+    "decision=deny",
+    "--limit",
+    "10",
+    NULL,
+  };
+  gchar *unknown_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "audit",
+    "unknown",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (missing_daemon_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_daemon_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: invalid daemon URL"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_timestamp_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid --guard-timestamp"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_loc_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid --guard-loc-class"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_risk_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid --guard-risk"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_limit_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: invalid --limit"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: missing --access-token-file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (extra_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: unexpected audit query argument"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (valid_scaffold_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: audit query is not implemented"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (unknown_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: unknown audit command"));
+
+  g_unlink (token_path);
+}
+
+static void
 test_policy_validation (void)
 {
   g_autofree gchar *token_path = NULL;
@@ -775,6 +1043,8 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/policy-help", test_policy_help);
   g_test_add_func ("/wyctl/policy-validation", test_policy_validation);
   g_test_add_func ("/wyctl/policy-check", test_policy_check);
+  g_test_add_func ("/wyctl/audit-help", test_audit_help);
+  g_test_add_func ("/wyctl/audit-validation", test_audit_validation);
 
   return g_test_run ();
 }

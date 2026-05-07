@@ -9,6 +9,7 @@
 #include "wyrelog/decide.h"
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-permission-scope-private.h"
 
 typedef struct
 {
@@ -25,8 +26,20 @@ typedef struct
   gchar *access_token_file;
 } WyctlPolicyOptions;
 
+typedef struct
+{
+  gchar *filter;
+  gchar *limit_arg;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlAuditOptions;
+
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
 #define WYCTL_MAX_TIMEOUT_MS 60000
+#define WYCTL_AUDIT_DEFAULT_LIMIT 100
+#define WYCTL_AUDIT_MAX_LIMIT 100
 
 typedef struct
 {
@@ -77,6 +90,45 @@ parse_timeout_ms (const gchar *raw, guint *out_timeout_ms)
     return FALSE;
 
   *out_timeout_ms = (guint) parsed;
+  return TRUE;
+}
+
+static gboolean
+parse_nonnegative_int64 (const gchar *raw, gint64 *out_value)
+{
+  if (raw == NULL || raw[0] == '\0' || out_value == NULL)
+    return FALSE;
+
+  errno = 0;
+  gchar *end = NULL;
+  gint64 parsed = g_ascii_strtoll (raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || parsed < 0)
+    return FALSE;
+
+  *out_value = parsed;
+  return TRUE;
+}
+
+static gboolean
+parse_audit_limit (const gchar *raw, guint *out_limit)
+{
+  if (out_limit == NULL)
+    return FALSE;
+  if (raw == NULL) {
+    *out_limit = WYCTL_AUDIT_DEFAULT_LIMIT;
+    return TRUE;
+  }
+  if (raw[0] == '\0')
+    return FALSE;
+
+  errno = 0;
+  gchar *end = NULL;
+  gint64 parsed = g_ascii_strtoll (raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || parsed < 1 ||
+      parsed > WYCTL_AUDIT_MAX_LIMIT)
+    return FALSE;
+
+  *out_limit = (guint) parsed;
   return TRUE;
 }
 
@@ -421,6 +473,105 @@ run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+static int
+run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  WyctlAuditOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"filter", 0, 0, G_OPTION_ARG_STRING, &opts.filter,
+        "Audit event filter", "FILTER"},
+    {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg,
+        "Maximum events to print", "N"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog audit query");
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected audit query argument: %s\n", argv[1]);
+    return 2;
+  }
+
+  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+    g_printerr ("wyctl: missing daemon URL\n");
+    return 2;
+  }
+  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+
+  gint64 guard_timestamp = 0;
+  if (!parse_nonnegative_int64 (opts.guard_timestamp_arg, &guard_timestamp)) {
+    g_printerr ("wyctl: invalid --guard-timestamp\n");
+    return 2;
+  }
+  if (opts.guard_loc_class == NULL ||
+      !wyl_guard_loc_class_is_valid (opts.guard_loc_class)) {
+    g_printerr ("wyctl: invalid --guard-loc-class\n");
+    return 2;
+  }
+  gint64 guard_risk = 0;
+  if (!parse_nonnegative_int64 (opts.guard_risk_arg, &guard_risk) ||
+      guard_risk > 100) {
+    g_printerr ("wyctl: invalid --guard-risk\n");
+    return 2;
+  }
+  guint limit = 0;
+  if (!parse_audit_limit (opts.limit_arg, &limit)) {
+    g_printerr ("wyctl: invalid --limit\n");
+    return 2;
+  }
+
+  g_autofree gchar *access_token = NULL;
+  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  if (token_rc != 0)
+    return token_rc;
+
+  (void) timeout_ms;
+  (void) guard_timestamp;
+  (void) guard_risk;
+  (void) limit;
+  (void) access_token;
+  g_printerr ("wyctl: audit query is not implemented\n");
+  return 3;
+}
+
+static int
+run_audit (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing audit command\n");
+    return 2;
+  }
+
+  if (g_strcmp0 (argv[1], "query") == 0)
+    return run_audit_query (global_opts, argc - 1, argv + 1);
+
+  g_printerr ("wyctl: unknown audit command: %s\n", argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -460,6 +611,8 @@ main (int argc, char **argv)
     return run_status (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "policy") == 0)
     return run_policy (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "audit") == 0)
+    return run_audit (&opts, argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;
