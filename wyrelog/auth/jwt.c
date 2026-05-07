@@ -13,9 +13,9 @@ non_empty (const gchar *value)
 static wyrelog_error_t
 validate_issue_input (const wyl_jwt_issue_input_t *input)
 {
-  if (input == NULL || !non_empty (input->jti) || !non_empty (input->subject)
-      || !non_empty (input->issuer) || !non_empty (input->audience)
-      || !non_empty (input->tenant)
+  if (input == NULL || !non_empty (input->key_id) || !non_empty (input->jti)
+      || !non_empty (input->subject) || !non_empty (input->issuer)
+      || !non_empty (input->audience) || !non_empty (input->tenant)
       || !non_empty (input->principal_state_at_issue)
       || !non_empty (input->session_id) || input->issued_at < 0
       || input->ttl_seconds < 0)
@@ -120,11 +120,14 @@ wyl_jwt_base64url_decode (const gchar *text, GBytes **out_bytes)
 }
 
 wyrelog_error_t
-wyl_jwt_build_header_json (gchar **out_json)
+wyl_jwt_build_header_json (const gchar *key_id, gchar **out_json)
 {
-  if (out_json == NULL)
+  if (!non_empty (key_id) || out_json == NULL)
     return WYRELOG_E_INVALID;
-  *out_json = g_strdup ("{\"alg\":\"HS256\",\"typ\":\"JWT\"}");
+  GString *json = g_string_new ("{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":");
+  append_json_string (json, key_id);
+  g_string_append_c (json, '}');
+  *out_json = g_string_free (json, FALSE);
   return WYRELOG_E_OK;
 }
 
@@ -178,10 +181,13 @@ wyl_jwt_build_unsigned_segments (const wyl_jwt_issue_input_t *input,
     return WYRELOG_E_INVALID;
   *out_header_segment = NULL;
   *out_payload_segment = NULL;
+  wyrelog_error_t rc = validate_issue_input (input);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   g_autofree gchar *header = NULL;
   g_autofree gchar *payload = NULL;
-  wyrelog_error_t rc = wyl_jwt_build_header_json (&header);
+  rc = wyl_jwt_build_header_json (input->key_id, &header);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_jwt_build_payload_json (input, &payload);
@@ -205,6 +211,9 @@ signing_secret_valid (const guint8 *secret, gsize secret_len)
     return WYRELOG_E_INVALID;
   return WYRELOG_E_OK;
 }
+
+static wyrelog_error_t validate_jwt_header_json (GBytes * header_json,
+    const gchar * expected_key_id);
 
 static wyrelog_error_t
 sign_hs256_input (const gchar *signing_input, const guint8 *secret,
@@ -259,10 +268,10 @@ wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t *input,
 
 wyrelog_error_t
 wyl_jwt_verify_hs256_signature (const gchar *token, const guint8 *secret,
-    gsize secret_len, GBytes **out_payload_json)
+    gsize secret_len, const gchar *expected_key_id, GBytes **out_payload_json)
 {
-  if (token == NULL || out_payload_json == NULL ||
-      signing_secret_valid (secret, secret_len) != WYRELOG_E_OK)
+  if (token == NULL || !non_empty (expected_key_id) || out_payload_json == NULL
+      || signing_secret_valid (secret, secret_len) != WYRELOG_E_OK)
     return WYRELOG_E_INVALID;
   *out_payload_json = NULL;
 
@@ -276,12 +285,9 @@ wyl_jwt_verify_hs256_signature (const gchar *token, const guint8 *secret,
   wyrelog_error_t rc = wyl_jwt_base64url_decode (parts[0], &header);
   if (rc != WYRELOG_E_OK)
     return rc;
-  gsize header_len = 0;
-  const gchar *header_data = g_bytes_get_data (header, &header_len);
-  if (header_len != strlen ("{\"alg\":\"HS256\",\"typ\":\"JWT\"}") ||
-      memcmp (header_data, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
-          header_len) != 0)
-    return WYRELOG_E_POLICY;
+  rc = validate_jwt_header_json (header, expected_key_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   g_autoptr (GBytes) signature = NULL;
   rc = wyl_jwt_base64url_decode (parts[2], &signature);
@@ -433,6 +439,138 @@ skip_json_ws (const gchar **cursor)
 {
   while (g_ascii_isspace (**cursor))
     (*cursor)++;
+}
+
+typedef struct
+{
+  gchar *algorithm;
+  gchar *type;
+  gchar *key_id;
+  guint seen_mask;
+} ParsedJwtHeader;
+
+enum
+{
+  HEADER_ALG = 1u << 0,
+  HEADER_TYP = 1u << 1,
+  HEADER_KID = 1u << 2,
+  HEADER_REQUIRED_MASK = HEADER_ALG | HEADER_TYP | HEADER_KID,
+};
+
+static void
+parsed_jwt_header_clear (ParsedJwtHeader *header)
+{
+  if (header == NULL)
+    return;
+  g_free (header->algorithm);
+  g_free (header->type);
+  g_free (header->key_id);
+  memset (header, 0, sizeof *header);
+}
+
+static wyrelog_error_t
+mark_header_seen (ParsedJwtHeader *header, guint bit)
+{
+  if ((header->seen_mask & bit) != 0)
+    return WYRELOG_E_POLICY;
+  header->seen_mask |= bit;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+parse_header_string_value (const gchar **cursor, ParsedJwtHeader *header,
+    guint bit, gchar **out_value)
+{
+  wyrelog_error_t rc = mark_header_seen (header, bit);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *value = NULL;
+  rc = parse_json_string (cursor, &value);
+  if (rc != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  if (value[0] == '\0')
+    return WYRELOG_E_POLICY;
+  *out_value = g_steal_pointer (&value);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+parse_jwt_header (const gchar *text, ParsedJwtHeader *header)
+{
+  if (text == NULL || header == NULL)
+    return WYRELOG_E_INVALID;
+  memset (header, 0, sizeof *header);
+
+  const gchar *p = text;
+  skip_json_ws (&p);
+  if (*p++ != '{')
+    return WYRELOG_E_POLICY;
+  skip_json_ws (&p);
+  while (*p != '}') {
+    g_autofree gchar *key = NULL;
+    wyrelog_error_t rc = parse_json_string (&p, &key);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    skip_json_ws (&p);
+    if (*p++ != ':')
+      return WYRELOG_E_POLICY;
+    skip_json_ws (&p);
+
+    if (g_strcmp0 (key, "alg") == 0)
+      rc = parse_header_string_value (&p, header, HEADER_ALG,
+          &header->algorithm);
+    else if (g_strcmp0 (key, "typ") == 0)
+      rc = parse_header_string_value (&p, header, HEADER_TYP, &header->type);
+    else if (g_strcmp0 (key, "kid") == 0)
+      rc = parse_header_string_value (&p, header, HEADER_KID, &header->key_id);
+    else
+      return WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      return rc;
+
+    skip_json_ws (&p);
+    if (*p == ',') {
+      p++;
+      skip_json_ws (&p);
+      if (*p == '}')
+        return WYRELOG_E_POLICY;
+    } else if (*p != '}') {
+      return WYRELOG_E_POLICY;
+    }
+  }
+  p++;
+  skip_json_ws (&p);
+  if (*p != '\0')
+    return WYRELOG_E_POLICY;
+  if ((header->seen_mask & HEADER_REQUIRED_MASK) != HEADER_REQUIRED_MASK)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_jwt_header_json (GBytes *header_json, const gchar *expected_key_id)
+{
+  if (header_json == NULL || !non_empty (expected_key_id))
+    return WYRELOG_E_INVALID;
+
+  gsize header_len = 0;
+  const gchar *header_data = g_bytes_get_data (header_json, &header_len);
+  if (memchr (header_data, '\0', header_len) != NULL)
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *header_text = g_strndup (header_data, header_len);
+  ParsedJwtHeader header = { 0 };
+  wyrelog_error_t rc = parse_jwt_header (header_text, &header);
+  if (rc != WYRELOG_E_OK) {
+    parsed_jwt_header_clear (&header);
+    return rc;
+  }
+
+  gboolean valid = g_strcmp0 (header.algorithm, "HS256") == 0
+      && g_strcmp0 (header.type, "JWT") == 0
+      && g_strcmp0 (header.key_id, expected_key_id) == 0;
+  parsed_jwt_header_clear (&header);
+  return valid ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 typedef struct
@@ -619,17 +757,18 @@ wyl_jwt_parse_access_claims_json (GBytes *payload_json,
 
 wyrelog_error_t
 wyl_jwt_verify_hs256_access_token (const gchar *token, const guint8 *secret,
-    gsize secret_len, const gchar *expected_issuer,
-    const gchar *expected_audience, gint64 now, GBytes **out_payload_json)
+    gsize secret_len, const gchar *expected_key_id,
+    const gchar *expected_issuer, const gchar *expected_audience, gint64 now,
+    GBytes **out_payload_json)
 {
-  if (!non_empty (expected_issuer) || !non_empty (expected_audience) ||
-      now < 0 || out_payload_json == NULL)
+  if (!non_empty (expected_key_id) || !non_empty (expected_issuer) ||
+      !non_empty (expected_audience) || now < 0 || out_payload_json == NULL)
     return WYRELOG_E_INVALID;
   *out_payload_json = NULL;
 
   g_autoptr (GBytes) payload = NULL;
   wyrelog_error_t rc = wyl_jwt_verify_hs256_signature (token, secret,
-      secret_len, &payload);
+      secret_len, expected_key_id, &payload);
   if (rc != WYRELOG_E_OK)
     return rc;
 

@@ -17,6 +17,7 @@
 
 #define WYL_DAEMON_JWT_ISSUER "wyrelogd"
 #define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
+#define WYL_DAEMON_JWT_KEY_ID "__wr_default_hs256"
 #define WYL_DAEMON_JWT_KEY_LEN 32
 #define WYL_DAEMON_REQUEST_ID_HEADER "X-Wyrelog-Request-Id"
 #define WYL_DAEMON_REQUEST_ID_DATA "wyl-daemon-request-id"
@@ -286,6 +287,7 @@ issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
 
   gint64 issued_at = wyl_session_get_created_at_us (session) / G_USEC_PER_SEC;
   wyl_jwt_issue_input_t input = {
+    .key_id = WYL_DAEMON_JWT_KEY_ID,
     .jti = token_id_buf,
     .subject = username,
     .issuer = WYL_DAEMON_JWT_ISSUER,
@@ -335,7 +337,8 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   g_autoptr (GBytes) payload = NULL;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   rc = wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret,
-      WYL_DAEMON_JWT_ISSUER, WYL_DAEMON_JWT_AUDIENCE, now, &payload);
+      WYL_DAEMON_JWT_KEY_ID, WYL_DAEMON_JWT_ISSUER,
+      WYL_DAEMON_JWT_AUDIENCE, now, &payload);
   sodium_memzero (secret, sizeof secret);
   if (rc != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
