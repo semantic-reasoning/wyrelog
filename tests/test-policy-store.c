@@ -677,6 +677,23 @@ typedef struct
   guint matches;
 } AuditEventExpect;
 
+typedef struct
+{
+  const gchar *id;
+  gint64 created_at_us;
+  const gchar *subject_id;
+  const gchar *action;
+  const gchar *resource_id;
+  const gchar *deny_reason;
+  const gchar *deny_origin;
+  const gchar *request_id;
+  wyl_decision_t decision;
+  const gchar *state;
+  gint64 attempt_count;
+  const gchar *last_error;
+  guint matches;
+} AuditIntentionExpect;
+
 static wyrelog_error_t
 role_permission_expect_cb (const gchar *role_id, const gchar *perm_id,
     gpointer user_data)
@@ -746,6 +763,31 @@ audit_event_expect_cb (const gchar *id, gint64 created_at_us,
       && g_strcmp0 (deny_origin, expect->deny_origin) == 0
       && g_strcmp0 (request_id, expect->request_id) == 0
       && decision == expect->decision)
+    expect->matches++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+audit_intention_expect_cb (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, const gchar *state, gint64 attempt_count,
+    const gchar *last_error, gpointer user_data)
+{
+  AuditIntentionExpect *expect = user_data;
+
+  if (g_strcmp0 (id, expect->id) == 0
+      && created_at_us == expect->created_at_us
+      && g_strcmp0 (subject_id, expect->subject_id) == 0
+      && g_strcmp0 (action, expect->action) == 0
+      && g_strcmp0 (resource_id, expect->resource_id) == 0
+      && g_strcmp0 (deny_reason, expect->deny_reason) == 0
+      && g_strcmp0 (deny_origin, expect->deny_origin) == 0
+      && g_strcmp0 (request_id, expect->request_id) == 0
+      && decision == expect->decision
+      && g_strcmp0 (state, expect->state) == 0
+      && attempt_count == expect->attempt_count
+      && g_strcmp0 (last_error, expect->last_error) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
 }
@@ -2058,6 +2100,240 @@ check_store_append_audit_event_is_idempotent (void)
 }
 
 static gint
+check_store_records_audit_intention (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  static const gchar *id = "01890c10-2e3f-7000-8000-000000000006";
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 240;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 241;
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_record_audit_intention_full (store, id, 1002,
+          "audit-user", "read", "doc/intent", "not_armed", "perm_state",
+          "req-intent", WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
+    return 242;
+  if (!inserted)
+    return 243;
+
+  AuditIntentionExpect expect = {
+    .id = id,
+    .created_at_us = 1002,
+    .subject_id = "audit-user",
+    .action = "read",
+    .resource_id = "doc/intent",
+    .deny_reason = "not_armed",
+    .deny_origin = "perm_state",
+    .request_id = "req-intent",
+    .decision = WYL_DECISION_DENY,
+    .state = "pending",
+    .attempt_count = 0,
+  };
+  if (wyl_policy_store_foreach_audit_intention (store, "pending",
+          audit_intention_expect_cb, &expect) != WYRELOG_E_OK)
+    return 244;
+  if (expect.matches != 1)
+    return 245;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT chain_prev, chain_hash, anchor_batch_id "
+      "FROM audit_intentions WHERE audit_id = ?;";
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
+          NULL) != SQLITE_OK)
+    return 246;
+  if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return 247;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  gint rc = 0;
+  if (step_rc != SQLITE_ROW)
+    rc = 248;
+  else if (sqlite3_column_type (stmt, 0) != SQLITE_NULL
+      || sqlite3_column_type (stmt, 1) != SQLITE_NULL
+      || sqlite3_column_type (stmt, 2) != SQLITE_NULL)
+    rc = 249;
+
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static gint
+check_store_audit_intention_is_idempotent (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  static const gchar *id = "01890c10-2e3f-7000-8000-000000000007";
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 250;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 251;
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
+          "audit-user", "same.action", NULL, NULL, NULL, "req-same",
+          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+    return 252;
+  if (!inserted)
+    return 253;
+  inserted = TRUE;
+  if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
+          "audit-user", "same.action", NULL, NULL, NULL, "req-same",
+          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+    return 254;
+  if (inserted)
+    return 255;
+  if (wyl_policy_store_record_audit_intention_full (store, id, 1003,
+          "audit-user", "different.action", NULL, NULL, NULL, "req-same",
+          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_POLICY)
+    return 256;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT COUNT(*) FROM audit_intentions WHERE audit_id = ?;";
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
+          NULL) != SQLITE_OK)
+    return 257;
+  if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return 258;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  gint rc = 0;
+  if (step_rc != SQLITE_ROW)
+    rc = 259;
+  else if (sqlite3_column_int64 (stmt, 0) != 1)
+    rc = 260;
+
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static gint
+check_store_marks_audit_intention_states (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  static const gchar *committed_id = "01890c10-2e3f-7000-8000-000000000008";
+  static const gchar *failed_id = "01890c10-2e3f-7000-8000-000000000009";
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 261;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 262;
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_record_audit_intention_full (store, committed_id, 1004,
+          "audit-user", "commit.action", NULL, NULL, NULL, NULL,
+          WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
+    return 263;
+  if (wyl_policy_store_record_audit_intention_full (store, failed_id, 1005,
+          "audit-user", "fail.action", NULL, NULL, NULL, NULL,
+          WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
+    return 264;
+  if (wyl_policy_store_mark_audit_intention_committed (store, committed_id)
+      != WYRELOG_E_OK)
+    return 265;
+  if (wyl_policy_store_mark_audit_intention_committed (store, committed_id)
+      != WYRELOG_E_OK)
+    return 283;
+  if (wyl_policy_store_mark_audit_intention_failed (store, committed_id,
+          "late failure") != WYRELOG_E_POLICY)
+    return 284;
+  if (wyl_policy_store_mark_audit_intention_failed (store, failed_id,
+          "duckdb append failed") != WYRELOG_E_OK)
+    return 266;
+  if (wyl_policy_store_mark_audit_intention_committed (store, failed_id)
+      != WYRELOG_E_OK)
+    return 285;
+  if (wyl_policy_store_mark_audit_intention_failed (store, failed_id,
+          "late failure") != WYRELOG_E_POLICY)
+    return 286;
+
+  AuditIntentionExpect committed = {
+    .id = committed_id,
+    .created_at_us = 1004,
+    .subject_id = "audit-user",
+    .action = "commit.action",
+    .decision = WYL_DECISION_ALLOW,
+    .state = "committed",
+    .attempt_count = 0,
+  };
+  if (wyl_policy_store_foreach_audit_intention (store, "committed",
+          audit_intention_expect_cb, &committed) != WYRELOG_E_OK)
+    return 267;
+  if (committed.matches != 1)
+    return 268;
+
+  AuditIntentionExpect failed = {
+    .id = failed_id,
+    .created_at_us = 1005,
+    .subject_id = "audit-user",
+    .action = "fail.action",
+    .decision = WYL_DECISION_DENY,
+    .state = "committed",
+    .attempt_count = 1,
+  };
+  if (wyl_policy_store_foreach_audit_intention (store, "committed",
+          audit_intention_expect_cb, &failed) != WYRELOG_E_OK)
+    return 269;
+  if (failed.matches != 1)
+    return 270;
+  return 0;
+}
+
+static gint
+check_store_rejects_bad_audit_intentions (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean inserted = FALSE;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 271;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 272;
+  if (wyl_policy_store_record_audit_intention_full (NULL,
+          "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
+          NULL, NULL, WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_INVALID)
+    return 273;
+  if (wyl_policy_store_record_audit_intention_full (store, NULL, 1, NULL,
+          NULL, NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW, &inserted)
+      != WYRELOG_E_INVALID)
+    return 274;
+  if (wyl_policy_store_record_audit_intention_full (store,
+          "01890c10-2e3f-7000-8000-000000000010", -1, NULL, NULL, NULL, NULL,
+          NULL, NULL, WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_INVALID)
+    return 275;
+  if (wyl_policy_store_record_audit_intention_full (store, "not-a-uuid", 1,
+          NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_ALLOW, &inserted)
+      != WYRELOG_E_INVALID)
+    return 276;
+  if (wyl_policy_store_record_audit_intention_full (store,
+          "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
+          NULL, NULL, (wyl_decision_t) 9, &inserted) != WYRELOG_E_INVALID)
+    return 277;
+  if (wyl_policy_store_record_audit_intention_full (store,
+          "01890c10-2e3f-7000-8000-000000000010", 1, NULL, NULL, NULL, NULL,
+          NULL, NULL, WYL_DECISION_ALLOW, NULL) != WYRELOG_E_INVALID)
+    return 278;
+  if (wyl_policy_store_foreach_audit_intention (store, "unknown",
+          audit_intention_expect_cb, NULL) != WYRELOG_E_INVALID)
+    return 279;
+  if (wyl_policy_store_foreach_audit_intention (store, NULL, NULL, NULL)
+      != WYRELOG_E_INVALID)
+    return 280;
+  if (wyl_policy_store_mark_audit_intention_committed (store,
+          "01890c10-2e3f-7000-8000-000000000010") != WYRELOG_E_POLICY)
+    return 281;
+  if (wyl_policy_store_mark_audit_intention_failed (store,
+          "01890c10-2e3f-7000-8000-000000000010", NULL)
+      != WYRELOG_E_INVALID)
+    return 282;
+  return 0;
+}
+
+static gint
 check_store_rejects_corrupt_audit_events (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -2360,6 +2636,14 @@ main (void)
   if ((rc = check_store_iterates_audit_event ()) != 0)
     return rc;
   if ((rc = check_store_append_audit_event_is_idempotent ()) != 0)
+    return rc;
+  if ((rc = check_store_records_audit_intention ()) != 0)
+    return rc;
+  if ((rc = check_store_audit_intention_is_idempotent ()) != 0)
+    return rc;
+  if ((rc = check_store_marks_audit_intention_states ()) != 0)
+    return rc;
+  if ((rc = check_store_rejects_bad_audit_intentions ()) != 0)
     return rc;
   if ((rc = check_store_rejects_corrupt_audit_events ()) != 0)
     return rc;

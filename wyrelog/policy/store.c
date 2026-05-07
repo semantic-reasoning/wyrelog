@@ -77,6 +77,7 @@ static const gchar *const required_tables[] = {
   "principal_states",
   "session_states",
   "session_events",
+  "audit_intentions",
   "audit_events",
   "policy_signatures",
 };
@@ -158,6 +159,14 @@ column_nullable_text_equal (sqlite3_stmt *stmt, int col, const gchar *expected)
     return expected == NULL;
   return g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, col),
       expected) == 0;
+}
+
+static gboolean
+is_valid_audit_intention_state (const gchar *state)
+{
+  return g_strcmp0 (state, "pending") == 0
+      || g_strcmp0 (state, "committed") == 0
+      || g_strcmp0 (state, "failed") == 0;
 }
 
 static gboolean
@@ -671,6 +680,32 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON audit_events (deny_reason);"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_origin "
       "  ON audit_events (deny_origin);"
+      "CREATE TABLE IF NOT EXISTS audit_intentions ("
+      "  audit_id TEXT PRIMARY KEY,"
+      "  created_at_us INTEGER NOT NULL,"
+      "  subject_id TEXT,"
+      "  action TEXT,"
+      "  resource_id TEXT,"
+      "  deny_reason TEXT,"
+      "  deny_origin TEXT,"
+      "  request_id TEXT,"
+      "  decision INTEGER NOT NULL CHECK (decision IN (0, 1)),"
+      "  state TEXT NOT NULL CHECK "
+      "    (state IN ('pending', 'committed', 'failed')),"
+      "  created_at INTEGER NOT NULL,"
+      "  updated_at INTEGER NOT NULL,"
+      "  attempt_count INTEGER NOT NULL DEFAULT 0,"
+      "  last_error TEXT,"
+      "  chain_prev TEXT,"
+      "  chain_hash TEXT,"
+      "  anchor_batch_id TEXT"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_audit_intentions_state "
+      "  ON audit_intentions (state);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_intentions_action "
+      "  ON audit_intentions (action);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_intentions_updated "
+      "  ON audit_intentions (updated_at);"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -2561,6 +2596,208 @@ wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
   return wyl_policy_store_append_audit_event_full (store, id, created_at_us,
       subject_id, action, resource_id, deny_reason, deny_origin, NULL, decision,
       &inserted);
+}
+
+wyrelog_error_t
+wyl_policy_store_record_audit_intention_full (wyl_policy_store_t *store,
+    const gchar *id, gint64 created_at_us, const gchar *subject_id,
+    const gchar *action, const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, gboolean *out_inserted)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyl_id_t parsed_id;
+
+  if (store == NULL || store->db == NULL || id == NULL || created_at_us < 0
+      || out_inserted == NULL)
+    return WYRELOG_E_INVALID;
+  *out_inserted = FALSE;
+  if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  if (decision != WYL_DECISION_DENY && decision != WYL_DECISION_ALLOW)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *select_sql =
+      "SELECT created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, request_id, decision "
+      "FROM audit_intentions WHERE audit_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, select_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int select_rc = sqlite3_step (stmt);
+  if (select_rc == SQLITE_ROW) {
+    gboolean equal =
+        sqlite3_column_int64 (stmt, 0) == created_at_us
+        && column_nullable_text_equal (stmt, 1, subject_id)
+        && column_nullable_text_equal (stmt, 2, action)
+        && column_nullable_text_equal (stmt, 3, resource_id)
+        && column_nullable_text_equal (stmt, 4, deny_reason)
+        && column_nullable_text_equal (stmt, 5, deny_origin)
+        && column_nullable_text_equal (stmt, 6, request_id)
+        && sqlite3_column_int (stmt, 7) == (int) decision;
+    sqlite3_finalize (stmt);
+    return equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  }
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (select_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+
+  static const gchar *sql =
+      "INSERT INTO audit_intentions "
+      "  (audit_id, created_at_us, subject_id, action, resource_id, "
+      "   deny_reason, deny_origin, request_id, decision, state, "
+      "   created_at, updated_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', unixepoch(), unixepoch());";
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 2, created_at_us) != SQLITE_OK
+      || (rc = bind_nullable_text (stmt, 3, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 4, action)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 5, resource_id)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 6, deny_reason)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 7, deny_origin)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 8, request_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int (stmt, 9, (int) decision) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  *out_inserted = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+mark_audit_intention_state (wyl_policy_store_t *store, const gchar *id,
+    const gchar *state, const gchar *last_error)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyl_id_t parsed_id;
+
+  if (store == NULL || store->db == NULL || id == NULL
+      || !is_valid_audit_intention_state (state))
+    return WYRELOG_E_INVALID;
+  if (g_strcmp0 (state, "failed") == 0 && last_error == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "UPDATE audit_intentions "
+      "SET state = ?, updated_at = unixepoch(), "
+      "    attempt_count = attempt_count + ?, last_error = ? "
+      "WHERE audit_id = ? AND (state != 'committed' OR ? = 'committed');";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, state)) != WYRELOG_E_OK
+      || sqlite3_bind_int (stmt, 2,
+          g_strcmp0 (state, "failed") == 0 ? 1 : 0) != SQLITE_OK
+      || (rc = bind_nullable_text (stmt, 3, last_error)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 5, state)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  return sqlite3_changes (store->db) == 1 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_policy_store_mark_audit_intention_committed (wyl_policy_store_t *store,
+    const gchar *id)
+{
+  return mark_audit_intention_state (store, id, "committed", NULL);
+}
+
+wyrelog_error_t
+wyl_policy_store_mark_audit_intention_failed (wyl_policy_store_t *store,
+    const gchar *id, const gchar *last_error)
+{
+  return mark_audit_intention_state (store, id, "failed", last_error);
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_audit_intention (wyl_policy_store_t *store,
+    const gchar *state, wyl_policy_audit_intention_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+  if (state != NULL && !is_valid_audit_intention_state (state))
+    return WYRELOG_E_INVALID;
+
+  static const gchar *all_sql =
+      "SELECT audit_id, created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, request_id, decision, state, "
+      "attempt_count, last_error "
+      "FROM audit_intentions ORDER BY created_at_us ASC, audit_id ASC;";
+  static const gchar *state_sql =
+      "SELECT audit_id, created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, request_id, decision, state, "
+      "attempt_count, last_error "
+      "FROM audit_intentions WHERE state = ? "
+      "ORDER BY created_at_us ASC, audit_id ASC;";
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      state == NULL ? all_sql : state_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (state != NULL && (rc = bind_text (stmt, 1, state)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *id = (const gchar *) sqlite3_column_text (stmt, 0);
+    gint64 created_at_us = sqlite3_column_int64 (stmt, 1);
+    const gchar *subject_id = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *action = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *resource_id = (const gchar *) sqlite3_column_text (stmt, 4);
+    const gchar *deny_reason = (const gchar *) sqlite3_column_text (stmt, 5);
+    const gchar *deny_origin = (const gchar *) sqlite3_column_text (stmt, 6);
+    const gchar *request_id = (const gchar *) sqlite3_column_text (stmt, 7);
+    int decision = sqlite3_column_int (stmt, 8);
+    const gchar *row_state = (const gchar *) sqlite3_column_text (stmt, 9);
+    gint64 attempt_count = sqlite3_column_int64 (stmt, 10);
+    const gchar *last_error = (const gchar *) sqlite3_column_text (stmt, 11);
+    wyl_id_t parsed_id;
+
+    if (id == NULL || wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK
+        || created_at_us < 0 || (decision != WYL_DECISION_DENY
+            && decision != WYL_DECISION_ALLOW)
+        || !is_valid_audit_intention_state (row_state)
+        || attempt_count < 0) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    rc = cb (id, created_at_us, subject_id, action, resource_id, deny_reason,
+        deny_origin, request_id, (wyl_decision_t) decision, row_state,
+        attempt_count, last_error, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
 wyrelog_error_t
