@@ -1,11 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "daemon/delta.h"
 
-#include "wyrelog/audit/conn-private.h"
-#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifdef WYL_HAS_AUDIT
+#include "wyrelog/audit/conn-private.h"
+#include "wyrelog/policy/store-private.h"
+
 static void
 record_daemon_audit_result (WylDaemonRuntime *runtime, wyrelog_error_t rc)
 {
