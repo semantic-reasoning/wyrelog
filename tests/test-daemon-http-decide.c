@@ -6,6 +6,7 @@
 #include <duckdb.h>
 #endif
 
+#include "daemon/delta.h"
 #include "daemon/http.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/client.h"
@@ -248,6 +249,86 @@ build_decide_uri (const gchar *base_url, const gchar *user, const gchar *perm,
   return g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s%s%s",
       base, escaped_user, escaped_perm, escaped_scope,
       extra_query != NULL ? "&" : "", extra_query != NULL ? extra_query : "");
+}
+
+static gint
+send_raw_path (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, guint *out_status,
+    gchar **out_body)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 1900;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+  g_autofree gchar *uri = g_strdup_printf ("%s%s", root, path);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 1901;
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 1902;
+  gint rc = check_response_request_id_header (msg, 1903);
+  if (rc != 0)
+    return rc;
+
+  gsize body_size = 0;
+  const gchar *body_data = g_bytes_get_data (bytes, &body_size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (body_data, body_size);
+  return 0;
+}
+
+static gint
+check_readyz_runtime_liveness_contract (const gchar *base_url,
+    WylDaemonRuntime *runtime)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  if (send_raw_path (session, "GET", base_url, "/healthz", &status, &body)
+      != 0)
+    return 1904;
+  if (status != 200 || strstr (body, "ok") == NULL)
+    return 1905;
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0)
+    return 1906;
+  if (status != 200 || strstr (body, "ready") == NULL)
+    return 1907;
+
+  g_atomic_int_set (&runtime->delta_session_live, FALSE);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0)
+    return 1908;
+  if (status != 503 || strstr (body, "\"delta_not_ready\"") == NULL)
+    return 1909;
+
+  g_atomic_int_set (&runtime->delta_session_live, TRUE);
+  g_atomic_int_set (&runtime->audit_degraded, TRUE);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0)
+    return 1910;
+  if (status != 503 || strstr (body, "\"audit_degraded\"") == NULL)
+    return 1911;
+
+  g_atomic_int_set (&runtime->audit_degraded, FALSE);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0)
+    return 1912;
+  return status == 200 ? 0 : 1913;
 }
 
 static gint
@@ -2477,10 +2558,16 @@ main (void)
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .listen_port = 0,
   };
+  WylDaemonRuntime runtime = {
+    .handle = handle,
+  };
+  if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
+    return 14;
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
-  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
+      &runtime, &error);
   if (http.server == NULL)
     return 3;
   GThread *thread = g_thread_new ("daemon-http-decide",
@@ -2495,6 +2582,10 @@ main (void)
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
     return 5;
+
+  gint readyz_rc = check_readyz_runtime_liveness_contract (base_url, &runtime);
+  if (readyz_rc != 0)
+    return readyz_rc;
 
   gint request_id_rc = check_request_id_header_contract (base_url);
   if (request_id_rc != 0)

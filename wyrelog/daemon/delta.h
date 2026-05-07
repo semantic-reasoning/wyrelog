@@ -6,10 +6,10 @@
 typedef struct
 {
   WylHandle *handle;
-  gboolean delta_session_live;
+  gint delta_session_live;
   guint64 delta_events_seen;
   gint64 last_delta_event_us;
-  gboolean audit_degraded;
+  gint audit_degraded;
   guint64 inserted;
   guint64 removed;
   guint64 audit_errors;

@@ -6,6 +6,7 @@
 #include <sodium.h>
 #include <string.h>
 
+#include "daemon/delta.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -24,6 +25,7 @@
 typedef struct
 {
   WylHandle *handle;
+  WylDaemonRuntime *runtime;
   guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
   gboolean access_token_secret_ready;
   GHashTable *sessions_by_token;
@@ -49,11 +51,12 @@ wyl_daemon_http_context_free (gpointer data)
 }
 
 static WylDaemonHttpContext *
-wyl_daemon_http_context_new (WylHandle *handle)
+wyl_daemon_http_context_new (WylHandle *handle, WylDaemonRuntime *runtime)
 {
   WylDaemonHttpContext *ctx = g_new0 (WylDaemonHttpContext, 1);
 
   ctx->handle = handle;
+  ctx->runtime = runtime;
   if (sodium_init () >= 0) {
     randombytes_buf (ctx->access_token_secret, sizeof ctx->access_token_secret);
     ctx->access_token_secret_ready = TRUE;
@@ -492,6 +495,21 @@ check_runtime_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static const gchar *
+check_runtime_liveness_ready (WylDaemonRuntime *runtime)
+{
+  if (runtime == NULL)
+    return NULL;
+  if (!g_atomic_int_get (&runtime->delta_session_live))
+    return "delta_not_ready";
+  if (runtime->last_delta_error != WYRELOG_E_OK)
+    return "delta_not_ready";
+  if (g_atomic_int_get (&runtime->audit_degraded))
+    return "audit_degraded";
+
+  return NULL;
+}
+
 static void
 readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
@@ -501,6 +519,12 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) query;
 
   WylDaemonHttpContext *ctx = user_data;
+  const gchar *liveness_error = check_runtime_liveness_ready (ctx->runtime);
+  if (liveness_error != NULL) {
+    set_json_error (msg, 503, liveness_error);
+    return;
+  }
+
   wyrelog_error_t rc = check_runtime_ready (ctx->handle);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 503, "not_ready");
@@ -1212,8 +1236,8 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 }
 
 SoupServer *
-wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
-    GError **error)
+wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
+    WylHandle *handle, WylDaemonRuntime *runtime, GError **error)
 {
   g_return_val_if_fail (opts != NULL, NULL);
   g_return_val_if_fail (WYL_IS_HANDLE (handle), NULL);
@@ -1225,7 +1249,7 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
   }
 
   SoupServer *server = soup_server_new (NULL, NULL);
-  WylDaemonHttpContext *ctx = wyl_daemon_http_context_new (handle);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_context_new (handle, runtime);
   g_object_set_data_full (G_OBJECT (server), "wyl-daemon-http-context", ctx,
       wyl_daemon_http_context_free);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
@@ -1251,5 +1275,12 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
   }
 
   return server;
+}
+
+SoupServer *
+wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
+    GError **error)
+{
+  return wyl_daemon_start_http_server_with_runtime (opts, handle, NULL, error);
 }
 #endif
