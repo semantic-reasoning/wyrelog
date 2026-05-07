@@ -90,10 +90,11 @@ wyl_client_audit_query_with_guard_context (WylClient *client,
       guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
     return WYRELOG_E_INVALID;
 
-  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
-  if (session_token == NULL || session_token[0] == '\0')
-    return WYRELOG_E_INVALID;
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
+  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  if ((access_token == NULL || access_token[0] == '\0') &&
+      (session_token == NULL || session_token[0] == '\0'))
+    return WYRELOG_E_INVALID;
   g_autofree gchar *tenant = wyl_client_dup_tenant (client);
   if (tenant == NULL || tenant[0] == '\0')
     return WYRELOG_E_INVALID;

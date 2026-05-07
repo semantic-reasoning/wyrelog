@@ -837,6 +837,29 @@ main (void)
     return 204;
   g_clear_pointer (&decision_result, wyl_client_decision_free);
 
+  g_autoptr (WylAuditIter) bearer_guarded_audit_iter = NULL;
+  if (wyl_client_audit_query_with_guard_context (local_client,
+          "decision=deny", 321, "semi_trusted", 89, &bearer_guarded_audit_iter)
+      != WYRELOG_E_OK)
+    return 207;
+  g_autofree gchar *bearer_guarded_audit_uri =
+      wyl_audit_iter_dup_request_uri (bearer_guarded_audit_iter);
+  if (strstr (bearer_guarded_audit_uri, "/audit/events?") == NULL ||
+      strstr (bearer_guarded_audit_uri, "tenant=__wr_default") == NULL ||
+      strstr (bearer_guarded_audit_uri, "session_token=") != NULL ||
+      strstr (bearer_guarded_audit_uri, "guard_timestamp=321") == NULL ||
+      strstr (bearer_guarded_audit_uri,
+          "guard_loc_class=semi_trusted") == NULL ||
+      strstr (bearer_guarded_audit_uri, "guard_risk=89") == NULL ||
+      strstr (bearer_guarded_audit_uri, "filter=decision%3Ddeny") == NULL)
+    return 208;
+  g_autoptr (SoupMessage) bearer_guarded_audit_message =
+      wyl_audit_iter_new_request_message (bearer_guarded_audit_iter);
+  if (g_strcmp0 (soup_message_headers_get_one (soup_message_get_request_headers
+              (bearer_guarded_audit_message), "Authorization"),
+          "Bearer access-ctl") != 0)
+    return 209;
+
   http.body = "{\"session_token\":\"session-relogin\",\"username\":\"alice\","
       "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
       "\"session_state\":\"active\",\"access_token\":\"access-relogin\"}";
