@@ -57,6 +57,16 @@ is_request_id_shape (const gchar *request_id)
   return TRUE;
 }
 
+static gint
+check_response_request_id_header (SoupMessage *msg, gint failure_code)
+{
+  const gchar *request_id = soup_message_headers_get_one
+      (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+  if (!is_request_id_shape (request_id))
+    return failure_code;
+  return 0;
+}
+
 static gpointer
 test_http_server_thread (gpointer data)
 {
@@ -251,6 +261,9 @@ send_raw_decide (SoupSession *session, const gchar *method,
       &error);
   if (body == NULL)
     return 32;
+  gint rc = check_response_request_id_header (msg, 50);
+  if (rc != 0)
+    return rc;
 
   gsize body_size = 0;
   const gchar *body_data = g_bytes_get_data (body, &body_size);
@@ -285,8 +298,9 @@ send_request_id_probe (SoupSession *session, const gchar *method,
   *out_status = soup_message_get_status (msg);
   const gchar *request_id = soup_message_headers_get_one
       (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
-  if (!is_request_id_shape (request_id))
-    return 1803;
+  gint rc = check_response_request_id_header (msg, 1803);
+  if (rc != 0)
+    return rc;
   *out_request_id = g_strdup (request_id);
   return 0;
 }
@@ -471,6 +485,9 @@ send_raw_login (SoupSession *session, const gchar *method,
       &error);
   if (bytes == NULL)
     return 2;
+  gint rc = check_response_request_id_header (msg, 513);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -603,6 +620,9 @@ send_raw_logout (SoupSession *session, const gchar *method,
       &error);
   if (bytes == NULL)
     return 486;
+  gint rc = check_response_request_id_header (msg, 514);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -638,6 +658,9 @@ send_raw_logout_authorization (SoupSession *session, const gchar *method,
       &error);
   if (bytes == NULL)
     return 486;
+  gint rc = check_response_request_id_header (msg, 515);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -1039,6 +1062,9 @@ send_raw_policy_mutation (SoupSession *session, const gchar *method,
       &error);
   if (bytes == NULL)
     return 122;
+  gint rc = check_response_request_id_header (msg, 177);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -1072,6 +1098,9 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
       &error);
   if (bytes == NULL)
     return 122;
+  gint rc = check_response_request_id_header (msg, 178);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -1745,6 +1774,9 @@ send_raw_audit (SoupSession *session, const gchar *base_url,
       &error);
   if (bytes == NULL)
     return 92;
+  gint rc = check_response_request_id_header (msg, 110);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -1774,6 +1806,9 @@ send_raw_audit_bearer (SoupSession *session, const gchar *base_url,
       &error);
   if (bytes == NULL)
     return 92;
+  gint rc = check_response_request_id_header (msg, 111);
+  if (rc != 0)
+    return rc;
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
