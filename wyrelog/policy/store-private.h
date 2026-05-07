@@ -112,7 +112,8 @@ wyrelog_error_t
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
     const gchar * audit_resource_id, const gchar * audit_deny_reason,
-    const gchar * audit_deny_origin, wyl_decision_t audit_decision);
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_role_membership_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * role_id,
     const gchar * scope, gboolean * out_exists);
@@ -142,7 +143,8 @@ wyrelog_error_t
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
     const gchar * audit_resource_id, const gchar * audit_deny_reason,
-    const gchar * audit_deny_origin, wyl_decision_t audit_decision);
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_direct_permission_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean * out_exists);
@@ -182,7 +184,7 @@ wyrelog_error_t
     gint64 audit_created_at_us, const gchar * audit_subject_id,
     const gchar * audit_action, const gchar * audit_resource_id,
     const gchar * audit_deny_reason, const gchar * audit_deny_origin,
-    wyl_decision_t audit_decision);
+    const gchar * audit_request_id, wyl_decision_t audit_decision);
 wyrelog_error_t wyl_policy_store_foreach_permission_state_event
     (wyl_policy_store_t * store, wyl_policy_permission_state_event_cb cb,
     gpointer user_data);

@@ -1498,7 +1498,8 @@ check_store_permission_state_transition_appends_audit (void)
           "perm-audit-user", "wr.perm.audit", "perm-audit-scope", "grant",
           &event_id, "01890c10-2e3f-7000-8000-000000000010", 999,
           "perm-audit-user", "permission_state.grant", "wr.perm.audit",
-          "allowed", "permission_state", WYL_DECISION_ALLOW) != WYRELOG_E_OK)
+          "allowed", "permission_state", NULL,
+          WYL_DECISION_ALLOW) != WYRELOG_E_OK)
     return 266;
   if (event_id <= 0)
     return 267;
@@ -1544,7 +1545,7 @@ check_store_permission_state_transition_rolls_back_audit_failure (void)
           "01890c10-2e3f-7000-8000-000000000011", 1000,
           "perm-audit-rollback-user", "permission_state.grant",
           "wr.perm.audit.rollback", "allowed", "permission_state",
-          WYL_DECISION_ALLOW) != WYRELOG_E_IO)
+          NULL, WYL_DECISION_ALLOW) != WYRELOG_E_IO)
     return 273;
   if (event_id != -1)
     return 274;
@@ -1589,7 +1590,7 @@ check_store_permission_state_transition_rejects_invalid_audit (void)
           "perm-bad-audit-scope", "grant", &event_id, "not-a-wyl-id", 1000,
           "perm-bad-audit-user", "permission_state.grant",
           "wr.perm.bad.audit", "allowed", "permission_state",
-          WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
+          NULL, WYL_DECISION_ALLOW) != WYRELOG_E_INVALID)
     return 288;
   if (event_id != -1)
     return 289;

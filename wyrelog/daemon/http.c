@@ -18,6 +18,8 @@
 #define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
 #define WYL_DAEMON_JWT_KEY_LEN 32
 #define WYL_DAEMON_REQUEST_ID_HEADER "X-Wyrelog-Request-Id"
+#define WYL_DAEMON_REQUEST_ID_DATA "wyl-daemon-request-id"
+#define WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA "wyl-daemon-request-id-attempted"
 
 typedef struct
 {
@@ -363,16 +365,42 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   return WYRELOG_E_OK;
 }
 
-static void
-attach_request_id_header (SoupServerMessage *msg)
+static const gchar *
+ensure_request_id_header (SoupServerMessage *msg)
 {
+  const gchar *existing = g_object_get_data (G_OBJECT (msg),
+      WYL_DAEMON_REQUEST_ID_DATA);
+  if (existing != NULL) {
+    SoupMessageHeaders *headers =
+        soup_server_message_get_response_headers (msg);
+    soup_message_headers_replace (headers, WYL_DAEMON_REQUEST_ID_HEADER,
+        existing);
+    return existing;
+  }
+
+  if (g_object_get_data (G_OBJECT (msg),
+          WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA) != NULL)
+    return NULL;
+  g_object_set_data (G_OBJECT (msg), WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA,
+      GINT_TO_POINTER (1));
+
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
   if (wyl_request_id_new (request_id, sizeof request_id) != WYRELOG_E_OK)
-    return;
+    return NULL;
+
+  g_object_set_data_full (G_OBJECT (msg), WYL_DAEMON_REQUEST_ID_DATA,
+      g_strdup (request_id), g_free);
 
   SoupMessageHeaders *headers = soup_server_message_get_response_headers (msg);
   soup_message_headers_replace (headers, WYL_DAEMON_REQUEST_ID_HEADER,
       request_id);
+  return g_object_get_data (G_OBJECT (msg), WYL_DAEMON_REQUEST_ID_DATA);
+}
+
+static void
+attach_request_id_header (SoupServerMessage *msg)
+{
+  (void) ensure_request_id_header (msg);
 }
 
 static void
@@ -773,6 +801,7 @@ policy_permission_transition_handler (SoupServer *server,
   wyl_audit_event_set_resource_id (audit_event, perm);
   wyl_audit_event_set_deny_reason (audit_event, event);
   wyl_audit_event_set_deny_origin (audit_event, scope);
+  wyl_audit_event_set_request_id (audit_event, ensure_request_id_header (msg));
   wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
 
   wyrelog_error_t rc = wyl_handle_apply_permission_state_transition

@@ -1087,7 +1087,8 @@ wyrelog_error_t
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
     const gchar * audit_resource_id, const gchar * audit_deny_reason,
-    const gchar * audit_deny_origin, wyl_decision_t audit_decision)
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision)
 {
   if (store == NULL || store->db == NULL || subject_id == NULL
       || perm_id == NULL || scope == NULL)
@@ -1120,10 +1121,11 @@ wyrelog_error_t
         perm_id, scope, insert ? "grant" : "revoke");
   }
   if (rc == WYRELOG_E_OK && audit_id != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, audit_id,
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
         audit_created_at_us, audit_subject_id, audit_action,
         audit_resource_id, audit_deny_reason, audit_deny_origin,
-        audit_decision);
+        audit_request_id, audit_decision, &inserted);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
@@ -1147,7 +1149,7 @@ wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
 {
   return wyl_policy_store_apply_direct_permission_mutation_with_audit (store,
       subject_id, perm_id, scope, insert, NULL, 0, NULL, NULL, NULL, NULL, NULL,
-      WYL_DECISION_DENY);
+      NULL, WYL_DECISION_DENY);
 }
 
 wyrelog_error_t
@@ -1533,7 +1535,7 @@ wyrelog_error_t
     gint64 audit_created_at_us, const gchar * audit_subject_id,
     const gchar * audit_action, const gchar * audit_resource_id,
     const gchar * audit_deny_reason, const gchar * audit_deny_origin,
-    wyl_decision_t audit_decision)
+    const gchar * audit_request_id, wyl_decision_t audit_decision)
 {
   if (out_event_id != NULL)
     *out_event_id = -1;
@@ -1581,10 +1583,11 @@ wyrelog_error_t
         perm_id, scope, event, from_state_name, to_state_name, &event_id);
   }
   if (rc == WYRELOG_E_OK && audit_id != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, audit_id,
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
         audit_created_at_us, audit_subject_id, audit_action,
         audit_resource_id, audit_deny_reason, audit_deny_origin,
-        audit_decision);
+        audit_request_id, audit_decision, &inserted);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
@@ -1610,7 +1613,7 @@ wyl_policy_store_apply_permission_state_transition (wyl_policy_store_t *store,
 {
   return wyl_policy_store_apply_permission_state_transition_with_audit (store,
       subject_id, perm_id, scope, event, out_event_id, NULL, 0, NULL, NULL,
-      NULL, NULL, NULL, WYL_DECISION_DENY);
+      NULL, NULL, NULL, NULL, WYL_DECISION_DENY);
 }
 
 wyrelog_error_t
@@ -2203,7 +2206,8 @@ wyrelog_error_t
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
     const gchar * audit_resource_id, const gchar * audit_deny_reason,
-    const gchar * audit_deny_origin, wyl_decision_t audit_decision)
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision)
 {
   if (store == NULL || store->db == NULL || subject_id == NULL
       || role_id == NULL || scope == NULL)
@@ -2223,10 +2227,11 @@ wyrelog_error_t
         role_id, scope, insert ? "grant" : "revoke");
   }
   if (rc == WYRELOG_E_OK && audit_id != NULL) {
-    rc = wyl_policy_store_append_audit_event (store, audit_id,
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
         audit_created_at_us, audit_subject_id, audit_action,
         audit_resource_id, audit_deny_reason, audit_deny_origin,
-        audit_decision);
+        audit_request_id, audit_decision, &inserted);
   }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
@@ -2250,7 +2255,7 @@ wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
 {
   return wyl_policy_store_apply_role_membership_mutation_with_audit (store,
       subject_id, role_id, scope, insert, NULL, 0, NULL, NULL, NULL, NULL, NULL,
-      WYL_DECISION_DENY);
+      NULL, WYL_DECISION_DENY);
 }
 
 wyrelog_error_t
