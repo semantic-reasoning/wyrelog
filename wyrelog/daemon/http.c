@@ -454,9 +454,25 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       strlen (body));
 }
 
-static wyrelog_error_t
-check_runtime_ready (WylHandle *handle)
+#ifdef WYL_HAS_AUDIT
+static void
+mark_runtime_audit_degraded (WylDaemonRuntime *runtime, wyrelog_error_t rc)
 {
+  if (runtime == NULL || rc == WYRELOG_E_OK)
+    return;
+
+  g_atomic_int_set (&runtime->audit_degraded, TRUE);
+  runtime->audit_errors++;
+  runtime->last_audit_error = rc;
+}
+#endif
+
+static wyrelog_error_t
+check_runtime_ready (WylHandle *handle, const gchar **out_error)
+{
+  if (out_error != NULL)
+    *out_error = "not_ready";
+
   gint64 row[1];
   wyrelog_error_t rc =
       wyl_handle_intern_engine_symbol (handle, "wr.audit.read", &row[0]);
@@ -486,15 +502,24 @@ check_runtime_ready (WylHandle *handle)
   wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
   gboolean found = FALSE;
   rc = wyl_audit_conn_table_exists (conn, "audit_events", &found);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    if (out_error != NULL)
+      *out_error = "audit_degraded";
     return rc;
-  if (!found)
+  }
+  if (!found) {
+    if (out_error != NULL)
+      *out_error = "audit_degraded";
     return WYRELOG_E_IO;
+  }
 
   g_autofree gchar *json = NULL;
   rc = wyl_audit_conn_query_events_json (conn, NULL, &json);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    if (out_error != NULL)
+      *out_error = "audit_degraded";
     return rc;
+  }
 #endif
 
   return WYRELOG_E_OK;
@@ -530,9 +555,10 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  wyrelog_error_t rc = check_runtime_ready (ctx->handle);
+  const gchar *readiness_error = "not_ready";
+  wyrelog_error_t rc = check_runtime_ready (ctx->handle, &readiness_error);
   if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, 503, "not_ready");
+    set_json_error (msg, 503, readiness_error);
     return;
   }
 
@@ -680,6 +706,7 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   if (rc != WYRELOG_E_OK) {
+    mark_runtime_audit_degraded (ctx->runtime, rc);
     set_json_error (msg, 500, "audit_query_failed");
     return;
   }

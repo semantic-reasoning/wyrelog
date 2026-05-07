@@ -2542,7 +2542,7 @@ check_readyz_malformed_audit_projection_contract (WylHandle *handle,
   if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
       != 0)
     return 1915;
-  if (status != 503 || strstr (body, "\"not_ready\"") == NULL)
+  if (status != 503 || strstr (body, "\"audit_degraded\"") == NULL)
     return 1916;
 
   if (drop_runtime_audit_events_table (handle) != WYRELOG_E_OK)
