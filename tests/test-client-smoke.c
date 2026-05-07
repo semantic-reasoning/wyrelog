@@ -547,6 +547,14 @@ main (void)
   if (wyl_client_decide (local_client, "alice", "read", "doc/42", NULL)
       != WYRELOG_E_INVALID)
     return 53;
+  g_autoptr (WylClientDecision) decision_result = NULL;
+  if (wyl_client_decide_ex (local_client, "alice", "read", "doc/42", NULL)
+      != WYRELOG_E_INVALID)
+    return 177;
+  if (wyl_client_decision_get_decision (NULL) != WYL_DECISION_DENY ||
+      wyl_client_decision_get_deny_reason (NULL) != NULL ||
+      wyl_client_decision_get_deny_origin (NULL) != NULL)
+    return 178;
 
   http.body = "{\"session_token\":\"session-4\",\"username\":\"alice\","
       "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
@@ -577,6 +585,22 @@ main (void)
   if (http.last_guard_timestamp != NULL || http.last_guard_loc_class != NULL ||
       http.last_guard_risk != NULL)
     return 69;
+  http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
+  if (wyl_client_decide_ex (local_client, "alice", "wr.audit.read",
+          "doc/42", &decision_result) != WYRELOG_E_OK)
+    return 179;
+  if (decision_result == NULL ||
+      wyl_client_decision_get_decision (decision_result) != WYL_DECISION_ALLOW)
+    return 180;
+  if (wyl_client_decision_get_deny_reason (decision_result) != NULL ||
+      wyl_client_decision_get_deny_origin (decision_result) != NULL)
+    return 181;
+  if (wyl_client_decide_ex (local_client, NULL, "wr.audit.read", "doc/42",
+          &decision_result) != WYRELOG_E_INVALID)
+    return 186;
+  if (decision_result != NULL)
+    return 187;
+  g_clear_pointer (&decision_result, wyl_client_decision_free);
 
   if (wyl_client_decide_with_guard_context (NULL, "alice", "read", "doc/42",
           123, "public", 69, &decision) != WYRELOG_E_INVALID)
@@ -627,6 +651,19 @@ main (void)
     return 84;
   if (g_strcmp0 (http.last_guard_risk, "69") != 0)
     return 85;
+  http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
+  if (wyl_client_decide_with_guard_context_ex (local_client, "alice",
+          "wr.audit.read", "doc/42", 123, "semi_trusted", 69,
+          &decision_result) != WYRELOG_E_OK)
+    return 188;
+  if (decision_result == NULL)
+    return 189;
+  if (wyl_client_decide_with_guard_context_ex (local_client, "alice",
+          "wr.audit.read", "doc/42", 123, NULL, 69,
+          &decision_result) != WYRELOG_E_INVALID)
+    return 190;
+  if (decision_result != NULL)
+    return 191;
 
   http.body = "{\"decision\":0,\"deny_reason\":\"missing_grant\","
       "\"deny_origin\":\"policy\"}";
@@ -635,6 +672,27 @@ main (void)
     return 86;
   if (decision != WYL_DECISION_DENY)
     return 87;
+  http.body = "{\"decision\":0,\"deny_reason\":\"missing_grant\","
+      "\"deny_origin\":\"policy\"}";
+  if (wyl_client_decide_ex (local_client, "bob", "write", "doc/43",
+          &decision_result) != WYRELOG_E_OK)
+    return 182;
+  if (decision_result == NULL ||
+      wyl_client_decision_get_decision (decision_result) != WYL_DECISION_DENY)
+    return 183;
+  if (g_strcmp0 (wyl_client_decision_get_deny_reason (decision_result),
+          "missing_grant") != 0 ||
+      g_strcmp0 (wyl_client_decision_get_deny_origin (decision_result),
+          "policy") != 0)
+    return 184;
+  g_autofree gchar *dup_deny_reason =
+      wyl_client_decision_dup_deny_reason (decision_result);
+  g_autofree gchar *dup_deny_origin =
+      wyl_client_decision_dup_deny_origin (decision_result);
+  if (g_strcmp0 (dup_deny_reason, "missing_grant") != 0 ||
+      g_strcmp0 (dup_deny_origin, "policy") != 0)
+    return 185;
+  g_clear_pointer (&decision_result, wyl_client_decision_free);
 
   http.body = "not-json";
   if (wyl_client_decide (local_client, "bob", "write", "doc/43", &decision)

@@ -16,6 +16,13 @@ struct _WylClient
   SoupSession *session;
 };
 
+struct _WylClientDecision
+{
+  gint decision;
+  gchar *deny_reason;
+  gchar *deny_origin;
+};
+
 G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
 
 static gboolean parse_login_response_json (const gchar * data, gsize size,
@@ -517,8 +524,12 @@ json_parse_string (JsonCursor *cursor, gchar **out_string)
 }
 
 static gboolean
-json_parse_nullable_string (JsonCursor *cursor)
+json_parse_nullable_string_value (JsonCursor *cursor, gchar **out_value)
 {
+  if (out_value == NULL)
+    return FALSE;
+  *out_value = NULL;
+
   json_skip_ws (cursor);
   if (cursor->pos + 4 <= cursor->size &&
       memcmp (cursor->data + cursor->pos, "null", 4) == 0) {
@@ -526,8 +537,7 @@ json_parse_nullable_string (JsonCursor *cursor)
     return TRUE;
   }
 
-  g_autofree gchar *value = NULL;
-  return json_parse_string (cursor, &value);
+  return json_parse_string (cursor, out_value);
 }
 
 static gboolean
@@ -548,10 +558,12 @@ json_parse_decision (JsonCursor *cursor, gint *out_decision)
 }
 
 static gboolean
-parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
+parse_decide_response_json (const gchar *data, gsize size,
+    WylClientDecision **out_result)
 {
-  if (data == NULL || out_decision == NULL)
+  if (data == NULL || out_result == NULL)
     return FALSE;
+  *out_result = NULL;
 
   JsonCursor cursor = { data, size, 0 };
   if (!json_consume (&cursor, '{'))
@@ -561,6 +573,8 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
   gboolean have_deny_reason = FALSE;
   gboolean have_deny_origin = FALSE;
   gint decision = WYL_DECISION_DENY;
+  g_autofree gchar *deny_reason = NULL;
+  g_autofree gchar *deny_origin = NULL;
   json_skip_ws (&cursor);
   if (cursor.pos < cursor.size && cursor.data[cursor.pos] == '}')
     return FALSE;
@@ -578,9 +592,11 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
         g_strcmp0 (key, "deny_origin") == 0) {
       gboolean *seen = g_strcmp0 (key, "deny_reason") == 0 ?
           &have_deny_reason : &have_deny_origin;
+      gchar **target = g_strcmp0 (key, "deny_reason") == 0 ?
+          &deny_reason : &deny_origin;
       if (*seen)
         return FALSE;
-      if (!json_parse_nullable_string (&cursor))
+      if (!json_parse_nullable_string_value (&cursor, target))
         return FALSE;
       *seen = TRUE;
     } else {
@@ -603,8 +619,54 @@ parse_decide_response_json (const gchar *data, gsize size, gint *out_decision)
   if (!have_decision || !have_deny_reason || !have_deny_origin ||
       cursor.pos != cursor.size)
     return FALSE;
-  *out_decision = decision;
+
+  WylClientDecision *result = g_new0 (WylClientDecision, 1);
+  result->decision = decision;
+  result->deny_reason = g_steal_pointer (&deny_reason);
+  result->deny_origin = g_steal_pointer (&deny_origin);
+  *out_result = result;
   return TRUE;
+}
+
+void
+wyl_client_decision_free (WylClientDecision *result)
+{
+  if (result == NULL)
+    return;
+
+  g_free (result->deny_reason);
+  g_free (result->deny_origin);
+  g_free (result);
+}
+
+gint
+wyl_client_decision_get_decision (const WylClientDecision *result)
+{
+  return result != NULL ? result->decision : WYL_DECISION_DENY;
+}
+
+const gchar *
+wyl_client_decision_get_deny_reason (const WylClientDecision *result)
+{
+  return result != NULL ? result->deny_reason : NULL;
+}
+
+const gchar *
+wyl_client_decision_get_deny_origin (const WylClientDecision *result)
+{
+  return result != NULL ? result->deny_origin : NULL;
+}
+
+gchar *
+wyl_client_decision_dup_deny_reason (const WylClientDecision *result)
+{
+  return g_strdup (wyl_client_decision_get_deny_reason (result));
+}
+
+gchar *
+wyl_client_decision_dup_deny_origin (const WylClientDecision *result)
+{
+  return g_strdup (wyl_client_decision_get_deny_origin (result));
 }
 
 static gboolean
@@ -727,12 +789,14 @@ static wyrelog_error_t
 client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
     const gchar *session_token, gboolean has_guard_context,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
-    gint *out_decision)
+    WylClientDecision **out_result)
 {
-  if (client == NULL || !WYL_IS_CLIENT (client) || user == NULL ||
-      perm == NULL || session_token == NULL || out_decision == NULL)
+  if (out_result == NULL)
     return WYRELOG_E_INVALID;
-  *out_decision = WYL_DECISION_DENY;
+  *out_result = NULL;
+  if (client == NULL || !WYL_IS_CLIENT (client) || user == NULL ||
+      perm == NULL || session_token == NULL)
+    return WYRELOG_E_INVALID;
   if (has_guard_context &&
       (guard_loc_class == NULL || guard_timestamp < 0 || guard_risk < 0 ||
           guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class)))
@@ -786,20 +850,48 @@ client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
 
   gsize body_size = 0;
   const gchar *body_data = g_bytes_get_data (body, &body_size);
-  gint decision = WYL_DECISION_DENY;
-  if (!parse_decide_response_json (body_data, body_size, &decision))
+  g_autoptr (WylClientDecision) result = NULL;
+  if (!parse_decide_response_json (body_data, body_size, &result))
     return WYRELOG_E_IO;
 
-  *out_decision = decision;
+  *out_result = g_steal_pointer (&result);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_decide_ex (WylClient *client, const gchar *user, const gchar *perm,
+    const gchar *session_token, WylClientDecision **out_result)
+{
+  return client_decide_request (client, user, perm, session_token, FALSE, 0,
+      NULL, 0, out_result);
 }
 
 wyrelog_error_t
 wyl_client_decide (WylClient *client, const gchar *user, const gchar *perm,
     const gchar *session_token, gint *out_decision)
 {
-  return client_decide_request (client, user, perm, session_token, FALSE, 0,
-      NULL, 0, out_decision);
+  if (out_decision == NULL)
+    return WYRELOG_E_INVALID;
+  *out_decision = WYL_DECISION_DENY;
+
+  g_autoptr (WylClientDecision) result = NULL;
+  wyrelog_error_t rc =
+      wyl_client_decide_ex (client, user, perm, session_token, &result);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_decision = wyl_client_decision_get_decision (result);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_decide_with_guard_context_ex (WylClient *client, const gchar *user,
+    const gchar *perm, const gchar *session_token, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientDecision **out_result)
+{
+  return client_decide_request (client, user, perm, session_token, TRUE,
+      guard_timestamp, guard_loc_class, guard_risk, out_result);
 }
 
 wyrelog_error_t
@@ -807,8 +899,19 @@ wyl_client_decide_with_guard_context (WylClient *client, const gchar *user,
     const gchar *perm, const gchar *session_token, gint64 guard_timestamp,
     const gchar *guard_loc_class, gint64 guard_risk, gint *out_decision)
 {
-  return client_decide_request (client, user, perm, session_token, TRUE,
-      guard_timestamp, guard_loc_class, guard_risk, out_decision);
+  if (out_decision == NULL)
+    return WYRELOG_E_INVALID;
+  *out_decision = WYL_DECISION_DENY;
+
+  g_autoptr (WylClientDecision) result = NULL;
+  wyrelog_error_t rc =
+      wyl_client_decide_with_guard_context_ex (client, user, perm,
+      session_token, guard_timestamp, guard_loc_class, guard_risk, &result);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_decision = wyl_client_decision_get_decision (result);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

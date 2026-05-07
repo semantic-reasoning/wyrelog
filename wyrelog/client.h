@@ -29,6 +29,8 @@ G_DECLARE_FINAL_TYPE (WylClient, wyl_client, WYL, CLIENT, GObject);
 G_DECLARE_FINAL_TYPE (WylAuditIter, wyl_audit_iter, WYL, AUDIT_ITER, GObject);
 #define WYL_TYPE_AUDIT_ITER (wyl_audit_iter_get_type ())
 
+typedef struct _WylClientDecision WylClientDecision;
+
 /* Lifecycle */
 wyrelog_error_t wyl_client_new (const gchar * base_url,
     WylClient ** out_client);
@@ -56,12 +58,31 @@ wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const gchar * otp);
 wyrelog_error_t wyl_client_decide (WylClient * client,
     const gchar * user,
     const gchar * perm, const gchar * session_token, gint * out_decision);
+wyrelog_error_t wyl_client_decide_ex (WylClient * client,
+    const gchar * user,
+    const gchar * perm,
+    const gchar * session_token, WylClientDecision ** out_result);
 wyrelog_error_t wyl_client_decide_with_guard_context (WylClient * client,
     const gchar * user,
     const gchar * perm,
     const gchar * session_token,
     gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk, gint * out_decision);
+wyrelog_error_t wyl_client_decide_with_guard_context_ex (WylClient * client,
+    const gchar * user,
+    const gchar * perm,
+    const gchar * session_token,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class,
+    gint64 guard_risk, WylClientDecision ** out_result);
+void wyl_client_decision_free (WylClientDecision * result);
+gint wyl_client_decision_get_decision (const WylClientDecision * result);
+const gchar *wyl_client_decision_get_deny_reason (const WylClientDecision *
+    result);
+const gchar *wyl_client_decision_get_deny_origin (const WylClientDecision *
+    result);
+gchar *wyl_client_decision_dup_deny_reason (const WylClientDecision * result);
+gchar *wyl_client_decision_dup_deny_origin (const WylClientDecision * result);
 
 /* Audit query (iterator) */
 wyrelog_error_t wyl_client_audit_query (WylClient * client,
@@ -120,3 +141,5 @@ wyrelog_error_t wyl_client_event_emit (WylClient * client,
 const gchar *wyrelog_client_version_string (void);
 
 G_END_DECLS;
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
