@@ -256,6 +256,33 @@ count_rows (wyl_policy_store_t *store, const gchar *sql, gint *out_count)
 }
 
 static gint
+check_permission_seed (wyl_policy_store_t *store, const gchar *perm_id,
+    const gchar *klass, gint error_base)
+{
+  g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM permissions "
+      "WHERE perm_id = '%s' AND class = '%s';",
+      perm_id, klass);
+  gint matches = 0;
+  if (count_rows (store, sql, &matches) != 0)
+    return error_base;
+  return matches == 1 ? 0 : error_base + 1;
+}
+
+static gint
+check_role_permission_seed (wyl_policy_store_t *store, const gchar *role_id,
+    const gchar *perm_id, gboolean expected, gint error_base)
+{
+  g_autofree gchar *sql =
+      g_strdup_printf ("SELECT COUNT(*) FROM role_permissions "
+      "WHERE role_id = '%s' AND perm_id = '%s';",
+      role_id, perm_id);
+  gint matches = 0;
+  if (count_rows (store, sql, &matches) != 0)
+    return error_base;
+  return (matches == (expected ? 1 : 0)) ? 0 : error_base + 1;
+}
+
+static gint
 check_store_seeds_builtin_catalog (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -295,6 +322,48 @@ check_store_seeds_builtin_catalog (void)
     return 210;
   if (matches != 1)
     return 211;
+
+  struct
+  {
+    const gchar *perm_id;
+    const gchar *klass;
+  } permission_seeds[] = {
+    {"wr.policy.read", "sensitive"},
+    {"wr.policy.write", "critical"},
+    {"wr.policy.grant_role", "critical"},
+    {"wr.audit.read", "sensitive"},
+    {"wr.audit.write", "critical"},
+    {"wr.login.skip_mfa", "critical"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (permission_seeds); i++) {
+    gint rc = check_permission_seed (store, permission_seeds[i].perm_id,
+        permission_seeds[i].klass, (gint) (244 + (i * 2)));
+    if (rc != 0)
+      return rc;
+  }
+
+  struct
+  {
+    const gchar *role_id;
+    const gchar *perm_id;
+    gboolean expected;
+  } role_permission_seeds[] = {
+    {"wr.system_admin", "wr.policy.write", FALSE},
+    {"wr.service_admin", "wr.policy.write", FALSE},
+    {"wr.auditor", "wr.audit.read", FALSE},
+    {"wr.system_agent", "wr.audit.write", FALSE},
+    {"wr.system_admin", "wr.login.skip_mfa", FALSE},
+    {"wr.service_admin", "wr.login.skip_mfa", FALSE},
+    {"wr.auditor", "wr.login.skip_mfa", FALSE},
+    {"wr.system_agent", "wr.login.skip_mfa", FALSE},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (role_permission_seeds); i++) {
+    gint rc = check_role_permission_seed (store,
+        role_permission_seeds[i].role_id, role_permission_seeds[i].perm_id,
+        role_permission_seeds[i].expected, (gint) (260 + (i * 2)));
+    if (rc != 0)
+      return rc;
+  }
 
   if (wyl_policy_store_upsert_role (store, "site.local-admin",
           "local admin") != WYRELOG_E_OK)
