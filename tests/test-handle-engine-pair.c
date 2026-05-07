@@ -2457,6 +2457,16 @@ check_login_skip_mfa_projection_autoload_on_open (void)
       return cases[i].code + 10;
     if (found != cases[i].expected)
       return cases[i].code + 20;
+    if (wyl_handle_engine_contains (handle, "login_skip_mfa_authz_observed",
+            row, 1, &found) != WYRELOG_E_OK)
+      return cases[i].code + 30;
+    if (found != cases[i].expected)
+      return cases[i].code + 40;
+    if (contains3_symbol (handle, "allow_bool", cases[i].user,
+            "wr.login.skip_mfa", "login", &found) != WYRELOG_E_OK)
+      return cases[i].code + 50;
+    if (found)
+      return cases[i].code + 60;
   }
 
   gint64 decision_row[3];
