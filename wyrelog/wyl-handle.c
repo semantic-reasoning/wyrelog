@@ -22,6 +22,14 @@
 #include "audit/conn-private.h"
 #endif
 
+typedef struct
+{
+  gchar *relation;
+  gint64 *row;
+  guint ncols;
+  WylDeltaKind kind;
+} WylPendingDelta;
+
 struct _WylHandle
 {
   GObject parent_instance;
@@ -33,14 +41,67 @@ struct _WylHandle
   gchar *template_dir;
   WylDeltaCallback delta_callback;
   gpointer delta_callback_user_data;
+  GPtrArray *pending_deltas;
   wyl_policy_store_t *policy_store;
   gboolean login_skip_mfa_allowed;
+  gboolean engine_pair_poisoned;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
 #endif
 };
 
 G_DEFINE_FINAL_TYPE (WylHandle, wyl_handle, G_TYPE_OBJECT);
+
+static void
+wyl_pending_delta_free (gpointer data)
+{
+  WylPendingDelta *delta = data;
+
+  if (delta == NULL)
+    return;
+  g_free (delta->relation);
+  g_free (delta->row);
+  g_free (delta);
+}
+
+static void
+clear_pending_deltas (WylHandle *self)
+{
+  if (self->pending_deltas != NULL)
+    g_ptr_array_set_size (self->pending_deltas, 0);
+}
+
+static void
+wyl_handle_buffer_delta_cb (const gchar *relation, const gint64 *row,
+    guint ncols, WylDeltaKind kind, gpointer user_data)
+{
+  WylHandle *self = WYL_HANDLE (user_data);
+  WylPendingDelta *delta = g_new0 (WylPendingDelta, 1);
+
+  delta->relation = g_strdup (relation);
+  delta->row = g_memdup2 (row, sizeof (gint64) * ncols);
+  delta->ncols = ncols;
+  delta->kind = kind;
+  g_ptr_array_add (self->pending_deltas, delta);
+}
+
+static void
+flush_pending_deltas (WylHandle *self)
+{
+  WylDeltaCallback cb = self->delta_callback;
+  gpointer user_data = self->delta_callback_user_data;
+
+  if (cb == NULL) {
+    clear_pending_deltas (self);
+    return;
+  }
+
+  for (guint i = 0; i < self->pending_deltas->len; i++) {
+    WylPendingDelta *delta = g_ptr_array_index (self->pending_deltas, i);
+    cb (delta->relation, delta->row, delta->ncols, delta->kind, user_data);
+  }
+  clear_pending_deltas (self);
+}
 
 static void
 wyl_handle_finalize (GObject *object)
@@ -51,6 +112,7 @@ wyl_handle_finalize (GObject *object)
   g_clear_object (&self->delta_engine);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
   g_clear_pointer (&self->template_dir, g_free);
+  g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
 #ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
@@ -84,6 +146,8 @@ wyl_handle_init (WylHandle *self)
   self->created_at_us = g_get_real_time ();
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
+  self->pending_deltas =
+      g_ptr_array_new_with_free_func (wyl_pending_delta_free);
 }
 
 static wyrelog_error_t wyl_handle_make_guard_expr_node_compound (WylHandle *
@@ -405,9 +469,17 @@ wyl_shutdown (WylHandle *handle)
   g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
+  handle->engine_pair_poisoned = FALSE;
+  clear_pending_deltas (handle);
   g_clear_pointer (&handle->template_dir, g_free);
   g_object_set_qdata (G_OBJECT (handle),
       wyl_handle_engine_remove_fault_once_quark (), NULL);
+  g_object_set_qdata (G_OBJECT (handle),
+      wyl_handle_engine_delta_insert_fault_once_quark (), NULL);
+  g_object_set_qdata (G_OBJECT (handle),
+      wyl_handle_engine_delta_remove_fault_once_quark (), NULL);
+  g_object_set_qdata (G_OBJECT (handle),
+      wyl_handle_engine_delta_step_fault_once_quark (), NULL);
   g_hash_table_remove_all (handle->engine_symbols_by_id);
 }
 
@@ -836,7 +908,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   }
   if (self->delta_callback != NULL) {
     rc = wyl_engine_set_delta_callback (self->delta_engine,
-        self->delta_callback, self->delta_callback_user_data);
+        wyl_handle_buffer_delta_cb, self);
     if (rc != WYRELOG_E_OK) {
       g_clear_object (&self->read_engine);
       g_clear_object (&self->delta_engine);
@@ -858,6 +930,23 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   return WYRELOG_E_OK;
 }
 
+static void
+poison_engine_pair (WylHandle *self)
+{
+  clear_pending_deltas (self);
+  g_clear_object (&self->read_engine);
+  g_clear_object (&self->delta_engine);
+  g_hash_table_remove_all (self->engine_symbols_by_id);
+  self->engine_pair_poisoned = TRUE;
+}
+
+static gboolean
+engine_pair_unavailable (WylHandle *self)
+{
+  return self->engine_pair_poisoned || self->read_engine == NULL
+      || self->delta_engine == NULL;
+}
+
 wyrelog_error_t
 wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
 {
@@ -868,7 +957,10 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
   if (self->read_engine != NULL || self->delta_engine != NULL)
     return WYRELOG_E_INVALID;
 
-  return replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc == WYRELOG_E_OK)
+    self->engine_pair_poisoned = FALSE;
+  return rc;
 }
 
 wyrelog_error_t
@@ -880,7 +972,10 @@ wyl_handle_reload_engine_pair (WylHandle *self)
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *template_dir = g_strdup (self->template_dir);
-  return replace_engine_pair (self, template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc == WYRELOG_E_OK)
+    self->engine_pair_poisoned = FALSE;
+  return rc;
 }
 
 wyrelog_error_t
@@ -891,7 +986,7 @@ wyl_handle_intern_engine_symbol (WylHandle *self, const gchar *symbol,
     return WYRELOG_E_INVALID;
   if (symbol == NULL || out_id == NULL)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   gint64 read_id = -1;
@@ -943,7 +1038,7 @@ wyl_handle_make_engine_compound (WylHandle *self, const gchar *functor,
     return WYRELOG_E_INVALID;
   if (nargs == 0 || nargs > G_MAXUINT32)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   gint64 read_id = 0;
@@ -977,7 +1072,7 @@ wyl_handle_make_read_engine_compound (WylHandle *self, const gchar *functor,
     return WYRELOG_E_INVALID;
   if (nargs == 0 || nargs > G_MAXUINT32)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   gint64 functor_id = 0;
@@ -1007,7 +1102,7 @@ wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
 
   if (self == NULL || !WYL_IS_HANDLE (self) || out_id == NULL)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   wirelog_compound_arg_t metadata_args[3] = {
@@ -1066,13 +1161,56 @@ relation_fans_out_to_delta (const gchar *relation)
       || g_strcmp0 (relation, "session_event") == 0;
 }
 
+static gboolean
+take_engine_fault_once (WylHandle *self, GQuark quark, const gchar *relation,
+    wyrelog_error_t *out_rc)
+{
+  WylHandleEngineFaultOnce *fault = g_object_get_qdata (G_OBJECT (self), quark);
+  if (fault == NULL || g_strcmp0 (fault->relation, relation) != 0)
+    return FALSE;
+
+  if (out_rc != NULL)
+    *out_rc = fault->rc;
+  g_object_steal_qdata (G_OBJECT (self), quark);
+  wyl_handle_engine_fault_once_free (fault);
+  return TRUE;
+}
+
+static wyrelog_error_t
+repair_engine_pair_after_projection_failure (WylHandle *self)
+{
+  if (self->template_dir == NULL)
+    return WYRELOG_E_INVALID;
+
+  clear_pending_deltas (self);
+  g_autofree gchar *template_dir = g_strdup (self->template_dir);
+  wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+  if (rc != WYRELOG_E_OK)
+    poison_engine_pair (self);
+  return rc;
+}
+
+static wyrelog_error_t
+step_delta_engine_and_flush (WylHandle *self)
+{
+  clear_pending_deltas (self);
+  wyrelog_error_t rc = wyl_engine_step (self->delta_engine);
+  if (rc != WYRELOG_E_OK) {
+    clear_pending_deltas (self);
+    return rc;
+  }
+
+  flush_pending_deltas (self);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
     const gint64 *row, gsize ncols)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   WylHandleEngineInsertFaultOnce *fault = g_object_get_qdata (G_OBJECT (self),
@@ -1092,10 +1230,36 @@ wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
 
   if (!relation_fans_out_to_delta (relation))
     return WYRELOG_E_OK;
+  wyrelog_error_t fault_rc = WYRELOG_E_OK;
+  if (take_engine_fault_once (self,
+          wyl_handle_engine_delta_insert_fault_once_quark (), relation,
+          &fault_rc)) {
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? fault_rc : repair_rc;
+  }
   rc = wyl_engine_insert (self->delta_engine, relation, row, ncols);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_engine_step (self->delta_engine);
+  if (rc != WYRELOG_E_OK) {
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? rc : repair_rc;
+  }
+  if (take_engine_fault_once (self,
+          wyl_handle_engine_delta_step_fault_once_quark (), relation,
+          &fault_rc)) {
+    wyl_handle_buffer_delta_cb (relation, row, (guint) ncols,
+        WYL_DELTA_INSERT, self);
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? fault_rc : repair_rc;
+  }
+  rc = step_delta_engine_and_flush (self);
+  if (rc != WYRELOG_E_OK) {
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? rc : repair_rc;
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -1104,7 +1268,7 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   WylHandleEngineRemoveFaultOnce *fault = g_object_get_qdata (G_OBJECT (self),
@@ -1125,12 +1289,35 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
 
   if (!relation_fans_out_to_delta (relation))
     return fault_matches ? fault_rc : WYRELOG_E_OK;
+  wyrelog_error_t delta_fault_rc = WYRELOG_E_OK;
+  if (take_engine_fault_once (self,
+          wyl_handle_engine_delta_remove_fault_once_quark (), relation,
+          &delta_fault_rc)) {
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? delta_fault_rc : repair_rc;
+  }
   rc = wyl_engine_remove (self->delta_engine, relation, row, ncols);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_engine_step (self->delta_engine);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  if (rc != WYRELOG_E_OK) {
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? rc : repair_rc;
+  }
+  if (take_engine_fault_once (self,
+          wyl_handle_engine_delta_step_fault_once_quark (), relation,
+          &delta_fault_rc)) {
+    wyl_handle_buffer_delta_cb (relation, row, (guint) ncols,
+        WYL_DELTA_REMOVE, self);
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? delta_fault_rc : repair_rc;
+  }
+  rc = step_delta_engine_and_flush (self);
+  if (rc != WYRELOG_E_OK) {
+    wyrelog_error_t repair_rc =
+        repair_engine_pair_after_projection_failure (self);
+    return repair_rc == WYRELOG_E_OK ? rc : repair_rc;
+  }
   return fault_matches ? fault_rc : WYRELOG_E_OK;
 }
 
@@ -1139,10 +1326,10 @@ wyl_handle_engine_step_delta (WylHandle *self)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->delta_engine == NULL)
+  if (self->engine_pair_poisoned || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  return wyl_engine_step (self->delta_engine);
+  return step_delta_engine_and_flush (self);
 }
 
 wyrelog_error_t
@@ -1151,14 +1338,18 @@ wyl_handle_engine_set_delta_callback (WylHandle *self, WylDeltaCallback cb,
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->delta_engine == NULL)
+  if (self->engine_pair_poisoned || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc =
-      wyl_engine_set_delta_callback (self->delta_engine, cb, user_data);
+  WylDeltaCallback engine_cb = cb == NULL ? NULL : wyl_handle_buffer_delta_cb;
+  gpointer engine_user_data = cb == NULL ? NULL : self;
+  wyrelog_error_t rc = wyl_engine_set_delta_callback (self->delta_engine,
+      engine_cb, engine_user_data);
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  if (cb == NULL)
+    clear_pending_deltas (self);
   self->delta_callback = cb;
   self->delta_callback_user_data = user_data;
   return WYRELOG_E_OK;
@@ -1681,7 +1872,7 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
     return WYRELOG_E_INVALID;
   if (id == NULL || created_at_us < 0)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_OK;
 
   const gchar *decision_name = decision_symbol (decision);
@@ -1779,7 +1970,7 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
   if (relation == NULL || row == NULL || ncols == 0 || out_contains == NULL)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   const gchar *snapshot_relation = relation;
@@ -1815,7 +2006,7 @@ wyl_handle_engine_decide (WylHandle *self, const gint64 row[3],
     return WYRELOG_E_INVALID;
   if (row == NULL || out_allowed == NULL)
     return WYRELOG_E_INVALID;
-  if (self->read_engine == NULL || self->delta_engine == NULL)
+  if (engine_pair_unavailable (self))
     return WYRELOG_E_INVALID;
 
   return wyl_handle_engine_contains (self, "allow_bool", row, 3, out_allowed);
@@ -1825,6 +2016,8 @@ WylEngine *
 wyl_handle_get_read_engine (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  if (self->engine_pair_poisoned)
+    return NULL;
   return self->read_engine;
 }
 
@@ -1832,6 +2025,8 @@ WylEngine *
 wyl_handle_get_delta_engine (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  if (self->engine_pair_poisoned)
+    return NULL;
   return self->delta_engine;
 }
 
@@ -1843,7 +2038,7 @@ wyl_handle_replay_delta_insert (WylHandle *self, const gchar *relation,
     return WYRELOG_E_INVALID;
   if (relation == NULL || row == NULL || ncols == 0)
     return WYRELOG_E_INVALID;
-  if (self->delta_engine == NULL)
+  if (self->engine_pair_poisoned || self->delta_engine == NULL)
     return WYRELOG_E_INVALID;
 
   if (self->delta_callback == NULL)

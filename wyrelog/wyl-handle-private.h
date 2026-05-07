@@ -120,6 +120,9 @@ typedef struct
 
 typedef WylHandleEngineFaultOnce WylHandleEngineInsertFaultOnce;
 typedef WylHandleEngineFaultOnce WylHandleEngineRemoveFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineDeltaInsertFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineDeltaRemoveFaultOnce;
+typedef WylHandleEngineFaultOnce WylHandleEngineDeltaStepFaultOnce;
 
 static inline void
 wyl_handle_engine_fault_once_free (gpointer data)
@@ -142,6 +145,24 @@ static inline GQuark
 wyl_handle_engine_remove_fault_once_quark (void)
 {
   return g_quark_from_static_string ("wyrelog-handle-engine-remove-fault-once");
+}
+
+static inline GQuark
+wyl_handle_engine_delta_insert_fault_once_quark (void)
+{
+  return g_quark_from_static_string ("wyl-delta-insert-fault-once");
+}
+
+static inline GQuark
+wyl_handle_engine_delta_remove_fault_once_quark (void)
+{
+  return g_quark_from_static_string ("wyl-delta-remove-fault-once");
+}
+
+static inline GQuark
+wyl_handle_engine_delta_step_fault_once_quark (void)
+{
+  return g_quark_from_static_string ("wyl-delta-step-fault-once");
 }
 
 static inline void
@@ -196,6 +217,72 @@ wyl_handle_set_engine_remove_fault_once (WylHandle *self,
   g_object_set_qdata_full (G_OBJECT (self),
       wyl_handle_engine_remove_fault_once_quark (), fault,
       wyl_handle_engine_remove_fault_once_free);
+}
+
+/*
+ * Test-only hook for fanout coverage. The next delta-engine insert for
+ * @relation fails after the read engine has accepted the row.
+ */
+static inline void
+wyl_handle_set_engine_delta_insert_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineDeltaInsertFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineDeltaInsertFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_delta_insert_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
+}
+
+/*
+ * Test-only hook for fanout coverage. The next delta-engine remove for
+ * @relation fails after the read engine has accepted the removal.
+ */
+static inline void
+wyl_handle_set_engine_delta_remove_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineDeltaRemoveFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineDeltaRemoveFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_delta_remove_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
+}
+
+/*
+ * Test-only hook for fanout coverage. The next delta-engine step for
+ * @relation fails after both engines have accepted the row.
+ */
+static inline void
+wyl_handle_set_engine_delta_step_fault_once (WylHandle *self,
+    const gchar *relation, wyrelog_error_t rc)
+{
+  WylHandleEngineDeltaStepFaultOnce *fault;
+
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (relation != NULL);
+  g_return_if_fail (rc != WYRELOG_E_OK);
+
+  fault = g_new0 (WylHandleEngineDeltaStepFaultOnce, 1);
+  fault->relation = g_strdup (relation);
+  fault->rc = rc;
+  g_object_set_qdata_full (G_OBJECT (self),
+      wyl_handle_engine_delta_step_fault_once_quark (), fault,
+      wyl_handle_engine_fault_once_free);
 }
 
 /*
