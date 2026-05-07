@@ -220,6 +220,53 @@ check_permission_scope_relation_contract (void)
       G_N_ELEMENTS (snippets), 130);
 }
 
+static gint
+check_audit_schema_contract (const gchar *relative_path, gint error_base)
+{
+  static const gchar *const snippets[] = {
+    "CREATE TABLE IF NOT EXISTS audit_events (",
+    "id            ",
+    "created_at_us ",
+    "subject_id    ",
+    "action        ",
+    "resource_id   ",
+    "deny_reason   ",
+    "deny_origin   ",
+    "request_id    ",
+    "decision      ",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us\n"
+        "    ON audit_events (created_at_us);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id\n"
+        "    ON audit_events (subject_id);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_action\n"
+        "    ON audit_events (action);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_decision\n"
+        "    ON audit_events (decision);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason\n"
+        "    ON audit_events (deny_reason);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_origin\n"
+        "    ON audit_events (deny_origin);",
+    "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id\n"
+        "    ON audit_events (request_id);",
+  };
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gint rc = read_template_file (relative_path, &contents, &len);
+  if (rc != 0)
+    return rc;
+  return check_required_snippets (contents, len, snippets,
+      G_N_ELEMENTS (snippets), error_base);
+}
+
+static gint
+check_audit_schema_contracts (void)
+{
+  gint rc = check_audit_schema_contract ("sqlite-schema.sql", 150);
+  if (rc != 0)
+    return rc;
+  return check_audit_schema_contract ("duckdb-schema.sql", 180);
+}
+
 int
 main (void)
 {
@@ -231,5 +278,8 @@ main (void)
   rc = check_decision_template_relation_contract ();
   if (rc != 0)
     return rc;
-  return check_permission_scope_relation_contract ();
+  rc = check_permission_scope_relation_contract ();
+  if (rc != 0)
+    return rc;
+  return check_audit_schema_contracts ();
 }

@@ -649,6 +649,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON audit_events (decision);"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason "
       "  ON audit_events (deny_reason);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_origin "
+      "  ON audit_events (deny_origin);"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -679,6 +681,11 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
     if (rc != WYRELOG_E_OK)
       return rc;
   }
+  rc = exec_sql (store->db,
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id "
+      "ON audit_events (request_id);");
+  if (rc != WYRELOG_E_OK)
+    return rc;
   return seed_builtin_catalog (store->db);
 }
 
