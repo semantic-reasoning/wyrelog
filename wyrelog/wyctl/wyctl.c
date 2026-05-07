@@ -19,6 +19,7 @@ typedef struct
   gchar *user;
   gchar *permission;
   gchar *resource;
+  gchar *access_token_file;
 } WyctlPolicyOptions;
 
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
@@ -73,6 +74,39 @@ parse_timeout_ms (const gchar *raw, guint *out_timeout_ms)
     return FALSE;
 
   *out_timeout_ms = (guint) parsed;
+  return TRUE;
+}
+
+static gboolean
+normalize_access_token_file (gchar *access_token, gsize access_token_size)
+{
+  if (access_token_size == 0)
+    return FALSE;
+
+  for (gsize i = 0; i < access_token_size; i++) {
+    if (access_token[i] == '\0')
+      return FALSE;
+  }
+
+  gsize token_len = access_token_size;
+  if (access_token[token_len - 1] == '\n') {
+    token_len--;
+    if (token_len > 0 && access_token[token_len - 1] == '\r')
+      token_len--;
+  }
+  if (token_len == 0)
+    return FALSE;
+
+  for (gsize i = 0; i < token_len; i++) {
+    if (g_ascii_isspace (access_token[i]) || g_ascii_iscntrl (access_token[i]))
+      return FALSE;
+  }
+  for (gsize i = token_len; i < access_token_size; i++) {
+    if (access_token[i] != '\r' && access_token[i] != '\n')
+      return FALSE;
+  }
+
+  access_token[token_len] = '\0';
   return TRUE;
 }
 
@@ -200,6 +234,8 @@ run_policy_decision_command (const gchar *command, gint argc, gchar **argv)
         "Decision permission", "PERMISSION"},
     {"resource", 0, 0, G_OPTION_ARG_STRING, &opts.resource,
         "Decision resource", "RESOURCE"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -226,6 +262,26 @@ run_policy_decision_command (const gchar *command, gint argc, gchar **argv)
   }
   if (opts.resource == NULL || opts.resource[0] == '\0') {
     g_printerr ("wyctl: missing --resource\n");
+    return 2;
+  }
+  if (opts.access_token_file == NULL || opts.access_token_file[0] == '\0') {
+    g_printerr ("wyctl: missing --access-token-file\n");
+    return 2;
+  }
+
+  g_autofree gchar *access_token = NULL;
+  gsize access_token_size = 0;
+  if (!g_file_get_contents (opts.access_token_file, &access_token,
+          &access_token_size, &error)) {
+    g_printerr ("wyctl: unable to read access token file\n");
+    return 2;
+  }
+  if (access_token_size == 0) {
+    g_printerr ("wyctl: empty access token file\n");
+    return 2;
+  }
+  if (!normalize_access_token_file (access_token, access_token_size)) {
+    g_printerr ("wyctl: invalid access token file\n");
     return 2;
   }
 
