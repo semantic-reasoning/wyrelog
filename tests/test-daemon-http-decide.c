@@ -300,11 +300,25 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
     return 1905;
 
   g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/healthz?format=json", &status,
+          &body) != 0)
+    return 1921;
+  if (status != 200 || strstr (body, "\"status\":\"ok\"") == NULL)
+    return 1922;
+
+  g_clear_pointer (&body, g_free);
   if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
       != 0)
     return 1906;
   if (status != 200 || strstr (body, "ready") == NULL)
     return 1907;
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
+          &body) != 0)
+    return 1923;
+  if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
+    return 1924;
 
   g_atomic_int_set (&runtime->delta_session_live, FALSE);
   g_clear_pointer (&body, g_free);
@@ -314,6 +328,14 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
   if (status != 503 || strstr (body, "\"delta_not_ready\"") == NULL)
     return 1909;
 
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
+          &body) != 0)
+    return 1925;
+  if (status != 503 || strstr (body, "\"status\":\"not_ready\"") == NULL ||
+      strstr (body, "\"reason\":\"delta_not_ready\"") == NULL)
+    return 1926;
+
   g_atomic_int_set (&runtime->delta_session_live, TRUE);
   g_atomic_int_set (&runtime->audit_degraded, TRUE);
   g_clear_pointer (&body, g_free);
@@ -322,6 +344,14 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
     return 1910;
   if (status != 503 || strstr (body, "\"audit_degraded\"") == NULL)
     return 1911;
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz?format=json", &status,
+          &body) != 0)
+    return 1927;
+  if (status != 503 || strstr (body, "\"status\":\"not_ready\"") == NULL ||
+      strstr (body, "\"reason\":\"audit_degraded\"") == NULL)
+    return 1928;
 
   g_atomic_int_set (&runtime->audit_degraded, FALSE);
   g_clear_pointer (&body, g_free);
