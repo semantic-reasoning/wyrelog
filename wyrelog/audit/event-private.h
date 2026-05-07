@@ -17,6 +17,7 @@ wyrelog_error_t wyl_audit_event_new_from_fields (const gchar * id,
     const gchar * resource_id,
     const gchar * deny_reason,
     const gchar * deny_origin,
+    const gchar * request_id,
     wyl_decision_t decision, WylAuditEvent ** out_event);
 
 wyrelog_error_t wyl_audit_mirror_event (WylHandle * handle,

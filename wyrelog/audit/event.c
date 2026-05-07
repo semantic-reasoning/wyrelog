@@ -20,6 +20,7 @@ struct _WylAuditEvent
   gchar *resource_id;
   gchar *deny_reason;
   gchar *deny_origin;
+  gchar *request_id;
   wyl_decision_t decision;
 };
 
@@ -35,6 +36,7 @@ wyl_audit_event_finalize (GObject *object)
   g_free (self->resource_id);
   g_free (self->deny_reason);
   g_free (self->deny_origin);
+  g_free (self->request_id);
 
   G_OBJECT_CLASS (wyl_audit_event_parent_class)->finalize (object);
 }
@@ -75,7 +77,7 @@ wyrelog_error_t
 wyl_audit_event_new_from_fields (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
     const gchar *deny_reason, const gchar *deny_origin,
-    wyl_decision_t decision, WylAuditEvent **out_event)
+    const gchar *request_id, wyl_decision_t decision, WylAuditEvent **out_event)
 {
   wyl_id_t parsed_id;
 
@@ -98,6 +100,7 @@ wyl_audit_event_new_from_fields (const gchar *id, gint64 created_at_us,
   wyl_audit_event_set_resource_id (self, resource_id);
   wyl_audit_event_set_deny_reason (self, deny_reason);
   wyl_audit_event_set_deny_origin (self, deny_origin);
+  wyl_audit_event_set_request_id (self, request_id);
   wyl_audit_event_set_decision (self, decision);
 
   *out_event = self;
@@ -196,6 +199,21 @@ wyl_audit_event_get_deny_origin (const WylAuditEvent *self)
 {
   g_return_val_if_fail (WYL_IS_AUDIT_EVENT (self), NULL);
   return self->deny_origin;
+}
+
+void
+wyl_audit_event_set_request_id (WylAuditEvent *self, const gchar *request_id)
+{
+  g_return_if_fail (WYL_IS_AUDIT_EVENT (self));
+  g_free (self->request_id);
+  self->request_id = g_strdup (request_id);
+}
+
+const gchar *
+wyl_audit_event_get_request_id (const WylAuditEvent *self)
+{
+  g_return_val_if_fail (WYL_IS_AUDIT_EVENT (self), NULL);
+  return self->request_id;
 }
 
 void
