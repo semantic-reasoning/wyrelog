@@ -278,7 +278,7 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
     return WYRELOG_E_INTERNAL;
 
   wyrelog_error_t store_rc =
-      wyl_policy_store_append_audit_event_full (wyl_handle_get_policy_store
+      wyl_policy_store_record_audit_intention_full (wyl_handle_get_policy_store
       (handle), id_buf, event->created_at_us,
       event->subject_id, event->action, event->resource_id,
       event->deny_reason, event->deny_origin, event->request_id,
@@ -286,6 +286,20 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
       &store_inserted);
   if (store_rc != WYRELOG_E_OK)
     return store_rc;
+
+  store_inserted = FALSE;
+  store_rc =
+      wyl_policy_store_append_audit_event_full (wyl_handle_get_policy_store
+      (handle), id_buf, event->created_at_us,
+      event->subject_id, event->action, event->resource_id,
+      event->deny_reason, event->deny_origin, event->request_id,
+      event->decision, &store_inserted);
+  if (store_rc != WYRELOG_E_OK) {
+    (void) wyl_policy_store_mark_audit_intention_failed
+        (wyl_handle_get_policy_store (handle), id_buf,
+        "sqlite audit append failed");
+    return store_rc;
+  }
 
   wyrelog_error_t rc = wyl_handle_insert_audit_fact (handle, id_buf,
       event->created_at_us,
@@ -300,22 +314,40 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
       if (cleanup_rc != WYRELOG_E_OK)
         return cleanup_rc;
     }
+    (void) wyl_policy_store_mark_audit_intention_failed
+        (wyl_handle_get_policy_store (handle), id_buf,
+        "wirelog fact projection failed");
     return rc;
   }
 
   wyl_audit_conn_t *audit_conn = wyl_handle_get_audit_conn (handle);
-  if (audit_conn == NULL)
+  if (audit_conn == NULL) {
+    (void) wyl_policy_store_mark_audit_intention_committed
+        (wyl_handle_get_policy_store (handle), id_buf);
     return WYRELOG_E_OK;
+  }
 
   rc = wyl_audit_conn_create_schema (audit_conn);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    (void) wyl_policy_store_mark_audit_intention_failed
+        (wyl_handle_get_policy_store (handle), id_buf,
+        "duckdb schema unavailable");
     return WYRELOG_E_OK;
+  }
 
   gboolean inserted = FALSE;
-  (void) wyl_audit_conn_insert_event_full (audit_conn, id_buf,
+  rc = wyl_audit_conn_insert_event_full (audit_conn, id_buf,
       event->created_at_us, event->subject_id, event->action,
       event->resource_id, event->deny_reason, event->deny_origin,
       event->request_id, event->decision, &inserted);
+  if (rc != WYRELOG_E_OK) {
+    (void) wyl_policy_store_mark_audit_intention_failed
+        (wyl_handle_get_policy_store (handle), id_buf, "duckdb append failed");
+    return WYRELOG_E_OK;
+  }
+
+  (void) wyl_policy_store_mark_audit_intention_committed
+      (wyl_handle_get_policy_store (handle), id_buf);
 
   return WYRELOG_E_OK;
 #else
