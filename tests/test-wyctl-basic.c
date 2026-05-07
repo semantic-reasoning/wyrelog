@@ -667,8 +667,9 @@ listen_url_for_policy_server (GSocketListener **out_listener)
 }
 
 static void
-run_policy_check_case (const gchar *response_body, const gchar *expected_output,
-    gboolean expect_success, guint delay_us, const gchar *timeout_ms)
+run_policy_decision_case (const gchar *command, const gchar *response_body,
+    const gchar *expected_output, gboolean expect_success, guint delay_us,
+    const gchar *timeout_ms)
 {
   g_autofree gchar *token_path = NULL;
   g_autoptr (GError) error = NULL;
@@ -695,7 +696,7 @@ run_policy_check_case (const gchar *response_body, const gchar *expected_output,
     "--timeout-ms",
     (gchar *) timeout_ms,
     "policy",
-    "check",
+    (gchar *) command,
     "--user",
     "alice",
     "--permission",
@@ -717,9 +718,11 @@ run_policy_check_case (const gchar *response_body, const gchar *expected_output,
   g_assert_cmpstr (stdout_buf, ==, expected_output);
   if (expected_output[0] != '\0')
     g_assert_cmpstr (stderr_buf, ==, "");
-  else
-    g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-            "wyctl: policy check failed"));
+  else {
+    g_autofree gchar *failure = g_strdup_printf ("wyctl: policy %s failed",
+        command);
+    g_assert_nonnull (g_strstr_len (stderr_buf, -1, failure));
+  }
   g_assert_nonnull (server.request);
   g_assert_nonnull (g_strstr_len (server.request, -1, "POST /decide?"));
   g_assert_nonnull (g_strstr_len (server.request, -1, "user=alice"));
@@ -737,14 +740,19 @@ run_policy_check_case (const gchar *response_body, const gchar *expected_output,
 static void
 test_policy_check (void)
 {
-  run_policy_check_case
-      ("{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "allow\n",
-      TRUE, 0, "1000");
-  run_policy_check_case ("{\"decision\":0,\"deny_reason\":\"missing_grant\","
+  run_policy_decision_case
+      ("check", "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}",
+      "allow\n", TRUE, 0, "1000");
+  run_policy_decision_case ("check",
+      "{\"decision\":0,\"deny_reason\":\"missing_grant\","
       "\"deny_origin\":\"policy\"}", "deny\n", FALSE, 0, "1000");
-  run_policy_check_case
-      ("{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "", FALSE,
+  run_policy_decision_case ("check",
+      "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "", FALSE,
       250 * 1000, "50");
+  run_policy_decision_case ("explain",
+      "{\"decision\":0,\"deny_reason\":\"missing_grant\","
+      "\"deny_origin\":\"policy\"}",
+      "deny\nreason=missing_grant\norigin=policy\n", TRUE, 0, "1000");
 }
 
 int
