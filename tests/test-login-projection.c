@@ -575,8 +575,13 @@ check_skip_mfa_login_projects_authority_state (void)
   if (wyl_policy_store_grant_direct_permission (store, username, perm_id,
           session_id) != WYRELOG_E_OK)
     return 71;
+  if (wyl_policy_store_set_permission_state (store, username, perm_id,
+          session_id, "armed") != WYRELOG_E_OK)
+    return 87;
   if (wyl_handle_load_policy_store_direct_permissions (handle) != WYRELOG_E_OK)
     return 72;
+  if (wyl_handle_load_policy_store_permission_states (handle) != WYRELOG_E_OK)
+    return 88;
   if (!decide_allows (handle, username, perm_id, session_id))
     return 73;
   if (!engine_contains_event_row5 (handle, "principal_fired",
@@ -671,6 +676,9 @@ check_handle_reopens_persistent_policy_and_audit_paths (void)
     if (wyl_policy_store_grant_direct_permission (store, username, perm_id,
             session_id) != WYRELOG_E_OK)
       return 116;
+    if (wyl_policy_store_set_permission_state (store, username, perm_id,
+            session_id, "armed") != WYRELOG_E_OK)
+      return 133;
     if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
       return 117;
     if (!decide_allows (handle, username, perm_id, session_id))
