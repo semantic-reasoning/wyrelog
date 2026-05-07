@@ -10,10 +10,12 @@
 
 /*
  * v0 contract for wyl_perm_grant / wyl_perm_revoke: validate
- * arguments, persist direct permission authority rows, mirror direct
- * permission plus armed-state facts into any attached policy engine
- * pair, record the admin operation in the audit log when audit is
- * enabled, and return WYRELOG_E_OK.
+ * arguments, persist direct permission authority rows, project those
+ * rows into any attached policy engine pair, record the admin
+ * operation in the audit log when audit is enabled, and return
+ * WYRELOG_E_OK. The permission-state lifecycle remains a separate
+ * contract; unguarded direct permissions keep a compatibility
+ * projection path until callers migrate to explicit transitions.
  */
 
 typedef struct
@@ -291,7 +293,7 @@ check_role_grant_requires_existing_role (void)
 }
 
 static gint
-check_grant_allows_engine_decide (void)
+check_direct_grant_compat_allows_engine_decide (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -341,7 +343,7 @@ check_grant_allows_engine_decide (void)
 }
 
 static gint
-check_role_grant_allows_engine_decide (void)
+check_role_grant_with_armed_state_allows_engine_decide (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -747,9 +749,9 @@ main (void)
     return rc;
   if ((rc = check_role_grant_requires_existing_role ()) != 0)
     return rc;
-  if ((rc = check_grant_allows_engine_decide ()) != 0)
+  if ((rc = check_direct_grant_compat_allows_engine_decide ()) != 0)
     return rc;
-  if ((rc = check_role_grant_allows_engine_decide ()) != 0)
+  if ((rc = check_role_grant_with_armed_state_allows_engine_decide ()) != 0)
     return rc;
   if ((rc = check_gated_grant_is_rejected_by_engine_path ()) != 0)
     return rc;

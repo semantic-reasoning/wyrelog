@@ -295,6 +295,11 @@ wyl_daemon_check_policy_snapshot_reload_ready (WylHandle *handle)
 wyrelog_error_t
 wyl_daemon_check_direct_permission_grant_ready (WylHandle *handle)
 {
+  /*
+   * This readiness probe covers direct permission mutation, audit, reload,
+   * and the unguarded compatibility projection. The canonical stateful
+   * lifecycle probe is wyl_daemon_check_permission_state_transition_ready().
+   */
   g_autoptr (WylSession) session = NULL;
   wyrelog_error_t rc =
       login_check_principal (handle, "wyrelogd-direct-grant-user", &session);
