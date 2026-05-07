@@ -118,7 +118,7 @@ if build_client
     c_args : [
       '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
     ],
-    dependencies : [glib_dep],
+    dependencies : [glib_dep, gio_dep],
   )
 
   test('wyctl-basic', test_wyctl_basic,

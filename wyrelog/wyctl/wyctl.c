@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <gio/gio.h>
 #include <libsoup/soup.h>
+#include <errno.h>
 #include <string.h>
 
 #include "wyrelog/version.h"
@@ -8,8 +10,64 @@
 typedef struct
 {
   gchar *daemon_url;
+  gchar *timeout_ms_arg;
   gboolean show_version;
 } WyctlOptions;
+
+#define WYCTL_DEFAULT_TIMEOUT_MS 2000
+#define WYCTL_MAX_TIMEOUT_MS 60000
+
+typedef struct
+{
+  GCancellable *cancellable;
+  GCond cond;
+  GMutex mutex;
+  gboolean done;
+  guint timeout_ms;
+} WyctlTimeout;
+
+static gpointer
+timeout_thread_func (gpointer data)
+{
+  WyctlTimeout *timeout = data;
+
+  g_mutex_lock (&timeout->mutex);
+  gint64 deadline = g_get_monotonic_time () + (gint64) timeout->timeout_ms
+      * 1000;
+  while (!timeout->done) {
+    if (!g_cond_wait_until (&timeout->cond, &timeout->mutex, deadline))
+      break;
+  }
+  if (!timeout->done)
+    g_cancellable_cancel (timeout->cancellable);
+  g_mutex_unlock (&timeout->mutex);
+
+  return NULL;
+}
+
+static gboolean
+parse_timeout_ms (const gchar *raw, guint *out_timeout_ms)
+{
+  if (raw == NULL) {
+    *out_timeout_ms = WYCTL_DEFAULT_TIMEOUT_MS;
+    return TRUE;
+  }
+
+  if (raw[0] == '\0')
+    return FALSE;
+
+  errno = 0;
+  gchar *end = NULL;
+  gint64 parsed = g_ascii_strtoll (raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0')
+    return FALSE;
+
+  if (parsed < 1 || parsed > WYCTL_MAX_TIMEOUT_MS)
+    return FALSE;
+
+  *out_timeout_ms = (guint) parsed;
+  return TRUE;
+}
 
 static gchar *
 build_healthz_uri (const gchar *daemon_url)
@@ -49,6 +107,12 @@ run_status (const WyctlOptions *opts)
     return 2;
   }
 
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (opts->timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+
   g_autofree gchar *uri = build_healthz_uri (opts->daemon_url);
   g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
   if (msg == NULL) {
@@ -57,9 +121,28 @@ run_status (const WyctlOptions *opts)
   }
 
   g_autoptr (SoupSession) session = soup_session_new ();
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  WyctlTimeout timeout = {
+    .cancellable = cancellable,
+    .timeout_ms = timeout_ms,
+  };
+  g_cond_init (&timeout.cond);
+  g_mutex_init (&timeout.mutex);
+  GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
+      &timeout);
+
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) body =
-      soup_session_send_and_read (session, msg, NULL, &error);
+      soup_session_send_and_read (session, msg, cancellable, &error);
+
+  g_mutex_lock (&timeout.mutex);
+  timeout.done = TRUE;
+  g_cond_signal (&timeout.cond);
+  g_mutex_unlock (&timeout.mutex);
+  g_thread_join (timeout_thread);
+  g_mutex_clear (&timeout.mutex);
+  g_cond_clear (&timeout.cond);
+
   if (body == NULL) {
     g_printerr ("wyctl: daemon unavailable: %s\n", opts->daemon_url);
     return 1;
@@ -82,6 +165,8 @@ main (int argc, char **argv)
   GOptionEntry entries[] = {
     {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
         "Daemon URL", "URL"},
+    {"timeout-ms", 0, 0, G_OPTION_ARG_STRING, &opts.timeout_ms_arg,
+        "Daemon probe timeout in milliseconds", "N"},
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts.show_version,
         "Print version and exit", NULL},
     {NULL}
