@@ -46,6 +46,7 @@ wyrelog_error_t wyl_client_login_skip_mfa (WylClient * client,
 gchar *wyl_client_dup_session_token (const WylClient * client);
 gchar *wyl_client_dup_access_token (const WylClient * client);
 gchar *wyl_client_dup_username (const WylClient * client);
+gchar *wyl_client_dup_tenant (const WylClient * client);
 gchar *wyl_client_dup_principal_state (const WylClient * client);
 gchar *wyl_client_dup_session_state (const WylClient * client);
 wyrelog_error_t wyl_client_token_refresh (WylClient * client);

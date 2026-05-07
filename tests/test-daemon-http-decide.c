@@ -682,9 +682,11 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
       principal_state);
   g_autofree gchar *expected_session =
       g_strdup_printf ("\"session_id\":\"%s\"", session_token);
+  const gchar *expected_tenant = "\"tenant\":\"__wr_default\"";
   if (strstr (payload_text, expected_sub) == NULL ||
       strstr (payload_text, expected_state) == NULL ||
-      strstr (payload_text, expected_session) == NULL)
+      strstr (payload_text, expected_session) == NULL ||
+      strstr (payload_text, expected_tenant) == NULL)
     return 533;
   g_autofree gchar *jti = extract_json_string (payload_text, "jti");
   if (jti == NULL || g_strcmp0 (jti, session_token) == 0)
@@ -1041,6 +1043,14 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 478;
   g_clear_pointer (&body, g_free);
 
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&tenant=unknown", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+    return 484;
+  g_clear_pointer (&body, g_free);
+
   rc = send_raw_login (session, "POST", base_url, "username=login-user",
       &status, &body);
   if (rc != 0)
@@ -1048,6 +1058,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (status != 200 ||
       strstr (body, "\"session_token\":\"") == NULL ||
       strstr (body, "\"username\":\"login-user\"") == NULL ||
+      strstr (body, "\"tenant\":\"__wr_default\"") == NULL ||
       strstr (body, "\"principal_state\":\"mfa_required\"") == NULL ||
       strstr (body, "\"session_state\":\"active\"") == NULL)
     return 475;
@@ -1061,6 +1072,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_autofree gchar *stored_username = wyl_session_dup_username (stored_session);
   if (g_strcmp0 (stored_username, "login-user") != 0)
     return 479;
+  g_autofree gchar *stored_tenant = wyl_session_dup_tenant (stored_session);
+  if (g_strcmp0 (stored_tenant, "__wr_default") != 0)
+    return 485;
   if (wyl_daemon_http_remove_session_for_test (server, "unknown-session"))
     return 481;
   if (!wyl_daemon_http_remove_session_for_test (server, session_token))
@@ -1616,10 +1630,13 @@ check_policy_permission_mutation_contract (WylHandle *handle,
 
   g_autofree gchar *session_token = wyl_client_dup_session_token (client);
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
+  g_autofree gchar *client_tenant = wyl_client_dup_tenant (client);
   if (session_token == NULL)
     return 124;
   if (access_token == NULL)
     return 164;
+  if (g_strcmp0 (client_tenant, "__wr_default") != 0)
+    return 165;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.policy.read",

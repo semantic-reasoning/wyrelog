@@ -367,6 +367,57 @@ check_login_with_unset_username (void)
 }
 
 static gint
+check_login_binds_default_tenant (void)
+{
+  g_autoptr (WylSession) session = login_with_username ("tenant-user");
+  if (session == NULL)
+    return 34;
+  g_autofree gchar *tenant = wyl_session_dup_tenant (session);
+  if (g_strcmp0 (tenant, "__wr_default") != 0)
+    return 35;
+  return 0;
+}
+
+static gint
+check_login_rejects_unknown_tenant (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 36;
+
+  g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
+  wyl_login_req_set_username (req, "tenant-user");
+  wyl_login_req_set_tenant (req, "unknown");
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, req, &session) != WYRELOG_E_INVALID)
+    return 37;
+  if (session != NULL)
+    return 38;
+  return 0;
+}
+
+static gint
+check_login_rejects_unknown_tenant_before_skip_mfa (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 39;
+
+  g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
+  wyl_login_req_set_username (req, "tenant-user");
+  wyl_login_req_set_tenant (req, "unknown");
+  wyl_login_req_set_skip_mfa (req, TRUE);
+
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_login (handle, req, &session) != WYRELOG_E_INVALID)
+    return 44;
+  if (session != NULL)
+    return 45;
+  return 0;
+}
+
+static gint
 check_request_buffer_independent_of_session (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1808,6 +1859,12 @@ main (void)
   if ((rc = check_login_with_null_request ()) != 0)
     return rc;
   if ((rc = check_login_with_unset_username ()) != 0)
+    return rc;
+  if ((rc = check_login_binds_default_tenant ()) != 0)
+    return rc;
+  if ((rc = check_login_rejects_unknown_tenant ()) != 0)
+    return rc;
+  if ((rc = check_login_rejects_unknown_tenant_before_skip_mfa ()) != 0)
     return rc;
   if ((rc = check_request_buffer_independent_of_session ()) != 0)
     return rc;

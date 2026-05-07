@@ -344,7 +344,8 @@ build_decide_json (const wyl_decide_resp_t *resp)
 
 static gchar *
 build_login_json (const gchar *session_token, const gchar *username,
-    const gchar *principal_state, const gchar *access_token)
+    const gchar *tenant, const gchar *principal_state,
+    const gchar *access_token)
 {
   g_autoptr (GString) json = g_string_new ("{");
 
@@ -352,6 +353,8 @@ build_login_json (const gchar *session_token, const gchar *username,
   append_json_string (json, session_token);
   g_string_append (json, ",\"username\":");
   append_json_string (json, username);
+  g_string_append (json, ",\"tenant\":");
+  append_json_string (json, tenant);
   g_string_append (json, ",\"principal_state\":");
   append_json_string (json, principal_state);
   g_string_append (json, ",\"session_state\":\"active\"");
@@ -377,14 +380,14 @@ copy_access_token_secret (WylDaemonHttpContext *ctx,
 
 static wyrelog_error_t
 issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
-    const gchar *username, const gchar *principal_state, WylSession *session,
-    gchar **out_token)
+    const gchar *username, const gchar *tenant, const gchar *principal_state,
+    WylSession *session, gchar **out_token)
 {
   if (out_token == NULL)
     return WYRELOG_E_INVALID;
   *out_token = NULL;
-  if (session_token == NULL || username == NULL || principal_state == NULL ||
-      session == NULL)
+  if (session_token == NULL || username == NULL || tenant == NULL ||
+      principal_state == NULL || session == NULL)
     return WYRELOG_E_INVALID;
 
   guint8 secret[WYL_DAEMON_JWT_KEY_LEN];
@@ -411,7 +414,6 @@ issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
     sodium_memzero (secret, sizeof secret);
     return WYRELOG_E_INVALID;
   }
-  const gchar *tenant = "__wr_default";
   wyl_jwt_issue_input_t input = {
     .key_id = WYL_DAEMON_JWT_KEY_ID,
     .jti = token_id_buf,
@@ -501,7 +503,9 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     return WYRELOG_E_POLICY;
   }
   g_autofree gchar *live_username = wyl_session_dup_username (session);
-  if (g_strcmp0 (live_username, claims.subject) != 0) {
+  g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
+  if (g_strcmp0 (live_username, claims.subject) != 0 ||
+      g_strcmp0 (live_tenant, claims.tenant) != 0) {
     wyl_jwt_access_claims_clear (&claims);
     return WYRELOG_E_POLICY;
   }
@@ -1182,14 +1186,22 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   const gchar *username = NULL;
+  const gchar *tenant = "__wr_default";
   const gchar *skip_mfa = NULL;
   const gchar *password = NULL;
   if (query != NULL) {
     username = g_hash_table_lookup (query, "username");
+    if (g_hash_table_contains (query, "tenant"))
+      tenant = g_hash_table_lookup (query, "tenant");
     skip_mfa = g_hash_table_lookup (query, "skip_mfa");
     password = g_hash_table_lookup (query, "password");
   }
   if (username == NULL || username[0] == '\0') {
+    set_json_error (msg, 400, "invalid_login_request");
+    return;
+  }
+  if (tenant == NULL || tenant[0] == '\0' ||
+      g_strcmp0 (tenant, "__wr_default") != 0) {
     set_json_error (msg, 400, "invalid_login_request");
     return;
   }
@@ -1212,6 +1224,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   WylHandle *handle = ctx->handle;
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, username);
+  wyl_login_req_set_tenant (login, tenant);
   wyl_login_req_set_skip_mfa (login, skip_mfa_requested);
   wyl_login_req_set_request_id (login, ensure_request_id_header (msg));
 
@@ -1231,7 +1244,12 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   g_autofree gchar *session_token = wyl_session_dup_id_string (session);
+  g_autofree gchar *session_tenant = wyl_session_dup_tenant (session);
   if (session_token == NULL) {
+    set_json_error (msg, 500, "login_failed");
+    return;
+  }
+  if (session_tenant == NULL || session_tenant[0] == '\0') {
     set_json_error (msg, 500, "login_failed");
     return;
   }
@@ -1240,7 +1258,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_autofree gchar *access_token = NULL;
   if (skip_mfa_requested) {
     rc = issue_login_access_token (ctx, session_token, username,
-        principal_state, session, &access_token);
+        session_tenant, principal_state, session, &access_token);
     if (rc != WYRELOG_E_OK) {
       set_json_error (msg, 500, "login_failed");
       return;
@@ -1253,7 +1271,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   g_autofree gchar *body = build_login_json (session_token, username,
-      principal_state, access_token);
+      session_tenant, principal_state, access_token);
   attach_request_id_header (msg);
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "application/json",
