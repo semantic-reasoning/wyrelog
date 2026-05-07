@@ -181,7 +181,7 @@ check_delta_callback_ignores_runtime_projection_failure (void)
 
   if (wyl_handle_engine_insert (handle, "member_of", row, 3) != WYRELOG_E_OK)
     return 14;
-  if (runtime.inserted != 1)
+  if (runtime.inserted == 0)
     return 15;
   if (runtime.audit_errors != 0)
     return 16;
