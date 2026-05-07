@@ -1028,7 +1028,9 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  wyrelog_error_t rc = wyl_session_close (ctx->handle, session);
+  const gchar *request_id = ensure_request_id_header (msg);
+  wyrelog_error_t rc =
+      wyl_session_close_with_request_id (ctx->handle, session, request_id);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "logout_failed");
     return;

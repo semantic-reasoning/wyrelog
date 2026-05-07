@@ -655,14 +655,16 @@ sign_test_access_token (SoupServer *server, const gchar *session_id,
 #endif
 
 static gint
-send_raw_logout (SoupSession *session, const gchar *method,
+send_raw_logout_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, guint *out_status,
-    gchar **out_body)
+    gchar **out_body, gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 484;
   *out_status = 0;
   *out_body = NULL;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -683,6 +685,11 @@ send_raw_logout (SoupSession *session, const gchar *method,
   gint rc = check_response_request_id_header (msg, 514);
   if (rc != 0)
     return rc;
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
@@ -691,14 +698,25 @@ send_raw_logout (SoupSession *session, const gchar *method,
 }
 
 static gint
-send_raw_logout_authorization (SoupSession *session, const gchar *method,
+send_raw_logout (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, guint *out_status,
+    gchar **out_body)
+{
+  return send_raw_logout_full (session, method, base_url, query, out_status,
+      out_body, NULL);
+}
+
+static gint
+send_raw_logout_authorization_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, const gchar *authorization,
-    guint *out_status, gchar **out_body)
+    guint *out_status, gchar **out_body, gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 484;
   *out_status = 0;
   *out_body = NULL;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
 
   g_autofree gchar *root = g_strdup (base_url);
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
@@ -721,11 +739,25 @@ send_raw_logout_authorization (SoupSession *session, const gchar *method,
   gint rc = check_response_request_id_header (msg, 515);
   if (rc != 0)
     return rc;
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_logout_authorization (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, const gchar *authorization,
+    guint *out_status, gchar **out_body)
+{
+  return send_raw_logout_authorization_full (session, method, base_url, query,
+      authorization, out_status, out_body, NULL);
 }
 
 static gint send_raw_policy_mutation (SoupSession * session,
@@ -1009,8 +1041,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 494;
   g_clear_pointer (&body, g_free);
 
-  rc = send_raw_logout (session, "POST", base_url, logout_query, &status,
-      &body);
+  g_autofree gchar *logout_request_id = NULL;
+  rc = send_raw_logout_full (session, "POST", base_url, logout_query, &status,
+      &body, &logout_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -1028,6 +1061,22 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 497;
   if (closed_expect.matches != 1)
     return 498;
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe close_audit = {
+    .subject_id = logout_session_token,
+    .action = "session_state",
+    .resource_id = "closed",
+    .deny_origin = "active",
+    .request_id = logout_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), audit_event_probe_cb, &close_audit) != WYRELOG_E_OK)
+    return 1818;
+  if (close_audit.matches != 1)
+    return 1819;
+#endif
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *guarded_query = g_strdup_printf ("session_token=%s"
@@ -1099,8 +1148,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return 507;
   g_clear_pointer (&body, g_free);
 
-  rc = send_raw_logout_authorization (session, "POST", base_url, NULL,
-      bearer_authorization, &status, &body);
+  g_autofree gchar *bearer_logout_request_id = NULL;
+  rc = send_raw_logout_authorization_full (session, "POST", base_url, NULL,
+      bearer_authorization, &status, &body, &bearer_logout_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -1109,6 +1159,22 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       wyl_daemon_http_ref_session (server, bearer_logout_session_token);
   if (bearer_logged_out_session != NULL)
     return 509;
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe bearer_close_audit = {
+    .subject_id = bearer_logout_session_token,
+    .action = "session_state",
+    .resource_id = "closed",
+    .deny_origin = "active",
+    .request_id = bearer_logout_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), audit_event_probe_cb, &bearer_close_audit) != WYRELOG_E_OK)
+    return 1820;
+  if (bearer_close_audit.matches != 1)
+    return 1821;
+#endif
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *bearer_guarded_query =
