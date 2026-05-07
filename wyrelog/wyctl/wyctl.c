@@ -5,7 +5,10 @@
 #include <errno.h>
 #include <string.h>
 
+#include "wyrelog/client.h"
+#include "wyrelog/decide.h"
 #include "wyrelog/version.h"
+#include "wyrelog/wyl-client-private.h"
 
 typedef struct
 {
@@ -225,7 +228,86 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
 }
 
 static int
-run_policy_decision_command (const gchar *command, gint argc, gchar **argv)
+load_access_token_file (const gchar *path, gchar **out_access_token)
+{
+  if (out_access_token == NULL)
+    return 2;
+  *out_access_token = NULL;
+
+  if (path == NULL || path[0] == '\0') {
+    g_printerr ("wyctl: missing --access-token-file\n");
+    return 2;
+  }
+
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *access_token = NULL;
+  gsize access_token_size = 0;
+  if (!g_file_get_contents (path, &access_token, &access_token_size, &error)) {
+    g_printerr ("wyctl: unable to read access token file\n");
+    return 2;
+  }
+  if (access_token_size == 0) {
+    g_printerr ("wyctl: empty access token file\n");
+    return 2;
+  }
+  if (!normalize_access_token_file (access_token, access_token_size)) {
+    g_printerr ("wyctl: invalid access token file\n");
+    return 2;
+  }
+
+  *out_access_token = g_steal_pointer (&access_token);
+  return 0;
+}
+
+static int
+run_policy_check (const WyctlOptions *global_opts,
+    const WyctlPolicyOptions *policy_opts, const gchar *access_token)
+{
+  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+    g_printerr ("wyctl: missing daemon URL\n");
+    return 2;
+  }
+  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+      wyl_client_set_bearer_credentials (client, access_token,
+          "__wr_default") != WYRELOG_E_OK) {
+    g_printerr ("wyctl: invalid policy credentials\n");
+    return 2;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+
+  g_autoptr (WylClientDecision) result = NULL;
+  wyrelog_error_t rc = wyl_client_decide_ex (client, policy_opts->user,
+      policy_opts->permission, policy_opts->resource, &result);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: policy check failed\n");
+    return 3;
+  }
+
+  gint decision = wyl_client_decision_get_decision (result);
+  if (decision == WYL_DECISION_ALLOW) {
+    g_print ("allow\n");
+    return 0;
+  }
+
+  g_print ("deny\n");
+  return 1;
+}
+
+static int
+run_policy_decision_command (const WyctlOptions *global_opts,
+    const gchar *command, gint argc, gchar **argv)
 {
   WyctlPolicyOptions opts = { 0 };
   GOptionEntry entries[] = {
@@ -264,33 +346,20 @@ run_policy_decision_command (const gchar *command, gint argc, gchar **argv)
     g_printerr ("wyctl: missing --resource\n");
     return 2;
   }
-  if (opts.access_token_file == NULL || opts.access_token_file[0] == '\0') {
-    g_printerr ("wyctl: missing --access-token-file\n");
-    return 2;
-  }
-
   g_autofree gchar *access_token = NULL;
-  gsize access_token_size = 0;
-  if (!g_file_get_contents (opts.access_token_file, &access_token,
-          &access_token_size, &error)) {
-    g_printerr ("wyctl: unable to read access token file\n");
-    return 2;
-  }
-  if (access_token_size == 0) {
-    g_printerr ("wyctl: empty access token file\n");
-    return 2;
-  }
-  if (!normalize_access_token_file (access_token, access_token_size)) {
-    g_printerr ("wyctl: invalid access token file\n");
-    return 2;
-  }
+  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  if (token_rc != 0)
+    return token_rc;
+
+  if (g_strcmp0 (command, "check") == 0)
+    return run_policy_check (global_opts, &opts, access_token);
 
   g_printerr ("wyctl: policy %s is not implemented\n", command);
   return 3;
 }
 
 static int
-run_policy (gint argc, gchar **argv)
+run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
     g_printerr ("wyctl: missing policy command\n");
@@ -298,7 +367,8 @@ run_policy (gint argc, gchar **argv)
   }
 
   if (g_strcmp0 (argv[1], "check") == 0 || g_strcmp0 (argv[1], "explain") == 0)
-    return run_policy_decision_command (argv[1], argc - 1, argv + 1);
+    return run_policy_decision_command (global_opts, argv[1], argc - 1,
+        argv + 1);
 
   g_printerr ("wyctl: unknown policy command: %s\n", argv[1]);
   return 2;
@@ -342,7 +412,7 @@ main (int argc, char **argv)
   if (g_strcmp0 (argv[1], "status") == 0)
     return run_status (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "policy") == 0)
-    return run_policy (argc - 1, argv + 1);
+    return run_policy (&opts, argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;

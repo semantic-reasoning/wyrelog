@@ -577,8 +577,7 @@ test_policy_validation (void)
   run_child (valid_scaffold_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: policy check is not implemented"));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -605,6 +604,149 @@ test_policy_validation (void)
   g_unlink (space_token_path);
 }
 
+typedef struct
+{
+  GSocketListener *listener;
+  const gchar *response_body;
+  guint delay_us;
+  gchar *request;
+} PolicyCheckServer;
+
+static gpointer
+policy_check_server_thread (gpointer data)
+{
+  PolicyCheckServer *server = data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) conn =
+      g_socket_listener_accept (server->listener, NULL, NULL, &error);
+  if (conn == NULL)
+    return NULL;
+
+  gchar buffer[4096];
+  GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
+  GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
+  gssize n = g_input_stream_read (input, buffer, sizeof buffer - 1, NULL, NULL);
+  if (n > 0) {
+    buffer[n] = '\0';
+    server->request = g_strdup (buffer);
+  }
+  if (server->delay_us > 0)
+    g_usleep (server->delay_us);
+
+  g_autofree gchar *response =
+      g_strdup_printf ("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+      strlen (server->response_body), server->response_body);
+  (void) g_output_stream_write (output, response, strlen (response), NULL,
+      NULL);
+  (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
+  return NULL;
+}
+
+static gchar *
+listen_url_for_policy_server (GSocketListener **out_listener)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketListener) listener = g_socket_listener_new ();
+  g_autoptr (GInetAddress) address =
+      g_inet_address_new_loopback (G_SOCKET_FAMILY_IPV4);
+  g_autoptr (GSocketAddress) socket_address =
+      g_inet_socket_address_new (address, 0);
+  g_autoptr (GSocketAddress) effective_address = NULL;
+
+  g_assert_true (g_socket_listener_add_address (listener, socket_address,
+          G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &effective_address,
+          &error));
+  g_assert_no_error (error);
+
+  guint16 port =
+      g_inet_socket_address_get_port (G_INET_SOCKET_ADDRESS
+      (effective_address));
+  *out_listener = g_steal_pointer (&listener);
+  return g_strdup_printf ("http://127.0.0.1:%u", port);
+}
+
+static void
+run_policy_check_case (const gchar *response_body, const gchar *expected_output,
+    gboolean expect_success, guint delay_us, const gchar *timeout_ms)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-policy-token-XXXXXX", &token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  PolicyCheckServer server = {
+    .listener = listener,
+    .response_body = response_body,
+    .delay_us = delay_us,
+  };
+  GThread *server_thread = g_thread_new ("policy-check",
+      policy_check_server_thread, &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    daemon_url,
+    "--timeout-ms",
+    (gchar *) timeout_ms,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    token_path,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_thread_join (server_thread);
+
+  g_assert_cmpint (wait_status_is_success (wait_status), ==, expect_success);
+  g_assert_cmpstr (stdout_buf, ==, expected_output);
+  if (expected_output[0] != '\0')
+    g_assert_cmpstr (stderr_buf, ==, "");
+  else
+    g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+            "wyctl: policy check failed"));
+  g_assert_nonnull (server.request);
+  g_assert_nonnull (g_strstr_len (server.request, -1, "POST /decide?"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "user=alice"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "perm=wr.audit.read"));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "session_token=doc%2F42"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "Authorization: Bearer token-1"));
+
+  g_free (server.request);
+  g_unlink (token_path);
+}
+
+static void
+test_policy_check (void)
+{
+  run_policy_check_case
+      ("{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "allow\n",
+      TRUE, 0, "1000");
+  run_policy_check_case ("{\"decision\":0,\"deny_reason\":\"missing_grant\","
+      "\"deny_origin\":\"policy\"}", "deny\n", FALSE, 0, "1000");
+  run_policy_check_case
+      ("{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}", "", FALSE,
+      250 * 1000, "50");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -624,6 +766,7 @@ main (int argc, char **argv)
       test_status_help_command_first);
   g_test_add_func ("/wyctl/policy-help", test_policy_help);
   g_test_add_func ("/wyctl/policy-validation", test_policy_validation);
+  g_test_add_func ("/wyctl/policy-check", test_policy_check);
 
   return g_test_run ();
 }
