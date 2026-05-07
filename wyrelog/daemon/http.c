@@ -1090,6 +1090,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   wyl_decide_req_set_subject_id (req, user);
   wyl_decide_req_set_action (req, perm);
   wyl_decide_req_set_resource_id (req, session_token);
+  wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
   if (has_guard_context) {
     gint64 timestamp = 0;
     gint64 risk = 0;

@@ -46,6 +46,14 @@ typedef struct
   guint matches;
 } PermissionStateProbe;
 
+#ifdef WYL_HAS_AUDIT
+static wyrelog_error_t audit_event_probe_cb (const gchar * id,
+    gint64 created_at_us, const gchar * subject_id, const gchar * action,
+    const gchar * resource_id, const gchar * deny_reason,
+    const gchar * deny_origin, const gchar * request_id,
+    wyl_decision_t decision, gpointer user_data);
+#endif
+
 static gboolean
 is_request_id_shape (const gchar *request_id)
 {
@@ -241,15 +249,17 @@ build_decide_uri (const gchar *base_url, const gchar *user, const gchar *perm,
 }
 
 static gint
-send_raw_decide (SoupSession *session, const gchar *method,
+send_raw_decide_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *user, const gchar *perm,
     const gchar *scope, const gchar *extra_query, guint *out_status,
-    gchar **out_body)
+    gchar **out_body, gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 30;
   *out_status = 0;
   *out_body = NULL;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
 
   g_autofree gchar *uri =
       build_decide_uri (base_url, user, perm, scope, extra_query);
@@ -270,7 +280,22 @@ send_raw_decide (SoupSession *session, const gchar *method,
   const gchar *body_data = g_bytes_get_data (body, &body_size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (body_data, body_size);
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   return 0;
+}
+
+static gint
+send_raw_decide (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *user, const gchar *perm,
+    const gchar *scope, const gchar *extra_query, guint *out_status,
+    gchar **out_body)
+{
+  return send_raw_decide_full (session, method, base_url, user, perm, scope,
+      extra_query, out_status, out_body, NULL);
 }
 
 static gint
@@ -355,7 +380,7 @@ check_request_id_header_contract (const gchar *base_url)
 }
 
 static gint
-check_raw_decide_contract (const gchar *base_url)
+check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -394,10 +419,11 @@ check_raw_decide_contract (const gchar *base_url)
     return 39;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  g_autofree gchar *allow_request_id = NULL;
+  rc = send_raw_decide_full (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      &status, &body);
+      &status, &body, &allow_request_id);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -408,6 +434,21 @@ check_raw_decide_contract (const gchar *base_url)
     return 42;
   if (strstr (body, "\"deny_origin\":null") == NULL)
     return 43;
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe allow_audit = {
+    .subject_id = "http-guard-user",
+    .action = "wr.audit.read",
+    .resource_id = "http-guard-scope",
+    .request_id = allow_request_id,
+  };
+  if (wyl_policy_store_foreach_audit_event (wyl_handle_get_policy_store
+          (handle), audit_event_probe_cb, &allow_audit) != WYRELOG_E_OK)
+    return 1810;
+  if (allow_audit.matches != 1)
+    return 1811;
+#else
+  (void) handle;
+#endif
 
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
@@ -2142,7 +2183,7 @@ main (void)
   if (request_id_rc != 0)
     return request_id_rc;
 
-  gint raw_rc = check_raw_decide_contract (base_url);
+  gint raw_rc = check_raw_decide_contract (handle, base_url);
   if (raw_rc != 0)
     return raw_rc;
   gint decision = -1;

@@ -13,6 +13,7 @@ struct _wyl_decide_req
   gchar *subject_id;
   gchar *action;
   gchar *resource_id;
+  gchar *request_id;
   gboolean has_guard_context;
   gint64 guard_timestamp;
   gchar *guard_loc_class;
@@ -60,6 +61,7 @@ wyl_decide_req_free (wyl_decide_req_t *req)
   g_free (req->subject_id);
   g_free (req->action);
   g_free (req->resource_id);
+  g_free (req->request_id);
   g_free (req->guard_loc_class);
   g_free (req);
 }
@@ -107,6 +109,21 @@ wyl_decide_req_get_resource_id (const wyl_decide_req_t *req)
 {
   g_return_val_if_fail (req != NULL, NULL);
   return req->resource_id;
+}
+
+void
+wyl_decide_req_set_request_id (wyl_decide_req_t *req, const gchar *request_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->request_id);
+  req->request_id = g_strdup (request_id);
+}
+
+const gchar *
+wyl_decide_req_get_request_id (const wyl_decide_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->request_id;
 }
 
 void
@@ -619,6 +636,7 @@ emit_audit:
   wyl_audit_event_set_resource_id (ev, wyl_decide_req_get_resource_id (req));
   wyl_audit_event_set_deny_reason (ev, deny_reason);
   wyl_audit_event_set_deny_origin (ev, deny_origin);
+  wyl_audit_event_set_request_id (ev, wyl_decide_req_get_request_id (req));
   wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
   if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK)
     fail_closed_for_audit (resp);
