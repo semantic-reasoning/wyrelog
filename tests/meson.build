@@ -127,6 +127,17 @@ if build_client
 endif
 
 if host_machine.system() != 'windows' and build_client
+  test('wyctl-status-daemon', sh,
+    args : [
+      meson.current_source_dir() / 'check-wyctl-status-daemon.sh',
+      wyctl_exe.full_path(),
+      wyrelogd_exe.full_path(),
+      meson.project_source_root() / 'templates' / 'access',
+      python3.full_path(),
+    ],
+    depends : [wyctl_exe, wyrelogd_exe],
+  )
+
   test('client-audit-daemon', sh,
     args : [
       meson.current_source_dir() / 'check-client-audit-daemon.sh',
