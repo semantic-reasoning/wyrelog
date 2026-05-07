@@ -1735,8 +1735,25 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
     return 130;
   if (direct_permission_exists (handle, "target", "site.policy.read",
-          "tenant-a"))
+          "tenant-a")) {
     return 131;
+  }
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *unknown_tenant_query =
+      g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
+      "&tenant=unknown&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", unknown_tenant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_policy_auth\"") == NULL)
+    return 187;
+  if (direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-a")) {
+    return 188;
+  }
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *transition_denied_query =
@@ -2390,6 +2407,17 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
     return rc;
   if (status != 200 || strstr (body, "[") == NULL)
     return 106;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *bearer_unknown_tenant =
+      g_strdup_printf ("tenant=unknown&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=69");
+  rc = send_raw_audit_bearer (session, base_url, bearer_unknown_tenant,
+      access_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
+    return 163;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *request_filter =
