@@ -666,7 +666,8 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
   g_autoptr (GBytes) payload = NULL;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
   wyrelog_error_t rc = wyl_jwt_verify_hs256_access_token (access_token, secret,
-      sizeof secret, "wyrelogd", "wyrelog-client", now, &payload);
+      sizeof secret, "__wr_default_hs256", "wyrelogd", "wyrelog-client", now,
+      &payload);
   memset (secret, 0, sizeof secret);
   if (rc != WYRELOG_E_OK)
     return 532;
@@ -709,6 +710,7 @@ sign_test_access_token_with_jti (SoupServer *server, const gchar *jti,
     return rc;
 
   wyl_jwt_issue_input_t input = {
+    .key_id = "__wr_default_hs256",
     .jti = jti,
     .subject = subject,
     .issuer = issuer,

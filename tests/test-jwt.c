@@ -6,6 +6,7 @@
 #include "wyrelog/auth/jwt-private.h"
 
 static const wyl_jwt_issue_input_t valid_input = {
+  .key_id = "wyrelogd-test-key",
   .jti = "01890c10-2e3f-7000-8000-000000000101",
   .subject = "alice",
   .issuer = "wyrelogd",
@@ -53,13 +54,18 @@ check_base64url_round_trip (void)
 }
 
 static gint
-check_header_json_is_fixed (void)
+check_header_json_contains_required_claims (void)
 {
   g_autofree gchar *header = NULL;
-  if (wyl_jwt_build_header_json (&header) != WYRELOG_E_OK)
+  if (wyl_jwt_build_header_json (valid_input.key_id, &header)
+      != WYRELOG_E_OK)
     return 20;
-  if (g_strcmp0 (header, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}") != 0)
+  if (g_strcmp0 (header,
+          "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"wyrelogd-test-key\"}")
+      != 0)
     return 21;
+  if (wyl_jwt_build_header_json ("", &header) != WYRELOG_E_INVALID)
+    return 22;
   return 0;
 }
 
@@ -135,8 +141,10 @@ check_unsigned_segments_are_base64url (void)
     return 62;
   gsize header_len = 0;
   const gchar *header = g_bytes_get_data (header_bytes, &header_len);
-  if (header_len != strlen ("{\"alg\":\"HS256\",\"typ\":\"JWT\"}") ||
-      memcmp (header, "{\"alg\":\"HS256\",\"typ\":\"JWT\"}", header_len) != 0)
+  const gchar *expected = "{\"alg\":\"HS256\",\"typ\":\"JWT\","
+      "\"kid\":\"wyrelogd-test-key\"}";
+  if (header_len != strlen (expected) || memcmp (header, expected,
+          header_len) != 0)
     return 63;
 
   g_autoptr (GBytes) payload_bytes = NULL;
@@ -148,6 +156,12 @@ check_unsigned_segments_are_base64url (void)
   g_autofree gchar *payload_text = g_strndup (payload, payload_len);
   if (payload_len == 0 || strstr (payload_text, "\"exp\":1900") == NULL)
     return 65;
+
+  g_autofree gchar *missing_header_segment = NULL;
+  g_autofree gchar *missing_payload_segment = NULL;
+  if (wyl_jwt_build_unsigned_segments (NULL, &missing_header_segment,
+          &missing_payload_segment) != WYRELOG_E_INVALID)
+    return 66;
   return 0;
 }
 
@@ -170,7 +184,8 @@ check_hs256_token_signature_round_trip (void)
 
   g_autoptr (GBytes) payload = NULL;
   if (wyl_jwt_verify_hs256_signature (token, secret,
-          strlen ((const gchar *) secret), &payload) != WYRELOG_E_OK)
+          strlen ((const gchar *) secret), valid_input.key_id, &payload)
+      != WYRELOG_E_OK)
     return 73;
   gsize payload_len = 0;
   const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
@@ -192,10 +207,12 @@ check_hs256_signature_fails_closed (void)
 
   g_autoptr (GBytes) payload = NULL;
   if (wyl_jwt_verify_hs256_signature (token, wrong_secret,
-          strlen ((const gchar *) wrong_secret), &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) wrong_secret), valid_input.key_id, &payload)
+      != WYRELOG_E_POLICY)
     return 81;
   if (wyl_jwt_verify_hs256_signature ("a.b", secret,
-          strlen ((const gchar *) secret), &payload) != WYRELOG_E_INVALID)
+          strlen ((const gchar *) secret), valid_input.key_id, &payload)
+      != WYRELOG_E_INVALID)
     return 82;
   if (wyl_jwt_sign_hs256 (&valid_input, NULL, 0, &token)
       != WYRELOG_E_INVALID)
@@ -205,16 +222,19 @@ check_hs256_signature_fails_closed (void)
   g_autofree gchar *tampered_payload = g_strdup_printf ("%s.%sA.%s",
       parts[0], parts[1], parts[2]);
   if (wyl_jwt_verify_hs256_signature (tampered_payload, secret,
-          strlen ((const gchar *) secret), &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, &payload)
+      != WYRELOG_E_POLICY)
     return 84;
 
   g_autofree gchar *tampered_signature = g_strdup_printf ("%s.%s.%sA",
       parts[0], parts[1], parts[2]);
   if (wyl_jwt_verify_hs256_signature (tampered_signature, secret,
-          strlen ((const gchar *) secret), &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, &payload)
+      != WYRELOG_E_POLICY)
     return 85;
 
-  const gchar *none_header = "{\"alg\":\"none\",\"typ\":\"JWT\"}";
+  const gchar *none_header = "{\"alg\":\"none\",\"typ\":\"JWT\","
+      "\"kid\":\"wyrelogd-test-key\"}";
   g_autofree gchar *none_header_segment = NULL;
   if (wyl_jwt_base64url_encode ((const guint8 *) none_header,
           strlen (none_header), &none_header_segment) != WYRELOG_E_OK)
@@ -222,7 +242,8 @@ check_hs256_signature_fails_closed (void)
   g_autofree gchar *none_token = g_strdup_printf ("%s.%s.%s",
       none_header_segment, parts[1], parts[2]);
   if (wyl_jwt_verify_hs256_signature (none_token, secret,
-          strlen ((const gchar *) secret), &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, &payload)
+      != WYRELOG_E_POLICY)
     return 87;
   return 0;
 }
@@ -238,8 +259,8 @@ check_hs256_access_token_claims_and_time (void)
 
   g_autoptr (GBytes) payload = NULL;
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_OK)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_OK)
     return 91;
   if (payload == NULL)
     return 92;
@@ -262,44 +283,49 @@ check_hs256_access_token_claims_and_time (void)
 
   g_clear_pointer (&payload, g_bytes_unref);
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1899,
-          &payload) != WYRELOG_E_OK)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1899, &payload) != WYRELOG_E_OK)
     return 93;
   g_clear_pointer (&payload, g_bytes_unref);
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "other-issuer", "wyrelog-client",
-          1000, &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "other-issuer",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
     return 94;
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "other-audience", 1000,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "other-audience", 1000, &payload) != WYRELOG_E_POLICY)
     return 95;
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 999,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 999, &payload) != WYRELOG_E_POLICY)
     return 96;
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1900,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1900, &payload) != WYRELOG_E_POLICY)
     return 97;
   if (wyl_jwt_verify_hs256_access_token (token, secret,
-          strlen ((const gchar *) secret), "", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_INVALID)
+          strlen ((const gchar *) secret), valid_input.key_id, "",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_INVALID)
     return 98;
+  if (wyl_jwt_verify_hs256_access_token (token, secret,
+          strlen ((const gchar *) secret), "other-key", "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
+    return 104;
   return 0;
 }
 
 static wyrelog_error_t
-sign_custom_payload_bytes (const guint8 *payload, gsize payload_len,
-    const guint8 *secret, gsize secret_len, gchar **out_token)
+sign_custom_header_payload_bytes (const gchar *header, const guint8 *payload,
+    gsize payload_len, const guint8 *secret, gsize secret_len,
+    gchar **out_token)
 {
-  if (payload == NULL || secret == NULL || secret_len == 0 || out_token == NULL)
+  if (header == NULL || payload == NULL || secret == NULL || secret_len == 0
+      || out_token == NULL)
     return WYRELOG_E_INVALID;
   *out_token = NULL;
   if (sodium_init () < 0)
     return WYRELOG_E_INTERNAL;
 
-  const gchar *header = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
   g_autofree gchar *header_segment = NULL;
   g_autofree gchar *payload_segment = NULL;
   wyrelog_error_t rc = wyl_jwt_base64url_encode ((const guint8 *) header,
@@ -329,6 +355,16 @@ sign_custom_payload_bytes (const guint8 *payload, gsize payload_len,
 }
 
 static wyrelog_error_t
+sign_custom_payload_bytes (const guint8 *payload, gsize payload_len,
+    const guint8 *secret, gsize secret_len, gchar **out_token)
+{
+  const gchar *header = "{\"alg\":\"HS256\",\"typ\":\"JWT\","
+      "\"kid\":\"wyrelogd-test-key\"}";
+  return sign_custom_header_payload_bytes (header, payload, payload_len,
+      secret, secret_len, out_token);
+}
+
+static wyrelog_error_t
 sign_custom_payload (const gchar *payload, const guint8 *secret,
     gsize secret_len, gchar **out_token)
 {
@@ -336,6 +372,42 @@ sign_custom_payload (const gchar *payload, const guint8 *secret,
     return WYRELOG_E_INVALID;
   return sign_custom_payload_bytes ((const guint8 *) payload, strlen (payload),
       secret, secret_len, out_token);
+}
+
+static gint
+check_hs256_signature_rejects_ambiguous_headers (void)
+{
+  static const guint8 secret[] = "test-secret";
+  const gchar *payload =
+      "{\"jti\":\"jti\",\"sub\":\"alice\",\"iss\":\"wyrelogd\","
+      "\"aud\":\"wyrelog-client\",\"iat\":1000,\"nbf\":1000,\"exp\":1900,"
+      "\"tenant\":\"t\",\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"session\"}";
+  const gchar *headers[] = {
+    "{\"alg\":\"HS256\",\"typ\":\"JWT\"}",
+    "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"other-key\"}",
+    "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"wyrelogd-test-key\","
+        "\"kid\":\"other-key\"}",
+    "{\"alg\":\"HS256\",\"typ\":\"JWT\",\"kid\":\"wyrelogd-test-key\","
+        "\"x5u\":\"https://example.invalid/key\"}",
+    "{\"alg\":{\"name\":\"HS256\"},\"typ\":\"JWT\","
+        "\"kid\":\"wyrelogd-test-key\"}",
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (headers); i++) {
+    g_autofree gchar *token = NULL;
+    if (sign_custom_header_payload_bytes (headers[i], (const guint8 *) payload,
+            strlen (payload), secret, strlen ((const gchar *) secret),
+            &token) != WYRELOG_E_OK)
+      return 120 + (gint) i;
+
+    g_autoptr (GBytes) decoded_payload = NULL;
+    if (wyl_jwt_verify_hs256_signature (token, secret,
+            strlen ((const gchar *) secret), valid_input.key_id,
+            &decoded_payload) != WYRELOG_E_POLICY)
+      return 130 + (gint) i;
+  }
+  return 0;
 }
 
 static gint
@@ -355,8 +427,8 @@ check_hs256_access_token_rejects_ambiguous_claims (void)
 
   g_autoptr (GBytes) payload = NULL;
   if (wyl_jwt_verify_hs256_access_token (duplicate_token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
     return 111;
 
   const gchar *nested_payload =
@@ -370,8 +442,8 @@ check_hs256_access_token_rejects_ambiguous_claims (void)
           strlen ((const gchar *) secret), &nested_token) != WYRELOG_E_OK)
     return 112;
   if (wyl_jwt_verify_hs256_access_token (nested_token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
     return 113;
 
   const gchar *nul_issuer_payload =
@@ -384,8 +456,8 @@ check_hs256_access_token_rejects_ambiguous_claims (void)
           strlen ((const gchar *) secret), &nul_issuer_token) != WYRELOG_E_OK)
     return 114;
   if (wyl_jwt_verify_hs256_access_token (nul_issuer_token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
     return 115;
 
   const gchar *short_escape_payload =
@@ -399,8 +471,8 @@ check_hs256_access_token_rejects_ambiguous_claims (void)
       != WYRELOG_E_OK)
     return 116;
   if (wyl_jwt_verify_hs256_access_token (short_escape_token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
     return 117;
 
   static const guint8 raw_nul_payload[] =
@@ -414,8 +486,8 @@ check_hs256_access_token_rejects_ambiguous_claims (void)
       != WYRELOG_E_OK)
     return 118;
   if (wyl_jwt_verify_hs256_access_token (raw_nul_token, secret,
-          strlen ((const gchar *) secret), "wyrelogd", "wyrelog-client", 1000,
-          &payload) != WYRELOG_E_POLICY)
+          strlen ((const gchar *) secret), valid_input.key_id, "wyrelogd",
+          "wyrelog-client", 1000, &payload) != WYRELOG_E_POLICY)
     return 119;
   return 0;
 }
@@ -427,7 +499,7 @@ main (void)
 
   if ((rc = check_base64url_round_trip ()) != 0)
     return rc;
-  if ((rc = check_header_json_is_fixed ()) != 0)
+  if ((rc = check_header_json_contains_required_claims ()) != 0)
     return rc;
   if ((rc = check_payload_json_contains_required_claims ()) != 0)
     return rc;
@@ -442,6 +514,8 @@ main (void)
   if ((rc = check_hs256_signature_fails_closed ()) != 0)
     return rc;
   if ((rc = check_hs256_access_token_claims_and_time ()) != 0)
+    return rc;
+  if ((rc = check_hs256_signature_rejects_ambiguous_headers ()) != 0)
     return rc;
   if ((rc = check_hs256_access_token_rejects_ambiguous_claims ()) != 0)
     return rc;
