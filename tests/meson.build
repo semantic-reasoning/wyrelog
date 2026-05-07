@@ -112,6 +112,20 @@ test_client_audit_daemon = executable('test-client-audit-daemon',
   dependencies : [wyrelog_client_dep],
 )
 
+if build_client
+  test_wyctl_basic = executable('test-wyctl-basic',
+    'test-wyctl-basic.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    dependencies : [glib_dep],
+  )
+
+  test('wyctl-basic', test_wyctl_basic,
+    depends : wyctl_exe,
+  )
+endif
+
 if host_machine.system() != 'windows' and build_client
   test('client-audit-daemon', sh,
     args : [
