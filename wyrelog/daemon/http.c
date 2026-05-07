@@ -448,6 +448,87 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       strlen (body));
 }
 
+static wyrelog_error_t
+check_runtime_ready (WylHandle *handle)
+{
+  gint64 row[1];
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (handle, "wr.audit.read", &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean ready = FALSE;
+  rc = wyl_handle_engine_contains (handle, "guarded_perm", row, 1, &ready);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!ready)
+    return WYRELOG_E_POLICY;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  const gchar *tables[] = {
+    "wyrelog_config",
+    "roles",
+    "permissions",
+    "role_permissions",
+    "role_inheritances",
+    "role_memberships",
+    "role_membership_events",
+    "direct_permissions",
+    "direct_permission_events",
+    "permission_states",
+    "permission_state_events",
+    "principal_events",
+    "principal_states",
+    "session_states",
+    "session_events",
+    "audit_events",
+    "policy_signatures",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
+    gboolean found = FALSE;
+    rc = wyl_policy_store_table_exists (store, tables[i], &found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!found)
+      return WYRELOG_E_POLICY;
+  }
+
+#ifdef WYL_HAS_AUDIT
+  wyl_audit_conn_t *conn = wyl_handle_get_audit_conn (handle);
+  gboolean found = FALSE;
+  rc = wyl_audit_conn_table_exists (conn, "audit_events", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!found)
+    return WYRELOG_E_IO;
+#endif
+
+  return WYRELOG_E_OK;
+}
+
+static void
+readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
+    GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+
+  WylDaemonHttpContext *ctx = user_data;
+  wyrelog_error_t rc = check_runtime_ready (ctx->handle);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 503, "not_ready");
+    return;
+  }
+
+  const gchar *body = "ready\n";
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "text/plain", SOUP_MEMORY_COPY, body,
+      strlen (body));
+}
+
 static gboolean
 authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
@@ -1143,6 +1224,7 @@ wyl_daemon_start_http_server (const WylDaemonOptions *opts, WylHandle *handle,
   g_object_set_data_full (G_OBJECT (server), "wyl-daemon-http-context", ctx,
       wyl_daemon_http_context_free);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
+  soup_server_add_handler (server, "/readyz", readyz_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
   soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
