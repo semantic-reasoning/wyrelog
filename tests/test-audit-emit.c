@@ -68,6 +68,32 @@ policy_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
 }
 
 static gboolean
+policy_get_audit_intention_state (WylHandle *handle, const gchar *id,
+    gchar **out_state, gint64 *out_attempt_count)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+          "SELECT state, attempt_count FROM audit_intentions "
+          "WHERE audit_id = ?;", -1, &stmt, NULL) != SQLITE_OK)
+    return FALSE;
+  if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return FALSE;
+  }
+
+  gboolean ok = FALSE;
+  if (sqlite3_step (stmt) == SQLITE_ROW) {
+    *out_state = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    *out_attempt_count = sqlite3_column_int64 (stmt, 1);
+    ok = TRUE;
+  }
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gboolean
 runtime_count_audit_rows (WylHandle *handle, const gchar *id, gint64 *out_count)
 {
   duckdb_connection conn =
@@ -652,6 +678,15 @@ check_emit_mirrors_policy_store_row (void)
     rc = 170;
 
   sqlite3_finalize (stmt);
+  if (rc == 0) {
+    g_autofree gchar *state = NULL;
+    gint64 attempt_count = -1;
+    if (!policy_get_audit_intention_state (handle, expected_id, &state,
+            &attempt_count))
+      rc = 500;
+    else if (g_strcmp0 (state, "committed") != 0 || attempt_count != 0)
+      rc = 501;
+  }
   g_object_unref (handle);
   return rc;
 }
@@ -1203,6 +1238,17 @@ check_decide_allows_when_runtime_audit_projection_fails (void)
     return 301;
   }
   sqlite3_finalize (stmt);
+
+  g_autofree gchar *state = NULL;
+  gint64 attempt_count = -1;
+  if (!policy_get_audit_intention_state (handle, id, &state, &attempt_count)) {
+    g_object_unref (handle);
+    return 506;
+  }
+  if (g_strcmp0 (state, "failed") != 0 || attempt_count != 1) {
+    g_object_unref (handle);
+    return 507;
+  }
 
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, id, created_at_us, "allow",
@@ -2530,6 +2576,16 @@ check_emit_reports_live_projection_failure (void)
     g_object_unref (handle);
     return 226;
   }
+  g_autofree gchar *state = NULL;
+  gint64 attempt_count = -1;
+  if (!policy_get_audit_intention_state (handle, id, &state, &attempt_count)) {
+    g_object_unref (handle);
+    return 502;
+  }
+  if (g_strcmp0 (state, "failed") != 0 || attempt_count != 1) {
+    g_object_unref (handle);
+    return 503;
+  }
 
   g_object_unref (handle);
   return 0;
@@ -2570,6 +2626,16 @@ check_failed_duplicate_emit_keeps_durable_rows (void)
   if (!policy_count_audit_rows (handle, id, &count) || count != 1) {
     g_object_unref (handle);
     return 231;
+  }
+  g_autofree gchar *state = NULL;
+  gint64 attempt_count = -1;
+  if (!policy_get_audit_intention_state (handle, id, &state, &attempt_count)) {
+    g_object_unref (handle);
+    return 504;
+  }
+  if (g_strcmp0 (state, "committed") != 0 || attempt_count != 0) {
+    g_object_unref (handle);
+    return 505;
   }
   gboolean contains = FALSE;
   if (contains_audit_event_fact (handle, id, created_at_us, "allow",
