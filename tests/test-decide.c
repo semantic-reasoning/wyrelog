@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
@@ -726,7 +727,7 @@ check_decide_denies_guarded_permission_on_context_miss (void)
 }
 
 static gint
-check_policy_store_replay_synthesizes_legacy_direct_grant_state (void)
+check_policy_store_replay_requires_durable_permission_state (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -745,19 +746,19 @@ check_policy_store_replay_synthesizes_legacy_direct_grant_state (void)
     return 126;
 
   gboolean contains = TRUE;
-  gint64 synthesized_row[4];
-  if (intern_symbol (handle, "replay-legacy-user", &synthesized_row[0])
+  gint64 armed_row[4];
+  if (intern_symbol (handle, "replay-legacy-user", &armed_row[0])
       != WYRELOG_E_OK)
     return 150;
-  if (intern_symbol (handle, "site.replay.read", &synthesized_row[1])
+  if (intern_symbol (handle, "site.replay.read", &armed_row[1])
       != WYRELOG_E_OK)
     return 151;
-  if (intern_symbol (handle, "tenant/replay", &synthesized_row[2])
+  if (intern_symbol (handle, "tenant/replay", &armed_row[2])
       != WYRELOG_E_OK)
     return 152;
-  if (intern_symbol (handle, "armed", &synthesized_row[3]) != WYRELOG_E_OK)
+  if (intern_symbol (handle, "armed", &armed_row[3]) != WYRELOG_E_OK)
     return 153;
-  if (wyl_handle_engine_contains (handle, "perm_state", synthesized_row, 4,
+  if (wyl_handle_engine_contains (handle, "perm_state", armed_row, 4,
           &contains) != WYRELOG_E_OK)
     return 154;
   if (contains)
@@ -767,10 +768,12 @@ check_policy_store_replay_synthesizes_legacy_direct_grant_state (void)
   if (decide_policy_store_fixture (handle, "replay-legacy-user",
           "site.replay.read", "tenant/replay", resp) != WYRELOG_E_OK)
     return 127;
-  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
     return 128;
-  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
     return 129;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 156;
   return 0;
 }
 
@@ -835,6 +838,129 @@ check_policy_store_replay_preserves_armed_permission_state (void)
     return 139;
   if (wyl_decide_resp_get_deny_reason (resp) != NULL)
     return 140;
+  return 0;
+}
+
+static gint
+check_persistent_permission_state_authority_matrix (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyrelog-decide-XXXXXX", &error);
+  if (dir == NULL)
+    return 157;
+
+  g_autofree gchar *policy_path = g_build_filename (dir, "policy.sqlite", NULL);
+#ifdef WYL_HAS_AUDIT
+  g_autofree gchar *audit_path = g_build_filename (dir, "audit.duckdb", NULL);
+#endif
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    WylHandleOpenOptions opts = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+      .policy_store_path = policy_path,
+#ifdef WYL_HAS_AUDIT
+      .audit_store_path = audit_path,
+#endif
+    };
+    if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
+      return 158;
+    if (seed_policy_store_decide_fixture (handle, "matrix-direct-user",
+            "site.matrix.read", "tenant/matrix", NULL) != WYRELOG_E_OK)
+      return 159;
+
+    g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "matrix-direct-user",
+            "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
+      return 160;
+    if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+      return 161;
+    if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+      return 162;
+
+    if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 163;
+    g_autoptr (wyl_decide_resp_t) reload_resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "matrix-direct-user",
+            "site.matrix.read", "tenant/matrix", reload_resp)
+        != WYRELOG_E_OK)
+      return 164;
+    if (wyl_decide_resp_get_decision (reload_resp) != WYL_DECISION_DENY)
+      return 165;
+    if (g_strcmp0 (wyl_decide_resp_get_deny_reason (reload_resp),
+            "not_armed") != 0)
+      return 166;
+  }
+
+  {
+    g_autoptr (WylHandle) handle = NULL;
+    WylHandleOpenOptions opts = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+      .policy_store_path = policy_path,
+#ifdef WYL_HAS_AUDIT
+      .audit_store_path = audit_path,
+#endif
+    };
+    if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
+      return 167;
+
+    g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "matrix-direct-user",
+            "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
+      return 168;
+    if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+      return 169;
+    if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+      return 170;
+
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    if (wyl_policy_store_set_permission_state (store, "matrix-direct-user",
+            "site.matrix.read", "tenant/matrix", "armed") != WYRELOG_E_OK)
+      return 171;
+    if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 172;
+    g_clear_pointer (&resp, wyl_decide_resp_free);
+    resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "matrix-direct-user",
+            "site.matrix.read", "tenant/matrix", resp) != WYRELOG_E_OK)
+      return 173;
+    if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+      return 174;
+    if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+      return 175;
+
+    if (wyl_policy_store_upsert_permission (store, "site.matrix.transition",
+            "transition only", "basic") != WYRELOG_E_OK)
+      return 176;
+    if (wyl_policy_store_set_principal_state (store, "matrix-transition-user",
+            "authenticated") != WYRELOG_E_OK)
+      return 177;
+    if (wyl_policy_store_set_session_state (store, "tenant/matrix-transition",
+            "active") != WYRELOG_E_OK)
+      return 178;
+    if (wyl_policy_store_set_permission_state (store, "matrix-transition-user",
+            "site.matrix.transition", "tenant/matrix-transition", "armed")
+        != WYRELOG_E_OK)
+      return 179;
+    if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 180;
+    g_clear_pointer (&resp, wyl_decide_resp_free);
+    resp = wyl_decide_resp_new ();
+    if (decide_policy_store_fixture (handle, "matrix-transition-user",
+            "site.matrix.transition", "tenant/matrix-transition", resp)
+        != WYRELOG_E_OK)
+      return 181;
+    if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+      return 182;
+    if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+      return 183;
+  }
+
+#ifdef WYL_HAS_AUDIT
+  g_remove (audit_path);
+#endif
+  g_remove (policy_path);
+  g_rmdir (dir);
   return 0;
 }
 
@@ -1147,7 +1273,7 @@ main (void)
     return rc;
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
     return rc;
-  if ((rc = check_policy_store_replay_synthesizes_legacy_direct_grant_state ())
+  if ((rc = check_policy_store_replay_requires_durable_permission_state ())
       != 0)
     return rc;
   if ((rc = check_policy_store_replay_preserves_dormant_permission_state ())
@@ -1155,6 +1281,8 @@ main (void)
     return rc;
   if ((rc = check_policy_store_replay_preserves_armed_permission_state ())
       != 0)
+    return rc;
+  if ((rc = check_persistent_permission_state_authority_matrix ()) != 0)
     return rc;
   if ((rc = check_decide_cleans_guard_facts_after_guarded_deny ()) != 0)
     return rc;

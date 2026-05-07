@@ -223,6 +223,12 @@ wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  rc = wyl_handle_apply_permission_state_transition (handle,
+      "wyrelogd-skip-mfa-user", "wyrelogd.skip_mfa.ready", session_id, "grant",
+      NULL, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "wyrelogd-skip-mfa-user");
   wyl_decide_req_set_action (decide, "wyrelogd.skip_mfa.ready");
@@ -282,6 +288,12 @@ wyl_daemon_check_policy_snapshot_reload_ready (WylHandle *handle)
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  rc = wyl_handle_apply_permission_state_transition (handle,
+      "wyrelogd-snapshot-user", "wyrelogd.snapshot.read", session_id, "grant",
+      NULL, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "wyrelogd-snapshot-user");
   wyl_decide_req_set_action (decide, "wyrelogd.snapshot.read");
@@ -300,8 +312,9 @@ wyl_daemon_check_direct_permission_grant_ready (WylHandle *handle)
 {
   /*
    * This readiness probe covers direct permission mutation, audit, reload,
-   * and the unguarded compatibility projection. The canonical stateful
-   * lifecycle probe is wyl_daemon_check_permission_state_transition_ready().
+   * and the decision path that requires durable permission-state arming.
+   * The canonical stateful transition lifecycle probe is
+   * wyl_daemon_check_permission_state_transition_ready().
    */
   g_autoptr (WylSession) session = NULL;
   wyrelog_error_t rc =
@@ -329,6 +342,12 @@ wyl_daemon_check_direct_permission_grant_ready (WylHandle *handle)
     return rc;
   if (!found)
     return WYRELOG_E_POLICY;
+
+  rc = wyl_handle_apply_permission_state_transition (handle,
+      "wyrelogd-direct-grant-user", "wyrelogd.direct_grant.read", session_id,
+      "grant", NULL, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "wyrelogd-direct-grant-user");

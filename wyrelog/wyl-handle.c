@@ -1451,40 +1451,6 @@ wyl_handle_load_policy_store_role_memberships (WylHandle *self)
 }
 
 static wyrelog_error_t
-direct_permission_should_synthesize_armed_state (WylHandle *self,
-    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
-    gboolean *out_synthesize)
-{
-  if (out_synthesize != NULL)
-    *out_synthesize = FALSE;
-  if (self == NULL || !WYL_IS_HANDLE (self) || out_synthesize == NULL)
-    return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL)
-    return WYRELOG_E_INVALID;
-
-  /*
-   * Direct permissions grant authority membership. Unguarded legacy
-   * decisions also need an armed lifecycle fact, but only as a replay
-   * compatibility projection when the durable Policy Store has no
-   * permission_states row for this tuple.
-   *
-   * Guarded permissions never use persisted perm_state as their arming
-   * source; they are armed by request-local guard evidence instead.
-   */
-  if (wyl_perm_arm_rule_lookup (perm_id) != NULL)
-    return WYRELOG_E_OK;
-
-  gboolean has_durable_state = FALSE;
-  wyrelog_error_t rc = wyl_policy_store_permission_state_exists
-      (self->policy_store, subject_id, perm_id, scope, &has_durable_state);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  *out_synthesize = !has_durable_state;
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
 insert_policy_store_direct_permission (const gchar *subject_id,
     const gchar *perm_id, const gchar *scope, gpointer user_data)
 {
@@ -1509,23 +1475,7 @@ insert_policy_store_direct_permission (const gchar *subject_id,
   rc = insert_login_skip_mfa_authz_if_allowed (self, subject_id, scope);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  gboolean synthesize_armed = FALSE;
-  rc = direct_permission_should_synthesize_armed_state (self, subject_id,
-      perm_id, scope, &synthesize_armed);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  if (!synthesize_armed)
-    return WYRELOG_E_OK;
-
-  gint64 state_row[4];
-  state_row[0] = row[0];
-  state_row[1] = row[1];
-  state_row[2] = row[2];
-  rc = wyl_handle_intern_engine_symbol (self, "armed", &state_row[3]);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_engine_insert (self, "perm_state", state_row, 4);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -1981,11 +1931,7 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
    * the template mirror while preserving the handle-level relation name. */
   if (g_strcmp0 (relation, "principal_state") == 0)
     snapshot_relation = "principal_state_observed";
-  /*
-   * perm_state probes are the public replay-observation path. Actual
-   * engine-local arming input may also include legacy synthesized rows,
-   * which must not be reported as durable replay.
-   */
+  /* perm_state probes are the public durable replay-observation path. */
   else if (g_strcmp0 (relation, "perm_state") == 0)
     snapshot_relation = "perm_state_observed";
   else if (g_strcmp0 (relation, "login_skip_mfa_authz") == 0)

@@ -465,6 +465,10 @@ check_mfa_verify_authenticates_engine_principal (void)
   if (grant_direct (handle, "login-user", "site.login-permission",
           "login-scope") != WYRELOG_E_OK)
     return 82;
+  if (wyl_handle_apply_permission_state_transition (handle, "login-user",
+          "site.login-permission", "login-scope", "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 231;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "login-user");
@@ -702,6 +706,10 @@ check_login_session_id_is_active_decision_scope (void)
   if (grant_direct (handle, "session-id-user", "site.session-id-permission",
           session_id) != WYRELOG_E_OK)
     return 145;
+  if (wyl_handle_apply_permission_state_transition (handle, "session-id-user",
+          "site.session-id-permission", session_id, "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 233;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "session-id-user");
@@ -758,6 +766,10 @@ check_mfa_verify_with_proof_requires_validator (void)
   if (grant_direct (handle, "mfa-proof-user", "site.mfa-proof-permission",
           "mfa-proof-scope") != WYRELOG_E_OK)
     return 102;
+  if (wyl_handle_apply_permission_state_transition (handle, "mfa-proof-user",
+          "site.mfa-proof-permission", "mfa-proof-scope", "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 234;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "mfa-proof-user");
@@ -872,6 +884,10 @@ check_login_skip_mfa_authenticates_principal (void)
   if (grant_direct (handle, "skip-mfa-user", "site.skip-mfa-permission",
           "skip-mfa-scope") != WYRELOG_E_OK)
     return 152;
+  if (wyl_handle_apply_permission_state_transition (handle, "skip-mfa-user",
+          "site.skip-mfa-permission", "skip-mfa-scope", "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 232;
 
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, "skip-mfa-user");
@@ -1252,6 +1268,10 @@ check_session_close_deactivates_decision_scope (void)
   if (grant_direct (handle, "close-user", "site.close-permission",
           session_id) != WYRELOG_E_OK)
     return 174;
+  if (wyl_handle_apply_permission_state_transition (handle, "close-user",
+          "site.close-permission", session_id, "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 241;
 
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
     return 176;
@@ -1404,6 +1424,10 @@ check_elevated_session_remains_active_decision_scope (void)
   if (grant_direct (handle, "elevate-user", "site.elevate-permission",
           session_id) != WYRELOG_E_OK)
     return 225;
+  if (wyl_handle_apply_permission_state_transition (handle, "elevate-user",
+          "site.elevate-permission", session_id, "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 242;
 
   g_autoptr (wyl_decide_req_t) decide = wyl_decide_req_new ();
   wyl_decide_req_set_subject_id (decide, "elevate-user");
@@ -1440,6 +1464,10 @@ check_elevated_session_close_deactivates_decision_scope (void)
   if (grant_direct (handle, "elevated-close-user",
           "site.elevated-close-permission", session_id) != WYRELOG_E_OK)
     return 235;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "elevated-close-user", "site.elevated-close-permission", session_id,
+          "grant", NULL, NULL) != WYRELOG_E_OK)
+    return 242;
 
   if (wyl_session_close (handle, session) != WYRELOG_E_OK)
     return 237;
@@ -1510,6 +1538,10 @@ check_idle_session_deactivates_decision_scope (void)
   if (grant_direct (handle, "idle-user", "site.idle-permission",
           session_id) != WYRELOG_E_OK)
     return 274;
+  if (wyl_handle_apply_permission_state_transition (handle, "idle-user",
+          "site.idle-permission", session_id, "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 286;
 
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
     return 276;
@@ -1552,6 +1584,10 @@ check_elevated_session_idle_timeout_deactivates_scope (void)
   if (grant_direct (handle, "elevated-idle-user",
           "site.elevated-idle-permission", session_id) != WYRELOG_E_OK)
     return 285;
+  if (wyl_handle_apply_permission_state_transition (handle,
+          "elevated-idle-user", "site.elevated-idle-permission", session_id,
+          "grant", NULL, NULL) != WYRELOG_E_OK)
+    return 286;
 
   if (wyl_session_idle_timeout (handle, session) != WYRELOG_E_OK)
     return 287;
@@ -1622,6 +1658,10 @@ check_expiring_session_deactivates_decision_scope (void)
   if (grant_direct (handle, "expiry-user", "site.expiry-permission",
           session_id) != WYRELOG_E_OK)
     return 314;
+  if (wyl_handle_apply_permission_state_transition (handle, "expiry-user",
+          "site.expiry-permission", session_id, "grant", NULL, NULL)
+      != WYRELOG_E_OK)
+    return 320;
 
   if (wyl_session_expire (handle, session) != WYRELOG_E_OK)
     return 316;

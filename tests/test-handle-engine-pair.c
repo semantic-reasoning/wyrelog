@@ -3107,7 +3107,7 @@ check_policy_store_role_memberships_require_engine_pair (void)
 }
 
 static gint
-check_policy_store_direct_permissions_autoload_on_open (void)
+check_policy_store_direct_permissions_autoload_without_auto_arm (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
@@ -3138,12 +3138,18 @@ check_policy_store_direct_permissions_autoload_on_open (void)
   if (intern3 (handle, "direct-load-user", "site.direct.autoload",
           "direct-load-scope", decision_row) != WYRELOG_E_OK)
     return 357;
+  gboolean found = FALSE;
+  if (wyl_handle_engine_contains (handle, "has_permission", decision_row, 3,
+          &found) != WYRELOG_E_OK)
+    return 359;
+  if (!found)
+    return 363;
   gboolean allowed = FALSE;
   if (wyl_handle_engine_decide (handle, decision_row, &allowed)
       != WYRELOG_E_OK)
     return 358;
-  if (!allowed)
-    return 359;
+  if (allowed)
+    return 364;
   return 0;
 }
 
@@ -4942,7 +4948,8 @@ main (void)
     return rc;
   if ((rc = check_policy_store_role_memberships_require_engine_pair ()) != 0)
     return rc;
-  if ((rc = check_policy_store_direct_permissions_autoload_on_open ()) != 0)
+  if ((rc = check_policy_store_direct_permissions_autoload_without_auto_arm ())
+      != 0)
     return rc;
   if ((rc = check_policy_store_guarded_direct_permissions_do_not_auto_arm ())
       != 0)
