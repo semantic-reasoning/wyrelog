@@ -2489,6 +2489,12 @@ main (void)
       WYL_DECISION_ALLOW, NULL, "site.policy.read");
   if (audit_rc != 0)
     return audit_rc;
+  audit_rc = check_audit_event_present (client,
+      "action(\"permission_state.grant\")",
+      "http-policy-admin", "permission_state.grant", "site.policy.read",
+      WYL_DECISION_ALLOW, "grant", "tenant-a");
+  if (audit_rc != 0)
+    return audit_rc;
   audit_rc = check_audit_event_present (client, "action(\"role_grant\")",
       "http-policy-admin", "role_grant", "tenant-b",
       WYL_DECISION_ALLOW, NULL, "site.reader");
