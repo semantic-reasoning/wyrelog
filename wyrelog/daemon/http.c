@@ -25,16 +25,50 @@
 
 typedef struct
 {
+  gchar *jti;
+  gchar *session_id;
+  gchar *subject;
+  gchar *tenant;
+  gchar *key_id;
+  gboolean revoked;
+  gint64 expires_at;
+} WylAccessTokenState;
+
+typedef struct
+{
+  const gchar *session_id;
+  GPtrArray *token_ids;
+} WylSessionTokenCollect;
+
+typedef struct
+{
   WylHandle *handle;
   WylDaemonRuntime *runtime;
   guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
   gboolean access_token_secret_ready;
   GHashTable *sessions_by_token;
+  GHashTable *access_tokens_by_jti;
   GMutex lock;
   GMutex policy_mutation_lock;
 } WylDaemonHttpContext;
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
+
+static void
+wyl_access_token_state_free (gpointer data)
+{
+  WylAccessTokenState *state = data;
+
+  if (state == NULL)
+    return;
+
+  g_free (state->jti);
+  g_free (state->session_id);
+  g_free (state->subject);
+  g_free (state->tenant);
+  g_free (state->key_id);
+  g_free (state);
+}
 
 static void
 wyl_daemon_http_context_free (gpointer data)
@@ -46,6 +80,7 @@ wyl_daemon_http_context_free (gpointer data)
 
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   g_hash_table_unref (ctx->sessions_by_token);
+  g_hash_table_unref (ctx->access_tokens_by_jti);
   g_mutex_clear (&ctx->lock);
   g_mutex_clear (&ctx->policy_mutation_lock);
   g_free (ctx);
@@ -64,9 +99,94 @@ wyl_daemon_http_context_new (WylHandle *handle, WylDaemonRuntime *runtime)
   }
   ctx->sessions_by_token =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
+  ctx->access_tokens_by_jti = g_hash_table_new_full (g_str_hash, g_str_equal,
+      g_free, wyl_access_token_state_free);
   g_mutex_init (&ctx->lock);
   g_mutex_init (&ctx->policy_mutation_lock);
   return ctx;
+}
+
+static gboolean
+wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
+    const gchar *jti, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, const gchar *key_id, gint64 expires_at)
+{
+  if (ctx == NULL || jti == NULL || jti[0] == '\0' || session_id == NULL ||
+      session_id[0] == '\0' || subject == NULL || subject[0] == '\0' ||
+      tenant == NULL || tenant[0] == '\0' || key_id == NULL ||
+      key_id[0] == '\0' || expires_at < 0)
+    return FALSE;
+
+  WylAccessTokenState *state = g_new0 (WylAccessTokenState, 1);
+  state->jti = g_strdup (jti);
+  state->session_id = g_strdup (session_id);
+  state->subject = g_strdup (subject);
+  state->tenant = g_strdup (tenant);
+  state->key_id = g_strdup (key_id);
+  state->expires_at = expires_at;
+
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_replace (ctx->access_tokens_by_jti, g_strdup (jti), state);
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+}
+
+static gboolean
+wyl_daemon_http_context_access_token_is_active (WylDaemonHttpContext *ctx,
+    const wyl_jwt_access_claims_t *claims, gint64 now)
+{
+  if (ctx == NULL || claims == NULL || claims->jti == NULL)
+    return FALSE;
+
+  g_mutex_lock (&ctx->lock);
+  WylAccessTokenState *state = g_hash_table_lookup (ctx->access_tokens_by_jti,
+      claims->jti);
+  gboolean active = state != NULL && !state->revoked && now < state->expires_at
+      && g_strcmp0 (state->session_id, claims->session_id) == 0
+      && g_strcmp0 (state->subject, claims->subject) == 0
+      && g_strcmp0 (state->tenant, claims->tenant) == 0
+      && g_strcmp0 (state->key_id, WYL_DAEMON_JWT_KEY_ID) == 0
+      && state->expires_at == claims->expires_at;
+  g_mutex_unlock (&ctx->lock);
+  return active;
+}
+
+static void
+collect_session_access_token (gpointer key, gpointer value, gpointer data)
+{
+  WylAccessTokenState *state = value;
+  WylSessionTokenCollect *collect = data;
+
+  if (state == NULL || collect == NULL || collect->token_ids == NULL)
+    return;
+  if (g_strcmp0 (state->session_id, collect->session_id) == 0)
+    g_ptr_array_add (collect->token_ids, g_strdup ((const gchar *) key));
+}
+
+static void
+wyl_daemon_http_context_revoke_session_access_tokens (WylDaemonHttpContext *ctx,
+    const gchar *session_id)
+{
+  if (ctx == NULL || session_id == NULL || session_id[0] == '\0')
+    return;
+
+  g_autoptr (GPtrArray) token_ids = g_ptr_array_new_with_free_func (g_free);
+  WylSessionTokenCollect collect = {
+    .session_id = session_id,
+    .token_ids = token_ids,
+  };
+
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_foreach (ctx->access_tokens_by_jti, collect_session_access_token,
+      &collect);
+  for (guint i = 0; i < token_ids->len; i++) {
+    const gchar *jti = g_ptr_array_index (token_ids, i);
+    WylAccessTokenState *state =
+        g_hash_table_lookup (ctx->access_tokens_by_jti, jti);
+    if (state != NULL)
+      state->revoked = TRUE;
+  }
+  g_mutex_unlock (&ctx->lock);
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
@@ -286,20 +406,34 @@ issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
   }
 
   gint64 issued_at = wyl_session_get_created_at_us (session) / G_USEC_PER_SEC;
+  gint64 ttl = WYL_JWT_ACCESS_TTL_SECONDS;
+  if (issued_at > G_MAXINT64 - ttl) {
+    sodium_memzero (secret, sizeof secret);
+    return WYRELOG_E_INVALID;
+  }
+  const gchar *tenant = "__wr_default";
   wyl_jwt_issue_input_t input = {
     .key_id = WYL_DAEMON_JWT_KEY_ID,
     .jti = token_id_buf,
     .subject = username,
     .issuer = WYL_DAEMON_JWT_ISSUER,
     .audience = WYL_DAEMON_JWT_AUDIENCE,
-    .tenant = "__wr_default",
+    .tenant = tenant,
     .principal_state_at_issue = principal_state,
     .session_id = session_token,
     .issued_at = issued_at,
-    .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
+    .ttl_seconds = ttl,
   };
   rc = wyl_jwt_sign_hs256 (&input, secret, sizeof secret, out_token);
   sodium_memzero (secret, sizeof secret);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!wyl_daemon_http_context_store_access_token (ctx, token_id_buf,
+          session_token, username, tenant, WYL_DAEMON_JWT_KEY_ID,
+          issued_at + ttl)) {
+    g_clear_pointer (out_token, g_free);
+    return WYRELOG_E_INTERNAL;
+  }
   return rc;
 }
 
@@ -352,6 +486,10 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     return WYRELOG_E_POLICY;
   }
   if (g_strcmp0 (claims.jti, claims.session_id) == 0) {
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
+  if (!wyl_daemon_http_context_access_token_is_active (ctx, &claims, now)) {
     wyl_jwt_access_claims_clear (&claims);
     return WYRELOG_E_POLICY;
   }
@@ -1181,6 +1319,7 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
+  wyl_daemon_http_context_revoke_session_access_tokens (ctx, session_token);
   if (!wyl_daemon_http_context_remove_session (ctx, session_token)) {
     set_json_error (msg, 401, "logout_auth_required");
     return;
