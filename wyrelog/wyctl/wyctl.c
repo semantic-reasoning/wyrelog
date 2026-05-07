@@ -14,6 +14,13 @@ typedef struct
   gboolean show_version;
 } WyctlOptions;
 
+typedef struct
+{
+  gchar *user;
+  gchar *permission;
+  gchar *resource;
+} WyctlPolicyOptions;
+
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
 #define WYCTL_MAX_TIMEOUT_MS 60000
 
@@ -95,25 +102,50 @@ daemon_url_is_valid (const gchar *daemon_url)
 }
 
 static int
-run_status (const WyctlOptions *opts)
+run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
-  if (opts->daemon_url == NULL || opts->daemon_url[0] == '\0') {
+  WyctlOptions opts = {
+    .daemon_url = global_opts->daemon_url,
+    .timeout_ms_arg = global_opts->timeout_ms_arg,
+  };
+  GOptionEntry entries[] = {
+    {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
+        "Daemon URL", "URL"},
+    {"timeout-ms", 0, 0, G_OPTION_ARG_STRING, &opts.timeout_ms_arg,
+        "Daemon probe timeout in milliseconds", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog daemon status");
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected status argument: %s\n", argv[1]);
+    return 2;
+  }
+
+  if (opts.daemon_url == NULL || opts.daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
 
-  if (!daemon_url_is_valid (opts->daemon_url)) {
+  if (!daemon_url_is_valid (opts.daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
 
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (opts->timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (opts.timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
 
-  g_autofree gchar *uri = build_healthz_uri (opts->daemon_url);
+  g_autofree gchar *uri = build_healthz_uri (opts.daemon_url);
   g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
   if (msg == NULL) {
     g_printerr ("wyctl: invalid daemon URL\n");
@@ -131,9 +163,9 @@ run_status (const WyctlOptions *opts)
   GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
       &timeout);
 
-  g_autoptr (GError) error = NULL;
+  g_autoptr (GError) io_error = NULL;
   g_autoptr (GBytes) body =
-      soup_session_send_and_read (session, msg, cancellable, &error);
+      soup_session_send_and_read (session, msg, cancellable, &io_error);
 
   g_mutex_lock (&timeout.mutex);
   timeout.done = TRUE;
@@ -144,18 +176,76 @@ run_status (const WyctlOptions *opts)
   g_cond_clear (&timeout.cond);
 
   if (body == NULL) {
-    g_printerr ("wyctl: daemon unavailable: %s\n", opts->daemon_url);
+    g_printerr ("wyctl: daemon unavailable: %s\n", opts.daemon_url);
     return 1;
   }
 
   guint status = soup_message_get_status (msg);
   if (status < 200 || status >= 300) {
-    g_printerr ("wyctl: daemon unavailable: %s\n", opts->daemon_url);
+    g_printerr ("wyctl: daemon unavailable: %s\n", opts.daemon_url);
     return 1;
   }
 
   g_print ("ok\n");
   return 0;
+}
+
+static int
+run_policy_decision_command (const gchar *command, gint argc, gchar **argv)
+{
+  WyctlPolicyOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"user", 0, 0, G_OPTION_ARG_STRING, &opts.user, "Decision user", "USER"},
+    {"permission", 0, 0, G_OPTION_ARG_STRING, &opts.permission,
+        "Decision permission", "PERMISSION"},
+    {"resource", 0, 0, G_OPTION_ARG_STRING, &opts.resource,
+        "Decision resource", "RESOURCE"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *summary = g_strdup_printf ("- wyrelog policy %s", command);
+  g_autoptr (GOptionContext) context = g_option_context_new (summary);
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected policy %s argument: %s\n", command, argv[1]);
+    return 2;
+  }
+
+  if (opts.user == NULL || opts.user[0] == '\0') {
+    g_printerr ("wyctl: missing --user\n");
+    return 2;
+  }
+  if (opts.permission == NULL || opts.permission[0] == '\0') {
+    g_printerr ("wyctl: missing --permission\n");
+    return 2;
+  }
+  if (opts.resource == NULL || opts.resource[0] == '\0') {
+    g_printerr ("wyctl: missing --resource\n");
+    return 2;
+  }
+
+  g_printerr ("wyctl: policy %s is not implemented\n", command);
+  return 3;
+}
+
+static int
+run_policy (gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing policy command\n");
+    return 2;
+  }
+
+  if (g_strcmp0 (argv[1], "check") == 0 || g_strcmp0 (argv[1], "explain") == 0)
+    return run_policy_decision_command (argv[1], argc - 1, argv + 1);
+
+  g_printerr ("wyctl: unknown policy command: %s\n", argv[1]);
+  return 2;
 }
 
 int
@@ -175,6 +265,7 @@ main (int argc, char **argv)
   g_autoptr (GOptionContext) context =
       g_option_context_new ("COMMAND - wyrelog control client");
   g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_strict_posix (context, TRUE);
 
   if (!g_option_context_parse (context, &argc, &argv, &error)) {
     g_printerr ("wyctl: %s\n", error->message);
@@ -193,7 +284,9 @@ main (int argc, char **argv)
   }
 
   if (g_strcmp0 (argv[1], "status") == 0)
-    return run_status (&opts);
+    return run_status (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "policy") == 0)
+    return run_policy (argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;

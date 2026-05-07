@@ -52,11 +52,11 @@ test_status_connection_failure (void)
 {
   gchar *argv[] = {
     WYL_TEST_WYCTL_PATH,
+    "status",
     "--daemon-url",
     "http://127.0.0.1:1",
     "--timeout-ms",
     "100",
-    "status",
     NULL,
   };
   g_autofree gchar *stdout_buf = NULL;
@@ -223,6 +223,113 @@ test_status_rejects_invalid_daemon_url (void)
   g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: invalid daemon URL"));
 }
 
+static void
+test_status_help_command_first (void)
+{
+  gchar *argv[] = { WYL_TEST_WYCTL_PATH, "status", "--help", NULL };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--daemon-url"));
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+
+static void
+test_policy_help (void)
+{
+  gchar *check_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--help",
+    NULL,
+  };
+  gchar *explain_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "explain",
+    "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (check_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--permission"));
+  g_assert_cmpstr (stderr_buf, ==, "");
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (explain_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--resource"));
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+
+static void
+test_policy_validation (void)
+{
+  gchar *missing_resource_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    NULL,
+  };
+  gchar *unknown_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "unknown",
+    NULL,
+  };
+  gchar *extra_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "extra",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (missing_resource_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing --resource"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (unknown_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: unknown policy command"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (extra_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: unexpected policy check argument"));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -238,6 +345,10 @@ main (int argc, char **argv)
       test_status_requires_daemon_url);
   g_test_add_func ("/wyctl/status-rejects-invalid-daemon-url",
       test_status_rejects_invalid_daemon_url);
+  g_test_add_func ("/wyctl/status-help-command-first",
+      test_status_help_command_first);
+  g_test_add_func ("/wyctl/policy-help", test_policy_help);
+  g_test_add_func ("/wyctl/policy-validation", test_policy_validation);
 
   return g_test_run ();
 }
