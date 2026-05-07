@@ -655,6 +655,33 @@ set_json_error (SoupServerMessage *msg, guint status, const gchar *code)
 }
 
 static gboolean
+wants_json_format (GHashTable *query)
+{
+  const gchar *format = query != NULL ? g_hash_table_lookup (query,
+      "format") : NULL;
+  return g_strcmp0 (format, "json") == 0;
+}
+
+static void
+set_status_json (SoupServerMessage *msg, guint status, const gchar *state,
+    const gchar *reason)
+{
+  attach_request_id_header (msg);
+
+  g_autoptr (GString) body = g_string_new ("{\"status\":");
+  append_json_string (body, state);
+  if (reason != NULL) {
+    g_string_append (body, ",\"reason\":");
+    append_json_string (body, reason);
+  }
+  g_string_append_c (body, '}');
+
+  soup_server_message_set_status (msg, status, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static gboolean
 parse_int64_query_param (const gchar *value, gint64 *out_value)
 {
   if (value == NULL || value[0] == '\0' || out_value == NULL)
@@ -675,8 +702,12 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 {
   (void) server;
   (void) path;
-  (void) query;
   (void) user_data;
+
+  if (wants_json_format (query)) {
+    set_status_json (msg, 200, "ok", NULL);
+    return;
+  }
 
   const gchar *body = "ok\n";
   attach_request_id_header (msg);
@@ -777,19 +808,30 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 {
   (void) server;
   (void) path;
-  (void) query;
 
   WylDaemonHttpContext *ctx = user_data;
+  gboolean json = wants_json_format (query);
   const gchar *liveness_error = check_runtime_liveness_ready (ctx->runtime);
   if (liveness_error != NULL) {
-    set_json_error (msg, 503, liveness_error);
+    if (json)
+      set_status_json (msg, 503, "not_ready", liveness_error);
+    else
+      set_json_error (msg, 503, liveness_error);
     return;
   }
 
   const gchar *readiness_error = "not_ready";
   wyrelog_error_t rc = check_runtime_ready (ctx->handle, &readiness_error);
   if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, 503, readiness_error);
+    if (json)
+      set_status_json (msg, 503, "not_ready", readiness_error);
+    else
+      set_json_error (msg, 503, readiness_error);
+    return;
+  }
+
+  if (json) {
+    set_status_json (msg, 200, "ready", NULL);
     return;
   }
 
