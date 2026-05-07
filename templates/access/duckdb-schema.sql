@@ -60,6 +60,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     resource_id   VARCHAR,
     deny_reason   VARCHAR,
     deny_origin   VARCHAR,
+    request_id    VARCHAR,
     decision      SMALLINT NOT NULL
 );
 

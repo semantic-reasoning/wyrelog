@@ -346,6 +346,7 @@ parse_audit_event_object (JsonCursor *cursor, WylAuditEvent **out_event)
   g_autofree gchar *resource_id = NULL;
   g_autofree gchar *deny_reason = NULL;
   g_autofree gchar *deny_origin = NULL;
+  g_autofree gchar *request_id = NULL;
   gint64 created_at_us = -1;
   gint64 decision_raw = -1;
   gboolean have_created_at = FALSE;
@@ -390,6 +391,9 @@ parse_audit_event_object (JsonCursor *cursor, WylAuditEvent **out_event)
     } else if (g_strcmp0 (key, "deny_origin") == 0) {
       if (!json_parse_nullable_string (cursor, &deny_origin))
         return WYRELOG_E_IO;
+    } else if (g_strcmp0 (key, "request_id") == 0) {
+      if (!json_parse_nullable_string (cursor, &request_id))
+        return WYRELOG_E_IO;
     } else if (g_strcmp0 (key, "decision") == 0) {
       if (!json_parse_int64 (cursor, &decision_raw))
         return WYRELOG_E_IO;
@@ -416,7 +420,7 @@ parse_audit_event_object (JsonCursor *cursor, WylAuditEvent **out_event)
     return WYRELOG_E_IO;
 
   return wyl_audit_event_new_from_fields (id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin, NULL,
+      action, resource_id, deny_reason, deny_origin, request_id,
       (wyl_decision_t) decision_raw, out_event);
 }
 

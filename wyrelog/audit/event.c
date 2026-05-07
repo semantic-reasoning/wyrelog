@@ -252,9 +252,11 @@ wyl_audit_mirror_event (WylHandle *handle, const WylAuditEvent *event)
   if (wyl_id_format (&event->id, id_buf, sizeof id_buf) != WYRELOG_E_OK)
     return WYRELOG_E_INTERNAL;
 
-  return wyl_audit_conn_insert_event (audit_conn, id_buf, event->created_at_us,
-      event->subject_id, event->action, event->resource_id, event->deny_reason,
-      event->deny_origin, event->decision);
+  gboolean inserted = FALSE;
+  return wyl_audit_conn_insert_event_full (audit_conn, id_buf,
+      event->created_at_us, event->subject_id, event->action,
+      event->resource_id, event->deny_reason, event->deny_origin,
+      event->request_id, event->decision, &inserted);
 #else
   (void) handle;
   (void) event;
@@ -279,7 +281,8 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
       wyl_policy_store_append_audit_event_full (wyl_handle_get_policy_store
       (handle), id_buf, event->created_at_us,
       event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->decision,
+      event->deny_reason, event->deny_origin, event->request_id,
+      event->decision,
       &store_inserted);
   if (store_rc != WYRELOG_E_OK)
     return store_rc;
@@ -287,7 +290,8 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   wyrelog_error_t rc = wyl_handle_insert_audit_fact (handle, id_buf,
       event->created_at_us,
       event->subject_id, event->action, event->resource_id,
-      event->deny_reason, event->deny_origin, event->decision);
+      event->deny_reason, event->deny_origin, event->request_id,
+      event->decision);
   if (rc != WYRELOG_E_OK) {
     if (store_inserted) {
       wyrelog_error_t cleanup_rc =
@@ -311,7 +315,7 @@ wyl_audit_emit (WylHandle *handle, const WylAuditEvent *event)
   (void) wyl_audit_conn_insert_event_full (audit_conn, id_buf,
       event->created_at_us, event->subject_id, event->action,
       event->resource_id, event->deny_reason, event->deny_origin,
-      event->decision, &inserted);
+      event->request_id, event->decision, &inserted);
 
   return WYRELOG_E_OK;
 #else

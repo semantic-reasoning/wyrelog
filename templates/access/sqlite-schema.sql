@@ -285,6 +285,7 @@ CREATE TABLE IF NOT EXISTS audit_events (
     resource_id   TEXT,
     deny_reason   TEXT,
     deny_origin   TEXT,
+    request_id    TEXT,
     decision      INTEGER NOT NULL CHECK (decision IN (0, 1))
 );
 

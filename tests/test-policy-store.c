@@ -638,6 +638,7 @@ typedef struct
   const gchar *resource_id;
   const gchar *deny_reason;
   const gchar *deny_origin;
+  const gchar *request_id;
   wyl_decision_t decision;
   guint matches;
 } AuditEventExpect;
@@ -697,7 +698,7 @@ role_membership_event_expect_cb (const gchar *subject_id,
 static wyrelog_error_t
 audit_event_expect_cb (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
-    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *deny_reason, const gchar *deny_origin, const gchar *request_id,
     wyl_decision_t decision, gpointer user_data)
 {
   AuditEventExpect *expect = user_data;
@@ -709,6 +710,7 @@ audit_event_expect_cb (const gchar *id, gint64 created_at_us,
       && g_strcmp0 (resource_id, expect->resource_id) == 0
       && g_strcmp0 (deny_reason, expect->deny_reason) == 0
       && g_strcmp0 (deny_origin, expect->deny_origin) == 0
+      && g_strcmp0 (request_id, expect->request_id) == 0
       && decision == expect->decision)
     expect->matches++;
   return WYRELOG_E_OK;
@@ -1826,46 +1828,52 @@ check_store_appends_audit_event (void)
     return 120;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 121;
-  if (wyl_policy_store_append_audit_event (store,
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_append_audit_event_full (store,
           "01890c10-2e3f-7000-8000-000000000001", 123,
           "audit-user", "read", "doc/1", "not_armed", "perm_state",
-          WYL_DECISION_DENY) != WYRELOG_E_OK)
+          "req-policy-store", WYL_DECISION_DENY, &inserted) != WYRELOG_E_OK)
     return 122;
+  if (!inserted)
+    return 123;
 
   sqlite3_stmt *stmt = NULL;
   static const gchar *sql =
       "SELECT subject_id, action, resource_id, deny_reason, deny_origin, "
-      "decision FROM audit_events WHERE id = ?;";
+      "request_id, decision FROM audit_events WHERE id = ?;";
   if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql, -1, &stmt,
           NULL) != SQLITE_OK)
-    return 123;
+    return 124;
   if (sqlite3_bind_text (stmt, 1, "01890c10-2e3f-7000-8000-000000000001",
           -1, SQLITE_TRANSIENT) != SQLITE_OK) {
     sqlite3_finalize (stmt);
-    return 124;
+    return 125;
   }
 
   int step_rc = sqlite3_step (stmt);
   gint rc = 0;
   if (step_rc != SQLITE_ROW)
-    rc = 125;
+    rc = 126;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 0),
           "audit-user") != 0)
-    rc = 126;
+    rc = 127;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
           "read") != 0)
-    rc = 127;
+    rc = 128;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
           "doc/1") != 0)
-    rc = 128;
+    rc = 129;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 3),
           "not_armed") != 0)
-    rc = 129;
+    rc = 130;
   else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
           "perm_state") != 0)
-    rc = 130;
-  else if (sqlite3_column_int (stmt, 5) != WYL_DECISION_DENY)
     rc = 131;
+  else if (g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 5),
+          "req-policy-store") != 0)
+    rc = 132;
+  else if (sqlite3_column_int (stmt, 6) != WYL_DECISION_DENY)
+    rc = 133;
 
   sqlite3_finalize (stmt);
   return rc;
@@ -1880,10 +1888,11 @@ check_store_iterates_audit_event (void)
     return 132;
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 133;
-  if (wyl_policy_store_append_audit_event (store,
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_append_audit_event_full (store,
           "01890c10-2e3f-7000-8000-000000000002", 456,
           "audit-user", "write", "doc/2", "allowed", "test",
-          WYL_DECISION_ALLOW) != WYRELOG_E_OK)
+          "req-iter", WYL_DECISION_ALLOW, &inserted) != WYRELOG_E_OK)
     return 134;
 
   AuditEventExpect expect = {
@@ -1894,6 +1903,7 @@ check_store_iterates_audit_event (void)
     .resource_id = "doc/2",
     .deny_reason = "allowed",
     .deny_origin = "test",
+    .request_id = "req-iter",
     .decision = WYL_DECISION_ALLOW,
   };
   if (wyl_policy_store_foreach_audit_event (store, audit_event_expect_cb,

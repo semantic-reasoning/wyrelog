@@ -1166,10 +1166,11 @@ static wyrelog_error_t
 audit_event_probe_cb (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
     const gchar *deny_reason, const gchar *deny_origin,
-    wyl_decision_t decision, gpointer user_data)
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
 {
   (void) id;
   (void) created_at_us;
+  (void) request_id;
   AuditEventProbe *probe = user_data;
 
   if (decision == WYL_DECISION_ALLOW

@@ -636,6 +636,7 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  resource_id TEXT,"
       "  deny_reason TEXT,"
       "  deny_origin TEXT,"
+      "  request_id TEXT,"
       "  decision INTEGER NOT NULL CHECK (decision IN (0, 1))"
       ");"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us "
@@ -659,6 +660,25 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   wyrelog_error_t rc = exec_sql (store->db, ddl);
   if (rc != WYRELOG_E_OK)
     return rc;
+  sqlite3_stmt *stmt = NULL;
+  gboolean has_request_id = FALSE;
+  if (sqlite3_prepare_v2 (store->db, "PRAGMA table_info(audit_events);", -1,
+          &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  while (sqlite3_step (stmt) == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (stmt, 1);
+    if (g_strcmp0 (name, "request_id") == 0) {
+      has_request_id = TRUE;
+      break;
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (!has_request_id) {
+    rc = exec_sql (store->db,
+        "ALTER TABLE audit_events ADD COLUMN request_id TEXT;");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   return seed_builtin_catalog (store->db);
 }
 
@@ -2370,7 +2390,8 @@ wyrelog_error_t
 wyl_policy_store_append_audit_event_full (wyl_policy_store_t *store,
     const gchar *id, gint64 created_at_us, const gchar *subject_id,
     const gchar *action, const gchar *resource_id, const gchar *deny_reason,
-    const gchar *deny_origin, wyl_decision_t decision, gboolean *out_inserted)
+    const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, gboolean *out_inserted)
 {
   sqlite3_stmt *stmt = NULL;
   wyl_id_t parsed_id;
@@ -2386,7 +2407,8 @@ wyl_policy_store_append_audit_event_full (wyl_policy_store_t *store,
 
   static const gchar *select_sql =
       "SELECT created_at_us, subject_id, action, resource_id, "
-      "deny_reason, deny_origin, decision FROM audit_events WHERE id = ?;";
+      "deny_reason, deny_origin, request_id, decision "
+      "FROM audit_events WHERE id = ?;";
   wyrelog_error_t rc = prepare_stmt (store->db, select_sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -2404,7 +2426,8 @@ wyl_policy_store_append_audit_event_full (wyl_policy_store_t *store,
         && column_nullable_text_equal (stmt, 3, resource_id)
         && column_nullable_text_equal (stmt, 4, deny_reason)
         && column_nullable_text_equal (stmt, 5, deny_origin)
-        && sqlite3_column_int (stmt, 6) == (int) decision;
+        && column_nullable_text_equal (stmt, 6, request_id)
+        && sqlite3_column_int (stmt, 7) == (int) decision;
     sqlite3_finalize (stmt);
     return equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
   }
@@ -2416,8 +2439,8 @@ wyl_policy_store_append_audit_event_full (wyl_policy_store_t *store,
   static const gchar *sql =
       "INSERT INTO audit_events "
       "  (id, created_at_us, subject_id, action, resource_id, "
-      "   deny_reason, deny_origin, decision) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+      "   deny_reason, deny_origin, request_id, decision) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
   rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -2428,7 +2451,8 @@ wyl_policy_store_append_audit_event_full (wyl_policy_store_t *store,
       || (rc = bind_nullable_text (stmt, 5, resource_id)) != WYRELOG_E_OK
       || (rc = bind_nullable_text (stmt, 6, deny_reason)) != WYRELOG_E_OK
       || (rc = bind_nullable_text (stmt, 7, deny_origin)) != WYRELOG_E_OK
-      || sqlite3_bind_int (stmt, 8, (int) decision) != SQLITE_OK) {
+      || (rc = bind_nullable_text (stmt, 8, request_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int (stmt, 9, (int) decision) != SQLITE_OK) {
     sqlite3_finalize (stmt);
     return WYRELOG_E_IO;
   }
@@ -2450,7 +2474,7 @@ wyl_policy_store_append_audit_event (wyl_policy_store_t *store,
   gboolean inserted = FALSE;
 
   return wyl_policy_store_append_audit_event_full (store, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, decision,
+      subject_id, action, resource_id, deny_reason, deny_origin, NULL, decision,
       &inserted);
 }
 
@@ -2490,7 +2514,7 @@ wyl_policy_store_foreach_audit_event (wyl_policy_store_t *store,
 
   static const gchar *sql =
       "SELECT id, created_at_us, subject_id, action, resource_id, "
-      "deny_reason, deny_origin, decision "
+      "deny_reason, deny_origin, request_id, decision "
       "FROM audit_events ORDER BY created_at_us ASC, id ASC;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -2505,7 +2529,8 @@ wyl_policy_store_foreach_audit_event (wyl_policy_store_t *store,
     const gchar *resource_id = (const gchar *) sqlite3_column_text (stmt, 4);
     const gchar *deny_reason = (const gchar *) sqlite3_column_text (stmt, 5);
     const gchar *deny_origin = (const gchar *) sqlite3_column_text (stmt, 6);
-    int decision = sqlite3_column_int (stmt, 7);
+    const gchar *request_id = (const gchar *) sqlite3_column_text (stmt, 7);
+    int decision = sqlite3_column_int (stmt, 8);
     wyl_id_t parsed_id;
 
     if (id == NULL || wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK
@@ -2515,7 +2540,7 @@ wyl_policy_store_foreach_audit_event (wyl_policy_store_t *store,
       return WYRELOG_E_POLICY;
     }
     rc = cb (id, created_at_us, subject_id, action, resource_id, deny_reason,
-        deny_origin, (wyl_decision_t) decision, user_data);
+        deny_origin, request_id, (wyl_decision_t) decision, user_data);
     if (rc != WYRELOG_E_OK) {
       sqlite3_finalize (stmt);
       return rc;

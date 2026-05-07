@@ -79,6 +79,7 @@ duckdb_connection wyl_audit_conn_get_connection (wyl_audit_conn_t * conn);
  *   resource_id   VARCHAR
  *   deny_reason   VARCHAR              -- representative deny code
  *   deny_origin   VARCHAR              -- source relation tag
+ *   request_id    VARCHAR              -- optional request lifecycle id
  *   decision      SMALLINT             -- 0 = DENY, 1 = ALLOW
  *
  * Returns WYRELOG_E_OK on success, WYRELOG_E_INVALID for a NULL
@@ -110,7 +111,7 @@ wyrelog_error_t wyl_audit_conn_insert_event_full (wyl_audit_conn_t * conn,
     const gchar * id, gint64 created_at_us, const gchar * subject_id,
     const gchar * action, const gchar * resource_id,
     const gchar * deny_reason, const gchar * deny_origin,
-    wyl_decision_t decision, gboolean * out_inserted);
+    const gchar * request_id, wyl_decision_t decision, gboolean * out_inserted);
 
 wyrelog_error_t wyl_audit_conn_delete_event (wyl_audit_conn_t * conn,
     const gchar * id);
@@ -132,6 +133,8 @@ wyrelog_error_t wyl_audit_conn_delete_event (wyl_audit_conn_t * conn,
  *   deny_reason("<value>")
  *   deny_origin=<value>
  *   deny_origin("<value>")
+ *   request_id=<value>
+ *   request_id("<value>")
  *
  * On success @out_json owns a newly allocated string.
  */

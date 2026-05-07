@@ -324,6 +324,7 @@ check_audit_fact_declarations (void)
     ".decl audit_event_resource(id: symbol, resource: symbol)",
     ".decl audit_event_deny_reason(id: symbol, reason: symbol)",
     ".decl audit_event_deny_origin(id: symbol, origin: symbol)",
+    ".decl audit_event_request_id(id: symbol, request_id: symbol)",
     "audit_event(ID, CreatedAtUs, Decision) :-",
   };
   g_autofree gchar *contents = NULL;
