@@ -190,6 +190,26 @@ wyl_daemon_check_audit_sink_ready (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+check_login_skip_mfa_override_ready (WylHandle *handle, gboolean restore)
+{
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  g_autoptr (wyl_login_req_t) override_login = wyl_login_req_new ();
+  g_autoptr (WylSession) override_session = NULL;
+  wyl_login_req_set_username (override_login,
+      "wyrelogd-skip-mfa-override-user");
+  wyl_login_req_set_skip_mfa (override_login, TRUE);
+  wyrelog_error_t rc =
+      wyl_session_login (handle, override_login, &override_session);
+  wyl_handle_set_login_skip_mfa_allowed (handle, restore);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (override_session == NULL)
+    return WYRELOG_E_POLICY;
+
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
 {
@@ -200,9 +220,11 @@ wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
   wyl_login_req_set_skip_mfa (login, TRUE);
 
   gboolean allowed = wyl_handle_get_login_skip_mfa_allowed (handle);
+  gboolean override_allowed =
+      wyl_handle_get_login_skip_mfa_override_allowed (handle);
   wyrelog_error_t rc = wyl_session_login (handle, login, &session);
   if (!allowed && rc == WYRELOG_E_POLICY)
-    return WYRELOG_E_OK;
+    return check_login_skip_mfa_override_ready (handle, override_allowed);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (session == NULL)
@@ -232,7 +254,7 @@ wyl_daemon_check_login_skip_mfa_ready (WylHandle *handle)
   if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
     return WYRELOG_E_POLICY;
 
-  return WYRELOG_E_OK;
+  return check_login_skip_mfa_override_ready (handle, override_allowed);
 }
 
 static wyrelog_error_t

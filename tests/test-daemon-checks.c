@@ -152,12 +152,19 @@ check_login_skip_mfa_ready_allows_development_path (void)
   if (!count_duckdb_rows (conn,
           "SELECT COUNT(*) FROM audit_events "
           "WHERE action = 'principal_state' "
-          "AND subject_id = 'wyrelogd-skip-mfa-user' "
+          "AND subject_id = 'wyrelogd-skip-mfa-override-user' "
           "AND deny_reason = 'login_skip_mfa' "
           "AND resource_id = 'authenticated' " "AND decision = 1;", &count))
     return 33;
   if (count != 1)
     return 34;
+  if (wyl_handle_get_login_skip_mfa_override_allowed (handle))
+    return 35;
+  if (wyl_policy_store_set_deployment_mode (wyl_handle_get_policy_store
+          (handle), "production") != WYRELOG_E_OK)
+    return 36;
+  if (wyl_handle_get_login_skip_mfa_allowed (handle))
+    return 37;
   return 0;
 }
 

@@ -63,6 +63,7 @@ wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
  * non-production modes and rejects it for production or unreadable config.
  */
 void wyl_handle_set_login_skip_mfa_allowed (WylHandle * self, gboolean allowed);
+gboolean wyl_handle_get_login_skip_mfa_override_allowed (WylHandle * self);
 gboolean wyl_handle_get_login_skip_mfa_allowed (WylHandle * self);
 
 /*

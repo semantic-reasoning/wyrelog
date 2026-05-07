@@ -511,6 +511,13 @@ wyl_handle_set_login_skip_mfa_allowed (WylHandle *self, gboolean allowed)
 }
 
 gboolean
+wyl_handle_get_login_skip_mfa_override_allowed (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
+  return self->login_skip_mfa_allowed;
+}
+
+gboolean
 wyl_handle_get_login_skip_mfa_allowed (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), FALSE);
