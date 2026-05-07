@@ -584,6 +584,16 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
   if (status != 400)
     return 49;
 
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "tenant=unknown&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_decide_request\"") == NULL)
+    return 1812;
+
   return 0;
 }
 

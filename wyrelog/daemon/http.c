@@ -1461,6 +1461,12 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 400, "invalid_decide_request");
     return;
   }
+  const gchar *tenant = lookup_request_tenant (query);
+  if (tenant == NULL || tenant[0] == '\0' ||
+      !wyl_daemon_tenant_is_known (tenant)) {
+    set_json_error (msg, 400, "invalid_decide_request");
+    return;
+  }
   gboolean has_guard_context =
       guard_timestamp != NULL || guard_loc_class != NULL || guard_risk != NULL;
   if (has_guard_context &&
