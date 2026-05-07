@@ -338,6 +338,27 @@ main (void)
       g_strcmp0 (client_principal_state, "authenticated") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 152;
+  if (wyl_client_set_bearer_credentials (NULL, "access-ctl",
+          "__wr_default") != WYRELOG_E_INVALID)
+    return 192;
+  if (wyl_client_set_bearer_credentials (local_client, NULL,
+          "__wr_default") != WYRELOG_E_INVALID)
+    return 193;
+  if (wyl_client_set_bearer_credentials (local_client, "",
+          "__wr_default") != WYRELOG_E_INVALID)
+    return 194;
+  if (wyl_client_set_bearer_credentials (local_client, "access ctl",
+          "__wr_default") != WYRELOG_E_INVALID)
+    return 195;
+  if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
+          NULL) != WYRELOG_E_INVALID)
+    return 196;
+  if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
+          "") != WYRELOG_E_INVALID)
+    return 197;
+  if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
+          "__wr default") != WYRELOG_E_INVALID)
+    return 198;
 
   if (wyl_client_policy_permission_grant (NULL, "target", "read", "scope",
           123, "public", 49) != WYRELOG_E_INVALID)
@@ -787,6 +808,44 @@ main (void)
   has_next = FALSE;
   if (wyl_audit_iter_next (invalid_iter, &has_next) == WYRELOG_E_OK)
     return 37;
+
+  if (wyl_client_set_bearer_credentials (local_client, "access-ctl",
+          "__wr_default") != WYRELOG_E_OK)
+    return 199;
+  g_clear_pointer (&client_access_token, g_free);
+  client_access_token = wyl_client_dup_access_token (local_client);
+  g_clear_pointer (&client_tenant, g_free);
+  client_tenant = wyl_client_dup_tenant (local_client);
+  g_clear_pointer (&client_session_token, g_free);
+  client_session_token = wyl_client_dup_session_token (local_client);
+  g_clear_pointer (&client_username, g_free);
+  client_username = wyl_client_dup_username (local_client);
+  if (g_strcmp0 (client_access_token, "access-ctl") != 0 ||
+      g_strcmp0 (client_tenant, "__wr_default") != 0 ||
+      client_session_token != NULL || client_username != NULL)
+    return 200;
+
+  http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
+  if (wyl_client_decide_ex (local_client, "alice", "wr.audit.read",
+          "doc/42", &decision_result) != WYRELOG_E_OK)
+    return 201;
+  if (g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
+    return 202;
+  if (g_strcmp0 (http.last_tenant, "__wr_default") != 0)
+    return 203;
+  if (g_strcmp0 (http.last_session_token, "doc/42") != 0)
+    return 204;
+  g_clear_pointer (&decision_result, wyl_client_decision_free);
+
+  http.body = "{\"session_token\":\"session-relogin\",\"username\":\"alice\","
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-relogin\"}";
+  if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
+    return 205;
+  g_clear_pointer (&client_access_token, g_free);
+  client_access_token = wyl_client_dup_access_token (local_client);
+  if (g_strcmp0 (client_access_token, "access-relogin") != 0)
+    return 206;
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);

@@ -69,6 +69,19 @@ wyl_client_init (WylClient *self)
   (void) self;
 }
 
+static gboolean
+credential_part_is_valid (const gchar *value)
+{
+  if (value == NULL || value[0] == '\0')
+    return FALSE;
+
+  for (const gchar * p = value; *p != '\0'; p++) {
+    if (g_ascii_isspace (*p) || g_ascii_iscntrl (*p))
+      return FALSE;
+  }
+  return TRUE;
+}
+
 wyrelog_error_t
 wyl_client_new (const gchar *base_url, WylClient **out_client)
 {
@@ -253,6 +266,22 @@ wyrelog_error_t
 wyl_client_login_skip_mfa (WylClient *client, const gchar *username)
 {
   return client_login_internal (client, username, NULL, TRUE);
+}
+
+wyrelog_error_t
+wyl_client_set_bearer_credentials (WylClient *client,
+    const gchar *access_token, const gchar *tenant)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client) ||
+      !credential_part_is_valid (access_token) ||
+      !credential_part_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+
+  wyl_client_clear_login_state (client);
+  client->access_token = g_strdup (access_token);
+  client->tenant = g_strdup (tenant);
+  client->selected_tenant = g_strdup (tenant);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
