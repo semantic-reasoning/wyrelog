@@ -416,7 +416,7 @@ parse_audit_event_object (JsonCursor *cursor, WylAuditEvent **out_event)
     return WYRELOG_E_IO;
 
   return wyl_audit_event_new_from_fields (id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin,
+      action, resource_id, deny_reason, deny_origin, NULL,
       (wyl_decision_t) decision_raw, out_event);
 }
 

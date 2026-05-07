@@ -89,8 +89,8 @@ check_private_rehydrate_preserves_fields (void)
   const gchar *id = "018f3f9b-7f4d-7a2e-8a51-467a0bc7d001";
   g_autoptr (WylAuditEvent) ev = NULL;
   if (wyl_audit_event_new_from_fields (id, 1234567, "alice", "read",
-          "doc/42", "not_armed", "perm_state", WYL_DECISION_ALLOW, &ev)
-      != WYRELOG_E_OK)
+          "doc/42", "not_armed", "perm_state", "req-123",
+          WYL_DECISION_ALLOW, &ev) != WYRELOG_E_OK)
     return 65;
 
   g_autofree gchar *actual_id = wyl_audit_event_dup_id_string (ev);
@@ -108,6 +108,8 @@ check_private_rehydrate_preserves_fields (void)
     return 73;
   if (g_strcmp0 (wyl_audit_event_get_deny_origin (ev), "perm_state") != 0)
     return 74;
+  if (g_strcmp0 (wyl_audit_event_get_request_id (ev), "req-123") != 0)
+    return 76;
   if (wyl_audit_event_get_decision (ev) != WYL_DECISION_ALLOW)
     return 75;
   return 0;
@@ -118,16 +120,16 @@ check_private_rehydrate_rejects_invalid_fields (void)
 {
   WylAuditEvent *ev = (WylAuditEvent *) (gpointer) 0x1;
   if (wyl_audit_event_new_from_fields (NULL, 1, NULL, NULL, NULL, NULL, NULL,
-          WYL_DECISION_DENY, &ev) != WYRELOG_E_INVALID)
+          NULL, WYL_DECISION_DENY, &ev) != WYRELOG_E_INVALID)
     return 76;
   if (ev != NULL)
     return 77;
   if (wyl_audit_event_new_from_fields ("018f3f9b-7f4d-7a2e-8a51-467a0bc7d001",
-          -1, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY,
+          -1, NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY,
           &ev) != WYRELOG_E_INVALID)
     return 78;
   if (wyl_audit_event_new_from_fields ("018f3f9b-7f4d-7a2e-8a51-467a0bc7d001",
-          1, NULL, NULL, NULL, NULL, NULL, (wyl_decision_t) 99,
+          1, NULL, NULL, NULL, NULL, NULL, NULL, (wyl_decision_t) 99,
           &ev) != WYRELOG_E_INVALID)
     return 79;
   return 0;
@@ -187,6 +189,8 @@ check_string_field_defaults_are_null (void)
     return 143;
   if (wyl_audit_event_get_deny_origin (ev) != NULL)
     return 144;
+  if (wyl_audit_event_get_request_id (ev) != NULL)
+    return 145;
   return 0;
 }
 
@@ -199,6 +203,7 @@ check_string_field_round_trips (void)
   wyl_audit_event_set_resource_id (ev, "doc/42");
   wyl_audit_event_set_deny_reason (ev, "not_authenticated");
   wyl_audit_event_set_deny_origin (ev, "principal_state");
+  wyl_audit_event_set_request_id (ev, "req-123");
   if (g_strcmp0 (wyl_audit_event_get_subject_id (ev), "alice") != 0)
     return 150;
   if (g_strcmp0 (wyl_audit_event_get_action (ev), "read") != 0)
@@ -211,6 +216,8 @@ check_string_field_round_trips (void)
   if (g_strcmp0 (wyl_audit_event_get_deny_origin (ev), "principal_state")
       != 0)
     return 154;
+  if (g_strcmp0 (wyl_audit_event_get_request_id (ev), "req-123") != 0)
+    return 155;
   return 0;
 }
 
@@ -221,15 +228,19 @@ check_string_set_null_clears (void)
   wyl_audit_event_set_subject_id (ev, "alice");
   wyl_audit_event_set_deny_reason (ev, "not_armed");
   wyl_audit_event_set_deny_origin (ev, "perm_state");
+  wyl_audit_event_set_request_id (ev, "req-123");
   wyl_audit_event_set_subject_id (ev, NULL);
   wyl_audit_event_set_deny_reason (ev, NULL);
   wyl_audit_event_set_deny_origin (ev, NULL);
+  wyl_audit_event_set_request_id (ev, NULL);
   if (wyl_audit_event_get_subject_id (ev) != NULL)
     return 160;
   if (wyl_audit_event_get_deny_reason (ev) != NULL)
     return 161;
   if (wyl_audit_event_get_deny_origin (ev) != NULL)
     return 162;
+  if (wyl_audit_event_get_request_id (ev) != NULL)
+    return 163;
   return 0;
 }
 
@@ -258,6 +269,8 @@ check_string_get_null_event (void)
     return 183;
   if (wyl_audit_event_get_deny_origin (NULL) != NULL)
     return 184;
+  if (wyl_audit_event_get_request_id (NULL) != NULL)
+    return 185;
   return 0;
 }
 
