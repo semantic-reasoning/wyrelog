@@ -548,6 +548,12 @@ main (void)
       != WYRELOG_E_INVALID)
     return 53;
 
+  http.body = "{\"session_token\":\"session-4\",\"username\":\"alice\","
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-4\"}";
+  if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
+    return 92;
+
   http.body = "{\"decision\":1,\"deny_reason\":null,\"deny_origin\":null}";
   if (wyl_client_decide (local_client, "alice", "wr.audit.read",
           "doc/42", &decision) != WYRELOG_E_OK)
@@ -564,7 +570,9 @@ main (void)
     return 59;
   if (g_strcmp0 (http.last_session_token, "doc/42") != 0)
     return 60;
-  if (http.last_authorization != NULL)
+  if (g_strcmp0 (http.last_tenant, "__wr_default") != 0)
+    return 93;
+  if (g_strcmp0 (http.last_authorization, "Bearer access-4") != 0)
     return 176;
   if (http.last_guard_timestamp != NULL || http.last_guard_loc_class != NULL ||
       http.last_guard_risk != NULL)
@@ -609,6 +617,10 @@ main (void)
     return 81;
   if (g_strcmp0 (http.last_path, "/decide") != 0)
     return 82;
+  if (g_strcmp0 (http.last_tenant, "__wr_default") != 0)
+    return 94;
+  if (g_strcmp0 (http.last_authorization, "Bearer access-4") != 0)
+    return 95;
   if (g_strcmp0 (http.last_guard_timestamp, "123") != 0)
     return 83;
   if (g_strcmp0 (http.last_guard_loc_class, "semi_trusted") != 0)

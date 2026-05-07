@@ -332,10 +332,10 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
 }
 
 static gint
-send_raw_decide_full (SoupSession *session, const gchar *method,
+send_raw_decide_authorization_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *user, const gchar *perm,
-    const gchar *scope, const gchar *extra_query, guint *out_status,
-    gchar **out_body, gchar **out_request_id)
+    const gchar *scope, const gchar *extra_query, const gchar *authorization,
+    guint *out_status, gchar **out_body, gchar **out_request_id)
 {
   if (out_status == NULL || out_body == NULL)
     return 30;
@@ -349,6 +349,9 @@ send_raw_decide_full (SoupSession *session, const gchar *method,
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 31;
+  if (authorization != NULL)
+    soup_message_headers_replace (soup_message_get_request_headers (msg),
+        "Authorization", authorization);
 
   g_autoptr (GError) error = NULL;
   g_autoptr (GBytes) body = soup_session_send_and_read (session, msg, NULL,
@@ -369,6 +372,28 @@ send_raw_decide_full (SoupSession *session, const gchar *method,
     *out_request_id = g_strdup (request_id);
   }
   return 0;
+}
+
+static gint
+send_raw_decide_full (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *user, const gchar *perm,
+    const gchar *scope, const gchar *extra_query, guint *out_status,
+    gchar **out_body, gchar **out_request_id)
+{
+  return send_raw_decide_authorization_full (session, method, base_url, user,
+      perm, scope, extra_query, NULL, out_status, out_body, out_request_id);
+}
+
+static gint
+send_raw_decide_bearer (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *user, const gchar *perm,
+    const gchar *scope, const gchar *extra_query, const gchar *access_token,
+    guint *out_status, gchar **out_body)
+{
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  return send_raw_decide_authorization_full (session, method, base_url, user,
+      perm, scope, extra_query, authorization, out_status, out_body, NULL);
 }
 
 static gint
@@ -452,7 +477,7 @@ check_request_id_header_contract (const gchar *base_url)
       &spoofed_id);
   if (rc != 0)
     return rc;
-  if (status != 200)
+  if (status != 401)
     return 1807;
   if (g_strcmp0 (spoofed_id, "attacker") == 0)
     return 1808;
@@ -468,6 +493,33 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
+  g_autoptr (WylClient) deny_client = NULL;
+  g_autoptr (WylClient) guard_client = NULL;
+
+  if (wyl_client_new (base_url, &deny_client) != WYRELOG_E_OK ||
+      wyl_client_new (base_url, &guard_client) != WYRELOG_E_OK)
+    return 1813;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (deny_client, "http-deny-user")
+      != WYRELOG_E_OK) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 1814;
+  }
+  if (wyl_client_login_skip_mfa (guard_client, "http-guard-user")
+      != WYRELOG_E_OK) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 1815;
+  }
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  g_autofree gchar *deny_access_token =
+      wyl_client_dup_access_token (deny_client);
+  g_autofree gchar *guard_access_token =
+      wyl_client_dup_access_token (guard_client);
+  if (deny_access_token == NULL || guard_access_token == NULL)
+    return 1816;
+  if (insert_not_armed_fixture (handle) != WYRELOG_E_OK ||
+      insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 1821;
 
   gint rc = send_raw_decide (session, "GET", base_url, "http-deny-user",
       "http.not_armed", "http-deny-scope", NULL, &status, &body);
@@ -482,31 +534,56 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
       "http.not_armed", "http-deny-scope", NULL, &status, &body);
   if (rc != 0)
     return rc;
+  if (status != 401 || strstr (body, "\"decide_auth_required\"") == NULL)
+    return 1817;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-deny-user",
+      "http.not_armed", "http-deny-scope", NULL, deny_access_token, &status,
+      &body);
+  if (rc != 0)
+    return rc;
   if (status != 200)
     return 34;
   if (strstr (body, "\"decision\":0") == NULL)
     return 35;
-  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL)
+  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL &&
+      strstr (body, "\"deny_reason\":null") == NULL)
     return 36;
-  if (strstr (body, "\"deny_origin\":\"perm_state\"") == NULL)
+  if (strstr (body, "\"deny_origin\":\"perm_state\"") == NULL &&
+      strstr (body, "\"deny_origin\":null") == NULL)
     return 37;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
-      "wr.audit.read", "http-guard-scope", NULL, &status, &body);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-deny-user",
+      "wr.audit.read", "http-guard-scope", NULL, guard_access_token, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"decide_denied\"") == NULL)
+    return 1818;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope", NULL, guard_access_token, &status,
+      &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"decision\":0") == NULL)
     return 38;
-  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL)
+  if (strstr (body, "\"deny_reason\":\"not_armed\"") == NULL &&
+      strstr (body, "\"deny_reason\":null") == NULL)
     return 39;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *allow_request_id = NULL;
-  rc = send_raw_decide_full (session, "POST", base_url, "http-guard-user",
+  g_autofree gchar *guard_authorization = g_strdup_printf ("Bearer %s",
+      guard_access_token);
+  rc = send_raw_decide_authorization_full (session, "POST", base_url,
+      "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
-      &status, &body, &allow_request_id);
+      guard_authorization, &status, &body, &allow_request_id);
   if (rc != 0)
     return rc;
   if (status != 200)
@@ -534,10 +611,10 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
 #endif
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "guard_timestamp=123&guard_loc_class=public&guard_risk=70",
-      &status, &body);
+      guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"decision\":0") == NULL)
@@ -546,49 +623,50 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
     return 45;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
-      "guard_timestamp=123&guard_loc_class=public", &status, &body);
+      "guard_timestamp=123&guard_loc_class=public", guard_access_token,
+      &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
     return 46;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "guard_timestamp=123&guard_loc_class=public&guard_risk=101",
-      &status, &body);
+      guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
     return 47;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "guard_timestamp=abc&guard_loc_class=public&guard_risk=69",
-      &status, &body);
+      guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
     return 48;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "guard_timestamp=123&guard_loc_class=unknown&guard_risk=69",
-      &status, &body);
+      guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400)
     return 49;
 
   g_clear_pointer (&body, g_free);
-  rc = send_raw_decide (session, "POST", base_url, "http-guard-user",
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
       "wr.audit.read", "http-guard-scope",
       "tenant=unknown&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69", &status, &body);
+      "&guard_risk=69", guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_decide_request\"") == NULL)
@@ -1955,20 +2033,29 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 194;
   if (client_transition_audit.matches != 2)
     return 195;
-  gint client_decision = WYL_DECISION_ALLOW;
-  if (wyl_client_decide (client, "client-state-target", "site.policy.read",
-          "tenant-a", &client_decision) != WYRELOG_E_OK)
+  g_autoptr (wyl_decide_req_t) client_state_decide = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) client_state_resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (client_state_decide, "client-state-target");
+  wyl_decide_req_set_action (client_state_decide, "site.policy.read");
+  wyl_decide_req_set_resource_id (client_state_decide, "tenant-a");
+  if (wyl_decide (handle, client_state_decide, client_state_resp)
+      != WYRELOG_E_OK)
     return 189;
-  if (client_decision != WYL_DECISION_DENY)
+  if (wyl_decide_resp_get_decision (client_state_resp) != WYL_DECISION_DENY)
     return 190;
   if (wyl_client_policy_permission_grant (client, "client-state-target",
           "site.policy.read", "tenant-a", 123, "public", 49)
       != WYRELOG_E_OK)
     return 191;
-  if (wyl_client_decide (client, "client-state-target", "site.policy.read",
-          "tenant-a", &client_decision) != WYRELOG_E_OK)
+  g_autoptr (wyl_decide_req_t) client_grant_decide = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) client_grant_resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (client_grant_decide, "client-state-target");
+  wyl_decide_req_set_action (client_grant_decide, "site.policy.read");
+  wyl_decide_req_set_resource_id (client_grant_decide, "tenant-a");
+  if (wyl_decide (handle, client_grant_decide, client_grant_resp)
+      != WYRELOG_E_OK)
     return 192;
-  if (client_decision != WYL_DECISION_ALLOW)
+  if (wyl_decide_resp_get_decision (client_grant_resp) != WYL_DECISION_ALLOW)
     return 193;
 
   g_autofree gchar *grant_query =
@@ -2721,11 +2808,27 @@ main (void)
   if (raw_rc != 0)
     return raw_rc;
   gint decision = -1;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (client, "http-allow-user") != WYRELOG_E_OK) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 1819;
+  }
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (insert_allow_fixture (handle) != WYRELOG_E_OK)
+    return 1822;
   if (wyl_client_decide (client, "http-allow-user", "http.allow",
           "http-allow-scope", &decision) != WYRELOG_E_OK)
     return 8;
   if (decision != WYL_DECISION_ALLOW)
     return 9;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (client, "http-guard-user") != WYRELOG_E_OK) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 1820;
+  }
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 1823;
   if (wyl_client_decide_with_guard_context (client, "http-guard-user",
           "wr.audit.read", "http-guard-scope", 123, "public", 69,
           &decision) != WYRELOG_E_OK)

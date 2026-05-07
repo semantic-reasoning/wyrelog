@@ -737,6 +737,12 @@ client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
       (guard_loc_class == NULL || guard_timestamp < 0 || guard_risk < 0 ||
           guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class)))
     return WYRELOG_E_INVALID;
+  g_autofree gchar *access_token = wyl_client_dup_access_token (client);
+  if (access_token == NULL || access_token[0] == '\0')
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
+  if (tenant == NULL || tenant[0] == '\0')
+    return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (base_url == NULL)
@@ -748,24 +754,30 @@ client_decide_request (WylClient *client, const gchar *user, const gchar *perm,
   g_autofree gchar *escaped_perm = g_uri_escape_string (perm, NULL, TRUE);
   g_autofree gchar *escaped_session_token =
       g_uri_escape_string (session_token, NULL, TRUE);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
   g_autofree gchar *escaped_guard_loc_class =
       has_guard_context ? g_uri_escape_string (guard_loc_class, NULL,
       TRUE) : NULL;
   g_autofree gchar *uri = NULL;
   if (has_guard_context) {
     uri = g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s"
-        "&guard_timestamp=%" G_GINT64_FORMAT "&guard_loc_class=%s"
-        "&guard_risk=%" G_GINT64_FORMAT, base_url, escaped_user,
-        escaped_perm, escaped_session_token, guard_timestamp,
-        escaped_guard_loc_class, guard_risk);
+        "&tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
+        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT, base_url,
+        escaped_user, escaped_perm, escaped_session_token, escaped_tenant,
+        guard_timestamp, escaped_guard_loc_class, guard_risk);
   } else {
-    uri = g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s",
-        base_url, escaped_user, escaped_perm, escaped_session_token);
+    uri = g_strdup_printf ("%s/decide?user=%s&perm=%s&session_token=%s"
+        "&tenant=%s", base_url, escaped_user, escaped_perm,
+        escaped_session_token, escaped_tenant);
   }
 
   g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
+  g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+      access_token);
+  soup_message_headers_replace (soup_message_get_request_headers (message),
+      "Authorization", authorization);
 
   g_autoptr (GBytes) body = NULL;
   wyrelog_error_t rc = wyl_client_send_message (client, message, &body);
