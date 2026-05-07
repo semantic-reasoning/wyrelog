@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "access/decision-private.h"
 #include "wyrelog/engine.h"
 #include "wyl-fsm-permission-scope-private.h"
 #include "wyl-fsm-principal-private.h"
@@ -317,101 +318,6 @@ wyl_handle_seed_session_active_states (WylHandle *self)
   return WYRELOG_E_OK;
 }
 
-static wyrelog_error_t
-wyl_handle_seed_principal_transitions (WylHandle *self)
-{
-  gsize n = 0;
-  const wyl_principal_transition_t *table = wyl_fsm_principal_table (&n);
-
-  /* The .dl facts keep the source catalogue readable; this runtime seed makes
-   * the same catalogue available to wirelog snapshots and derived facts. */
-  for (gsize i = 0; i < n; i++) {
-    gint64 row[3];
-    const gchar *from_name = wyl_principal_state_name (table[i].from);
-    const gchar *event_name = wyl_principal_event_name (table[i].event);
-    const gchar *to_name = wyl_principal_state_name (table[i].to);
-    if (from_name == NULL || event_name == NULL || to_name == NULL)
-      return WYRELOG_E_INTERNAL;
-
-    wyrelog_error_t rc =
-        wyl_handle_intern_engine_symbol (self, from_name, &row[0]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_intern_engine_symbol (self, event_name, &row[1]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_intern_engine_symbol (self, to_name, &row[2]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_engine_insert (self, "principal_transition", row, 3);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-wyl_handle_seed_session_transitions (WylHandle *self)
-{
-  gsize n = 0;
-  const wyl_session_transition_t *table = wyl_fsm_session_table (&n);
-
-  for (gsize i = 0; i < n; i++) {
-    gint64 row[3];
-    const gchar *from_name = wyl_session_state_name (table[i].from);
-    const gchar *event_name = wyl_session_event_name (table[i].event);
-    const gchar *to_name = wyl_session_state_name (table[i].to);
-    if (from_name == NULL || event_name == NULL || to_name == NULL)
-      return WYRELOG_E_INTERNAL;
-
-    wyrelog_error_t rc =
-        wyl_handle_intern_engine_symbol (self, from_name, &row[0]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_intern_engine_symbol (self, event_name, &row[1]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_intern_engine_symbol (self, to_name, &row[2]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_engine_insert (self, "session_transition", row, 3);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-wyl_handle_seed_perm_state_transitions (WylHandle *self)
-{
-  gsize n = 0;
-  const wyl_perm_transition_t *table = wyl_fsm_permission_scope_table (&n);
-
-  for (gsize i = 0; i < n; i++) {
-    gint64 row[3];
-    const gchar *from_name = wyl_perm_state_name (table[i].from);
-    const gchar *event_name = wyl_perm_event_name (table[i].event);
-    const gchar *to_name = wyl_perm_state_name (table[i].to);
-    if (from_name == NULL || event_name == NULL || to_name == NULL)
-      return WYRELOG_E_INTERNAL;
-
-    wyrelog_error_t rc =
-        wyl_handle_intern_engine_symbol (self, from_name, &row[0]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_intern_engine_symbol (self, event_name, &row[1]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_intern_engine_symbol (self, to_name, &row[2]);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyl_handle_engine_insert (self, "perm_state_transition", row, 3);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-  }
-  return WYRELOG_E_OK;
-}
-
 wyrelog_error_t
 wyl_init (const gchar *config_path, WylHandle **out_handle)
 {
@@ -625,21 +531,229 @@ new_engine_symbol_map (void)
 }
 
 static wyrelog_error_t
+preintern_policy_store_symbol (WylHandle *self, const gchar *symbol)
+{
+  gint64 ignored = 0;
+  return wyl_handle_intern_engine_symbol (self, symbol, &ignored);
+}
+
+static wyrelog_error_t
+preintern_policy_store_role_permission_symbols (const gchar *role_id,
+    const gchar *perm_id, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, role_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, perm_id);
+}
+
+static wyrelog_error_t
+preintern_policy_store_role_membership_symbols (const gchar *subject_id,
+    const gchar *role_id, const gchar *scope, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, role_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, scope);
+}
+
+static wyrelog_error_t
+preintern_policy_store_direct_permission_symbols (const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, perm_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, scope);
+}
+
+static wyrelog_error_t
+preintern_policy_store_permission_state_symbols (const gchar *subject_id,
+    const gchar *perm_id, const gchar *scope, const gchar *state,
+    gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  wyrelog_error_t rc = preintern_policy_store_direct_permission_symbols
+      (subject_id, perm_id, scope, user_data);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, state);
+}
+
+static wyrelog_error_t
+preintern_policy_store_permission_event_symbols (gint64 event_id,
+    const gchar *subject_id, const gchar *perm_id, const gchar *scope,
+    const gchar *event, const gchar *from_state, const gchar *to_state,
+    gpointer user_data)
+{
+  WylHandle *self = user_data;
+  (void) event_id;
+
+  wyrelog_error_t rc = preintern_policy_store_direct_permission_symbols
+      (subject_id, perm_id, scope, user_data);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, from_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, to_state);
+}
+
+static wyrelog_error_t
+preintern_policy_store_principal_state_symbols (const gchar *subject_id,
+    const gchar *state, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, state);
+}
+
+static wyrelog_error_t
+preintern_policy_store_principal_event_symbols (gint64 event_id,
+    const gchar *subject_id, const gchar *event, const gchar *from_state,
+    const gchar *to_state, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  (void) event_id;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, subject_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, from_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, to_state);
+}
+
+static wyrelog_error_t
+preintern_policy_store_session_state_symbols (const gchar *session_id,
+    const gchar *state, gpointer user_data)
+{
+  WylHandle *self = user_data;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, session_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, state);
+}
+
+static wyrelog_error_t
+preintern_policy_store_session_event_symbols (gint64 event_id,
+    const gchar *session_id, const gchar *event, const gchar *from_state,
+    const gchar *to_state, gpointer user_data)
+{
+  WylHandle *self = user_data;
+  (void) event_id;
+
+  wyrelog_error_t rc = preintern_policy_store_symbol (self, session_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, event);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = preintern_policy_store_symbol (self, from_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return preintern_policy_store_symbol (self, to_state);
+}
+
+static wyrelog_error_t
+preintern_deny_reason_catalog_symbols (WylHandle *self)
+{
+  for (guint i = 0; i < wyl_deny_reason_count (); i++) {
+    const gchar *name = wyl_deny_reason_name ((wyl_deny_reason_code_t) i);
+    const gchar *origin = wyl_deny_reason_origin ((wyl_deny_reason_code_t) i);
+    if (name == NULL || origin == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc = preintern_policy_store_symbol (self, name);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = preintern_policy_store_symbol (self, origin);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+preintern_policy_store_symbols (WylHandle *self)
+{
+  wyrelog_error_t rc = preintern_deny_reason_catalog_symbols (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_role_permission
+      (self->policy_store, preintern_policy_store_role_permission_symbols,
+      self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_role_membership (self->policy_store,
+      preintern_policy_store_role_membership_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_direct_permission (self->policy_store,
+      preintern_policy_store_direct_permission_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_permission_state (self->policy_store,
+      preintern_policy_store_permission_state_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_permission_state_event (self->policy_store,
+      preintern_policy_store_permission_event_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_principal_state (self->policy_store,
+      preintern_policy_store_principal_state_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_principal_event (self->policy_store,
+      preintern_policy_store_principal_event_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_foreach_session_state (self->policy_store,
+      preintern_policy_store_session_state_symbols, self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_policy_store_foreach_session_event (self->policy_store,
+      preintern_policy_store_session_event_symbols, self);
+}
+
+static wyrelog_error_t
 load_current_engine_pair (WylHandle *self)
 {
-  wyrelog_error_t rc = wyl_handle_seed_perm_arm_rules (self);
+  wyrelog_error_t rc = preintern_policy_store_symbols (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_load_policy_store_audit_facts (self);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_seed_perm_arm_rules (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_seed_session_active_states (self);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_seed_principal_transitions (self);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_seed_session_transitions (self);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_handle_seed_perm_state_transitions (self);
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_load_policy_store_role_permissions (self);
@@ -669,7 +783,7 @@ load_current_engine_pair (WylHandle *self)
   rc = wyl_handle_load_policy_store_session_events (self);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_load_policy_store_audit_facts (self);
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -894,18 +1008,43 @@ wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
     {WIRELOG_TYPE_STRING, loc_class_id},
     {WIRELOG_TYPE_INT64, risk},
   };
-  gint64 metadata_id = 0;
-  wyrelog_error_t rc = wyl_handle_make_read_engine_compound (self,
-      "metadata", metadata_args, G_N_ELEMENTS (metadata_args), &metadata_id);
+  gint64 ignored = 0;
+  wyrelog_error_t rc =
+      wyl_handle_intern_engine_symbol (self, "metadata", &ignored);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (self, "scope", &ignored);
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  wirelog_compound_arg_t scope_args[2] = {
-    {WIRELOG_TYPE_INT64, metadata_id},
+  gint64 read_metadata_id = 0;
+  rc = wyl_engine_make_compound (self->read_engine, "metadata",
+      metadata_args, G_N_ELEMENTS (metadata_args), &read_metadata_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 delta_metadata_id = 0;
+  rc = wyl_engine_make_compound (self->delta_engine, "metadata",
+      metadata_args, G_N_ELEMENTS (metadata_args), &delta_metadata_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t read_scope_args[2] = {
+    {WIRELOG_TYPE_INT64, read_metadata_id},
     {WIRELOG_TYPE_STRING, scope_id},
   };
-  return wyl_handle_make_read_engine_compound (self, "scope", scope_args,
-      G_N_ELEMENTS (scope_args), out_id);
+  rc = wyl_engine_make_compound (self->read_engine, "scope",
+      read_scope_args, G_N_ELEMENTS (read_scope_args), out_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wirelog_compound_arg_t delta_scope_args[2] = {
+    {WIRELOG_TYPE_INT64, delta_metadata_id},
+    {WIRELOG_TYPE_STRING, scope_id},
+  };
+  gint64 delta_scope_id = 0;
+  return wyl_engine_make_compound (self->delta_engine, "scope",
+      delta_scope_args, G_N_ELEMENTS (delta_scope_args), &delta_scope_id);
 }
 
 static gboolean

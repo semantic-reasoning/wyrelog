@@ -194,7 +194,16 @@ ttl("break_glass", 900).
 effective_member(U, R, S) :- member_of(U, R, S), !disabled_role(R).
 
 effective_permission(R, P) :- role_permission(R, P).
-effective_permission(R, P) :- inherits(R, R2), effective_permission(R2, P).
+effective_permission(R, P) :- inherits(R, R2), role_permission(R2, P).
+effective_permission(R, P) :-
+    inherits(R, R2),
+    inherits(R2, R3),
+    role_permission(R3, P).
+effective_permission(R, P) :-
+    inherits(R, R2),
+    inherits(R2, R3),
+    inherits(R3, R4),
+    role_permission(R4, P).
 
 has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).
 has_permission(U, P, S) :- direct_permission(U, P, S).
@@ -221,7 +230,11 @@ disabled_role("wr.break_glass") :-
 // IDB: inheritance depth (host enforces N <= 3 at load time)
 // ---------------------------------------------------------------------------
 inh_depth(R, R2, 1) :- inherits(R, R2).
-inh_depth(R, R3, N) :- inherits(R, R2), inh_depth(R2, R3, M), N = M + 1.
+inh_depth(R, R3, 2) :- inherits(R, R2), inherits(R2, R3).
+inh_depth(R, R4, 3) :-
+    inherits(R, R2),
+    inherits(R2, R3),
+    inherits(R3, R4).
 
 // ---------------------------------------------------------------------------
 // Integrity constraints — moved out of the policy program
