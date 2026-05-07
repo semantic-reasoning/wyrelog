@@ -139,6 +139,44 @@ emit_wirelog_fsm_fired_audit (WylDaemonRuntime *runtime, const gchar *relation,
           ev));
 }
 
+static void
+emit_wirelog_perm_state_fired_audit (WylDaemonRuntime *runtime,
+    const gint64 row[7], WylDeltaKind kind)
+{
+  if (runtime == NULL || runtime->handle == NULL)
+    return;
+
+  g_autofree gchar *subject =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[1]);
+  g_autofree gchar *perm =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[2]);
+  g_autofree gchar *scope =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[3]);
+  g_autofree gchar *from_state =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[4]);
+  g_autofree gchar *event =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[5]);
+  g_autofree gchar *to_state =
+      wyl_handle_dup_engine_symbol (runtime->handle, row[6]);
+  if (subject == NULL || perm == NULL || scope == NULL || from_state == NULL
+      || event == NULL || to_state == NULL)
+    return;
+
+  g_autofree gchar *transition =
+      g_strdup_printf ("%s:%s:%s", from_state, event, to_state);
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, subject);
+  wyl_audit_event_set_action (ev,
+      kind == WYL_DELTA_INSERT ? "perm_state_fired_delta_insert" :
+      "perm_state_fired_delta_remove");
+  wyl_audit_event_set_resource_id (ev, perm);
+  wyl_audit_event_set_deny_reason (ev, transition);
+  wyl_audit_event_set_deny_origin (ev, scope);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  record_daemon_audit_result (runtime, persist_daemon_audit_event (runtime,
+          ev));
+}
+
 static wyrelog_error_t
 check_wirelog_delta_audit_rows (WylHandle *handle)
 {
@@ -201,6 +239,18 @@ check_wirelog_fsm_audit_rows (WylHandle *handle)
           "AND resource_id = 'elevated' "
           "AND deny_reason = 'elevate_grant' "
           "AND deny_origin = 'active' "
+          "AND decision = 1), "
+          "COUNT(*) FILTER (WHERE action = 'perm_state_fired_delta_insert' "
+          "AND subject_id = 'wyrelogd-perm-state-user' "
+          "AND resource_id = 'wyrelogd.perm_state.read' "
+          "AND deny_reason = 'dormant:grant:armed' "
+          "AND deny_origin = 'wyrelogd-perm-state-scope' "
+          "AND decision = 1), "
+          "COUNT(*) FILTER (WHERE action = 'perm_state_fired_delta_remove' "
+          "AND subject_id = 'wyrelogd-perm-state-user' "
+          "AND resource_id = 'wyrelogd.perm_state.read' "
+          "AND deny_reason = 'dormant:grant:armed' "
+          "AND deny_origin = 'wyrelogd-perm-state-scope' "
           "AND decision = 1) " "FROM audit_events;", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -211,9 +261,12 @@ check_wirelog_fsm_audit_rows (WylHandle *handle)
   gint64 session_inserts = duckdb_value_int64 (&result, 1, 0);
   gint64 principal_removes = duckdb_value_int64 (&result, 2, 0);
   gint64 session_removes = duckdb_value_int64 (&result, 3, 0);
+  gint64 perm_state_inserts = duckdb_value_int64 (&result, 4, 0);
+  gint64 perm_state_removes = duckdb_value_int64 (&result, 5, 0);
   duckdb_destroy_result (&result);
   return principal_inserts == 1 && session_inserts == 1
-      && principal_removes == 1 && session_removes == 1 ?
+      && principal_removes == 1 && session_removes == 1
+      && perm_state_inserts == 1 && perm_state_removes == 1 ?
       WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 #endif
@@ -257,7 +310,7 @@ fsm_relations:
   if ((g_strcmp0 (relation, "principal_fired") != 0
           && g_strcmp0 (relation, "session_fired") != 0)
       || (kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE) || ncols != 5)
-    return;
+    goto perm_state_fired_relation;
 
 #ifdef WYL_HAS_AUDIT
   emit_wirelog_fsm_fired_audit (runtime, relation, row, kind);
@@ -287,6 +340,31 @@ fsm_relations:
     else if (kind == WYL_DELTA_REMOVE)
       runtime->matched_session_fired_remove = TRUE;
   }
+  return;
+
+perm_state_fired_relation:
+  if (g_strcmp0 (relation, "perm_state_fired") != 0
+      || (kind != WYL_DELTA_INSERT && kind != WYL_DELTA_REMOVE) || ncols != 7)
+    return;
+
+#ifdef WYL_HAS_AUDIT
+  emit_wirelog_perm_state_fired_audit (runtime, row, kind);
+#endif
+
+  if (!runtime->expect_perm_state_fired)
+    return;
+  if (row[0] == runtime->expected_perm_state_fired[0]
+      && row[1] == runtime->expected_perm_state_fired[1]
+      && row[2] == runtime->expected_perm_state_fired[2]
+      && row[3] == runtime->expected_perm_state_fired[3]
+      && row[4] == runtime->expected_perm_state_fired[4]
+      && row[5] == runtime->expected_perm_state_fired[5]
+      && row[6] == runtime->expected_perm_state_fired[6]) {
+    if (kind == WYL_DELTA_INSERT)
+      runtime->matched_perm_state_fired_insert = TRUE;
+    else if (kind == WYL_DELTA_REMOVE)
+      runtime->matched_perm_state_fired_remove = TRUE;
+  }
 }
 
 wyrelog_error_t
@@ -304,6 +382,7 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     .expect_effective_member = TRUE,
     .expect_principal_fired = TRUE,
     .expect_session_fired = TRUE,
+    .expect_perm_state_fired = TRUE,
   };
 
   wyrelog_error_t rc =
@@ -353,6 +432,31 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
       &runtime.expected_session_fired[4]);
   if (rc != WYRELOG_E_OK)
     return rc;
+  runtime.expected_perm_state_fired[0] = 3;
+  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-perm-state-user",
+      &runtime.expected_perm_state_fired[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd.perm_state.read",
+      &runtime.expected_perm_state_fired[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "wyrelogd-perm-state-scope",
+      &runtime.expected_perm_state_fired[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "dormant",
+      &runtime.expected_perm_state_fired[4]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "grant",
+      &runtime.expected_perm_state_fired[5]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, "armed",
+      &runtime.expected_perm_state_fired[6]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   rc = wyl_daemon_start_delta_callbacks (handle, &runtime);
   if (rc != WYRELOG_E_OK)
@@ -371,6 +475,15 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     runtime.expected_session_fired[3],
     runtime.expected_session_fired[2],
     runtime.expected_session_fired[4],
+  };
+  gint64 perm_state_event[7] = {
+    runtime.expected_perm_state_fired[0],
+    runtime.expected_perm_state_fired[1],
+    runtime.expected_perm_state_fired[2],
+    runtime.expected_perm_state_fired[3],
+    runtime.expected_perm_state_fired[5],
+    runtime.expected_perm_state_fired[4],
+    runtime.expected_perm_state_fired[6],
   };
 
   rc = wyl_handle_engine_insert (handle, "member_of", runtime.expected_row, 3);
@@ -397,6 +510,15 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
     goto cleanup;
   }
 
+  rc = wyl_handle_engine_insert (handle, "perm_state_event",
+      perm_state_event, 7);
+  if (rc != WYRELOG_E_OK)
+    goto cleanup;
+  if (!runtime.matched_perm_state_fired_insert) {
+    rc = WYRELOG_E_POLICY;
+    goto cleanup;
+  }
+
   rc = wyl_handle_engine_remove (handle, "principal_event", principal_event, 5);
   if (rc != WYRELOG_E_OK)
     goto cleanup;
@@ -409,6 +531,15 @@ wyl_daemon_check_delta_ready (WylHandle *handle)
   if (rc != WYRELOG_E_OK)
     goto cleanup;
   if (!runtime.matched_session_fired_remove) {
+    rc = WYRELOG_E_POLICY;
+    goto cleanup;
+  }
+
+  rc = wyl_handle_engine_remove (handle, "perm_state_event",
+      perm_state_event, 7);
+  if (rc != WYRELOG_E_OK)
+    goto cleanup;
+  if (!runtime.matched_perm_state_fired_remove) {
     rc = WYRELOG_E_POLICY;
     goto cleanup;
   }

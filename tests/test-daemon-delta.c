@@ -34,6 +34,30 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
 }
 
 static wyrelog_error_t
+intern_perm_event7 (WylHandle *handle, gint64 event_id, const gchar *subject,
+    const gchar *perm, const gchar *scope, const gchar *event,
+    const gchar *from_state, const gchar *to_state, gint64 row[7])
+{
+  row[0] = event_id;
+  wyrelog_error_t rc = intern_symbol (handle, subject, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, perm, &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, scope, &row[3]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, event, &row[4]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, from_state, &row[5]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return intern_symbol (handle, to_state, &row[6]);
+}
+
+static wyrelog_error_t
 contains_audit_event_fact (WylHandle *handle, const gchar *id,
     gint64 created_at_us, gboolean *out_contains)
 {
@@ -221,6 +245,70 @@ check_delta_callback_ignores_runtime_projection_failure (void)
 }
 
 static gint
+check_perm_state_delta_persists_audit_rows (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 event_row[7];
+  WylDaemonRuntime runtime = { 0 };
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 50;
+  runtime.handle = handle;
+  if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
+    return 51;
+  if (intern_perm_event7 (handle, 701, "daemon-delta-perm-user",
+          "site.daemon-delta.perm", "daemon-delta-perm-scope", "grant",
+          "dormant", "armed", event_row) != WYRELOG_E_OK)
+    return 52;
+
+  if (wyl_handle_engine_insert (handle, "perm_state_event", event_row, 7)
+      != WYRELOG_E_OK)
+    return 53;
+  if (runtime.inserted == 0)
+    return 54;
+  if (runtime.audit_errors != 0)
+    return 55;
+
+  if (wyl_handle_engine_remove (handle, "perm_state_event", event_row, 7)
+      != WYRELOG_E_OK)
+    return 56;
+  if (runtime.removed == 0)
+    return 57;
+  if (runtime.audit_errors != 0)
+    return 58;
+
+  g_autofree gchar *insert_id = NULL;
+  gint64 insert_created_at_us = -1;
+  if (!lookup_policy_audit_row (handle, "perm_state_fired_delta_insert",
+          "daemon-delta-perm-user", "site.daemon-delta.perm",
+          "dormant:grant:armed", "daemon-delta-perm-scope", &insert_id,
+          &insert_created_at_us))
+    return 59;
+  g_autofree gchar *remove_id = NULL;
+  gint64 remove_created_at_us = -1;
+  if (!lookup_policy_audit_row (handle, "perm_state_fired_delta_remove",
+          "daemon-delta-perm-user", "site.daemon-delta.perm",
+          "dormant:grant:armed", "daemon-delta-perm-scope", &remove_id,
+          &remove_created_at_us))
+    return 60;
+
+  gboolean contains = FALSE;
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", insert_id,
+          "perm_state_fired_delta_insert", &contains) != WYRELOG_E_OK
+      || !contains)
+    return 61;
+  if (contains_audit_event_attr_fact (handle, "audit_event_action", remove_id,
+          "perm_state_fired_delta_remove", &contains) != WYRELOG_E_OK
+      || !contains)
+    return 62;
+
+  if (wyl_handle_engine_set_delta_callback (handle, NULL, NULL)
+      != WYRELOG_E_OK)
+    return 63;
+  return 0;
+}
+
+static gint
 check_delta_readiness_recovers_audit_table_loss (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -254,6 +342,8 @@ main (void)
   gint rc;
 
   if ((rc = check_delta_callback_ignores_runtime_projection_failure ()) != 0)
+    return rc;
+  if ((rc = check_perm_state_delta_persists_audit_rows ()) != 0)
     return rc;
   if ((rc = check_delta_readiness_recovers_audit_table_loss ()) != 0)
     return rc;
