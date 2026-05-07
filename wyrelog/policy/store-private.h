@@ -168,6 +168,9 @@ wyrelog_error_t wyl_policy_store_set_permission_state (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_permission_state_exists (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
     gboolean * out_exists);
+wyrelog_error_t wyl_policy_store_permission_state_is (wyl_policy_store_t *
+    store, const gchar * subject_id, const gchar * perm_id, const gchar * scope,
+    const gchar * state, gboolean * out_matches);
 wyrelog_error_t wyl_policy_store_foreach_permission_state (wyl_policy_store_t *
     store, wyl_policy_permission_state_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_append_permission_state_event

@@ -2476,6 +2476,9 @@ check_login_skip_mfa_projection_autoload_on_open (void)
           "skip-mfa-direct-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 364;
+  if (wyl_policy_store_set_permission_state (store, "skip-mfa-direct-user",
+          "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK)
+    return 396;
   if (wyl_policy_store_grant_direct_permission (store,
           "skip-mfa-wrong-scope-user", "wr.login.skip_mfa", "other")
       != WYRELOG_E_OK)
@@ -2489,6 +2492,9 @@ check_login_skip_mfa_projection_autoload_on_open (void)
   if (wyl_policy_store_grant_role_membership (store, "skip-mfa-role-user",
           "skip-mfa-role", "login") != WYRELOG_E_OK)
     return 368;
+  if (wyl_policy_store_set_permission_state (store, "skip-mfa-role-user",
+          "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK)
+    return 397;
   if (wyl_policy_store_upsert_role (store, "skip-mfa-child-role",
           "skip mfa child role") != WYRELOG_E_OK)
     return 369;
@@ -2499,6 +2505,9 @@ check_login_skip_mfa_projection_autoload_on_open (void)
           "skip-mfa-inherited-user", "skip-mfa-child-role", "login")
       != WYRELOG_E_OK)
     return 371;
+  if (wyl_policy_store_set_permission_state (store, "skip-mfa-inherited-user",
+          "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK)
+    return 398;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_OK)
     return 372;
