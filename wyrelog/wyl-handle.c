@@ -5,6 +5,7 @@
 
 #include "access/decision-private.h"
 #include "wyrelog/engine.h"
+#include "wyl-engine-private.h"
 #include "wyl-fsm-permission-scope-private.h"
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
@@ -162,7 +163,7 @@ wyl_handle_intern_symbol_on_engine (WylHandle *self, WylEngine *engine,
   if (engine == NULL || symbol == NULL || out_id == NULL)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = wyl_engine_intern_symbol (engine, symbol, out_id);
+  wyrelog_error_t rc = wyl_engine_owned_intern_symbol (engine, symbol, out_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -211,7 +212,7 @@ wyl_handle_make_guard_cmp_compound (WylHandle *self,
     {WIRELOG_TYPE_STRING, op_id},
     {WIRELOG_TYPE_STRING, value_id},
   };
-  return wyl_engine_make_compound (engine, "guard_cmp", args,
+  return wyl_engine_owned_make_compound (engine, "guard_cmp", args,
       G_N_ELEMENTS (args), out_id);
 }
 
@@ -228,7 +229,7 @@ wyl_handle_make_guard_tag_compound (WylHandle *self,
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_STRING, atom_id},
   };
-  return wyl_engine_make_compound (engine, "guard_tag", args,
+  return wyl_engine_owned_make_compound (engine, "guard_tag", args,
       G_N_ELEMENTS (args), out_id);
 }
 
@@ -246,8 +247,8 @@ wyl_handle_make_guard_unary_compound (WylHandle *self, WylEngine *engine,
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_INT64, child_id},
   };
-  return wyl_engine_make_compound (engine, functor, args, G_N_ELEMENTS (args),
-      out_id);
+  return wyl_engine_owned_make_compound (engine, functor, args,
+      G_N_ELEMENTS (args), out_id);
 }
 
 static wyrelog_error_t
@@ -271,8 +272,8 @@ wyl_handle_make_guard_binary_compound (WylHandle *self, WylEngine *engine,
     {WIRELOG_TYPE_INT64, left_id},
     {WIRELOG_TYPE_INT64, right_id},
   };
-  return wyl_engine_make_compound (engine, functor, args, G_N_ELEMENTS (args),
-      out_id);
+  return wyl_engine_owned_make_compound (engine, functor, args,
+      G_N_ELEMENTS (args), out_id);
 }
 
 static wyrelog_error_t
@@ -317,8 +318,8 @@ wyl_handle_make_guard_expr_compound (WylHandle *self, WylEngine *engine,
   wirelog_compound_arg_t args[1] = {
     {WIRELOG_TYPE_INT64, root_id},
   };
-  return wyl_engine_make_compound (engine, "guard", args, G_N_ELEMENTS (args),
-      out_id);
+  return wyl_engine_owned_make_compound (engine, "guard", args,
+      G_N_ELEMENTS (args), out_id);
 }
 
 static wyrelog_error_t
@@ -335,11 +336,11 @@ wyl_handle_seed_perm_arm_rule_on_engine (WylHandle *self, WylEngine *engine,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  rc = wyl_engine_insert (engine, "perm_arm_rule", row, 2);
+  rc = wyl_engine_owned_insert (engine, "perm_arm_rule", row, 2);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (engine == self->delta_engine)
-    return wyl_engine_step (engine);
+    return wyl_engine_owned_step (engine);
   return WYRELOG_E_OK;
 }
 
@@ -888,6 +889,8 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
     g_object_unref (new_read_engine);
     return rc;
   }
+  wyl_engine_set_owner (new_read_engine, WYL_ENGINE_OWNER_READ);
+  wyl_engine_set_owner (new_delta_engine, WYL_ENGINE_OWNER_DELTA);
 
   self->read_engine = new_read_engine;
   self->delta_engine = new_delta_engine;
@@ -907,7 +910,7 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
     return rc;
   }
   if (self->delta_callback != NULL) {
-    rc = wyl_engine_set_delta_callback (self->delta_engine,
+    rc = wyl_engine_owned_set_delta_callback (self->delta_engine,
         wyl_handle_buffer_delta_cb, self);
     if (rc != WYRELOG_E_OK) {
       g_clear_object (&self->read_engine);
@@ -991,12 +994,12 @@ wyl_handle_intern_engine_symbol (WylHandle *self, const gchar *symbol,
 
   gint64 read_id = -1;
   wyrelog_error_t rc =
-      wyl_engine_intern_symbol (self->read_engine, symbol, &read_id);
+      wyl_engine_owned_intern_symbol (self->read_engine, symbol, &read_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 delta_id = -1;
-  rc = wyl_engine_intern_symbol (self->delta_engine, symbol, &delta_id);
+  rc = wyl_engine_owned_intern_symbol (self->delta_engine, symbol, &delta_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1042,13 +1045,13 @@ wyl_handle_make_engine_compound (WylHandle *self, const gchar *functor,
     return WYRELOG_E_INVALID;
 
   gint64 read_id = 0;
-  wyrelog_error_t rc = wyl_engine_make_compound (self->read_engine,
+  wyrelog_error_t rc = wyl_engine_owned_make_compound (self->read_engine,
       functor, args, nargs, &read_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 delta_id = 0;
-  rc = wyl_engine_make_compound (self->delta_engine, functor, args, nargs,
+  rc = wyl_engine_owned_make_compound (self->delta_engine, functor, args, nargs,
       &delta_id);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1081,7 +1084,7 @@ wyl_handle_make_read_engine_compound (WylHandle *self, const gchar *functor,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  rc = wyl_engine_make_compound (self->read_engine, functor, args, nargs,
+  rc = wyl_engine_owned_make_compound (self->read_engine, functor, args, nargs,
       out_id);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1089,8 +1092,8 @@ wyl_handle_make_read_engine_compound (WylHandle *self, const gchar *functor,
   /* Keep the handle-owned engines' intern and side-arena streams aligned.
    * The returned handle remains read-engine-local and request-scoped. */
   gint64 delta_id = 0;
-  return wyl_engine_make_compound (self->delta_engine, functor, args, nargs,
-      &delta_id);
+  return wyl_engine_owned_make_compound (self->delta_engine, functor, args,
+      nargs, &delta_id);
 }
 
 wyrelog_error_t
@@ -1120,13 +1123,13 @@ wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
     return rc;
 
   gint64 read_metadata_id = 0;
-  rc = wyl_engine_make_compound (self->read_engine, "metadata",
+  rc = wyl_engine_owned_make_compound (self->read_engine, "metadata",
       metadata_args, G_N_ELEMENTS (metadata_args), &read_metadata_id);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   gint64 delta_metadata_id = 0;
-  rc = wyl_engine_make_compound (self->delta_engine, "metadata",
+  rc = wyl_engine_owned_make_compound (self->delta_engine, "metadata",
       metadata_args, G_N_ELEMENTS (metadata_args), &delta_metadata_id);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1135,7 +1138,7 @@ wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
     {WIRELOG_TYPE_INT64, read_metadata_id},
     {WIRELOG_TYPE_STRING, scope_id},
   };
-  rc = wyl_engine_make_compound (self->read_engine, "scope",
+  rc = wyl_engine_owned_make_compound (self->read_engine, "scope",
       read_scope_args, G_N_ELEMENTS (read_scope_args), out_id);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -1145,7 +1148,7 @@ wyl_handle_make_guard_context_compound (WylHandle *self, gint64 timestamp,
     {WIRELOG_TYPE_STRING, scope_id},
   };
   gint64 delta_scope_id = 0;
-  return wyl_engine_make_compound (self->delta_engine, "scope",
+  return wyl_engine_owned_make_compound (self->delta_engine, "scope",
       delta_scope_args, G_N_ELEMENTS (delta_scope_args), &delta_scope_id);
 }
 
@@ -1194,7 +1197,7 @@ static wyrelog_error_t
 step_delta_engine_and_flush (WylHandle *self)
 {
   clear_pending_deltas (self);
-  wyrelog_error_t rc = wyl_engine_step (self->delta_engine);
+  wyrelog_error_t rc = wyl_engine_owned_step (self->delta_engine);
   if (rc != WYRELOG_E_OK) {
     clear_pending_deltas (self);
     return rc;
@@ -1224,7 +1227,7 @@ wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
   }
 
   wyrelog_error_t rc =
-      wyl_engine_insert (self->read_engine, relation, row, ncols);
+      wyl_engine_owned_insert (self->read_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1238,7 +1241,7 @@ wyl_handle_engine_insert (WylHandle *self, const gchar *relation,
         repair_engine_pair_after_projection_failure (self);
     return repair_rc == WYRELOG_E_OK ? fault_rc : repair_rc;
   }
-  rc = wyl_engine_insert (self->delta_engine, relation, row, ncols);
+  rc = wyl_engine_owned_insert (self->delta_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t repair_rc =
         repair_engine_pair_after_projection_failure (self);
@@ -1283,7 +1286,7 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
   }
 
   wyrelog_error_t rc =
-      wyl_engine_remove (self->read_engine, relation, row, ncols);
+      wyl_engine_owned_remove (self->read_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -1297,7 +1300,7 @@ wyl_handle_engine_remove (WylHandle *self, const gchar *relation,
         repair_engine_pair_after_projection_failure (self);
     return repair_rc == WYRELOG_E_OK ? delta_fault_rc : repair_rc;
   }
-  rc = wyl_engine_remove (self->delta_engine, relation, row, ncols);
+  rc = wyl_engine_owned_remove (self->delta_engine, relation, row, ncols);
   if (rc != WYRELOG_E_OK) {
     wyrelog_error_t repair_rc =
         repair_engine_pair_after_projection_failure (self);
@@ -1343,7 +1346,7 @@ wyl_handle_engine_set_delta_callback (WylHandle *self, WylDeltaCallback cb,
 
   WylDeltaCallback engine_cb = cb == NULL ? NULL : wyl_handle_buffer_delta_cb;
   gpointer engine_user_data = cb == NULL ? NULL : self;
-  wyrelog_error_t rc = wyl_engine_set_delta_callback (self->delta_engine,
+  wyrelog_error_t rc = wyl_engine_owned_set_delta_callback (self->delta_engine,
       engine_cb, engine_user_data);
   if (rc != WYRELOG_E_OK)
     return rc;

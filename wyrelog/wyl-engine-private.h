@@ -21,6 +21,13 @@ typedef enum
   WYL_ENGINE_MODE_SNAPSHOT,
 } wyl_engine_mode_t;
 
+typedef enum
+{
+  WYL_ENGINE_OWNER_STANDALONE = 0,
+  WYL_ENGINE_OWNER_READ,
+  WYL_ENGINE_OWNER_DELTA,
+} wyl_engine_owner_t;
+
 typedef struct _WylDeltaCookie WylDeltaCookie;
 
 struct _WylEngine
@@ -30,6 +37,7 @@ struct _WylEngine
   /* Logical path strings for diagnostic logging only; freed in finalize. */
   gchar *dl_src_logical_paths[WYL_ENGINE_TEMPLATE_COUNT];
   wyl_engine_mode_t mode;       /* Latched at first step or snapshot. */
+  wyl_engine_owner_t owner;     /* Handle pair role, or standalone. */
   WylDeltaCookie *delta_cookie; /* Heap-owned, NULL when no cb. */
 };
 
@@ -83,5 +91,19 @@ wyrelog_error_t wyl_engine_load_templates (const gchar * template_dir,
 wyrelog_error_t wyl_engine_make_compound (WylEngine * self,
     const gchar * functor, const wirelog_compound_arg_t * args, gsize nargs,
     gint64 * out_id);
+
+void wyl_engine_set_owner (WylEngine * self, wyl_engine_owner_t owner);
+wyrelog_error_t wyl_engine_owned_intern_symbol (WylEngine * self,
+    const gchar * symbol, gint64 * out_id);
+wyrelog_error_t wyl_engine_owned_make_compound (WylEngine * self,
+    const gchar * functor, const wirelog_compound_arg_t * args, gsize nargs,
+    gint64 * out_id);
+wyrelog_error_t wyl_engine_owned_insert (WylEngine * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_engine_owned_remove (WylEngine * self,
+    const gchar * relation, const gint64 * row, gsize ncols);
+wyrelog_error_t wyl_engine_owned_step (WylEngine * self);
+wyrelog_error_t wyl_engine_owned_set_delta_callback (WylEngine * self,
+    WylDeltaCallback cb, gpointer user_data);
 
 G_END_DECLS;

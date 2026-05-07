@@ -89,6 +89,14 @@ wyl_engine_delta_trampoline (const char *relation, const int64_t *row,
 
 G_DEFINE_FINAL_TYPE (WylEngine, wyl_engine, G_TYPE_OBJECT);
 
+void
+wyl_engine_set_owner (WylEngine *self, wyl_engine_owner_t owner)
+{
+  g_return_if_fail (WYL_IS_ENGINE (self));
+
+  self->owner = owner;
+}
+
 static void
 wyl_engine_finalize (GObject *object)
 {
@@ -280,8 +288,9 @@ wyl_engine_close (WylEngine *engine)
   g_object_unref (engine);
 }
 
-wyrelog_error_t
-wyl_engine_intern_symbol (WylEngine *self, const gchar *symbol, gint64 *out_id)
+static wyrelog_error_t
+wyl_engine_intern_symbol_unchecked (WylEngine *self, const gchar *symbol,
+    gint64 *out_id)
 {
   if (self == NULL || !WYL_IS_ENGINE (self))
     return WYRELOG_E_INVALID;
@@ -303,7 +312,25 @@ wyl_engine_intern_symbol (WylEngine *self, const gchar *symbol, gint64 *out_id)
 }
 
 wyrelog_error_t
-wyl_engine_make_compound (WylEngine *self, const gchar *functor,
+wyl_engine_intern_symbol (WylEngine *self, const gchar *symbol, gint64 *out_id)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_STANDALONE)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_intern_symbol_unchecked (self, symbol, out_id);
+}
+
+wyrelog_error_t
+wyl_engine_owned_intern_symbol (WylEngine *self, const gchar *symbol,
+    gint64 *out_id)
+{
+  return wyl_engine_intern_symbol_unchecked (self, symbol, out_id);
+}
+
+static wyrelog_error_t
+wyl_engine_make_compound_unchecked (WylEngine *self, const gchar *functor,
     const wirelog_compound_arg_t *args, gsize nargs, gint64 *out_id)
 {
   if (out_id != NULL)
@@ -341,8 +368,29 @@ wyl_engine_make_compound (WylEngine *self, const gchar *functor,
 }
 
 wyrelog_error_t
-wyl_engine_insert (WylEngine *self, const gchar *relation, const gint64 *row,
-    gsize ncols)
+wyl_engine_make_compound (WylEngine *self, const gchar *functor,
+    const wirelog_compound_arg_t *args, gsize nargs, gint64 *out_id)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_STANDALONE)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_make_compound_unchecked (self, functor, args, nargs,
+      out_id);
+}
+
+wyrelog_error_t
+wyl_engine_owned_make_compound (WylEngine *self, const gchar *functor,
+    const wirelog_compound_arg_t *args, gsize nargs, gint64 *out_id)
+{
+  return wyl_engine_make_compound_unchecked (self, functor, args, nargs,
+      out_id);
+}
+
+static wyrelog_error_t
+wyl_engine_insert_unchecked (WylEngine *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
 {
   if (self == NULL || !WYL_IS_ENGINE (self))
     return WYRELOG_E_INVALID;
@@ -367,7 +415,26 @@ wyl_engine_insert (WylEngine *self, const gchar *relation, const gint64 *row,
 }
 
 wyrelog_error_t
-wyl_engine_step (WylEngine *self)
+wyl_engine_insert (WylEngine *self, const gchar *relation, const gint64 *row,
+    gsize ncols)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_STANDALONE)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_insert_unchecked (self, relation, row, ncols);
+}
+
+wyrelog_error_t
+wyl_engine_owned_insert (WylEngine *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
+{
+  return wyl_engine_insert_unchecked (self, relation, row, ncols);
+}
+
+static wyrelog_error_t
+wyl_engine_step_unchecked (WylEngine *self)
 {
   if (self == NULL || !WYL_IS_ENGINE (self))
     return WYRELOG_E_INVALID;
@@ -389,6 +456,23 @@ wyl_engine_step (WylEngine *self)
 }
 
 wyrelog_error_t
+wyl_engine_step (WylEngine *self)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_STANDALONE)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_step_unchecked (self);
+}
+
+wyrelog_error_t
+wyl_engine_owned_step (WylEngine *self)
+{
+  return wyl_engine_step_unchecked (self);
+}
+
+wyrelog_error_t
 wyl_engine_snapshot (WylEngine *self, const gchar *relation,
     WylTupleCallback cb, gpointer user_data)
 {
@@ -397,6 +481,8 @@ wyl_engine_snapshot (WylEngine *self, const gchar *relation,
   if (relation == NULL || cb == NULL)
     return WYRELOG_E_INVALID;
   if (self->session == NULL)
+    return WYRELOG_E_INVALID;
+  if (self->owner == WYL_ENGINE_OWNER_DELTA)
     return WYRELOG_E_INVALID;
   if (self->mode == WYL_ENGINE_MODE_STEP)
     return WYRELOG_E_INVALID;
@@ -417,8 +503,8 @@ wyl_engine_snapshot (WylEngine *self, const gchar *relation,
   return rc;
 }
 
-wyrelog_error_t
-wyl_engine_set_delta_callback (WylEngine *self, WylDeltaCallback cb,
+static wyrelog_error_t
+wyl_engine_set_delta_callback_unchecked (WylEngine *self, WylDeltaCallback cb,
     gpointer user_data)
 {
   if (self == NULL || !WYL_IS_ENGINE (self))
@@ -465,8 +551,27 @@ wyl_engine_set_delta_callback (WylEngine *self, WylDeltaCallback cb,
 }
 
 wyrelog_error_t
-wyl_engine_remove (WylEngine *self, const gchar *relation, const gint64 *row,
-    gsize ncols)
+wyl_engine_set_delta_callback (WylEngine *self, WylDeltaCallback cb,
+    gpointer user_data)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_STANDALONE)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_set_delta_callback_unchecked (self, cb, user_data);
+}
+
+wyrelog_error_t
+wyl_engine_owned_set_delta_callback (WylEngine *self, WylDeltaCallback cb,
+    gpointer user_data)
+{
+  return wyl_engine_set_delta_callback_unchecked (self, cb, user_data);
+}
+
+static wyrelog_error_t
+wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
 {
   if (self == NULL || !WYL_IS_ENGINE (self))
     return WYRELOG_E_INVALID;
@@ -488,4 +593,23 @@ wyl_engine_remove (WylEngine *self, const gchar *relation, const gint64 *row,
   }
 
   return rc;
+}
+
+wyrelog_error_t
+wyl_engine_remove (WylEngine *self, const gchar *relation, const gint64 *row,
+    gsize ncols)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self))
+    return WYRELOG_E_INVALID;
+  if (self->owner != WYL_ENGINE_OWNER_STANDALONE)
+    return WYRELOG_E_INVALID;
+
+  return wyl_engine_remove_unchecked (self, relation, row, ncols);
+}
+
+wyrelog_error_t
+wyl_engine_owned_remove (WylEngine *self, const gchar *relation,
+    const gint64 *row, gsize ncols)
+{
+  return wyl_engine_remove_unchecked (self, relation, row, ncols);
 }

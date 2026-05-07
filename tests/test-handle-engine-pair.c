@@ -6,6 +6,7 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-compound-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-engine-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -527,7 +528,7 @@ intern3 (WylHandle *handle, const gchar *a, const gchar *b, const gchar *c,
 static wyrelog_error_t
 intern_read_symbol (WylHandle *handle, const gchar *symbol, gint64 *out_id)
 {
-  return wyl_engine_intern_symbol (wyl_handle_get_read_engine (handle),
+  return wyl_engine_owned_intern_symbol (wyl_handle_get_read_engine (handle),
       symbol, out_id);
 }
 
@@ -856,6 +857,92 @@ check_open_pair_creates_distinct_engines (void)
 }
 
 static gint
+check_owned_read_engine_rejects_public_mutation (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 row[3];
+  gint64 symbol_id = 0;
+  gint64 compound_id = 0;
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_STRING, 1},
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 560;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 561;
+  if (intern3 (handle, "owned-read-user", "wr.viewer", "owned-read-scope",
+          row) != WYRELOG_E_OK)
+    return 562;
+
+  WylEngine *read_engine = wyl_handle_get_read_engine (handle);
+  if (wyl_engine_step (read_engine) != WYRELOG_E_INVALID)
+    return 563;
+  if (wyl_engine_insert (read_engine, "member_of", row, 3)
+      != WYRELOG_E_INVALID)
+    return 564;
+  if (wyl_engine_remove (read_engine, "member_of", row, 3)
+      != WYRELOG_E_INVALID)
+    return 565;
+  if (wyl_engine_set_delta_callback (read_engine, delta_expect_cb, NULL)
+      != WYRELOG_E_INVALID)
+    return 566;
+  if (wyl_engine_intern_symbol (read_engine, "owned-read-extra", &symbol_id)
+      != WYRELOG_E_INVALID)
+    return 576;
+  if (wyl_engine_make_compound (read_engine, "scope", args, G_N_ELEMENTS (args),
+          &compound_id) != WYRELOG_E_INVALID)
+    return 577;
+  return 0;
+}
+
+static gint
+check_owned_delta_engine_rejects_public_probe_and_mutation (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 row[3];
+  gint64 symbol_id = 0;
+  gint64 compound_id = 0;
+  guint seen = 0;
+  wirelog_compound_arg_t args[1] = {
+    {WIRELOG_TYPE_STRING, 1},
+  };
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 567;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 568;
+  if (intern3 (handle, "owned-delta-user", "wr.viewer", "owned-delta-scope",
+          row) != WYRELOG_E_OK)
+    return 569;
+
+  WylEngine *delta_engine = wyl_handle_get_delta_engine (handle);
+  if (wyl_engine_snapshot (delta_engine, "member_of", snapshot_count_cb, &seen)
+      != WYRELOG_E_INVALID)
+    return 570;
+  if (wyl_engine_step (delta_engine) != WYRELOG_E_INVALID)
+    return 571;
+  if (wyl_engine_insert (delta_engine, "member_of", row, 3)
+      != WYRELOG_E_INVALID)
+    return 572;
+  if (wyl_engine_remove (delta_engine, "member_of", row, 3)
+      != WYRELOG_E_INVALID)
+    return 573;
+  if (wyl_engine_set_delta_callback (delta_engine, delta_expect_cb, NULL)
+      != WYRELOG_E_INVALID)
+    return 574;
+  if (wyl_engine_intern_symbol (delta_engine, "owned-delta-extra", &symbol_id)
+      != WYRELOG_E_INVALID)
+    return 578;
+  if (wyl_engine_make_compound (delta_engine, "scope", args,
+          G_N_ELEMENTS (args), &compound_id) != WYRELOG_E_INVALID)
+    return 579;
+  return wyl_handle_engine_step_delta (handle) == WYRELOG_E_OK ? 0 : 575;
+}
+
+static gint
 check_init_config_opens_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1019,11 +1106,11 @@ check_symbol_intern_reaches_both_engines (void)
     return 62;
   if (pair_id < 0)
     return 63;
-  if (wyl_engine_intern_symbol (wyl_handle_get_read_engine (handle),
-          "pair-symbol-a", &read_id) != WYRELOG_E_OK)
+  if (wyl_handle_intern_engine_symbol (handle, "pair-symbol-a", &read_id)
+      != WYRELOG_E_OK)
     return 64;
-  if (wyl_engine_intern_symbol (wyl_handle_get_delta_engine (handle),
-          "pair-symbol-a", &delta_id) != WYRELOG_E_OK)
+  if (wyl_handle_intern_engine_symbol (handle, "pair-symbol-a", &delta_id)
+      != WYRELOG_E_OK)
     return 65;
   if (pair_id != read_id)
     return 66;
@@ -4725,6 +4812,10 @@ main (void)
   if ((rc = check_init_keeps_engines_absent ()) != 0)
     return rc;
   if ((rc = check_open_pair_creates_distinct_engines ()) != 0)
+    return rc;
+  if ((rc = check_owned_read_engine_rejects_public_mutation ()) != 0)
+    return rc;
+  if ((rc = check_owned_delta_engine_rejects_public_probe_and_mutation ()) != 0)
     return rc;
   if ((rc = check_init_config_opens_engine_pair ()) != 0)
     return rc;
