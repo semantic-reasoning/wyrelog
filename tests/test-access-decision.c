@@ -444,6 +444,77 @@ append_non_comment_lines (GString *out, const gchar *contents)
 }
 
 static gint
+paren_delta (const gchar *line)
+{
+  gint delta = 0;
+
+  for (const gchar * p = line; *p != '\0'; p++) {
+    if (*p == '(')
+      delta++;
+    else if (*p == ')')
+      delta--;
+  }
+  return delta;
+}
+
+static void
+append_declaration_blocks (GString *out, const gchar *contents)
+{
+  g_auto (GStrv) lines = g_strsplit (contents, "\n", -1);
+  gboolean in_decl = FALSE;
+  gint depth = 0;
+
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    g_autofree gchar *line = g_strdup (lines[i]);
+    gchar *trimmed = g_strstrip (line);
+
+    if (trimmed[0] == '\0' || g_str_has_prefix (trimmed, "//"))
+      continue;
+    if (!in_decl && !g_str_has_prefix (trimmed, ".decl "))
+      continue;
+
+    g_string_append (out, trimmed);
+    g_string_append_c (out, '\n');
+    depth += paren_delta (trimmed);
+    in_decl = depth > 0;
+  }
+}
+
+static gint
+check_legacy_declarations_match_canonical (void)
+{
+  g_autofree gchar *canonical = NULL;
+  g_autofree gchar *legacy = NULL;
+  gsize canonical_len = 0;
+  gsize legacy_len = 0;
+  g_autoptr (GError) err = NULL;
+
+  if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_DL_PATH, &canonical,
+          &canonical_len, &err)) {
+    g_printerr ("cannot read %s: %s\n", WYL_TEST_ACCESS_DECISION_DL_PATH,
+        err ? err->message : "?");
+    return 173;
+  }
+
+  g_clear_error (&err);
+  if (!g_file_get_contents (WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, &legacy,
+          &legacy_len, &err)) {
+    g_printerr ("cannot read %s: %s\n",
+        WYL_TEST_ACCESS_DECISION_LEGACY_DL_PATH, err ? err->message : "?");
+    return 174;
+  }
+
+  g_autoptr (GString) canonical_decls = g_string_new (NULL);
+  g_autoptr (GString) legacy_decls = g_string_new (NULL);
+  append_declaration_blocks (canonical_decls, canonical);
+  append_declaration_blocks (legacy_decls, legacy);
+
+  if (g_strcmp0 (canonical_decls->str, legacy_decls->str) != 0)
+    return 175;
+  return 0;
+}
+
+static gint
 check_legacy_template_matches_canonical (void)
 {
   g_autofree gchar *canonical = NULL;
@@ -494,6 +565,8 @@ main (void)
   if ((rc = check_audit_fact_declarations ()) != 0)
     return rc;
   if ((rc = check_decision_rule_bodies ()) != 0)
+    return rc;
+  if ((rc = check_legacy_declarations_match_canonical ()) != 0)
     return rc;
   if ((rc = check_legacy_template_matches_canonical ()) != 0)
     return rc;
