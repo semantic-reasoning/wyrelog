@@ -1477,6 +1477,26 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   WylDaemonHttpContext *ctx = user_data;
+  const gchar *bearer_token = lookup_bearer_token (msg);
+  if (bearer_token == NULL || bearer_token[0] == '\0') {
+    set_json_error (msg, 401, "decide_auth_required");
+    return;
+  }
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
+      bearer_token, &auth);
+  if (auth_rc != WYRELOG_E_OK) {
+    set_json_error (msg, 401, "decide_auth_required");
+    return;
+  }
+  if (!ensure_auth_context_request_tenant (msg, query, &auth,
+          "invalid_decide_request", "decide_denied"))
+    return;
+  if (g_strcmp0 (auth.actor, user) != 0) {
+    set_json_error (msg, 403, "decide_denied");
+    return;
+  }
+
   WylHandle *handle = ctx->handle;
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();

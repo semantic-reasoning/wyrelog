@@ -90,19 +90,17 @@ def decide_requires_post():
     except urllib.error.HTTPError as exc:
         return exc.code == 405
 
-def decide_denies_unseeded_user():
-    payload = urllib.request.urlopen(
-        f"{base}/decide?user=healthz-user"
-        "&perm=wr.audit.read&session_token=healthz-scope",
-        data=b"",
-        timeout=1,
-    ).read()
-    body = json.loads(payload)
-    return (
-        body.get("decision") == 0
-        and "deny_reason" in body
-        and "deny_origin" in body
-    )
+def decide_requires_auth():
+    try:
+        urllib.request.urlopen(
+            f"{base}/decide?user=healthz-user"
+            "&perm=wr.audit.read&session_token=healthz-scope",
+            data=b"",
+            timeout=1,
+        ).read()
+        return False
+    except urllib.error.HTTPError as exc:
+        return exc.code == 401
 
 for _ in range(150):
     try:
@@ -126,7 +124,7 @@ for _ in range(150):
             sys.exit(1)
         if not decide_requires_post():
             sys.exit(1)
-        if not decide_denies_unseeded_user():
+        if not decide_requires_auth():
             sys.exit(1)
         sys.exit(0)
     except Exception as exc:
