@@ -1625,6 +1625,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 134;
+#ifdef WYL_HAS_AUDIT
   AuditEventProbe guard_denied_audit = {
     .subject_id = "http-policy-admin",
     .action = "wr.policy.write",
@@ -1640,6 +1641,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 200;
   if (guard_denied_audit.matches != 1)
     return 201;
+#endif
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *transition_request_id = NULL;
@@ -1754,6 +1756,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 136;
+#ifdef WYL_HAS_AUDIT
   AuditEventProbe grant_audit = {
     .subject_id = "http-policy-admin",
     .action = "permission_grant",
@@ -1779,6 +1782,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 202;
   if (grant_auth_audit.matches != 1)
     return 203;
+#endif
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
@@ -1925,6 +1929,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!role_membership_exists (handle, "role-target", "site.reader",
           "tenant-b"))
     return 146;
+#ifdef WYL_HAS_AUDIT
   AuditEventProbe role_grant_audit = {
     .subject_id = "http-policy-admin",
     .action = "role_grant",
@@ -1937,6 +1942,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 198;
   if (role_grant_audit.matches != 1)
     return 199;
+#endif
 
   g_autofree gchar *builtin_role_query =
       g_strdup_printf ("subject=builtin-role-target&role=wr.auditor"
