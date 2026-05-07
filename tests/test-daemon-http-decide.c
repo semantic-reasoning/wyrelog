@@ -2467,6 +2467,20 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
       return invalid_tokens[i].failure_code;
   }
 
+  g_autofree gchar *unregistered_token = NULL;
+  if (sign_test_access_token_with_jti (server, "unregistered-access-token",
+          session_token, "http-audit-user", "authenticated", "wyrelogd",
+          "wyrelog-client", now, &unregistered_token) != WYRELOG_E_OK)
+    return 161;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_audit_bearer (session, base_url,
+      "guard_timestamp=123&guard_loc_class=public&guard_risk=69",
+      unregistered_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"audit_auth_required\"") == NULL)
+    return 162;
+
   g_autofree gchar *session_jti_token = NULL;
   if (sign_test_access_token_with_jti (server, session_token, session_token,
           "http-audit-user", "authenticated", "wyrelogd", "wyrelog-client",
