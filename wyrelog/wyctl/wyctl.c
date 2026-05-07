@@ -16,6 +16,7 @@ typedef struct
   gchar *daemon_url;
   gchar *timeout_ms_arg;
   gboolean show_version;
+  gboolean readiness;
 } WyctlOptions;
 
 typedef struct
@@ -247,13 +248,25 @@ append_audit_event_json (GString *json, const WylAuditEvent *event)
 }
 
 static gchar *
-build_healthz_uri (const gchar *daemon_url)
+build_daemon_path_uri (const gchar *daemon_url, const gchar *path)
 {
   g_autofree gchar *root = g_strdup (daemon_url);
 
   while (root[0] != '\0' && g_str_has_suffix (root, "/"))
     root[strlen (root) - 1] = '\0';
-  return g_strdup_printf ("%s/healthz", root);
+  return g_strdup_printf ("%s%s", root, path);
+}
+
+static gchar *
+build_healthz_uri (const gchar *daemon_url)
+{
+  return build_daemon_path_uri (daemon_url, "/healthz");
+}
+
+static gchar *
+build_readyz_json_uri (const gchar *daemon_url)
+{
+  return build_daemon_path_uri (daemon_url, "/readyz?format=json");
 }
 
 static gboolean
@@ -272,17 +285,163 @@ daemon_url_is_valid (const gchar *daemon_url)
 }
 
 static int
+send_status_probe (const gchar *uri, guint timeout_ms, guint *out_status,
+    gchar **out_body)
+{
+  g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
+  if (out_status == NULL || out_body == NULL || msg == NULL)
+    return 2;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  WyctlTimeout timeout = {
+    .cancellable = cancellable,
+    .timeout_ms = timeout_ms,
+  };
+  g_cond_init (&timeout.cond);
+  g_mutex_init (&timeout.mutex);
+  GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
+      &timeout);
+
+  g_autoptr (GError) io_error = NULL;
+  g_autoptr (GBytes) body =
+      soup_session_send_and_read (session, msg, cancellable, &io_error);
+
+  g_mutex_lock (&timeout.mutex);
+  timeout.done = TRUE;
+  g_cond_signal (&timeout.cond);
+  g_mutex_unlock (&timeout.mutex);
+  g_thread_join (timeout_thread);
+  g_mutex_clear (&timeout.mutex);
+  g_cond_clear (&timeout.cond);
+
+  if (body == NULL)
+    return 1;
+
+  *out_status = soup_message_get_status (msg);
+  gsize body_size = 0;
+  const gchar *body_data = g_bytes_get_data (body, &body_size);
+  *out_body = g_strndup (body_data, body_size);
+  return 0;
+}
+
+static const gchar *
+skip_json_ws (const gchar *p)
+{
+  while (p != NULL && g_ascii_isspace (*p))
+    p++;
+  return p;
+}
+
+static gboolean
+parse_json_code_string (const gchar **inout_p, gchar **out_value)
+{
+  const gchar *p = skip_json_ws (*inout_p);
+  if (p == NULL || *p != '"' || out_value == NULL)
+    return FALSE;
+  p++;
+
+  const gchar *start = p;
+  while (g_ascii_isalnum (*p) || *p == '_')
+    p++;
+  if (p == start || *p != '"')
+    return FALSE;
+
+  *out_value = g_strndup (start, (gsize) (p - start));
+  *inout_p = p + 1;
+  return TRUE;
+}
+
+static gboolean
+parse_readiness_json (const gchar *body, gchar **out_status, gchar **out_reason)
+{
+  if (body == NULL || out_status == NULL || out_reason == NULL)
+    return FALSE;
+  *out_status = NULL;
+  *out_reason = NULL;
+
+  const gchar *p = skip_json_ws (body);
+  if (*p != '{')
+    return FALSE;
+  p++;
+
+  g_autofree gchar *key = NULL;
+  if (!parse_json_code_string (&p, &key) || g_strcmp0 (key, "status") != 0)
+    return FALSE;
+  p = skip_json_ws (p);
+  if (*p != ':')
+    return FALSE;
+  p++;
+  if (!parse_json_code_string (&p, out_status))
+    return FALSE;
+
+  p = skip_json_ws (p);
+  if (*p == ',') {
+    p++;
+    g_clear_pointer (&key, g_free);
+    if (!parse_json_code_string (&p, &key) || g_strcmp0 (key, "reason") != 0)
+      return FALSE;
+    p = skip_json_ws (p);
+    if (*p != ':')
+      return FALSE;
+    p++;
+    if (!parse_json_code_string (&p, out_reason))
+      return FALSE;
+    p = skip_json_ws (p);
+  }
+
+  if (*p != '}')
+    return FALSE;
+  p = skip_json_ws (p + 1);
+  return *p == '\0';
+}
+
+static gboolean
+readiness_reason_is_known (const gchar *reason)
+{
+  if (reason == NULL)
+    return FALSE;
+  return g_strcmp0 (reason, "delta_not_ready") == 0 ||
+      g_strcmp0 (reason, "audit_degraded") == 0 ||
+      g_strcmp0 (reason, "not_ready") == 0;
+}
+
+static const gchar *
+readiness_reason_from_body (const gchar *body)
+{
+  g_autofree gchar *status = NULL;
+  g_autofree gchar *reason = NULL;
+  if (!parse_readiness_json (body, &status, &reason))
+    return NULL;
+  if (g_strcmp0 (status, "not_ready") != 0 ||
+      !readiness_reason_is_known (reason))
+    return NULL;
+  if (g_strcmp0 (reason, "delta_not_ready") == 0)
+    return "delta_not_ready";
+  if (g_strcmp0 (reason, "audit_degraded") == 0)
+    return "audit_degraded";
+  if (g_strcmp0 (reason, "not_ready") == 0)
+    return "not_ready";
+  return NULL;
+}
+
+static int
 run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   WyctlOptions opts = {
     .daemon_url = global_opts->daemon_url,
     .timeout_ms_arg = global_opts->timeout_ms_arg,
+    .readiness = global_opts->readiness,
   };
   GOptionEntry entries[] = {
     {"daemon-url", 0, 0, G_OPTION_ARG_STRING, &opts.daemon_url,
         "Daemon URL", "URL"},
     {"timeout-ms", 0, 0, G_OPTION_ARG_STRING, &opts.timeout_ms_arg,
         "Daemon probe timeout in milliseconds", "N"},
+    {"readiness", 0, 0, G_OPTION_ARG_NONE, &opts.readiness,
+        "Report daemon readiness", NULL},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -315,45 +474,43 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
 
-  g_autofree gchar *uri = build_healthz_uri (opts.daemon_url);
-  g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
-  if (msg == NULL) {
+  g_autofree gchar *uri =
+      opts.readiness ? build_readyz_json_uri (opts.daemon_url) :
+      build_healthz_uri (opts.daemon_url);
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  int probe_rc = send_status_probe (uri, timeout_ms, &status, &body);
+  if (probe_rc == 2) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
-
-  g_autoptr (SoupSession) session = soup_session_new ();
-  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
-  WyctlTimeout timeout = {
-    .cancellable = cancellable,
-    .timeout_ms = timeout_ms,
-  };
-  g_cond_init (&timeout.cond);
-  g_mutex_init (&timeout.mutex);
-  GThread *timeout_thread = g_thread_new ("wyctl-timeout", timeout_thread_func,
-      &timeout);
-
-  g_autoptr (GError) io_error = NULL;
-  g_autoptr (GBytes) body =
-      soup_session_send_and_read (session, msg, cancellable, &io_error);
-
-  g_mutex_lock (&timeout.mutex);
-  timeout.done = TRUE;
-  g_cond_signal (&timeout.cond);
-  g_mutex_unlock (&timeout.mutex);
-  g_thread_join (timeout_thread);
-  g_mutex_clear (&timeout.mutex);
-  g_cond_clear (&timeout.cond);
-
-  if (body == NULL) {
+  if (probe_rc != 0) {
     g_printerr ("wyctl: daemon unavailable: %s\n", opts.daemon_url);
     return 1;
   }
 
-  guint status = soup_message_get_status (msg);
   if (status < 200 || status >= 300) {
+    if (opts.readiness && status == 503) {
+      const gchar *reason = readiness_reason_from_body (body);
+      if (reason != NULL) {
+        g_print ("status=not_ready reason=%s\n", reason);
+        return 1;
+      }
+    }
     g_printerr ("wyctl: daemon unavailable: %s\n", opts.daemon_url);
     return 1;
+  }
+
+  if (opts.readiness) {
+    g_autofree gchar *ready_status = NULL;
+    g_autofree gchar *ready_reason = NULL;
+    if (!parse_readiness_json (body, &ready_status, &ready_reason) ||
+        g_strcmp0 (ready_status, "ready") != 0 || ready_reason != NULL) {
+      g_printerr ("wyctl: daemon readiness failed\n");
+      return 1;
+    }
+    g_print ("status=ready\n");
+    return 0;
   }
 
   g_print ("ok\n");

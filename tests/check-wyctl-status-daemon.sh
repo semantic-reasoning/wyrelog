@@ -40,6 +40,19 @@ while [ "$i" -lt 150 ]; do
   if "$WYCTL" --daemon-url "$BASE_URL" --timeout-ms 500 status \
       >"$OUT" 2>"$ERR"; then
     if [ "$(cat "$OUT")" = "ok" ] && [ ! -s "$ERR" ]; then
+      if ! "$WYCTL" --daemon-url "$BASE_URL" --timeout-ms 500 status \
+          --readiness >"$OUT" 2>"$ERR"; then
+        echo "wyctl readiness status failed" >&2
+        cat "$OUT" >&2
+        cat "$ERR" >&2
+        exit 1
+      fi
+      if [ "$(cat "$OUT")" != "status=ready" ] || [ -s "$ERR" ]; then
+        echo "wyctl readiness status returned unexpected output" >&2
+        cat "$OUT" >&2
+        cat "$ERR" >&2
+        exit 1
+      fi
       kill -TERM "$PID"
       wait "$PID"
       PID=
