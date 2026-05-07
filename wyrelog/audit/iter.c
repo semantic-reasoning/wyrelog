@@ -13,6 +13,7 @@ struct _WylAuditIter
   GObject parent_instance;
   WylClient *client;
   gchar *query_filter;
+  gchar *tenant;
   gchar *session_token;
   gchar *access_token;
   gboolean has_guard_context;
@@ -36,6 +37,7 @@ wyl_audit_iter_finalize (GObject *object)
   g_clear_pointer (&self->events, g_ptr_array_unref);
   g_clear_object (&self->current_event);
   g_free (self->query_filter);
+  g_free (self->tenant);
   g_free (self->session_token);
   g_free (self->access_token);
   g_free (self->guard_loc_class);
@@ -92,10 +94,14 @@ wyl_client_audit_query_with_guard_context (WylClient *client,
   if (session_token == NULL || session_token[0] == '\0')
     return WYRELOG_E_INVALID;
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
+  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
+  if (tenant == NULL || tenant[0] == '\0')
+    return WYRELOG_E_INVALID;
 
   WylAuditIter *iter = g_object_new (WYL_TYPE_AUDIT_ITER, NULL);
   iter->client = g_object_ref (client);
   iter->query_filter = g_strdup (query_filter);
+  iter->tenant = g_steal_pointer (&tenant);
   iter->session_token = g_steal_pointer (&session_token);
   iter->access_token = g_steal_pointer (&access_token);
   iter->has_guard_context = TRUE;
@@ -125,21 +131,23 @@ wyl_audit_iter_dup_request_uri (const WylAuditIter *iter)
   g_autoptr (GString) query = g_string_new (NULL);
 
   if (iter->has_guard_context) {
+    g_autofree gchar *escaped_tenant =
+        g_uri_escape_string (iter->tenant, NULL, TRUE);
     g_autofree gchar *escaped_loc =
         g_uri_escape_string (iter->guard_loc_class, NULL, TRUE);
     if (iter->access_token == NULL) {
       g_autofree gchar *escaped_session =
           g_uri_escape_string (iter->session_token, NULL, TRUE);
       g_string_append_printf (query,
-          "session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+          "tenant=%s&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
           "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-          escaped_session, iter->guard_timestamp, escaped_loc,
+          escaped_tenant, escaped_session, iter->guard_timestamp, escaped_loc,
           iter->guard_risk);
     } else {
       g_string_append_printf (query,
-          "guard_timestamp=%" G_GINT64_FORMAT
+          "tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
           "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
-          iter->guard_timestamp, escaped_loc, iter->guard_risk);
+          escaped_tenant, iter->guard_timestamp, escaped_loc, iter->guard_risk);
     }
   }
 
