@@ -165,6 +165,87 @@ normalize_access_token_file (gchar *access_token, gsize access_token_size)
   return TRUE;
 }
 
+static void
+append_json_string (GString *json, const gchar *value)
+{
+  g_string_append_c (json, '"');
+  for (const guchar * p = (const guchar *)value; p != NULL && *p != '\0'; p++) {
+    switch (*p) {
+      case '"':
+        g_string_append (json, "\\\"");
+        break;
+      case '\\':
+        g_string_append (json, "\\\\");
+        break;
+      case '\b':
+        g_string_append (json, "\\b");
+        break;
+      case '\f':
+        g_string_append (json, "\\f");
+        break;
+      case '\n':
+        g_string_append (json, "\\n");
+        break;
+      case '\r':
+        g_string_append (json, "\\r");
+        break;
+      case '\t':
+        g_string_append (json, "\\t");
+        break;
+      default:
+        if (*p < 0x20)
+          g_string_append_printf (json, "\\u%04x", (guint) * p);
+        else
+          g_string_append_c (json, (gchar) * p);
+        break;
+    }
+  }
+  g_string_append_c (json, '"');
+}
+
+static void
+append_json_nullable_string_member (GString *json, const gchar *name,
+    const gchar *value)
+{
+  append_json_string (json, name);
+  g_string_append_c (json, ':');
+  if (value == NULL)
+    g_string_append (json, "null");
+  else
+    append_json_string (json, value);
+}
+
+static void
+append_audit_event_json (GString *json, const WylAuditEvent *event)
+{
+  g_autofree gchar *id = wyl_audit_event_dup_id_string (event);
+
+  g_string_append_c (json, '{');
+  append_json_nullable_string_member (json, "id", id);
+  g_string_append_printf (json, ",\"created_at_us\":%" G_GINT64_FORMAT,
+      wyl_audit_event_get_created_at_us (event));
+  g_string_append_c (json, ',');
+  append_json_nullable_string_member (json, "subject_id",
+      wyl_audit_event_get_subject_id (event));
+  g_string_append_c (json, ',');
+  append_json_nullable_string_member (json, "action",
+      wyl_audit_event_get_action (event));
+  g_string_append_c (json, ',');
+  append_json_nullable_string_member (json, "resource_id",
+      wyl_audit_event_get_resource_id (event));
+  g_string_append_c (json, ',');
+  append_json_nullable_string_member (json, "deny_reason",
+      wyl_audit_event_get_deny_reason (event));
+  g_string_append_c (json, ',');
+  append_json_nullable_string_member (json, "deny_origin",
+      wyl_audit_event_get_deny_origin (event));
+  g_string_append_c (json, ',');
+  append_json_nullable_string_member (json, "request_id",
+      wyl_audit_event_get_request_id (event));
+  g_string_append_printf (json, ",\"decision\":%d}",
+      wyl_audit_event_get_decision (event));
+}
+
 static gchar *
 build_healthz_uri (const gchar *daemon_url)
 {
@@ -548,13 +629,48 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   if (token_rc != 0)
     return token_rc;
 
-  (void) timeout_ms;
-  (void) guard_timestamp;
-  (void) guard_risk;
-  (void) limit;
-  (void) access_token;
-  g_printerr ("wyctl: audit query is not implemented\n");
-  return 3;
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+      wyl_client_set_bearer_credentials (client, access_token,
+          "__wr_default") != WYRELOG_E_OK) {
+    g_printerr ("wyctl: invalid audit credentials\n");
+    return 2;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+
+  g_autoptr (WylAuditIter) iter = NULL;
+  wyrelog_error_t query_rc = wyl_client_audit_query_with_guard_context (client,
+      opts.filter, guard_timestamp, opts.guard_loc_class, guard_risk, &iter);
+  if (query_rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: audit query failed\n");
+    return 3;
+  }
+
+  g_autoptr (GString) json = g_string_new ("[");
+  guint emitted = 0;
+  gboolean has_next = FALSE;
+  while (emitted < limit) {
+    wyrelog_error_t next_rc = wyl_audit_iter_next (iter, &has_next);
+    if (next_rc != WYRELOG_E_OK) {
+      g_printerr ("wyctl: audit query failed\n");
+      return 3;
+    }
+    if (!has_next)
+      break;
+
+    g_autoptr (WylAuditEvent) event = wyl_audit_iter_ref_event (iter);
+    if (event == NULL) {
+      g_printerr ("wyctl: audit query failed\n");
+      return 3;
+    }
+    if (emitted > 0)
+      g_string_append_c (json, ',');
+    append_audit_event_json (json, event);
+    emitted++;
+  }
+  g_string_append (json, "]\n");
+  g_print ("%s", json->str);
+  return 0;
 }
 
 static int

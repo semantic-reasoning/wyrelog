@@ -527,8 +527,7 @@ test_audit_validation (void)
   run_child (valid_scaffold_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: audit query is not implemented"));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: audit query failed"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -1023,6 +1022,116 @@ test_policy_check (void)
       "deny\nreason=missing_grant\norigin=policy\n", TRUE, 0, "1000");
 }
 
+static void
+run_audit_query_case (const gchar *response_body, const gchar *expected_output,
+    guint delay_us, const gchar *timeout_ms, const gchar *limit)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-audit-token-XXXXXX", &token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  PolicyCheckServer server = {
+    .listener = listener,
+    .response_body = response_body,
+    .delay_us = delay_us,
+  };
+  GThread *server_thread = g_thread_new ("audit-query",
+      policy_check_server_thread, &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    daemon_url,
+    "--timeout-ms",
+    (gchar *) timeout_ms,
+    "audit",
+    "query",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    "--filter",
+    "decision=deny",
+    "--limit",
+    (gchar *) limit,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_thread_join (server_thread);
+
+  g_assert_cmpint (wait_status_is_success (wait_status),
+      ==, expected_output[0] != '\0');
+  g_assert_cmpstr (stdout_buf, ==, expected_output);
+  if (expected_output[0] != '\0')
+    g_assert_cmpstr (stderr_buf, ==, "");
+  else
+    g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+            "wyctl: audit query failed"));
+  g_assert_nonnull (server.request);
+  g_assert_nonnull (g_strstr_len (server.request, -1, "GET /audit/events?"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "guard_timestamp=123"));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "guard_loc_class=public"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "guard_risk=69"));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "filter=decision%3Ddeny"));
+  g_assert_null (g_strstr_len (server.request, -1, "session_token="));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "Authorization: Bearer token-1"));
+
+  g_free (server.request);
+  g_unlink (token_path);
+}
+
+static void
+test_audit_query (void)
+{
+  run_audit_query_case
+      ("[{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d001\","
+      "\"created_at_us\":1234567,"
+      "\"subject_id\":\"ali\\nce\","
+      "\"action\":\"read\","
+      "\"resource_id\":\"doc/42\","
+      "\"deny_reason\":null,"
+      "\"deny_origin\":null,"
+      "\"request_id\":null,"
+      "\"decision\":1},"
+      "{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d002\","
+      "\"created_at_us\":1234568,"
+      "\"subject_id\":\"bob\","
+      "\"action\":\"write\","
+      "\"resource_id\":\"doc/43\","
+      "\"deny_reason\":\"missing_grant\","
+      "\"deny_origin\":\"policy\","
+      "\"request_id\":\"req-audit\","
+      "\"decision\":0}]",
+      "[{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d001\","
+      "\"created_at_us\":1234567,"
+      "\"subject_id\":\"ali\\nce\","
+      "\"action\":\"read\","
+      "\"resource_id\":\"doc/42\","
+      "\"deny_reason\":null,"
+      "\"deny_origin\":null,"
+      "\"request_id\":null," "\"decision\":1}]\n", 0, "1000", "1");
+  run_audit_query_case ("[]", "[]\n", 0, "1000", "100");
+  run_audit_query_case ("[]", "", 250 * 1000, "50", "100");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1045,6 +1154,7 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/policy-check", test_policy_check);
   g_test_add_func ("/wyctl/audit-help", test_audit_help);
   g_test_add_func ("/wyctl/audit-validation", test_audit_validation);
+  g_test_add_func ("/wyctl/audit-query", test_audit_query);
 
   return g_test_run ();
 }
