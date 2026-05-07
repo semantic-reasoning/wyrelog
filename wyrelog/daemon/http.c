@@ -42,6 +42,14 @@ typedef struct
 
 typedef struct
 {
+  gchar *session_id;
+  gchar *actor;
+  gchar *tenant;
+  gboolean bearer;
+} WylDaemonAuthContext;
+
+typedef struct
+{
   WylHandle *handle;
   WylDaemonRuntime *runtime;
   guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
@@ -53,6 +61,20 @@ typedef struct
 } WylDaemonHttpContext;
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
+
+static void
+wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
+{
+  if (auth == NULL)
+    return;
+  g_free (auth->session_id);
+  g_free (auth->actor);
+  g_free (auth->tenant);
+  memset (auth, 0, sizeof *auth);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylDaemonAuthContext,
+    wyl_daemon_auth_context_clear);
 
 static void
 wyl_access_token_state_free (gpointer data)
@@ -457,13 +479,11 @@ lookup_bearer_token (SoupServerMessage *msg)
 
 static wyrelog_error_t
 resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
-    const gchar *token, gchar **out_session_id, gchar **out_actor)
+    const gchar *token, WylDaemonAuthContext *out_auth)
 {
-  if (ctx == NULL || token == NULL || out_session_id == NULL ||
-      out_actor == NULL)
+  if (ctx == NULL || token == NULL || out_auth == NULL)
     return WYRELOG_E_INVALID;
-  *out_session_id = NULL;
-  *out_actor = NULL;
+  wyl_daemon_auth_context_clear (out_auth);
 
   guint8 secret[WYL_DAEMON_JWT_KEY_LEN];
   wyrelog_error_t rc = copy_access_token_secret (ctx, secret);
@@ -510,9 +530,37 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     return WYRELOG_E_POLICY;
   }
 
-  *out_session_id = g_steal_pointer (&claims.session_id);
-  *out_actor = g_steal_pointer (&claims.subject);
+  out_auth->session_id = g_steal_pointer (&claims.session_id);
+  out_auth->actor = g_steal_pointer (&claims.subject);
+  out_auth->tenant = g_steal_pointer (&claims.tenant);
+  out_auth->bearer = TRUE;
   wyl_jwt_access_claims_clear (&claims);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+resolve_session_token_auth (SoupServer *server, const gchar *session_token,
+    WylDaemonAuthContext *out_auth)
+{
+  if (server == NULL || session_token == NULL || out_auth == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_daemon_auth_context_clear (out_auth);
+
+  g_autoptr (WylSession) session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (session == NULL)
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *username = wyl_session_dup_username (session);
+  g_autofree gchar *tenant = wyl_session_dup_tenant (session);
+  if (username == NULL || username[0] == '\0' || tenant == NULL ||
+      tenant[0] == '\0')
+    return WYRELOG_E_POLICY;
+
+  out_auth->session_id = g_strdup (session_token);
+  out_auth->actor = g_steal_pointer (&username);
+  out_auth->tenant = g_steal_pointer (&tenant);
+  out_auth->bearer = FALSE;
   return WYRELOG_E_OK;
 }
 
@@ -762,24 +810,17 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     return FALSE;
   }
 
-  g_autofree gchar *auth_session_id = NULL;
-  g_autofree gchar *username = NULL;
+  g_auto (WylDaemonAuthContext) auth = { 0 };
   if (has_session_token) {
-    g_autoptr (WylSession) session =
-        wyl_daemon_http_ref_session (server, session_token);
-    if (session == NULL) {
-      set_json_error (msg, 401, auth_required_code);
-      return FALSE;
-    }
-    username = wyl_session_dup_username (session);
-    auth_session_id = g_strdup (session_token);
-    if (username == NULL || username[0] == '\0') {
+    wyrelog_error_t auth_rc =
+        resolve_session_token_auth (server, session_token, &auth);
+    if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401, auth_required_code);
       return FALSE;
     }
   } else {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-        bearer_token, &auth_session_id, &username);
+        bearer_token, &auth);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401, auth_required_code);
       return FALSE;
@@ -788,10 +829,10 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
-  wyl_decide_req_set_subject_id (req, username);
+  wyl_decide_req_set_subject_id (req, auth.actor);
   wyl_decide_req_set_action (req, action);
   wyl_decide_req_set_resource_id (req,
-      resource != NULL ? resource : auth_session_id);
+      resource != NULL ? resource : auth.session_id);
   wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
   wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
 
@@ -810,7 +851,7 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   }
 
   if (out_actor != NULL)
-    *out_actor = g_steal_pointer (&username);
+    *out_actor = g_strdup (auth.actor);
   return TRUE;
 }
 
@@ -1310,16 +1351,15 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   WylDaemonHttpContext *ctx = user_data;
-  g_autofree gchar *bearer_session_token = NULL;
-  g_autofree gchar *bearer_actor = NULL;
+  g_auto (WylDaemonAuthContext) bearer_auth = { 0 };
   if (has_bearer_token) {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-        bearer_token, &bearer_session_token, &bearer_actor);
+        bearer_token, &bearer_auth);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401, "logout_auth_required");
       return;
     }
-    session_token = bearer_session_token;
+    session_token = bearer_auth.session_id;
   }
 
   g_autoptr (WylSession) session =
