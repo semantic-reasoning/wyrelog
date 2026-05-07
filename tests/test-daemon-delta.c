@@ -231,7 +231,7 @@ malform_audit_events_table (WylHandle *handle)
 }
 
 static gint
-check_delta_callback_ignores_runtime_projection_failure (void)
+check_delta_callback_records_runtime_projection_failure (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   gint64 row[3];
@@ -256,11 +256,11 @@ check_delta_callback_ignores_runtime_projection_failure (void)
     return 15;
   if (runtime.delta_events_seen == 0 || runtime.last_delta_event_us <= 0)
     return 27;
-  if (runtime.audit_errors != 0)
+  if (runtime.audit_errors == 0)
     return 16;
-  if (g_atomic_int_get (&runtime.audit_degraded))
+  if (!g_atomic_int_get (&runtime.audit_degraded))
     return 28;
-  if (runtime.last_audit_error != WYRELOG_E_OK)
+  if (runtime.last_audit_error == WYRELOG_E_OK)
     return 17;
 
   g_autofree gchar *id = NULL;
@@ -447,7 +447,7 @@ main (void)
 {
   gint rc;
 
-  if ((rc = check_delta_callback_ignores_runtime_projection_failure ()) != 0)
+  if ((rc = check_delta_callback_records_runtime_projection_failure ()) != 0)
     return rc;
   if ((rc = check_perm_state_delta_persists_audit_rows ()) != 0)
     return rc;
