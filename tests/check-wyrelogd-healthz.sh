@@ -102,6 +102,9 @@ for _ in range(50):
         health = urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
         if health != b"ok\n":
             sys.exit(1)
+        ready = urllib.request.urlopen(f"{base}/readyz", timeout=1).read()
+        if ready != b"ready\n":
+            sys.exit(1)
         if expect_audit:
             if not audit_endpoint_requires_auth():
                 sys.exit(1)
