@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <string.h>
 
@@ -275,6 +276,72 @@ test_policy_help (void)
 static void
 test_policy_validation (void)
 {
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-token-XXXXXX", &token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autofree gchar *empty_token_path = NULL;
+  fd = g_file_open_tmp ("wyctl-empty-token-XXXXXX", &empty_token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+
+  g_autofree gchar *invalid_token_path = NULL;
+  fd = g_file_open_tmp ("wyctl-invalid-token-XXXXXX", &invalid_token_path,
+      &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (invalid_token_path, "token-1\nbad\n",
+          -1, &error));
+  g_assert_no_error (error);
+
+  g_autofree gchar *nul_token_path = NULL;
+  fd = g_file_open_tmp ("wyctl-nul-token-XXXXXX", &nul_token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  {
+    const gchar token_with_nul[] = { 't', 'o', 'k', 'e', 'n', '\0', 'b' };
+    g_assert_true (g_file_set_contents (nul_token_path, token_with_nul,
+            sizeof token_with_nul, &error));
+    g_assert_no_error (error);
+  }
+
+  g_autofree gchar *leading_token_path = NULL;
+  fd = g_file_open_tmp ("wyctl-leading-token-XXXXXX", &leading_token_path,
+      &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (leading_token_path, "\ntoken-1\n", -1,
+          &error));
+  g_assert_no_error (error);
+
+  g_autofree gchar *trailing_blank_token_path = NULL;
+  fd = g_file_open_tmp ("wyctl-trailing-token-XXXXXX",
+      &trailing_blank_token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (trailing_blank_token_path,
+          "token-1\n\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autofree gchar *space_token_path = NULL;
+  fd = g_file_open_tmp ("wyctl-space-token-XXXXXX", &space_token_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (space_token_path, " token-1\n", -1,
+          &error));
+  g_assert_no_error (error);
+
   gchar *missing_resource_argv[] = {
     WYL_TEST_WYCTL_PATH,
     "policy",
@@ -283,6 +350,132 @@ test_policy_validation (void)
     "alice",
     "--permission",
     "wr.audit.read",
+    "--access-token-file",
+    token_path,
+    NULL,
+  };
+  gchar *missing_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    NULL,
+  };
+  gchar *unreadable_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    "/nonexistent/wyctl-token",
+    NULL,
+  };
+  gchar *empty_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    empty_token_path,
+    NULL,
+  };
+  gchar *invalid_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    invalid_token_path,
+    NULL,
+  };
+  gchar *nul_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    nul_token_path,
+    NULL,
+  };
+  gchar *leading_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    leading_token_path,
+    NULL,
+  };
+  gchar *trailing_blank_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    trailing_blank_token_path,
+    NULL,
+  };
+  gchar *space_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    space_token_path,
+    NULL,
+  };
+  gchar *valid_scaffold_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "check",
+    "--user",
+    "alice",
+    "--permission",
+    "wr.audit.read",
+    "--resource",
+    "doc/42",
+    "--access-token-file",
+    token_path,
     NULL,
   };
   gchar *unknown_argv[] = {
@@ -301,6 +494,8 @@ test_policy_validation (void)
     "wr.audit.read",
     "--resource",
     "doc/42",
+    "--access-token-file",
+    token_path,
     "extra",
     NULL,
   };
@@ -312,6 +507,78 @@ test_policy_validation (void)
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing --resource"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: missing --access-token-file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (unreadable_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: unable to read access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (empty_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: empty access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (leading_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (trailing_blank_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (space_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (nul_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid access token file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (valid_scaffold_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: policy check is not implemented"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -328,6 +595,14 @@ test_policy_validation (void)
   g_assert_cmpstr (stdout_buf, ==, "");
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
           "wyctl: unexpected policy check argument"));
+
+  g_unlink (token_path);
+  g_unlink (empty_token_path);
+  g_unlink (invalid_token_path);
+  g_unlink (nul_token_path);
+  g_unlink (leading_token_path);
+  g_unlink (trailing_blank_token_path);
+  g_unlink (space_token_path);
 }
 
 int
