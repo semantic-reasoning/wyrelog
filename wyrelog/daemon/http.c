@@ -929,6 +929,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, username);
   wyl_login_req_set_skip_mfa (login, skip_mfa_requested);
+  wyl_login_req_set_request_id (login, ensure_request_id_header (msg));
 
   g_autoptr (WylSession) session = NULL;
   wyrelog_error_t rc = wyl_session_login (handle, login, &session);

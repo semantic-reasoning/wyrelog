@@ -8,6 +8,7 @@
 struct _wyl_login_req
 {
   gchar *username;
+  gchar *request_id;
   gboolean skip_mfa;
 };
 
@@ -62,6 +63,7 @@ wyl_login_req_free (wyl_login_req_t *req)
   if (req == NULL)
     return;
   g_free (req->username);
+  g_free (req->request_id);
   g_free (req);
 }
 
@@ -92,6 +94,21 @@ wyl_login_req_get_skip_mfa (const wyl_login_req_t *req)
 {
   g_return_val_if_fail (req != NULL, FALSE);
   return req->skip_mfa;
+}
+
+void
+wyl_login_req_set_request_id (wyl_login_req_t *req, const gchar *request_id)
+{
+  g_return_if_fail (req != NULL);
+  g_free (req->request_id);
+  req->request_id = g_strdup (request_id);
+}
+
+const gchar *
+wyl_login_req_get_request_id (const wyl_login_req_t *req)
+{
+  g_return_val_if_fail (req != NULL, NULL);
+  return req->request_id;
 }
 
 wyl_grant_req_t *
