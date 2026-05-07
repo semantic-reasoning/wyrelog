@@ -809,6 +809,72 @@ check_policy_store_audit_replay_loads_runtime_query (void)
 }
 
 static gint
+check_policy_store_audit_intention_reconciles_runtime_query (void)
+{
+  WylHandle *handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 508;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  static const gchar *id = "01890c10-2e3f-7000-8000-000000000013";
+  gboolean inserted = FALSE;
+  if (wyl_policy_store_record_audit_intention_full (store, id, 891,
+          "reconcile-user", "audit.reconcile", "reconcile-resource",
+          "not_armed", "perm_state", "req-reconcile", WYL_DECISION_DENY,
+          &inserted) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 509;
+  }
+  if (!inserted) {
+    g_object_unref (handle);
+    return 510;
+  }
+
+  gint64 count = -1;
+  if (!policy_count_audit_rows (handle, id, &count) || count != 0) {
+    g_object_unref (handle);
+    return 511;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 512;
+  }
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 513;
+  }
+  if (!policy_count_audit_rows (handle, id, &count) || count != 1) {
+    g_object_unref (handle);
+    return 514;
+  }
+  if (!runtime_count_audit_rows (handle, id, &count) || count != 1) {
+    g_object_unref (handle);
+    return 515;
+  }
+
+  g_autofree gchar *state = NULL;
+  gint64 attempt_count = -1;
+  if (!policy_get_audit_intention_state (handle, id, &state, &attempt_count)) {
+    g_object_unref (handle);
+    return 516;
+  }
+  if (g_strcmp0 (state, "committed") != 0 || attempt_count != 0) {
+    g_object_unref (handle);
+    return 517;
+  }
+
+  gboolean contains = FALSE;
+  if (contains_audit_event_fact (handle, id, 891, "deny", &contains)
+      != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 518;
+  }
+
+  g_object_unref (handle);
+  return 0;
+}
+
+static gint
 check_emit_replays_runtime_query_after_table_loss (void)
 {
   WylHandle *handle = NULL;
@@ -2916,6 +2982,9 @@ main (void)
   if ((rc = check_emit_mirrors_policy_store_row ()) != 0)
     return rc;
   if ((rc = check_policy_store_audit_replay_loads_runtime_query ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_audit_intention_reconciles_runtime_query ())
+      != 0)
     return rc;
   if ((rc = check_emit_replays_runtime_query_after_table_loss ()) != 0)
     return rc;

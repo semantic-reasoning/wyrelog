@@ -525,6 +525,80 @@ insert_policy_store_audit_event (const gchar *id, gint64 created_at_us,
       decision, &inserted);
 }
 
+typedef struct
+{
+  WylHandle *self;
+  GPtrArray *committed_ids;
+} WylAuditReconcileCtx;
+
+static wyrelog_error_t
+reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, const gchar *state, gint64 attempt_count,
+    const gchar *last_error, gpointer user_data)
+{
+  WylAuditReconcileCtx *ctx = user_data;
+  WylHandle *self = ctx->self;
+  gboolean inserted = FALSE;
+
+  (void) state;
+  (void) attempt_count;
+  (void) last_error;
+
+  wyrelog_error_t rc =
+      wyl_policy_store_append_audit_event_full (self->policy_store, id,
+      created_at_us, subject_id, action, resource_id, deny_reason, deny_origin,
+      request_id, decision, &inserted);
+  if (rc != WYRELOG_E_OK) {
+    (void) wyl_policy_store_mark_audit_intention_failed (self->policy_store,
+        id, "sqlite audit append failed");
+    return rc;
+  }
+
+  rc = wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
+      action, resource_id, deny_reason, deny_origin, request_id, decision);
+  if (rc != WYRELOG_E_OK) {
+    if (inserted) {
+      wyrelog_error_t cleanup_rc =
+          wyl_policy_store_delete_audit_event (self->policy_store, id);
+      if (cleanup_rc != WYRELOG_E_OK)
+        return cleanup_rc;
+    }
+    (void) wyl_policy_store_mark_audit_intention_failed (self->policy_store,
+        id, "wirelog fact projection failed");
+    return rc;
+  }
+
+  rc = insert_policy_store_audit_event (id, created_at_us, subject_id, action,
+      resource_id, deny_reason, deny_origin, request_id, decision, self);
+  if (rc != WYRELOG_E_OK) {
+    (void) wyl_policy_store_mark_audit_intention_failed (self->policy_store,
+        id, "duckdb append failed");
+    return rc;
+  }
+
+  g_ptr_array_add (ctx->committed_ids, g_strdup (id));
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+reconcile_policy_store_audit_intentions (WylHandle *self,
+    GPtrArray *committed_ids)
+{
+  WylAuditReconcileCtx ctx = {
+    .self = self,
+    .committed_ids = committed_ids,
+  };
+  wyrelog_error_t rc =
+      wyl_policy_store_foreach_audit_intention (self->policy_store, "pending",
+      reconcile_policy_store_audit_intention, &ctx);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_policy_store_foreach_audit_intention (self->policy_store,
+      "failed", reconcile_policy_store_audit_intention, &ctx);
+}
+
 wyrelog_error_t
 wyl_handle_load_policy_store_audit_events (WylHandle *self)
 {
@@ -540,12 +614,21 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
   duckdb_connection conn = wyl_audit_conn_get_connection (self->audit_conn);
   duckdb_result result;
   memset (&result, 0, sizeof (result));
+  g_autoptr (GPtrArray) committed_ids = g_ptr_array_new_with_free_func (g_free);
 
   if (duckdb_query (conn, "BEGIN TRANSACTION;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
   }
   duckdb_destroy_result (&result);
+
+  rc = reconcile_policy_store_audit_intentions (self, committed_ids);
+  if (rc != WYRELOG_E_OK) {
+    memset (&result, 0, sizeof (result));
+    duckdb_query (conn, "ROLLBACK;", &result);
+    duckdb_destroy_result (&result);
+    return rc;
+  }
 
   rc = wyl_policy_store_foreach_audit_event (self->policy_store,
       insert_policy_store_audit_event, self);
@@ -565,6 +648,13 @@ wyl_handle_load_policy_store_audit_events (WylHandle *self)
     return WYRELOG_E_IO;
   }
   duckdb_destroy_result (&result);
+  for (guint i = 0; i < committed_ids->len; i++) {
+    const gchar *id = g_ptr_array_index (committed_ids, i);
+    rc = wyl_policy_store_mark_audit_intention_committed (self->policy_store,
+        id);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   return WYRELOG_E_OK;
 }
 #endif
