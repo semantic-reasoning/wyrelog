@@ -655,6 +655,32 @@ insert4_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
 }
 
 static wyrelog_error_t
+contains3_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, const gchar *c, gboolean *out_found)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = intern3 (handle, a, b, c, row);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, relation, row, 3, out_found);
+}
+
+static wyrelog_error_t
+contains5_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, const gchar *c, const gchar *d, const gchar *e,
+    gboolean *out_found)
+{
+  gint64 row[5];
+  wyrelog_error_t rc = intern4 (handle, a, b, c, d, row);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, e, &row[4]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, relation, row, 5, out_found);
+}
+
+static wyrelog_error_t
 insert_decision_fixture_state (WylHandle *handle, const gchar *user,
     const gchar *role, const gchar *permission, const gchar *scope,
     const gchar *principal_state, const gchar *session_state,
@@ -2160,6 +2186,83 @@ check_decision_query_rejects_missing_pair (void)
     return 151;
   if (!allowed)
     return 152;
+  return 0;
+}
+
+static gint
+check_decision_rule_runtime_invariants (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  gint64 decision_row[3];
+  gboolean found = FALSE;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 183;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 184;
+  if (insert_decision_fixture (handle, "runtime-allow-user",
+          "runtime-allow-role", "runtime-allow-perm", "runtime-allow-scope",
+          "authenticated", "active", decision_row) != WYRELOG_E_OK)
+    return 185;
+  if (contains3_symbol (handle, "allow", "runtime-allow-user",
+          "runtime-allow-perm", "runtime-allow-scope", &found)
+      != WYRELOG_E_OK)
+    return 186;
+  if (!found)
+    return 187;
+  if (contains3_symbol (handle, "allow_bool", "runtime-allow-user",
+          "runtime-allow-perm", "runtime-allow-scope", &found)
+      != WYRELOG_E_OK)
+    return 188;
+  if (!found)
+    return 189;
+
+  if (insert_decision_fixture_state (handle, "runtime-unarmed-user",
+          "runtime-unarmed-role", "runtime-unarmed-perm",
+          "runtime-unarmed-scope", "authenticated", "active", FALSE,
+          decision_row) != WYRELOG_E_OK)
+    return 190;
+  if (contains3_symbol (handle, "allow_bool", "runtime-unarmed-user",
+          "runtime-unarmed-perm", "runtime-unarmed-scope", &found)
+      != WYRELOG_E_OK)
+    return 191;
+  if (found)
+    return 192;
+  if (contains5_symbol (handle, "deny_reason", "runtime-unarmed-user",
+          "runtime-unarmed-perm", "runtime-unarmed-scope", "not_armed",
+          "perm_state", &found) != WYRELOG_E_OK)
+    return 193;
+  if (!found)
+    return 194;
+
+  if (insert_decision_fixture (handle, "runtime-multi-deny-user",
+          "runtime-multi-deny-role", "runtime-multi-deny-perm",
+          "runtime-multi-deny-scope", "unverified", "active", decision_row)
+      != WYRELOG_E_OK)
+    return 195;
+  if (insert1_symbol (handle, "frozen", "runtime-multi-deny-scope")
+      != WYRELOG_E_OK)
+    return 196;
+  if (contains5_symbol (handle, "deny_reason", "runtime-multi-deny-user",
+          "runtime-multi-deny-perm", "runtime-multi-deny-scope",
+          "not_authenticated", "principal_state", &found) != WYRELOG_E_OK)
+    return 197;
+  if (!found)
+    return 198;
+  if (contains5_symbol (handle, "deny_reason", "runtime-multi-deny-user",
+          "runtime-multi-deny-perm", "runtime-multi-deny-scope", "frozen",
+          "frozen", &found) != WYRELOG_E_OK)
+    return 199;
+  if (!found)
+    return 200;
+
+  if (contains5_symbol (handle, "deny_reason", "runtime-ungranted-user",
+          "runtime-ungranted-perm", "runtime-ungranted-scope",
+          "not_authenticated", "principal_state", &found) != WYRELOG_E_OK)
+    return 201;
+  if (found)
+    return 202;
   return 0;
 }
 
@@ -4179,6 +4282,8 @@ main (void)
   if ((rc = check_decision_query_denies_armed_catalogue_permission ()) != 0)
     return rc;
   if ((rc = check_decision_query_rejects_missing_pair ()) != 0)
+    return rc;
+  if ((rc = check_decision_rule_runtime_invariants ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_permissions_load_into_engine ()) != 0)
     return rc;
