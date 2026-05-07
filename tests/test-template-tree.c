@@ -86,6 +86,48 @@ check_seed_list (GHashTable *template_ids, gsize count,
 }
 
 static gint
+check_bootstrap_seed_contract (const gchar *contents, gsize len)
+{
+  static const gchar *const snippets[] = {
+    ".decl role(name: symbol)",
+    ".decl permission(name: symbol)",
+    ".decl role_permission(role: symbol, perm: symbol)",
+    ".decl inherits(child: symbol, parent: symbol)",
+    ".decl direct_permission(user: symbol, perm: symbol, scope: symbol)",
+    ".decl member_of(user: symbol, role: symbol, scope: symbol)",
+    ".decl effective_member(user: symbol, role: symbol, scope: symbol)",
+    ".decl effective_permission(role: symbol, perm: symbol)",
+    ".decl has_permission(user: symbol, perm: symbol, scope: symbol)",
+    ".decl login_skip_mfa_authz(user: symbol)",
+    "permission(\"wr.policy.read\").",
+    "permission(\"wr.policy.write\").",
+    "permission(\"wr.policy.grant_role\").",
+    "permission(\"wr.audit.read\").",
+    "permission(\"wr.audit.write\").",
+    "role_permission(\"wr.system_admin\", \"wr.policy.write\").",
+    "role_permission(\"wr.service_admin\", \"wr.policy.write\").",
+    "role_permission(\"wr.auditor\", \"wr.audit.read\").",
+    "role_permission(\"wr.system_agent\", \"wr.audit.write\").",
+    "effective_permission(R, P) :- role_permission(R, P).",
+    "has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).",
+    "has_permission(U, P, S) :- direct_permission(U, P, S).",
+    "can_read_audit(U) :- has_permission(U, \"wr.audit.read\", _).",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (snippets); i++) {
+    if (g_strstr_len (contents, (gssize) len, snippets[i]) == NULL)
+      return (gint) (80 + i);
+  }
+  if (count_substring (contents, "permission(\"wr.login.skip_mfa\").") != 1)
+    return 103;
+  if (count_substring (contents, "role_permission(\"wr.login.skip_mfa\"") != 0)
+    return 104;
+  if (count_substring (contents, ", \"wr.login.skip_mfa\")") != 0)
+    return 105;
+  return 0;
+}
+
+static gint
 check_bootstrap_seed_consistency (void)
 {
   g_autofree gchar *path =
@@ -98,13 +140,16 @@ check_bootstrap_seed_consistency (void)
     return 30;
   if (count_substring (contents, "\"wr.login.skip_mfa\"") != 1)
     return 33;
+  gint rc = check_bootstrap_seed_contract (contents, len);
+  if (rc != 0)
+    return rc;
 
   g_autoptr (GHashTable) roles = g_hash_table_new_full (g_str_hash,
       g_str_equal, g_free, NULL);
   g_autoptr (GHashTable) permissions = g_hash_table_new_full (g_str_hash,
       g_str_equal, g_free, NULL);
 
-  gint rc = collect_template_facts (contents, "role(", roles);
+  rc = collect_template_facts (contents, "role(", roles);
   if (rc != 0)
     return 31;
   rc = collect_template_facts (contents, "permission(", permissions);
