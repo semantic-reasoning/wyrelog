@@ -633,6 +633,20 @@ insert2_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
 }
 
 static wyrelog_error_t
+contains2_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    const gchar *b, gboolean *out_found)
+{
+  gint64 row[2];
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, b, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, relation, row, 2, out_found);
+}
+
+static wyrelog_error_t
 insert3_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
     const gchar *b, const gchar *c)
 {
@@ -666,6 +680,17 @@ contains3_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
 }
 
 static wyrelog_error_t
+contains1_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
+    gboolean *out_found)
+{
+  gint64 row[1];
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, a, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_contains (handle, relation, row, 1, out_found);
+}
+
+static wyrelog_error_t
 contains5_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
     const gchar *b, const gchar *c, const gchar *d, const gchar *e,
     gboolean *out_found)
@@ -678,6 +703,21 @@ contains5_symbol (WylHandle *handle, const gchar *relation, const gchar *a,
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_engine_contains (handle, relation, row, 5, out_found);
+}
+
+static wyrelog_error_t
+contains_inh_depth (WylHandle *handle, const gchar *child,
+    const gchar *ancestor, gint64 depth, gboolean *out_found)
+{
+  gint64 row[3];
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (handle, child, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_intern_engine_symbol (handle, ancestor, &row[1]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  row[2] = depth;
+  return wyl_handle_engine_contains (handle, "inh_depth", row, 3, out_found);
 }
 
 static wyrelog_error_t
@@ -2484,6 +2524,150 @@ check_login_skip_mfa_projection_autoload_on_open (void)
 }
 
 static gint
+check_bootstrap_role_permission_projection_autoload_on_open (void)
+{
+  struct
+  {
+    const gchar *user;
+    const gchar *role;
+    const gchar *perm;
+    const gchar *scope;
+    gboolean expect_allow;
+    gint code;
+  } cases[] = {
+    {"bootstrap-policy-user", "wr.system_admin", "wr.policy.read",
+        "bootstrap-policy-scope", TRUE, 4452},
+    {"bootstrap-audit-user", "wr.auditor", "wr.audit.read",
+        "bootstrap-audit-scope", FALSE, 4472},
+    {"bootstrap-agent-user", "wr.system_agent", "wr.audit.write",
+        "bootstrap-agent-scope", TRUE, 4492},
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_autoptr (WylHandle) handle = NULL;
+
+    if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+      return cases[i].code - 2;
+    if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+        != WYRELOG_E_OK)
+      return cases[i].code - 1;
+
+    if (insert2_symbol (handle, "principal_state", cases[i].user,
+            "authenticated") != WYRELOG_E_OK)
+      return cases[i].code;
+    if (insert2_symbol (handle, "session_state", cases[i].scope, "active")
+        != WYRELOG_E_OK)
+      return cases[i].code + 1;
+    if (insert4_symbol (handle, "perm_state", cases[i].user, cases[i].perm,
+            cases[i].scope, "armed") != WYRELOG_E_OK)
+      return cases[i].code + 2;
+    if (insert3_symbol (handle, "member_of", cases[i].user, cases[i].role,
+            cases[i].scope) != WYRELOG_E_OK)
+      return cases[i].code + 3;
+
+    gboolean found = FALSE;
+    if (contains2_symbol (handle, "effective_permission", cases[i].role,
+            cases[i].perm, &found) != WYRELOG_E_OK)
+      return cases[i].code + 6;
+    if (!found)
+      return cases[i].code + 7;
+    if (contains3_symbol (handle, "has_permission", cases[i].user,
+            cases[i].perm, cases[i].scope, &found) != WYRELOG_E_OK)
+      return cases[i].code + 8;
+    if (!found)
+      return cases[i].code + 9;
+    if (contains3_symbol (handle, "allow_bool", cases[i].user,
+            cases[i].perm, cases[i].scope, &found) != WYRELOG_E_OK)
+      return cases[i].code + 10;
+    if (found != cases[i].expect_allow)
+      return cases[i].code + 11;
+    if (contains1_symbol (handle, "login_skip_mfa_authz", cases[i].user,
+            &found) != WYRELOG_E_OK)
+      return cases[i].code + 12;
+    if (found)
+      return cases[i].code + 13;
+
+    gint64 decision_row[3];
+    gboolean allowed = FALSE;
+    if (intern3 (handle, cases[i].user, cases[i].perm, cases[i].scope,
+            decision_row) != WYRELOG_E_OK)
+      return cases[i].code + 14;
+    if (wyl_handle_engine_decide (handle, decision_row, &allowed)
+        != WYRELOG_E_OK)
+      return cases[i].code + 15;
+    if (allowed != cases[i].expect_allow)
+      return cases[i].code + 16;
+  }
+
+  return 0;
+}
+
+static gint
+check_bootstrap_inheritance_depth_cap_projection (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 4517;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 4518;
+
+  const gchar *inherits[][2] = {
+    {"site.depth-role-1", "site.depth-role-2"},
+    {"site.depth-role-2", "site.depth-role-3"},
+    {"site.depth-role-3", "site.depth-role-4"},
+    {"site.depth-role-4", "site.depth-role-5"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (inherits); i++) {
+    if (insert2_symbol (handle, "inherits", inherits[i][0], inherits[i][1])
+        != WYRELOG_E_OK)
+      return 4519;
+  }
+  if (insert2_symbol (handle, "role_permission", "site.depth-role-2",
+          "site.depth.perm-1") != WYRELOG_E_OK)
+    return 4520;
+  if (insert2_symbol (handle, "role_permission", "site.depth-role-3",
+          "site.depth.perm-2") != WYRELOG_E_OK)
+    return 4521;
+  if (insert2_symbol (handle, "role_permission", "site.depth-role-4",
+          "site.depth.perm-3") != WYRELOG_E_OK)
+    return 4522;
+  if (insert2_symbol (handle, "role_permission", "site.depth-role-5",
+          "site.depth.perm-4") != WYRELOG_E_OK)
+    return 4523;
+
+  gboolean found = FALSE;
+  if (contains2_symbol (handle, "effective_permission", "site.depth-role-1",
+          "site.depth.perm-1", &found) != WYRELOG_E_OK || !found)
+    return 4524;
+  if (contains2_symbol (handle, "effective_permission", "site.depth-role-1",
+          "site.depth.perm-2", &found) != WYRELOG_E_OK || !found)
+    return 4525;
+  if (contains2_symbol (handle, "effective_permission", "site.depth-role-1",
+          "site.depth.perm-3", &found) != WYRELOG_E_OK || !found)
+    return 4526;
+  if (contains2_symbol (handle, "effective_permission", "site.depth-role-1",
+          "site.depth.perm-4", &found) != WYRELOG_E_OK || found)
+    return 4527;
+
+  if (contains_inh_depth (handle, "site.depth-role-1", "site.depth-role-2",
+          1, &found) != WYRELOG_E_OK || !found)
+    return 4528;
+  if (contains_inh_depth (handle, "site.depth-role-1", "site.depth-role-3",
+          2, &found) != WYRELOG_E_OK || !found)
+    return 4529;
+  if (contains_inh_depth (handle, "site.depth-role-1", "site.depth-role-4",
+          3, &found) != WYRELOG_E_OK || !found)
+    return 4530;
+  if (contains_inh_depth (handle, "site.depth-role-1", "site.depth-role-5",
+          4, &found) != WYRELOG_E_OK || found)
+    return 4531;
+
+  return 0;
+}
+
+static gint
 check_policy_store_role_permissions_require_engine_pair (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -2645,7 +2829,8 @@ check_policy_store_guarded_direct_permissions_do_not_auto_arm (void)
   if (!found)
     return 375;
 
-  if (wyl_handle_engine_contains (handle, "perm_state", state_row, 4, &found)
+  (void) state_row;
+  if (wyl_handle_engine_contains (handle, "armed", permission_row, 3, &found)
       != WYRELOG_E_OK)
     return 376;
   if (found)
@@ -3923,7 +4108,7 @@ check_policy_store_service_admin_auditor_membership_fails_open (void)
 }
 
 static gint
-check_policy_store_auditor_admin_cross_scope_allows_open (void)
+check_policy_store_auditor_admin_cross_scope_opens (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
@@ -4303,6 +4488,11 @@ main (void)
     return rc;
   if ((rc = check_login_skip_mfa_projection_autoload_on_open ()) != 0)
     return rc;
+  if ((rc = check_bootstrap_role_permission_projection_autoload_on_open ())
+      != 0)
+    return rc;
+  if ((rc = check_bootstrap_inheritance_depth_cap_projection ()) != 0)
+    return rc;
   if ((rc = check_policy_store_role_permissions_require_engine_pair ()) != 0)
     return rc;
   if ((rc = check_policy_store_role_memberships_autoload_on_open ()) != 0)
@@ -4416,7 +4606,7 @@ main (void)
   if ((rc = check_policy_store_service_admin_auditor_membership_fails_open ())
       != 0)
     return rc;
-  if ((rc = check_policy_store_auditor_admin_cross_scope_allows_open ()) != 0)
+  if ((rc = check_policy_store_auditor_admin_cross_scope_opens ()) != 0)
     return rc;
   if ((rc = check_policy_store_inherited_auditor_admin_membership_fails_open ())
       != 0)

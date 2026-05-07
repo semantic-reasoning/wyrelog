@@ -109,6 +109,7 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
     "role_permission(\"wr.auditor\", \"wr.audit.read\").",
     "role_permission(\"wr.system_agent\", \"wr.audit.write\").",
     "effective_permission(R, P) :- role_permission(R, P).",
+    "effective_permission(R, P) :- inherits(R, R2), role_permission(R2, P).",
     "has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).",
     "has_permission(U, P, S) :- direct_permission(U, P, S).",
     "can_read_audit(U) :- has_permission(U, \"wr.audit.read\", _).",
