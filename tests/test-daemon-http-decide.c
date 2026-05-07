@@ -850,6 +850,10 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
           (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 484;
+  if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
+          (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
+      != WYRELOG_E_OK)
+    return 488;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 487;
 

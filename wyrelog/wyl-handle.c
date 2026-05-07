@@ -1178,6 +1178,12 @@ insert_login_skip_mfa_authz_if_allowed (WylHandle *self,
   if (rc != WYRELOG_E_OK || !allowed)
     return rc;
 
+  rc = wyl_policy_store_permission_state_is (self->policy_store, subject_id,
+      WYL_LOGIN_SKIP_MFA_PERMISSION, WYL_LOGIN_SKIP_MFA_SCOPE, "armed",
+      &allowed);
+  if (rc != WYRELOG_E_OK || !allowed)
+    return rc;
+
   gint64 row[1];
   rc = wyl_handle_intern_engine_symbol (self, subject_id, &row[0]);
   if (rc != WYRELOG_E_OK)

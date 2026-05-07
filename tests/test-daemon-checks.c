@@ -180,6 +180,10 @@ check_login_skip_mfa_ready_allows_policy_path (void)
           (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
     return 41;
+  if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
+          (handle), "wyrelogd-skip-mfa-user", "wr.login.skip_mfa", "login",
+          "armed") != WYRELOG_E_OK)
+    return 65;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 45;
   if (wyl_daemon_check_login_skip_mfa_ready (handle) != WYRELOG_E_OK)
@@ -219,6 +223,9 @@ check_login_skip_mfa_ready_allows_role_policy_path (void)
           "wyrelogd-skip-mfa-user", "wyrelogd-skip-mfa-role", "login")
       != WYRELOG_E_OK)
     return 49;
+  if (wyl_policy_store_set_permission_state (store, "wyrelogd-skip-mfa-user",
+          "wr.login.skip_mfa", "login", "armed") != WYRELOG_E_OK)
+    return 66;
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 60;
 
