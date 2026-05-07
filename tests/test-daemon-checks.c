@@ -151,10 +151,10 @@ check_login_skip_mfa_ready_allows_development_path (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
           "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'principal_state' "
+          "WHERE action = 'login_skip_mfa' "
           "AND subject_id = 'wyrelogd-skip-mfa-override-user' "
-          "AND deny_reason = 'login_skip_mfa' "
-          "AND resource_id = 'authenticated' " "AND decision = 1;", &count))
+          "AND deny_reason IS NULL "
+          "AND resource_id = 'principal_state' " "AND decision = 1;", &count))
     return 33;
   if (count != 1)
     return 34;
@@ -193,10 +193,10 @@ check_login_skip_mfa_ready_allows_policy_path (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
           "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'principal_state' "
+          "WHERE action = 'login_skip_mfa' "
           "AND subject_id = 'wyrelogd-skip-mfa-user' "
-          "AND deny_reason = 'login_skip_mfa' "
-          "AND resource_id = 'authenticated' AND decision = 1;", &count))
+          "AND deny_reason IS NULL "
+          "AND resource_id = 'principal_state' AND decision = 1;", &count))
     return 43;
   if (count != 1)
     return 44;
@@ -242,10 +242,10 @@ check_login_skip_mfa_ready_allows_role_policy_path (void)
       wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
   if (!count_duckdb_rows (conn,
           "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'principal_state' "
+          "WHERE action = 'login_skip_mfa' "
           "AND subject_id = 'wyrelogd-skip-mfa-user' "
-          "AND deny_reason = 'login_skip_mfa' "
-          "AND resource_id = 'authenticated' AND decision = 1;", &count))
+          "AND deny_reason IS NULL "
+          "AND resource_id = 'principal_state' AND decision = 1;", &count))
     return 62;
   if (count != 1)
     return 63;

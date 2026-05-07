@@ -119,6 +119,19 @@ new_login_skip_mfa_denied_audit (const gchar *username, const gchar *request_id)
   return ev;
 }
 
+static WylAuditEvent *
+new_login_skip_mfa_allowed_audit (const gchar *username,
+    const gchar *request_id)
+{
+  WylAuditEvent *ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, username);
+  wyl_audit_event_set_action (ev, "login_skip_mfa");
+  wyl_audit_event_set_resource_id (ev, "principal_state");
+  wyl_audit_event_set_request_id (ev, request_id);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  return ev;
+}
+
 static wyrelog_error_t
 emit_login_skip_mfa_denied_audit (WylHandle *handle, const gchar *username,
     const gchar *request_id)
@@ -596,11 +609,15 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
       return (rc == WYRELOG_E_OK) ? WYRELOG_E_INTERNAL : rc;
     }
 #ifdef WYL_HAS_AUDIT
-    g_autoptr (WylAuditEvent) principal_ev =
-        new_principal_state_audit (username,
-        wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
-        wyl_principal_state_name (state), wyl_principal_event_name (event),
-        wyl_login_req_get_request_id (req));
+    g_autoptr (WylAuditEvent) principal_ev = NULL;
+    if (req != NULL && wyl_login_req_get_skip_mfa (req))
+      principal_ev = new_login_skip_mfa_allowed_audit (username,
+          wyl_login_req_get_request_id (req));
+    else
+      principal_ev = new_principal_state_audit (username,
+          wyl_principal_state_name (WYL_PRINCIPAL_STATE_UNVERIFIED),
+          wyl_principal_state_name (state), wyl_principal_event_name (event),
+          wyl_login_req_get_request_id (req));
     g_autoptr (WylAuditEvent) session_ev =
         new_session_state_audit (session_id,
         wyl_session_state_name (session->state), "active",

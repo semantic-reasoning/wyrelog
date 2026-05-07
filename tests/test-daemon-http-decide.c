@@ -955,10 +955,8 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe principal_skip_audit = {
     .subject_id = "login-user",
-    .action = "principal_state",
-    .resource_id = "authenticated",
-    .deny_reason = "login_skip_mfa",
-    .deny_origin = "unverified",
+    .action = "login_skip_mfa",
+    .resource_id = "principal_state",
     .request_id = skip_success_request_id,
     .check_decision = TRUE,
     .decision = WYL_DECISION_ALLOW,

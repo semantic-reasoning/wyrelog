@@ -519,10 +519,10 @@ check_skip_mfa_login_projects_authority_state (void)
   if (!policy_count_rows (store,
           "SELECT COUNT(*) FROM audit_events "
           "WHERE subject_id = 'projection-skip-mfa-user' "
-          "AND action = 'principal_state' "
-          "AND resource_id = 'authenticated' "
-          "AND deny_reason = 'login_skip_mfa' "
-          "AND deny_origin = 'unverified' AND decision = 1;", &count))
+          "AND action = 'login_skip_mfa' "
+          "AND resource_id = 'principal_state' "
+          "AND deny_reason IS NULL "
+          "AND deny_origin IS NULL AND decision = 1;", &count))
     return 62;
   if (count != 1)
     return 63;
@@ -556,11 +556,10 @@ check_skip_mfa_login_projects_authority_state (void)
   if (!policy_select_text_params (store,
           "SELECT id FROM audit_events "
           "WHERE subject_id = 'projection-skip-mfa-user' "
-          "AND action = 'principal_state' "
-          "AND resource_id = 'authenticated' "
-          "AND deny_reason = 'login_skip_mfa' "
-          "AND deny_origin = 'unverified' AND decision = 1;",
-          NULL, 0, &audit_id))
+          "AND action = 'login_skip_mfa' "
+          "AND resource_id = 'principal_state' "
+          "AND deny_reason IS NULL "
+          "AND deny_origin IS NULL AND decision = 1;", NULL, 0, &audit_id))
     return 68;
   gint64 audit_created_at_us = -1;
   const gchar *audit_param[] = { audit_id };
@@ -598,15 +597,15 @@ check_skip_mfa_login_projects_authority_state (void)
           username))
     return 77;
   if (!engine_contains_audit_attr (handle, "audit_event_action", audit_id,
-          "principal_state"))
+          "login_skip_mfa"))
     return 78;
   if (!engine_contains_audit_attr (handle, "audit_event_resource", audit_id,
-          "authenticated"))
+          "principal_state"))
     return 79;
-  if (!engine_contains_audit_attr (handle, "audit_event_deny_reason",
+  if (engine_contains_audit_attr (handle, "audit_event_deny_reason",
           audit_id, "login_skip_mfa"))
     return 80;
-  if (!engine_contains_audit_attr (handle, "audit_event_deny_origin",
+  if (engine_contains_audit_attr (handle, "audit_event_deny_origin",
           audit_id, "unverified"))
     return 81;
 
@@ -686,9 +685,9 @@ check_handle_reopens_persistent_policy_and_audit_paths (void)
 
     if (!policy_select_text_params (store,
             "SELECT id FROM audit_events "
-            "WHERE subject_id = ? AND action = 'principal_state' "
-            "AND resource_id = 'authenticated' "
-            "AND deny_reason = 'login_skip_mfa';", &username, 1, &audit_id))
+            "WHERE subject_id = ? AND action = 'login_skip_mfa' "
+            "AND resource_id = 'principal_state' "
+            "AND deny_reason IS NULL;", &username, 1, &audit_id))
       return 119;
     const gchar *audit_param[] = { audit_id };
     if (!policy_select_int64_params (store,
@@ -699,7 +698,7 @@ check_handle_reopens_persistent_policy_and_audit_paths (void)
     gint64 runtime_count = -1;
     if (!runtime_count_rows (handle,
             "SELECT COUNT(*) FROM audit_events "
-            "WHERE action = 'principal_state' "
+            "WHERE action = 'login_skip_mfa' "
             "AND subject_id = 'projection-persistent-user';", &runtime_count))
       return 121;
     if (runtime_count != 1)
@@ -737,13 +736,13 @@ check_handle_reopens_persistent_policy_and_audit_paths (void)
             username))
       return 128;
     if (!engine_contains_audit_attr (handle, "audit_event_action", audit_id,
-            "principal_state"))
+            "login_skip_mfa"))
       return 129;
 
     gint64 runtime_count = -1;
     if (!runtime_count_rows (handle,
             "SELECT COUNT(*) FROM audit_events "
-            "WHERE action = 'principal_state' "
+            "WHERE action = 'login_skip_mfa' "
             "AND subject_id = 'projection-persistent-user';", &runtime_count))
       return 130;
     if (runtime_count != 1)
