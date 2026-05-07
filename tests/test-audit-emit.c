@@ -1408,7 +1408,7 @@ check_login_survives_runtime_audit_failure (void)
   gint64 count = -1;
   if (!policy_count_rows (store,
           "SELECT COUNT(*) FROM audit_events "
-          "WHERE action = 'principal_state';", &count)) {
+          "WHERE action = 'login_skip_mfa';", &count)) {
     g_object_unref (handle);
     return 250;
   }
@@ -1694,7 +1694,7 @@ check_login_principal_state_emits_audit_row (void)
 }
 
 static gint
-check_login_skip_mfa_emits_principal_state_audit_row (void)
+check_login_skip_mfa_emits_canonical_audit_row (void)
 {
   WylHandle *handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
@@ -1716,7 +1716,7 @@ check_login_skip_mfa_emits_principal_state_audit_row (void)
   if (duckdb_query (conn,
           "SELECT subject_id, action, resource_id, deny_reason, "
           "deny_origin, decision "
-          "FROM audit_events WHERE action = 'principal_state';", &result)
+          "FROM audit_events WHERE action = 'login_skip_mfa';", &result)
       != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -1732,18 +1732,18 @@ check_login_skip_mfa_emits_principal_state_audit_row (void)
   const gchar *subject = duckdb_value_varchar (&result, 0, 0);
   const gchar *action = duckdb_value_varchar (&result, 1, 0);
   const gchar *resource = duckdb_value_varchar (&result, 2, 0);
-  const gchar *event = duckdb_value_varchar (&result, 3, 0);
-  const gchar *old_state = duckdb_value_varchar (&result, 4, 0);
+  gboolean reason_is_null = duckdb_value_is_null (&result, 3, 0);
+  gboolean origin_is_null = duckdb_value_is_null (&result, 4, 0);
   gint16 decision = (gint16) duckdb_value_int64 (&result, 5, 0);
   if (g_strcmp0 (subject, "audit-skip-mfa-user") != 0)
     rc = 104;
-  else if (g_strcmp0 (action, "principal_state") != 0)
+  else if (g_strcmp0 (action, "login_skip_mfa") != 0)
     rc = 105;
-  else if (g_strcmp0 (resource, "authenticated") != 0)
+  else if (g_strcmp0 (resource, "principal_state") != 0)
     rc = 106;
-  else if (g_strcmp0 (event, "login_skip_mfa") != 0)
+  else if (!reason_is_null)
     rc = 107;
-  else if (g_strcmp0 (old_state, "unverified") != 0)
+  else if (!origin_is_null)
     rc = 108;
   else if (decision != WYL_DECISION_ALLOW)
     rc = 109;
@@ -1751,8 +1751,6 @@ check_login_skip_mfa_emits_principal_state_audit_row (void)
   duckdb_free ((void *) subject);
   duckdb_free ((void *) action);
   duckdb_free ((void *) resource);
-  duckdb_free ((void *) event);
-  duckdb_free ((void *) old_state);
   duckdb_destroy_result (&result);
   g_object_unref (handle);
   return rc;
@@ -1879,7 +1877,7 @@ check_allowed_login_skip_mfa_rolls_back_on_store_audit_failure (void)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (sqlite3_exec (wyl_policy_store_get_db (store),
           "CREATE TRIGGER fail_skip_mfa_principal_audit "
-          "BEFORE INSERT ON audit_events WHEN NEW.action = 'principal_state' "
+          "BEFORE INSERT ON audit_events WHEN NEW.action = 'login_skip_mfa' "
           "BEGIN SELECT RAISE(ABORT, 'fail audit'); END;",
           NULL, NULL, NULL) != SQLITE_OK) {
     g_object_unref (handle);
@@ -2891,7 +2889,7 @@ main (void)
     return rc;
   if ((rc = check_login_principal_state_emits_audit_row ()) != 0)
     return rc;
-  if ((rc = check_login_skip_mfa_emits_principal_state_audit_row ()) != 0)
+  if ((rc = check_login_skip_mfa_emits_canonical_audit_row ()) != 0)
     return rc;
   if ((rc = check_denied_login_skip_mfa_emits_audit_row ()) != 0)
     return rc;
