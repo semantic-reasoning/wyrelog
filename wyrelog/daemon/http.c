@@ -727,6 +727,7 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_grant_req_set_action (req, perm);
     wyl_grant_req_set_resource_id (req, scope);
     wyl_grant_req_set_actor_id (req, actor);
+    wyl_grant_req_set_request_id (req, ensure_request_id_header (msg));
     rc = wyl_perm_grant (ctx->handle, req);
   } else {
     g_autoptr (wyl_revoke_req_t) req = wyl_revoke_req_new ();
@@ -734,6 +735,7 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_revoke_req_set_action (req, perm);
     wyl_revoke_req_set_resource_id (req, scope);
     wyl_revoke_req_set_actor_id (req, actor);
+    wyl_revoke_req_set_request_id (req, ensure_request_id_header (msg));
     rc = wyl_perm_revoke (ctx->handle, req);
   }
   if (rc != WYRELOG_E_OK) {
@@ -850,6 +852,7 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_role_grant_req_set_role_id (req, role);
     wyl_role_grant_req_set_scope (req, scope);
     wyl_role_grant_req_set_actor_id (req, actor);
+    wyl_role_grant_req_set_request_id (req, ensure_request_id_header (msg));
     rc = wyl_role_grant (ctx->handle, req);
   } else {
     g_autoptr (wyl_role_revoke_req_t) req = wyl_role_revoke_req_new ();
@@ -857,6 +860,7 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_role_revoke_req_set_role_id (req, role);
     wyl_role_revoke_req_set_scope (req, scope);
     wyl_role_revoke_req_set_actor_id (req, actor);
+    wyl_role_revoke_req_set_request_id (req, ensure_request_id_header (msg));
     rc = wyl_role_revoke (ctx->handle, req);
   }
   if (rc != WYRELOG_E_OK) {

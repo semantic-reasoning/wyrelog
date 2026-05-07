@@ -1548,8 +1548,10 @@ check_policy_permission_mutation_contract (WylHandle *handle,
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=49", session_token);
-  rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", grant_query, &status, &body);
+  g_autofree gchar *grant_request_id = NULL;
+  rc = send_raw_policy_mutation_full (session, "POST", base_url,
+      "/policy/permissions/grant", grant_query, &status, &body,
+      &grant_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -1557,6 +1559,18 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 136;
+  AuditEventProbe grant_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_grant",
+    .resource_id = "tenant-a",
+    .deny_origin = "site.policy.read",
+    .request_id = grant_request_id,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &grant_audit) != WYRELOG_E_OK)
+    return 196;
+  if (grant_audit.matches != 1)
+    return 197;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
@@ -1692,8 +1706,10 @@ check_policy_permission_mutation_contract (WylHandle *handle,
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=29", session_token);
   g_clear_pointer (&body, g_free);
-  rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/roles/grant", role_grant_query, &status, &body);
+  g_autofree gchar *role_grant_request_id = NULL;
+  rc = send_raw_policy_mutation_full (session, "POST", base_url,
+      "/policy/roles/grant", role_grant_query, &status, &body,
+      &role_grant_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"ok\":true") == NULL)
@@ -1701,6 +1717,18 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (!role_membership_exists (handle, "role-target", "site.reader",
           "tenant-b"))
     return 146;
+  AuditEventProbe role_grant_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "role_grant",
+    .resource_id = "tenant-b",
+    .deny_origin = "site.reader",
+    .request_id = role_grant_request_id,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &role_grant_audit) != WYRELOG_E_OK)
+    return 198;
+  if (role_grant_audit.matches != 1)
+    return 199;
 
   g_autofree gchar *builtin_role_query =
       g_strdup_printf ("subject=builtin-role-target&role=wr.auditor"
