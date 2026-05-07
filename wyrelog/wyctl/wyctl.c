@@ -260,9 +260,14 @@ load_access_token_file (const gchar *path, gchar **out_access_token)
 }
 
 static int
-run_policy_check (const WyctlOptions *global_opts,
-    const WyctlPolicyOptions *policy_opts, const gchar *access_token)
+run_policy_decide_request (const WyctlOptions *global_opts,
+    const WyctlPolicyOptions *policy_opts, const gchar *access_token,
+    const gchar *command, WylClientDecision **out_result)
 {
+  if (out_result == NULL)
+    return 2;
+  *out_result = NULL;
+
   if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
@@ -291,9 +296,23 @@ run_policy_check (const WyctlOptions *global_opts,
   wyrelog_error_t rc = wyl_client_decide_ex (client, policy_opts->user,
       policy_opts->permission, policy_opts->resource, &result);
   if (rc != WYRELOG_E_OK) {
-    g_printerr ("wyctl: policy check failed\n");
+    g_printerr ("wyctl: policy %s failed\n", command);
     return 3;
   }
+
+  *out_result = g_steal_pointer (&result);
+  return 0;
+}
+
+static int
+run_policy_check (const WyctlOptions *global_opts,
+    const WyctlPolicyOptions *policy_opts, const gchar *access_token)
+{
+  g_autoptr (WylClientDecision) result = NULL;
+  int rc = run_policy_decide_request (global_opts, policy_opts, access_token,
+      "check", &result);
+  if (rc != 0)
+    return rc;
 
   gint decision = wyl_client_decision_get_decision (result);
   if (decision == WYL_DECISION_ALLOW) {
@@ -303,6 +322,32 @@ run_policy_check (const WyctlOptions *global_opts,
 
   g_print ("deny\n");
   return 1;
+}
+
+static int
+run_policy_explain (const WyctlOptions *global_opts,
+    const WyctlPolicyOptions *policy_opts, const gchar *access_token)
+{
+  g_autoptr (WylClientDecision) result = NULL;
+  int rc = run_policy_decide_request (global_opts, policy_opts, access_token,
+      "explain", &result);
+  if (rc != 0)
+    return rc;
+
+  gint decision = wyl_client_decision_get_decision (result);
+  if (decision == WYL_DECISION_ALLOW) {
+    g_print ("allow\n");
+    return 0;
+  }
+
+  g_print ("deny\n");
+  const gchar *deny_reason = wyl_client_decision_get_deny_reason (result);
+  const gchar *deny_origin = wyl_client_decision_get_deny_origin (result);
+  if (deny_reason != NULL)
+    g_print ("reason=%s\n", deny_reason);
+  if (deny_origin != NULL)
+    g_print ("origin=%s\n", deny_origin);
+  return 0;
 }
 
 static int
@@ -353,6 +398,8 @@ run_policy_decision_command (const WyctlOptions *global_opts,
 
   if (g_strcmp0 (command, "check") == 0)
     return run_policy_check (global_opts, &opts, access_token);
+  if (g_strcmp0 (command, "explain") == 0)
+    return run_policy_explain (global_opts, &opts, access_token);
 
   g_printerr ("wyctl: policy %s is not implemented\n", command);
   return 3;
