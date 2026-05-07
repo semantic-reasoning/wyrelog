@@ -201,7 +201,9 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
       "CREATE INDEX IF NOT EXISTS idx_audit_events_decision "
       "  ON audit_events (decision);"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason "
-      "  ON audit_events (deny_reason);";
+      "  ON audit_events (deny_reason);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_deny_origin "
+      "  ON audit_events (deny_origin);";
 
   if (conn == NULL)
     return WYRELOG_E_INVALID;
@@ -212,7 +214,18 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
     return WYRELOG_E_IO;
   }
   duckdb_destroy_result (&result);
-  return ensure_audit_events_request_id_column (conn);
+  wyrelog_error_t rc = ensure_audit_events_request_id_column (conn);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (duckdb_query (conn->conn,
+          "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id "
+          "ON audit_events (request_id);", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

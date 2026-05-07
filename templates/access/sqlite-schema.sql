@@ -304,6 +304,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_decision
 CREATE INDEX IF NOT EXISTS idx_audit_events_deny_reason
     ON audit_events (deny_reason);
 
+CREATE INDEX IF NOT EXISTS idx_audit_events_deny_origin
+    ON audit_events (deny_origin);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_request_id
+    ON audit_events (request_id);
+
 -- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
