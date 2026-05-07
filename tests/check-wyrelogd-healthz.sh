@@ -7,7 +7,14 @@ WYRELOGD=$1
 TEMPLATE_DIR=$2
 PYTHON=$3
 EXPECT_AUDIT=${4:-0}
-PORT=$((39000 + $$ % 20000))
+PORT=$("$PYTHON" - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
 TMPDIR=$(mktemp -d)
 POLICY_DB="$TMPDIR/policy.sqlite"
 AUDIT_DB="$TMPDIR/audit.duckdb"
@@ -97,7 +104,7 @@ def decide_denies_unseeded_user():
         and "deny_origin" in body
     )
 
-for _ in range(50):
+for _ in range(150):
     try:
         health = urllib.request.urlopen(f"{base}/healthz", timeout=1).read()
         if health != b"ok\n":
