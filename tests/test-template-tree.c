@@ -254,6 +254,8 @@ check_permission_scope_relation_contract (void)
     ".decl guard_context_risk(user: symbol, scope: symbol, risk: int64)",
     ".decl guard_context_in_window(user: symbol, scope: symbol, timestamp: int64,\n"
         "    window: symbol)",
+    ".decl loc_class(loc_id: symbol, class: symbol)",
+    ".decl in_window(timestamp: int64, window: symbol)",
     "perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).",
     "perm_window_guard_observed(P, W) :- perm_window_guard(P, W).",
   };
