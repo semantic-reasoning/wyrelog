@@ -761,6 +761,22 @@ expect_engine_row_count (WylEngine *engine, const gchar *relation,
   return 0;
 }
 
+static gint
+check_host_context_relations_start_empty (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 220;
+  if (expect_engine_row_count (wyl_handle_get_read_engine (handle),
+          "loc_class", 0, 221) != 0)
+    return 221;
+  if (expect_engine_row_count (wyl_handle_get_read_engine (handle),
+          "in_window", 0, 223) != 0)
+    return 223;
+  return 0;
+}
+
 typedef struct
 {
   wyl_perm_state_t from;
@@ -1124,6 +1140,8 @@ main (void)
   if ((rc = check_argument_validation ()) != 0)
     return rc;
   if ((rc = check_template_static_fact_guards ()) != 0)
+    return rc;
+  if ((rc = check_host_context_relations_start_empty ()) != 0)
     return rc;
   if ((rc = check_perm_state_golden_trace ()) != 0)
     return rc;

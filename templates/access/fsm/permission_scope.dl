@@ -38,6 +38,10 @@
 //   guard_context_risk(user, scope, risk)
 //   guard_context_in_window(user, scope, ts,     -- host-confirmed
 //       window)                                      timestamp window
+//   loc_class(loc_id, class)                      -- operator-maintained
+//                                                   location class map
+//   in_window(ts, window)                         -- host-confirmed
+//                                                   global time window
 //   eval_guard(user, perm, scope, ctx)           -- host guard result
 //
 // Derived schemas:
@@ -70,6 +74,8 @@
 .decl guard_context_risk(user: symbol, scope: symbol, risk: int64)
 .decl guard_context_in_window(user: symbol, scope: symbol, timestamp: int64,
     window: symbol)
+.decl loc_class(loc_id: symbol, class: symbol)
+.decl in_window(timestamp: int64, window: symbol)
 .decl eval_guard(user: symbol, perm: symbol, scope: symbol, ctx: scope/2 side)
 .decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)
 .decl perm_window_guard_observed(perm: symbol, window: symbol)
