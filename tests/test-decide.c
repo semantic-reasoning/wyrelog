@@ -2,6 +2,7 @@
 #include <glib.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 /*
@@ -127,6 +128,46 @@ insert_grant_fixture (WylHandle *handle, const gchar *subject,
     return rc;
   return insert_symbol_row3 (handle, "member_of", subject, "wr.decide-role",
       resource);
+}
+
+static wyrelog_error_t
+seed_policy_store_decide_fixture (WylHandle *handle, const gchar *subject,
+    const gchar *action, const gchar *resource, const gchar *perm_state)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  wyrelog_error_t rc = wyl_policy_store_upsert_permission (store, action,
+      action, "basic");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_grant_direct_permission (store, subject, action,
+      resource);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_principal_state (store, subject, "authenticated");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_session_state (store, resource, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (perm_state != NULL) {
+    rc = wyl_policy_store_set_permission_state (store, subject, action,
+        resource, perm_state);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return wyl_handle_reload_engine_pair (handle);
+}
+
+static wyrelog_error_t
+decide_policy_store_fixture (WylHandle *handle, const gchar *subject,
+    const gchar *action, const gchar *resource, wyl_decide_resp_t *resp)
+{
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, subject);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, resource);
+  return wyl_decide (handle, req, resp);
 }
 
 typedef struct
@@ -685,6 +726,119 @@ check_decide_denies_guarded_permission_on_context_miss (void)
 }
 
 static gint
+check_policy_store_replay_synthesizes_legacy_direct_grant_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 123;
+
+  if (seed_policy_store_decide_fixture (handle, "replay-legacy-user",
+          "site.replay.read", "tenant/replay", NULL) != WYRELOG_E_OK)
+    return 124;
+
+  gboolean has_durable_state = TRUE;
+  if (wyl_policy_store_permission_state_exists (wyl_handle_get_policy_store
+          (handle), "replay-legacy-user", "site.replay.read",
+          "tenant/replay", &has_durable_state) != WYRELOG_E_OK)
+    return 125;
+  if (has_durable_state)
+    return 126;
+
+  gboolean contains = TRUE;
+  gint64 synthesized_row[4];
+  if (intern_symbol (handle, "replay-legacy-user", &synthesized_row[0])
+      != WYRELOG_E_OK)
+    return 150;
+  if (intern_symbol (handle, "site.replay.read", &synthesized_row[1])
+      != WYRELOG_E_OK)
+    return 151;
+  if (intern_symbol (handle, "tenant/replay", &synthesized_row[2])
+      != WYRELOG_E_OK)
+    return 152;
+  if (intern_symbol (handle, "armed", &synthesized_row[3]) != WYRELOG_E_OK)
+    return 153;
+  if (wyl_handle_engine_contains (handle, "perm_state", synthesized_row, 4,
+          &contains) != WYRELOG_E_OK)
+    return 154;
+  if (contains)
+    return 155;
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (decide_policy_store_fixture (handle, "replay-legacy-user",
+          "site.replay.read", "tenant/replay", resp) != WYRELOG_E_OK)
+    return 127;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 128;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 129;
+  return 0;
+}
+
+static gint
+check_policy_store_replay_preserves_dormant_permission_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 130;
+
+  if (seed_policy_store_decide_fixture (handle, "replay-dormant-user",
+          "site.replay.write", "tenant/replay", "dormant") != WYRELOG_E_OK)
+    return 131;
+  gboolean contains = FALSE;
+  gint64 dormant_row[4];
+  if (intern_symbol (handle, "replay-dormant-user", &dormant_row[0])
+      != WYRELOG_E_OK)
+    return 142;
+  if (intern_symbol (handle, "site.replay.write", &dormant_row[1])
+      != WYRELOG_E_OK)
+    return 143;
+  if (intern_symbol (handle, "tenant/replay", &dormant_row[2])
+      != WYRELOG_E_OK)
+    return 144;
+  if (intern_symbol (handle, "dormant", &dormant_row[3]) != WYRELOG_E_OK)
+    return 145;
+  if (wyl_handle_engine_contains (handle, "perm_state", dormant_row, 4,
+          &contains) != WYRELOG_E_OK)
+    return 146;
+  if (!contains)
+    return 147;
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (decide_policy_store_fixture (handle, "replay-dormant-user",
+          "site.replay.write", "tenant/replay", resp) != WYRELOG_E_OK)
+    return 132;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 133;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 134;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 135;
+  return 0;
+}
+
+static gint
+check_policy_store_replay_preserves_armed_permission_state (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 136;
+
+  if (seed_policy_store_decide_fixture (handle, "replay-armed-user",
+          "site.replay.admin", "tenant/replay", "armed") != WYRELOG_E_OK)
+    return 137;
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (decide_policy_store_fixture (handle, "replay-armed-user",
+          "site.replay.admin", "tenant/replay", resp) != WYRELOG_E_OK)
+    return 138;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 139;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 140;
+  return 0;
+}
+
+static gint
 check_decide_cleans_guard_facts_after_guarded_deny (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -992,6 +1146,15 @@ main (void)
   if ((rc = check_decide_allows_guarded_permission_with_context ()) != 0)
     return rc;
   if ((rc = check_decide_denies_guarded_permission_on_context_miss ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_replay_synthesizes_legacy_direct_grant_state ())
+      != 0)
+    return rc;
+  if ((rc = check_policy_store_replay_preserves_dormant_permission_state ())
+      != 0)
+    return rc;
+  if ((rc = check_policy_store_replay_preserves_armed_permission_state ())
+      != 0)
     return rc;
   if ((rc = check_decide_cleans_guard_facts_after_guarded_deny ()) != 0)
     return rc;

@@ -215,6 +215,9 @@ check_stratification (void)
   static const wyl_dl_body_atom_t perm_state_step_body[] = {
     {.predicate = "perm_state_transition",.negated = FALSE},
   };
+  static const wyl_dl_body_atom_t perm_state_observed_body[] = {
+    {.predicate = "perm_state_replayed",.negated = FALSE},
+  };
   static const wyl_dl_body_atom_t perm_state_fired_body[] = {
     {.predicate = "perm_state_event",.negated = FALSE},
     {.predicate = "perm_state_transition",.negated = FALSE},
@@ -257,6 +260,8 @@ check_stratification (void)
         .body_len = G_N_ELEMENTS (window_observed_body)},
     {.head = "perm_state_step",.body = perm_state_step_body,.body_len =
           G_N_ELEMENTS (perm_state_step_body)},
+    {.head = "perm_state_observed",.body = perm_state_observed_body,
+        .body_len = G_N_ELEMENTS (perm_state_observed_body)},
     {.head = "perm_state_fired",.body = perm_state_fired_body,.body_len =
           G_N_ELEMENTS (perm_state_fired_body)},
     {.head = "armed",.body = rule1_body,.body_len = G_N_ELEMENTS (rule1_body)},

@@ -1371,7 +1371,10 @@ insert_policy_store_permission_state (const gchar *subject_id,
   rc = wyl_handle_intern_engine_symbol (self, state, &row[3]);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return wyl_handle_engine_insert (self, "perm_state", row, 4);
+  rc = wyl_handle_engine_insert (self, "perm_state", row, 4);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (self, "perm_state_replayed", row, 4);
 }
 
 wyrelog_error_t
@@ -1784,6 +1787,13 @@ wyl_handle_engine_contains (WylHandle *self, const gchar *relation,
    * the template mirror while preserving the handle-level relation name. */
   if (g_strcmp0 (relation, "principal_state") == 0)
     snapshot_relation = "principal_state_observed";
+  /*
+   * perm_state probes are the public replay-observation path. Actual
+   * engine-local arming input may also include legacy synthesized rows,
+   * which must not be reported as durable replay.
+   */
+  else if (g_strcmp0 (relation, "perm_state") == 0)
+    snapshot_relation = "perm_state_observed";
   else if (g_strcmp0 (relation, "login_skip_mfa_authz") == 0)
     snapshot_relation = "login_skip_mfa_authz_observed";
 
