@@ -784,8 +784,12 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
 
-  if (!ensure_policy_permission_exists (msg, ctx, perm))
+  g_mutex_lock (&ctx->policy_mutation_lock);
+
+  if (!ensure_policy_permission_exists (msg, ctx, perm)) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
+  }
 
   wyrelog_error_t rc;
   if (grant) {
@@ -807,10 +811,12 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc != WYRELOG_E_OK) {
     set_policy_mutation_error (msg, rc);
+    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
   }
 
   set_json_ok (msg);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
 }
 
 static void
@@ -859,13 +865,19 @@ policy_permission_transition_handler (SoupServer *server,
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
 
-  if (!ensure_policy_permission_exists (msg, ctx, perm))
-    return;
+  g_mutex_lock (&ctx->policy_mutation_lock);
 
-  g_autoptr (WylAuditEvent) audit_event = wyl_audit_event_new ();
+  if (!ensure_policy_permission_exists (msg, ctx, perm)) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    return;
+  }
+
+  g_autoptr (WylAuditEvent) audit_event = NULL;
+  g_autofree gchar *audit_action = NULL;
+
+  audit_event = wyl_audit_event_new ();
   wyl_audit_event_set_subject_id (audit_event, actor);
-  g_autofree gchar *audit_action = g_strdup_printf ("permission_state.%s",
-      event);
+  audit_action = g_strdup_printf ("permission_state.%s", event);
   wyl_audit_event_set_action (audit_event, audit_action);
   wyl_audit_event_set_resource_id (audit_event, perm);
   wyl_audit_event_set_deny_reason (audit_event, event);
@@ -877,10 +889,12 @@ policy_permission_transition_handler (SoupServer *server,
       (ctx->handle, subject, perm, scope, event, audit_event, NULL);
   if (rc != WYRELOG_E_OK) {
     set_policy_transition_error (msg, rc);
+    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
   }
 
   set_json_ok (msg);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
 }
 
 static void
@@ -909,8 +923,12 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
 
-  if (!ensure_policy_role_exists (msg, ctx, role))
+  g_mutex_lock (&ctx->policy_mutation_lock);
+
+  if (!ensure_policy_role_exists (msg, ctx, role)) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
+  }
 
   wyrelog_error_t rc;
   if (grant) {
@@ -932,10 +950,12 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc != WYRELOG_E_OK) {
     set_policy_mutation_error (msg, rc);
+    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
   }
 
   set_json_ok (msg);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
 }
 
 static void
