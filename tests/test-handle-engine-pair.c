@@ -320,6 +320,19 @@ eval_guard_count_cb (const gchar *relation, const gint64 *row, guint ncols,
 }
 
 static void
+guard_context_field_count_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  GuardBridgeExpect *expect = user_data;
+
+  (void) relation;
+
+  if ((ncols == 3 || ncols == 4) && row[0] == expect->row[0]
+      && row[1] == expect->row[2])
+    expect->matches++;
+}
+
+static void
 seen_expect_cb (const gchar *relation, const gint64 *row, guint ncols,
     gpointer user_data)
 {
@@ -546,6 +559,22 @@ expect_guard_bridge_absent (WylHandle *handle, const gchar *subject,
     return base_code + 5;
   if (expect.matches != 0)
     return base_code + 6;
+
+  static const gchar *const field_relations[] = {
+    "guard_context_timestamp",
+    "guard_context_loc_class",
+    "guard_context_risk",
+    "guard_context_in_window",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (field_relations); i++) {
+    expect.matches = 0;
+    if (wyl_engine_snapshot (wyl_handle_get_read_engine (handle),
+            field_relations[i], guard_context_field_count_cb, &expect)
+        != WYRELOG_E_OK)
+      return base_code + 7 + (gint) (i * 2);
+    if (expect.matches != 0)
+      return base_code + 8 + (gint) (i * 2);
+  }
 
   return 0;
 }
@@ -3204,20 +3233,81 @@ check_policy_store_guarded_permission_state_stays_guarded (void)
 }
 
 static gint
+check_policy_store_guarded_permission_state_needs_context (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 708;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_direct_permission (store,
+          "permstate-guard-context-user", "wr.audit.read",
+          "permstate-guard-context-scope") != WYRELOG_E_OK)
+    return 709;
+  if (wyl_policy_store_set_principal_state (store,
+          "permstate-guard-context-user", "authenticated") != WYRELOG_E_OK)
+    return 710;
+  if (wyl_policy_store_set_session_state (store,
+          "permstate-guard-context-scope", "active") != WYRELOG_E_OK)
+    return 711;
+  if (wyl_policy_store_set_permission_state (store,
+          "permstate-guard-context-user", "wr.audit.read",
+          "permstate-guard-context-scope", "armed") != WYRELOG_E_OK)
+    return 712;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 713;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "permstate-guard-context-user");
+  wyl_decide_req_set_action (req, "wr.audit.read");
+  wyl_decide_req_set_resource_id (req, "permstate-guard-context-scope");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 714;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_DENY)
+    return 715;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_reason (resp), "not_armed") != 0)
+    return 716;
+  if (g_strcmp0 (wyl_decide_resp_get_deny_origin (resp), "perm_state") != 0)
+    return 717;
+
+  wyl_decide_req_set_guard_context (req, 123, "public", 69);
+  wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 718;
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW)
+    return 719;
+  if (wyl_decide_resp_get_deny_reason (resp) != NULL)
+    return 720;
+  if (wyl_decide_resp_get_deny_origin (resp) != NULL)
+    return 721;
+
+  gint residue = expect_guard_bridge_absent (handle,
+      "permstate-guard-context-user", "wr.audit.read",
+      "permstate-guard-context-scope", 722);
+  if (residue != 0)
+    return residue;
+  return 0;
+}
+
+static gint
 check_policy_store_permission_states_reject_unknown_state (void)
 {
   g_autoptr (WylHandle) handle = NULL;
 
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
-    return 705;
+    return 730;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_set_permission_state (store, "permstate-bad-user",
           "wr.audit.read", "permstate-bad-scope", "missing") != WYRELOG_E_OK)
-    return 706;
+    return 731;
   if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
       != WYRELOG_E_POLICY)
-    return 707;
+    return 732;
   return 0;
 }
 
@@ -4529,6 +4619,8 @@ main (void)
   if ((rc = check_policy_store_permission_states_reject_non_armed ()) != 0)
     return rc;
   if ((rc = check_policy_store_guarded_permission_state_stays_guarded ()) != 0)
+    return rc;
+  if ((rc = check_policy_store_guarded_permission_state_needs_context ()) != 0)
     return rc;
   if ((rc = check_policy_store_permission_states_reject_unknown_state ()) != 0)
     return rc;
