@@ -245,8 +245,12 @@ check_permission_scope_relation_contract (void)
     ".decl perm_state_transition(from: symbol, event: symbol, to: symbol)",
     ".decl perm_state_event(event_id: int64, user: symbol, perm: symbol,\n"
         "    scope: symbol, event: symbol, from_state: symbol, to_state: symbol)",
+    ".decl perm_state_replayed(user: symbol, perm: symbol, scope: symbol,\n"
+        "    state: symbol)",
     ".decl perm_state_fired(event_id: int64, user: symbol, perm: symbol,\n"
         "    scope: symbol, from_state: symbol, event: symbol, to_state: symbol)",
+    ".decl perm_state_observed(user: symbol, perm: symbol, scope: symbol,\n"
+        "    state: symbol)",
     ".decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)",
     ".decl perm_window_guard_observed(perm: symbol, window: symbol)",
     ".decl guard_context_timestamp(user: symbol, scope: symbol, timestamp: int64)",
@@ -256,6 +260,8 @@ check_permission_scope_relation_contract (void)
         "    window: symbol)",
     ".decl loc_class(loc_id: symbol, class: symbol)",
     ".decl in_window(timestamp: int64, window: symbol)",
+    "perm_state_observed(U, P, S, State) :- "
+        "perm_state_replayed(U, P, S, State).",
     "perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).",
     "perm_window_guard_observed(P, W) :- perm_window_guard(P, W).",
   };
