@@ -2043,12 +2043,14 @@ send_raw_audit (SoupSession *session, const gchar *base_url,
 }
 
 static gint
-send_raw_audit_bearer (SoupSession *session, const gchar *base_url,
+send_raw_audit_bearer_full (SoupSession *session, const gchar *base_url,
     const gchar *query, const gchar *access_token, guint *out_status,
-    gchar **out_body)
+    gchar **out_body, gchar **out_request_id)
 {
   if (access_token == NULL)
     return 89;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
 
   g_autofree gchar *uri = build_audit_uri (base_url, query);
   g_autoptr (SoupMessage) msg = soup_message_new ("GET", uri);
@@ -2067,11 +2069,25 @@ send_raw_audit_bearer (SoupSession *session, const gchar *base_url,
   gint rc = check_response_request_id_header (msg, 111);
   if (rc != 0)
     return rc;
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
   gsize size = 0;
   const gchar *data = g_bytes_get_data (bytes, &size);
   *out_status = soup_message_get_status (msg);
   *out_body = g_strndup (data, size);
   return 0;
+}
+
+static gint
+send_raw_audit_bearer (SoupSession *session, const gchar *base_url,
+    const gchar *query, const gchar *access_token, guint *out_status,
+    gchar **out_body)
+{
+  return send_raw_audit_bearer_full (session, base_url, query, access_token,
+      out_status, out_body, NULL);
 }
 
 static gint
@@ -2155,12 +2171,32 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
   g_autofree gchar *bearer_allowed =
       g_strdup_printf ("guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=69");
-  rc = send_raw_audit_bearer (session, base_url, bearer_allowed, access_token,
-      &status, &body);
+  g_autofree gchar *bearer_allowed_request_id = NULL;
+  rc = send_raw_audit_bearer_full (session, base_url, bearer_allowed,
+      access_token, &status, &body, &bearer_allowed_request_id);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "[") == NULL)
     return 106;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *request_filter =
+      g_strdup_printf ("request_id(\"%s\")", bearer_allowed_request_id);
+  g_autofree gchar *escaped_request_filter =
+      g_uri_escape_string (request_filter, NULL, TRUE);
+  g_autofree gchar *request_filter_query =
+      g_strdup_printf ("filter=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=69", escaped_request_filter);
+  rc = send_raw_audit_bearer (session, base_url, request_filter_query,
+      access_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"subject_id\":\"http-audit-user\"") == NULL ||
+      strstr (body, "\"action\":\"wr.audit.read\"") == NULL ||
+      strstr (body, "\"request_id\":\"") == NULL ||
+      strstr (body, bearer_allowed_request_id) == NULL)
+    return 160;
 
   g_clear_pointer (&body, g_free);
   g_autofree gchar *mixed =
