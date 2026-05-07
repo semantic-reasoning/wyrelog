@@ -21,6 +21,8 @@ check_defaults_are_null (void)
     return 13;
   if (wyl_decide_req_has_guard_context (req))
     return 14;
+  if (wyl_decide_req_get_request_id (req) != NULL)
+    return 15;
   return 0;
 }
 
@@ -51,6 +53,19 @@ check_resource_round_trip (void)
   wyl_decide_req_set_resource_id (req, "doc/42");
   if (g_strcmp0 (wyl_decide_req_get_resource_id (req), "doc/42") != 0)
     return 40;
+  return 0;
+}
+
+static gint
+check_request_id_round_trip (void)
+{
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_request_id (req, "req-123");
+  if (g_strcmp0 (wyl_decide_req_get_request_id (req), "req-123") != 0)
+    return 45;
+  wyl_decide_req_set_request_id (req, NULL);
+  if (wyl_decide_req_get_request_id (req) != NULL)
+    return 46;
   return 0;
 }
 
@@ -116,6 +131,8 @@ check_get_null_request (void)
     return 91;
   if (wyl_decide_req_get_resource_id (NULL) != NULL)
     return 92;
+  if (wyl_decide_req_get_request_id (NULL) != NULL)
+    return 93;
   return 0;
 }
 
@@ -235,6 +252,8 @@ main (void)
   if ((rc = check_action_round_trip ()) != 0)
     return rc;
   if ((rc = check_resource_round_trip ()) != 0)
+    return rc;
+  if ((rc = check_request_id_round_trip ()) != 0)
     return rc;
   if ((rc = check_caller_buffer_is_copied ()) != 0)
     return rc;

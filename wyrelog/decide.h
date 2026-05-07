@@ -55,6 +55,10 @@ void wyl_decide_req_set_resource_id (wyl_decide_req_t * req,
     const gchar * resource_id);
 const gchar *wyl_decide_req_get_resource_id (const wyl_decide_req_t * req);
 
+void wyl_decide_req_set_request_id (wyl_decide_req_t * req,
+    const gchar * request_id);
+const gchar *wyl_decide_req_get_request_id (const wyl_decide_req_t * req);
+
 /*
  * Sets or clears request-time attributes used by guarded catalogue
  * permissions. When no guard context is set, guarded permissions remain
