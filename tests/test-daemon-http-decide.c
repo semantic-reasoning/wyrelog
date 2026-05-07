@@ -1548,8 +1548,10 @@ check_policy_permission_mutation_contract (WylHandle *handle,
       g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-a"
       "&session_token=%s&guard_timestamp=123&guard_loc_class=public"
       "&guard_risk=50", session_token);
-  rc = send_raw_policy_mutation (session, "POST", base_url,
-      "/policy/permissions/grant", guard_denied_query, &status, &body);
+  g_autofree gchar *guard_denied_request_id = NULL;
+  rc = send_raw_policy_mutation_full (session, "POST", base_url,
+      "/policy/permissions/grant", guard_denied_query, &status, &body,
+      &guard_denied_request_id);
   if (rc != 0)
     return rc;
   if (status != 403 || strstr (body, "\"policy_denied\"") == NULL)
@@ -1557,6 +1559,21 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a"))
     return 134;
+  AuditEventProbe guard_denied_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "wr.policy.write",
+    .resource_id = "tenant-a",
+    .deny_reason = "not_armed",
+    .deny_origin = "perm_state",
+    .request_id = guard_denied_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_DENY,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &guard_denied_audit) != WYRELOG_E_OK)
+    return 200;
+  if (guard_denied_audit.matches != 1)
+    return 201;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *transition_request_id = NULL;
@@ -1683,6 +1700,19 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 196;
   if (grant_audit.matches != 1)
     return 197;
+  AuditEventProbe grant_auth_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "wr.policy.write",
+    .resource_id = "tenant-a",
+    .request_id = grant_request_id,
+    .check_decision = TRUE,
+    .decision = WYL_DECISION_ALLOW,
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &grant_auth_audit) != WYRELOG_E_OK)
+    return 202;
+  if (grant_auth_audit.matches != 1)
+    return 203;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_policy_mutation_bearer (session, "POST", base_url,
