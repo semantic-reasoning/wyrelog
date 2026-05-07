@@ -7,6 +7,7 @@
 #include "wyrelog/client.h"
 
 SoupSession *wyl_client_get_soup_session (WylClient * client);
+void wyl_client_set_timeout_ms (WylClient * client, guint timeout_ms);
 wyrelog_error_t wyl_client_send_message (WylClient * client,
     SoupMessage * message, GBytes ** out_body);
 

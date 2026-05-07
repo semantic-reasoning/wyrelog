@@ -14,6 +14,7 @@ struct _WylClient
   gchar *principal_state;
   gchar *session_state;
   SoupSession *session;
+  guint timeout_ms;
 };
 
 struct _WylClientDecision
@@ -164,6 +165,41 @@ wyl_client_get_soup_session (WylClient *client)
   return client->session;
 }
 
+void
+wyl_client_set_timeout_ms (WylClient *client, guint timeout_ms)
+{
+  g_return_if_fail (WYL_IS_CLIENT (client));
+  client->timeout_ms = timeout_ms;
+}
+
+typedef struct
+{
+  GCancellable *cancellable;
+  GCond cond;
+  GMutex mutex;
+  gboolean done;
+  guint timeout_ms;
+} WylClientTimeout;
+
+static gpointer
+client_timeout_thread_func (gpointer data)
+{
+  WylClientTimeout *timeout = data;
+
+  g_mutex_lock (&timeout->mutex);
+  gint64 deadline = g_get_monotonic_time () + (gint64) timeout->timeout_ms
+      * 1000;
+  while (!timeout->done) {
+    if (!g_cond_wait_until (&timeout->cond, &timeout->mutex, deadline))
+      break;
+  }
+  if (!timeout->done)
+    g_cancellable_cancel (timeout->cancellable);
+  g_mutex_unlock (&timeout->mutex);
+
+  return NULL;
+}
+
 wyrelog_error_t
 wyl_client_send_message (WylClient *client, SoupMessage *message,
     GBytes **out_body)
@@ -174,8 +210,31 @@ wyl_client_send_message (WylClient *client, SoupMessage *message,
   *out_body = NULL;
 
   g_autoptr (GError) error = NULL;
-  GBytes *body = soup_session_send_and_read (client->session, message, NULL,
-      &error);
+  g_autoptr (GCancellable) cancellable =
+      client->timeout_ms > 0 ? g_cancellable_new () : NULL;
+  WylClientTimeout timeout = {
+    .cancellable = cancellable,
+    .timeout_ms = client->timeout_ms,
+  };
+  GThread *timeout_thread = NULL;
+  if (cancellable != NULL) {
+    g_cond_init (&timeout.cond);
+    g_mutex_init (&timeout.mutex);
+    timeout_thread = g_thread_new ("wyl-client-timeout",
+        client_timeout_thread_func, &timeout);
+  }
+
+  GBytes *body = soup_session_send_and_read (client->session, message,
+      cancellable, &error);
+  if (timeout_thread != NULL) {
+    g_mutex_lock (&timeout.mutex);
+    timeout.done = TRUE;
+    g_cond_signal (&timeout.cond);
+    g_mutex_unlock (&timeout.mutex);
+    g_thread_join (timeout_thread);
+    g_mutex_clear (&timeout.mutex);
+    g_cond_clear (&timeout.cond);
+  }
   if (body == NULL)
     return WYRELOG_E_IO;
 
