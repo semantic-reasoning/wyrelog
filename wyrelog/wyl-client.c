@@ -10,6 +10,7 @@ struct _WylClient
   gchar *access_token;
   gchar *username;
   gchar *tenant;
+  gchar *selected_tenant;
   gchar *principal_state;
   gchar *session_state;
   SoupSession *session;
@@ -30,6 +31,7 @@ wyl_client_clear_login_state (WylClient *self)
   g_clear_pointer (&self->access_token, g_free);
   g_clear_pointer (&self->username, g_free);
   g_clear_pointer (&self->tenant, g_free);
+  g_clear_pointer (&self->selected_tenant, g_free);
   g_clear_pointer (&self->principal_state, g_free);
   g_clear_pointer (&self->session_state, g_free);
 }
@@ -117,7 +119,8 @@ gchar *
 wyl_client_dup_tenant (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
-  return g_strdup (client->tenant);
+  return g_strdup (client->selected_tenant != NULL ? client->selected_tenant
+      : client->tenant);
 }
 
 gchar *
@@ -226,6 +229,7 @@ client_login_internal (WylClient *client, const gchar *username,
   client->access_token = g_steal_pointer (&access_token);
   client->username = g_steal_pointer (&parsed_username);
   client->tenant = g_steal_pointer (&tenant);
+  client->selected_tenant = g_strdup (client->tenant);
   client->principal_state = g_steal_pointer (&principal_state);
   client->session_state = g_steal_pointer (&session_state);
   return WYRELOG_E_OK;
@@ -281,6 +285,9 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
     return WYRELOG_E_INVALID;
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
   gboolean use_access_token = access_token != NULL && access_token[0] != '\0';
+  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
+  if (tenant == NULL || tenant[0] == '\0')
+    return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (base_url == NULL)
@@ -292,6 +299,7 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
   g_autofree gchar *escaped_target =
       g_uri_escape_string (target_value, NULL, TRUE);
   g_autofree gchar *escaped_scope = g_uri_escape_string (scope, NULL, TRUE);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
   g_autofree gchar *escaped_event =
       event != NULL ? g_uri_escape_string (event, NULL, TRUE) : NULL;
   g_autofree gchar *escaped_loc =
@@ -299,36 +307,38 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
   g_autofree gchar *uri = NULL;
   if (use_access_token) {
     if (escaped_event != NULL) {
-      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&event=%s"
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&tenant=%s"
+          "&event=%s"
           "&guard_timestamp=%" G_GINT64_FORMAT
           "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
           base_url, path, escaped_subject, target_name, escaped_target,
-          escaped_scope, escaped_event, guard_timestamp, escaped_loc,
-          guard_risk);
+          escaped_scope, escaped_tenant, escaped_event, guard_timestamp,
+          escaped_loc, guard_risk);
     } else {
-      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s"
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&tenant=%s"
           "&guard_timestamp=%" G_GINT64_FORMAT
           "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
           base_url, path, escaped_subject, target_name, escaped_target,
-          escaped_scope, guard_timestamp, escaped_loc, guard_risk);
+          escaped_scope, escaped_tenant, guard_timestamp, escaped_loc,
+          guard_risk);
     }
   } else {
     g_autofree gchar *escaped_session =
         g_uri_escape_string (session_token, NULL, TRUE);
     if (escaped_event != NULL) {
       uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&event=%s"
-          "&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+          "&tenant=%s&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
           "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
           base_url, path, escaped_subject, target_name, escaped_target,
-          escaped_scope, escaped_event, escaped_session, guard_timestamp,
-          escaped_loc, guard_risk);
+          escaped_scope, escaped_event, escaped_tenant, escaped_session,
+          guard_timestamp, escaped_loc, guard_risk);
     } else {
-      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s"
+      uri = g_strdup_printf ("%s/%s?subject=%s&%s=%s&scope=%s&tenant=%s"
           "&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
           "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
           base_url, path, escaped_subject, target_name, escaped_target,
-          escaped_scope, escaped_session, guard_timestamp, escaped_loc,
-          guard_risk);
+          escaped_scope, escaped_tenant, escaped_session, guard_timestamp,
+          escaped_loc, guard_risk);
     }
   }
 
@@ -792,9 +802,16 @@ wyl_client_decide_with_guard_context (WylClient *client, const gchar *user,
 wyrelog_error_t
 wyl_client_tenant_select (WylClient *client, const gchar *tenant)
 {
-  (void) client;
-  (void) tenant;
-  return WYRELOG_E_INTERNAL;
+  if (client == NULL || !WYL_IS_CLIENT (client) || tenant == NULL ||
+      tenant[0] == '\0')
+    return WYRELOG_E_INVALID;
+  if (client->tenant == NULL || g_strcmp0 (tenant, "__wr_default") != 0 ||
+      g_strcmp0 (client->tenant, tenant) != 0)
+    return WYRELOG_E_INVALID;
+
+  g_free (client->selected_tenant);
+  client->selected_tenant = g_strdup (tenant);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

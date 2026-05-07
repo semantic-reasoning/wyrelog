@@ -20,6 +20,7 @@ typedef struct
   gchar *last_perm;
   gchar *last_role;
   gchar *last_scope;
+  gchar *last_tenant;
   gchar *last_event;
   gchar *last_session_token;
   gchar *last_authorization;
@@ -72,6 +73,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_perm);
   g_free (http->last_role);
   g_free (http->last_scope);
+  g_free (http->last_tenant);
   g_free (http->last_event);
   g_free (http->last_session_token);
   g_free (http->last_authorization);
@@ -98,6 +100,8 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
       query != NULL ? g_strdup (g_hash_table_lookup (query, "role")) : NULL;
   http->last_scope =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "scope")) : NULL;
+  http->last_tenant =
+      query != NULL ? g_strdup (g_hash_table_lookup (query, "tenant")) : NULL;
   http->last_event =
       query != NULL ? g_strdup (g_hash_table_lookup (query, "event")) : NULL;
   http->last_session_token =
@@ -274,12 +278,17 @@ main (void)
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
+  if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
+    return 90;
+  if (wyl_client_tenant_select (local_client, "__wr_default") != WYRELOG_E_OK)
+    return 91;
   http.body = "{\"ok\":true}";
   if (wyl_client_policy_permission_grant (local_client, "fallback target",
           "site.policy.read", "tenant/fallback", 123, "public", 49)
       != WYRELOG_E_OK)
     return 170;
   if (g_strcmp0 (http.last_session_token, "session-1") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_authorization != NULL)
     return 171;
   g_autoptr (WylAuditIter) fallback_guarded_audit_iter = NULL;
@@ -288,7 +297,8 @@ main (void)
     return 173;
   g_autofree gchar *fallback_guarded_audit_uri =
       wyl_audit_iter_dup_request_uri (fallback_guarded_audit_iter);
-  if (strstr (fallback_guarded_audit_uri, "session_token=session-1") == NULL)
+  if (strstr (fallback_guarded_audit_uri, "tenant=__wr_default") == NULL ||
+      strstr (fallback_guarded_audit_uri, "session_token=session-1") == NULL)
     return 174;
   g_autoptr (SoupMessage) fallback_guarded_audit_message =
       wyl_audit_iter_new_request_message (fallback_guarded_audit_iter);
@@ -381,6 +391,7 @@ main (void)
       g_strcmp0 (http.last_subject, "target user") != 0 ||
       g_strcmp0 (http.last_perm, "site.policy.read") != 0 ||
       g_strcmp0 (http.last_scope, "tenant/a") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
@@ -391,6 +402,7 @@ main (void)
           "site.policy.read", "tenant/a", 123, "public", 49) != WYRELOG_E_OK)
     return 519;
   if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
     return 520;
@@ -402,6 +414,7 @@ main (void)
       g_strcmp0 (http.last_subject, "target user") != 0 ||
       g_strcmp0 (http.last_perm, "site.policy.read") != 0 ||
       g_strcmp0 (http.last_scope, "tenant/a") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       g_strcmp0 (http.last_event, "grant") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
@@ -415,6 +428,7 @@ main (void)
   if (g_strcmp0 (http.last_path, "/policy/roles/grant") != 0 ||
       g_strcmp0 (http.last_role, "site.reader") != 0 ||
       g_strcmp0 (http.last_scope, "tenant/b") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_guard_risk, "29") != 0)
@@ -423,6 +437,7 @@ main (void)
           "site.reader", "tenant/b", 123, "public", 29) != WYRELOG_E_OK)
     return 523;
   if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_session_token != NULL ||
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
     return 524;
@@ -463,6 +478,7 @@ main (void)
   g_autofree gchar *guarded_audit_uri =
       wyl_audit_iter_dup_request_uri (guarded_audit_iter);
   if (strstr (guarded_audit_uri, "/audit/events?") == NULL ||
+      strstr (guarded_audit_uri, "tenant=__wr_default") == NULL ||
       strstr (guarded_audit_uri, "session_token=") != NULL ||
       strstr (guarded_audit_uri, "guard_timestamp=123") == NULL ||
       strstr (guarded_audit_uri, "guard_loc_class=public") == NULL ||
@@ -713,6 +729,7 @@ main (void)
   g_clear_pointer (&http.last_perm, g_free);
   g_clear_pointer (&http.last_role, g_free);
   g_clear_pointer (&http.last_scope, g_free);
+  g_clear_pointer (&http.last_tenant, g_free);
   g_clear_pointer (&http.last_event, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
   g_clear_pointer (&http.last_authorization, g_free);
