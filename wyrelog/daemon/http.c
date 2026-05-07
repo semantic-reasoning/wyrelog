@@ -18,6 +18,7 @@
 #define WYL_DAEMON_JWT_ISSUER "wyrelogd"
 #define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
 #define WYL_DAEMON_JWT_KEY_ID "__wr_default_hs256"
+#define WYL_DAEMON_DEFAULT_TENANT "__wr_default"
 #define WYL_DAEMON_JWT_KEY_LEN 32
 #define WYL_DAEMON_REQUEST_ID_HEADER "X-Wyrelog-Request-Id"
 #define WYL_DAEMON_REQUEST_ID_DATA "wyl-daemon-request-id"
@@ -61,6 +62,14 @@ typedef struct
 } WylDaemonHttpContext;
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
+static void set_json_error (SoupServerMessage * msg, guint status,
+    const gchar * code);
+
+static gboolean
+wyl_daemon_tenant_is_known (const gchar *tenant)
+{
+  return g_strcmp0 (tenant, WYL_DAEMON_DEFAULT_TENANT) == 0;
+}
 
 static void
 wyl_daemon_auth_context_clear (WylDaemonAuthContext *auth)
@@ -565,6 +574,35 @@ resolve_session_token_auth (SoupServer *server, const gchar *session_token,
 }
 
 static const gchar *
+lookup_request_tenant (GHashTable *query)
+{
+  if (query != NULL && g_hash_table_contains (query, "tenant"))
+    return g_hash_table_lookup (query, "tenant");
+  return WYL_DAEMON_DEFAULT_TENANT;
+}
+
+static gboolean
+ensure_auth_context_request_tenant (SoupServerMessage *msg, GHashTable *query,
+    const WylDaemonAuthContext *auth, const gchar *invalid_code,
+    const gchar *denied_code)
+{
+  const gchar *request_tenant = lookup_request_tenant (query);
+  if (request_tenant == NULL || request_tenant[0] == '\0' ||
+      !wyl_daemon_tenant_is_known (request_tenant)) {
+    set_json_error (msg, 400, invalid_code);
+    return FALSE;
+  }
+
+  if (auth == NULL || auth->tenant == NULL ||
+      g_strcmp0 (auth->tenant, request_tenant) != 0) {
+    set_json_error (msg, 403, denied_code);
+    return FALSE;
+  }
+
+  return TRUE;
+}
+
+static const gchar *
 ensure_request_id_header (SoupServerMessage *msg)
 {
   const gchar *existing = g_object_get_data (G_OBJECT (msg),
@@ -826,6 +864,9 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
       return FALSE;
     }
   }
+  if (!ensure_auth_context_request_tenant (msg, query, &auth, invalid_code,
+          denied_code))
+    return FALSE;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -1227,7 +1268,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   const gchar *username = NULL;
-  const gchar *tenant = "__wr_default";
+  const gchar *tenant = WYL_DAEMON_DEFAULT_TENANT;
   const gchar *skip_mfa = NULL;
   const gchar *password = NULL;
   if (query != NULL) {
@@ -1242,7 +1283,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
   if (tenant == NULL || tenant[0] == '\0' ||
-      g_strcmp0 (tenant, "__wr_default") != 0) {
+      !wyl_daemon_tenant_is_known (tenant)) {
     set_json_error (msg, 400, "invalid_login_request");
     return;
   }
