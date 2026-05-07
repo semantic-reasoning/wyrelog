@@ -2,6 +2,19 @@
 #include "wyl-boot-private.h"
 #include "wyl-common-private.h"
 
+const gchar *
+wyl_boot_phase_failure_code (boot_phase_id_t id)
+{
+  switch (id) {
+    case BOOT_01_TPM_PROBE:
+      return "boot_tpm_probe_failed";
+    case BOOT_02_DEK_UNSEAL:
+      return "boot_dek_unseal_failed";
+    default:
+      return "boot_phase_failed";
+  }
+}
+
 wyrelog_error_t
 wyl_boot_run (const boot_phase_t *seq, gsize n, gpointer ctx)
 {
@@ -28,13 +41,15 @@ wyl_boot_run (const boot_phase_t *seq, gsize n, gpointer ctx)
     if (rc != WYRELOG_E_OK) {
       if (phase->fail_closed) {
         WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-            "boot phase %d (%s) failed; halting",
-            phase->id, phase->name ? phase->name : "?");
+            "boot phase %d (%s) failed; code=%s; halting",
+            phase->id, phase->name ? phase->name : "?",
+            wyl_boot_phase_failure_code (phase->id));
         return rc;
       }
       WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
-          "boot phase %d (%s) failed (continuing)",
-          phase->id, phase->name ? phase->name : "?");
+          "boot phase %d (%s) failed; code=%s (continuing)",
+          phase->id, phase->name ? phase->name : "?",
+          wyl_boot_phase_failure_code (phase->id));
     }
   }
 

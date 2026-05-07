@@ -31,6 +31,15 @@ main (void)
   /* Non-zero count with NULL seq is an invalid argument. */
   if (wyl_boot_run (NULL, 1, NULL) != WYRELOG_E_INVALID)
     return 2;
+  if (g_strcmp0 (wyl_boot_phase_failure_code (BOOT_01_TPM_PROBE),
+          "boot_tpm_probe_failed") != 0)
+    return 9;
+  if (g_strcmp0 (wyl_boot_phase_failure_code (BOOT_02_DEK_UNSEAL),
+          "boot_dek_unseal_failed") != 0)
+    return 10;
+  if (g_strcmp0 (wyl_boot_phase_failure_code (BOOT_LAST),
+          "boot_phase_failed") != 0)
+    return 11;
 
   /* All-success sequence runs every phase and returns OK. */
   call_count = 0;

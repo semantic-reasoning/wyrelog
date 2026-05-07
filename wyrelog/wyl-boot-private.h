@@ -48,5 +48,6 @@ typedef struct boot_phase_t
  * NULL while n > 0.
  */
 wyrelog_error_t wyl_boot_run (const boot_phase_t * seq, gsize n, gpointer ctx);
+const gchar *wyl_boot_phase_failure_code (boot_phase_id_t id);
 
 G_END_DECLS;
