@@ -124,10 +124,103 @@ check_bootstrap_seed_consistency (void)
   return 0;
 }
 
+static gint
+read_template_file (const gchar *relative_path, gchar **out_contents,
+    gsize *out_len)
+{
+  g_autofree gchar *path =
+      g_build_filename (WYL_TEST_TEMPLATE_DIR, relative_path, NULL);
+  g_autoptr (GError) error = NULL;
+
+  if (!g_file_get_contents (path, out_contents, out_len, &error))
+    return 90;
+  return 0;
+}
+
+static gint
+check_required_snippets (const gchar *contents, gsize len,
+    const gchar *const *snippets, gsize n_snippets, gint error_base)
+{
+  for (gsize i = 0; i < n_snippets; i++) {
+    if (g_strstr_len (contents, (gssize) len, snippets[i]) == NULL)
+      return (gint) (error_base + i);
+  }
+  return 0;
+}
+
+static gint
+check_decision_template_relation_contract (void)
+{
+  static const gchar *const snippets[] = {
+    ".decl audit_event_input(id: symbol, created_at_us: int64, decision: symbol)",
+    ".decl audit_event_subject_input(id: symbol, subject: symbol)",
+    ".decl audit_event_action_input(id: symbol, action: symbol)",
+    ".decl audit_event_resource_input(id: symbol, resource: symbol)",
+    ".decl audit_event_deny_reason_input(id: symbol, reason: symbol)",
+    ".decl audit_event_deny_origin_input(id: symbol, origin: symbol)",
+    ".decl audit_event_request_id_input(id: symbol, request_id: symbol)",
+    ".decl audit_event(id: symbol, created_at_us: int64, decision: symbol)",
+    ".decl audit_event_subject(id: symbol, subject: symbol)",
+    ".decl audit_event_action(id: symbol, action: symbol)",
+    ".decl audit_event_resource(id: symbol, resource: symbol)",
+    ".decl audit_event_deny_reason(id: symbol, reason: symbol)",
+    ".decl audit_event_deny_origin(id: symbol, origin: symbol)",
+    ".decl audit_event_request_id(id: symbol, request_id: symbol)",
+    ".decl login_skip_mfa_authz_observed(user: symbol)",
+    ".decl allow_bool(user: symbol, perm: symbol, scope: symbol)",
+    ".decl deny_reason(user: symbol, perm: symbol, scope: symbol,\n"
+        "    code: symbol, origin: symbol)",
+    "audit_event_request_id(ID, RequestID) :-\n"
+        "    audit_event_request_id_input(ID, RequestID).",
+    "login_skip_mfa_authz_observed(U) :-\n" "    login_skip_mfa_authz(U).",
+  };
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gint rc = read_template_file ("lobac/decision.dl", &contents, &len);
+  if (rc != 0)
+    return rc;
+  return check_required_snippets (contents, len, snippets,
+      G_N_ELEMENTS (snippets), 100);
+}
+
+static gint
+check_permission_scope_relation_contract (void)
+{
+  static const gchar *const snippets[] = {
+    ".decl perm_state_transition(from: symbol, event: symbol, to: symbol)",
+    ".decl perm_state_event(event_id: int64, user: symbol, perm: symbol,\n"
+        "    scope: symbol, event: symbol, from_state: symbol, to_state: symbol)",
+    ".decl perm_state_fired(event_id: int64, user: symbol, perm: symbol,\n"
+        "    scope: symbol, from_state: symbol, event: symbol, to_state: symbol)",
+    ".decl perm_arm_rule_observed(perm: symbol, guard_handle: int64)",
+    ".decl perm_window_guard_observed(perm: symbol, window: symbol)",
+    ".decl guard_context_timestamp(user: symbol, scope: symbol, timestamp: int64)",
+    ".decl guard_context_loc_class(user: symbol, scope: symbol, loc_class: symbol)",
+    ".decl guard_context_risk(user: symbol, scope: symbol, risk: int64)",
+    ".decl guard_context_in_window(user: symbol, scope: symbol, timestamp: int64,\n"
+        "    window: symbol)",
+    "perm_arm_rule_observed(P, G) :- perm_arm_rule(P, G).",
+    "perm_window_guard_observed(P, W) :- perm_window_guard(P, W).",
+  };
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gint rc = read_template_file ("fsm/permission_scope.dl", &contents, &len);
+  if (rc != 0)
+    return rc;
+  return check_required_snippets (contents, len, snippets,
+      G_N_ELEMENTS (snippets), 130);
+}
+
 int
 main (void)
 {
   if (template_tree_has_backup (WYL_TEST_TEMPLATE_DIR))
     return 1;
-  return check_bootstrap_seed_consistency ();
+  gint rc = check_bootstrap_seed_consistency ();
+  if (rc != 0)
+    return rc;
+  rc = check_decision_template_relation_contract ();
+  if (rc != 0)
+    return rc;
+  return check_permission_scope_relation_contract ();
 }
