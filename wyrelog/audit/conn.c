@@ -148,9 +148,15 @@ static wyrelog_error_t
 ensure_audit_events_request_id_column (wyl_audit_conn_t *conn)
 {
   duckdb_result result = { 0 };
+  /* DuckDB v1.5.1's information_schema.columns view binds an internal
+   * "system" catalog that is not resolvable on an open in-memory database,
+   * surfacing as a Binder Error and breaking init for every caller that
+   * runs the audit schema migration. pragma_table_info is the portable
+   * column-existence probe in DuckDB and matches the SQLite migration in
+   * wyl_policy_store_create_schema. */
   static const gchar *probe_sql =
-      "SELECT COUNT(*) FROM information_schema.columns "
-      "WHERE table_name = 'audit_events' AND column_name = 'request_id';";
+      "SELECT COUNT(*) FROM pragma_table_info('audit_events') "
+      "WHERE name = 'request_id';";
 
   if (duckdb_query (conn->conn, probe_sql, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
