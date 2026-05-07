@@ -1303,6 +1303,27 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
   return 0;
 }
 
+typedef struct
+{
+  const gchar *base_url;
+  gchar *query;
+  gint rc;
+  guint status;
+  gchar *body;
+} ConcurrentPolicyMutation;
+
+static gpointer
+concurrent_permission_grant_thread (gpointer user_data)
+{
+  ConcurrentPolicyMutation *mutation = user_data;
+  g_autoptr (SoupSession) session = soup_session_new ();
+
+  mutation->rc = send_raw_policy_mutation (session, "POST",
+      mutation->base_url, "/policy/permissions/grant", mutation->query,
+      &mutation->status, &mutation->body);
+  return NULL;
+}
+
 static wyrelog_error_t
 grant_policy_write_authority (WylHandle *handle, const gchar *subject,
     const gchar *scope)
@@ -1422,6 +1443,81 @@ role_membership_exists (WylHandle *handle, const gchar *subject,
           &exists) != WYRELOG_E_OK)
     return FALSE;
   return exists;
+}
+
+static gint
+check_concurrent_permission_grants_serialize (WylHandle *handle,
+    const gchar *base_url, const gchar *session_token)
+{
+  static const guint n_threads = 4;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+
+  if (wyl_policy_store_upsert_permission (store, "site.concurrent.read",
+          "site concurrent read", "basic") != WYRELOG_E_OK)
+    return 204;
+
+  ConcurrentPolicyMutation mutations[n_threads];
+  GThread *threads[n_threads];
+  gint result = 0;
+  memset (mutations, 0, sizeof mutations);
+  memset (threads, 0, sizeof threads);
+
+  for (guint i = 0; i < n_threads; i++) {
+    mutations[i].base_url = base_url;
+    mutations[i].query =
+        g_strdup_printf ("subject=concurrent-target"
+        "&perm=site.concurrent.read&scope=tenant-a"
+        "&session_token=%s&guard_timestamp=123"
+        "&guard_loc_class=public&guard_risk=49", session_token);
+    g_autofree gchar *name = g_strdup_printf ("policy-grant-%u", i);
+    threads[i] = g_thread_new (name, concurrent_permission_grant_thread,
+        &mutations[i]);
+  }
+
+  for (guint i = 0; i < n_threads; i++)
+    g_thread_join (threads[i]);
+
+  for (guint i = 0; i < n_threads; i++) {
+    if (mutations[i].rc != 0) {
+      result = 205;
+      goto cleanup;
+    }
+    if (mutations[i].status != 200
+        || strstr (mutations[i].body, "\"ok\":true") == NULL) {
+      result = 206;
+      goto cleanup;
+    }
+  }
+
+  if (!direct_permission_exists (handle, "concurrent-target",
+          "site.concurrent.read", "tenant-a")) {
+    result = 207;
+    goto cleanup;
+  }
+#ifdef WYL_HAS_AUDIT
+  AuditEventProbe grant_audit = {
+    .subject_id = "http-policy-admin",
+    .action = "permission_grant",
+    .resource_id = "tenant-a",
+    .deny_origin = "site.concurrent.read",
+  };
+  if (wyl_policy_store_foreach_audit_event (store, audit_event_probe_cb,
+          &grant_audit) != WYRELOG_E_OK) {
+    result = 208;
+    goto cleanup;
+  }
+  if (grant_audit.matches != n_threads) {
+    result = 209;
+    goto cleanup;
+  }
+#endif
+
+cleanup:
+  for (guint i = 0; i < n_threads; i++) {
+    g_free (mutations[i].query);
+    g_free (mutations[i].body);
+  }
+  return result;
 }
 
 static gint
@@ -1572,6 +1668,11 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   if (grant_policy_write_authority (handle, "http-policy-admin",
           "tenant-a") != WYRELOG_E_OK)
     return 132;
+
+  gint concurrent_rc = check_concurrent_permission_grants_serialize (handle,
+      base_url, session_token);
+  if (concurrent_rc != 0)
+    return concurrent_rc;
 
   rc = send_raw_policy_mutation (session, "POST", base_url,
       "/policy/permissions/grant", missing_perm_grant_query, &status, &body);
