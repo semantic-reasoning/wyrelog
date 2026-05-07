@@ -490,6 +490,11 @@ check_runtime_ready (WylHandle *handle)
     return rc;
   if (!found)
     return WYRELOG_E_IO;
+
+  g_autofree gchar *json = NULL;
+  rc = wyl_audit_conn_query_events_json (conn, NULL, &json);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 #endif
 
   return WYRELOG_E_OK;

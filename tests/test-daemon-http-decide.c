@@ -2510,6 +2510,56 @@ drop_runtime_audit_events_table (WylHandle *handle)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+malform_runtime_audit_events_table (WylHandle *handle)
+{
+  wyrelog_error_t rc = drop_runtime_audit_events_table (handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  duckdb_result result = { 0 };
+  if (duckdb_query (conn,
+          "CREATE TABLE audit_events (id VARCHAR PRIMARY KEY);", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_readyz_malformed_audit_projection_contract (WylHandle *handle,
+    const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  if (malform_runtime_audit_events_table (handle) != WYRELOG_E_OK)
+    return 1914;
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0)
+    return 1915;
+  if (status != 503 || strstr (body, "\"not_ready\"") == NULL)
+    return 1916;
+
+  if (drop_runtime_audit_events_table (handle) != WYRELOG_E_OK)
+    return 1917;
+  if (wyl_audit_conn_create_schema (wyl_handle_get_audit_conn (handle))
+      != WYRELOG_E_OK)
+    return 1918;
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/readyz", &status, &body)
+      != 0)
+    return 1919;
+  return status == 200 ? 0 : 1920;
+}
+
 static gint
 check_audit_event_present (WylClient *client, const gchar *filter,
     const gchar *subject, const gchar *action, const gchar *resource,
@@ -2586,6 +2636,13 @@ main (void)
   gint readyz_rc = check_readyz_runtime_liveness_contract (base_url, &runtime);
   if (readyz_rc != 0)
     return readyz_rc;
+
+#ifdef WYL_HAS_AUDIT
+  readyz_rc = check_readyz_malformed_audit_projection_contract (handle,
+      base_url);
+  if (readyz_rc != 0)
+    return readyz_rc;
+#endif
 
   gint request_id_rc = check_request_id_header_contract (base_url);
   if (request_id_rc != 0)

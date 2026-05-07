@@ -67,10 +67,10 @@ persist_daemon_audit_event (WylDaemonRuntime *runtime, const WylAuditEvent *ev)
 
   rc = wyl_audit_conn_create_schema (audit_conn);
   if (rc != WYRELOG_E_OK)
-    return WYRELOG_E_OK;
+    return rc;
 
   gboolean audit_inserted = FALSE;
-  (void) wyl_audit_conn_insert_event_full (audit_conn, id,
+  rc = wyl_audit_conn_insert_event_full (audit_conn, id,
       wyl_audit_event_get_created_at_us (ev),
       wyl_audit_event_get_subject_id (ev), wyl_audit_event_get_action (ev),
       wyl_audit_event_get_resource_id (ev),
@@ -78,7 +78,7 @@ persist_daemon_audit_event (WylDaemonRuntime *runtime, const WylAuditEvent *ev)
       wyl_audit_event_get_deny_origin (ev),
       wyl_audit_event_get_request_id (ev), wyl_audit_event_get_decision (ev),
       &audit_inserted);
-  return WYRELOG_E_OK;
+  return rc;
 }
 
 static void
