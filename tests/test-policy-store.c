@@ -19,33 +19,17 @@ check_store_creates_authority_schema (void)
   if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
     return 11;
 
-  const gchar *tables[] = {
-    "wyrelog_config",
-    "roles",
-    "permissions",
-    "role_permissions",
-    "role_inheritances",
-    "role_memberships",
-    "role_membership_events",
-    "direct_permissions",
-    "direct_permission_events",
-    "permission_states",
-    "permission_state_events",
-    "principal_events",
-    "principal_states",
-    "session_states",
-    "session_events",
-    "audit_events",
-    "policy_signatures",
-  };
-  for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
+  for (gsize i = 0; i < wyl_policy_store_required_table_count (); i++) {
     gboolean exists = FALSE;
-    if (wyl_policy_store_table_exists (store, tables[i], &exists)
-        != WYRELOG_E_OK)
+    const gchar *table = wyl_policy_store_required_table_name (i);
+    if (wyl_policy_store_table_exists (store, table, &exists) != WYRELOG_E_OK)
       return 12;
     if (!exists)
       return 13;
   }
+  if (wyl_policy_store_required_table_name
+      (wyl_policy_store_required_table_count ()) != NULL)
+    return 14;
 
   return 0;
 }
@@ -70,29 +54,10 @@ check_template_schema_creates_state_tables (void)
     return 22;
   }
 
-  const gchar *tables[] = {
-    "wyrelog_config",
-    "roles",
-    "permissions",
-    "role_permissions",
-    "role_inheritances",
-    "role_memberships",
-    "role_membership_events",
-    "direct_permissions",
-    "direct_permission_events",
-    "permission_states",
-    "permission_state_events",
-    "principal_events",
-    "principal_states",
-    "session_states",
-    "session_events",
-    "audit_events",
-    "policy_signatures",
-  };
-  for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
+  for (gsize i = 0; i < wyl_policy_store_required_table_count (); i++) {
     gboolean exists = FALSE;
-    if (wyl_policy_store_table_exists (store, tables[i], &exists)
-        != WYRELOG_E_OK)
+    const gchar *table = wyl_policy_store_required_table_name (i);
+    if (wyl_policy_store_table_exists (store, table, &exists) != WYRELOG_E_OK)
       return 23;
     if (!exists)
       return 24;

@@ -32,30 +32,11 @@ wyrelog_error_t
 wyl_daemon_check_policy_store_ready (WylHandle *handle)
 {
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  const gchar *tables[] = {
-    "wyrelog_config",
-    "roles",
-    "permissions",
-    "role_permissions",
-    "role_inheritances",
-    "role_memberships",
-    "role_membership_events",
-    "direct_permissions",
-    "direct_permission_events",
-    "permission_states",
-    "permission_state_events",
-    "principal_events",
-    "principal_states",
-    "session_states",
-    "session_events",
-    "audit_events",
-    "policy_signatures",
-  };
 
-  for (gsize i = 0; i < G_N_ELEMENTS (tables); i++) {
+  for (gsize i = 0; i < wyl_policy_store_required_table_count (); i++) {
     gboolean found = FALSE;
-    wyrelog_error_t rc =
-        wyl_policy_store_table_exists (store, tables[i], &found);
+    const gchar *table = wyl_policy_store_required_table_name (i);
+    wyrelog_error_t rc = wyl_policy_store_table_exists (store, table, &found);
     if (rc != WYRELOG_E_OK)
       return rc;
     if (!found)

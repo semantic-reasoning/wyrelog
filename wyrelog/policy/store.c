@@ -61,6 +61,26 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.audit.write", "audit write", "critical"},
 };
 
+static const gchar *const required_tables[] = {
+  "wyrelog_config",
+  "roles",
+  "permissions",
+  "role_permissions",
+  "role_inheritances",
+  "role_memberships",
+  "role_membership_events",
+  "direct_permissions",
+  "direct_permission_events",
+  "permission_states",
+  "permission_state_events",
+  "principal_events",
+  "principal_states",
+  "session_states",
+  "session_events",
+  "audit_events",
+  "policy_signatures",
+};
+
 static const BuiltinRole *
 find_builtin_role (const gchar *role_id)
 {
@@ -687,6 +707,20 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
   return seed_builtin_catalog (store->db);
+}
+
+gsize
+wyl_policy_store_required_table_count (void)
+{
+  return G_N_ELEMENTS (required_tables);
+}
+
+const gchar *
+wyl_policy_store_required_table_name (gsize idx)
+{
+  if (idx >= G_N_ELEMENTS (required_tables))
+    return NULL;
+  return required_tables[idx];
 }
 
 gsize
