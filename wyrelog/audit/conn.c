@@ -93,7 +93,8 @@ static wyrelog_error_t
 audit_event_matches_existing (wyl_audit_conn_t *conn, const gchar *id,
     gint64 created_at_us, const gchar *subject_id, const gchar *action,
     const gchar *resource_id, const gchar *deny_reason,
-    const gchar *deny_origin, wyl_decision_t decision, gboolean *out_exists)
+    const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, gboolean *out_exists)
 {
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result;
@@ -102,7 +103,8 @@ audit_event_matches_existing (wyl_audit_conn_t *conn, const gchar *id,
   *out_exists = FALSE;
   static const gchar *sql =
       "SELECT created_at_us, subject_id, action, resource_id, "
-      "deny_reason, deny_origin, decision " "FROM audit_events WHERE id = ?;";
+      "deny_reason, deny_origin, request_id, decision "
+      "FROM audit_events WHERE id = ?;";
   if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
   if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
@@ -135,10 +137,38 @@ audit_event_matches_existing (wyl_audit_conn_t *conn, const gchar *id,
       && result_nullable_varchar_equal (&result, 3, 0, resource_id)
       && result_nullable_varchar_equal (&result, 4, 0, deny_reason)
       && result_nullable_varchar_equal (&result, 5, 0, deny_origin)
-      && duckdb_value_int64 (&result, 6, 0) == decision;
+      && result_nullable_varchar_equal (&result, 6, 0, request_id)
+      && duckdb_value_int64 (&result, 7, 0) == decision;
 
   duckdb_destroy_result (&result);
   return equal ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+ensure_audit_events_request_id_column (wyl_audit_conn_t *conn)
+{
+  duckdb_result result = { 0 };
+  static const gchar *probe_sql =
+      "SELECT COUNT(*) FROM information_schema.columns "
+      "WHERE table_name = 'audit_events' AND column_name = 'request_id';";
+
+  if (duckdb_query (conn->conn, probe_sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  gboolean exists = duckdb_value_int64 (&result, 0, 0) > 0;
+  duckdb_destroy_result (&result);
+  if (exists)
+    return WYRELOG_E_OK;
+
+  if (duckdb_query (conn->conn,
+          "ALTER TABLE audit_events ADD COLUMN request_id VARCHAR;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -153,6 +183,7 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
       "  resource_id   VARCHAR,"
       "  deny_reason   VARCHAR,"
       "  deny_origin   VARCHAR,"
+      "  request_id    VARCHAR,"
       "  decision      SMALLINT NOT NULL"
       ");"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us "
@@ -175,7 +206,7 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
     return WYRELOG_E_IO;
   }
   duckdb_destroy_result (&result);
-  return WYRELOG_E_OK;
+  return ensure_audit_events_request_id_column (conn);
 }
 
 wyrelog_error_t
@@ -217,7 +248,8 @@ wyrelog_error_t
 wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
     gint64 created_at_us, const gchar *subject_id, const gchar *action,
     const gchar *resource_id, const gchar *deny_reason,
-    const gchar *deny_origin, wyl_decision_t decision, gboolean *out_inserted)
+    const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, gboolean *out_inserted)
 {
   duckdb_prepared_statement stmt = NULL;
   duckdb_result result;
@@ -236,8 +268,8 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
     return WYRELOG_E_INVALID;
 
   wyrelog_error_t rc = audit_event_matches_existing (conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, decision,
-      &exists);
+      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+      decision, &exists);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (exists)
@@ -246,7 +278,8 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
   static const gchar *sql =
       "INSERT INTO audit_events "
       "(id, created_at_us, subject_id, action, resource_id, "
-      "deny_reason, deny_origin, decision) " "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+      "deny_reason, deny_origin, request_id, decision) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
   if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -259,7 +292,8 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
       || bind_nullable_varchar (stmt, 5, resource_id) != WYRELOG_E_OK
       || bind_nullable_varchar (stmt, 6, deny_reason) != WYRELOG_E_OK
       || bind_nullable_varchar (stmt, 7, deny_origin) != WYRELOG_E_OK
-      || duckdb_bind_int16 (stmt, 8, (int16_t) decision) != DuckDBSuccess) {
+      || bind_nullable_varchar (stmt, 8, request_id) != WYRELOG_E_OK
+      || duckdb_bind_int16 (stmt, 9, (int16_t) decision) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
   }
@@ -283,7 +317,7 @@ wyl_audit_conn_insert_event (wyl_audit_conn_t *conn, const gchar *id,
   gboolean inserted = FALSE;
 
   return wyl_audit_conn_insert_event_full (conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, decision,
+      subject_id, action, resource_id, deny_reason, deny_origin, NULL, decision,
       &inserted);
 }
 
@@ -466,6 +500,8 @@ parse_audit_filter (const gchar *filter, const gchar **out_column,
     *out_column = "deny_reason";
   else if (g_strcmp0 (key, "deny_origin") == 0)
     *out_column = "deny_origin";
+  else if (g_strcmp0 (key, "request_id") == 0)
+    *out_column = "request_id";
 
   if (*out_column != NULL) {
     *out_string = g_steal_pointer (&value);
@@ -497,13 +533,13 @@ wyl_audit_conn_query_events_json (wyl_audit_conn_t *conn,
   if (column == NULL) {
     sql =
         g_strdup ("SELECT id, created_at_us, subject_id, action, resource_id, "
-        "deny_reason, deny_origin, decision " "FROM audit_events "
+        "deny_reason, deny_origin, request_id, decision " "FROM audit_events "
         "ORDER BY created_at_us DESC, id DESC " "LIMIT 100;");
   } else {
     sql =
         g_strdup_printf
         ("SELECT id, created_at_us, subject_id, action, resource_id, "
-        "deny_reason, deny_origin, decision " "FROM audit_events "
+        "deny_reason, deny_origin, request_id, decision " "FROM audit_events "
         "WHERE %s = ? " "ORDER BY created_at_us DESC, id DESC " "LIMIT 100;",
         column);
   }
@@ -552,8 +588,10 @@ wyl_audit_conn_query_events_json (wyl_audit_conn_t *conn,
     append_json_member_string (json, "deny_reason", &result, 5, row);
     g_string_append_c (json, ',');
     append_json_member_string (json, "deny_origin", &result, 6, row);
+    g_string_append_c (json, ',');
+    append_json_member_string (json, "request_id", &result, 7, row);
     g_string_append_printf (json, ",\"decision\":%" G_GINT16_FORMAT "}",
-        (gint16) duckdb_value_int64 (&result, 7, row));
+        (gint16) duckdb_value_int64 (&result, 8, row));
   }
   g_string_append_c (json, ']');
 

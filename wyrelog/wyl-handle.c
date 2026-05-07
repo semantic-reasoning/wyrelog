@@ -535,13 +535,15 @@ wyl_handle_get_audit_conn (WylHandle *self)
 static wyrelog_error_t
 insert_policy_store_audit_event (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
-    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *deny_reason, const gchar *deny_origin, const gchar *request_id,
     wyl_decision_t decision, gpointer user_data)
 {
   WylHandle *self = user_data;
+  gboolean inserted = FALSE;
 
-  return wyl_audit_conn_insert_event (self->audit_conn, id, created_at_us,
-      subject_id, action, resource_id, deny_reason, deny_origin, decision);
+  return wyl_audit_conn_insert_event_full (self->audit_conn, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+      decision, &inserted);
 }
 
 wyrelog_error_t
@@ -1477,19 +1479,19 @@ insert_audit_attr_fact (WylHandle *self, WylAuditAttrFact *attr,
 static wyrelog_error_t
 insert_policy_store_audit_fact (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
-    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *deny_reason, const gchar *deny_origin, const gchar *request_id,
     wyl_decision_t decision, gpointer user_data)
 {
   WylHandle *self = user_data;
   return wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin, decision);
+      action, resource_id, deny_reason, deny_origin, request_id, decision);
 }
 
 wyrelog_error_t
 wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
     gint64 created_at_us, const gchar *subject_id, const gchar *action,
     const gchar *resource_id, const gchar *deny_reason,
-    const gchar *deny_origin, wyl_decision_t decision)
+    const gchar *deny_origin, const gchar *request_id, wyl_decision_t decision)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
@@ -1510,6 +1512,7 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
     {.relation = "audit_event_resource_input"},
     {.relation = "audit_event_deny_reason_input"},
     {.relation = "audit_event_deny_origin_input"},
+    {.relation = "audit_event_request_id_input"},
   };
 
   wyrelog_error_t rc =
@@ -1531,6 +1534,7 @@ wyl_handle_insert_audit_fact (WylHandle *self, const gchar *id,
     resource_id,
     deny_reason,
     deny_origin,
+    request_id,
   };
   for (gsize i = 0; i < G_N_ELEMENTS (attrs); i++) {
     rc = insert_audit_attr_fact (self, &attrs[i], audit_event[0], values[i]);

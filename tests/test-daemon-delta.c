@@ -79,8 +79,9 @@ static wyrelog_error_t
 lookup_audit_row_cb (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
     const gchar *deny_reason, const gchar *deny_origin,
-    wyl_decision_t decision, gpointer user_data)
+    const gchar *request_id, wyl_decision_t decision, gpointer user_data)
 {
+  (void) request_id;
   AuditRowLookup *lookup = user_data;
 
   if (decision != WYL_DECISION_ALLOW

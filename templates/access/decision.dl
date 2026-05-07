@@ -28,6 +28,7 @@
 //   audit_event_resource_input(id, resource)
 //   audit_event_deny_reason_input(id, reason)
 //   audit_event_deny_origin_input(id, origin)
+//   audit_event_request_id_input(id, request_id)
 //
 // Audit fact projections (host-observable):
 //   audit_event(id, created_at_us, decision)
@@ -36,6 +37,7 @@
 //   audit_event_resource(id, resource)
 //   audit_event_deny_reason(id, reason)
 //   audit_event_deny_origin(id, origin)
+//   audit_event_request_id(id, request_id)
 //
 // `has_permission/3` and `armed/3` are IDB rules defined elsewhere
 // (bootstrap.dl and permission_scope.dl respectively); both are
@@ -59,12 +61,14 @@
 .decl audit_event_resource_input(id: symbol, resource: symbol)
 .decl audit_event_deny_reason_input(id: symbol, reason: symbol)
 .decl audit_event_deny_origin_input(id: symbol, origin: symbol)
+.decl audit_event_request_id_input(id: symbol, request_id: symbol)
 .decl audit_event(id: symbol, created_at_us: int64, decision: symbol)
 .decl audit_event_subject(id: symbol, subject: symbol)
 .decl audit_event_action(id: symbol, action: symbol)
 .decl audit_event_resource(id: symbol, resource: symbol)
 .decl audit_event_deny_reason(id: symbol, reason: symbol)
 .decl audit_event_deny_origin(id: symbol, origin: symbol)
+.decl audit_event_request_id(id: symbol, request_id: symbol)
 .decl principal_state_observed(user: symbol, state: symbol)
 .decl login_skip_mfa_authz(user: symbol)
 .decl login_skip_mfa_authz_observed(user: symbol)
@@ -95,6 +99,9 @@ audit_event_deny_reason(ID, Reason) :-
 
 audit_event_deny_origin(ID, Origin) :-
     audit_event_deny_origin_input(ID, Origin).
+
+audit_event_request_id(ID, RequestID) :-
+    audit_event_request_id_input(ID, RequestID).
 
 principal_state_observed(U, State) :-
     principal_state(U, State).

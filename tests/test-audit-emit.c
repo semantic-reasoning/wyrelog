@@ -378,6 +378,7 @@ check_emit_persists_event_fields (void)
   wyl_audit_event_set_resource_id (ev, "doc/99");
   wyl_audit_event_set_deny_reason (ev, "not_armed");
   wyl_audit_event_set_deny_origin (ev, "perm_state");
+  wyl_audit_event_set_request_id (ev, "req-audit-emit");
   wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
 
   g_autofree gchar *expected_id = wyl_audit_event_dup_id_string (ev);
@@ -392,7 +393,7 @@ check_emit_persists_event_fields (void)
   duckdb_result result;
   if (duckdb_query (conn,
           "SELECT id, subject_id, action, resource_id, deny_reason, "
-          "deny_origin, decision "
+          "deny_origin, request_id, decision "
           "FROM audit_events;", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     g_object_unref (handle);
@@ -405,7 +406,8 @@ check_emit_persists_event_fields (void)
   const gchar *resource = duckdb_value_varchar (&result, 3, 0);
   const gchar *deny_reason = duckdb_value_varchar (&result, 4, 0);
   const gchar *deny_origin = duckdb_value_varchar (&result, 5, 0);
-  gint16 decision = (gint16) duckdb_value_int64 (&result, 6, 0);
+  const gchar *request_id = duckdb_value_varchar (&result, 6, 0);
+  gint16 decision = (gint16) duckdb_value_int64 (&result, 7, 0);
 
   if (g_strcmp0 (id, expected_id) != 0)
     rc = 23;
@@ -419,6 +421,8 @@ check_emit_persists_event_fields (void)
     rc = 27;
   else if (g_strcmp0 (deny_origin, "perm_state") != 0)
     rc = 28;
+  else if (g_strcmp0 (request_id, "req-audit-emit") != 0)
+    rc = 30;
   else if (decision != WYL_DECISION_DENY)
     rc = 29;
 
@@ -428,6 +432,7 @@ check_emit_persists_event_fields (void)
   duckdb_free ((void *) resource);
   duckdb_free ((void *) deny_reason);
   duckdb_free ((void *) deny_origin);
+  duckdb_free ((void *) request_id);
   duckdb_destroy_result (&result);
   g_object_unref (handle);
   return rc;
@@ -446,6 +451,7 @@ check_query_events_json_filters_rows (void)
   wyl_audit_event_set_resource_id (denied, "doc/99");
   wyl_audit_event_set_deny_reason (denied, "not_armed");
   wyl_audit_event_set_deny_origin (denied, "perm_state");
+  wyl_audit_event_set_request_id (denied, "req-json-bob");
   wyl_audit_event_set_decision (denied, WYL_DECISION_DENY);
 
   g_autoptr (WylAuditEvent) allowed = wyl_audit_event_new ();
@@ -513,6 +519,21 @@ check_query_events_json_filters_rows (void)
           "\"deny_reason\":\"not_armed\"") == NULL) {
     g_object_unref (handle);
     return 1543;
+  }
+
+  g_autofree gchar *request_json = NULL;
+  if (wyl_audit_conn_query_events_json (conn, "request_id(\"req-json-bob\")",
+          &request_json) != WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return 1544;
+  }
+  if (g_strstr_len (request_json, -1, "\"subject_id\":\"json-bob\"")
+      == NULL || g_strstr_len (request_json, -1,
+          "\"request_id\":\"req-json-bob\"") == NULL
+      || g_strstr_len (request_json, -1, "\"subject_id\":\"json-alice\"")
+      != NULL) {
+    g_object_unref (handle);
+    return 1545;
   }
 
   g_autofree gchar *all_json = NULL;
@@ -651,11 +672,17 @@ check_policy_store_audit_replay_loads_runtime_query (void)
     return 172;
   }
   static const gchar *full_replay_id = "01890c10-2e3f-7000-8000-000000000012";
-  if (wyl_policy_store_append_audit_event (store, full_replay_id, 790,
+  gboolean full_inserted = FALSE;
+  if (wyl_policy_store_append_audit_event_full (store, full_replay_id, 790,
           "replay-user", "audit.replay.full", "replay-full-resource",
-          "not_armed", "perm_state", WYL_DECISION_DENY) != WYRELOG_E_OK) {
+          "not_armed", "perm_state", "req-replay-full", WYL_DECISION_DENY,
+          &full_inserted) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 205;
+  }
+  if (!full_inserted) {
+    g_object_unref (handle);
+    return 216;
   }
   if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -706,6 +733,8 @@ check_policy_store_audit_replay_loads_runtime_query (void)
     rc = 179;
   else if (g_strstr_len (json, -1, "\"deny_origin\":null") == NULL)
     rc = 180;
+  else if (g_strstr_len (json, -1, "\"request_id\":null") == NULL)
+    rc = 214;
   else if (g_strstr_len (json, -1, "\"decision\":1") == NULL)
     rc = 181;
   if (rc != 0) {
@@ -734,6 +763,9 @@ check_policy_store_audit_replay_loads_runtime_query (void)
     rc = 211;
   else if (g_strstr_len (json, -1, "\"deny_origin\":\"perm_state\"") == NULL)
     rc = 212;
+  else if (g_strstr_len (json, -1, "\"request_id\":\"req-replay-full\"")
+      == NULL)
+    rc = 215;
   else if (g_strstr_len (json, -1, "\"decision\":0") == NULL)
     rc = 213;
 
@@ -2453,6 +2485,7 @@ check_emit_projects_sparse_wirelog_facts_immediately (void)
     "audit_event_resource",
     "audit_event_deny_reason",
     "audit_event_deny_origin",
+    "audit_event_request_id",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (relations); i++) {
     guint count = 0;
@@ -2560,6 +2593,7 @@ check_emit_rolls_back_partial_live_projection_failure (void)
     "audit_event_resource_input",
     "audit_event_deny_reason_input",
     "audit_event_deny_origin_input",
+    "audit_event_request_id_input",
   };
   static const gchar *projected_relations[] = {
     "audit_event",
@@ -2568,6 +2602,7 @@ check_emit_rolls_back_partial_live_projection_failure (void)
     "audit_event_resource",
     "audit_event_deny_reason",
     "audit_event_deny_origin",
+    "audit_event_request_id",
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (fault_relations); i++) {
@@ -2584,6 +2619,7 @@ check_emit_rolls_back_partial_live_projection_failure (void)
     wyl_audit_event_set_resource_id (ev, "audit-live-partial-resource");
     wyl_audit_event_set_deny_reason (ev, "not_armed");
     wyl_audit_event_set_deny_origin (ev, "perm_state");
+    wyl_audit_event_set_request_id (ev, "req-partial");
     wyl_audit_event_set_decision (ev, WYL_DECISION_DENY);
     g_autofree gchar *id = wyl_audit_event_dup_id_string (ev);
 
@@ -2694,11 +2730,17 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   static const gchar *full_id = "01890c10-2e3f-7000-8000-000000000010";
-  if (wyl_policy_store_append_audit_event (store, full_id, 1001,
+  gboolean full_inserted = FALSE;
+  if (wyl_policy_store_append_audit_event_full (store, full_id, 1001,
           "audit-fact-user", "audit-fact-action", "audit-fact-resource",
-          "not_armed", "perm_state", WYL_DECISION_DENY) != WYRELOG_E_OK) {
+          "not_armed", "perm_state", "req-audit-fact", WYL_DECISION_DENY,
+          &full_inserted) != WYRELOG_E_OK) {
     g_object_unref (handle);
     return 162;
+  }
+  if (!full_inserted) {
+    g_object_unref (handle);
+    return 194;
   }
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
     g_object_unref (handle);
@@ -2741,6 +2783,11 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
     g_object_unref (handle);
     return 169;
   }
+  if (contains_audit_event_attr_fact (handle, "audit_event_request_id",
+          full_id, "req-audit-fact", &contains) != WYRELOG_E_OK || !contains) {
+    g_object_unref (handle);
+    return 193;
+  }
 
   static const gchar *sparse_id = "01890c10-2e3f-7000-8000-000000000011";
   if (wyl_policy_store_append_audit_event (store, sparse_id, 1002, NULL,
@@ -2773,6 +2820,7 @@ check_policy_store_audit_rows_load_wirelog_facts (void)
     {"audit_event_resource", 0},
     {"audit_event_deny_reason", 0},
     {"audit_event_deny_origin", 0},
+    {"audit_event_request_id", 0},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (optional_counts); i++) {
     guint count = 0;

@@ -298,7 +298,7 @@ wyrelog_error_t wyl_handle_insert_audit_fact (WylHandle * self,
     const gchar * id, gint64 created_at_us, const gchar * subject_id,
     const gchar * action, const gchar * resource_id,
     const gchar * deny_reason, const gchar * deny_origin,
-    wyl_decision_t decision);
+    const gchar * request_id, wyl_decision_t decision);
 
 /*
  * Probes the read engine for an exact snapshot-visible row match. Rejected

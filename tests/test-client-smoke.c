@@ -38,6 +38,7 @@ static const gchar *two_event_body =
     "\"resource_id\":\"doc/42\","
     "\"deny_reason\":null,"
     "\"deny_origin\":null,"
+    "\"request_id\":null,"
     "\"decision\":1},"
     "{\"id\":\"018f3f9b-7f4d-7a2e-8a51-467a0bc7d002\","
     "\"created_at_us\":1234568,"
@@ -45,7 +46,8 @@ static const gchar *two_event_body =
     "\"action\":\"write\","
     "\"resource_id\":\"doc/43\","
     "\"deny_reason\":\"missing_grant\","
-    "\"deny_origin\":\"policy\"," "\"decision\":0}]";
+    "\"deny_origin\":\"policy\","
+    "\"request_id\":\"req-client-smoke\"," "\"decision\":0}]";
 
 static gpointer
 test_http_server_thread (gpointer data)
@@ -652,6 +654,8 @@ main (void)
     return 42;
   if (g_strcmp0 (wyl_audit_event_get_resource_id (first_event), "doc/42") != 0)
     return 43;
+  if (wyl_audit_event_get_request_id (first_event) != NULL)
+    return 50;
   if (wyl_audit_event_get_decision (first_event) != WYL_DECISION_ALLOW)
     return 44;
   has_next = FALSE;
@@ -669,6 +673,9 @@ main (void)
     return 47;
   if (g_strcmp0 (wyl_audit_event_get_deny_origin (second_event), "policy") != 0)
     return 48;
+  if (g_strcmp0 (wyl_audit_event_get_request_id (second_event),
+          "req-client-smoke") != 0)
+    return 51;
   if (wyl_audit_event_get_decision (second_event) != WYL_DECISION_DENY)
     return 49;
   has_next = TRUE;
