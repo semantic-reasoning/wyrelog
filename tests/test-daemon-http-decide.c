@@ -1443,6 +1443,10 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       extract_json_string (body, "access_token");
   if (bearer_logout_access_token == NULL)
     return 504;
+  g_autofree gchar *bearer_logout_refresh_token =
+      extract_json_string (body, "refresh_token");
+  if (bearer_logout_refresh_token == NULL)
+    return 524;
   g_clear_pointer (&body, g_free);
   if (grant_policy_write_authority (handle, "bearer-logout-user",
           bearer_logout_session_token) != WYRELOG_E_OK)
@@ -1479,6 +1483,21 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       wyl_daemon_http_ref_session (server, bearer_logout_session_token);
   if (bearer_logged_out_session != NULL)
     return 509;
+  /*
+   * Refresh token captured at login must be rejected after the
+   * bearer logout completes. The teardown order in logout_handler
+   * revokes refresh tokens before driving the session FSM, so the
+   * window during which a captured refresh could rotate into a
+   * fresh access/refresh pair is closed before the public reply
+   * lands at the caller.
+   */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_refresh (session, "POST", base_url,
+      bearer_logout_refresh_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"refresh_auth_required\"") == NULL)
+    return 525;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe bearer_close_audit = {
     .subject_id = bearer_logout_session_token,
