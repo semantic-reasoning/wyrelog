@@ -75,6 +75,19 @@ typedef struct
   GHashTable *sessions_by_token;
   GHashTable *access_tokens_by_jti;
   GHashTable *refresh_tokens_by_token;
+  /*
+   * Set of session_token strings that have entered the logout
+   * teardown path. Once a session is in this set, both
+   * wyl_daemon_http_context_store_access_token and _store_refresh_token
+   * refuse to insert any new state for that session, closing the
+   * window in which an /auth/refresh that already passed the
+   * lock-protected revoked-state check could mint a fresh access
+   * or refresh token after the logout's revoke pass had already
+   * snapshotted the existing tokens. Entries are added under
+   * ctx->lock during logout teardown and live for the lifetime of
+   * the context.
+   */
+  GHashTable *revoked_session_ids;
   GMutex lock;
   GMutex policy_mutation_lock;
 } WylDaemonHttpContext;
@@ -148,6 +161,7 @@ wyl_daemon_http_context_free (gpointer data)
   g_hash_table_unref (ctx->sessions_by_token);
   g_hash_table_unref (ctx->access_tokens_by_jti);
   g_hash_table_unref (ctx->refresh_tokens_by_token);
+  g_clear_pointer (&ctx->revoked_session_ids, g_hash_table_unref);
   g_mutex_clear (&ctx->lock);
   g_mutex_clear (&ctx->policy_mutation_lock);
   g_free (ctx);
@@ -170,9 +184,23 @@ wyl_daemon_http_context_new (WylHandle *handle, WylDaemonRuntime *runtime)
       g_free, wyl_access_token_state_free);
   ctx->refresh_tokens_by_token = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, wyl_refresh_token_state_free);
+  ctx->revoked_session_ids = g_hash_table_new_full (g_str_hash, g_str_equal,
+      g_free, NULL);
   g_mutex_init (&ctx->lock);
   g_mutex_init (&ctx->policy_mutation_lock);
   return ctx;
+}
+
+static void
+wyl_daemon_http_context_mark_session_revoked (WylDaemonHttpContext *ctx,
+    const gchar *session_id)
+{
+  if (ctx == NULL || session_id == NULL || session_id[0] == '\0')
+    return;
+
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_add (ctx->revoked_session_ids, g_strdup (session_id));
+  g_mutex_unlock (&ctx->lock);
 }
 
 static gboolean
@@ -195,6 +223,19 @@ wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
   state->expires_at = expires_at;
 
   g_mutex_lock (&ctx->lock);
+  /*
+   * Refuse to register tokens for a session that has already entered
+   * the logout teardown path. This closes the window in which a
+   * concurrent /auth/refresh that snapshotted state->revoked == FALSE
+   * before the teardown's revoke pass landed could otherwise insert
+   * a freshly-minted access token whose jti the teardown's snapshot
+   * never saw.
+   */
+  if (g_hash_table_contains (ctx->revoked_session_ids, session_id)) {
+    g_mutex_unlock (&ctx->lock);
+    wyl_access_token_state_free (state);
+    return FALSE;
+  }
   g_hash_table_replace (ctx->access_tokens_by_jti, g_strdup (jti), state);
   g_mutex_unlock (&ctx->lock);
   return TRUE;
@@ -241,6 +282,17 @@ wyl_daemon_http_context_store_refresh_token (WylDaemonHttpContext *ctx,
   state->expires_at = expires_at;
 
   g_mutex_lock (&ctx->lock);
+  /*
+   * Same revoked-session gate as the access-token store path: refuse
+   * to register a refresh token for a session that has already
+   * entered logout teardown. Pairs with /auth/refresh handling so
+   * the rotation cannot mint a new refresh that survives logout.
+   */
+  if (g_hash_table_contains (ctx->revoked_session_ids, session_id)) {
+    g_mutex_unlock (&ctx->lock);
+    wyl_refresh_token_state_free (state);
+    return FALSE;
+  }
   g_hash_table_replace (ctx->refresh_tokens_by_token, g_strdup (token), state);
   g_mutex_unlock (&ctx->lock);
   return TRUE;
@@ -358,6 +410,23 @@ wyl_daemon_http_copy_access_token_secret (SoupServer *server,
 
   memcpy (out_secret, ctx->access_token_secret, WYL_DAEMON_JWT_KEY_LEN);
   return WYRELOG_E_OK;
+}
+
+gboolean
+wyl_daemon_http_session_is_revoked (SoupServer *server, const gchar *session_id)
+{
+  if (server == NULL || session_id == NULL || session_id[0] == '\0')
+    return FALSE;
+
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return FALSE;
+
+  g_mutex_lock (&ctx->lock);
+  gboolean revoked = g_hash_table_contains (ctx->revoked_session_ids,
+      session_id);
+  g_mutex_unlock (&ctx->lock);
+  return revoked;
 }
 #endif
 
@@ -1748,18 +1817,28 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
    * session_id (the rotation path will see a revoked refresh and
    * fail before issuing a new access token).
    *
-   * Then revoke any access tokens already minted, then drive the
-   * FSM through the durable close primitive. Returning to the
+   * Then revoke any access tokens already minted. After both
+   * snapshot-walks complete, mark the session as revoked so the
+   * store paths refuse any token state that an /auth/refresh which
+   * already passed the lock-protected revoked-state check could
+   * still try to insert after our snapshots ran. Returning to the
    * caller before token revocation completes would leave a replay
    * window during which a captured access token still resolves
    * against the registry; the order here closes that window.
+   *
+   * Drive the FSM through the public logout primitive (which
+   * resolves the integer sid, runs the FSM transition, emits the
+   * canonical session-state audit row, and tombstones the
+   * handle's session registry) so HTTP and the core API converge
+   * on a single FSM call site.
    */
   wyl_daemon_http_context_revoke_session_refresh_tokens (ctx, session_token);
   wyl_daemon_http_context_revoke_session_access_tokens (ctx, session_token);
+  wyl_daemon_http_context_mark_session_revoked (ctx, session_token);
 
   const gchar *request_id = ensure_request_id_header (msg);
-  wyrelog_error_t rc =
-      wyl_session_close_with_request_id (ctx->handle, session, request_id);
+  wyrelog_error_t rc = wyl_session_logout_with_request_id (ctx->handle,
+      wyl_session_get_id (session), request_id);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "logout_failed");
     return;
