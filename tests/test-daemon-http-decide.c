@@ -1498,6 +1498,16 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return rc;
   if (status != 401 || strstr (body, "\"refresh_auth_required\"") == NULL)
     return 525;
+  /*
+   * The logout teardown must mark the session as revoked in the
+   * daemon-side gate so the store paths refuse any token state an
+   * in-flight /auth/refresh might still try to insert after the
+   * snapshot-walking revoke pass returned. The revoked-session set
+   * is the structural fix for the residual store-after-revoke
+   * window the snapshot revoke alone leaves open.
+   */
+  if (!wyl_daemon_http_session_is_revoked (server, bearer_logout_session_token))
+    return 526;
 #ifdef WYL_HAS_AUDIT
   AuditEventProbe bearer_close_audit = {
     .subject_id = bearer_logout_session_token,
