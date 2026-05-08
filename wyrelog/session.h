@@ -98,13 +98,42 @@ wyrelog_error_t wyl_session_expire (WylHandle * handle, WylSession * session);
 wyrelog_error_t wyl_session_close (WylHandle * handle, WylSession * session);
 wyrelog_error_t wyl_session_close_with_request_id (WylHandle * handle,
     WylSession * session, const gchar * request_id);
+/*
+ * Drives the durable session identified by |sid| through the session
+ * FSM into the closed terminal state and releases the handle's
+ * registry reference so token caches and other derived state can be
+ * reclaimed. Resolves |sid| against the per-handle registry (the
+ * integer minted on the wyl_session_login success path); the
+ * lookup is the single source of truth for what the call does next:
+ *
+ *   - sid not registered: returns WYRELOG_E_NOT_FOUND so the caller
+ *     can distinguish "you asked for a session this handle never
+ *     knew about" from a malformed call.
+ *   - sid registered but already torn down (idempotent re-logout
+ *     or post-close cleanup): returns WYRELOG_E_OK without driving
+ *     the FSM and without emitting a fresh audit row.
+ *   - sid registered and live in {idle, active, elevated, expiring}:
+ *     drives WYL_SESSION_EVENT_LOGOUT through the FSM, records the
+ *     durable state-transition audit row, and tombstones the
+ *     registry entry so subsequent calls take the idempotent path.
+ *   - sid registered and live in the closed terminal state (e.g.
+ *     wyl_session_close was already invoked through the WylSession*
+ *     surface): tombstones the registry entry and returns
+ *     WYRELOG_E_OK without re-entering the FSM (which has no
+ *     transition row from closed).
+ *
+ * Returns WYRELOG_E_INVALID for a NULL handle and propagates
+ * WYRELOG_E_INTERNAL or any I/O error from the durable transition
+ * primitive on the live, non-closed path. The plain entry point is
+ * exactly equivalent to passing NULL through the request-id variant.
+ */
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);
 
 /*
- * Same as wyl_session_logout but propagates a caller-supplied
- * request_id into the durable transition audit row so logout can be
- * correlated with the originating wyl_session_login. Pass NULL to
- * mirror wyl_session_logout exactly.
+ * Same contract as wyl_session_logout but propagates a caller-supplied
+ * |request_id| into the durable transition audit row so the logout
+ * event can be correlated with the originating wyl_session_login.
+ * Pass NULL to mirror wyl_session_logout exactly.
  */
 wyrelog_error_t wyl_session_logout_with_request_id (WylHandle * handle,
     wyl_session_id_t sid, const gchar * request_id);
