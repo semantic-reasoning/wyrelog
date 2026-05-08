@@ -1739,6 +1739,24 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
+  /*
+   * Revoke refresh tokens FIRST so a concurrent /auth/refresh that
+   * lands during teardown cannot rotate the refresh into a fresh
+   * access/refresh pair bound to the now-being-killed session;
+   * each revoke takes ctx->lock internally, so the window between
+   * the two passes cannot mint a new refresh through the same
+   * session_id (the rotation path will see a revoked refresh and
+   * fail before issuing a new access token).
+   *
+   * Then revoke any access tokens already minted, then drive the
+   * FSM through the durable close primitive. Returning to the
+   * caller before token revocation completes would leave a replay
+   * window during which a captured access token still resolves
+   * against the registry; the order here closes that window.
+   */
+  wyl_daemon_http_context_revoke_session_refresh_tokens (ctx, session_token);
+  wyl_daemon_http_context_revoke_session_access_tokens (ctx, session_token);
+
   const gchar *request_id = ensure_request_id_header (msg);
   wyrelog_error_t rc =
       wyl_session_close_with_request_id (ctx->handle, session, request_id);
@@ -1747,8 +1765,6 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  wyl_daemon_http_context_revoke_session_access_tokens (ctx, session_token);
-  wyl_daemon_http_context_revoke_session_refresh_tokens (ctx, session_token);
   if (!wyl_daemon_http_context_remove_session (ctx, session_token)) {
     set_json_error (msg, 401, "logout_auth_required");
     return;
