@@ -23,6 +23,8 @@ wyrelog_error_string (wyrelog_error_t err)
       return "internal invariant violated";
     case WYRELOG_E_EXEC:
       return "policy evaluation runtime fault";
+    case WYRELOG_E_NOT_FOUND:
+      return "no entity registered for the supplied identifier";
   }
   return "unknown error";
 }

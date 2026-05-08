@@ -24,6 +24,16 @@ typedef enum wyrelog_error_t
    * violation) so operators can route incidents correctly.
    */
   WYRELOG_E_EXEC = -8,
+  /*
+   * Caller-supplied identifier resolved past argument validation but
+   * names no entity the callee currently tracks. Distinct from
+   * WYRELOG_E_INVALID (argument-shape failure: NULL handle, NULL
+   * out-pointer, or otherwise malformed input) so callers can
+   * distinguish "you asked for something that no longer exists" from
+   * "you handed me junk." Used today by wyl_session_logout to flag a
+   * sid the handle has never registered.
+   */
+  WYRELOG_E_NOT_FOUND = -9,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);
