@@ -14,6 +14,7 @@ wyrelog_public_headers = files(
 )
 
 wyrelog_sources = files(
+  'access/break-glass.c',
   'access/decision.c',
   'auth/jwt.c',
   'audit/event.c',
@@ -66,6 +67,10 @@ if get_option('enable_audit').allowed()
   wyrelog_sources += files('audit/conn.c')
   wyrelog_deps += duckdb_dep
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
+endif
+
+if get_option('enable_break_glass')
+  wyrelog_c_args += '-DWYL_HAS_BREAK_GLASS'
 endif
 
 libwyrelog = library('wyrelog',
@@ -135,6 +140,9 @@ endif
 if get_option('enable_audit').allowed()
   wyrelogd_deps += duckdb_dep
   wyrelogd_c_args += '-DWYL_HAS_AUDIT'
+endif
+if get_option('enable_break_glass')
+  wyrelogd_c_args += '-DWYL_HAS_BREAK_GLASS'
 endif
 
 wyrelogd_exe = executable('wyrelogd',
