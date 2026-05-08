@@ -101,6 +101,15 @@ wyrelog_error_t wyl_session_close_with_request_id (WylHandle * handle,
 wyrelog_error_t wyl_session_logout (WylHandle * handle, wyl_session_id_t sid);
 
 /*
+ * Same as wyl_session_logout but propagates a caller-supplied
+ * request_id into the durable transition audit row so logout can be
+ * correlated with the originating wyl_session_login. Pass NULL to
+ * mirror wyl_session_logout exactly.
+ */
+wyrelog_error_t wyl_session_logout_with_request_id (WylHandle * handle,
+    wyl_session_id_t sid, const gchar * request_id);
+
+/*
  * Returns the session's construct-time identifier as a 36-character
  * canonical string (caller frees with g_free or g_autofree). May
  * return NULL only if the session is NULL or not a WylSession. The

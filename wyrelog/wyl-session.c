@@ -858,31 +858,65 @@ wyl_session_expire (WylHandle *handle, WylSession *session)
 }
 
 wyrelog_error_t
-wyl_session_logout (WylHandle *handle, wyl_session_id_t sid)
+wyl_session_logout_with_request_id (WylHandle *handle, wyl_session_id_t sid,
+    const gchar *request_id)
 {
   if (handle == NULL)
     return WYRELOG_E_INVALID;
 
-#ifdef WYL_HAS_AUDIT
-  /* Mirror the logout in the audit log so session terminations are
-   * observable even before the session table that owns the sid is
-   * wired. The action column carries "logout" semantics; the
-   * subject_id column carries the integer session handle as text
-   * so log readers can tie the event back to the originating
-   * wyl_session_login. */
-  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
-  g_autofree gchar *sid_str = g_strdup_printf ("%" G_GUINT64_FORMAT, sid);
-  wyl_audit_event_set_subject_id (ev, sid_str);
-  wyl_audit_event_set_action (ev, "logout");
-  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
-  (void) wyl_audit_emit (handle, ev);
-#else
-  (void) sid;
-#endif
+  /*
+   * State matrix (resolved against the per-handle session registry):
+   *   - sid not registered: WYRELOG_E_NOT_FOUND. Distinct from
+   *     WYRELOG_E_INVALID so callers can tell "you handed me junk"
+   *     from "you asked for a session this handle never knew about".
+   *   - sid registered but tombstoned (already torn down): idempotent
+   *     WYRELOG_E_OK with no FSM step and no fresh audit row.
+   *   - sid registered and live in {idle, active, elevated, expiring}:
+   *     drive the session FSM through WYL_SESSION_EVENT_LOGOUT (which
+   *     is the canonical event for those four source states), record
+   *     the durable transition + audit row through the existing
+   *     close-with-request-id primitive, then tombstone the registry
+   *     entry so a repeat logout collapses to the idempotent path.
+   *   - sid registered and live but already in the terminal CLOSED
+   *     state (e.g. wyl_session_close was driven directly through the
+   *     WylSession* surface and the registry was not yet tombstoned):
+   *     skip the FSM step (the FSM has no (closed, logout) row),
+   *     tombstone the entry, and return E_OK so this entry point is
+   *     idempotent against both prior code paths.
+   */
+  wyl_session_lookup_state_t state = WYL_SESSION_LOOKUP_UNKNOWN;
+  g_autoptr (WylSession) live = NULL;
+  wyrelog_error_t rc = wyl_handle_lookup_session_by_id_ref (handle, sid,
+      &state, &live);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
-  /* Real session-table teardown lands in a follow-up; v0 returns
-   * E_OK after argument validation and audit recording. */
+  switch (state) {
+    case WYL_SESSION_LOOKUP_UNKNOWN:
+      return WYRELOG_E_NOT_FOUND;
+    case WYL_SESSION_LOOKUP_TOMBSTONED:
+      return WYRELOG_E_OK;
+    case WYL_SESSION_LOOKUP_LIVE:
+      break;
+  }
+
+  if (live->state == WYL_SESSION_STATE_CLOSED) {
+    (void) wyl_handle_tombstone_session (handle, sid);
+    return WYRELOG_E_OK;
+  }
+
+  rc = wyl_session_close_with_request_id (handle, live, request_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  (void) wyl_handle_tombstone_session (handle, sid);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_session_logout (WylHandle *handle, wyl_session_id_t sid)
+{
+  return wyl_session_logout_with_request_id (handle, sid, NULL);
 }
 
 gchar *

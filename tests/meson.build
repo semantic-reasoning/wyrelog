@@ -455,6 +455,9 @@ test('perm', test_perm)
 
 test_session_logout = executable('test-session-logout',
   'test-session-logout.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
   dependencies : [wyrelog_dep],
 )
 

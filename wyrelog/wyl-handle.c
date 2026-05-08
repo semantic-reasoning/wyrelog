@@ -31,6 +31,31 @@ typedef struct
   WylDeltaKind kind;
 } WylPendingDelta;
 
+/*
+ * Per-sid registry entry. A live entry holds a strong reference to
+ * the session through |session|; once the session reaches the closed
+ * terminal state the strong reference is dropped and |session| is
+ * NULL. The entry survives in the table so that wyl_session_logout
+ * can distinguish a sid that was never registered (table miss) from
+ * a sid whose session has already been torn down (entry present
+ * with session == NULL), which keeps repeated logout idempotent.
+ */
+typedef struct
+{
+  WylSession *session;
+} WylSessionRegistryEntry;
+
+static void
+wyl_session_registry_entry_free (gpointer data)
+{
+  WylSessionRegistryEntry *entry = data;
+
+  if (entry == NULL)
+    return;
+  g_clear_object (&entry->session);
+  g_free (entry);
+}
+
 struct _WylHandle
 {
   GObject parent_instance;
@@ -169,7 +194,7 @@ wyl_handle_init (WylHandle *self)
    */
   g_mutex_init (&self->sessions_lock);
   self->sessions_by_id = g_hash_table_new_full (g_int64_hash, g_int64_equal,
-      g_free, g_object_unref);
+      g_free, wyl_session_registry_entry_free);
   self->next_session_id = 1;
 }
 
@@ -181,11 +206,14 @@ wyl_handle_register_session (WylHandle *self, WylSession *session,
       || !WYL_IS_HANDLE (self) || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
+  WylSessionRegistryEntry *entry = g_new0 (WylSessionRegistryEntry, 1);
+  entry->session = g_object_ref (session);
+
   g_mutex_lock (&self->sessions_lock);
   guint64 sid = self->next_session_id++;
   guint64 *key = g_new (guint64, 1);
   *key = sid;
-  g_hash_table_replace (self->sessions_by_id, key, g_object_ref (session));
+  g_hash_table_replace (self->sessions_by_id, key, entry);
   g_mutex_unlock (&self->sessions_lock);
 
   *out_sid = sid;
@@ -195,14 +223,72 @@ wyl_handle_register_session (WylHandle *self, WylSession *session,
 WylSession *
 wyl_handle_lookup_session_by_id (WylHandle *self, wyl_session_id_t sid)
 {
+  /*
+   * Borrowed-pointer convenience: the returned pointer is valid only
+   * until the next mutation of |self->sessions_by_id| (which today
+   * means the next wyl_handle_tombstone_session call or handle
+   * finalize). Internal call sites that need to outlive the lookup
+   * must use wyl_handle_lookup_session_by_id_ref instead.
+   */
   if (self == NULL || !WYL_IS_HANDLE (self))
     return NULL;
 
   g_mutex_lock (&self->sessions_lock);
   guint64 key = sid;
-  WylSession *session = g_hash_table_lookup (self->sessions_by_id, &key);
+  WylSessionRegistryEntry *entry =
+      g_hash_table_lookup (self->sessions_by_id, &key);
+  WylSession *session = (entry != NULL) ? entry->session : NULL;
   g_mutex_unlock (&self->sessions_lock);
   return session;
+}
+
+wyrelog_error_t
+wyl_handle_lookup_session_by_id_ref (WylHandle *self, wyl_session_id_t sid,
+    wyl_session_lookup_state_t *out_state, WylSession **out_session)
+{
+  if (self == NULL || out_state == NULL || out_session == NULL
+      || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+
+  *out_state = WYL_SESSION_LOOKUP_UNKNOWN;
+  *out_session = NULL;
+
+  g_mutex_lock (&self->sessions_lock);
+  guint64 key = sid;
+  WylSessionRegistryEntry *entry =
+      g_hash_table_lookup (self->sessions_by_id, &key);
+  if (entry == NULL) {
+    g_mutex_unlock (&self->sessions_lock);
+    return WYRELOG_E_OK;
+  }
+  if (entry->session == NULL) {
+    *out_state = WYL_SESSION_LOOKUP_TOMBSTONED;
+    g_mutex_unlock (&self->sessions_lock);
+    return WYRELOG_E_OK;
+  }
+  *out_state = WYL_SESSION_LOOKUP_LIVE;
+  *out_session = g_object_ref (entry->session);
+  g_mutex_unlock (&self->sessions_lock);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_handle_tombstone_session (WylHandle *self, wyl_session_id_t sid)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&self->sessions_lock);
+  guint64 key = sid;
+  WylSessionRegistryEntry *entry =
+      g_hash_table_lookup (self->sessions_by_id, &key);
+  if (entry == NULL) {
+    g_mutex_unlock (&self->sessions_lock);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  g_clear_object (&entry->session);
+  g_mutex_unlock (&self->sessions_lock);
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t wyl_handle_make_guard_expr_node_compound (WylHandle *

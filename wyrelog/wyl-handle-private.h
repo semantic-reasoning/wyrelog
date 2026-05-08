@@ -72,11 +72,48 @@ wyrelog_error_t wyl_handle_register_session (WylHandle * self,
 /*
  * Returns a borrowed pointer to the WylSession previously registered
  * with |sid|, or NULL if no such session exists in this handle's
- * registry. The lifetime of the returned pointer is bounded by the
- * registry's strong reference, which is held until handle finalize.
- * Callers must not unref the returned pointer.
+ * registry. The borrowed pointer is valid only until the next
+ * registry mutation (wyl_handle_tombstone_session) or handle finalize,
+ * whichever comes first. Internal call sites that need to outlive
+ * the lookup must use wyl_handle_lookup_session_by_id_ref instead.
+ * Callers of this borrowed-pointer variant must not unref it.
  */
 WylSession *wyl_handle_lookup_session_by_id (WylHandle * self,
+    wyl_session_id_t sid);
+
+/*
+ * Discriminant returned by wyl_handle_lookup_session_by_id_ref so
+ * callers can distinguish "this sid was never registered" from
+ * "this sid was registered but has since been torn down". The two
+ * cases drive different return codes in wyl_session_logout.
+ */
+typedef enum
+{
+  WYL_SESSION_LOOKUP_UNKNOWN = 0,
+  WYL_SESSION_LOOKUP_TOMBSTONED = 1,
+  WYL_SESSION_LOOKUP_LIVE = 2,
+} wyl_session_lookup_state_t;
+
+/*
+ * Race-safe variant of wyl_handle_lookup_session_by_id. On a live
+ * lookup, |*out_session| is set to a fresh strong reference that
+ * the caller must release with g_object_unref. On a tombstoned or
+ * unknown lookup, |*out_session| is set to NULL and |*out_state|
+ * disambiguates the two cases. Returns WYRELOG_E_INVALID for NULL
+ * out-pointers or a NULL/non-WylHandle handle.
+ */
+wyrelog_error_t wyl_handle_lookup_session_by_id_ref (WylHandle * self,
+    wyl_session_id_t sid, wyl_session_lookup_state_t * out_state,
+    WylSession ** out_session);
+
+/*
+ * Marks the registry entry for |sid| as torn down: drops the strong
+ * reference to the underlying WylSession while leaving the entry in
+ * place so that subsequent lookups can distinguish "logged out" from
+ * "never registered". Idempotent on an already-tombstoned entry.
+ * Returns WYRELOG_E_NOT_FOUND when no entry exists for |sid|.
+ */
+wyrelog_error_t wyl_handle_tombstone_session (WylHandle * self,
     wyl_session_id_t sid);
 
 /*
