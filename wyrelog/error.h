@@ -34,6 +34,20 @@ typedef enum wyrelog_error_t
    * sid the handle has never registered.
    */
   WYRELOG_E_NOT_FOUND = -9,
+  /*
+   * Break-glass override surface is not available in this build or
+   * has not been activated for the current handle. Returned by the
+   * override-aware paths when WYL_HAS_BREAK_GLASS was not set at
+   * compile time, when the operator-supplied reason is missing or
+   * out of vocabulary, when the requested TTL exceeds the
+   * compile-time ceiling, or when the calling code attempts to use
+   * an override that the runtime activation state does not
+   * authorise. Distinct from WYRELOG_E_POLICY (load-time policy
+   * fault) and WYRELOG_E_INVALID (argument-shape failure) so
+   * operators can triage "build does not ship the override path"
+   * from genuine misuse.
+   */
+  WYRELOG_E_BREAK_GLASS_DISABLED = -10,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);

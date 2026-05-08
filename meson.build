@@ -18,6 +18,18 @@ sodium_dep = dependency('libsodium', required : true)
 sqlite_dep = dependency('sqlite3', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
+enable_break_glass_opt = get_option('enable_break_glass')
+if enable_break_glass_opt and not enable_audit_opt.allowed()
+  # The break-glass override path emits an audit event with a stable
+  # reason code on every arming and every override decision. Without
+  # the audit subsystem there is no place to record those events, so
+  # break-glass would silently bypass policy with no audit trail.
+  # Refuse the configuration at meson-setup time rather than ship a
+  # build that violates the meson.options:84-86 contract.
+  error('enable_break_glass=true requires enable_audit to be enabled '
+      + '(auto or enabled); the override path needs a durable audit '
+      + 'sink for reason-code emission.')
+endif
 if enable_audit_opt.allowed()
   duckdb_source = get_option('duckdb_source')
   if duckdb_source == 'prebuilt'

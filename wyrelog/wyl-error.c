@@ -25,6 +25,9 @@ wyrelog_error_string (wyrelog_error_t err)
       return "policy evaluation runtime fault";
     case WYRELOG_E_NOT_FOUND:
       return "no entity registered for the supplied identifier";
+    case WYRELOG_E_BREAK_GLASS_DISABLED:
+      return "break-glass override is disabled in this build or not "
+          "armed at runtime";
   }
   return "unknown error";
 }

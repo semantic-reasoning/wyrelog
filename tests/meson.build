@@ -473,6 +473,14 @@ test_session_registry = executable('test-session-registry',
 
 test('session-registry', test_session_registry)
 
+test_break_glass_vocab = executable('test-break-glass-vocab',
+  'test-break-glass-vocab.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep],
+)
+
+test('break-glass-vocab', test_break_glass_vocab)
+
 # NOTE: WYL_TEST_TEMPLATE_DIR points at the in-tree source layout
 # only. The installed layout (${datadir}/wyrelog/access) — produced
 # by install_subdir at the top-level meson.build — is not
