@@ -379,15 +379,29 @@ test_login_req = executable('test-login-req',
 
 test('login-req', test_login_req)
 
+test_session_username_c_args = [
+  '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  # The two session-username variants share one source file with one
+  # main() per variant; helpers irrelevant to the active variant remain
+  # defined to keep the source readable.
+  '-Wno-unused-function',
+]
+
 test_session_username = executable('test-session-username',
   'test-session-username.c',
-  c_args : [
-    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-  ],
+  c_args : test_session_username_c_args,
   dependencies : [wyrelog_dep, wirelog_dep],
 )
 
 test('session-username', test_session_username)
+
+test_session_username_lifecycle = executable('test-session-username-lifecycle',
+  'test-session-username.c',
+  c_args : test_session_username_c_args + '-DWYL_TEST_VARIANT_LIFECYCLE',
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+test('session-username-lifecycle', test_session_username_lifecycle)
 
 test_decide_req = executable('test-decide-req',
   'test-decide-req.c',

@@ -1849,6 +1849,26 @@ check_session_elevation_rejects_invalid_args (void)
   return 0;
 }
 
+/*
+ * The session-username test surface has been split across two binaries
+ * compiled from this single translation unit:
+ *
+ *   - WYL_TEST_VARIANT_LIFECYCLE undefined: login + MFA flows (username
+ *     propagation, tenant binding, request buffers, MFA verify, skip-mfa
+ *     policy paths, login decision-scope wiring).
+ *
+ *   - WYL_TEST_VARIANT_LIFECYCLE defined: session lifecycle transitions
+ *     (close, elevate / drop-elevation, idle timeout, expire) and their
+ *     decision-scope and wirelog event side-effects.
+ *
+ * Splitting was driven by Meson's per-test 30s timeout: under CI parallel
+ * scheduling the merged test crossed the wall-clock ceiling on Windows
+ * (30.10s SIGTERM, 22.77s on prior main). Both variants now run in
+ * parallel and each finishes well under the timeout. Variant-irrelevant
+ * static helpers stay defined in this file; the build silences the
+ * resulting -Wunused-function warnings.
+ */
+#ifndef WYL_TEST_VARIANT_LIFECYCLE
 int
 main (void)
 {
@@ -1912,6 +1932,15 @@ main (void)
     return rc;
   if ((rc = check_login_skip_mfa_does_not_bypass_guarded_permission ()) != 0)
     return rc;
+
+  return 0;
+}
+#else /* WYL_TEST_VARIANT_LIFECYCLE */
+int
+main (void)
+{
+  gint rc;
+
   if ((rc = check_session_close_persists_closed_state ()) != 0)
     return rc;
   if ((rc = check_session_close_inserts_wirelog_session_fired ()) != 0)
@@ -1951,3 +1980,4 @@ main (void)
 
   return 0;
 }
+#endif /* WYL_TEST_VARIANT_LIFECYCLE */
