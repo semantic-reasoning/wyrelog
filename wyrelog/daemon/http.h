@@ -26,6 +26,6 @@ gboolean wyl_daemon_http_remove_session_for_test (SoupServer * server,
 gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
     const gchar * refresh_token);
 gboolean wyl_daemon_http_session_is_revoked (SoupServer * server,
-    const gchar * session_id);
+    const gchar * session_token);
 #endif
 #endif

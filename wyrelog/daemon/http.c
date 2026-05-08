@@ -87,7 +87,7 @@ typedef struct
    * ctx->lock during logout teardown and live for the lifetime of
    * the context.
    */
-  GHashTable *revoked_session_ids;
+  GHashTable *revoked_session_tokens;
   GMutex lock;
   GMutex policy_mutation_lock;
 } WylDaemonHttpContext;
@@ -161,7 +161,7 @@ wyl_daemon_http_context_free (gpointer data)
   g_hash_table_unref (ctx->sessions_by_token);
   g_hash_table_unref (ctx->access_tokens_by_jti);
   g_hash_table_unref (ctx->refresh_tokens_by_token);
-  g_clear_pointer (&ctx->revoked_session_ids, g_hash_table_unref);
+  g_clear_pointer (&ctx->revoked_session_tokens, g_hash_table_unref);
   g_mutex_clear (&ctx->lock);
   g_mutex_clear (&ctx->policy_mutation_lock);
   g_free (ctx);
@@ -184,7 +184,7 @@ wyl_daemon_http_context_new (WylHandle *handle, WylDaemonRuntime *runtime)
       g_free, wyl_access_token_state_free);
   ctx->refresh_tokens_by_token = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, wyl_refresh_token_state_free);
-  ctx->revoked_session_ids = g_hash_table_new_full (g_str_hash, g_str_equal,
+  ctx->revoked_session_tokens = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, NULL);
   g_mutex_init (&ctx->lock);
   g_mutex_init (&ctx->policy_mutation_lock);
@@ -193,13 +193,13 @@ wyl_daemon_http_context_new (WylHandle *handle, WylDaemonRuntime *runtime)
 
 static void
 wyl_daemon_http_context_mark_session_revoked (WylDaemonHttpContext *ctx,
-    const gchar *session_id)
+    const gchar *session_token)
 {
-  if (ctx == NULL || session_id == NULL || session_id[0] == '\0')
+  if (ctx == NULL || session_token == NULL || session_token[0] == '\0')
     return;
 
   g_mutex_lock (&ctx->lock);
-  g_hash_table_add (ctx->revoked_session_ids, g_strdup (session_id));
+  g_hash_table_add (ctx->revoked_session_tokens, g_strdup (session_token));
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -231,7 +231,7 @@ wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
    * a freshly-minted access token whose jti the teardown's snapshot
    * never saw.
    */
-  if (g_hash_table_contains (ctx->revoked_session_ids, session_id)) {
+  if (g_hash_table_contains (ctx->revoked_session_tokens, session_id)) {
     g_mutex_unlock (&ctx->lock);
     wyl_access_token_state_free (state);
     return FALSE;
@@ -288,7 +288,7 @@ wyl_daemon_http_context_store_refresh_token (WylDaemonHttpContext *ctx,
    * entered logout teardown. Pairs with /auth/refresh handling so
    * the rotation cannot mint a new refresh that survives logout.
    */
-  if (g_hash_table_contains (ctx->revoked_session_ids, session_id)) {
+  if (g_hash_table_contains (ctx->revoked_session_tokens, session_id)) {
     g_mutex_unlock (&ctx->lock);
     wyl_refresh_token_state_free (state);
     return FALSE;
@@ -413,9 +413,10 @@ wyl_daemon_http_copy_access_token_secret (SoupServer *server,
 }
 
 gboolean
-wyl_daemon_http_session_is_revoked (SoupServer *server, const gchar *session_id)
+wyl_daemon_http_session_is_revoked (SoupServer *server,
+    const gchar *session_token)
 {
-  if (server == NULL || session_id == NULL || session_id[0] == '\0')
+  if (server == NULL || session_token == NULL || session_token[0] == '\0')
     return FALSE;
 
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
@@ -423,8 +424,8 @@ wyl_daemon_http_session_is_revoked (SoupServer *server, const gchar *session_id)
     return FALSE;
 
   g_mutex_lock (&ctx->lock);
-  gboolean revoked = g_hash_table_contains (ctx->revoked_session_ids,
-      session_id);
+  gboolean revoked = g_hash_table_contains (ctx->revoked_session_tokens,
+      session_token);
   g_mutex_unlock (&ctx->lock);
   return revoked;
 }
