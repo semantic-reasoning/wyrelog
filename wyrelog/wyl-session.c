@@ -12,6 +12,14 @@ struct _WylSession
 {
   GObject parent_instance;
   wyl_id_t id;
+  /*
+   * Handle-scoped integer id assigned at the wyl_session_login success
+   * path through wyl_handle_register_session. Stable across the
+   * lifetime of the owning WylHandle and used by wyl_session_logout
+   * to resolve back to this session through the handle registry.
+   * Zero before registration; non-zero after.
+   */
+  wyl_session_id_t sid;
   gint64 created_at_us;
   gchar *username;
   gchar *tenant;
@@ -675,6 +683,11 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
     (void) wyl_audit_mirror_event (handle, session_ev);
 #endif
     session->state = WYL_SESSION_STATE_ACTIVE;
+    rc = wyl_handle_register_session (handle, session, &session->sid);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (session);
+      return rc;
+    }
     *out_session = session;
     return WYRELOG_E_OK;
   }
@@ -707,6 +720,11 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   }
   session->state = WYL_SESSION_STATE_ACTIVE;
 
+  rc = wyl_handle_register_session (handle, session, &session->sid);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (session);
+    return rc;
+  }
   *out_session = session;
   return WYRELOG_E_OK;
 }
@@ -884,6 +902,14 @@ wyl_session_get_created_at_us (const WylSession *self)
 {
   g_return_val_if_fail (WYL_IS_SESSION (self), -1);
   return self->created_at_us;
+}
+
+wyl_session_id_t
+wyl_session_get_id (const WylSession *self)
+{
+  if (self == NULL || !WYL_IS_SESSION (self))
+    return 0;
+  return self->sid;
 }
 
 gchar *

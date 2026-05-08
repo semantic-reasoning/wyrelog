@@ -117,6 +117,16 @@ gchar *wyl_session_dup_id_string (const WylSession * self);
 gint64 wyl_session_get_created_at_us (const WylSession * self);
 
 /*
+ * Returns the handle-scoped integer session id assigned to |self| on
+ * the wyl_session_login success path. The id is non-zero for any
+ * session returned through wyl_session_login and stable across the
+ * lifetime of the owning WylHandle. Pass it to wyl_session_logout to
+ * tear down the durable session state. Returns 0 when |self| is NULL
+ * or not a WylSession.
+ */
+wyl_session_id_t wyl_session_get_id (const WylSession * self);
+
+/*
  * Returns a heap-allocated copy of the principal username carried
  * into the session by wyl_session_login (i.e. wyl_login_req's
  * username field at login time). Returns NULL when the request

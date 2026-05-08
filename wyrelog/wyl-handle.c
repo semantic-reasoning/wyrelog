@@ -46,6 +46,16 @@ struct _WylHandle
   wyl_policy_store_t *policy_store;
   gboolean login_skip_mfa_allowed;
   gboolean engine_pair_poisoned;
+  /*
+   * Per-handle registry mapping wyl_session_id_t to live WylSession*.
+   * Strong references; sessions stay alive at least until handle
+   * finalize. The registry exists so wyl_session_logout (which only
+   * receives the integer id) can resolve back to the session that
+   * owns the durable state about to be torn down.
+   */
+  GMutex sessions_lock;
+  GHashTable *sessions_by_id;
+  guint64 next_session_id;
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
 #endif
@@ -115,6 +125,8 @@ wyl_handle_finalize (GObject *object)
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
+  g_clear_pointer (&self->sessions_by_id, g_hash_table_unref);
+  g_mutex_clear (&self->sessions_lock);
 #ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
    * was reset to NULL there; otherwise this is the only close site
@@ -149,6 +161,48 @@ wyl_handle_init (WylHandle *self)
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
   self->pending_deltas =
       g_ptr_array_new_with_free_func (wyl_pending_delta_free);
+  /*
+   * Sessions registered through wyl_handle_register_session hold a
+   * strong reference; releasing on hash-table free drops the ref.
+   * Sid 0 is reserved for "uninitialised", so the counter starts at
+   * 1 and is incremented on every successful registration.
+   */
+  g_mutex_init (&self->sessions_lock);
+  self->sessions_by_id = g_hash_table_new_full (g_int64_hash, g_int64_equal,
+      g_free, g_object_unref);
+  self->next_session_id = 1;
+}
+
+wyrelog_error_t
+wyl_handle_register_session (WylHandle *self, WylSession *session,
+    wyl_session_id_t *out_sid)
+{
+  if (self == NULL || session == NULL || out_sid == NULL
+      || !WYL_IS_HANDLE (self) || !WYL_IS_SESSION (session))
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&self->sessions_lock);
+  guint64 sid = self->next_session_id++;
+  guint64 *key = g_new (guint64, 1);
+  *key = sid;
+  g_hash_table_replace (self->sessions_by_id, key, g_object_ref (session));
+  g_mutex_unlock (&self->sessions_lock);
+
+  *out_sid = sid;
+  return WYRELOG_E_OK;
+}
+
+WylSession *
+wyl_handle_lookup_session_by_id (WylHandle *self, wyl_session_id_t sid)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return NULL;
+
+  g_mutex_lock (&self->sessions_lock);
+  guint64 key = sid;
+  WylSession *session = g_hash_table_lookup (self->sessions_by_id, &key);
+  g_mutex_unlock (&self->sessions_lock);
+  return session;
 }
 
 static wyrelog_error_t wyl_handle_make_guard_expr_node_compound (WylHandle *

@@ -6,6 +6,7 @@
 #include "wyrelog/handle.h"
 #include "wyrelog/engine.h"
 #include "wyrelog/audit.h"
+#include "wyrelog/session.h"
 #include "policy/store-private.h"
 
 #ifdef WYL_HAS_AUDIT
@@ -55,6 +56,28 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
  * valid until wyl_shutdown or g_object_unref.
  */
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
+
+/*
+ * Mints a fresh, handle-scoped wyl_session_id_t for |session| and stores
+ * a strong reference in the handle's session registry so a subsequent
+ * lookup by the integer id can resolve back to the live WylSession*. The
+ * returned id is non-zero. The handle retains a reference for the
+ * registry; callers must not unref the session below their own
+ * reference count to compensate. Reserved for the wyl_session_login
+ * success path.
+ */
+wyrelog_error_t wyl_handle_register_session (WylHandle * self,
+    WylSession * session, wyl_session_id_t * out_sid);
+
+/*
+ * Returns a borrowed pointer to the WylSession previously registered
+ * with |sid|, or NULL if no such session exists in this handle's
+ * registry. The lifetime of the returned pointer is bounded by the
+ * registry's strong reference, which is held until handle finalize.
+ * Callers must not unref the returned pointer.
+ */
+WylSession *wyl_handle_lookup_session_by_id (WylHandle * self,
+    wyl_session_id_t sid);
 
 /*
  * Host-side ingress guard for login requests that carry skip_mfa. Explicitly
