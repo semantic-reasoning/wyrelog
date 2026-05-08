@@ -2777,6 +2777,27 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 }
 #endif
 
+/*
+ * The daemon-http-decide test surface has been split across two binaries
+ * compiled from this single translation unit:
+ *
+ *   - WYL_TEST_VARIANT_AUDIT undefined: HTTP-decide protocol contracts
+ *     (readyz, request-id headers, raw decide, policy mutation, raw login)
+ *     plus the login + decide and login + guarded-decide flows.
+ *
+ *   - WYL_TEST_VARIANT_AUDIT defined: end-to-end audit pipeline. Generates
+ *     the decide and policy events the audit verification depends on, then
+ *     verifies the audit log via raw HTTP, the readyz audit-projection
+ *     contract, and a series of audit_event_present queries.
+ *
+ * Splitting was driven by Meson's per-test 30s timeout: under CI parallel
+ * scheduling the merged test serialised on local TCP and DuckDB and crossed
+ * the wall-clock ceiling. Both variants now run in parallel, each with its
+ * own daemon, and each finishes well under the timeout. Variant-irrelevant
+ * static helpers stay defined in this file; the build silences the
+ * resulting -Wunused-function warnings.
+ */
+#ifndef WYL_TEST_VARIANT_AUDIT
 int
 main (void)
 {
@@ -2823,13 +2844,6 @@ main (void)
   if (readyz_rc != 0)
     return readyz_rc;
 
-#ifdef WYL_HAS_AUDIT
-  readyz_rc = check_readyz_malformed_audit_projection_contract (handle,
-      base_url);
-  if (readyz_rc != 0)
-    return readyz_rc;
-#endif
-
   gint request_id_rc = check_request_id_header_contract (base_url);
   if (request_id_rc != 0)
     return request_id_rc;
@@ -2872,11 +2886,110 @@ main (void)
   if (decision != WYL_DECISION_DENY)
     return 13;
 
+  raw_rc = check_raw_login_contract (http.server, handle, base_url);
+  if (raw_rc != 0)
+    return raw_rc;
+
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return 0;
+}
+#else /* WYL_TEST_VARIANT_AUDIT */
+int
+main (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1;
+  if (insert_allow_fixture (handle) != WYRELOG_E_OK)
+    return 2;
+  if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
+    return 10;
+  if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 11;
+
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  WylDaemonRuntime runtime = {
+    .handle = handle,
+  };
+  if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
+    return 14;
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GError) error = NULL;
+  http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
+      &runtime, &error);
+  if (http.server == NULL)
+    return 3;
+  GThread *thread = g_thread_new ("daemon-http-decide-audit",
+      test_http_server_thread, &http);
+
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL)
+    return 4;
+  g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
+    return 5;
+
+  gint readyz_rc = check_readyz_malformed_audit_projection_contract (handle,
+      base_url);
+  if (readyz_rc != 0)
+    return readyz_rc;
+
+  /* Seed http.not_armed (http-deny-user) and other negative-decide audit
+   * events that the audit_event_present series below relies on. The full
+   * raw decide protocol contract is exercised in the non-audit variant. */
+  gint raw_rc = check_raw_decide_contract (handle, base_url);
+  if (raw_rc != 0)
+    return raw_rc;
+  gint decision = -1;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (client, "http-allow-user") != WYRELOG_E_OK) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 1819;
+  }
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (insert_allow_fixture (handle) != WYRELOG_E_OK)
+    return 1822;
+  if (wyl_client_decide (client, "http-allow-user", "http.allow",
+          "http-allow-scope", &decision) != WYRELOG_E_OK)
+    return 8;
+  if (decision != WYL_DECISION_ALLOW)
+    return 9;
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  if (wyl_client_login_skip_mfa (client, "http-guard-user") != WYRELOG_E_OK) {
+    wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+    return 1820;
+  }
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 1823;
+  if (wyl_client_decide_with_guard_context (client, "http-guard-user",
+          "wr.audit.read", "http-guard-scope", 123, "public", 69,
+          &decision) != WYRELOG_E_OK)
+    return 10;
+  if (decision != WYL_DECISION_ALLOW)
+    return 11;
+  if (wyl_client_decide_with_guard_context (client, "http-guard-user",
+          "wr.audit.read", "http-guard-scope", 123, "public", 70,
+          &decision) != WYRELOG_E_OK)
+    return 12;
+  if (decision != WYL_DECISION_DENY)
+    return 13;
+
   raw_rc = check_policy_permission_mutation_contract (handle, client, base_url);
   if (raw_rc != 0)
     return raw_rc;
 
-#ifdef WYL_HAS_AUDIT
   wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
   if (wyl_client_login_skip_mfa (client, "http-audit-user") != WYRELOG_E_OK)
     return 84;
@@ -2963,11 +3076,6 @@ main (void)
       WYL_DECISION_ALLOW, NULL, "site.reader");
   if (audit_rc != 0)
     return audit_rc;
-#endif
-
-  raw_rc = check_raw_login_contract (http.server, handle, base_url);
-  if (raw_rc != 0)
-    return raw_rc;
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
@@ -2976,3 +3084,4 @@ main (void)
   g_clear_pointer (&http.loop, g_main_loop_unref);
   return 0;
 }
+#endif /* WYL_TEST_VARIANT_AUDIT */
