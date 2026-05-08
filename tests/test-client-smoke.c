@@ -23,6 +23,7 @@ typedef struct
   gchar *last_tenant;
   gchar *last_event;
   gchar *last_session_token;
+  gchar *last_refresh_token;
   gchar *last_authorization;
   gchar *last_password;
   gchar *last_skip_mfa;
@@ -76,6 +77,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_tenant);
   g_free (http->last_event);
   g_free (http->last_session_token);
+  g_free (http->last_refresh_token);
   g_free (http->last_authorization);
   g_free (http->last_password);
   g_free (http->last_skip_mfa);
@@ -107,6 +109,9 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   http->last_session_token =
       query != NULL ? g_strdup (g_hash_table_lookup (query,
           "session_token")) : NULL;
+  http->last_refresh_token =
+      query != NULL ? g_strdup (g_hash_table_lookup (query,
+          "refresh_token")) : NULL;
   http->last_authorization = g_strdup (soup_message_headers_get_one
       (soup_server_message_get_request_headers (msg), "Authorization"));
   http->last_password =
@@ -862,13 +867,28 @@ main (void)
 
   http.body = "{\"session_token\":\"session-relogin\",\"username\":\"alice\","
       "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
-      "\"session_state\":\"active\",\"access_token\":\"access-relogin\"}";
+      "\"session_state\":\"active\",\"access_token\":\"access-relogin\","
+      "\"refresh_token\":\"refresh-relogin\"}";
   if (wyl_client_login_skip_mfa (local_client, "alice") != WYRELOG_E_OK)
     return 205;
   g_clear_pointer (&client_access_token, g_free);
   client_access_token = wyl_client_dup_access_token (local_client);
   if (g_strcmp0 (client_access_token, "access-relogin") != 0)
     return 206;
+  http.body = "{\"session_token\":\"session-relogin\",\"username\":\"alice\","
+      "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
+      "\"session_state\":\"active\",\"access_token\":\"access-refresh\","
+      "\"refresh_token\":\"refresh-next\"}";
+  if (wyl_client_token_refresh (local_client) != WYRELOG_E_OK)
+    return 210;
+  if (g_strcmp0 (http.last_method, "POST") != 0 ||
+      g_strcmp0 (http.last_path, "/auth/refresh") != 0 ||
+      g_strcmp0 (http.last_refresh_token, "refresh-relogin") != 0)
+    return 211;
+  g_clear_pointer (&client_access_token, g_free);
+  client_access_token = wyl_client_dup_access_token (local_client);
+  if (g_strcmp0 (client_access_token, "access-refresh") != 0)
+    return 212;
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
@@ -884,6 +904,7 @@ main (void)
   g_clear_pointer (&http.last_tenant, g_free);
   g_clear_pointer (&http.last_event, g_free);
   g_clear_pointer (&http.last_session_token, g_free);
+  g_clear_pointer (&http.last_refresh_token, g_free);
   g_clear_pointer (&http.last_authorization, g_free);
   g_clear_pointer (&http.last_password, g_free);
   g_clear_pointer (&http.last_skip_mfa, g_free);

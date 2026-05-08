@@ -23,5 +23,7 @@ wyrelog_error_t wyl_daemon_http_copy_access_token_secret (SoupServer * server,
     guint8 * out_secret, gsize out_len);
 gboolean wyl_daemon_http_remove_session_for_test (SoupServer * server,
     const gchar * session_token);
+gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
+    const gchar * refresh_token);
 #endif
 #endif
