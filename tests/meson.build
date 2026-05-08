@@ -458,6 +458,16 @@ test_session_logout = executable('test-session-logout',
 
 test('session-logout', test_session_logout)
 
+test_session_registry = executable('test-session-registry',
+  'test-session-registry.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep],
+)
+
+test('session-registry', test_session_registry)
+
 # NOTE: WYL_TEST_TEMPLATE_DIR points at the in-tree source layout
 # only. The installed layout (${datadir}/wyrelog/access) — produced
 # by install_subdir at the top-level meson.build — is not
