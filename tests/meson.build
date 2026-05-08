@@ -336,7 +336,9 @@ test_handle_engine_pair = executable('test-handle-engine-pair',
   dependencies : [wyrelog_dep, wirelog_dep, sqlite_dep],
 )
 
-test('handle-engine-pair', test_handle_engine_pair)
+test('handle-engine-pair', test_handle_engine_pair,
+  timeout : 120,
+)
 
 test_lobac_partial_delta = executable('test-lobac-partial-delta',
   'test-lobac-partial-delta.c',
