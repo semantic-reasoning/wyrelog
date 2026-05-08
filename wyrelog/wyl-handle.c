@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "access/break-glass-private.h"
 #include "access/decision-private.h"
 #include "wyrelog/engine.h"
 #include "wyl-engine-private.h"
@@ -81,6 +82,24 @@ struct _WylHandle
   GMutex sessions_lock;
   GHashTable *sessions_by_id;
   guint64 next_session_id;
+#ifdef WYL_HAS_BREAK_GLASS
+  /*
+   * Handle-scoped break-glass override state. The override path is
+   * gated on the build option to keep the bypass surface absent
+   * from default builds; off-builds expose the public API as
+   * stubs returning WYRELOG_E_BREAK_GLASS_DISABLED. Activation is
+   * single-shot per handle: a second arm before disarm fails so
+   * an operator cannot extend the wall-clock window by re-arming.
+   * Live fields are read under break_glass_lock so a concurrent
+   * decide cannot observe a torn state.
+   */
+  GMutex break_glass_lock;
+  gboolean break_glass_active;
+  wyl_break_glass_reason_code_t break_glass_reason;
+  gint64 break_glass_activated_at_us;
+  gint64 break_glass_ttl_seconds;
+  gboolean break_glass_used;
+#endif
 #ifdef WYL_HAS_AUDIT
   wyl_audit_conn_t *audit_conn;
 #endif
@@ -152,6 +171,9 @@ wyl_handle_finalize (GObject *object)
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
   g_clear_pointer (&self->sessions_by_id, g_hash_table_unref);
   g_mutex_clear (&self->sessions_lock);
+#ifdef WYL_HAS_BREAK_GLASS
+  g_mutex_clear (&self->break_glass_lock);
+#endif
 #ifdef WYL_HAS_AUDIT
   /* NULL-safe: if wyl_shutdown already closed the conn the pointer
    * was reset to NULL there; otherwise this is the only close site
@@ -196,6 +218,11 @@ wyl_handle_init (WylHandle *self)
   self->sessions_by_id = g_hash_table_new_full (g_int64_hash, g_int64_equal,
       g_free, wyl_session_registry_entry_free);
   self->next_session_id = 1;
+#ifdef WYL_HAS_BREAK_GLASS
+  g_mutex_init (&self->break_glass_lock);
+  self->break_glass_active = FALSE;
+  self->break_glass_used = FALSE;
+#endif
 }
 
 wyrelog_error_t
@@ -832,6 +859,88 @@ wyl_handle_get_login_skip_mfa_allowed (WylHandle *self)
           &deployment_mode) != WYRELOG_E_OK)
     return FALSE;
   return g_strcmp0 (deployment_mode, "production") != 0;
+}
+
+wyrelog_error_t
+wyl_handle_break_glass_arm (WylHandle *handle,
+    wyl_break_glass_reason_code_t reason, gint64 ttl_seconds)
+{
+#ifdef WYL_HAS_BREAK_GLASS
+  if (handle == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  if ((guint) reason >= WYL_BREAK_GLASS_REASON_LAST_)
+    return WYRELOG_E_INVALID;
+  if (ttl_seconds <= 0 || ttl_seconds > WYL_BREAK_GLASS_DEFAULT_TTL_SECONDS)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&handle->break_glass_lock);
+  if (handle->break_glass_active) {
+    g_mutex_unlock (&handle->break_glass_lock);
+    /*
+     * Single-shot per handle: a second arm before disarm is a
+     * misuse, not a TTL extension. Returning E_INVALID forces
+     * the caller through the explicit disarm path so the
+     * activation event log records both the prior teardown and
+     * the fresh activation rather than a silent overwrite.
+     */
+    return WYRELOG_E_INVALID;
+  }
+  handle->break_glass_active = TRUE;
+  handle->break_glass_reason = reason;
+  handle->break_glass_activated_at_us = g_get_real_time ();
+  handle->break_glass_ttl_seconds = ttl_seconds;
+  handle->break_glass_used = FALSE;
+  g_mutex_unlock (&handle->break_glass_lock);
+  return WYRELOG_E_OK;
+#else
+  (void) handle;
+  (void) reason;
+  (void) ttl_seconds;
+  return WYRELOG_E_BREAK_GLASS_DISABLED;
+#endif
+}
+
+wyrelog_error_t
+wyl_handle_break_glass_disarm (WylHandle *handle)
+{
+#ifdef WYL_HAS_BREAK_GLASS
+  if (handle == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&handle->break_glass_lock);
+  handle->break_glass_active = FALSE;
+  handle->break_glass_used = FALSE;
+  g_mutex_unlock (&handle->break_glass_lock);
+  return WYRELOG_E_OK;
+#else
+  (void) handle;
+  return WYRELOG_E_BREAK_GLASS_DISABLED;
+#endif
+}
+
+gboolean
+wyl_handle_break_glass_is_active (WylHandle *handle)
+{
+#ifdef WYL_HAS_BREAK_GLASS
+  if (handle == NULL || !WYL_IS_HANDLE (handle))
+    return FALSE;
+
+  gboolean active;
+  g_mutex_lock (&handle->break_glass_lock);
+  if (!handle->break_glass_active) {
+    active = FALSE;
+  } else {
+    gint64 now_us = g_get_real_time ();
+    gint64 expiry_us = handle->break_glass_activated_at_us
+        + handle->break_glass_ttl_seconds * G_USEC_PER_SEC;
+    active = (now_us < expiry_us);
+  }
+  g_mutex_unlock (&handle->break_glass_lock);
+  return active;
+#else
+  (void) handle;
+  return FALSE;
+#endif
 }
 
 static GHashTable *

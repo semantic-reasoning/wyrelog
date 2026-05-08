@@ -17,4 +17,5 @@
 #include "wyrelog/audit.h"
 #include "wyrelog/decide.h"
 #include "wyrelog/perm.h"
+#include "wyrelog/break-glass.h"
 #include "wyrelog/version.h"

@@ -481,6 +481,21 @@ test_break_glass_vocab = executable('test-break-glass-vocab',
 
 test('break-glass-vocab', test_break_glass_vocab)
 
+test_break_glass_arm_c_args = [
+  '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+]
+if get_option('enable_break_glass')
+  test_break_glass_arm_c_args += '-DWYL_HAS_BREAK_GLASS'
+endif
+
+test_break_glass_arm = executable('test-break-glass-arm',
+  'test-break-glass-arm.c',
+  c_args : test_break_glass_arm_c_args,
+  dependencies : [wyrelog_dep],
+)
+
+test('break-glass-arm', test_break_glass_arm)
+
 # NOTE: WYL_TEST_TEMPLATE_DIR points at the in-tree source layout
 # only. The installed layout (${datadir}/wyrelog/access) — produced
 # by install_subdir at the top-level meson.build — is not

@@ -2,6 +2,7 @@ wyrelog_inc = include_directories('..')
 
 wyrelog_public_headers = files(
   'audit.h',
+  'break-glass.h',
   'decide.h',
   'engine.h',
   'error.h',
