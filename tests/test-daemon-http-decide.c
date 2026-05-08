@@ -754,6 +754,41 @@ send_raw_login (SoupSession *session, const gchar *method,
       out_body, NULL);
 }
 
+static gint
+send_raw_refresh (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *refresh_token, guint *out_status,
+    gchar **out_body)
+{
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  g_autofree gchar *uri = NULL;
+  if (refresh_token != NULL) {
+    g_autofree gchar *escaped = g_uri_escape_string (refresh_token, NULL, TRUE);
+    uri = g_strdup_printf ("%s/auth/refresh?refresh_token=%s", root, escaped);
+  } else {
+    uri = g_strdup_printf ("%s/auth/refresh", root);
+  }
+
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 1;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 2;
+  gint rc = check_response_request_id_header (msg, 573);
+  if (rc != 0)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
 static gchar *
 extract_json_string (const gchar *body, const gchar *name)
 {
@@ -1108,6 +1143,74 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       "login-user", "authenticated", server);
   if (rc != 0)
     return rc;
+  g_autofree gchar *login_access_token =
+      extract_json_string (body, "access_token");
+  g_autofree gchar *login_refresh_token =
+      extract_json_string (body, "refresh_token");
+  if (login_access_token == NULL || login_refresh_token == NULL)
+    return 535;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_refresh (session, "GET", base_url, login_refresh_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 536;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_refresh (session, "POST", base_url, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_refresh_request\"") == NULL)
+    return 537;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_refresh (session, "POST", base_url, login_refresh_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"principal_state\":\"authenticated\"") == NULL ||
+      strstr (body, "\"access_token\":\"") == NULL ||
+      strstr (body, "\"refresh_token\":\"") == NULL)
+    return 538;
+  g_autofree gchar *next_refresh_token =
+      extract_json_string (body, "refresh_token");
+  if (next_refresh_token == NULL ||
+      g_strcmp0 (next_refresh_token, login_refresh_token) == 0)
+    return 539;
+  rc = verify_login_access_token (body, authenticated_session_token,
+      "login-user", "authenticated", server);
+  if (rc != 0)
+    return rc;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_refresh (session, "POST", base_url, login_refresh_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, next_refresh_token) == NULL)
+    return 540;
+  g_clear_pointer (&body, g_free);
+
+  if (!wyl_daemon_http_expire_refresh_grace_for_test (server,
+          login_refresh_token))
+    return 541;
+  rc = send_raw_refresh (session, "POST", base_url, login_refresh_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"refresh_reuse_detected\"") == NULL)
+    return 542;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_decide_bearer (session, "POST", base_url, "login-user",
+      "wr.login.skip_mfa", "login", NULL, login_access_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"decide_auth_required\"") == NULL)
+    return 543;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url,
