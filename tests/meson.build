@@ -496,6 +496,21 @@ test_break_glass_arm = executable('test-break-glass-arm',
 
 test('break-glass-arm', test_break_glass_arm)
 
+if get_option('enable_break_glass') and get_option('enable_audit').allowed()
+  test_break_glass_decide = executable('test-break-glass-decide',
+    'test-break-glass-decide.c',
+    c_args : [
+      '-DWYL_HAS_BREAK_GLASS',
+      '-DWYL_HAS_AUDIT',
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep],
+  )
+
+  test('break-glass-decide', test_break_glass_decide)
+endif
+
 # NOTE: WYL_TEST_TEMPLATE_DIR points at the in-tree source layout
 # only. The installed layout (${datadir}/wyrelog/access) — produced
 # by install_subdir at the top-level meson.build — is not
