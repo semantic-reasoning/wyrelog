@@ -49,6 +49,17 @@ typedef struct
   gchar *guard_risk_arg;
 } WyctlPolicyPermissionOptions;
 
+typedef struct
+{
+  gchar *subject;
+  gchar *role;
+  gchar *scope;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlPolicyRoleOptions;
+
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
 #define WYCTL_MAX_TIMEOUT_MS 60000
 #define WYCTL_AUDIT_DEFAULT_LIMIT 100
@@ -835,6 +846,133 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
 }
 
 static int
+run_policy_role_mutation_command (const WyctlOptions *global_opts,
+    const gchar *command, gint argc, gchar **argv)
+{
+  WyctlPolicyRoleOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Mutation subject", "SUBJECT_ID"},
+    {"role", 0, 0, G_OPTION_ARG_STRING, &opts.role,
+        "Mutation role", "ROLE_ID"},
+    {"scope", 0, 0, G_OPTION_ARG_STRING, &opts.scope,
+        "Mutation scope", "SCOPE_ID"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *summary = g_strdup_printf ("- wyrelog policy %s", command);
+  g_autoptr (GOptionContext) context = g_option_context_new (summary);
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected policy %s argument: %s\n", command, argv[1]);
+    return 2;
+  }
+
+  if (opts.subject == NULL || opts.subject[0] == '\0') {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  if (opts.role == NULL || opts.role[0] == '\0') {
+    g_printerr ("wyctl: missing --role\n");
+    return 2;
+  }
+  if (opts.scope == NULL || opts.scope[0] == '\0') {
+    g_printerr ("wyctl: missing --scope\n");
+    return 2;
+  }
+
+  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+    g_printerr ("wyctl: missing daemon URL\n");
+    return 2;
+  }
+  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+
+  gint64 guard_timestamp = 0;
+  if (!parse_nonnegative_int64 (opts.guard_timestamp_arg, &guard_timestamp)) {
+    g_printerr ("wyctl: invalid --guard-timestamp\n");
+    return 2;
+  }
+  if (opts.guard_loc_class == NULL ||
+      !wyl_guard_loc_class_is_valid (opts.guard_loc_class)) {
+    g_printerr ("wyctl: invalid --guard-loc-class\n");
+    return 2;
+  }
+  gint64 guard_risk = 0;
+  if (!parse_nonnegative_int64 (opts.guard_risk_arg, &guard_risk) ||
+      guard_risk > 100) {
+    g_printerr ("wyctl: invalid --guard-risk\n");
+    return 2;
+  }
+
+  g_autofree gchar *access_token = NULL;
+  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  if (token_rc != 0)
+    return token_rc;
+
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+      wyl_client_set_bearer_credentials (client, access_token,
+          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
+    g_printerr ("wyctl: invalid policy credentials\n");
+    return 2;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  if (g_strcmp0 (command, "role-grant") == 0) {
+    rc = wyl_client_policy_role_grant (client, opts.subject, opts.role,
+        opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+  } else if (g_strcmp0 (command, "role-revoke") == 0) {
+    rc = wyl_client_policy_role_revoke (client, opts.subject, opts.role,
+        opts.scope, guard_timestamp, opts.guard_loc_class, guard_risk);
+  } else {
+    g_printerr ("wyctl: policy %s is not implemented\n", command);
+    return 3;
+  }
+
+  if (rc == WYRELOG_E_OK) {
+    g_print ("ok\n");
+    return 0;
+  }
+  if (rc == WYRELOG_E_INVALID) {
+    g_printerr ("wyctl: policy %s failed: invalid_policy_mutation\n", command);
+    return 3;
+  }
+  if (rc == WYRELOG_E_AUTH) {
+    g_printerr ("wyctl: policy %s failed: policy_auth_required\n", command);
+    return 6;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    g_printerr ("wyctl: policy %s failed: policy_mutation_denied\n", command);
+    return 4;
+  }
+  g_printerr ("wyctl: policy %s failed: policy_mutation_failed\n", command);
+  return 5;
+}
+
+static int
 run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -848,6 +986,10 @@ run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
   if (g_strcmp0 (argv[1], "permission-grant") == 0 ||
       g_strcmp0 (argv[1], "permission-revoke") == 0)
     return run_policy_permission_mutation_command (global_opts, argv[1],
+        argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "role-grant") == 0 ||
+      g_strcmp0 (argv[1], "role-revoke") == 0)
+    return run_policy_role_mutation_command (global_opts, argv[1],
         argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown policy command: %s\n", argv[1]);
