@@ -2938,7 +2938,7 @@ check_tenant_gate_codes_contract (void)
   /* Pass: NULL request tenant falls back to the default, matches auth. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (!wyl_daemon_http_check_request_tenant_for_test ("__wr_default", NULL,
+  if (!wyl_daemon_http_check_request_tenant_for_test (NULL, "__wr_default",
           &status, &code))
     return 1902;
   if (status != 0 || code != NULL)
@@ -2947,8 +2947,8 @@ check_tenant_gate_codes_contract (void)
   /* Reject: request tenant is not the known default. 400 tenant_invalid. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
-          "unknown", &status, &code))
+  if (wyl_daemon_http_check_request_tenant_for_test ("unknown",
+          "__wr_default", &status, &code))
     return 1904;
   if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
     return 1905;
@@ -2956,7 +2956,7 @@ check_tenant_gate_codes_contract (void)
   /* Reject: empty request tenant. 400 tenant_invalid. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default", "",
+  if (wyl_daemon_http_check_request_tenant_for_test ("", "__wr_default",
           &status, &code))
     return 1906;
   if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
@@ -2972,8 +2972,8 @@ check_tenant_gate_codes_contract (void)
    */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test ("other-tenant",
-          "__wr_default", &status, &code))
+  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
+          "other-tenant", &status, &code))
     return 1908;
   if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
     return 1909;
@@ -2981,7 +2981,7 @@ check_tenant_gate_codes_contract (void)
   /* Reject: missing auth tenant on a default-tenant request. 403 tenant_denied. */
   g_clear_pointer (&code, g_free);
   status = 0;
-  if (wyl_daemon_http_check_request_tenant_for_test (NULL, "__wr_default",
+  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default", NULL,
           &status, &code))
     return 1910;
   if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)

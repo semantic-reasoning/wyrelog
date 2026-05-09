@@ -9,6 +9,7 @@
 #include "wyrelog/decide.h"
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 typedef struct
@@ -576,7 +577,7 @@ run_policy_decide_request (const WyctlOptions *global_opts,
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
-          "__wr_default") != WYRELOG_E_OK) {
+          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
     return 2;
   }
@@ -789,7 +790,7 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
-          "__wr_default") != WYRELOG_E_OK) {
+          WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid audit credentials\n");
     return 2;
   }

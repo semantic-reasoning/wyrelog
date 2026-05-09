@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 struct _WylClient
@@ -1071,7 +1072,7 @@ wyl_client_tenant_select (WylClient *client, const gchar *tenant)
   if (client == NULL || !WYL_IS_CLIENT (client) || tenant == NULL ||
       tenant[0] == '\0')
     return WYRELOG_E_INVALID;
-  if (client->tenant == NULL || g_strcmp0 (tenant, "__wr_default") != 0 ||
+  if (client->tenant == NULL || g_strcmp0 (tenant, WYL_TENANT_DEFAULT) != 0 ||
       g_strcmp0 (client->tenant, tenant) != 0)
     return WYRELOG_E_INVALID;
 
