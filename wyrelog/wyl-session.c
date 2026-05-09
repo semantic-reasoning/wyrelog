@@ -2,6 +2,7 @@
 #include "wyrelog/wyrelog.h"
 
 #include "audit/event-private.h"
+#include "wyl-common-private.h"
 #include "wyl-fsm-principal-private.h"
 #include "wyl-fsm-session-private.h"
 #include "wyl-handle-private.h"
@@ -75,7 +76,7 @@ reload_session_snapshot (WylHandle *handle)
 static gboolean
 login_tenant_is_valid (const gchar *tenant)
 {
-  return tenant != NULL && g_strcmp0 (tenant, "__wr_default") == 0;
+  return tenant != NULL && g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0;
 }
 
 static wyrelog_error_t
@@ -585,7 +586,7 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (handle == NULL)
     return WYRELOG_E_INVALID;
 
-  const gchar *tenant = "__wr_default";
+  const gchar *tenant = WYL_TENANT_DEFAULT;
   if (req != NULL && wyl_login_req_get_tenant (req) != NULL)
     tenant = wyl_login_req_get_tenant (req);
   if (!login_tenant_is_valid (tenant))

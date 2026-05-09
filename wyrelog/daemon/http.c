@@ -9,6 +9,7 @@
 #include "daemon/delta.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
@@ -18,7 +19,6 @@
 #define WYL_DAEMON_JWT_ISSUER "wyrelogd"
 #define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
 #define WYL_DAEMON_JWT_KEY_ID "__wr_default_hs256"
-#define WYL_DAEMON_DEFAULT_TENANT "__wr_default"
 #define WYL_DAEMON_JWT_KEY_LEN 32
 #define WYL_DAEMON_REFRESH_TTL_SECONDS 86400
 #define WYL_DAEMON_REFRESH_GRACE_SECONDS 30
@@ -35,7 +35,7 @@
  *   tenant_invalid  - 400. The request carries a tenant query
  *                     parameter (or login body field) whose value is
  *                     not a tenant this daemon recognises. In v0 the
- *                     only known tenant is WYL_DAEMON_DEFAULT_TENANT.
+ *                     only known tenant is WYL_TENANT_DEFAULT.
  *   tenant_denied   - 403. The authenticated principal's tenant does
  *                     not match the tenant declared on the request.
  *                     Distinct from tenant_invalid so callers can
@@ -121,7 +121,7 @@ static void set_json_error (SoupServerMessage * msg, guint status,
 static gboolean
 wyl_daemon_tenant_is_known (const gchar *tenant)
 {
-  return g_strcmp0 (tenant, WYL_DAEMON_DEFAULT_TENANT) == 0;
+  return g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0;
 }
 
 static void
@@ -846,7 +846,7 @@ lookup_request_tenant (GHashTable *query)
 {
   if (query != NULL && g_hash_table_contains (query, "tenant"))
     return g_hash_table_lookup (query, "tenant");
-  return WYL_DAEMON_DEFAULT_TENANT;
+  return WYL_TENANT_DEFAULT;
 }
 
 /*
@@ -906,8 +906,8 @@ ensure_auth_context_request_tenant (SoupServerMessage *msg, GHashTable *query,
 
 #ifdef WYL_TEST_DAEMON_HTTP
 gboolean
-wyl_daemon_http_check_request_tenant_for_test (const gchar *auth_tenant,
-    const gchar *request_tenant, guint *out_status, gchar **out_code)
+wyl_daemon_http_check_request_tenant_for_test (const gchar *request_tenant,
+    const gchar *auth_tenant, guint *out_status, gchar **out_code)
 {
   /*
    * Mirrors lookup_request_tenant()'s NULL-query fallback: if the
@@ -916,7 +916,7 @@ wyl_daemon_http_check_request_tenant_for_test (const gchar *auth_tenant,
    * lookup_request_tenant() does inside a real handler.
    */
   const gchar *effective = request_tenant != NULL ? request_tenant
-      : WYL_DAEMON_DEFAULT_TENANT;
+      : WYL_TENANT_DEFAULT;
   const gchar *code = NULL;
   guint status = decide_request_tenant_gate (effective, auth_tenant, &code);
   if (out_status != NULL)
@@ -1634,7 +1634,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
 
   const gchar *username = NULL;
-  const gchar *tenant = WYL_DAEMON_DEFAULT_TENANT;
+  const gchar *tenant = WYL_TENANT_DEFAULT;
   const gchar *skip_mfa = NULL;
   const gchar *password = NULL;
   if (query != NULL) {
