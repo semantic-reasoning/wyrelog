@@ -754,10 +754,32 @@ lookup_bearer_token (SoupServerMessage *msg)
   return token;
 }
 
+/*
+ * Bearer-token auth resolver. Defense-in-depth tenant gate: after
+ * the signature/issuer/audience/exp verifier passes and the access
+ * claims are parsed, we directly require that the JWT's tenant
+ * claim is one of the daemon's known tenants (today, only
+ * WYL_TENANT_DEFAULT). This check is REDUNDANT with the live-session
+ * comparison below, by design: today wyl_session_login() only mints
+ * sessions on the default tenant, so a foreign-tenant JWT would
+ * already be caught by the live_tenant != claims.tenant arm. The
+ * direct check here makes the contract explicit so a future
+ * relaxation upstream (e.g., letting the live session carry a
+ * non-default tenant) cannot silently widen the JWT-acceptance
+ * surface. On miss, we surface the stable wire code
+ * WYL_DAEMON_ERR_TENANT_INVALID through *out_auth_error_code so the
+ * caller can emit it instead of the generic auth_required code.
+ * out_auth_error_code may be NULL; callers that don't need the
+ * specific reason still get WYRELOG_E_POLICY and can fall back to
+ * their handler-family auth_required code.
+ */
 static wyrelog_error_t
 resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
-    const gchar *token, WylDaemonAuthContext *out_auth)
+    const gchar *token, WylDaemonAuthContext *out_auth,
+    const gchar **out_auth_error_code)
 {
+  if (out_auth_error_code != NULL)
+    *out_auth_error_code = NULL;
   if (ctx == NULL || token == NULL || out_auth == NULL)
     return WYRELOG_E_INVALID;
   wyl_daemon_auth_context_clear (out_auth);
@@ -780,6 +802,19 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   rc = wyl_jwt_parse_access_claims_json (payload, &claims);
   if (rc != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
+  /*
+   * Direct JWT-claims tenant gate (defense-in-depth, see function
+   * header comment). Runs immediately after signature verify and
+   * BEFORE the live-session comparison so a foreign-tenant claim
+   * is rejected as a tenant violation even if the transitive check
+   * below would also reject it.
+   */
+  if (!wyl_daemon_tenant_is_known (claims.tenant)) {
+    if (out_auth_error_code != NULL)
+      *out_auth_error_code = WYL_DAEMON_ERR_TENANT_INVALID;
+    wyl_jwt_access_claims_clear (&claims);
+    return WYRELOG_E_POLICY;
+  }
   if (g_strcmp0 (claims.principal_state_at_issue, "authenticated") != 0) {
     wyl_jwt_access_claims_clear (&claims);
     return WYRELOG_E_POLICY;
@@ -815,10 +850,21 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   return WYRELOG_E_OK;
 }
 
+/*
+ * Session-token (cookie-equivalent) auth resolver. Same
+ * defense-in-depth tenant gate as resolve_bearer_session: the
+ * live session's tenant must be one of the daemon's known tenants.
+ * Today wyl_session_login() only mints WYL_TENANT_DEFAULT sessions,
+ * so this check is redundant; it stays as an explicit gate so a
+ * future relaxation upstream cannot let a non-default tenant slip
+ * through to a privileged handler. out_auth_error_code may be NULL.
+ */
 static wyrelog_error_t
 resolve_session_token_auth (SoupServer *server, const gchar *session_token,
-    WylDaemonAuthContext *out_auth)
+    WylDaemonAuthContext *out_auth, const gchar **out_auth_error_code)
 {
+  if (out_auth_error_code != NULL)
+    *out_auth_error_code = NULL;
   if (server == NULL || session_token == NULL || out_auth == NULL)
     return WYRELOG_E_INVALID;
   wyl_daemon_auth_context_clear (out_auth);
@@ -833,6 +879,11 @@ resolve_session_token_auth (SoupServer *server, const gchar *session_token,
   if (username == NULL || username[0] == '\0' || tenant == NULL ||
       tenant[0] == '\0')
     return WYRELOG_E_POLICY;
+  if (!wyl_daemon_tenant_is_known (tenant)) {
+    if (out_auth_error_code != NULL)
+      *out_auth_error_code = WYL_DAEMON_ERR_TENANT_INVALID;
+    return WYRELOG_E_POLICY;
+  }
 
   out_auth->session_id = g_strdup (session_token);
   out_auth->actor = g_steal_pointer (&username);
@@ -1216,18 +1267,22 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   }
 
   g_auto (WylDaemonAuthContext) auth = { 0 };
+  const gchar *auth_tenant_error = NULL;
   if (has_session_token) {
     wyrelog_error_t auth_rc =
-        resolve_session_token_auth (server, session_token, &auth);
+        resolve_session_token_auth (server, session_token, &auth,
+        &auth_tenant_error);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401, auth_required_code);
+      set_json_error (msg, 401,
+          auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
       return FALSE;
     }
   } else {
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-        bearer_token, &auth);
+        bearer_token, &auth, &auth_tenant_error);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401, auth_required_code);
+      set_json_error (msg, 401,
+          auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
       return FALSE;
     }
   }
@@ -1871,10 +1926,12 @@ logout_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   WylDaemonHttpContext *ctx = user_data;
   g_auto (WylDaemonAuthContext) bearer_auth = { 0 };
   if (has_bearer_token) {
+    const gchar *auth_tenant_error = NULL;
     wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-        bearer_token, &bearer_auth);
+        bearer_token, &bearer_auth, &auth_tenant_error);
     if (auth_rc != WYRELOG_E_OK) {
-      set_json_error (msg, 401, "logout_auth_required");
+      set_json_error (msg, 401, auth_tenant_error != NULL
+          ? auth_tenant_error : "logout_auth_required");
       return;
     }
     session_token = bearer_auth.session_id;
@@ -1987,10 +2044,12 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
   g_auto (WylDaemonAuthContext) auth = { 0 };
+  const gchar *auth_tenant_error = NULL;
   wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
-      bearer_token, &auth);
+      bearer_token, &auth, &auth_tenant_error);
   if (auth_rc != WYRELOG_E_OK) {
-    set_json_error (msg, 401, "decide_auth_required");
+    set_json_error (msg, 401, auth_tenant_error != NULL
+        ? auth_tenant_error : "decide_auth_required");
     return;
   }
   if (!ensure_auth_context_request_tenant (msg, query, &auth))
