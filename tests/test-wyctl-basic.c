@@ -3,6 +3,7 @@
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <string.h>
+#include <sys/wait.h>
 
 #ifndef WYL_TEST_WYCTL_PATH
 #error "WYL_TEST_WYCTL_PATH is required"
@@ -1255,6 +1256,509 @@ test_audit_query (void)
   run_audit_query_case ("[]", "", 250 * 1000, "50", "100");
 }
 
+typedef struct
+{
+  GSocketListener *listener;
+  guint status;
+  const gchar *body;
+  gchar *request;
+} PolicyMutationServer;
+
+static gpointer
+policy_mutation_server_thread (gpointer data)
+{
+  PolicyMutationServer *server = data;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GSocketConnection) conn =
+      g_socket_listener_accept (server->listener, NULL, NULL, &error);
+  if (conn == NULL)
+    return NULL;
+
+  gchar buffer[4096];
+  GInputStream *input = g_io_stream_get_input_stream (G_IO_STREAM (conn));
+  GOutputStream *output = g_io_stream_get_output_stream (G_IO_STREAM (conn));
+  gssize n = g_input_stream_read (input, buffer, sizeof buffer - 1, NULL, NULL);
+  if (n > 0) {
+    buffer[n] = '\0';
+    server->request = g_strdup (buffer);
+  }
+
+  const gchar *body = server->body != NULL ? server->body : "{}";
+  g_autofree gchar *response =
+      g_strdup_printf ("HTTP/1.1 %u OK\r\nContent-Type: application/json\r\n"
+      "Content-Length: %" G_GSIZE_FORMAT "\r\n\r\n%s",
+      server->status, strlen (body), body);
+  (void) g_output_stream_write (output, response, strlen (response), NULL,
+      NULL);
+  (void) g_io_stream_close (G_IO_STREAM (conn), NULL, NULL);
+  return NULL;
+}
+
+static void
+test_policy_permission_help (void)
+{
+  gchar *grant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "permission-grant",
+    "--help",
+    NULL,
+  };
+  gchar *revoke_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "permission-revoke",
+    "--help",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (grant_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--subject"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--perm"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--scope"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--access-token-file"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-timestamp"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-loc-class"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--guard-risk"));
+  g_assert_null (g_strstr_len (stdout_buf, -1, "--tenant"));
+  g_assert_null (g_strstr_len (stdout_buf, -1, "--access-token "));
+  g_assert_cmpstr (stderr_buf, ==, "");
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (revoke_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--subject"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--perm"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--scope"));
+  g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--access-token-file"));
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+
+static void
+run_policy_permission_success_case (const gchar *command, const gchar *path)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
+      &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  PolicyMutationServer server = {
+    .listener = listener,
+    .status = 200,
+    .body = "{}",
+  };
+  GThread *server_thread = g_thread_new ("policy-mutation",
+      policy_mutation_server_thread, &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    daemon_url,
+    "--timeout-ms",
+    "1000",
+    "policy",
+    (gchar *) command,
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_thread_join (server_thread);
+
+  g_assert_true (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "ok\n");
+  g_assert_cmpstr (stderr_buf, ==, "");
+  g_assert_nonnull (server.request);
+  g_autofree gchar *expected_request_line = g_strdup_printf ("POST %s?", path);
+  g_assert_nonnull (g_strstr_len (server.request, -1, expected_request_line));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "subject=alice"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "perm=wr.audit.read"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "scope=tenant%2Fa"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "tenant=__wr_default"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "guard_timestamp=123"));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "guard_loc_class=public"));
+  g_assert_nonnull (g_strstr_len (server.request, -1, "guard_risk=69"));
+  g_assert_null (g_strstr_len (server.request, -1, "session_token="));
+  g_assert_nonnull (g_strstr_len (server.request, -1,
+          "Authorization: Bearer token-1"));
+
+  g_free (server.request);
+  g_unlink (token_path);
+}
+
+static void
+test_policy_permission_grant_success (void)
+{
+  run_policy_permission_success_case ("permission-grant",
+      "/policy/permissions/grant");
+}
+
+static void
+test_policy_permission_revoke_success (void)
+{
+  run_policy_permission_success_case ("permission-revoke",
+      "/policy/permissions/revoke");
+}
+
+static void
+run_policy_permission_status_case (const gchar *command, guint status,
+    gint expected_exit, const gchar *expected_stderr_marker)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
+      &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  g_autoptr (GSocketListener) listener = NULL;
+  g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
+  PolicyMutationServer server = {
+    .listener = listener,
+    .status = status,
+    .body = "{}",
+  };
+  GThread *server_thread = g_thread_new ("policy-mutation",
+      policy_mutation_server_thread, &server);
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    daemon_url,
+    "--timeout-ms",
+    "1000",
+    "policy",
+    (gchar *) command,
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_thread_join (server_thread);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpint (WEXITSTATUS (wait_status), ==, expected_exit);
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, expected_stderr_marker));
+
+  g_free (server.request);
+  g_unlink (token_path);
+}
+
+static void
+test_policy_permission_grant_status_errors (void)
+{
+  run_policy_permission_status_case ("permission-grant", 400, 3,
+      "wyctl: policy permission-grant failed: invalid_policy_mutation");
+  run_policy_permission_status_case ("permission-grant", 401, 6,
+      "wyctl: policy permission-grant failed: policy_auth_required");
+  run_policy_permission_status_case ("permission-grant", 403, 4,
+      "wyctl: policy permission-grant failed: policy_mutation_denied");
+  run_policy_permission_status_case ("permission-grant", 500, 5,
+      "wyctl: policy permission-grant failed: policy_mutation_failed");
+}
+
+static void
+test_policy_permission_revoke_status_errors (void)
+{
+  run_policy_permission_status_case ("permission-revoke", 400, 3,
+      "wyctl: policy permission-revoke failed: invalid_policy_mutation");
+  run_policy_permission_status_case ("permission-revoke", 401, 6,
+      "wyctl: policy permission-revoke failed: policy_auth_required");
+  run_policy_permission_status_case ("permission-revoke", 403, 4,
+      "wyctl: policy permission-revoke failed: policy_mutation_denied");
+  run_policy_permission_status_case ("permission-revoke", 500, 5,
+      "wyctl: policy permission-revoke failed: policy_mutation_failed");
+}
+
+static void
+test_policy_permission_validation (void)
+{
+  g_autofree gchar *token_path = NULL;
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp ("wyctl-policy-perm-token-XXXXXX", &token_path,
+      &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
+  g_assert_no_error (error);
+
+  gchar *missing_subject_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *missing_perm_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *missing_scope_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *missing_token_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *missing_timestamp_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *invalid_loc_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "unknown",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  gchar *invalid_risk_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "101",
+    NULL,
+  };
+  gchar *missing_daemon_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "policy",
+    "permission-grant",
+    "--subject",
+    "alice",
+    "--perm",
+    "wr.audit.read",
+    "--scope",
+    "tenant/a",
+    "--access-token-file",
+    token_path,
+    "--guard-timestamp",
+    "123",
+    "--guard-loc-class",
+    "public",
+    "--guard-risk",
+    "69",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+
+  run_child (missing_subject_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing --subject"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_perm_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing --perm"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_scope_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing --scope"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_token_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: missing --access-token-file"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_timestamp_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid --guard-timestamp"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_loc_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid --guard-loc-class"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (invalid_risk_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid --guard-risk"));
+
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (missing_daemon_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_cmpstr (stdout_buf, ==, "");
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+
+  g_unlink (token_path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1276,6 +1780,18 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/policy-help", test_policy_help);
   g_test_add_func ("/wyctl/policy-validation", test_policy_validation);
   g_test_add_func ("/wyctl/policy-check", test_policy_check);
+  g_test_add_func ("/wyctl/policy-permission-help",
+      test_policy_permission_help);
+  g_test_add_func ("/wyctl/policy-permission-validation",
+      test_policy_permission_validation);
+  g_test_add_func ("/wyctl/policy-permission-grant-success",
+      test_policy_permission_grant_success);
+  g_test_add_func ("/wyctl/policy-permission-revoke-success",
+      test_policy_permission_revoke_success);
+  g_test_add_func ("/wyctl/policy-permission-grant-status-errors",
+      test_policy_permission_grant_status_errors);
+  g_test_add_func ("/wyctl/policy-permission-revoke-status-errors",
+      test_policy_permission_revoke_status_errors);
   g_test_add_func ("/wyctl/audit-help", test_audit_help);
   g_test_add_func ("/wyctl/audit-validation", test_audit_validation);
   g_test_add_func ("/wyctl/audit-query", test_audit_query);
