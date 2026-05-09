@@ -3,6 +3,7 @@
 
 #include "wyrelog/wyrelog.h"
 
+#include "access/break-glass-private.h"
 #include "access/decision-private.h"
 #include "wyl-handle-compound-private.h"
 #include "wyl-handle-private.h"
@@ -530,6 +531,78 @@ fail_closed_for_audit (wyl_decide_resp_t *resp)
 }
 #endif
 
+#ifdef WYL_HAS_BREAK_GLASS
+typedef struct
+{
+  gint64 now_row[1];
+  gint64 used_row[1];
+  gboolean now_inserted;
+  gboolean used_inserted;
+} break_glass_eval_facts_t;
+
+static wyrelog_error_t
+remove_break_glass_facts (WylHandle *handle,
+    const break_glass_eval_facts_t *facts)
+{
+  wyrelog_error_t first_rc = WYRELOG_E_OK;
+  if (facts->used_inserted) {
+    wyrelog_error_t rc = wyl_handle_engine_remove (handle, "break_glass_used",
+        facts->used_row, 1);
+    if (first_rc == WYRELOG_E_OK)
+      first_rc = rc;
+  }
+  if (facts->now_inserted) {
+    wyrelog_error_t rc = wyl_handle_engine_remove (handle, "now",
+        facts->now_row, 1);
+    if (first_rc == WYRELOG_E_OK)
+      first_rc = rc;
+  }
+  return first_rc;
+}
+
+/*
+ * Inserts the host-supplied EDB rows that templates/access/bootstrap.dl
+ * declares as runtime-only (now/1 and break_glass_used/1) so the
+ * self-disable rule disabled_role("wr.break_glass") can fire when the
+ * activation outlives its TTL. The facts are inserted lock-free under
+ * the per-decide critical section the caller already owns; on any
+ * insertion failure the partially-inserted facts are removed before
+ * returning so the engine state is restored to its pre-call shape.
+ *
+ * The injection happens unconditionally on every break-glass-aware
+ * decide so a handle whose break-glass window has expired since the
+ * previous decide does not need a separate host-side gate to surface
+ * the deny. now/1 is always injected; break_glass_used/1 is injected
+ * only when the handle has observed at least one armed decide.
+ */
+static wyrelog_error_t
+insert_break_glass_facts (WylHandle *handle, break_glass_eval_facts_t *facts)
+{
+  facts->now_row[0] = g_get_real_time () / G_USEC_PER_SEC;
+  wyrelog_error_t rc = wyl_handle_engine_insert (handle, "now",
+      facts->now_row, 1);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  facts->now_inserted = TRUE;
+
+  if (wyl_handle_break_glass_has_been_used (handle)) {
+    gint64 activated_at_us = 0;
+    if (wyl_handle_break_glass_get_activated_at_us (handle, &activated_at_us)
+        == WYRELOG_E_OK) {
+      facts->used_row[0] = activated_at_us / G_USEC_PER_SEC;
+      rc = wyl_handle_engine_insert (handle, "break_glass_used",
+          facts->used_row, 1);
+      if (rc != WYRELOG_E_OK) {
+        (void) remove_break_glass_facts (handle, facts);
+        return rc;
+      }
+      facts->used_inserted = TRUE;
+    }
+  }
+  return WYRELOG_E_OK;
+}
+#endif
+
 wyrelog_error_t
 wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
     wyl_decide_resp_t *resp)
@@ -570,6 +643,10 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
 
     gboolean allowed = FALSE;
     guard_eval_facts_t guard_facts = { 0 };
+#ifdef WYL_HAS_BREAK_GLASS
+    break_glass_eval_facts_t break_glass_facts = { 0 };
+    gboolean break_glass_active_now = wyl_handle_break_glass_is_active (handle);
+#endif
     const wyl_guard_expr_t *guard =
         wyl_perm_arm_rule_lookup (wyl_decide_req_get_action (req));
     if (guard != NULL) {
@@ -588,11 +665,24 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       if (rc != WYRELOG_E_OK)
         return rc;
     }
+#ifdef WYL_HAS_BREAK_GLASS
+    if (break_glass_active_now) {
+      rc = insert_break_glass_facts (handle, &break_glass_facts);
+      if (rc != WYRELOG_E_OK) {
+        if (guard_facts.eval_guard_inserted)
+          (void) remove_guard_eval_facts (handle, &guard_facts);
+        return rc;
+      }
+    }
+#endif
 
     rc = wyl_handle_engine_decide (handle, row, &allowed);
     if (rc != WYRELOG_E_OK) {
       if (guard_facts.eval_guard_inserted)
         (void) remove_guard_eval_facts (handle, &guard_facts);
+#ifdef WYL_HAS_BREAK_GLASS
+      (void) remove_break_glass_facts (handle, &break_glass_facts);
+#endif
       return rc;
     }
     if (allowed) {
@@ -603,6 +693,9 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
       if (rc != WYRELOG_E_OK) {
         if (guard_facts.eval_guard_inserted)
           (void) remove_guard_eval_facts (handle, &guard_facts);
+#ifdef WYL_HAS_BREAK_GLASS
+        (void) remove_break_glass_facts (handle, &break_glass_facts);
+#endif
         return rc;
       }
       deny_reason = wyl_deny_reason_name (code);
@@ -614,9 +707,15 @@ wyl_decide (WylHandle *handle, const wyl_decide_req_t *req,
         wyl_decide_resp_set_decision (resp, WYL_DECISION_DENY);
         wyl_decide_resp_set_deny_tags (resp, "guard_cleanup_failed",
             "eval_guard");
+#ifdef WYL_HAS_BREAK_GLASS
+        (void) remove_break_glass_facts (handle, &break_glass_facts);
+#endif
         return rc;
       }
     }
+#ifdef WYL_HAS_BREAK_GLASS
+    (void) remove_break_glass_facts (handle, &break_glass_facts);
+#endif
   }
   wyl_decide_resp_set_deny_tags (resp, deny_reason, deny_origin);
 emit_audit:
@@ -640,6 +739,16 @@ emit_audit:
   wyl_audit_event_set_decision (ev, wyl_decide_resp_get_decision (resp));
   if (wyl_audit_emit (handle, ev) != WYRELOG_E_OK)
     fail_closed_for_audit (resp);
+#endif
+
+#ifdef WYL_HAS_BREAK_GLASS
+  /*
+   * Mark the activation observed AFTER the audit row has committed
+   * so a fail-closed audit emit does not falsely register a usage
+   * the operator's incident docket cannot see. The mark is a no-op
+   * when the handle is not currently in an activation window.
+   */
+  wyl_handle_break_glass_mark_used (handle);
 #endif
 
   return WYRELOG_E_OK;

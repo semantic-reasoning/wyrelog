@@ -40,4 +40,50 @@ wyrelog_error_t wyl_break_glass_reason_from_name (const gchar * name,
  */
 #define WYL_BREAK_GLASS_DEFAULT_TTL_SECONDS 900
 
+#ifdef WYL_HAS_BREAK_GLASS
+
+/*
+ * Forward declaration so the helpers below can name WylHandle
+ * without forcing every include path through handle-private.h.
+ */
+typedef struct _WylHandle WylHandle;
+
+/*
+ * Returns the operator-supplied reason code for the current
+ * activation. |out_reason| is written only when the handle is in
+ * an active break-glass window; on a NULL handle, an inactive
+ * handle, or an expired activation the call returns
+ * WYRELOG_E_INVALID and |*out_reason| is left untouched.
+ */
+wyrelog_error_t wyl_handle_break_glass_get_reason (WylHandle * handle,
+    wyl_break_glass_reason_code_t * out_reason);
+
+/*
+ * Returns the wall-clock microsecond timestamp at which the
+ * current activation was registered. NULL or inactive handle
+ * returns WYRELOG_E_INVALID and leaves |*out_activated_at_us|
+ * untouched.
+ */
+wyrelog_error_t wyl_handle_break_glass_get_activated_at_us (WylHandle * handle,
+    gint64 * out_activated_at_us);
+
+/*
+ * Records that the active break-glass window has been observed by
+ * a decide call so subsequent decides inject break_glass_used/1
+ * for the DL self-disable rule. Idempotent; further calls after
+ * the first do not advance the timestamp. Safe to call when the
+ * handle is inactive: the call becomes a no-op.
+ */
+void wyl_handle_break_glass_mark_used (WylHandle * handle);
+
+/*
+ * Returns TRUE iff the handle has observed a break-glass-arm
+ * decide at least once since the last disarm. Used by the decide
+ * path to decide whether to inject break_glass_used/1 into the
+ * engine.
+ */
+gboolean wyl_handle_break_glass_has_been_used (WylHandle * handle);
+
+#endif
+
 G_END_DECLS;

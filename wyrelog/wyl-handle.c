@@ -891,6 +891,26 @@ wyl_handle_break_glass_arm (WylHandle *handle,
   handle->break_glass_ttl_seconds = ttl_seconds;
   handle->break_glass_used = FALSE;
   g_mutex_unlock (&handle->break_glass_lock);
+
+#ifdef WYL_HAS_AUDIT
+  /*
+   * Emit the arm event outside the lock: the audit conn has its
+   * own write serialisation, and a failure to land the row must
+   * not be allowed to roll back the in-memory activation. The
+   * activation has already happened from the operator's point of
+   * view; an audit-write failure is a fail-closed signal for the
+   * operator's external incident docket, not a reason to silently
+   * disarm and pretend the arming never occurred.
+   */
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_action (ev, "break_glass_arm");
+  wyl_audit_event_set_resource_id (ev, "wr.break_glass");
+  wyl_audit_event_set_deny_reason (ev, wyl_break_glass_reason_name (reason));
+  wyl_audit_event_set_deny_origin (ev, "break_glass");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+#endif
+
   return WYRELOG_E_OK;
 #else
   (void) handle;
@@ -911,6 +931,22 @@ wyl_handle_break_glass_disarm (WylHandle *handle)
   handle->break_glass_active = FALSE;
   handle->break_glass_used = FALSE;
   g_mutex_unlock (&handle->break_glass_lock);
+
+#ifdef WYL_HAS_AUDIT
+  /*
+   * Disarm is idempotent and always emits a row; a disarm against
+   * an already-inactive handle still records the operator's
+   * intent so the audit log captures the teardown signal even
+   * when no activation was outstanding.
+   */
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_action (ev, "break_glass_disarm");
+  wyl_audit_event_set_resource_id (ev, "wr.break_glass");
+  wyl_audit_event_set_deny_origin (ev, "break_glass");
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  (void) wyl_audit_emit (handle, ev);
+#endif
+
   return WYRELOG_E_OK;
 #else
   (void) handle;
@@ -942,6 +978,67 @@ wyl_handle_break_glass_is_active (WylHandle *handle)
   return FALSE;
 #endif
 }
+
+#ifdef WYL_HAS_BREAK_GLASS
+wyrelog_error_t
+wyl_handle_break_glass_get_reason (WylHandle *handle,
+    wyl_break_glass_reason_code_t *out_reason)
+{
+  if (handle == NULL || out_reason == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  g_mutex_lock (&handle->break_glass_lock);
+  if (handle->break_glass_active) {
+    *out_reason = handle->break_glass_reason;
+    rc = WYRELOG_E_OK;
+  }
+  g_mutex_unlock (&handle->break_glass_lock);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_handle_break_glass_get_activated_at_us (WylHandle *handle,
+    gint64 *out_activated_at_us)
+{
+  if (handle == NULL || out_activated_at_us == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  g_mutex_lock (&handle->break_glass_lock);
+  if (handle->break_glass_active) {
+    *out_activated_at_us = handle->break_glass_activated_at_us;
+    rc = WYRELOG_E_OK;
+  }
+  g_mutex_unlock (&handle->break_glass_lock);
+  return rc;
+}
+
+void
+wyl_handle_break_glass_mark_used (WylHandle *handle)
+{
+  if (handle == NULL || !WYL_IS_HANDLE (handle))
+    return;
+
+  g_mutex_lock (&handle->break_glass_lock);
+  if (handle->break_glass_active)
+    handle->break_glass_used = TRUE;
+  g_mutex_unlock (&handle->break_glass_lock);
+}
+
+gboolean
+wyl_handle_break_glass_has_been_used (WylHandle *handle)
+{
+  if (handle == NULL || !WYL_IS_HANDLE (handle))
+    return FALSE;
+
+  gboolean used;
+  g_mutex_lock (&handle->break_glass_lock);
+  used = handle->break_glass_active && handle->break_glass_used;
+  g_mutex_unlock (&handle->break_glass_lock);
+  return used;
+}
+#endif
 
 static GHashTable *
 new_engine_symbol_map (void)
