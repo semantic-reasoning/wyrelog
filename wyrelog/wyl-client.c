@@ -427,10 +427,12 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *session_token = wyl_client_dup_session_token (client);
-  if (session_token == NULL || session_token[0] == '\0')
-    return WYRELOG_E_INVALID;
   g_autofree gchar *access_token = wyl_client_dup_access_token (client);
-  gboolean use_access_token = access_token != NULL && access_token[0] != '\0';
+  gboolean has_session = session_token != NULL && session_token[0] != '\0';
+  gboolean has_access = access_token != NULL && access_token[0] != '\0';
+  if (!has_session && !has_access)
+    return WYRELOG_E_INVALID;
+  gboolean use_access_token = has_access;
   g_autofree gchar *tenant = wyl_client_dup_tenant (client);
   if (tenant == NULL || tenant[0] == '\0')
     return WYRELOG_E_INVALID;
