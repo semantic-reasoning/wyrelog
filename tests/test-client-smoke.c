@@ -874,6 +874,64 @@ main (void)
           "Bearer access-ctl") != 0)
     return 209;
 
+  /*
+   * Bearer-only policy mutation: with no session_token set, the
+   * client must still emit the request using the access_token in the
+   * Authorization header and omit session_token from the URI query.
+   */
+  http.body = "{\"ok\":true}";
+  http.status = 0;
+  if (wyl_client_policy_permission_grant (local_client, "bearer subject",
+          "site.policy.read", "tenant/bearer", 321, "semi_trusted", 89)
+      != WYRELOG_E_OK)
+    return 220;
+  if (g_strcmp0 (http.last_method, "POST") != 0 ||
+      g_strcmp0 (http.last_path, "/policy/permissions/grant") != 0 ||
+      g_strcmp0 (http.last_subject, "bearer subject") != 0 ||
+      g_strcmp0 (http.last_perm, "site.policy.read") != 0 ||
+      g_strcmp0 (http.last_scope, "tenant/bearer") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0 ||
+      g_strcmp0 (http.last_guard_timestamp, "321") != 0 ||
+      g_strcmp0 (http.last_guard_loc_class, "semi_trusted") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "89") != 0)
+    return 221;
+  if (wyl_client_policy_permission_revoke (local_client, "bearer subject",
+          "site.policy.read", "tenant/bearer", 321, "semi_trusted", 89)
+      != WYRELOG_E_OK)
+    return 222;
+  if (g_strcmp0 (http.last_path, "/policy/permissions/revoke") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
+    return 223;
+  if (wyl_client_policy_role_grant (local_client, "bearer subject",
+          "site.reader", "tenant/bearer", 321, "semi_trusted", 89)
+      != WYRELOG_E_OK)
+    return 224;
+  if (g_strcmp0 (http.last_path, "/policy/roles/grant") != 0 ||
+      g_strcmp0 (http.last_role, "site.reader") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
+    return 225;
+  if (wyl_client_policy_role_revoke (local_client, "bearer subject",
+          "site.reader", "tenant/bearer", 321, "semi_trusted", 89)
+      != WYRELOG_E_OK)
+    return 226;
+  if (g_strcmp0 (http.last_path, "/policy/roles/revoke") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
+    return 227;
+  if (wyl_client_policy_permission_transition (local_client, "bearer subject",
+          "site.policy.read", "tenant/bearer", "grant", 321, "semi_trusted",
+          89) != WYRELOG_E_OK)
+    return 228;
+  if (g_strcmp0 (http.last_path, "/policy/permissions/transition") != 0 ||
+      g_strcmp0 (http.last_event, "grant") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-ctl") != 0)
+    return 229;
+
   http.body = "{\"session_token\":\"session-relogin\",\"username\":\"alice\","
       "\"tenant\":\"__wr_default\",\"principal_state\":\"authenticated\","
       "\"session_state\":\"active\",\"access_token\":\"access-relogin\","
