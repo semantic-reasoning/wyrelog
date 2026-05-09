@@ -27,5 +27,18 @@ gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
     const gchar * refresh_token);
 gboolean wyl_daemon_http_session_is_revoked (SoupServer * server,
     const gchar * session_token);
+/*
+ * Test seam: drive the tenant-gate cross-check between a synthesised
+ * authenticated principal tenant (auth_tenant, may be NULL) and the
+ * tenant declared by the request (request_tenant, may be NULL meaning
+ * "no tenant query param", which causes lookup_request_tenant() to
+ * fall back to the default tenant). Returns TRUE on pass and FALSE on
+ * rejection; on rejection out_status / out_code (caller-owned, copy
+ * via g_strdup) are populated with the wire-format response that the
+ * helper would have set on a real SoupServerMessage.
+ */
+gboolean wyl_daemon_http_check_request_tenant_for_test
+    (const gchar * auth_tenant, const gchar * request_tenant,
+    guint * out_status, gchar ** out_code);
 #endif
 #endif

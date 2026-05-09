@@ -26,6 +26,28 @@
 #define WYL_DAEMON_REQUEST_ID_DATA "wyl-daemon-request-id"
 #define WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA "wyl-daemon-request-id-attempted"
 
+/*
+ * Stable HTTP wire-format error codes for the tenant gate. Both are
+ * emitted as the "error" field of the JSON error body produced by
+ * set_json_error(). They are part of the v0 single-tenant contract
+ * tracked in issue #273:
+ *
+ *   tenant_invalid  - 400. The request carries a tenant query
+ *                     parameter (or login body field) whose value is
+ *                     not a tenant this daemon recognises. In v0 the
+ *                     only known tenant is WYL_DAEMON_DEFAULT_TENANT.
+ *   tenant_denied   - 403. The authenticated principal's tenant does
+ *                     not match the tenant declared on the request.
+ *                     Distinct from tenant_invalid so callers can
+ *                     distinguish "your request was malformed" from
+ *                     "your credentials are not for this tenant".
+ *
+ * These constants are HTTP wire strings only; they intentionally do
+ * NOT extend the wyrelog_error_t enum.
+ */
+#define WYL_DAEMON_ERR_TENANT_INVALID "tenant_invalid"
+#define WYL_DAEMON_ERR_TENANT_DENIED  "tenant_denied"
+
 typedef struct
 {
   gchar *jti;
@@ -827,26 +849,83 @@ lookup_request_tenant (GHashTable *query)
   return WYL_DAEMON_DEFAULT_TENANT;
 }
 
-static gboolean
-ensure_auth_context_request_tenant (SoupServerMessage *msg, GHashTable *query,
-    const WylDaemonAuthContext *auth, const gchar *invalid_code,
-    const gchar *denied_code)
+/*
+ * Pure-decision form of the tenant gate: takes the request tenant and
+ * the authenticated principal's tenant and returns 0 on pass, or the
+ * HTTP status (400 / 403) that the gate would emit on failure. On
+ * failure, *out_code points to one of the stable wire-format error
+ * code constants (WYL_DAEMON_ERR_TENANT_INVALID /
+ * WYL_DAEMON_ERR_TENANT_DENIED). Used by both the SoupServerMessage
+ * wrapper below and the WYL_TEST_DAEMON_HTTP test seam.
+ */
+static guint
+decide_request_tenant_gate (const gchar *request_tenant,
+    const gchar *auth_tenant, const gchar **out_code)
 {
-  const gchar *request_tenant = lookup_request_tenant (query);
   if (request_tenant == NULL || request_tenant[0] == '\0' ||
       !wyl_daemon_tenant_is_known (request_tenant)) {
-    set_json_error (msg, 400, invalid_code);
-    return FALSE;
+    if (out_code != NULL)
+      *out_code = WYL_DAEMON_ERR_TENANT_INVALID;
+    return 400;
   }
 
-  if (auth == NULL || auth->tenant == NULL ||
-      g_strcmp0 (auth->tenant, request_tenant) != 0) {
-    set_json_error (msg, 403, denied_code);
-    return FALSE;
+  if (auth_tenant == NULL || g_strcmp0 (auth_tenant, request_tenant) != 0) {
+    if (out_code != NULL)
+      *out_code = WYL_DAEMON_ERR_TENANT_DENIED;
+    return 403;
   }
 
-  return TRUE;
+  if (out_code != NULL)
+    *out_code = NULL;
+  return 0;
 }
+
+/*
+ * Cross-check the request's declared tenant against the authenticated
+ * principal's tenant and emit the stable tenant gate error codes
+ * (WYL_DAEMON_ERR_TENANT_INVALID / WYL_DAEMON_ERR_TENANT_DENIED) on
+ * failure. The codes are wire strings independent of the surrounding
+ * handler family (decide / audit / policy / login) so that clients can
+ * recognise a tenant-gate rejection regardless of which endpoint
+ * produced it.
+ */
+static gboolean
+ensure_auth_context_request_tenant (SoupServerMessage *msg, GHashTable *query,
+    const WylDaemonAuthContext *auth)
+{
+  const gchar *request_tenant = lookup_request_tenant (query);
+  const gchar *auth_tenant = (auth != NULL) ? auth->tenant : NULL;
+  const gchar *code = NULL;
+  guint status = decide_request_tenant_gate (request_tenant, auth_tenant,
+      &code);
+  if (status == 0)
+    return TRUE;
+  set_json_error (msg, status, code);
+  return FALSE;
+}
+
+#ifdef WYL_TEST_DAEMON_HTTP
+gboolean
+wyl_daemon_http_check_request_tenant_for_test (const gchar *auth_tenant,
+    const gchar *request_tenant, guint *out_status, gchar **out_code)
+{
+  /*
+   * Mirrors lookup_request_tenant()'s NULL-query fallback: if the
+   * caller passes request_tenant=NULL we treat that as "no tenant
+   * query parameter" and fall back to the default tenant, exactly as
+   * lookup_request_tenant() does inside a real handler.
+   */
+  const gchar *effective = request_tenant != NULL ? request_tenant
+      : WYL_DAEMON_DEFAULT_TENANT;
+  const gchar *code = NULL;
+  guint status = decide_request_tenant_gate (effective, auth_tenant, &code);
+  if (out_status != NULL)
+    *out_status = status;
+  if (out_code != NULL)
+    *out_code = code != NULL ? g_strdup (code) : NULL;
+  return status == 0;
+}
+#endif
 
 static const gchar *
 ensure_request_id_header (SoupServerMessage *msg)
@@ -1152,8 +1231,7 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
       return FALSE;
     }
   }
-  if (!ensure_auth_context_request_tenant (msg, query, &auth, invalid_code,
-          denied_code))
+  if (!ensure_auth_context_request_tenant (msg, query, &auth))
     return FALSE;
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
@@ -1572,7 +1650,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   }
   if (tenant == NULL || tenant[0] == '\0' ||
       !wyl_daemon_tenant_is_known (tenant)) {
-    set_json_error (msg, 400, "invalid_login_request");
+    set_json_error (msg, 400, WYL_DAEMON_ERR_TENANT_INVALID);
     return;
   }
   if (password != NULL) {
@@ -1890,7 +1968,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *tenant = lookup_request_tenant (query);
   if (tenant == NULL || tenant[0] == '\0' ||
       !wyl_daemon_tenant_is_known (tenant)) {
-    set_json_error (msg, 400, "invalid_decide_request");
+    set_json_error (msg, 400, WYL_DAEMON_ERR_TENANT_INVALID);
     return;
   }
   gboolean has_guard_context =
@@ -1915,8 +1993,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 401, "decide_auth_required");
     return;
   }
-  if (!ensure_auth_context_request_tenant (msg, query, &auth,
-          "invalid_decide_request", "decide_denied"))
+  if (!ensure_auth_context_request_tenant (msg, query, &auth))
     return;
   if (g_strcmp0 (auth.actor, user) != 0) {
     set_json_error (msg, 403, "decide_denied");
