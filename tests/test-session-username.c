@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -414,6 +415,52 @@ check_login_rejects_unknown_tenant_before_skip_mfa (void)
     return 44;
   if (session != NULL)
     return 45;
+  return 0;
+}
+
+/*
+ * The single-tenant v0 contract rejects every tenant value other than
+ * the canonical default, so a foreign-looking literal like "evil-co"
+ * must fail closed at wyl_session_login with WYRELOG_E_INVALID and
+ * leave the out-session NULL. Pinning a distinct literal here (in
+ * addition to the existing "unknown" coverage) makes the foreign-
+ * tenant rejection unambiguous and guards against a regression that
+ * silently widens the accept set. The accept side is exercised
+ * symbolically by binding wyl_login_req_set_tenant to
+ * WYL_TENANT_DEFAULT and asserting WYRELOG_E_OK; this makes the
+ * "only the default constant is accepted" rule fail loudly if either
+ * the constant or the comparison drifts.
+ */
+static gint
+check_login_rejects_evil_co_tenant (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 46;
+
+  g_autoptr (wyl_login_req_t) reject_req = wyl_login_req_new ();
+  wyl_login_req_set_username (reject_req, "tenant-user");
+  wyl_login_req_set_tenant (reject_req, "evil-co");
+
+  g_autoptr (WylSession) reject_session = NULL;
+  if (wyl_session_login (handle, reject_req, &reject_session)
+      != WYRELOG_E_INVALID)
+    return 47;
+  if (reject_session != NULL)
+    return 48;
+
+  g_autoptr (wyl_login_req_t) accept_req = wyl_login_req_new ();
+  wyl_login_req_set_username (accept_req, "tenant-user");
+  wyl_login_req_set_tenant (accept_req, WYL_TENANT_DEFAULT);
+
+  g_autoptr (WylSession) accept_session = NULL;
+  if (wyl_session_login (handle, accept_req, &accept_session) != WYRELOG_E_OK)
+    return 49;
+  if (accept_session == NULL)
+    return 50;
+  g_autofree gchar *bound_tenant = wyl_session_dup_tenant (accept_session);
+  if (g_strcmp0 (bound_tenant, WYL_TENANT_DEFAULT) != 0)
+    return 51;
   return 0;
 }
 
@@ -1885,6 +1932,8 @@ main (void)
   if ((rc = check_login_rejects_unknown_tenant ()) != 0)
     return rc;
   if ((rc = check_login_rejects_unknown_tenant_before_skip_mfa ()) != 0)
+    return rc;
+  if ((rc = check_login_rejects_evil_co_tenant ()) != 0)
     return rc;
   if ((rc = check_request_buffer_independent_of_session ()) != 0)
     return rc;

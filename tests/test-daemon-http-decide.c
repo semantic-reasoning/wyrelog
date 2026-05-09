@@ -708,6 +708,24 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 1812;
 
+  /*
+   * The single-tenant v0 contract rejects every tenant value other
+   * than the canonical default, including foreign-looking literals
+   * such as "evil-co". This pins the rejection through the full
+   * /decide HTTP path (in addition to the JWT-claims gate exercised
+   * below) so a regression that silently widens the accept set
+   * cannot escape detection.
+   */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope",
+      "tenant=evil-co&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69", guard_access_token, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
+    return 1813;
+
 #ifdef WYL_HAS_AUDIT
   /*
    * Defense-in-depth tenant gate on the JWT claims themselves
@@ -1325,6 +1343,22 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
     return rc;
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 484;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * Single-tenant v0 contract: a foreign-looking tenant literal on
+   * the /auth/login surface must fail closed with the stable wire
+   * code "tenant_invalid" and HTTP 400, mirroring the /decide gate
+   * above. Pinning a distinct literal here (in addition to the
+   * existing "unknown" coverage) makes the foreign-tenant rejection
+   * unambiguous on the login surface.
+   */
+  rc = send_raw_login (session, "POST", base_url,
+      "username=login-user&tenant=evil-co", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
+    return 513;
   g_clear_pointer (&body, g_free);
 
   rc = send_raw_login (session, "POST", base_url, "username=login-user",

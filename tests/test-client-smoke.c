@@ -285,6 +285,15 @@ main (void)
     return 138;
   if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
     return 90;
+  /*
+   * Single-tenant v0 contract: every tenant literal other than the
+   * canonical default must fail closed with WYRELOG_E_INVALID. Pin a
+   * distinct foreign-looking literal here so a regression that
+   * silently widens the accept set on wyl_client_tenant_select is
+   * caught by the smoke suite.
+   */
+  if (wyl_client_tenant_select (local_client, "evil-co") != WYRELOG_E_INVALID)
+    return 96;
   if (wyl_client_tenant_select (local_client, "__wr_default") != WYRELOG_E_OK)
     return 91;
   http.body = "{\"ok\":true}";
