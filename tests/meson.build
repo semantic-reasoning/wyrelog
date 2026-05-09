@@ -141,6 +141,32 @@ if build_client
   test('wyctl-basic', test_wyctl_basic,
     depends : wyctl_exe,
   )
+
+  # End-to-end: drives wyctl as a subprocess against an in-process daemon
+  # so the policy mutation subcommands exercise the full client -> HTTP
+  # -> handler path, including bearer-only credentials and the privileged
+  # operator the daemon CLI cannot seed on its own.
+  test_wyctl_policy_daemon = executable('test-wyctl-policy-daemon',
+    'test-wyctl-policy-daemon.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    c_args : [
+      '-DWYL_HAS_DAEMON_HTTP',
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [
+      wyrelog_dep,
+      wyrelog_client_dep,
+      libsoup_dep,
+      sodium_dep,
+    ],
+  )
+
+  test('wyctl-policy-daemon', test_wyctl_policy_daemon,
+    depends : wyctl_exe,
+  )
 endif
 
 if host_machine.system() != 'windows' and build_client
