@@ -518,7 +518,8 @@ check_request_id_header_contract (const gchar *base_url)
 }
 
 static gint
-check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
+check_raw_decide_contract (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
@@ -706,6 +707,55 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
    */
   if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 1812;
+
+#ifdef WYL_HAS_AUDIT
+  /*
+   * Defense-in-depth tenant gate on the JWT claims themselves
+   * (issue #273). Forge a token with the daemon's secret carrying
+   * a foreign tenant in the access claims; the signature verifies
+   * but resolve_bearer_session must reject the token because the
+   * claims tenant is not WYL_TENANT_DEFAULT. Today this rejection
+   * is also reachable transitively via the live_tenant comparison
+   * (every wyl_session_login() session carries the default tenant,
+   * so claims.tenant != live_tenant), but the direct claims gate
+   * makes the contract explicit so a future relaxation cannot
+   * silently widen the JWT-acceptance surface. The wire code is
+   * "tenant_invalid" with HTTP 401 (auth boundary).
+   */
+  g_autofree gchar *foreign_tenant_token = NULL;
+  guint8 secret[32];
+  if (wyl_daemon_http_copy_access_token_secret (server, secret, sizeof secret)
+      != WYRELOG_E_OK)
+    return 1824;
+  wyl_jwt_issue_input_t foreign_tenant_input = {
+    .key_id = "__wr_default_hs256",
+    .jti = "foreign-tenant-jti",
+    .subject = "http-guard-user",
+    .issuer = "wyrelogd",
+    .audience = "wyrelog-client",
+    .tenant = "evil-co",
+    .principal_state_at_issue = "authenticated",
+    .session_id = "foreign-tenant-session",
+    .issued_at = g_get_real_time () / G_USEC_PER_SEC,
+    .ttl_seconds = WYL_JWT_ACCESS_TTL_SECONDS,
+  };
+  wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&foreign_tenant_input, secret,
+      sizeof secret, &foreign_tenant_token);
+  memset (secret, 0, sizeof secret);
+  if (sign_rc != WYRELOG_E_OK)
+    return 1825;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
+      "wr.audit.read", "http-guard-scope", NULL, foreign_tenant_token,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"tenant_invalid\"") == NULL)
+    return 1826;
+#else
+  (void) server;
+#endif
 
   return 0;
 }
@@ -3065,7 +3115,7 @@ main (void)
   if (request_id_rc != 0)
     return request_id_rc;
 
-  gint raw_rc = check_raw_decide_contract (handle, base_url);
+  gint raw_rc = check_raw_decide_contract (http.server, handle, base_url);
   if (raw_rc != 0)
     return raw_rc;
   gint decision = -1;
@@ -3169,7 +3219,7 @@ main (void)
   /* Seed http.not_armed (http-deny-user) and other negative-decide audit
    * events that the audit_event_present series below relies on. The full
    * raw decide protocol contract is exercised in the non-audit variant. */
-  gint raw_rc = check_raw_decide_contract (handle, base_url);
+  gint raw_rc = check_raw_decide_contract (http.server, handle, base_url);
   if (raw_rc != 0)
     return raw_rc;
   gint decision = -1;
