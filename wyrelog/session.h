@@ -67,7 +67,24 @@ gboolean wyl_login_req_get_skip_mfa (const wyl_login_req_t * req);
 void wyl_login_req_set_request_id (wyl_login_req_t * req,
     const gchar * request_id);
 const gchar *wyl_login_req_get_request_id (const wyl_login_req_t * req);
+/*
+ * Sets the tenant carried by |req|. v0 contract: single-tenant;
+ * wyl_session_login accepts only the canonical default
+ * ("__wr_default") and fails closed with WYRELOG_E_INVALID for every
+ * other literal. The setter itself does not validate the value (it
+ * only stores the caller-supplied string); the rejection lands at
+ * login time. Passing NULL clears the field, which wyl_session_login
+ * treats as "use the default tenant". Multi-tenant support is
+ * tracked as a follow-up.
+ */
 void wyl_login_req_set_tenant (wyl_login_req_t * req, const gchar * tenant);
+/*
+ * Returns the borrowed tenant carried by |req|, or NULL when unset.
+ * The pointer is owned by the request and remains valid until the
+ * next set call or until the request is freed. v0 contract:
+ * single-tenant; on a successful login the bound tenant is always
+ * the canonical default ("__wr_default").
+ */
 const gchar *wyl_login_req_get_tenant (const wyl_login_req_t * req);
 
 wyrelog_error_t wyl_session_login (WylHandle * handle,
@@ -172,6 +189,15 @@ wyl_session_id_t wyl_session_get_id (const WylSession * self);
  * Caller frees with g_free or g_autofree.
  */
 gchar *wyl_session_dup_username (const WylSession * self);
+/*
+ * Returns a heap-allocated copy of the tenant carried into |self|
+ * by wyl_session_login. v0 contract: single-tenant; the only value
+ * that can ever be observed here is the canonical default
+ * ("__wr_default") because wyl_session_login fails closed for every
+ * other tenant literal. Returns NULL when |self| is NULL or not a
+ * WylSession. Caller frees with g_free or g_autofree. Multi-tenant
+ * support is tracked as a follow-up.
+ */
 gchar *wyl_session_dup_tenant (const WylSession * self);
 
 G_END_DECLS;
