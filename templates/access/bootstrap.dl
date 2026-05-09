@@ -186,7 +186,23 @@ tenant("__wr_default").
 // ---------------------------------------------------------------------------
 ttl("break_glass", 900).
 // `now/1` and `break_glass_used/1` are injected by the host at runtime;
-// the template does not write them.
+// the template does not write them. The injector is the per-decide
+// helper insert_break_glass_facts() in wyrelog/wyl-decide.c, which
+// stamps `now(now_secs)` on every break-glass-aware decide and adds
+// `break_glass_used(activated_at_secs)` once the activation has been
+// observed by at least one prior decide. The DL self-disable rule at
+// disabled_role("wr.break_glass") below uses these two facts together
+// with ttl("break_glass", 900) to retire the override after the
+// 900-second template horizon.
+//
+// The host also gates the per-arming activation through
+// wyl_handle_break_glass_is_active() in wyrelog/wyl-handle.c, which
+// applies the operator-supplied per-arm TTL (clamped at 900 by
+// WYL_BREAK_GLASS_DEFAULT_TTL_SECONDS in
+// wyrelog/access/break-glass-private.h). Because the per-arm TTL is
+// always less than or equal to the template horizon, the host-side
+// gate fires first; the DL self-disable rule is the durable backstop
+// when an in-memory activation outlives a single decide cycle.
 
 // ---------------------------------------------------------------------------
 // IDB: derivations

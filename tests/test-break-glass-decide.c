@@ -225,6 +225,118 @@ check_disarm_clears_used_and_active (void)
 }
 
 static gint
+check_ttl_expiry_disarm_and_rearm (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 70;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 71;
+  if (seed_armed_allow_fixture (handle, "bg-decide-user-4",
+          "wr.decide-permission-4", "bg-decide-resource-4") != WYRELOG_E_OK)
+    return 72;
+
+  /* Arm with a 1-second per-arm TTL. The host-side gate
+   * wyl_handle_break_glass_is_active applies this operator TTL, so
+   * a g_usleep past the horizon flips the gate to FALSE long before
+   * the 900-second DL self-disable horizon would fire. */
+  if (wyl_handle_break_glass_arm (handle,
+          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 1) != WYRELOG_E_OK)
+    return 73;
+  if (!wyl_handle_break_glass_is_active (handle))
+    return 74;
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "bg-decide-user-4");
+  wyl_decide_req_set_action (req, "wr.decide-permission-4");
+  wyl_decide_req_set_resource_id (req, "bg-decide-resource-4");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) != WYRELOG_E_OK)
+    return 75;
+  if (!wyl_handle_break_glass_has_been_used (handle))
+    return 76;
+
+  /* Sleep past the 1-second TTL and verify the host-side gate
+   * reports the activation has expired. */
+  g_usleep (G_USEC_PER_SEC + (G_USEC_PER_SEC / 2));
+  if (wyl_handle_break_glass_is_active (handle))
+    return 77;
+
+  /* Disarm is idempotent against an in-memory activation that has
+   * already passed its operator-TTL: the call still succeeds and
+   * tears the activation flag down so a subsequent arm starts from
+   * a clean slate. */
+  if (wyl_handle_break_glass_disarm (handle) != WYRELOG_E_OK)
+    return 78;
+  if (wyl_handle_break_glass_is_active (handle))
+    return 79;
+  if (wyl_handle_break_glass_has_been_used (handle))
+    return 80;
+
+  /* Re-arm with a fresh TTL and confirm the new activation is live;
+   * the prior expiry must not bleed into the new window. */
+  if (wyl_handle_break_glass_arm (handle,
+          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
+    return 81;
+  if (!wyl_handle_break_glass_is_active (handle))
+    return 82;
+  if (wyl_handle_break_glass_has_been_used (handle))
+    return 83;
+  return 0;
+}
+
+static gint
+check_decide_fact_insert_failure_does_not_latch_used (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
+    return 90;
+  if (wyl_handle_open_engine_pair (handle, WYL_TEST_TEMPLATE_DIR)
+      != WYRELOG_E_OK)
+    return 91;
+  if (seed_armed_allow_fixture (handle, "bg-decide-user-5",
+          "wr.decide-permission-5", "bg-decide-resource-5") != WYRELOG_E_OK)
+    return 92;
+
+  if (wyl_handle_break_glass_arm (handle,
+          WYL_BREAK_GLASS_REASON_INCIDENT_RESPONSE, 60) != WYRELOG_E_OK)
+    return 93;
+  if (wyl_handle_break_glass_has_been_used (handle))
+    return 94;
+
+  /* Trip the next "now" insert so insert_break_glass_facts() returns
+   * non-OK before the engine_decide call. wyl_decide must propagate
+   * the failure and bypass both the audit-emit block and the
+   * mark-used latch: the audit-then-mark invariant requires that a
+   * decide which fails before audit commits leaves the used bit
+   * exactly as it was. */
+  wyl_handle_set_engine_insert_fault_once (handle, "now", WYRELOG_E_INVALID);
+
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  wyl_decide_req_set_subject_id (req, "bg-decide-user-5");
+  wyl_decide_req_set_action (req, "wr.decide-permission-5");
+  wyl_decide_req_set_resource_id (req, "bg-decide-resource-5");
+
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp) == WYRELOG_E_OK)
+    return 95;
+  if (wyl_handle_break_glass_has_been_used (handle))
+    return 96;
+
+  /* The activation itself remains intact: only the per-decide fact
+   * injection failed. A follow-up decide with no fault hook armed
+   * must succeed and now latch the used bit. */
+  g_autoptr (wyl_decide_resp_t) resp2 = wyl_decide_resp_new ();
+  if (wyl_decide (handle, req, resp2) != WYRELOG_E_OK)
+    return 97;
+  if (!wyl_handle_break_glass_has_been_used (handle))
+    return 98;
+  return 0;
+}
+
+static gint
 check_arm_writes_audit_row (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -284,6 +396,10 @@ main (void)
   if ((rc = check_decide_does_not_mark_when_inactive ()) != 0)
     return rc;
   if ((rc = check_disarm_clears_used_and_active ()) != 0)
+    return rc;
+  if ((rc = check_ttl_expiry_disarm_and_rearm ()) != 0)
+    return rc;
+  if ((rc = check_decide_fact_insert_failure_does_not_latch_used ()) != 0)
     return rc;
   if ((rc = check_arm_writes_audit_row ()) != 0)
     return rc;
