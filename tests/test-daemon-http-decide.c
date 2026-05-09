@@ -699,7 +699,12 @@ check_raw_decide_contract (WylHandle *handle, const gchar *base_url)
       "&guard_risk=69", guard_access_token, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_decide_request\"") == NULL)
+  /*
+   * Tenant gate emits the stable wire code "tenant_invalid" rather
+   * than the surrounding handler's generic shape error so callers
+   * can recognise tenant rejections regardless of endpoint family.
+   */
+  if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 1812;
 
   return 0;
@@ -1268,7 +1273,7 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
       "username=login-user&tenant=unknown", &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_login_request\"") == NULL)
+  if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 484;
   g_clear_pointer (&body, g_free);
 
@@ -1998,7 +2003,7 @@ check_policy_permission_mutation_contract (WylHandle *handle,
       "/policy/permissions/grant", unknown_tenant_query, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_policy_auth\"") == NULL)
+  if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 187;
   if (direct_permission_exists (handle, "target", "site.policy.read",
           "tenant-a")) {
@@ -2675,7 +2680,7 @@ check_raw_audit_contract (SoupServer *server, WylHandle *handle,
       access_token, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 400 || strstr (body, "\"invalid_audit_auth\"") == NULL)
+  if (status != 400 || strstr (body, "\"tenant_invalid\"") == NULL)
     return 163;
 
   g_clear_pointer (&body, g_free);
@@ -2910,6 +2915,82 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 #endif
 
 /*
+ * Unit-style coverage for the v0 tenant-gate wire codes (issue #273).
+ * Drives the http.c decision helper through the WYL_TEST_DAEMON_HTTP
+ * seam so that both gate arms are exercised even though the
+ * tenant_denied arm is unreachable end-to-end in v0 single-tenant mode
+ * (every wyl_session_login() session today carries the default
+ * tenant, so the request_tenant != auth_tenant arm fires only against
+ * a synthesised auth context).
+ */
+static gint
+check_tenant_gate_codes_contract (void)
+{
+  /* Pass: matching default tenant on both sides. */
+  guint status = 0;
+  g_autofree gchar *code = NULL;
+  if (!wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
+          "__wr_default", &status, &code))
+    return 1900;
+  if (status != 0 || code != NULL)
+    return 1901;
+
+  /* Pass: NULL request tenant falls back to the default, matches auth. */
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (!wyl_daemon_http_check_request_tenant_for_test ("__wr_default", NULL,
+          &status, &code))
+    return 1902;
+  if (status != 0 || code != NULL)
+    return 1903;
+
+  /* Reject: request tenant is not the known default. 400 tenant_invalid. */
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default",
+          "unknown", &status, &code))
+    return 1904;
+  if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
+    return 1905;
+
+  /* Reject: empty request tenant. 400 tenant_invalid. */
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (wyl_daemon_http_check_request_tenant_for_test ("__wr_default", "",
+          &status, &code))
+    return 1906;
+  if (status != 400 || g_strcmp0 (code, "tenant_invalid") != 0)
+    return 1907;
+
+  /*
+   * Reject: request tenant is the known default but the authenticated
+   * principal carries a different tenant. 403 tenant_denied. This is
+   * the arm that is currently unreachable end-to-end in v0 because
+   * wyl_session_login() only mints sessions for __wr_default; the
+   * unit-style check covers the wire contract ahead of C3, which
+   * adds a direct JWT-claims tenant check that can reach this arm.
+   */
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (wyl_daemon_http_check_request_tenant_for_test ("other-tenant",
+          "__wr_default", &status, &code))
+    return 1908;
+  if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
+    return 1909;
+
+  /* Reject: missing auth tenant on a default-tenant request. 403 tenant_denied. */
+  g_clear_pointer (&code, g_free);
+  status = 0;
+  if (wyl_daemon_http_check_request_tenant_for_test (NULL, "__wr_default",
+          &status, &code))
+    return 1910;
+  if (status != 403 || g_strcmp0 (code, "tenant_denied") != 0)
+    return 1911;
+
+  return 0;
+}
+
+/*
  * The daemon-http-decide test surface has been split across two binaries
  * compiled from this single translation unit:
  *
@@ -2933,6 +3014,10 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 int
 main (void)
 {
+  gint tenant_gate_rc = check_tenant_gate_codes_contract ();
+  if (tenant_gate_rc != 0)
+    return tenant_gate_rc;
+
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
@@ -3033,6 +3118,10 @@ main (void)
 int
 main (void)
 {
+  gint tenant_gate_rc = check_tenant_gate_codes_contract ();
+  if (tenant_gate_rc != 0)
+    return tenant_gate_rc;
+
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
