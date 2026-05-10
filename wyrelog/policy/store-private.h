@@ -6,10 +6,20 @@
 
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
+#include "wyrelog/wyl-traits-private.h"
 
 G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
+
+typedef struct
+{
+  const gchar *path;
+  const wyl_keyprovider_vtable_t *keyprovider_vtable;
+  gpointer keyprovider_state;
+  void (*keyprovider_state_free) (gpointer state);
+  gboolean require_encrypted;
+} wyl_policy_store_open_options_t;
 
 typedef wyrelog_error_t (*wyl_policy_role_permission_cb) (const gchar * role_id,
     const gchar * perm_id, gpointer user_data);
@@ -63,6 +73,8 @@ typedef wyrelog_error_t (*wyl_policy_audit_intention_cb) (const gchar * id,
  */
 wyrelog_error_t wyl_policy_store_open (const gchar * path,
     wyl_policy_store_t ** out_store);
+wyrelog_error_t wyl_policy_store_open_with_options (const
+    wyl_policy_store_open_options_t * opts, wyl_policy_store_t ** out_store);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);

@@ -19,6 +19,7 @@ typedef struct
 {
   const gchar *template_dir;
   const gchar *policy_store_path;
+  const gchar *policy_keyprovider_path;
 #ifdef WYL_HAS_AUDIT
   const gchar *audit_store_path;
 #endif

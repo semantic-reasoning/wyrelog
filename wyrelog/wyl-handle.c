@@ -14,6 +14,7 @@
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
 #include "wyl-log-private.h"
+#include "wyl-keyprovider-file-private.h"
 #include "wyl-permission-scope-private.h"
 #include "policy/store-private.h"
 
@@ -580,9 +581,36 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
   self->require_template_manifest = opts->require_template_manifest
       || opts->production_mode;
+  wyl_policy_store_open_options_t store_open_opts = {
+    .path = opts->policy_store_path,
+    .require_encrypted = opts->production_mode,
+  };
+  g_autoptr (wyl_keyprovider_file_t) keyprovider_state = NULL;
 
-  wyrelog_error_t rc =
-      wyl_policy_store_open (opts->policy_store_path, &self->policy_store);
+  if (opts->production_mode) {
+    if (opts->policy_keyprovider_path == NULL
+        || opts->policy_keyprovider_path[0] == '\0') {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "production mode requires a policy keyprovider path");
+      g_object_unref (self);
+      return WYRELOG_E_POLICY;
+    }
+    keyprovider_state =
+        wyl_keyprovider_file_new (opts->policy_keyprovider_path);
+    if (keyprovider_state == NULL) {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "production mode keyprovider initialization failed");
+      g_object_unref (self);
+      return WYRELOG_E_CRYPTO;
+    }
+    store_open_opts.keyprovider_vtable = wyl_keyprovider_file_get_vtable ();
+    store_open_opts.keyprovider_state = keyprovider_state;
+    store_open_opts.keyprovider_state_free =
+        (void (*)(gpointer)) wyl_keyprovider_file_free;
+  }
+
+  wyrelog_error_t rc = wyl_policy_store_open_with_options (&store_open_opts,
+      &self->policy_store);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
     return rc;
@@ -635,12 +663,6 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
       g_object_unref (self);
       return WYRELOG_E_POLICY;
     }
-#endif
-#ifndef WYL_HAS_PRODUCTION_KEYPROVIDER
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "production mode requires a non-development KeyProvider");
-    g_object_unref (self);
-    return WYRELOG_E_POLICY;
 #endif
   }
 

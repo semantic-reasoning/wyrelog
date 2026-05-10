@@ -34,6 +34,7 @@ wyrelog_sources = files(
   'wyl-request-id.c',
   'wyl-id.c',
   'wyl-keyprovider-dev.c',
+  'wyl-keyprovider-file.c',
   'wyl-log.c',
   'wyl-perm.c',
   'wyl-permission-scope.c',

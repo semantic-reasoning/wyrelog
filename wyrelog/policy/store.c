@@ -1,12 +1,42 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <string.h>
+
+#include <sodium.h>
+#include <glib/gstdio.h>
+
 #include "store-private.h"
 
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
 
+#define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
+#define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
+
+#define WYL_POLICY_STORE_KEY_LEN crypto_secretbox_KEYBYTES
+#define WYL_POLICY_STORE_KEY_ID_LEN crypto_generichash_BYTES
+#define WYL_POLICY_STORE_ENCRYPTION_LABEL "policy_store_v1"
+#define WYL_POLICY_STORE_MAGIC "WYLPS1"
+#define WYL_POLICY_STORE_MAGIC_LEN sizeof (WYL_POLICY_STORE_MAGIC)
+
+typedef struct
+{
+  gchar magic[WYL_POLICY_STORE_MAGIC_LEN];
+  gchar key_id[WYL_POLICY_STORE_KEY_ID_LEN];
+  guint8 nonce[crypto_secretbox_NONCEBYTES];
+  guint64 ciphertext_len_le;
+} __attribute__((packed)) WylPolicyStoreFileHeader;
+
+G_STATIC_ASSERT (sizeof (WYL_POLICY_STORE_MAGIC) == 7);
+
 struct wyl_policy_store_t
 {
   sqlite3 *db;
+  gchar *canonical_path;
+  gchar *work_path;
+  guint8 encryption_key[WYL_POLICY_STORE_KEY_LEN];
+  guint8 encryption_key_id[WYL_POLICY_STORE_KEY_ID_LEN];
+  gboolean encrypted;
+  gboolean key_materialized;
 };
 
 typedef struct
@@ -174,6 +204,153 @@ deployment_mode_is_valid (const gchar *mode)
 {
   return g_strcmp0 (mode, "production") == 0
       || g_strcmp0 (mode, "development") == 0 || g_strcmp0 (mode, "demo") == 0;
+}
+
+static gboolean
+path_is_memory_db (const gchar *path)
+{
+  return path == NULL || path[0] == '\0' || g_strcmp0 (path, ":memory:") == 0;
+}
+
+static void
+policy_store_zero_key_material (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return;
+  sodium_memzero (store->encryption_key, sizeof store->encryption_key);
+  sodium_memzero (store->encryption_key_id, sizeof store->encryption_key_id);
+  store->key_materialized = FALSE;
+}
+
+static wyrelog_error_t
+cleanup_keyprovider_state (const wyl_policy_store_open_options_t *opts)
+{
+  if (opts == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (opts->keyprovider_vtable != NULL && opts->keyprovider_vtable->wipe != NULL
+      && opts->keyprovider_state != NULL) {
+    opts->keyprovider_vtable->wipe (opts->keyprovider_state);
+  }
+  if (opts->keyprovider_state_free != NULL && opts->keyprovider_state != NULL)
+    opts->keyprovider_state_free (opts->keyprovider_state);
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+materialize_store_key (wyl_policy_store_t *store,
+    const wyl_policy_store_open_options_t *opts)
+{
+  if (store == NULL || opts == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (!opts->require_encrypted) {
+    store->encrypted = FALSE;
+    store->key_materialized = FALSE;
+    return WYRELOG_E_OK;
+  }
+
+  if (sodium_init () < 0)
+    return WYRELOG_E_CRYPTO;
+
+  if (opts->keyprovider_vtable == NULL || opts->keyprovider_state == NULL)
+    return WYRELOG_E_POLICY;
+
+  if (opts->keyprovider_vtable->probe == NULL
+      || opts->keyprovider_vtable->derive == NULL)
+    return WYRELOG_E_INTERNAL;
+
+  if (opts->keyprovider_vtable->probe (opts->keyprovider_state)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+
+  wyrelog_error_t rc =
+      opts->keyprovider_vtable->derive (opts->keyprovider_state,
+      WYL_POLICY_STORE_ENCRYPTION_LABEL, store->encryption_key,
+      WYL_POLICY_STORE_KEY_LEN);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (crypto_generichash (store->encryption_key_id, WYL_POLICY_STORE_KEY_ID_LEN,
+          store->encryption_key, sizeof store->encryption_key, NULL, 0) != 0)
+    return WYRELOG_E_CRYPTO;
+
+  store->encrypted = TRUE;
+  store->key_materialized = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
+{
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+
+  if (path == NULL || out_bytes == NULL || out_len == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_bytes = NULL;
+  *out_len = 0;
+  if (!g_file_get_contents (path, &contents, &len, NULL))
+    return WYRELOG_E_IO;
+  *out_bytes = (guint8 *) g_steal_pointer (&contents);
+  *out_len = len;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+decrypt_policy_store_from_canonical (wyl_policy_store_t *store,
+    const gchar *canonical_path, const gchar *work_path)
+{
+  g_autofree guint8 *ciphertext = NULL;
+  gsize ciphertext_len = 0;
+  wyrelog_error_t rc = read_whole_file (canonical_path, &ciphertext,
+      &ciphertext_len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (ciphertext_len < sizeof (WylPolicyStoreFileHeader))
+    return WYRELOG_E_POLICY;
+  const WylPolicyStoreFileHeader *header =
+      (const WylPolicyStoreFileHeader *) (const void *) ciphertext;
+  if (memcmp (header->magic, WYL_POLICY_STORE_MAGIC, WYL_POLICY_STORE_MAGIC_LEN)
+      != 0)
+    return WYRELOG_E_POLICY;
+  if (memcmp (header->key_id, store->encryption_key_id,
+          WYL_POLICY_STORE_KEY_ID_LEN)
+      != 0)
+    return WYRELOG_E_POLICY;
+
+  const gsize max_header_and_mac = sizeof (WylPolicyStoreFileHeader)
+      + crypto_secretbox_MACBYTES;
+  if (ciphertext_len < max_header_and_mac)
+    return WYRELOG_E_POLICY;
+  guint64 cipher_len_le = GUINT64_FROM_LE (header->ciphertext_len_le);
+  if (cipher_len_le == 0)
+    return WYRELOG_E_POLICY;
+  if (cipher_len_le > G_MAXSIZE
+      || header->ciphertext_len_le > (guint64) (G_MAXSIZE
+          - sizeof (WylPolicyStoreFileHeader)))
+    return WYRELOG_E_POLICY;
+
+  if (cipher_len_le + sizeof (WylPolicyStoreFileHeader) != ciphertext_len
+      || cipher_len_le <= crypto_secretbox_MACBYTES)
+    return WYRELOG_E_POLICY;
+
+  gsize plaintext_len = (gsize) cipher_len_le;
+  g_autofree guint8 *plaintext = g_malloc (plaintext_len);
+  const guint8 *ciphertext_body =
+      ciphertext + sizeof (WylPolicyStoreFileHeader);
+
+  if (crypto_secretbox_open_easy (plaintext, ciphertext_body, cipher_len_le,
+          header->nonce, store->encryption_key) != 0)
+    return WYRELOG_E_CRYPTO;
+
+  if (!g_file_set_contents (work_path, (const gchar *) plaintext, plaintext_len,
+          NULL))
+    return WYRELOG_E_IO;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -415,6 +592,53 @@ seed_builtin_catalog (sqlite3 *db)
   return validate_builtin_catalog (db);
 }
 
+static wyrelog_error_t
+persist_policy_store_encrypted (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  if (!store->encrypted)
+    return WYRELOG_E_OK;
+  if (!store->key_materialized)
+    return WYRELOG_E_INTERNAL;
+  if (store->work_path == NULL || store->canonical_path == NULL
+      || store->canonical_path[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = exec_sql (store->db, "PRAGMA wal_checkpoint(TRUNCATE);");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree guint8 *plaintext = NULL;
+  gsize plaintext_len = 0;
+  if (read_whole_file (store->work_path, &plaintext,
+          &plaintext_len) != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+
+  const gsize encrypted_len =
+      sizeof (WylPolicyStoreFileHeader) + crypto_secretbox_MACBYTES
+      + plaintext_len;
+  g_autofree guint8 *encrypted = g_malloc0 (encrypted_len);
+  WylPolicyStoreFileHeader *header = (WylPolicyStoreFileHeader *) encrypted;
+  memcpy (header->magic, WYL_POLICY_STORE_MAGIC, WYL_POLICY_STORE_MAGIC_LEN);
+  memcpy (header->key_id, store->encryption_key_id,
+      WYL_POLICY_STORE_KEY_ID_LEN);
+  randombytes_buf (header->nonce, sizeof (header->nonce));
+  header->ciphertext_len_le = GUINT64_TO_LE ((guint64) (plaintext_len
+          + crypto_secretbox_MACBYTES));
+
+  guint8 *ciphertext = encrypted + sizeof (WylPolicyStoreFileHeader);
+  if (crypto_secretbox_easy (ciphertext, plaintext, plaintext_len,
+          header->nonce, store->encryption_key) != 0)
+    return WYRELOG_E_CRYPTO;
+
+  if (!g_file_set_contents (store->canonical_path, (const gchar *) encrypted,
+          encrypted_len, NULL))
+    return WYRELOG_E_IO;
+  (void) g_remove (store->work_path);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_policy_store_begin_mutation (wyl_policy_store_t *store)
 {
@@ -441,34 +665,89 @@ wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
 }
 
 wyrelog_error_t
-wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
+wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
+    wyl_policy_store_t **out_store)
 {
-  if (out_store == NULL)
+  if (opts == NULL || out_store == NULL)
     return WYRELOG_E_INVALID;
+  *out_store = NULL;
 
-  const gchar *effective_path = path;
-  if (effective_path == NULL || g_strcmp0 (effective_path, ":memory:") == 0)
+  const gchar *effective_path = opts->path;
+  if (path_is_memory_db (effective_path))
     effective_path = ":memory:";
 
   wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
-  if (sqlite3_open_v2 (effective_path, &self->db,
+  self->encrypted = opts->require_encrypted;
+  self->canonical_path = g_strdup (effective_path);
+
+  const gchar *open_path = effective_path;
+  if (self->encrypted) {
+    if (path_is_memory_db (effective_path)) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return WYRELOG_E_POLICY;
+    }
+
+    self->work_path = g_strdup_printf ("%s%s",
+        self->canonical_path, WYL_POLICY_STORE_CLEAR_SUFFIX);
+
+    (void) g_remove (self->work_path);
+
+    wyrelog_error_t rc = materialize_store_key (self, opts);
+    if (rc != WYRELOG_E_OK) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return rc;
+    }
+
+    if (g_file_test (self->canonical_path, G_FILE_TEST_EXISTS)) {
+      rc = decrypt_policy_store_from_canonical (self, self->canonical_path,
+          self->work_path);
+      if (rc != WYRELOG_E_OK) {
+        cleanup_keyprovider_state (opts);
+        wyl_policy_store_close (self);
+        return rc;
+      }
+    }
+    open_path = self->work_path;
+  } else {
+    wyrelog_error_t rc = materialize_store_key (self, opts);
+    if (rc != WYRELOG_E_OK) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return rc;
+    }
+  }
+
+  if (sqlite3_open_v2 (open_path, &self->db,
           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
           NULL) != SQLITE_OK) {
     if (self->db != NULL)
       sqlite3_close (self->db);
-    g_free (self);
+    self->db = NULL;
+    cleanup_keyprovider_state (opts);
+    wyl_policy_store_close (self);
     return WYRELOG_E_IO;
   }
 
-  wyrelog_error_t rc = exec_sql (self->db,
-      "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;");
-  if (rc != WYRELOG_E_OK) {
+  if (exec_sql (self->db,
+          "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;") !=
+      WYRELOG_E_OK) {
+    cleanup_keyprovider_state (opts);
     wyl_policy_store_close (self);
-    return rc;
+    return WYRELOG_E_IO;
   }
 
+  cleanup_keyprovider_state (opts);
   *out_store = self;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
+{
+  wyl_policy_store_open_options_t opts = {.path = path };
+  return wyl_policy_store_open_with_options (&opts, out_store);
 }
 
 void
@@ -476,8 +755,16 @@ wyl_policy_store_close (wyl_policy_store_t *store)
 {
   if (store == NULL)
     return;
-  if (store->db != NULL)
-    sqlite3_close (store->db);
+  if (store->db != NULL) {
+    if (store->encrypted)
+      (void) persist_policy_store_encrypted (store);
+    else
+      sqlite3_close (store->db);
+    store->db = NULL;
+  }
+  g_clear_pointer (&store->canonical_path, g_free);
+  g_clear_pointer (&store->work_path, g_free);
+  policy_store_zero_key_material (store);
   g_free (store);
 }
 
