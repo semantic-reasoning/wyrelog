@@ -537,7 +537,7 @@ test_delta_after_close (void)
 {
   WylEngine *engine = open_engine_from_test_templates ();
 
-  wl_easy_close (engine->session);
+  wirelog_easy_close (engine->session);
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_set_delta_callback (engine, delta_expect_cb,
@@ -594,7 +594,7 @@ test_insert_after_close (void)
   WylEngine *engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
-  wl_easy_close (engine->session);
+  wirelog_easy_close (engine->session);
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_insert (engine, "member_of", row, 3),
@@ -618,7 +618,7 @@ test_step_after_close (void)
 {
   WylEngine *engine = open_engine_from_test_templates ();
 
-  wl_easy_close (engine->session);
+  wirelog_easy_close (engine->session);
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_step (engine), ==, WYRELOG_E_INVALID);
@@ -665,7 +665,7 @@ test_snapshot_after_close (void)
   WylEngine *engine = open_engine_from_test_templates ();
   guint seen = 0;
 
-  wl_easy_close (engine->session);
+  wirelog_easy_close (engine->session);
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_snapshot (engine, "member_of",
@@ -722,7 +722,7 @@ test_remove_after_close (void)
   WylEngine *engine = open_engine_from_test_templates ();
   gint64 row[3] = { 1, 2, 3 };
 
-  wl_easy_close (engine->session);
+  wirelog_easy_close (engine->session);
   engine->session = NULL;
 
   g_assert_cmpint (wyl_engine_remove (engine, "member_of", row, 3),

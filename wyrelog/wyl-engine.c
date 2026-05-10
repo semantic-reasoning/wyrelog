@@ -526,7 +526,7 @@ wyl_engine_finalize (GObject *object)
 {
   WylEngine *self = WYL_ENGINE (object);
 
-  g_clear_pointer (&self->session, wl_easy_close);
+  g_clear_pointer (&self->session, wirelog_easy_close);
   g_clear_pointer (&self->delta_cookie, g_free);
 
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
@@ -684,15 +684,15 @@ wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  wl_easy_open_opts_t opts = {
+  wirelog_easy_open_opts_t opts = {
     .size = sizeof (opts),
     .num_workers = num_workers,
     .eager_build = true,
     ._reserved = NULL,
   };
 
-  wl_easy_session_t *session = NULL;
-  wirelog_error_t wl_rc = wl_easy_open_opts (dl_src, &opts, &session);
+  wirelog_easy_session_t *session = NULL;
+  wirelog_error_t wl_rc = wirelog_easy_open_opts (dl_src, &opts, &session);
 
   /* FC4: zero-fill the policy source buffer before freeing to avoid leaving
    * policy text in core dumps or swap.  Use the tracked length rather than
@@ -703,11 +703,11 @@ wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
   dl_src = NULL;
 
   if (wl_rc != WIRELOG_OK) {
-    /* wl_easy_open_opts sets *out to NULL on error per its contract,
+    /* wirelog_easy_open_opts sets *out to NULL on error per its contract,
      * but be defensive: close any partial session that may have been
      * returned despite the error. */
     if (session != NULL)
-      wl_easy_close (session);
+      wirelog_easy_close (session);
     return wyl_engine_map_wirelog_error (wl_rc);
   }
 
@@ -756,7 +756,7 @@ wyl_engine_intern_symbol_unchecked (WylEngine *self, const gchar *symbol,
   if (self->session == NULL)
     return WYRELOG_E_INVALID;
 
-  int64_t id = wl_easy_intern (self->session, symbol);
+  int64_t id = wirelog_easy_intern (self->session, symbol);
   if (id < 0) {
     WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
         "engine: symbol interning failed for symbol of length %zu",
@@ -859,7 +859,7 @@ wyl_engine_insert_unchecked (WylEngine *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   wirelog_error_t wl_rc =
-      wl_easy_insert (self->session, relation, (const int64_t *) row,
+      wirelog_easy_insert (self->session, relation, (const int64_t *) row,
       (uint32_t) ncols);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK) {
@@ -900,7 +900,7 @@ wyl_engine_step_unchecked (WylEngine *self)
   if (self->mode == WYL_ENGINE_MODE_SNAPSHOT)
     return WYRELOG_E_INVALID;
 
-  wirelog_error_t wl_rc = wl_easy_step (self->session);
+  wirelog_error_t wl_rc = wirelog_easy_step (self->session);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc == WYRELOG_E_OK) {
     self->mode = WYL_ENGINE_MODE_STEP;
@@ -945,8 +945,8 @@ wyl_engine_snapshot (WylEngine *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   wyl_engine_tuple_cookie_t cookie = { cb, user_data };
-  wirelog_error_t wl_rc =
-      wl_easy_snapshot (self->session, relation, wyl_engine_tuple_trampoline,
+  wirelog_error_t wl_rc = wirelog_easy_snapshot (self->session, relation,
+      wyl_engine_tuple_trampoline,
       &cookie);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc == WYRELOG_E_OK) {
@@ -973,7 +973,8 @@ wyl_engine_set_delta_callback_unchecked (WylEngine *self, WylDeltaCallback cb,
 
   if (cb == NULL) {
     /* Clear the substrate hook before releasing the cookie it may reference. */
-    wirelog_error_t wl_rc = wl_easy_set_delta_cb (self->session, NULL, NULL);
+    wirelog_error_t wl_rc =
+        wirelog_easy_set_delta_cb (self->session, NULL, NULL);
     wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
     if (rc != WYRELOG_E_OK) {
       WYL_LOG_ERROR (WYL_LOG_SECTION_POLICY,
@@ -990,7 +991,7 @@ wyl_engine_set_delta_callback_unchecked (WylEngine *self, WylDeltaCallback cb,
   new_cookie->user_data = user_data;
 
   wirelog_error_t wl_rc =
-      wl_easy_set_delta_cb (self->session, wyl_engine_delta_trampoline,
+      wirelog_easy_set_delta_cb (self->session, wyl_engine_delta_trampoline,
       new_cookie);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK) {
@@ -1040,7 +1041,7 @@ wyl_engine_remove_unchecked (WylEngine *self, const gchar *relation,
     return WYRELOG_E_INVALID;
 
   wirelog_error_t wl_rc =
-      wl_easy_remove (self->session, relation, (const int64_t *) row,
+      wirelog_easy_remove (self->session, relation, (const int64_t *) row,
       (uint32_t) ncols);
   wyrelog_error_t rc = wyl_engine_map_wirelog_error (wl_rc);
   if (rc != WYRELOG_E_OK) {

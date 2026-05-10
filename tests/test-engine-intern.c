@@ -354,14 +354,14 @@ test_intern_after_close (void)
 
   /* Simulate a closed engine: close the underlying session directly and
    * null the pointer so the engine object remains alive but sessionless. */
-  wl_easy_close (engine->session);
+  wirelog_easy_close (engine->session);
   engine->session = NULL;
 
   gint64 id = -999;
   rc = wyl_engine_intern_symbol (engine, "alice", &id);
 
   /* Release the engine. finalize will see session == NULL and skip
-   * wl_easy_close (g_clear_pointer is a no-op on NULL). */
+   * wirelog_easy_close (g_clear_pointer is a no-op on NULL). */
   g_object_unref (engine);
 
   if (rc != WYRELOG_E_INVALID) {

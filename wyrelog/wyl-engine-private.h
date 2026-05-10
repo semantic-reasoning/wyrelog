@@ -4,7 +4,7 @@
 #include <glib.h>
 #include <glib-object.h>
 
-#include <wirelog/wl_easy.h>
+#include <wirelog/wirelog-easy.h>
 
 #include "wyrelog/engine.h"
 #include "wyrelog/error.h"
@@ -41,7 +41,7 @@ typedef struct
 struct _WylEngine
 {
   GObject parent_instance;
-  wl_easy_session_t *session;
+  wirelog_easy_session_t *session;
   /* Logical path strings for diagnostic logging only; freed in finalize. */
   gchar *dl_src_logical_paths[WYL_ENGINE_TEMPLATE_COUNT];
   wyl_engine_mode_t mode;       /* Latched at first step or snapshot. */
