@@ -249,6 +249,206 @@ check_table_probe_rejects_invalid_args (void)
   return 0;
 }
 
+static gint
+check_reserved_stream_guard (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 110;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 111;
+  if (!wyl_audit_conn_stream_name_is_reserved ("__wyrelog.audit"))
+    return 112;
+  if (wyl_audit_conn_validate_user_stream_name ("__wyrelog.audit")
+      != WYRELOG_E_POLICY)
+    return 113;
+  if (wyl_audit_conn_create_user_stream (conn, "__wyrelog.security")
+      != WYRELOG_E_POLICY)
+    return 114;
+  if (wyl_audit_conn_drop_user_stream (conn, "__wyrelog.audit")
+      != WYRELOG_E_POLICY)
+    return 115;
+  if (wyl_audit_conn_rename_user_stream (conn, "tenant.audit",
+          "__wyrelog.audit") != WYRELOG_E_POLICY)
+    return 116;
+  if (wyl_audit_conn_create_user_stream (conn, "tenant.audit")
+      != WYRELOG_E_OK)
+    return 117;
+  if (wyl_audit_conn_rename_user_stream (conn, "tenant.audit",
+          "tenant.audit.v2") != WYRELOG_E_OK)
+    return 118;
+  if (wyl_audit_conn_drop_user_stream (conn, "tenant.audit.v2")
+      != WYRELOG_E_OK)
+    return 119;
+  return 0;
+}
+
+static gint
+insert_chain_event (wyl_audit_conn_t *conn, const gchar *id,
+    const gchar *subject)
+{
+  gboolean inserted = FALSE;
+  return wyl_audit_conn_insert_event_full (conn, id, 1000, subject,
+      "read", "resource", NULL, NULL, "req", WYL_DECISION_ALLOW,
+      &inserted) == WYRELOG_E_OK && inserted ? 0 : 1;
+}
+
+static gint
+check_chain_verifies_clean_store (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  g_autofree gchar *error = NULL;
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 120;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 121;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000101",
+          "alice") != 0)
+    return 122;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000102",
+          "bob") != 0)
+    return 123;
+  if (wyl_audit_conn_verify_chain (conn, &error) != WYRELOG_E_OK)
+    return 124;
+  if (error != NULL)
+    return 125;
+  return 0;
+}
+
+static gint
+check_chain_detects_record_modification (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  g_autofree gchar *error = NULL;
+  duckdb_result result = { 0 };
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 130;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 131;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000201",
+          "alice") != 0)
+    return 132;
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  if (duckdb_query (h,
+          "UPDATE audit_events SET subject_id = 'mallory' "
+          "WHERE sequence_no = 1;", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 133;
+  }
+  duckdb_destroy_result (&result);
+  if (wyl_audit_conn_verify_chain (conn, &error) != WYRELOG_E_POLICY)
+    return 134;
+  if (g_strcmp0 (error, "record_hash_mismatch") != 0)
+    return 135;
+  return 0;
+}
+
+static gint
+check_chain_detects_missing_link_and_reorder (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  g_autofree gchar *error = NULL;
+  duckdb_result result = { 0 };
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 140;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 141;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000301",
+          "alice") != 0)
+    return 142;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000302",
+          "bob") != 0)
+    return 143;
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  if (duckdb_query (h,
+          "UPDATE audit_events SET sequence_no = 3 WHERE sequence_no = 2;",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 144;
+  }
+  duckdb_destroy_result (&result);
+  if (wyl_audit_conn_verify_chain (conn, &error) != WYRELOG_E_POLICY)
+    return 145;
+  if (g_strcmp0 (error, "missing_link") != 0)
+    return 146;
+  return 0;
+}
+
+static gint
+check_chain_detects_deleted_tail_record (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  g_autofree gchar *error = NULL;
+  duckdb_result result = { 0 };
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 147;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 148;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000401",
+          "alice") != 0)
+    return 149;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000402",
+          "bob") != 0)
+    return 156;
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  if (duckdb_query (h, "DELETE FROM audit_events WHERE sequence_no = 2;",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 157;
+  }
+  duckdb_destroy_result (&result);
+  if (wyl_audit_conn_verify_chain (conn, &error) != WYRELOG_E_POLICY)
+    return 158;
+  if (g_strcmp0 (error, "missing_link") != 0)
+    return 159;
+  return 0;
+}
+
+static gint
+check_duplicate_checkpoint_and_tombstone_flow (void)
+{
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  gboolean inserted = FALSE;
+  duckdb_result result = { 0 };
+
+  if (wyl_audit_conn_open (NULL, &conn) != WYRELOG_E_OK)
+    return 150;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 151;
+  if (wyl_audit_conn_append_tombstone (conn, "subject-to-erase",
+          "erase-request", &inserted) != WYRELOG_E_OK || !inserted)
+    return 152;
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  if (duckdb_query (h,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE action = 'privacy.erase.tombstone' "
+          "AND deny_reason = 'erasure_tombstone';", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 153;
+  }
+  if (duckdb_value_int64 (&result, 0, 0) != 1) {
+    duckdb_destroy_result (&result);
+    return 154;
+  }
+  duckdb_destroy_result (&result);
+  if (duckdb_query (h,
+          "INSERT INTO audit_checkpoints "
+          "(stream_name, sequence_no, root_hash, created_at_us) "
+          "VALUES ('__wyrelog.audit', 1, 'duplicate', 1);", &result)
+      == DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 155;
+  }
+  duckdb_destroy_result (&result);
+  return 0;
+}
+
 int
 main (void)
 {
@@ -276,6 +476,18 @@ main (void)
   if ((rc = check_table_probe_reports_schema ()) != 0)
     return rc;
   if ((rc = check_table_probe_rejects_invalid_args ()) != 0)
+    return rc;
+  if ((rc = check_reserved_stream_guard ()) != 0)
+    return rc;
+  if ((rc = check_chain_verifies_clean_store ()) != 0)
+    return rc;
+  if ((rc = check_chain_detects_record_modification ()) != 0)
+    return rc;
+  if ((rc = check_chain_detects_missing_link_and_reorder ()) != 0)
+    return rc;
+  if ((rc = check_chain_detects_deleted_tail_record ()) != 0)
+    return rc;
+  if ((rc = check_duplicate_checkpoint_and_tombstone_flow ()) != 0)
     return rc;
   return 0;
 }
