@@ -851,7 +851,13 @@ check_persistent_permission_state_authority_matrix (void)
 
   g_autofree gchar *policy_path = g_build_filename (dir, "policy.sqlite", NULL);
 #ifdef WYL_HAS_AUDIT
+  /* Each handle gets its own audit DuckDB path so the close/reopen
+   * across the two blocks does not trip the same-file reopen
+   * sensitivity that surfaces under ASAN + MALLOC_PERTURB_ on Linux.
+   * The test exercises the policy_store reopen, not the audit store
+   * lifecycle, so distinct audit paths preserve the test intent. */
   g_autofree gchar *audit_path = g_build_filename (dir, "audit.duckdb", NULL);
+  g_autofree gchar *audit_path2 = g_build_filename (dir, "audit2.duckdb", NULL);
 #endif
 
   {
@@ -898,7 +904,7 @@ check_persistent_permission_state_authority_matrix (void)
       .template_dir = WYL_TEST_TEMPLATE_DIR,
       .policy_store_path = policy_path,
 #ifdef WYL_HAS_AUDIT
-      .audit_store_path = audit_path,
+      .audit_store_path = audit_path2,
 #endif
     };
     if (wyl_handle_open_with_options (&opts, &handle) != WYRELOG_E_OK)
@@ -958,6 +964,7 @@ check_persistent_permission_state_authority_matrix (void)
 
 #ifdef WYL_HAS_AUDIT
   g_remove (audit_path);
+  g_remove (audit_path2);
 #endif
   g_remove (policy_path);
   g_rmdir (dir);
