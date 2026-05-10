@@ -2,6 +2,7 @@
 #include "daemon/runtime.h"
 
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "daemon/checks.h"
 #include "daemon/delta.h"
@@ -9,6 +10,19 @@
 #include "daemon/signals.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
+
+static void
+cleanup_readiness_policy_db (gpointer data)
+{
+  gchar *path = data;
+  if (path == NULL)
+    return;
+
+  g_autofree gchar *clear_path = g_strdup_printf ("%s.clear", path);
+  (void) g_remove (path);
+  (void) g_remove (clear_path);
+  g_free (path);
+}
 
 static wyrelog_error_t
 open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
@@ -30,16 +44,38 @@ open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
 static wyrelog_error_t
 open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
 {
+  if (out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  *out_handle = NULL;
+
+  g_autofree gchar *scratch_policy_store = NULL;
+  if (opts->production_mode) {
+    g_autoptr (GError) error = NULL;
+    gint fd = g_file_open_tmp ("wyrelog-readiness-policy-XXXXXX.sqlite",
+        &scratch_policy_store, &error);
+    if (fd < 0)
+      return WYRELOG_E_IO;
+    (void) g_close (fd, NULL);
+    (void) g_remove (scratch_policy_store);
+  }
+
   /* Readiness probes intentionally run against scratch stores: the checks
    * exercise mutation paths and must not seed configured authority data. */
   WylHandleOpenOptions open_opts = {
     .template_dir = opts->template_dir,
+    .policy_store_path = scratch_policy_store,
     .policy_keyprovider_path = opts->policy_keyprovider_path,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
   };
 
-  return wyl_handle_open_with_options (&open_opts, out_handle);
+  wyrelog_error_t rc = wyl_handle_open_with_options (&open_opts, out_handle);
+  if (rc == WYRELOG_E_OK && scratch_policy_store != NULL) {
+    g_object_set_data_full (G_OBJECT (*out_handle),
+        "wyl-readiness-policy-db", g_steal_pointer (&scratch_policy_store),
+        cleanup_readiness_policy_db);
+  }
+  return rc;
 }
 
 static gboolean

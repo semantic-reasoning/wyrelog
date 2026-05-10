@@ -745,8 +745,12 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
   if (wyl_daemon_http_copy_access_token_secret (server, secret, sizeof secret)
       != WYRELOG_E_OK)
     return 1824;
+  g_autofree gchar *foreign_tenant_key_id =
+      wyl_daemon_http_dup_access_token_key_id (server);
+  if (foreign_tenant_key_id == NULL)
+    return 1827;
   wyl_jwt_issue_input_t foreign_tenant_input = {
-    .key_id = "__wr_default_hs256",
+    .key_id = foreign_tenant_key_id,
     .jti = "foreign-tenant-jti",
     .subject = "http-guard-user",
     .issuer = "wyrelogd",
@@ -891,12 +895,14 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
 
   g_autoptr (GBytes) payload = NULL;
   gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id == NULL)
+    return 532;
   wyrelog_error_t rc = wyl_jwt_verify_hs256_access_token (access_token, secret,
-      sizeof secret, "__wr_default_hs256", "wyrelogd", "wyrelog-client", now,
-      &payload);
+      sizeof secret, key_id, "wyrelogd", "wyrelog-client", now, &payload);
   memset (secret, 0, sizeof secret);
   if (rc != WYRELOG_E_OK)
-    return 532;
+    return 536;
 
   gsize payload_len = 0;
   const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
@@ -913,10 +919,10 @@ verify_login_access_token (const gchar *body, const gchar *session_token,
       strstr (payload_text, expected_state) == NULL ||
       strstr (payload_text, expected_session) == NULL ||
       strstr (payload_text, expected_tenant) == NULL)
-    return 533;
+    return 537;
   g_autofree gchar *jti = extract_json_string (payload_text, "jti");
   if (jti == NULL || g_strcmp0 (jti, session_token) == 0)
-    return 534;
+    return 538;
   return 0;
 }
 
@@ -936,9 +942,14 @@ sign_test_access_token_with_jti (SoupServer *server, const gchar *jti,
       wyl_daemon_http_copy_access_token_secret (server, secret, sizeof secret);
   if (rc != WYRELOG_E_OK)
     return rc;
+  g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id == NULL) {
+    memset (secret, 0, sizeof secret);
+    return WYRELOG_E_INTERNAL;
+  }
 
   wyl_jwt_issue_input_t input = {
-    .key_id = "__wr_default_hs256",
+    .key_id = key_id,
     .jti = jti,
     .subject = subject,
     .issuer = issuer,
@@ -1098,6 +1109,74 @@ session_state_expect_cb (const gchar *session_id, const gchar *state,
       g_strcmp0 (state, expect->state) == 0)
     expect->matches++;
   return WYRELOG_E_OK;
+}
+
+static gint
+check_jwt_epoch_rotation_contract (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  g_autofree gchar *key_id_before =
+      wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id_before == NULL)
+    return 1840;
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  gint rc = send_raw_login (session, "POST", base_url,
+      "username=rotation-user&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 1841;
+
+  g_autofree gchar *session_token = extract_json_string (body,
+      "session_token");
+  g_autofree gchar *access_token = extract_json_string (body, "access_token");
+  g_autofree gchar *refresh_token = extract_json_string (body,
+      "refresh_token");
+  if (session_token == NULL || access_token == NULL || refresh_token == NULL)
+    return 1842;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "rotation-user",
+      "site.rotation.read", "rotation-scope", NULL, access_token, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 1843;
+
+  if (wyl_daemon_http_rotate_access_token_key_for_test (server)
+      != WYRELOG_E_OK)
+    return 1844;
+
+  g_autofree gchar *key_id_after =
+      wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id_after == NULL || g_strcmp0 (key_id_before, key_id_after) == 0)
+    return 1845;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_decide_bearer (session, "POST", base_url, "rotation-user",
+      "site.rotation.read", "rotation-scope", NULL, access_token, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"decide_auth_required\"") == NULL)
+    return 1846;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_refresh (session, "POST", base_url, refresh_token, &status,
+      &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"refresh_auth_required\"") == NULL)
+    return 1847;
+
+  return 0;
 }
 
 static gint
@@ -3188,6 +3267,9 @@ main (void)
     return 13;
 
   raw_rc = check_raw_login_contract (http.server, handle, base_url);
+  if (raw_rc != 0)
+    return raw_rc;
+  raw_rc = check_jwt_epoch_rotation_contract (http.server, handle, base_url);
   if (raw_rc != 0)
     return raw_rc;
 

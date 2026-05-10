@@ -35,3 +35,15 @@ if "$WYRELOGD" --production --template-dir "$TEMPLATE_DIR" \
   echo "production mode accepted the development KeyProvider" >&2
   exit 1
 fi
+
+"$PYTHON" - "$TMPDIR/prod.key" <<'PY'
+import os
+import sys
+
+with open(sys.argv[1], "wb") as f:
+    f.write(os.urandom(32))
+PY
+
+"$WYRELOGD" --production --template-dir "$TEMPLATE_DIR" \
+  --policy-db "$TMPDIR/prod.sqlite" \
+  --policy-keyprovider "$TMPDIR/prod.key" --check
