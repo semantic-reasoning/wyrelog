@@ -343,6 +343,11 @@ check_template_manifest_contract (void)
   if (error != NULL || g_strcmp0 (semantics, "append-only") != 0)
     return 212;
 
+  g_autofree gchar *migration_path = g_key_file_get_string (key_file,
+      "template", "migration_path", &error);
+  if (error != NULL || g_strcmp0 (migration_path, "migrations") != 0)
+    return 218;
+
   g_autofree gchar *hash = g_key_file_get_string (key_file, "template",
       "sha256", &error);
   if (error != NULL || strlen (hash) != 64)
@@ -371,6 +376,76 @@ check_template_manifest_contract (void)
   return 0;
 }
 
+static gint
+check_template_migration_contract (void)
+{
+  g_autofree gchar *path = g_build_filename (WYL_TEST_TEMPLATE_DIR,
+      "migrations", "0000-baseline.ini", NULL);
+  g_autoptr (GKeyFile) key_file = g_key_file_new ();
+  g_autoptr (GError) error = NULL;
+
+  if (!g_key_file_load_from_file (key_file, path, G_KEY_FILE_NONE, &error))
+    return 230;
+
+  g_autofree gchar *id = g_key_file_get_string (key_file, "migration", "id",
+      &error);
+  if (error != NULL || g_strcmp0 (id, "0000-baseline") != 0)
+    return 231;
+
+  gint64 sequence = g_key_file_get_int64 (key_file, "migration", "sequence",
+      &error);
+  if (error != NULL || sequence != 0)
+    return 232;
+
+  gint64 from_version = g_key_file_get_int64 (key_file, "migration",
+      "from_version", &error);
+  if (error != NULL || from_version != 0)
+    return 233;
+
+  gint64 to_version = g_key_file_get_int64 (key_file, "migration",
+      "to_version", &error);
+  if (error != NULL || to_version != 0)
+    return 234;
+
+  g_autofree gchar *semantics = g_key_file_get_string (key_file, "migration",
+      "semantics", &error);
+  if (error != NULL || g_strcmp0 (semantics, "append-only") != 0)
+    return 235;
+
+  g_autofree gchar *operation = g_key_file_get_string (key_file, "migration",
+      "operation", &error);
+  if (error != NULL || g_strcmp0 (operation, "baseline") != 0)
+    return 236;
+
+  g_autofree gchar *reserved_namespace = g_key_file_get_string (key_file,
+      "migration", "reserved_namespace", &error);
+  if (error != NULL || g_strcmp0 (reserved_namespace, "wr.") != 0)
+    return 237;
+
+  g_autofree gchar *hash = g_key_file_get_string (key_file, "migration",
+      "sha256", &error);
+  if (error != NULL || strlen (hash) != 64)
+    return 238;
+
+  g_autofree gchar *context = g_key_file_get_string (key_file, "signature",
+      "context", &error);
+  if (error != NULL
+      || g_strcmp0 (context, "wyrelog-template-migration-v0-sha256") != 0)
+    return 239;
+
+  g_autofree gchar *public_key = g_key_file_get_string (key_file,
+      "signature", "public_key", &error);
+  if (error != NULL || strlen (public_key) != 64)
+    return 240;
+
+  g_autofree gchar *signature = g_key_file_get_string (key_file,
+      "signature", "ed25519", &error);
+  if (error != NULL || strlen (signature) != 128)
+    return 241;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -388,5 +463,8 @@ main (void)
   rc = check_audit_schema_contracts ();
   if (rc != 0)
     return rc;
-  return check_template_manifest_contract ();
+  rc = check_template_manifest_contract ();
+  if (rc != 0)
+    return rc;
+  return check_template_migration_contract ();
 }
