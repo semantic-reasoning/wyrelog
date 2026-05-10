@@ -162,6 +162,7 @@ if build_client
 
   test('wyctl-basic', test_wyctl_basic,
     depends : wyctl_exe,
+    timeout : 60,
   )
 
   # End-to-end: drives wyctl as a subprocess against an in-process daemon
