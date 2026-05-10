@@ -114,7 +114,9 @@ if build_client
       dependencies : test_daemon_http_decide_deps,
     )
 
-    test('daemon-http-decide-audit', test_daemon_http_decide_audit)
+    test('daemon-http-decide-audit', test_daemon_http_decide_audit,
+      timeout : 60,
+    )
   endif
 endif
 
