@@ -63,12 +63,17 @@ wirelog_proj = subproject(
   'wirelog',
   default_options : ['tests=false', 'documentation=false'],
 )
+wirelog_consumer_args = []
+if host_machine.system() == 'windows'
+  wirelog_consumer_args += ['-DWIRELOG_BUILDING']
+endif
 wirelog_dep = declare_dependency(
   link_with : wirelog_proj.get_variable('wirelog_lib'),
   include_directories : [
     wirelog_proj.get_variable('wirelog_inc'),
     wirelog_proj.get_variable('wirelog_src_inc'),
   ],
+  compile_args : wirelog_consumer_args,
 )
 
 libchronoid_proj = subproject(
@@ -94,6 +99,8 @@ install_subdir(
 
 install_data(
   'packaging/systemd/wyrelog.service',
+  'packaging/systemd/wyrelog-system.service',
+  'packaging/systemd/wyrelog-service.service',
   install_dir : join_paths(get_option('prefix'), 'lib', 'systemd', 'system'),
 )
 install_data(
@@ -106,6 +113,8 @@ install_data(
 )
 install_data(
   'packaging/wyrelogd.env',
+  'packaging/system.env',
+  'packaging/service.env',
   install_dir : join_paths(get_option('sysconfdir'), 'wyrelog'),
 )
 

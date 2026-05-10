@@ -31,9 +31,13 @@ trap cleanup EXIT INT TERM
 
 for path in \
   "$SOURCE_ROOT/packaging/systemd/wyrelog.service" \
+  "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service" \
+  "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service" \
   "$SOURCE_ROOT/packaging/sysusers.d/wyrelog.conf" \
   "$SOURCE_ROOT/packaging/tmpfiles.d/wyrelog.conf" \
   "$SOURCE_ROOT/packaging/wyrelogd.env" \
+  "$SOURCE_ROOT/packaging/system.env" \
+  "$SOURCE_ROOT/packaging/service.env" \
   "$SOURCE_ROOT/docs/operator-runbook.md"; do
   test -s "$path"
 done
@@ -41,6 +45,16 @@ done
 if ! grep -q -- "--production" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog.service"; then
   echo "service unit does not enable production gates" >&2
+  exit 1
+fi
+if ! grep -q -- "--profile=system" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
+  echo "system unit does not select the system profile" >&2
+  exit 1
+fi
+if ! grep -q -- "--profile=service" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; then
+  echo "service unit does not select the service profile" >&2
   exit 1
 fi
 if ! grep -q "WYL_LOG=warn" \
@@ -52,12 +66,18 @@ fi
 INSTALL_ROOT="$TMPDIR/install"
 mkdir -p "$INSTALL_ROOT/usr/share/wyrelog" \
   "$INSTALL_ROOT/etc/wyrelog" \
+  "$INSTALL_ROOT/etc/wyrelog/system" \
+  "$INSTALL_ROOT/etc/wyrelog/service" \
   "$INSTALL_ROOT/var/lib/wyrelog" \
+  "$INSTALL_ROOT/var/lib/wyrelog/system" \
+  "$INSTALL_ROOT/var/lib/wyrelog/service" \
   "$INSTALL_ROOT/var/log/wyrelog" \
+  "$INSTALL_ROOT/var/log/wyrelog/system" \
+  "$INSTALL_ROOT/var/log/wyrelog/service" \
   "$INSTALL_ROOT/run/wyrelog"
 cp -R "$TEMPLATE_DIR" "$INSTALL_ROOT/usr/share/wyrelog/access"
 
-"$PYTHON" - "$INSTALL_ROOT/etc/wyrelog/policy.key" <<'PY'
+"$PYTHON" - "$INSTALL_ROOT/etc/wyrelog/system/policy.key" <<'PY'
 import os
 import pathlib
 import sys
@@ -67,9 +87,9 @@ path.write_bytes(os.urandom(32))
 PY
 
 TEMPLATE_INSTALL="$INSTALL_ROOT/usr/share/wyrelog/access"
-POLICY_DB="$INSTALL_ROOT/var/lib/wyrelog/policy.sqlite"
-AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/audit.duckdb"
-KEY="$INSTALL_ROOT/etc/wyrelog/policy.key"
+POLICY_DB="$INSTALL_ROOT/var/lib/wyrelog/system/policy.sqlite"
+AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/system/audit.duckdb"
+KEY="$INSTALL_ROOT/etc/wyrelog/system/policy.key"
 BASE_URL="http://127.0.0.1:$PORT"
 
 "$WYCTL" key status --keyprovider "$KEY" >"$TMPDIR/key.out"
@@ -86,6 +106,7 @@ grep -q '^sha256=' "$TMPDIR/template-info.out"
 grep -q '^migrations=' "$TMPDIR/template-info.out"
 
 "$WYRELOGD" --production \
+  --profile system \
   --template-dir "$TEMPLATE_INSTALL" \
   --policy-db "$POLICY_DB" \
   --policy-keyprovider "$KEY" \
@@ -93,6 +114,7 @@ grep -q '^migrations=' "$TMPDIR/template-info.out"
   --check
 
 "$WYRELOGD" --production \
+  --profile system \
   --template-dir "$TEMPLATE_INSTALL" \
   --policy-db "$POLICY_DB" \
   --policy-keyprovider "$KEY" \
@@ -119,6 +141,18 @@ while [ "$i" -lt 150 ]; do
       cat "$TMPDIR/ready.err" >&2
       exit 1
     fi
+    "$PYTHON" - "$BASE_URL" <<'PY'
+import json
+import sys
+import urllib.request
+
+body = urllib.request.urlopen(f"{sys.argv[1]}/profile/status", timeout=1).read()
+status = json.loads(body.decode())
+if status.get("profile") != "system":
+    raise SystemExit(status)
+if status.get("event_queue_limit") != 1024:
+    raise SystemExit(status)
+PY
     kill -TERM "$PID"
     wait "$PID"
     PID=

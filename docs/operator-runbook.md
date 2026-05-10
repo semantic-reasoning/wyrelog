@@ -10,14 +10,44 @@ support files from `packaging/`.
 - Binaries: `/usr/bin/wyrelogd`, `/usr/bin/wyctl`
 - Templates: `/usr/share/wyrelog/access`
 - Daemon environment: `/etc/wyrelog/wyrelogd.env`
-- Policy KeyProvider state: `/etc/wyrelog/policy.key`
-- Policy store: `/var/lib/wyrelog/policy.sqlite`
-- Audit store: `/var/log/wyrelog/audit.duckdb`
+- System KeyProvider state: `/etc/wyrelog/system/policy.key`
+- System policy store: `/var/lib/wyrelog/system/policy.sqlite`
+- System audit store: `/var/log/wyrelog/system/audit.duckdb`
+- Service KeyProvider state: `/etc/wyrelog/service/policy.key`
+- Service policy store: `/var/lib/wyrelog/service/policy.sqlite`
+- Service audit store: `/var/log/wyrelog/service/audit.duckdb`
 - Runtime directory: `/run/wyrelog`
 - HTTP listen port: `127.0.0.1:8765` unless overridden by the service file
 - Production log policy: compile release builds with
   `-Dwyrelog_log_max_level=warn`; packaged runtime defaults set
   `WYL_LOG=warn`
+
+## Profiles
+
+Wyrelog ships two daemon profiles:
+
+- `system`: the authority profile for policy, keys, audit aggregation,
+  and operator control.
+- `service`: the application-facing profile for user decisions. It uses
+  independent policy/key/audit paths and a bounded disk spool for events
+  that cannot yet be forwarded to the system profile.
+
+Packaged profile paths:
+
+- System policy store: `/var/lib/wyrelog/system/policy.sqlite`
+- System KeyProvider state: `/etc/wyrelog/system/policy.key`
+- System audit store: `/var/log/wyrelog/system/audit.duckdb`
+- Service policy store: `/var/lib/wyrelog/service/policy.sqlite`
+- Service KeyProvider state: `/etc/wyrelog/service/policy.key`
+- Service audit store: `/var/log/wyrelog/service/audit.duckdb`
+- Service event spool: `/var/lib/wyrelog/service/event-spool`
+
+Inspect the resolved profile contract with:
+
+```sh
+wyrelogd --profile=system --profile-info --production
+wyrelogd --profile=service --profile-info --production
+```
 
 ## First Install
 
@@ -31,35 +61,39 @@ support files from `packaging/`.
 2. Create the production KeyProvider state once:
 
    ```sh
-   install -m 0640 -o root -g wyrelog /dev/null /etc/wyrelog/policy.key
+   install -m 0640 -o root -g wyrelog /dev/null /etc/wyrelog/system/policy.key
    python3 - <<'PY'
 import os
-with open("/etc/wyrelog/policy.key", "wb") as f:
+with open("/etc/wyrelog/system/policy.key", "wb") as f:
     f.write(os.urandom(32))
 PY
-   chown root:wyrelog /etc/wyrelog/policy.key
-   chmod 0640 /etc/wyrelog/policy.key
+   chown root:wyrelog /etc/wyrelog/system/policy.key
+   chmod 0640 /etc/wyrelog/system/policy.key
    ```
 
 3. Validate package readiness before starting the daemon:
 
    ```sh
    wyrelogd --production \
+     --profile system \
      --template-dir /usr/share/wyrelog/access \
-     --policy-db /var/lib/wyrelog/policy.sqlite \
-     --policy-keyprovider /etc/wyrelog/policy.key \
-     --audit-db /var/log/wyrelog/audit.duckdb \
+     --policy-db /var/lib/wyrelog/system/policy.sqlite \
+     --policy-keyprovider /etc/wyrelog/system/policy.key \
+     --audit-db /var/log/wyrelog/system/audit.duckdb \
      --check
    wyrelogd --template-info --template-dir /usr/share/wyrelog/access
-   wyctl key status --keyprovider /etc/wyrelog/policy.key
+   wyctl key status --keyprovider /etc/wyrelog/system/policy.key
    ```
 
 4. Start and verify service readiness:
 
    ```sh
-   systemctl enable --now wyrelog.service
+   systemctl enable --now wyrelog-system.service
+   systemctl enable --now wyrelog-service.service
    wyctl --daemon-url http://127.0.0.1:8765 status
    wyctl --daemon-url http://127.0.0.1:8765 status --readiness
+   wyctl --daemon-url http://127.0.0.1:8766 status
+   wyctl --daemon-url http://127.0.0.1:8766 status --readiness
    ```
 
 ## Day-2 Operations
@@ -69,9 +103,10 @@ PY
   ```sh
   wyrelogd --template-info --template-dir /usr/share/wyrelog/access
   wyrelogd --production --template-dir /usr/share/wyrelog/access \
-    --policy-db /var/lib/wyrelog/policy.sqlite \
-    --policy-keyprovider /etc/wyrelog/policy.key \
-    --audit-db /var/log/wyrelog/audit.duckdb --check
+    --profile system \
+    --policy-db /var/lib/wyrelog/system/policy.sqlite \
+    --policy-keyprovider /etc/wyrelog/system/policy.key \
+    --audit-db /var/log/wyrelog/system/audit.duckdb --check
   ```
 
 - Policy grant/revoke:
@@ -96,24 +131,40 @@ PY
 - Restart:
 
   ```sh
-  systemctl restart wyrelog.service
+  systemctl restart wyrelog-system.service
+  systemctl restart wyrelog-service.service
   wyctl --daemon-url http://127.0.0.1:8765 status --readiness
+  wyctl --daemon-url http://127.0.0.1:8766 status --readiness
   ```
 
   Access and refresh tokens are invalidated by daemon restart. Operators
   must obtain fresh credentials after restart.
+
+- Profile status:
+
+  ```sh
+  curl -fsS http://127.0.0.1:8765/profile/status
+  curl -fsS http://127.0.0.1:8766/profile/status
+  ```
+
+  Service-profile event forwarding targets
+  `http://127.0.0.1:8765/profile/events`. If the system profile is not
+  reachable, the service profile keeps its local decision path isolated
+  and uses the configured event spool directory as the bounded recovery
+  surface.
 
 ## Backup And Restore
 
 1. Stop the daemon:
 
    ```sh
-   systemctl stop wyrelog.service
+   systemctl stop wyrelog-service.service
+   systemctl stop wyrelog-system.service
    ```
 
-2. Back up `/etc/wyrelog/policy.key`,
-   `/var/lib/wyrelog/policy.sqlite`, `/var/log/wyrelog/audit.duckdb`,
-   and the output of `wyrelogd --template-info`.
+2. Back up the active profile's KeyProvider state, policy store, audit
+   store, event spool when present, and the output of
+   `wyrelogd --template-info`.
 
 3. Restore the files with the same ownership and modes, then run the
    production `--check` command before restarting.
@@ -132,9 +183,9 @@ PY
 
 1. Stop the daemon.
 2. Back up the current key and policy store together.
-3. Replace `/etc/wyrelog/policy.key` with a new 32-byte file using mode
-   `0640`, owner `root`, and group `wyrelog`.
-4. Run `wyctl key status --keyprovider /etc/wyrelog/policy.key`.
+3. Replace the active profile's `policy.key` with a new 32-byte file
+   using mode `0640`, owner `root`, and group `wyrelog`.
+4. Run `wyctl key status --keyprovider PATH`.
 5. Run production `--check`, then start the daemon.
 
 Changing the KeyProvider root invalidates sealed policy-store material

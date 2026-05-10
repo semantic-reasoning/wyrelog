@@ -33,6 +33,16 @@ if host_machine.system() != 'windows'
     depends : wyrelogd_exe,
   )
 
+  test('wyrelogd-profiles', sh,
+    args : [
+      meson.current_source_dir() / 'check-wyrelogd-profiles.sh',
+      wyrelogd_exe.full_path(),
+      meson.project_source_root() / 'templates' / 'access',
+      python3.full_path(),
+    ],
+    depends : wyrelogd_exe,
+  )
+
   wyrelogd_sigterm_cmd = '"' + wyrelogd_exe.full_path()
   wyrelogd_sigterm_cmd += '" --template-dir "'
   wyrelogd_sigterm_cmd += meson.project_source_root() / 'templates' / 'access'

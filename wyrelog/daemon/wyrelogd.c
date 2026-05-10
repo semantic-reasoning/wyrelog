@@ -16,11 +16,15 @@ main (int argc, char **argv)
 {
   WylDaemonOptions opts = {
     .template_dir = WYL_DEFAULT_TEMPLATE_DIR,
-    .listen_port = 8765,
+    .listen_port = -1,
   };
   g_autoptr (GError) error = NULL;
 
   if (!wyl_daemon_parse_options (&argc, &argv, &opts, &error)) {
+    g_printerr ("wyrelogd: %s\n", error->message);
+    return 2;
+  }
+  if (!wyl_daemon_options_resolve (&opts, &error)) {
     g_printerr ("wyrelogd: %s\n", error->message);
     return 2;
   }
@@ -76,6 +80,24 @@ main (int argc, char **argv)
         ("version=%u\nsha256=%s\nmigrations=%u\nlatest_migration_version=%u\n",
         info.version, info.sha256_hex, info.migration_count,
         info.latest_migration_version);
+    return 0;
+  }
+
+  if (opts.show_profile_info) {
+    g_print ("profile=%s\n", wyl_daemon_profile_name (opts.profile));
+    g_print ("template_dir=%s\n", opts.template_dir);
+    g_print ("policy_db=%s\n",
+        opts.policy_store_path != NULL ? opts.policy_store_path : "");
+    g_print ("policy_keyprovider=%s\n",
+        opts.policy_keyprovider_path != NULL ? opts.policy_keyprovider_path :
+        "");
+    g_print ("audit_db=%s\n",
+        opts.audit_store_path != NULL ? opts.audit_store_path : "");
+    g_print ("listen_port=%d\n", opts.listen_port);
+    g_print ("system_url=%s\n", opts.system_url != NULL ? opts.system_url : "");
+    g_print ("event_spool_dir=%s\n",
+        opts.event_spool_dir != NULL ? opts.event_spool_dir : "");
+    g_print ("event_queue_limit=%u\n", opts.event_queue_limit);
     return 0;
   }
 

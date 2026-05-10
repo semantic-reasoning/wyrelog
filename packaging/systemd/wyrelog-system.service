@@ -1,5 +1,5 @@
 [Unit]
-Description=Wyrelog application service
+Description=Wyrelog system profile service
 Documentation=man:wyrelogd(1)
 After=network-online.target
 Wants=network-online.target
@@ -9,7 +9,7 @@ Type=simple
 User=wyrelog
 Group=wyrelog
 Environment=WYL_LOG=warn
-EnvironmentFile=-/etc/wyrelog/wyrelogd.env
+EnvironmentFile=-/etc/wyrelog/system.env
 ExecStart=/usr/bin/wyrelogd --production --profile=system --template-dir /usr/share/wyrelog/access --policy-db /var/lib/wyrelog/system/policy.sqlite --policy-keyprovider /etc/wyrelog/system/policy.key --audit-db /var/log/wyrelog/system/audit.duckdb --listen-port 8765
 Restart=on-failure
 RestartSec=5s
