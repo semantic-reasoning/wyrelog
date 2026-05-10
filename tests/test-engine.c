@@ -97,6 +97,29 @@ copy_real_templates_to (const gchar *dest_dir)
   return TRUE;
 }
 
+static gboolean
+copy_manifest_to (const gchar *dest_dir)
+{
+  g_autofree gchar *src =
+      g_build_filename (WYL_TEST_TEMPLATE_DIR, "manifest.ini", NULL);
+  g_autofree gchar *dst = g_build_filename (dest_dir, "manifest.ini", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+
+  if (!g_file_get_contents (src, &contents, &len, &err)) {
+    g_printerr ("copy_manifest_to: cannot read %s: %s\n",
+        src, err ? err->message : "?");
+    return FALSE;
+  }
+  if (!g_file_set_contents (dst, contents, (gssize) len, &err)) {
+    g_printerr ("copy_manifest_to: cannot write %s: %s\n",
+        dst, err ? err->message : "?");
+    return FALSE;
+  }
+  return TRUE;
+}
+
 /*
  * rmdir_recursive: removes a directory and all its contents.
  * Only goes one level deep (sufficient for our tmpdir layout).
@@ -291,6 +314,10 @@ test_engine_open_legacy_decision_fallback (void)
   rmdir_recursive (tmpdir);
 
   if (rc != WYRELOG_E_OK || engine == NULL) {
+#ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
+    if (rc == WYRELOG_E_POLICY && engine == NULL)
+      return 0;
+#endif
     g_printerr ("test_engine_open_legacy_decision_fallback: "
         "expected open success, got %d\n", (int) rc);
     if (engine != NULL)
@@ -426,6 +453,9 @@ test_engine_double_close_safe (void)
 static gint
 test_engine_concat_with_newline_helper (void)
 {
+#ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
+  return 0;
+#endif
   /* Test wyl_engine_load_templates directly via the internal helper exposed
    * by wyl-engine-private.h: create a tmpdir with two files where the first
    * lacks a trailing newline, verify the combined source has a newline
@@ -562,6 +592,135 @@ test_engine_open_empty_templates (void)
   return 0;
 }
 
+static gint
+test_template_manifest_validates_canonical (void)
+{
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc =
+      wyl_engine_load_templates (WYL_TEST_TEMPLATE_DIR, &dl_src, &dl_src_len);
+  if (rc != WYRELOG_E_OK)
+    return 110;
+
+  guint32 template_version = G_MAXUINT32;
+  rc = wyl_engine_verify_template_manifest (WYL_TEST_TEMPLATE_DIR, dl_src,
+      dl_src_len, TRUE, &template_version);
+  if (rc != WYRELOG_E_OK)
+    goto done;
+  if (template_version != 0) {
+    rc = WYRELOG_E_POLICY;
+    goto done;
+  }
+
+  {
+    g_autoptr (GString) crlf_src = g_string_sized_new (dl_src_len * 2);
+    for (gsize i = 0; i < dl_src_len; i++) {
+      if (dl_src[i] == '\n')
+        g_string_append_c (crlf_src, '\r');
+      g_string_append_c (crlf_src, dl_src[i]);
+    }
+    rc = wyl_engine_verify_template_manifest (WYL_TEST_TEMPLATE_DIR,
+        crlf_src->str, crlf_src->len, TRUE, &template_version);
+  }
+
+done:
+  memset (dl_src, 0, dl_src_len);
+  g_free (dl_src);
+
+  if (rc != WYRELOG_E_OK)
+    return 111;
+  if (template_version != 0)
+    return 112;
+  return 0;
+}
+
+static gint
+test_template_manifest_rejects_tampered_template (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 120;
+  if (!copy_real_templates_to (tmpdir) || !copy_manifest_to (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 121;
+  }
+  if (!write_file_in_dir (tmpdir, "fsm/principal.dl",
+          "% tampered principal template\n")) {
+    rmdir_recursive (tmpdir);
+    return 122;
+  }
+
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
+      &dl_src_len);
+  if (dl_src != NULL) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+  }
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_POLICY) {
+    g_printerr ("test_template_manifest_rejects_tampered_template: "
+        "expected WYRELOG_E_POLICY, got %d\n", (int) rc);
+    return 123;
+  }
+  return 0;
+}
+
+static gint
+test_template_manifest_rejects_retraction_migrations (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 130;
+  if (!copy_real_templates_to (tmpdir) || !copy_manifest_to (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 131;
+  }
+
+  g_autofree gchar *manifest_path =
+      g_build_filename (tmpdir, "manifest.ini", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (manifest_path, &contents, &len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 132;
+  }
+  const gchar *needle = "migration_semantics=append-only";
+  gchar *pos = strstr (contents, needle);
+  if (pos == NULL) {
+    rmdir_recursive (tmpdir);
+    return 133;
+  }
+  g_autoptr (GString) bad = g_string_new_len (contents,
+      (gssize) (pos - contents));
+  g_string_append (bad, "migration_semantics=retraction");
+  g_string_append (bad, pos + strlen (needle));
+  if (!g_file_set_contents (manifest_path, bad->str, -1, &err)) {
+    rmdir_recursive (tmpdir);
+    return 134;
+  }
+
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
+      &dl_src_len);
+  if (dl_src != NULL) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+  }
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_POLICY) {
+    g_printerr ("test_template_manifest_rejects_retraction_migrations: "
+        "expected WYRELOG_E_POLICY, got %d\n", (int) rc);
+    return 135;
+  }
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* main                                                                */
 /* ------------------------------------------------------------------ */
@@ -602,6 +761,15 @@ main (void)
     return rc;
 
   if ((rc = test_engine_open_empty_templates ()) != 0)
+    return rc;
+
+  if ((rc = test_template_manifest_validates_canonical ()) != 0)
+    return rc;
+
+  if ((rc = test_template_manifest_rejects_tampered_template ()) != 0)
+    return rc;
+
+  if ((rc = test_template_manifest_rejects_retraction_migrations ()) != 0)
     return rc;
 
   return 0;

@@ -85,3 +85,13 @@ option('enable_break_glass',
               + 'requires a recorded audit reason code. Wiring lands in '
               + 'a follow-up commit (override path + audit reason code).'
 )
+
+option('require_template_manifest',
+  type : 'boolean',
+  value : false,
+  description : 'Fail closed when the access template directory does not '
+              + 'ship a template manifest. Enable for release builds so '
+              + 'the canonical template version, SHA-256 hash, Ed25519 '
+              + 'signature, and append-only migration contract are verified '
+              + 'before the policy program is loaded.'
+)

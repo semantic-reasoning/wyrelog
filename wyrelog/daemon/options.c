@@ -22,6 +22,9 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
         "Load policy templates and exit", NULL},
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts->show_version,
         "Print version and exit", NULL},
+    {"template-version", 0, 0, G_OPTION_ARG_NONE,
+          &opts->show_template_version,
+        "Print access template version and exit", NULL},
     {NULL}
   };
 

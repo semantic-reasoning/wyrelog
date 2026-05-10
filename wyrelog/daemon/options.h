@@ -13,6 +13,7 @@ typedef struct
   gint listen_port;
   gboolean check_only;
   gboolean show_version;
+  gboolean show_template_version;
 } WylDaemonOptions;
 
 gboolean wyl_daemon_parse_options (gint * argc, gchar *** argv,
