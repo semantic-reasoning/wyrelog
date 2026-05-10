@@ -16,6 +16,7 @@ open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
   WylHandleOpenOptions open_opts = {
     .template_dir = opts->template_dir,
     .policy_store_path = opts->policy_store_path,
+    .policy_keyprovider_path = opts->policy_keyprovider_path,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
 #ifdef WYL_HAS_AUDIT
@@ -33,6 +34,7 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
    * exercise mutation paths and must not seed configured authority data. */
   WylHandleOpenOptions open_opts = {
     .template_dir = opts->template_dir,
+    .policy_keyprovider_path = opts->policy_keyprovider_path,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
   };
