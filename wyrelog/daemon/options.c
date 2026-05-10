@@ -13,10 +13,8 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
     {"policy-keyprovider", 0, 0, G_OPTION_ARG_STRING,
           &opts->policy_keyprovider_path,
         "Path to policy database key provider state", "PATH"},
-#ifdef WYL_HAS_AUDIT
     {"audit-db", 0, 0, G_OPTION_ARG_STRING, &opts->audit_store_path,
         "Runtime audit sink database path", "PATH"},
-#endif
 #ifdef WYL_HAS_DAEMON_HTTP
     {"listen-port", 0, 0, G_OPTION_ARG_INT, &opts->listen_port,
         "HTTP listen port", "PORT"},
