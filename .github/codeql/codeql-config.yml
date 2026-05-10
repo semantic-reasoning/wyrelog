@@ -3,3 +3,6 @@ name: Wyrelog CodeQL
 paths:
   - tests
   - wyrelog
+paths-ignore:
+  - subprojects/**
+  - builddir/**
