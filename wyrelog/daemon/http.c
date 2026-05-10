@@ -1302,6 +1302,13 @@ check_runtime_ready (WylHandle *handle, const gchar **out_error)
       *out_error = "audit_degraded";
     return rc;
   }
+
+  rc = wyl_audit_conn_verify_chain (conn, NULL);
+  if (rc != WYRELOG_E_OK) {
+    if (out_error != NULL)
+      *out_error = "audit_degraded";
+    return rc;
+  }
 #endif
 
   return WYRELOG_E_OK;

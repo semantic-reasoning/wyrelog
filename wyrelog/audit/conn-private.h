@@ -117,6 +117,26 @@ wyrelog_error_t wyl_audit_conn_delete_event (wyl_audit_conn_t * conn,
     const gchar * id);
 
 /*
+ * Reserved system stream guard. User-managed streams must not use the
+ * __wyrelog.* namespace; mutation attempts return WYRELOG_E_POLICY with a
+ * stable fail-closed shape.
+ */
+gboolean wyl_audit_conn_stream_name_is_reserved (const gchar * stream_name);
+wyrelog_error_t wyl_audit_conn_validate_user_stream_name
+    (const gchar * stream_name);
+wyrelog_error_t wyl_audit_conn_create_user_stream (wyl_audit_conn_t * conn,
+    const gchar * stream_name);
+wyrelog_error_t wyl_audit_conn_drop_user_stream (wyl_audit_conn_t * conn,
+    const gchar * stream_name);
+wyrelog_error_t wyl_audit_conn_rename_user_stream (wyl_audit_conn_t * conn,
+    const gchar * old_name, const gchar * new_name);
+wyrelog_error_t wyl_audit_conn_append_tombstone (wyl_audit_conn_t * conn,
+    const gchar * subject_id, const gchar * request_id,
+    gboolean * out_inserted);
+wyrelog_error_t wyl_audit_conn_verify_chain (wyl_audit_conn_t * conn,
+    gchar ** out_error);
+
+/*
  * Serialises audit_events rows to a compact JSON array ordered by newest
  * first. @filter may be NULL/empty or one exact-match term. Both
  * key=value and compound predicate forms are accepted:

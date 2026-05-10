@@ -6,11 +6,67 @@
 #include "wyrelog/decide.h"
 #include "wyrelog/wyl-id-private.h"
 
+#define WYL_AUDIT_RESERVED_PREFIX "__wyrelog."
+#define WYL_AUDIT_STREAM_AUDIT "__wyrelog.audit"
+#define WYL_AUDIT_CHECKPOINT_INTERVAL 1
+
 struct wyl_audit_conn_t
 {
   duckdb_database db;
   duckdb_connection conn;
+  GMutex lock;
 };
+
+gboolean
+wyl_audit_conn_stream_name_is_reserved (const gchar *stream_name)
+{
+  return stream_name != NULL &&
+      g_str_has_prefix (stream_name, WYL_AUDIT_RESERVED_PREFIX);
+}
+
+wyrelog_error_t
+wyl_audit_conn_validate_user_stream_name (const gchar *stream_name)
+{
+  if (stream_name == NULL || stream_name[0] == '\0')
+    return WYRELOG_E_INVALID;
+  return wyl_audit_conn_stream_name_is_reserved (stream_name) ?
+      WYRELOG_E_POLICY : WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+table_exists_unlocked (wyl_audit_conn_t *conn, const gchar *table_name,
+    gboolean *out_exists)
+{
+  duckdb_prepared_statement stmt;
+  duckdb_result result;
+  duckdb_state rc;
+
+  if (conn == NULL || table_name == NULL || out_exists == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_exists = FALSE;
+  static const gchar *sql =
+      "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_bind_varchar (stmt, 1, table_name) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+
+  rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_prepare (&stmt);
+  if (rc != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  *out_exists = duckdb_value_int64 (&result, 0, 0) > 0;
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
 
 wyrelog_error_t
 wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
@@ -35,6 +91,7 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
     g_free (self);
     return WYRELOG_E_INTERNAL;
   }
+  g_mutex_init (&self->lock);
 
   *out_conn = self;
   return WYRELOG_E_OK;
@@ -51,6 +108,7 @@ wyl_audit_conn_close (wyl_audit_conn_t *conn)
    * already free'd the wrapper at that point. */
   duckdb_disconnect (&conn->conn);
   duckdb_close (&conn->db);
+  g_mutex_clear (&conn->lock);
   g_free (conn);
 }
 
@@ -177,6 +235,36 @@ ensure_audit_events_request_id_column (wyl_audit_conn_t *conn)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+ensure_column (wyl_audit_conn_t *conn, const gchar *table_name,
+    const gchar *column_name, const gchar *column_def)
+{
+  duckdb_result result = { 0 };
+  g_autofree gchar *probe_sql =
+      g_strdup_printf
+      ("SELECT COUNT(*) FROM pragma_table_info('%s') WHERE name = '%s';",
+      table_name, column_name);
+
+  if (duckdb_query (conn->conn, probe_sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  gboolean exists = duckdb_value_int64 (&result, 0, 0) > 0;
+  duckdb_destroy_result (&result);
+  if (exists)
+    return WYRELOG_E_OK;
+
+  g_autofree gchar *alter_sql =
+      g_strdup_printf ("ALTER TABLE %s ADD COLUMN %s %s;", table_name,
+      column_name, column_def);
+  if (duckdb_query (conn->conn, alter_sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
 {
@@ -190,10 +278,29 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
       "  deny_reason   VARCHAR,"
       "  deny_origin   VARCHAR,"
       "  request_id    VARCHAR,"
-      "  decision      SMALLINT NOT NULL"
+      "  decision      SMALLINT NOT NULL,"
+      "  stream_name   VARCHAR NOT NULL DEFAULT '" WYL_AUDIT_STREAM_AUDIT "',"
+      "  event_kind    VARCHAR NOT NULL DEFAULT 'audit.decision',"
+      "  sequence_no   BIGINT,"
+      "  previous_hash VARCHAR,"
+      "  record_hash   VARCHAR,"
+      "  checkpoint_root VARCHAR"
+      ");"
+      "CREATE TABLE IF NOT EXISTS audit_checkpoints ("
+      "  stream_name VARCHAR NOT NULL,"
+      "  sequence_no BIGINT NOT NULL,"
+      "  root_hash   VARCHAR NOT NULL,"
+      "  created_at_us BIGINT NOT NULL,"
+      "  PRIMARY KEY (stream_name, sequence_no)"
+      ");"
+      "CREATE TABLE IF NOT EXISTS user_audit_streams ("
+      "  name VARCHAR PRIMARY KEY,"
+      "  created_at_us BIGINT NOT NULL"
       ");"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_created_at_us "
       "  ON audit_events (created_at_us);"
+      "CREATE INDEX IF NOT EXISTS idx_audit_events_stream_sequence "
+      "  ON audit_events (stream_name, sequence_no);"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_subject_id "
       "  ON audit_events (subject_id);"
       "CREATE INDEX IF NOT EXISTS idx_audit_events_action "
@@ -208,21 +315,114 @@ wyl_audit_conn_create_schema (wyl_audit_conn_t *conn)
   if (conn == NULL)
     return WYRELOG_E_INVALID;
 
+  gboolean had_audit_events = FALSE;
+  wyrelog_error_t rc =
+      table_exists_unlocked (conn, "audit_events", &had_audit_events);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   duckdb_result result;
   if (duckdb_query (conn->conn, ddl, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
   }
   duckdb_destroy_result (&result);
-  wyrelog_error_t rc = ensure_audit_events_request_id_column (conn);
+  rc = ensure_audit_events_request_id_column (conn);
   if (rc != WYRELOG_E_OK)
     return rc;
+  const struct
+  {
+    const gchar *name;
+    const gchar *def;
+  } chain_columns[] = {
+    {"stream_name", "VARCHAR"},
+    {"event_kind", "VARCHAR"},
+    {"sequence_no", "BIGINT"},
+    {"previous_hash", "VARCHAR"},
+    {"record_hash", "VARCHAR"},
+    {"checkpoint_root", "VARCHAR"},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (chain_columns); i++) {
+    rc = ensure_column (conn, "audit_events", chain_columns[i].name,
+        chain_columns[i].def);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   if (duckdb_query (conn->conn,
           "CREATE INDEX IF NOT EXISTS idx_audit_events_request_id "
           "ON audit_events (request_id);", &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
     return WYRELOG_E_IO;
+  }
+  duckdb_destroy_result (&result);
+
+  if (!had_audit_events) {
+    if (duckdb_query (conn->conn, "DELETE FROM audit_checkpoints;", &result)
+        != DuckDBSuccess) {
+      duckdb_destroy_result (&result);
+      return WYRELOG_E_IO;
+    }
+    duckdb_destroy_result (&result);
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static gchar *
+compute_audit_record_hash (const gchar *stream_name, gint64 sequence_no,
+    const gchar *previous_hash, const gchar *id, gint64 created_at_us,
+    const gchar *subject_id, const gchar *action, const gchar *resource_id,
+    const gchar *deny_reason, const gchar *deny_origin,
+    const gchar *request_id, wyl_decision_t decision, const gchar *event_kind)
+{
+  g_autofree gchar *payload =
+      g_strdup_printf ("v1|%s|%" G_GINT64_FORMAT "|%s|%s|%" G_GINT64_FORMAT
+      "|%s|%s|%s|%s|%s|%s|%d|%s",
+      stream_name, sequence_no, previous_hash, id, created_at_us,
+      subject_id != NULL ? subject_id : "", action != NULL ? action : "",
+      resource_id != NULL ? resource_id : "",
+      deny_reason != NULL ? deny_reason : "",
+      deny_origin != NULL ? deny_origin : "",
+      request_id != NULL ? request_id : "", (gint) decision, event_kind);
+  return g_compute_checksum_for_string (G_CHECKSUM_SHA256, payload, -1);
+}
+
+static wyrelog_error_t
+get_next_chain_state (wyl_audit_conn_t *conn, const gchar *stream_name,
+    gint64 *out_sequence_no, gchar **out_previous_hash)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+
+  *out_sequence_no = 1;
+  *out_previous_hash = g_strdup ("");
+  static const gchar *sql =
+      "SELECT sequence_no, record_hash FROM audit_events "
+      "WHERE stream_name = ? ORDER BY sequence_no DESC LIMIT 1;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, stream_name) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_prepare (&stmt);
+  if (step_rc != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  if (duckdb_row_count (&result) == 1) {
+    *out_sequence_no = duckdb_value_int64 (&result, 0, 0) + 1;
+    g_free (*out_previous_hash);
+    if (duckdb_value_is_null (&result, 1, 0)) {
+      *out_previous_hash = g_strdup ("");
+    } else {
+      gchar *value = duckdb_value_varchar (&result, 1, 0);
+      *out_previous_hash = g_strdup (value);
+      duckdb_free (value);
+    }
   }
   duckdb_destroy_result (&result);
   return WYRELOG_E_OK;
@@ -232,39 +432,11 @@ wyrelog_error_t
 wyl_audit_conn_table_exists (wyl_audit_conn_t *conn, const gchar *table_name,
     gboolean *out_exists)
 {
-  duckdb_prepared_statement stmt;
-  duckdb_result result;
-  duckdb_state rc;
-
-  if (conn == NULL || table_name == NULL || out_exists == NULL)
-    return WYRELOG_E_INVALID;
-
-  *out_exists = FALSE;
-  static const gchar *sql =
-      "SELECT COUNT(*) FROM information_schema.tables " "WHERE table_name = ?;";
-  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-  if (duckdb_bind_varchar (stmt, 1, table_name) != DuckDBSuccess) {
-    duckdb_destroy_prepare (&stmt);
-    return WYRELOG_E_IO;
-  }
-
-  rc = duckdb_execute_prepared (stmt, &result);
-  duckdb_destroy_prepare (&stmt);
-  if (rc != DuckDBSuccess) {
-    duckdb_destroy_result (&result);
-    return WYRELOG_E_IO;
-  }
-
-  *out_exists = duckdb_value_int64 (&result, 0, 0) > 0;
-  duckdb_destroy_result (&result);
-  return WYRELOG_E_OK;
+  return table_exists_unlocked (conn, table_name, out_exists);
 }
 
-wyrelog_error_t
-wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
+static wyrelog_error_t
+insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
     gint64 created_at_us, const gchar *subject_id, const gchar *action,
     const gchar *resource_id, const gchar *deny_reason,
     const gchar *deny_origin, const gchar *request_id,
@@ -294,11 +466,24 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
   if (exists)
     return WYRELOG_E_OK;
 
+  g_autofree gchar *previous_hash = NULL;
+  gint64 sequence_no = 0;
+  rc = get_next_chain_state (conn, WYL_AUDIT_STREAM_AUDIT, &sequence_no,
+      &previous_hash);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *record_hash =
+      compute_audit_record_hash (WYL_AUDIT_STREAM_AUDIT, sequence_no,
+      previous_hash, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+      decision, "audit.decision");
+
   static const gchar *sql =
       "INSERT INTO audit_events "
       "(id, created_at_us, subject_id, action, resource_id, "
-      "deny_reason, deny_origin, request_id, decision) "
-      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);";
+      "deny_reason, deny_origin, request_id, decision, stream_name, "
+      "event_kind, sequence_no, previous_hash, record_hash, checkpoint_root) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
   if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
@@ -312,7 +497,14 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
       || bind_nullable_varchar (stmt, 6, deny_reason) != WYRELOG_E_OK
       || bind_nullable_varchar (stmt, 7, deny_origin) != WYRELOG_E_OK
       || bind_nullable_varchar (stmt, 8, request_id) != WYRELOG_E_OK
-      || duckdb_bind_int16 (stmt, 9, (int16_t) decision) != DuckDBSuccess) {
+      || duckdb_bind_int16 (stmt, 9, (int16_t) decision) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 10, WYL_AUDIT_STREAM_AUDIT)
+      != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 11, "audit.decision") != DuckDBSuccess
+      || duckdb_bind_int64 (stmt, 12, sequence_no) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 13, previous_hash) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 14, record_hash) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 15, record_hash) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
   }
@@ -323,8 +515,48 @@ wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
   if (step_rc != DuckDBSuccess)
     return WYRELOG_E_IO;
 
+  if (sequence_no % WYL_AUDIT_CHECKPOINT_INTERVAL == 0) {
+    static const gchar *checkpoint_sql =
+        "INSERT INTO audit_checkpoints "
+        "(stream_name, sequence_no, root_hash, created_at_us) "
+        "VALUES (?, ?, ?, ?);";
+    if (duckdb_prepare (conn->conn, checkpoint_sql, &stmt) != DuckDBSuccess)
+      return WYRELOG_E_IO;
+    if (duckdb_bind_varchar (stmt, 1, WYL_AUDIT_STREAM_AUDIT)
+        != DuckDBSuccess
+        || duckdb_bind_int64 (stmt, 2, sequence_no) != DuckDBSuccess
+        || duckdb_bind_varchar (stmt, 3, record_hash) != DuckDBSuccess
+        || duckdb_bind_int64 (stmt, 4, g_get_real_time ()) != DuckDBSuccess) {
+      duckdb_destroy_prepare (&stmt);
+      return WYRELOG_E_IO;
+    }
+    step_rc = duckdb_execute_prepared (stmt, &result);
+    duckdb_destroy_result (&result);
+    duckdb_destroy_prepare (&stmt);
+    if (step_rc != DuckDBSuccess)
+      return WYRELOG_E_POLICY;
+  }
+
   *out_inserted = TRUE;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_audit_conn_insert_event_full (wyl_audit_conn_t *conn, const gchar *id,
+    gint64 created_at_us, const gchar *subject_id, const gchar *action,
+    const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, const gchar *request_id,
+    wyl_decision_t decision, gboolean *out_inserted)
+{
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = insert_event_full_unlocked (conn, id, created_at_us,
+      subject_id, action, resource_id, deny_reason, deny_origin, request_id,
+      decision, out_inserted);
+  g_mutex_unlock (&conn->lock);
+  return rc;
 }
 
 wyrelog_error_t
@@ -343,8 +575,6 @@ wyl_audit_conn_insert_event (wyl_audit_conn_t *conn, const gchar *id,
 wyrelog_error_t
 wyl_audit_conn_delete_event (wyl_audit_conn_t *conn, const gchar *id)
 {
-  duckdb_prepared_statement stmt = NULL;
-  duckdb_result result = { 0 };
   wyl_id_t parsed_id;
 
   if (conn == NULL || id == NULL)
@@ -352,18 +582,249 @@ wyl_audit_conn_delete_event (wyl_audit_conn_t *conn, const gchar *id)
   if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
     return WYRELOG_E_INVALID;
 
-  static const gchar *sql = "DELETE FROM audit_events WHERE id = ?;";
+  return WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_audit_conn_create_user_stream (wyl_audit_conn_t *conn,
+    const gchar *stream_name)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_audit_conn_validate_user_stream_name (stream_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  static const gchar *sql =
+      "INSERT INTO user_audit_streams (name, created_at_us) VALUES (?, ?);";
   if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
     return WYRELOG_E_IO;
-  if (duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess) {
+  if (duckdb_bind_varchar (stmt, 1, stream_name) != DuckDBSuccess
+      || duckdb_bind_int64 (stmt, 2, g_get_real_time ()) != DuckDBSuccess) {
     duckdb_destroy_prepare (&stmt);
     return WYRELOG_E_IO;
   }
+  duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  return step_rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
 
+wyrelog_error_t
+wyl_audit_conn_drop_user_stream (wyl_audit_conn_t *conn,
+    const gchar *stream_name)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_audit_conn_validate_user_stream_name (stream_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  static const gchar *sql = "DELETE FROM user_audit_streams WHERE name = ?;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, stream_name) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
   duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
   duckdb_destroy_result (&result);
   duckdb_destroy_prepare (&stmt);
   return step_rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_audit_conn_rename_user_stream (wyl_audit_conn_t *conn,
+    const gchar *old_name, const gchar *new_name)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_audit_conn_validate_user_stream_name (old_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_audit_conn_validate_user_stream_name (new_name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  static const gchar *sql =
+      "UPDATE user_audit_streams SET name = ? WHERE name = ?;";
+  if (duckdb_prepare (conn->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, new_name) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 2, old_name) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  duckdb_state step_rc = duckdb_execute_prepared (stmt, &result);
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  return step_rc == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_audit_conn_append_tombstone (wyl_audit_conn_t *conn,
+    const gchar *subject_id, const gchar *request_id, gboolean *out_inserted)
+{
+  wyl_id_t id;
+  gchar id_buf[WYL_ID_STRING_BUF];
+
+  wyrelog_error_t rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_id_format (&id, id_buf, sizeof id_buf);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_audit_conn_insert_event_full (conn, id_buf, g_get_real_time (),
+      subject_id, "privacy.erase.tombstone", "subject", "erasure_tombstone",
+      "system", request_id, WYL_DECISION_ALLOW, out_inserted);
+}
+
+static gchar *
+dup_result_varchar (duckdb_result *result, idx_t col, idx_t row)
+{
+  if (duckdb_value_is_null (result, col, row))
+    return g_strdup ("");
+  gchar *value = duckdb_value_varchar (result, col, row);
+  gchar *copy = g_strdup (value);
+  duckdb_free (value);
+  return copy;
+}
+
+wyrelog_error_t
+wyl_audit_conn_verify_chain (wyl_audit_conn_t *conn, gchar **out_error)
+{
+  duckdb_result result = { 0 };
+
+  if (conn == NULL)
+    return WYRELOG_E_INVALID;
+  if (out_error != NULL)
+    *out_error = NULL;
+
+  static const gchar *sql =
+      "SELECT id, created_at_us, subject_id, action, resource_id, "
+      "deny_reason, deny_origin, request_id, decision, stream_name, "
+      "event_kind, sequence_no, previous_hash, record_hash, checkpoint_root "
+      "FROM audit_events WHERE stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
+      "ORDER BY sequence_no ASC;";
+  if (duckdb_query (conn->conn, sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+
+  g_autofree gchar *previous_hash = g_strdup ("");
+  idx_t rows = duckdb_row_count (&result);
+  for (idx_t row = 0; row < rows; row++) {
+    gint64 expected_sequence = (gint64) row + 1;
+    gint64 sequence_no = duckdb_value_int64 (&result, 11, row);
+    if (sequence_no != expected_sequence) {
+      if (out_error != NULL)
+        *out_error = g_strdup ("missing_link");
+      duckdb_destroy_result (&result);
+      return WYRELOG_E_POLICY;
+    }
+
+    g_autofree gchar *id = dup_result_varchar (&result, 0, row);
+    gint64 created_at_us = duckdb_value_int64 (&result, 1, row);
+    g_autofree gchar *subject_id = dup_result_varchar (&result, 2, row);
+    g_autofree gchar *action = dup_result_varchar (&result, 3, row);
+    g_autofree gchar *resource_id = dup_result_varchar (&result, 4, row);
+    g_autofree gchar *deny_reason = dup_result_varchar (&result, 5, row);
+    g_autofree gchar *deny_origin = dup_result_varchar (&result, 6, row);
+    g_autofree gchar *request_id = dup_result_varchar (&result, 7, row);
+    wyl_decision_t decision =
+        (wyl_decision_t) duckdb_value_int64 (&result, 8, row);
+    g_autofree gchar *stream_name = dup_result_varchar (&result, 9, row);
+    g_autofree gchar *event_kind = dup_result_varchar (&result, 10, row);
+    g_autofree gchar *stored_previous = dup_result_varchar (&result, 12, row);
+    g_autofree gchar *stored_hash = dup_result_varchar (&result, 13, row);
+    g_autofree gchar *checkpoint_root = dup_result_varchar (&result, 14, row);
+
+    if (g_strcmp0 (stream_name, WYL_AUDIT_STREAM_AUDIT) != 0
+        || g_strcmp0 (stored_previous, previous_hash) != 0) {
+      if (out_error != NULL)
+        *out_error = g_strdup ("chain_link_mismatch");
+      duckdb_destroy_result (&result);
+      return WYRELOG_E_POLICY;
+    }
+
+    g_autofree gchar *expected_hash = compute_audit_record_hash (stream_name,
+        sequence_no, stored_previous, id, created_at_us, subject_id, action,
+        resource_id, deny_reason, deny_origin, request_id, decision,
+        event_kind);
+    if (g_strcmp0 (stored_hash, expected_hash) != 0
+        || g_strcmp0 (checkpoint_root, expected_hash) != 0) {
+      if (out_error != NULL)
+        *out_error = g_strdup ("record_hash_mismatch");
+      duckdb_destroy_result (&result);
+      return WYRELOG_E_POLICY;
+    }
+
+    g_free (previous_hash);
+    previous_hash = g_strdup (stored_hash);
+  }
+  duckdb_destroy_result (&result);
+
+  if (duckdb_query (conn->conn,
+          "SELECT COUNT(*) FROM audit_checkpoints c "
+          "LEFT JOIN audit_events e "
+          "ON c.stream_name = e.stream_name "
+          "AND c.sequence_no = e.sequence_no "
+          "WHERE c.stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
+          "AND e.id IS NULL;", &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_value_int64 (&result, 0, 0) != 0) {
+    if (out_error != NULL)
+      *out_error = g_strdup ("missing_link");
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+  duckdb_destroy_result (&result);
+
+  if (duckdb_query (conn->conn,
+          "SELECT COUNT(*) FROM audit_checkpoints c "
+          "JOIN audit_events e "
+          "ON c.stream_name = e.stream_name "
+          "AND c.sequence_no = e.sequence_no "
+          "WHERE c.stream_name = '" WYL_AUDIT_STREAM_AUDIT "' "
+          "AND c.root_hash != e.checkpoint_root;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_value_int64 (&result, 0, 0) != 0) {
+    if (out_error != NULL)
+      *out_error = g_strdup ("record_hash_mismatch");
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+  duckdb_destroy_result (&result);
+
+  if (duckdb_query (conn->conn,
+          "SELECT stream_name, sequence_no, COUNT(*) FROM audit_checkpoints "
+          "GROUP BY stream_name, sequence_no HAVING COUNT(*) > 1;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_row_count (&result) != 0) {
+    if (out_error != NULL)
+      *out_error = g_strdup ("duplicate_checkpoint");
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+  duckdb_destroy_result (&result);
+  return WYRELOG_E_OK;
 }
 
 static void
