@@ -604,7 +604,7 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
       return WYRELOG_E_CRYPTO;
     }
     store_open_opts.keyprovider_vtable = wyl_keyprovider_file_get_vtable ();
-    store_open_opts.keyprovider_state = keyprovider_state;
+    store_open_opts.keyprovider_state = g_steal_pointer (&keyprovider_state);
     store_open_opts.keyprovider_state_free =
         (void (*)(gpointer)) wyl_keyprovider_file_free;
   }
