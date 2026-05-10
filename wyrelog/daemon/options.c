@@ -20,6 +20,8 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
 #endif
     {"check", 0, 0, G_OPTION_ARG_NONE, &opts->check_only,
         "Load policy templates and exit", NULL},
+    {"production", 0, 0, G_OPTION_ARG_NONE, &opts->production_mode,
+        "Enable production fail-closed startup gates", NULL},
     {"version", 0, 0, G_OPTION_ARG_NONE, &opts->show_version,
         "Print version and exit", NULL},
     {"template-version", 0, 0, G_OPTION_ARG_NONE,

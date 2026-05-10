@@ -306,8 +306,9 @@ wyl_engine_map_wirelog_error (wirelog_error_t wl_err)
   }
 }
 
-wyrelog_error_t
-wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
+static wyrelog_error_t
+load_templates_internal (const gchar *template_dir,
+    gboolean require_template_manifest, gchar **dl_src_out,
     gsize *dl_src_len_out)
 {
   g_autoptr (GString) combined = g_string_new (NULL);
@@ -361,12 +362,7 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
   }
 
   wyrelog_error_t rc = wyl_engine_verify_template_manifest (template_dir,
-      combined->str, combined->len,
-#ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
-      TRUE,
-#else
-      FALSE,
-#endif
+      combined->str, combined->len, require_template_manifest,
       NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -379,11 +375,24 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
+    gsize *dl_src_len_out)
+{
+  return load_templates_internal (template_dir,
+#ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
+      TRUE,
+#else
+      FALSE,
+#endif
+      dl_src_out, dl_src_len_out);
+}
+
 /* --- Public API ---------------------------------------------------- */
 
 wyrelog_error_t
-wyl_engine_open (const gchar *template_dir, guint32 num_workers,
-    WylEngine **out)
+wyl_engine_open_with_options (const gchar *template_dir, guint32 num_workers,
+    gboolean require_template_manifest, WylEngine **out)
 {
   /* Set out-param to NULL at entry; every failure path leaves it NULL. */
   if (out != NULL)
@@ -397,8 +406,8 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
 
   gchar *dl_src = NULL;
   gsize dl_src_len = 0;
-  wyrelog_error_t rc =
-      wyl_engine_load_templates (template_dir, &dl_src, &dl_src_len);
+  wyrelog_error_t rc = load_templates_internal (template_dir,
+      require_template_manifest, &dl_src, &dl_src_len);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -440,6 +449,19 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
 
   *out = engine;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_engine_open (const gchar *template_dir, guint32 num_workers,
+    WylEngine **out)
+{
+  return wyl_engine_open_with_options (template_dir, num_workers,
+#ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
+      TRUE,
+#else
+      FALSE,
+#endif
+      out);
 }
 
 void

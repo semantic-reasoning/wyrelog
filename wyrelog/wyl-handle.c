@@ -72,6 +72,7 @@ struct _WylHandle
   wyl_policy_store_t *policy_store;
   gboolean login_skip_mfa_allowed;
   gboolean engine_pair_poisoned;
+  gboolean require_template_manifest;
   /*
    * Per-handle registry mapping wyl_session_id_t to live WylSession*.
    * Strong references; sessions stay alive at least until handle
@@ -577,6 +578,8 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     return WYRELOG_E_INVALID;
 
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
+  self->require_template_manifest = opts->require_template_manifest
+      || opts->production_mode;
 
   wyrelog_error_t rc =
       wyl_policy_store_open (opts->policy_store_path, &self->policy_store);
@@ -617,6 +620,29 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     return rc;
   }
 #endif
+
+  if (opts->production_mode) {
+#if defined(WYL_HAS_BREAK_GLASS) && !defined(WYL_HAS_AUDIT)
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "production mode requires audit when break-glass is compiled in");
+    g_object_unref (self);
+    return WYRELOG_E_POLICY;
+#endif
+#if defined(WYL_HAS_BREAK_GLASS) && defined(WYL_HAS_AUDIT)
+    if (opts->audit_store_path == NULL || opts->audit_store_path[0] == '\0') {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "production mode requires a durable audit store for break-glass");
+      g_object_unref (self);
+      return WYRELOG_E_POLICY;
+    }
+#endif
+#ifndef WYL_HAS_PRODUCTION_KEYPROVIDER
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "production mode requires a non-development KeyProvider");
+    g_object_unref (self);
+    return WYRELOG_E_POLICY;
+#endif
+  }
 
   *out_handle = self;
   return WYRELOG_E_OK;
@@ -1315,12 +1341,14 @@ replace_engine_pair (WylHandle *self, const gchar *template_dir)
   gchar *old_template_dir = self->template_dir;
 
   WylEngine *new_read_engine = NULL;
-  rc = wyl_engine_open (template_dir, 1, &new_read_engine);
+  rc = wyl_engine_open_with_options (template_dir, 1,
+      self->require_template_manifest, &new_read_engine);
   if (rc != WYRELOG_E_OK)
     return rc;
 
   WylEngine *new_delta_engine = NULL;
-  rc = wyl_engine_open (template_dir, 1, &new_delta_engine);
+  rc = wyl_engine_open_with_options (template_dir, 1,
+      self->require_template_manifest, &new_delta_engine);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (new_read_engine);
     return rc;

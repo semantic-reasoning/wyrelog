@@ -24,13 +24,11 @@ option('enable_client',
 option('require_tpm',
   type : 'boolean',
   value : true,
-  description : 'Runtime fail-closed gate for the hardware-backed key '
-              + 'provider. When true, wyrelog refuses to start if the '
-              + 'tss2-esys provider cannot be initialised, even if the '
-              + 'development stub is compiled in. Set to false only for '
-              + 'host development environments where running against the '
-              + 'dev key provider is acceptable. Wiring lands in a '
-              + 'follow-up commit (runtime gate in wyl_init).'
+  description : 'Release intent for hardware-backed key provider '
+              + 'requirements. Production daemon startup fails closed when '
+              + 'only the development KeyProvider is available; set this '
+              + 'false only for host development configurations that are '
+              + 'not expected to satisfy production key custody.'
 )
 
 option('enable_audit',
@@ -39,9 +37,7 @@ option('enable_audit',
   description : 'Build the DuckDB-backed audit subsystem that records '
               + 'access decisions to a local analytic store. Disabled by '
               + 'default pending dependency stabilisation; set to enabled '
-              + 'to opt in once the DuckDB integration is ready. Wiring '
-              + 'lands in a follow-up commit (audit sink + DuckDB '
-              + 'linkage).'
+              + 'to opt in to the DuckDB-backed audit sink.'
 )
 
 option('duckdb_source',
@@ -82,8 +78,7 @@ option('enable_break_glass',
               + 'enable for builds that ship the corresponding signed '
               + 'override credential. Must not be enabled unless '
               + 'enable_audit is also enabled, since the override path '
-              + 'requires a recorded audit reason code. Wiring lands in '
-              + 'a follow-up commit (override path + audit reason code).'
+              + 'requires a recorded audit reason code.'
 )
 
 option('require_template_manifest',
