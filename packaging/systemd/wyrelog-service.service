@@ -1,0 +1,31 @@
+[Unit]
+Description=Wyrelog service profile service
+Documentation=man:wyrelogd(1)
+After=network-online.target wyrelog-system.service
+Wants=network-online.target wyrelog-system.service
+
+[Service]
+Type=simple
+User=wyrelog
+Group=wyrelog
+Environment=WYL_LOG=warn
+EnvironmentFile=-/etc/wyrelog/service.env
+ExecStart=/usr/bin/wyrelogd --production --profile=service --template-dir /usr/share/wyrelog/access --policy-db /var/lib/wyrelog/service/policy.sqlite --policy-keyprovider /etc/wyrelog/service/policy.key --audit-db /var/log/wyrelog/service/audit.duckdb --system-url http://127.0.0.1:8765 --event-spool-dir /var/lib/wyrelog/service/event-spool --event-queue-limit 1024 --listen-port 8766
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/etc/wyrelog /usr/share/wyrelog
+ReadWritePaths=/var/lib/wyrelog/service /var/log/wyrelog/service /run/wyrelog
+RuntimeDirectory=wyrelog
+RuntimeDirectoryMode=0750
+StateDirectory=wyrelog
+StateDirectoryMode=0750
+LogsDirectory=wyrelog
+LogsDirectoryMode=0750
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

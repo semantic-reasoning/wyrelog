@@ -100,7 +100,11 @@ typedef struct
   gchar *access_token_key_id;
   gboolean access_token_secret_ready;
   gboolean production_mode;
+  WylDaemonProfile profile;
   gchar *policy_keyprovider_path;
+  gchar *system_url;
+  gchar *event_spool_dir;
+  guint event_queue_limit;
   GHashTable *sessions_by_token;
   GHashTable *access_tokens_by_jti;
   GHashTable *refresh_tokens_by_token;
@@ -124,6 +128,7 @@ typedef struct
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
 static void set_json_error (SoupServerMessage * msg, guint status,
     const gchar * code);
+static void set_json_ok (SoupServerMessage * msg);
 
 static gboolean
 wyl_daemon_tenant_is_known (const gchar *tenant)
@@ -189,6 +194,8 @@ wyl_daemon_http_context_free (gpointer data)
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   g_free (ctx->access_token_key_id);
   g_free (ctx->policy_keyprovider_path);
+  g_free (ctx->system_url);
+  g_free (ctx->event_spool_dir);
   g_hash_table_unref (ctx->sessions_by_token);
   g_hash_table_unref (ctx->access_tokens_by_jti);
   g_hash_table_unref (ctx->refresh_tokens_by_token);
@@ -301,7 +308,11 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   ctx->handle = handle;
   ctx->runtime = runtime;
   ctx->production_mode = opts->production_mode;
+  ctx->profile = opts->profile;
   ctx->policy_keyprovider_path = g_strdup (opts->policy_keyprovider_path);
+  ctx->system_url = g_strdup (opts->system_url);
+  ctx->event_spool_dir = g_strdup (opts->event_spool_dir);
+  ctx->event_queue_limit = opts->event_queue_limit;
   ctx->sessions_by_token =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
   ctx->access_tokens_by_jti = g_hash_table_new_full (g_str_hash, g_str_equal,
@@ -1351,6 +1362,59 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       strlen (body));
 }
 
+static void
+profile_status_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+
+  WylDaemonHttpContext *ctx = user_data;
+  const gchar *profile =
+      ctx->profile == WYL_DAEMON_PROFILE_SERVICE ? "service" : "system";
+  g_autoptr (GString) body = g_string_new ("{\"profile\":");
+  append_json_string (body, profile);
+  g_string_append (body, ",\"system_url\":");
+  if (ctx->system_url == NULL)
+    g_string_append (body, "null");
+  else
+    append_json_string (body, ctx->system_url);
+  g_string_append (body, ",\"event_spool_dir\":");
+  if (ctx->event_spool_dir == NULL)
+    g_string_append (body, "null");
+  else
+    append_json_string (body, ctx->event_spool_dir);
+  g_string_append_printf (body, ",\"event_queue_limit\":%u}",
+      ctx->event_queue_limit);
+
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+profile_events_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  if (ctx->profile != WYL_DAEMON_PROFILE_SYSTEM) {
+    set_json_error (msg, 403, "profile_event_ingest_denied");
+    return;
+  }
+
+  set_json_ok (msg);
+}
+
 static gboolean
 authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
@@ -2253,6 +2317,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       wyl_daemon_http_context_free);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
   soup_server_add_handler (server, "/readyz", readyz_handler, ctx, NULL);
+  soup_server_add_handler (server, "/profile/status", profile_status_handler,
+      ctx, NULL);
+  soup_server_add_handler (server, "/profile/events", profile_events_handler,
+      ctx, NULL);
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/refresh", refresh_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
