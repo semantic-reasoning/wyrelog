@@ -471,11 +471,16 @@ test_revoke_req = executable('test-revoke-req',
 
 test('revoke-req', test_revoke_req)
 
+test_decide_c_args = [
+  '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+]
+if get_option('enable_audit').allowed()
+  test_decide_c_args += '-DWYL_HAS_AUDIT'
+endif
+
 test_decide = executable('test-decide',
   'test-decide.c',
-  c_args : [
-    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-  ],
+  c_args : test_decide_c_args,
   dependencies : [wyrelog_dep, wirelog_dep],
 )
 
