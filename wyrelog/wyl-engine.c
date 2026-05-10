@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <string.h>
 
+#include <sodium.h>
+
 #include "wyrelog/wyrelog.h"
 #include "wyl-engine-private.h"
 #include "wyl-common-private.h"
@@ -26,6 +28,8 @@ G_STATIC_ASSERT (G_N_ELEMENTS (TEMPLATE_FILES) == WYL_ENGINE_TEMPLATE_COUNT);
 
 #define WYL_ENGINE_LOBAC_DECISION_TEMPLATE "lobac/decision.dl"
 #define WYL_ENGINE_LEGACY_DECISION_TEMPLATE "decision.dl"
+#define WYL_ENGINE_TEMPLATE_MANIFEST "manifest.ini"
+#define WYL_ENGINE_TEMPLATE_SIGNATURE_CONTEXT "wyrelog-template-v0-sha256"
 
 typedef struct
 {
@@ -59,6 +63,153 @@ relation_emits_delta_callback (const char *relation)
     return FALSE;
 
   return TRUE;
+}
+
+static wyrelog_error_t
+decode_hex_field (const gchar *field_name, const gchar *hex, guint8 *out,
+    gsize out_len)
+{
+  if (hex == NULL || out == NULL || out_len == 0)
+    return WYRELOG_E_POLICY;
+
+  gsize parsed_len = 0;
+  if (sodium_hex2bin (out, out_len, hex, strlen (hex), NULL, &parsed_len,
+          NULL) != 0 || parsed_len != out_len) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest has invalid %s hex", field_name);
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+static void
+hash_template_source_canonical (guint8 out_hash[crypto_hash_sha256_BYTES],
+    const gchar *dl_src, gsize dl_src_len)
+{
+  crypto_hash_sha256_state state;
+
+  crypto_hash_sha256_init (&state);
+  for (gsize i = 0; i < dl_src_len; i++) {
+    const guint8 c = (const guint8) dl_src[i];
+    if (c != '\r')
+      crypto_hash_sha256_update (&state, &c, 1);
+  }
+  crypto_hash_sha256_final (&state, out_hash);
+}
+
+wyrelog_error_t
+wyl_engine_verify_template_manifest (const gchar *template_dir,
+    const gchar *dl_src, gsize dl_src_len, gboolean require_manifest,
+    guint32 *template_version_out)
+{
+  if (template_version_out != NULL)
+    *template_version_out = 0;
+
+  if (template_dir == NULL || dl_src == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (sodium_init () < 0)
+    return WYRELOG_E_CRYPTO;
+
+  g_autofree gchar *manifest_path =
+      g_build_filename (template_dir, WYL_ENGINE_TEMPLATE_MANIFEST, NULL);
+  if (!g_file_test (manifest_path, G_FILE_TEST_EXISTS)) {
+    if (require_manifest) {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "missing required template manifest: %s",
+          WYL_ENGINE_TEMPLATE_MANIFEST);
+      return WYRELOG_E_POLICY;
+    }
+    return WYRELOG_E_OK;
+  }
+
+  g_autoptr (GKeyFile) key_file = g_key_file_new ();
+  g_autoptr (GError) error = NULL;
+  if (!g_key_file_load_from_file (key_file, manifest_path,
+          G_KEY_FILE_NONE, &error)) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT, "unreadable template manifest");
+    return WYRELOG_E_IO;
+  }
+
+  gint64 version = g_key_file_get_int64 (key_file, "template",
+      "version", &error);
+  if (error != NULL || version < 0 || version > G_MAXUINT32) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest has invalid version");
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *migration_semantics = g_key_file_get_string (key_file,
+      "template", "migration_semantics", &error);
+  if (error != NULL || g_strcmp0 (migration_semantics, "append-only") != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest rejects non append-only migration semantics");
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *hash_hex = g_key_file_get_string (key_file, "template",
+      "sha256", &error);
+  if (error != NULL) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT, "template manifest is missing sha256");
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *public_key_hex = g_key_file_get_string (key_file,
+      "signature", "public_key", &error);
+  if (error != NULL) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest is missing signature public key");
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *signature_hex = g_key_file_get_string (key_file,
+      "signature", "ed25519", &error);
+  if (error != NULL) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest is missing Ed25519 signature");
+    return WYRELOG_E_POLICY;
+  }
+
+  guint8 expected_hash[crypto_hash_sha256_BYTES];
+  wyrelog_error_t rc = decode_hex_field ("sha256", hash_hex, expected_hash,
+      sizeof expected_hash);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  guint8 public_key[crypto_sign_PUBLICKEYBYTES];
+  rc = decode_hex_field ("public_key", public_key_hex, public_key,
+      sizeof public_key);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  guint8 signature[crypto_sign_BYTES];
+  rc = decode_hex_field ("ed25519", signature_hex, signature, sizeof signature);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  guint8 actual_hash[crypto_hash_sha256_BYTES];
+  hash_template_source_canonical (actual_hash, dl_src, dl_src_len);
+  if (sodium_memcmp (actual_hash, expected_hash, sizeof actual_hash) != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest hash does not match loaded templates");
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autoptr (GByteArray) signed_payload = g_byte_array_new ();
+  g_byte_array_append (signed_payload,
+      (const guint8 *) WYL_ENGINE_TEMPLATE_SIGNATURE_CONTEXT,
+      strlen (WYL_ENGINE_TEMPLATE_SIGNATURE_CONTEXT));
+  g_byte_array_append (signed_payload, actual_hash, sizeof actual_hash);
+  if (crypto_sign_verify_detached (signature, signed_payload->data,
+          signed_payload->len, public_key) != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest signature verification failed");
+    return WYRELOG_E_CRYPTO;
+  }
+
+  if (template_version_out != NULL)
+    *template_version_out = (guint32) version;
+  return WYRELOG_E_OK;
 }
 
 static void
@@ -208,6 +359,17 @@ wyl_engine_load_templates (const gchar *template_dir, gchar **dl_src_out,
         "engine: invariant violated — in-tree templates produced zero bytes");
     return WYRELOG_E_INTERNAL;
   }
+
+  wyrelog_error_t rc = wyl_engine_verify_template_manifest (template_dir,
+      combined->str, combined->len,
+#ifdef WYL_REQUIRE_TEMPLATE_MANIFEST
+      TRUE,
+#else
+      FALSE,
+#endif
+      NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   /* Capture the authoritative byte count before transferring ownership of the
    * underlying buffer.  strlen() must not be used for the subsequent memset

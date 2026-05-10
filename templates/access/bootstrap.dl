@@ -56,6 +56,8 @@
 // ---------------------------------------------------------------------------
 // EDB: built-in roles (system profile)
 // ---------------------------------------------------------------------------
+wr_template_version(0).
+
 role("wr.system_admin").       // operates the daemon; cannot read audit
 role("wr.auditor").            // read-only over __wyrelog.audit.*
 role("wr.system_agent").       // internal service principal for Merkle work

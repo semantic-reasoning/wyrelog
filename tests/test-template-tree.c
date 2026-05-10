@@ -99,6 +99,7 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
     ".decl effective_permission(role: symbol, perm: symbol)",
     ".decl has_permission(user: symbol, perm: symbol, scope: symbol)",
     ".decl login_skip_mfa_authz(user: symbol)",
+    "wr_template_version(0).",
     "permission(\"wr.policy.read\").",
     "permission(\"wr.policy.write\").",
     "permission(\"wr.policy.grant_role\").",
@@ -321,6 +322,55 @@ check_audit_schema_contracts (void)
   return check_audit_schema_contract ("duckdb-schema.sql", 180);
 }
 
+static gint
+check_template_manifest_contract (void)
+{
+  g_autofree gchar *path =
+      g_build_filename (WYL_TEST_TEMPLATE_DIR, "manifest.ini", NULL);
+  g_autoptr (GKeyFile) key_file = g_key_file_new ();
+  g_autoptr (GError) error = NULL;
+
+  if (!g_key_file_load_from_file (key_file, path, G_KEY_FILE_NONE, &error))
+    return 210;
+
+  gint64 version = g_key_file_get_int64 (key_file, "template", "version",
+      &error);
+  if (error != NULL || version != 0)
+    return 211;
+
+  g_autofree gchar *semantics = g_key_file_get_string (key_file,
+      "template", "migration_semantics", &error);
+  if (error != NULL || g_strcmp0 (semantics, "append-only") != 0)
+    return 212;
+
+  g_autofree gchar *hash = g_key_file_get_string (key_file, "template",
+      "sha256", &error);
+  if (error != NULL || strlen (hash) != 64)
+    return 213;
+
+  g_autofree gchar *algorithm = g_key_file_get_string (key_file,
+      "signature", "algorithm", &error);
+  if (error != NULL || g_strcmp0 (algorithm, "ed25519") != 0)
+    return 214;
+
+  g_autofree gchar *context = g_key_file_get_string (key_file, "signature",
+      "context", &error);
+  if (error != NULL || g_strcmp0 (context, "wyrelog-template-v0-sha256") != 0)
+    return 215;
+
+  g_autofree gchar *public_key = g_key_file_get_string (key_file,
+      "signature", "public_key", &error);
+  if (error != NULL || strlen (public_key) != 64)
+    return 216;
+
+  g_autofree gchar *signature = g_key_file_get_string (key_file,
+      "signature", "ed25519", &error);
+  if (error != NULL || strlen (signature) != 128)
+    return 217;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -335,5 +385,8 @@ main (void)
   rc = check_permission_scope_relation_contract ();
   if (rc != 0)
     return rc;
-  return check_audit_schema_contracts ();
+  rc = check_audit_schema_contracts ();
+  if (rc != 0)
+    return rc;
+  return check_template_manifest_contract ();
 }

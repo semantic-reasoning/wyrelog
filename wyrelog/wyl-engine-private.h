@@ -72,6 +72,10 @@ wyrelog_error_t wyl_engine_map_wirelog_error (wirelog_error_t wl_err);
 wyrelog_error_t wyl_engine_load_templates (const gchar * template_dir,
     gchar ** dl_src_out, gsize * dl_src_len_out);
 
+wyrelog_error_t wyl_engine_verify_template_manifest (const gchar * template_dir,
+    const gchar * dl_src, gsize dl_src_len, gboolean require_manifest,
+    guint32 * template_version_out);
+
 /*
  * wyl_engine_make_compound:
  * @self: A `WylEngine` instance. Must not be NULL.

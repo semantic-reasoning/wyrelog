@@ -544,11 +544,16 @@ endif
 # by install_subdir at the top-level meson.build — is not
 # exercised by these tests. Validation of the installed layout is
 # tracked as packaging-CI follow-up rather than unit-test concern.
+test_engine_c_args = [
+  '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+]
+if get_option('require_template_manifest')
+  test_engine_c_args += '-DWYL_REQUIRE_TEMPLATE_MANIFEST'
+endif
+
 test_engine = executable('test-engine',
   'test-engine.c',
-  c_args : [
-    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-  ],
+  c_args : test_engine_c_args,
   dependencies : [wyrelog_dep, wirelog_dep],
 )
 

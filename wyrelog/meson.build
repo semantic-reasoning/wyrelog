@@ -69,6 +69,9 @@ if get_option('enable_audit').allowed()
   wyrelog_deps += duckdb_dep
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
 endif
+if get_option('require_template_manifest')
+  wyrelog_c_args += '-DWYL_REQUIRE_TEMPLATE_MANIFEST'
+endif
 
 if get_option('enable_break_glass')
   wyrelog_c_args += '-DWYL_HAS_BREAK_GLASS'
@@ -130,7 +133,7 @@ else
   wyctl_exe = disabler()
 endif
 
-wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep]
+wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep, wirelog_dep]
 wyrelogd_c_args = [
   '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
 ]
