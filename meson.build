@@ -92,6 +92,23 @@ install_subdir(
   install_dir : join_paths(get_option('datadir'), 'wyrelog'),
 )
 
+install_data(
+  'packaging/systemd/wyrelog.service',
+  install_dir : join_paths(get_option('prefix'), 'lib', 'systemd', 'system'),
+)
+install_data(
+  'packaging/sysusers.d/wyrelog.conf',
+  install_dir : join_paths(get_option('prefix'), 'lib', 'sysusers.d'),
+)
+install_data(
+  'packaging/tmpfiles.d/wyrelog.conf',
+  install_dir : join_paths(get_option('prefix'), 'lib', 'tmpfiles.d'),
+)
+install_data(
+  'packaging/wyrelogd.env',
+  install_dir : join_paths(get_option('sysconfdir'), 'wyrelog'),
+)
+
 # Install git pre-commit hook for code style checking
 git_hook_script = find_program('hooks/pre-commit.hook')
 git_dir = join_paths(meson.project_source_root(), '.git')

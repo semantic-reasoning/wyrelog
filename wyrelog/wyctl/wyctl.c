@@ -60,10 +60,16 @@ typedef struct
   gchar *guard_risk_arg;
 } WyctlPolicyRoleOptions;
 
+typedef struct
+{
+  gchar *keyprovider_path;
+} WyctlKeyOptions;
+
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
 #define WYCTL_MAX_TIMEOUT_MS 60000
 #define WYCTL_AUDIT_DEFAULT_LIMIT 100
 #define WYCTL_AUDIT_MAX_LIMIT 100
+#define WYCTL_KEYPROVIDER_FILE_BYTES 32
 
 typedef struct
 {
@@ -1130,6 +1136,64 @@ run_audit (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+static int
+run_key_status (gint argc, gchar **argv)
+{
+  WyctlKeyOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
+        "Policy KeyProvider state file", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog key status");
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected key status argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (opts.keyprovider_path == NULL || opts.keyprovider_path[0] == '\0') {
+    g_printerr ("wyctl: missing --keyprovider\n");
+    return 2;
+  }
+
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  if (!g_file_get_contents (opts.keyprovider_path, &contents, &len, NULL)) {
+    g_printerr ("wyctl: keyprovider unreadable\n");
+    return 1;
+  }
+  if (len != WYCTL_KEYPROVIDER_FILE_BYTES) {
+    g_printerr ("wyctl: keyprovider invalid\n");
+    return 1;
+  }
+
+  g_print ("status=ready type=file bytes=%u\n",
+      (guint) WYCTL_KEYPROVIDER_FILE_BYTES);
+  return 0;
+}
+
+static int
+run_key (gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing key command\n");
+    return 2;
+  }
+
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_key_status (argc - 1, argv + 1);
+
+  g_printerr ("wyctl: unknown key command: %s\n", argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1171,6 +1235,8 @@ main (int argc, char **argv)
     return run_policy (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "audit") == 0)
     return run_audit (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "key") == 0)
+    return run_key (argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;
