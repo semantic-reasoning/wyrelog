@@ -75,6 +75,8 @@ wyrelog_error_t wyl_engine_load_templates (const gchar * template_dir,
 wyrelog_error_t wyl_engine_verify_template_manifest (const gchar * template_dir,
     const gchar * dl_src, gsize dl_src_len, gboolean require_manifest,
     guint32 * template_version_out);
+wyrelog_error_t wyl_engine_open_with_options (const gchar * template_dir,
+    guint32 num_workers, gboolean require_template_manifest, WylEngine ** out);
 
 /*
  * wyl_engine_make_compound:

@@ -22,6 +22,8 @@ typedef struct
 #ifdef WYL_HAS_AUDIT
   const gchar *audit_store_path;
 #endif
+  gboolean production_mode;
+  gboolean require_template_manifest;
 } WylHandleOpenOptions;
 
 /*

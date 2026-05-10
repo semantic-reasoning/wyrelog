@@ -12,6 +12,7 @@ typedef struct
 #endif
   gint listen_port;
   gboolean check_only;
+  gboolean production_mode;
   gboolean show_version;
   gboolean show_template_version;
 } WylDaemonOptions;
