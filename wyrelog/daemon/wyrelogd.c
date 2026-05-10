@@ -53,5 +53,31 @@ main (int argc, char **argv)
     return 0;
   }
 
+  if (opts.show_template_info) {
+    gchar *dl_src = NULL;
+    gsize dl_src_len = 0;
+    wyrelog_error_t rc =
+        wyl_engine_load_templates (opts.template_dir, &dl_src, &dl_src_len);
+    WylTemplateArtifactInfo info = { 0 };
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_engine_inspect_template_artifact (opts.template_dir, dl_src,
+          dl_src_len, TRUE, &info);
+    }
+    if (dl_src != NULL) {
+      memset (dl_src, 0, dl_src_len);
+      g_free (dl_src);
+    }
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: template info unavailable: %s\n",
+          wyrelog_error_string (rc));
+      return 3;
+    }
+    g_print
+        ("version=%u\nsha256=%s\nmigrations=%u\nlatest_migration_version=%u\n",
+        info.version, info.sha256_hex, info.migration_count,
+        info.latest_migration_version);
+    return 0;
+  }
+
   return wyl_daemon_run_runtime (&opts);
 }

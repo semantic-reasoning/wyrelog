@@ -30,6 +30,8 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
     {"template-version", 0, 0, G_OPTION_ARG_NONE,
           &opts->show_template_version,
         "Print access template version and exit", NULL},
+    {"template-info", 0, 0, G_OPTION_ARG_NONE, &opts->show_template_info,
+        "Print access template artifact identity and exit", NULL},
     {NULL}
   };
 

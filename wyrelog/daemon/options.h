@@ -16,6 +16,7 @@ typedef struct
   gboolean production_mode;
   gboolean show_version;
   gboolean show_template_version;
+  gboolean show_template_info;
 } WylDaemonOptions;
 
 gboolean wyl_daemon_parse_options (gint * argc, gchar *** argv,

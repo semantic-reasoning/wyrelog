@@ -120,6 +120,32 @@ copy_manifest_to (const gchar *dest_dir)
   return TRUE;
 }
 
+static gboolean
+copy_migrations_to (const gchar *dest_dir)
+{
+  g_autofree gchar *dst_dir = g_build_filename (dest_dir, "migrations", NULL);
+  if (g_mkdir (dst_dir, 0755) != 0)
+    return FALSE;
+
+  g_autofree gchar *src = g_build_filename (WYL_TEST_TEMPLATE_DIR,
+      "migrations", "0000-baseline.ini", NULL);
+  g_autofree gchar *dst = g_build_filename (dst_dir, "0000-baseline.ini",
+      NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+
+  if (!g_file_get_contents (src, &contents, &len, &err))
+    return FALSE;
+  return g_file_set_contents (dst, contents, (gssize) len, &err);
+}
+
+static gboolean
+copy_template_artifacts_to (const gchar *dest_dir)
+{
+  return copy_manifest_to (dest_dir) && copy_migrations_to (dest_dir);
+}
+
 /*
  * rmdir_recursive: removes a directory and all its contents.
  * Only goes one level deep (sufficient for our tmpdir layout).
@@ -640,7 +666,7 @@ test_template_manifest_rejects_tampered_template (void)
   g_autofree gchar *tmpdir = make_tmpdir ();
   if (tmpdir == NULL)
     return 120;
-  if (!copy_real_templates_to (tmpdir) || !copy_manifest_to (tmpdir)) {
+  if (!copy_real_templates_to (tmpdir) || !copy_template_artifacts_to (tmpdir)) {
     rmdir_recursive (tmpdir);
     return 121;
   }
@@ -674,7 +700,7 @@ test_template_manifest_rejects_retraction_migrations (void)
   g_autofree gchar *tmpdir = make_tmpdir ();
   if (tmpdir == NULL)
     return 130;
-  if (!copy_real_templates_to (tmpdir) || !copy_manifest_to (tmpdir)) {
+  if (!copy_real_templates_to (tmpdir) || !copy_template_artifacts_to (tmpdir)) {
     rmdir_recursive (tmpdir);
     return 131;
   }
@@ -718,6 +744,198 @@ test_template_manifest_rejects_retraction_migrations (void)
         "expected WYRELOG_E_POLICY, got %d\n", (int) rc);
     return 135;
   }
+  return 0;
+}
+
+static gint
+test_template_artifact_info_reports_identity (void)
+{
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc =
+      wyl_engine_load_templates (WYL_TEST_TEMPLATE_DIR, &dl_src, &dl_src_len);
+  if (rc != WYRELOG_E_OK)
+    return 140;
+
+  WylTemplateArtifactInfo info = { 0 };
+  rc = wyl_engine_inspect_template_artifact (WYL_TEST_TEMPLATE_DIR, dl_src,
+      dl_src_len, TRUE, &info);
+
+  memset (dl_src, 0, dl_src_len);
+  g_free (dl_src);
+
+  if (rc != WYRELOG_E_OK)
+    return 141;
+  if (info.version != 0 || info.migration_count != 1 ||
+      info.latest_migration_version != 0)
+    return 142;
+  if (g_strcmp0 (info.sha256_hex,
+          "41859bb3c341edf977b72379afc92d8b288cd3eeaf1159b11a72ccbe95e76b0f")
+      != 0)
+    return 143;
+  return 0;
+}
+
+static gint
+test_template_artifact_rejects_missing_migration (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 150;
+  if (!copy_real_templates_to (tmpdir) || !copy_manifest_to (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 151;
+  }
+
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
+      &dl_src_len);
+  if (dl_src != NULL) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+  }
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_POLICY) {
+    g_printerr ("test_template_artifact_rejects_missing_migration: "
+        "expected WYRELOG_E_POLICY, got %d\n", (int) rc);
+    return 152;
+  }
+  return 0;
+}
+
+static gint
+test_template_artifact_rejects_duplicate_migration (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 160;
+  if (!copy_real_templates_to (tmpdir) || !copy_template_artifacts_to (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 161;
+  }
+  g_autofree gchar *src = g_build_filename (tmpdir, "migrations",
+      "0000-baseline.ini", NULL);
+  g_autofree gchar *dst = g_build_filename (tmpdir, "migrations",
+      "0001-duplicate.ini", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (src, &contents, &len, &err)
+      || !g_file_set_contents (dst, contents, (gssize) len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 162;
+  }
+
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
+      &dl_src_len);
+  if (dl_src != NULL) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+  }
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_POLICY)
+    return 163;
+  return 0;
+}
+
+static gint
+test_template_artifact_rejects_tampered_migration_signature (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 170;
+  if (!copy_real_templates_to (tmpdir) || !copy_template_artifacts_to (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 171;
+  }
+  g_autofree gchar *path = g_build_filename (tmpdir, "migrations",
+      "0000-baseline.ini", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (path, &contents, &len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 172;
+  }
+  gchar *pos = strstr (contents, "operation=baseline");
+  if (pos == NULL) {
+    rmdir_recursive (tmpdir);
+    return 173;
+  }
+  g_autoptr (GString) bad = g_string_new_len (contents,
+      (gssize) (pos - contents));
+  g_string_append (bad, "operation=additive");
+  g_string_append (bad, pos + strlen ("operation=baseline"));
+  if (!g_file_set_contents (path, bad->str, -1, &err)) {
+    rmdir_recursive (tmpdir);
+    return 174;
+  }
+
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
+      &dl_src_len);
+  if (dl_src != NULL) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+  }
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_POLICY)
+    return 175;
+  return 0;
+}
+
+static gint
+test_template_artifact_rejects_reserved_namespace_violation (void)
+{
+  g_autofree gchar *tmpdir = make_tmpdir ();
+  if (tmpdir == NULL)
+    return 180;
+  if (!copy_real_templates_to (tmpdir) || !copy_template_artifacts_to (tmpdir)) {
+    rmdir_recursive (tmpdir);
+    return 181;
+  }
+  g_autofree gchar *path = g_build_filename (tmpdir, "migrations",
+      "0000-baseline.ini", NULL);
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_autoptr (GError) err = NULL;
+  if (!g_file_get_contents (path, &contents, &len, &err)) {
+    rmdir_recursive (tmpdir);
+    return 182;
+  }
+  gchar *pos = strstr (contents, "reserved_namespace=wr.");
+  if (pos == NULL) {
+    rmdir_recursive (tmpdir);
+    return 183;
+  }
+  g_autoptr (GString) bad = g_string_new_len (contents,
+      (gssize) (pos - contents));
+  g_string_append (bad, "reserved_namespace=customer.");
+  g_string_append (bad, pos + strlen ("reserved_namespace=wr."));
+  if (!g_file_set_contents (path, bad->str, -1, &err)) {
+    rmdir_recursive (tmpdir);
+    return 184;
+  }
+
+  gchar *dl_src = NULL;
+  gsize dl_src_len = 0;
+  wyrelog_error_t rc = wyl_engine_load_templates (tmpdir, &dl_src,
+      &dl_src_len);
+  if (dl_src != NULL) {
+    memset (dl_src, 0, dl_src_len);
+    g_free (dl_src);
+  }
+  rmdir_recursive (tmpdir);
+
+  if (rc != WYRELOG_E_POLICY)
+    return 185;
   return 0;
 }
 
@@ -770,6 +988,23 @@ main (void)
     return rc;
 
   if ((rc = test_template_manifest_rejects_retraction_migrations ()) != 0)
+    return rc;
+
+  if ((rc = test_template_artifact_info_reports_identity ()) != 0)
+    return rc;
+
+  if ((rc = test_template_artifact_rejects_missing_migration ()) != 0)
+    return rc;
+
+  if ((rc = test_template_artifact_rejects_duplicate_migration ()) != 0)
+    return rc;
+
+  if ((rc =
+          test_template_artifact_rejects_tampered_migration_signature ()) != 0)
+    return rc;
+
+  if ((rc =
+          test_template_artifact_rejects_reserved_namespace_violation ()) != 0)
     return rc;
 
   return 0;

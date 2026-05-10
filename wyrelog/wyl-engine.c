@@ -30,6 +30,9 @@ G_STATIC_ASSERT (G_N_ELEMENTS (TEMPLATE_FILES) == WYL_ENGINE_TEMPLATE_COUNT);
 #define WYL_ENGINE_LEGACY_DECISION_TEMPLATE "decision.dl"
 #define WYL_ENGINE_TEMPLATE_MANIFEST "manifest.ini"
 #define WYL_ENGINE_TEMPLATE_SIGNATURE_CONTEXT "wyrelog-template-v0-sha256"
+#define WYL_ENGINE_TEMPLATE_MIGRATION_DIR "migrations"
+#define WYL_ENGINE_TEMPLATE_MIGRATION_SIGNATURE_CONTEXT \
+  "wyrelog-template-migration-v0-sha256"
 
 typedef struct
 {
@@ -97,13 +100,254 @@ hash_template_source_canonical (guint8 out_hash[crypto_hash_sha256_BYTES],
   crypto_hash_sha256_final (&state, out_hash);
 }
 
-wyrelog_error_t
-wyl_engine_verify_template_manifest (const gchar *template_dir,
-    const gchar *dl_src, gsize dl_src_len, gboolean require_manifest,
-    guint32 *template_version_out)
+static gchar *
+hex_encode (const guint8 *data, gsize len)
 {
-  if (template_version_out != NULL)
-    *template_version_out = 0;
+  gchar *hex = g_malloc0 ((len * 2) + 1);
+  sodium_bin2hex (hex, (len * 2) + 1, data, len);
+  return hex;
+}
+
+static gchar *
+canonical_migration_payload (const gchar *id, guint64 sequence,
+    guint64 from_version, guint64 to_version, const gchar *semantics,
+    const gchar *operation, const gchar *reserved_namespace)
+{
+  return g_strdup_printf ("id=%s\nsequence=%" G_GUINT64_FORMAT
+      "\nfrom_version=%" G_GUINT64_FORMAT "\nto_version=%" G_GUINT64_FORMAT
+      "\nsemantics=%s\noperation=%s\n" "reserved_namespace=%s\n", id, sequence,
+      from_version, to_version, semantics, operation, reserved_namespace);
+}
+
+static gboolean
+migration_operation_is_append_only (const gchar *operation)
+{
+  return g_strcmp0 (operation, "baseline") == 0
+      || g_strcmp0 (operation, "additive") == 0
+      || g_strcmp0 (operation, "supersession") == 0;
+}
+
+static gint
+compare_string_ptr (gconstpointer a, gconstpointer b)
+{
+  const gchar *const *sa = a;
+  const gchar *const *sb = b;
+  return g_strcmp0 (*sa, *sb);
+}
+
+static wyrelog_error_t
+verify_migration_artifact (const gchar *path, const gchar *name,
+    guint32 expected_sequence, guint32 expected_from_version,
+    GHashTable *seen_ids, GHashTable *seen_sequences, guint32 *to_version_out)
+{
+  g_autoptr (GKeyFile) key_file = g_key_file_new ();
+  g_autoptr (GError) error = NULL;
+  if (!g_key_file_load_from_file (key_file, path, G_KEY_FILE_NONE, &error)) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "unreadable template migration artifact: %s", name);
+    return WYRELOG_E_IO;
+  }
+
+  gint64 sequence = g_key_file_get_int64 (key_file, "migration", "sequence",
+      &error);
+  if (error != NULL || sequence < 0 || sequence > G_MAXUINT32
+      || (guint32) sequence != expected_sequence) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact has invalid sequence: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  gchar expected_prefix[16];
+  g_snprintf (expected_prefix, sizeof expected_prefix, "%04u-",
+      (guint) expected_sequence);
+  if (!g_str_has_prefix (name, expected_prefix)) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact order does not match filename: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *id = g_key_file_get_string (key_file, "migration", "id",
+      &error);
+  if (error != NULL || id == NULL || id[0] == '\0') {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact has invalid id: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  if (g_hash_table_contains (seen_ids, id)
+      || g_hash_table_contains (seen_sequences, GUINT_TO_POINTER ((guint)
+              sequence))) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact is duplicated: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  gint64 from_version = g_key_file_get_int64 (key_file, "migration",
+      "from_version", &error);
+  if (error != NULL || from_version < 0 || from_version > G_MAXUINT32
+      || (guint32) from_version != expected_from_version) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact has invalid from_version: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  gint64 to_version = g_key_file_get_int64 (key_file, "migration",
+      "to_version", &error);
+  if (error != NULL || to_version < from_version || to_version > G_MAXUINT32) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact has invalid to_version: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *semantics = g_key_file_get_string (key_file, "migration",
+      "semantics", &error);
+  if (error != NULL || g_strcmp0 (semantics, "append-only") != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact rejects append-only semantics: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *operation = g_key_file_get_string (key_file, "migration",
+      "operation", &error);
+  if (error != NULL || !migration_operation_is_append_only (operation)) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact has non append-only operation: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *reserved_namespace = g_key_file_get_string (key_file,
+      "migration", "reserved_namespace", &error);
+  if (error != NULL || g_strcmp0 (reserved_namespace, "wr.") != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact violates reserved namespace: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *hash_hex = g_key_file_get_string (key_file, "migration",
+      "sha256", &error);
+  g_autofree gchar *public_key_hex = g_key_file_get_string (key_file,
+      "signature", "public_key", &error);
+  g_autofree gchar *signature_hex = g_key_file_get_string (key_file,
+      "signature", "ed25519", &error);
+  if (error != NULL) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact is missing signed identity: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  guint8 expected_hash[crypto_hash_sha256_BYTES];
+  wyrelog_error_t rc = decode_hex_field ("migration sha256", hash_hex,
+      expected_hash, sizeof expected_hash);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *payload = canonical_migration_payload (id,
+      (guint64) sequence, (guint64) from_version, (guint64) to_version,
+      semantics, operation, reserved_namespace);
+  guint8 actual_hash[crypto_hash_sha256_BYTES];
+  crypto_hash_sha256 (actual_hash, (const guint8 *) payload, strlen (payload));
+  if (sodium_memcmp (actual_hash, expected_hash, sizeof actual_hash) != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact hash mismatch: %s", name);
+    return WYRELOG_E_POLICY;
+  }
+
+  guint8 public_key[crypto_sign_PUBLICKEYBYTES];
+  rc = decode_hex_field ("migration public_key", public_key_hex, public_key,
+      sizeof public_key);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint8 signature[crypto_sign_BYTES];
+  rc = decode_hex_field ("migration ed25519", signature_hex, signature,
+      sizeof signature);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (GByteArray) signed_payload = g_byte_array_new ();
+  g_byte_array_append (signed_payload,
+      (const guint8 *) WYL_ENGINE_TEMPLATE_MIGRATION_SIGNATURE_CONTEXT,
+      strlen (WYL_ENGINE_TEMPLATE_MIGRATION_SIGNATURE_CONTEXT));
+  g_byte_array_append (signed_payload, actual_hash, sizeof actual_hash);
+  if (crypto_sign_verify_detached (signature, signed_payload->data,
+          signed_payload->len, public_key) != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration artifact signature verification failed: %s", name);
+    return WYRELOG_E_CRYPTO;
+  }
+
+  g_hash_table_add (seen_ids, g_strdup (id));
+  g_hash_table_add (seen_sequences, GUINT_TO_POINTER ((guint) sequence));
+  *to_version_out = (guint32) to_version;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+verify_template_migrations (const gchar *template_dir,
+    const gchar *migration_path, guint32 template_version,
+    guint32 *migration_count_out, guint32 *latest_migration_version_out)
+{
+  *migration_count_out = 0;
+  *latest_migration_version_out = template_version;
+
+  if (migration_path == NULL || migration_path[0] == '\0')
+    return WYRELOG_E_OK;
+  if (g_path_is_absolute (migration_path)
+      || strstr (migration_path, "..") != NULL) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template manifest has invalid migration path");
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *dir_path = g_build_filename (template_dir,
+      migration_path, NULL);
+  g_autoptr (GDir) dir = g_dir_open (dir_path, 0, NULL);
+  if (dir == NULL) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "missing template migration directory: %s", migration_path);
+    return WYRELOG_E_POLICY;
+  }
+
+  g_autoptr (GPtrArray) names = g_ptr_array_new_with_free_func (g_free);
+  const gchar *entry = NULL;
+  while ((entry = g_dir_read_name (dir)) != NULL) {
+    if (g_str_has_suffix (entry, ".ini"))
+      g_ptr_array_add (names, g_strdup (entry));
+  }
+  if (names->len == 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "template migration directory is empty: %s", migration_path);
+    return WYRELOG_E_POLICY;
+  }
+  g_ptr_array_sort (names, compare_string_ptr);
+
+  g_autoptr (GHashTable) seen_ids = g_hash_table_new_full (g_str_hash,
+      g_str_equal, g_free, NULL);
+  g_autoptr (GHashTable) seen_sequences = g_hash_table_new (g_direct_hash,
+      g_direct_equal);
+  guint32 expected_from_version = template_version;
+  for (guint i = 0; i < names->len; i++) {
+    const gchar *name = g_ptr_array_index (names, i);
+    g_autofree gchar *path = g_build_filename (dir_path, name, NULL);
+    guint32 to_version = 0;
+    wyrelog_error_t rc = verify_migration_artifact (path, name, i,
+        expected_from_version, seen_ids, seen_sequences, &to_version);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    expected_from_version = to_version;
+  }
+
+  *migration_count_out = names->len;
+  *latest_migration_version_out = expected_from_version;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_engine_inspect_template_artifact (const gchar *template_dir,
+    const gchar *dl_src, gsize dl_src_len, gboolean require_manifest,
+    WylTemplateArtifactInfo *info_out)
+{
+  if (info_out != NULL)
+    memset (info_out, 0, sizeof *info_out);
 
   if (template_dir == NULL || dl_src == NULL)
     return WYRELOG_E_INVALID;
@@ -147,6 +391,8 @@ wyl_engine_verify_template_manifest (const gchar *template_dir,
     return WYRELOG_E_POLICY;
   }
 
+  g_autofree gchar *migration_path = g_key_file_get_string (key_file,
+      "template", "migration_path", NULL);
   g_autofree gchar *hash_hex = g_key_file_get_string (key_file, "template",
       "sha256", &error);
   if (error != NULL) {
@@ -207,9 +453,36 @@ wyl_engine_verify_template_manifest (const gchar *template_dir,
     return WYRELOG_E_CRYPTO;
   }
 
-  if (template_version_out != NULL)
-    *template_version_out = (guint32) version;
+  guint32 migration_count = 0;
+  guint32 latest_migration_version = 0;
+  rc = verify_template_migrations (template_dir, migration_path,
+      (guint32) version, &migration_count, &latest_migration_version);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (info_out != NULL) {
+    info_out->version = (guint32) version;
+    info_out->migration_count = migration_count;
+    info_out->latest_migration_version = latest_migration_version;
+    g_autofree gchar *actual_hash_hex = hex_encode (actual_hash,
+        sizeof actual_hash);
+    g_strlcpy (info_out->sha256_hex, actual_hash_hex,
+        sizeof info_out->sha256_hex);
+  }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_engine_verify_template_manifest (const gchar *template_dir,
+    const gchar *dl_src, gsize dl_src_len, gboolean require_manifest,
+    guint32 *template_version_out)
+{
+  WylTemplateArtifactInfo info = { 0 };
+  wyrelog_error_t rc = wyl_engine_inspect_template_artifact (template_dir,
+      dl_src, dl_src_len, require_manifest, &info);
+  if (rc == WYRELOG_E_OK && template_version_out != NULL)
+    *template_version_out = info.version;
+  return rc;
 }
 
 static void
