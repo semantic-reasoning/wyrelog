@@ -318,6 +318,57 @@ check_chain_verifies_clean_store (void)
 }
 
 static gint
+check_chain_tail_cache_hydrates_after_reopen (void)
+{
+  g_autoptr (GError) err = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-audit-chain-XXXXXX", &err);
+  if (tmpdir == NULL)
+    return 126;
+  g_autofree gchar *path = g_build_filename (tmpdir, "audit.db", NULL);
+
+  g_autoptr (wyl_audit_conn_t) conn = NULL;
+  if (wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK)
+    return 127;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 128;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000103",
+          "alice") != 0)
+    return 129;
+  wyl_audit_conn_close (g_steal_pointer (&conn));
+
+  if (wyl_audit_conn_open (path, &conn) != WYRELOG_E_OK)
+    return 136;
+  if (wyl_audit_conn_create_schema (conn) != WYRELOG_E_OK)
+    return 137;
+  if (insert_chain_event (conn, "01890c10-2e3f-7000-8000-000000000104",
+          "bob") != 0)
+    return 138;
+
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  duckdb_result result = { 0 };
+  if (duckdb_query (h,
+          "SELECT COUNT(*) FROM audit_events "
+          "WHERE sequence_no = 2 AND previous_hash != '';",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 139;
+  }
+  gboolean linked = duckdb_value_int64 (&result, 0, 0) == 1;
+  duckdb_destroy_result (&result);
+  if (!linked)
+    return 149;
+
+  g_autofree gchar *chain_error = NULL;
+  if (wyl_audit_conn_verify_chain (conn, &chain_error) != WYRELOG_E_OK)
+    return 156;
+
+  wyl_audit_conn_close (g_steal_pointer (&conn));
+  g_unlink (path);
+  g_rmdir (tmpdir);
+  return 0;
+}
+
+static gint
 check_chain_detects_record_modification (void)
 {
   g_autoptr (wyl_audit_conn_t) conn = NULL;
@@ -480,6 +531,8 @@ main (void)
   if ((rc = check_reserved_stream_guard ()) != 0)
     return rc;
   if ((rc = check_chain_verifies_clean_store ()) != 0)
+    return rc;
+  if ((rc = check_chain_tail_cache_hydrates_after_reopen ()) != 0)
     return rc;
   if ((rc = check_chain_detects_record_modification ()) != 0)
     return rc;
