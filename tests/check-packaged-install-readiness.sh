@@ -131,6 +131,43 @@ grep -q '^migrations=' "$TMPDIR/template-info.out"
   --audit-db "$AUDIT_DB" \
   --check
 
+ROTATE_DB="$INSTALL_ROOT/var/lib/wyrelog/system/rotate.sqlite"
+ROTATE_AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/system/rotate-audit.duckdb"
+ROTATE_NEW_KEY="$INSTALL_ROOT/etc/wyrelog/system/policy-rotated.key"
+"$PYTHON" - "$ROTATE_NEW_KEY" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_bytes(os.urandom(32))
+PY
+"$WYRELOGD" --production \
+  --profile system \
+  --template-dir "$TEMPLATE_INSTALL" \
+  --policy-db "$ROTATE_DB" \
+  --policy-keyprovider "file:$KEY" \
+  --audit-db "$ROTATE_AUDIT_DB" \
+  --check
+"$WYCTL" key rotate --store "$ROTATE_DB" \
+  --from-keyprovider "file:$KEY" \
+  --to-keyprovider "file:$ROTATE_NEW_KEY" >"$TMPDIR/rotate.out"
+if [ "$(cat "$TMPDIR/rotate.out")" != "status=rotated store=$ROTATE_DB" ]; then
+  echo "unexpected key rotation output" >&2
+  cat "$TMPDIR/rotate.out" >&2
+  exit 1
+fi
+if "$WYCTL" key rotate --store "$ROTATE_DB" \
+    --from-keyprovider "file:$KEY" \
+    --to-keyprovider "file:$ROTATE_NEW_KEY" \
+    >"$TMPDIR/rotate-old.out" 2>"$TMPDIR/rotate-old.err"; then
+  echo "old keyprovider still opens rotated policy store" >&2
+  exit 1
+fi
+"$WYCTL" key rotate --store "$ROTATE_DB" \
+  --from-keyprovider "file:$ROTATE_NEW_KEY" \
+  --to-keyprovider "file:$ROTATE_NEW_KEY" >"$TMPDIR/rotate-verify.out"
+
 CREDENTIALS_DIRECTORY="$INSTALL_ROOT/etc/wyrelog/system" \
   "$WYRELOGD" --production \
   --profile system \

@@ -7,6 +7,7 @@
 
 #include "wyrelog/client.h"
 #include "wyrelog/decide.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -64,6 +65,9 @@ typedef struct
 typedef struct
 {
   gchar *keyprovider_path;
+  gchar *store_path;
+  gchar *from_keyprovider_path;
+  gchar *to_keyprovider_path;
 } WyctlKeyOptions;
 
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
@@ -1183,6 +1187,84 @@ run_key_status (gint argc, gchar **argv)
 }
 
 static int
+run_key_rotate (gint argc, gchar **argv)
+{
+  WyctlKeyOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Encrypted policy store path", "PATH"},
+    {"from-keyprovider", 0, 0, G_OPTION_ARG_STRING,
+        &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
+    {"to-keyprovider", 0, 0, G_OPTION_ARG_STRING,
+        &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- rotate encrypted policy store key material");
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected key rotate argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (opts.store_path == NULL || opts.store_path[0] == '\0') {
+    g_printerr ("wyctl: missing --store\n");
+    return 2;
+  }
+  if (opts.from_keyprovider_path == NULL
+      || opts.from_keyprovider_path[0] == '\0') {
+    g_printerr ("wyctl: missing --from-keyprovider\n");
+    return 2;
+  }
+  if (opts.to_keyprovider_path == NULL || opts.to_keyprovider_path[0] == '\0') {
+    g_printerr ("wyctl: missing --to-keyprovider\n");
+    return 2;
+  }
+
+  wyl_keyprovider_file_t *from_keyprovider =
+      wyl_keyprovider_file_new_from_spec (opts.from_keyprovider_path);
+  if (from_keyprovider == NULL) {
+    g_printerr ("wyctl: current keyprovider unreadable\n");
+    return 1;
+  }
+  wyl_keyprovider_file_t *to_keyprovider =
+      wyl_keyprovider_file_new_from_spec (opts.to_keyprovider_path);
+  if (to_keyprovider == NULL) {
+    wyl_keyprovider_file_free (from_keyprovider);
+    g_printerr ("wyctl: new keyprovider unreadable\n");
+    return 1;
+  }
+
+  const wyl_keyprovider_vtable_t *vt = wyl_keyprovider_file_get_vtable ();
+  wyl_policy_store_open_options_t old_opts = {
+    .keyprovider_vtable = vt,
+    .keyprovider_state = from_keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+  };
+  wyl_policy_store_open_options_t new_opts = {
+    .keyprovider_vtable = vt,
+    .keyprovider_state = to_keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+  };
+  wyrelog_error_t rc = wyl_policy_store_rotate_keyprovider (opts.store_path,
+      &old_opts, &new_opts);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: key rotation failed: %s\n", wyrelog_error_string (rc));
+    return 1;
+  }
+
+  g_print ("status=rotated store=%s\n", opts.store_path);
+  return 0;
+}
+
+static int
 run_key (gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -1192,6 +1274,8 @@ run_key (gint argc, gchar **argv)
 
   if (g_strcmp0 (argv[1], "status") == 0)
     return run_key_status (argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "rotate") == 0)
+    return run_key_rotate (argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown key command: %s\n", argv[1]);
   return 2;

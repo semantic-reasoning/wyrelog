@@ -1,9 +1,11 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-keyprovider-file-private.h"
 
 #ifndef WYL_TEST_SQLITE_SCHEMA_PATH
 #error "WYL_TEST_SQLITE_SCHEMA_PATH must be defined by the build."
@@ -267,6 +269,258 @@ check_handle_owns_policy_store (void)
     return 33;
   if (!exists)
     return 34;
+  return 0;
+}
+
+static gboolean
+write_policy_key (const gchar *path, guint8 seed)
+{
+  guint8 key[32];
+  for (gsize i = 0; i < sizeof key; i++)
+    key[i] = (guint8) (seed + i);
+  return g_file_set_contents (path, (const gchar *) key, sizeof key, NULL);
+}
+
+static wyrelog_error_t
+open_encrypted_policy_store (const gchar *store_path, const gchar *key_path,
+    wyl_policy_store_t **out_store)
+{
+  wyl_keyprovider_file_t *keyprovider = wyl_keyprovider_file_new (key_path);
+  if (keyprovider == NULL)
+    return WYRELOG_E_IO;
+  wyl_policy_store_open_options_t opts = {
+    .path = store_path,
+    .keyprovider_vtable = wyl_keyprovider_file_get_vtable (),
+    .keyprovider_state = keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+  };
+  return wyl_policy_store_open_with_options (&opts, out_store);
+}
+
+static wyrelog_error_t
+rotate_encrypted_policy_store (const gchar *store_path,
+    const gchar *old_key_path, const gchar *new_key_path)
+{
+  wyl_keyprovider_file_t *old_keyprovider =
+      wyl_keyprovider_file_new (old_key_path);
+  if (old_keyprovider == NULL)
+    return WYRELOG_E_IO;
+  wyl_keyprovider_file_t *new_keyprovider =
+      wyl_keyprovider_file_new (new_key_path);
+  if (new_keyprovider == NULL) {
+    wyl_keyprovider_file_free (old_keyprovider);
+    return WYRELOG_E_IO;
+  }
+  const wyl_keyprovider_vtable_t *vt = wyl_keyprovider_file_get_vtable ();
+  wyl_policy_store_open_options_t old_opts = {
+    .keyprovider_vtable = vt,
+    .keyprovider_state = old_keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+  };
+  wyl_policy_store_open_options_t new_opts = {
+    .keyprovider_vtable = vt,
+    .keyprovider_state = new_keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+  };
+  return wyl_policy_store_rotate_keyprovider (store_path, &old_opts, &new_opts);
+}
+
+static wyrelog_error_t
+failing_keyprovider_probe (gpointer self)
+{
+  (void) self;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+failing_keyprovider_derive (gpointer self, const gchar *label, guint8 *out_key,
+    gsize out_len)
+{
+  (void) self;
+  (void) label;
+  (void) out_key;
+  (void) out_len;
+  return WYRELOG_E_INTERNAL;
+}
+
+static const wyl_keyprovider_vtable_t failing_keyprovider_vtable = {
+  .probe = failing_keyprovider_probe,
+  .derive = failing_keyprovider_derive,
+};
+
+static wyrelog_error_t
+rotate_encrypted_policy_store_to_failing_provider (const gchar *store_path,
+    const gchar *old_key_path)
+{
+  wyl_keyprovider_file_t *old_keyprovider =
+      wyl_keyprovider_file_new (old_key_path);
+  if (old_keyprovider == NULL)
+    return WYRELOG_E_IO;
+  const guint8 failing_state = 0;
+  wyl_policy_store_open_options_t old_opts = {
+    .keyprovider_vtable = wyl_keyprovider_file_get_vtable (),
+    .keyprovider_state = old_keyprovider,
+    .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+    .require_encrypted = TRUE,
+  };
+  wyl_policy_store_open_options_t new_opts = {
+    .keyprovider_vtable = &failing_keyprovider_vtable,
+    .keyprovider_state = (gpointer) & failing_state,
+    .require_encrypted = TRUE,
+  };
+  return wyl_policy_store_rotate_keyprovider (store_path, &old_opts, &new_opts);
+}
+
+static gint
+check_encrypted_policy_store_hardening_and_rotation (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-policy-enc-XXXXXX", &error);
+  if (tmpdir == NULL)
+    return 300;
+  g_autofree gchar *store_path =
+      g_build_filename (tmpdir, "policy.store", NULL);
+  g_autofree gchar *old_key_path = g_build_filename (tmpdir, "old.key", NULL);
+  g_autofree gchar *new_key_path = g_build_filename (tmpdir, "new.key", NULL);
+  g_autofree gchar *wrong_key_path =
+      g_build_filename (tmpdir, "wrong.key", NULL);
+  if (!write_policy_key (old_key_path, 1)
+      || !write_policy_key (new_key_path, 44)
+      || !write_policy_key (wrong_key_path, 99))
+    return 301;
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, old_key_path, &store)
+        != WYRELOG_E_OK)
+      return 302;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 303;
+    if (wyl_policy_store_set_deployment_mode (store, "development")
+        != WYRELOG_E_OK)
+      return 304;
+  }
+
+  g_autofree gchar *valid_bytes = NULL;
+  gsize valid_len = 0;
+  if (!g_file_get_contents (store_path, &valid_bytes, &valid_len, &error))
+    return 305;
+  if (valid_len < 96)
+    return 306;
+  if (memcmp (valid_bytes, "WYLPS", 5) != 0)
+    return 307;
+  if (((const guint8 *) valid_bytes)[5] != 1)
+    return 308;
+#ifndef G_OS_WIN32
+  struct stat st;
+  if (g_stat (store_path, &st) != 0)
+    return 309;
+  if ((st.st_mode & 0777) != 0600)
+    return 310;
+#endif
+
+  g_autoptr (wyl_policy_store_t) wrong_store = NULL;
+  if (open_encrypted_policy_store (store_path, wrong_key_path, &wrong_store)
+      == WYRELOG_E_OK)
+    return 311;
+
+  g_autofree gchar *variant_path = g_build_filename (tmpdir, "variant.store",
+      NULL);
+  g_autofree gchar *variant_bytes = g_memdup2 (valid_bytes, valid_len);
+  variant_bytes[0] ^= 0x01;
+  if (!g_file_set_contents (variant_path, variant_bytes, valid_len, NULL))
+    return 312;
+  g_autoptr (wyl_policy_store_t) variant_store = NULL;
+  if (open_encrypted_policy_store (variant_path, old_key_path, &variant_store)
+      == WYRELOG_E_OK)
+    return 313;
+
+  memcpy (variant_bytes, valid_bytes, valid_len);
+  ((guint8 *) variant_bytes)[5] = 0xff;
+  if (!g_file_set_contents (variant_path, variant_bytes, valid_len, NULL))
+    return 314;
+  g_clear_pointer (&variant_store, wyl_policy_store_close);
+  if (open_encrypted_policy_store (variant_path, old_key_path, &variant_store)
+      == WYRELOG_E_OK)
+    return 315;
+
+  memcpy (variant_bytes, valid_bytes, valid_len);
+  variant_bytes[8] ^= 0x01;
+  if (!g_file_set_contents (variant_path, variant_bytes, valid_len, NULL))
+    return 316;
+  g_clear_pointer (&variant_store, wyl_policy_store_close);
+  if (open_encrypted_policy_store (variant_path, old_key_path, &variant_store)
+      == WYRELOG_E_OK)
+    return 317;
+
+  if (!g_file_set_contents (variant_path, valid_bytes, valid_len - 3, NULL))
+    return 318;
+  g_clear_pointer (&variant_store, wyl_policy_store_close);
+  if (open_encrypted_policy_store (variant_path, old_key_path, &variant_store)
+      == WYRELOG_E_OK)
+    return 319;
+
+  g_autofree gchar *tmp_write_path = g_strdup_printf ("%s.wyrelog-tmp",
+      store_path);
+  if (!g_file_set_contents (tmp_write_path, "interrupted", -1, NULL))
+    return 320;
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_autofree gchar *mode = NULL;
+    if (open_encrypted_policy_store (store_path, old_key_path, &store)
+        != WYRELOG_E_OK)
+      return 321;
+    if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+      return 322;
+    if (g_strcmp0 (mode, "development") != 0)
+      return 323;
+  }
+
+  if (rotate_encrypted_policy_store (store_path, old_key_path, new_key_path)
+      != WYRELOG_E_OK)
+    return 324;
+  g_clear_pointer (&wrong_store, wyl_policy_store_close);
+  if (open_encrypted_policy_store (store_path, old_key_path, &wrong_store)
+      == WYRELOG_E_OK)
+    return 325;
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_autofree gchar *mode = NULL;
+    if (open_encrypted_policy_store (store_path, new_key_path, &store)
+        != WYRELOG_E_OK)
+      return 326;
+    if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+      return 327;
+    if (g_strcmp0 (mode, "development") != 0)
+      return 328;
+  }
+
+  if (rotate_encrypted_policy_store_to_failing_provider (store_path,
+          new_key_path)
+      == WYRELOG_E_OK)
+    return 329;
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_autofree gchar *mode = NULL;
+    if (open_encrypted_policy_store (store_path, new_key_path, &store)
+        != WYRELOG_E_OK)
+      return 330;
+    if (wyl_policy_store_get_deployment_mode (store, &mode) != WYRELOG_E_OK)
+      return 331;
+    if (g_strcmp0 (mode, "development") != 0)
+      return 332;
+  }
+
+  (void) g_remove (tmp_write_path);
+  (void) g_remove (variant_path);
+  (void) g_remove (store_path);
+  (void) g_remove (old_key_path);
+  (void) g_remove (new_key_path);
+  (void) g_remove (wrong_key_path);
+  (void) g_rmdir (tmpdir);
   return 0;
 }
 
@@ -2636,6 +2890,8 @@ main (void)
   if ((rc = check_store_sets_deployment_mode ()) != 0)
     return rc;
   if ((rc = check_handle_owns_policy_store ()) != 0)
+    return rc;
+  if ((rc = check_encrypted_policy_store_hardening_and_rotation ()) != 0)
     return rc;
   if ((rc = check_store_seeds_builtin_catalog ()) != 0)
     return rc;

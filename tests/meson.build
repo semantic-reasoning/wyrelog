@@ -244,7 +244,9 @@ test_policy_store = executable('test-policy-store',
   dependencies : [wyrelog_dep, sqlite_dep],
 )
 
-test('policy-store', test_policy_store)
+test('policy-store', test_policy_store,
+  timeout : 90,
+)
 
 test_dl_static = executable('test-dl-static',
   'test-dl-static.c',
