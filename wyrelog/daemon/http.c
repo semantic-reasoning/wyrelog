@@ -263,7 +263,7 @@ derive_access_token_secret (const WylDaemonOptions *opts,
   }
 
   g_autoptr (wyl_keyprovider_file_t) keyprovider =
-      wyl_keyprovider_file_new (opts->policy_keyprovider_path);
+      wyl_keyprovider_file_new_from_spec (opts->policy_keyprovider_path);
   if (keyprovider == NULL) {
     sodium_memzero (epoch, sizeof epoch);
     return WYRELOG_E_CRYPTO;

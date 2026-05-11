@@ -408,6 +408,13 @@ test_keyprovider_dev = executable('test-keyprovider-dev',
 
 test('keyprovider-dev', test_keyprovider_dev)
 
+test_keyprovider_file = executable('test-keyprovider-file',
+  'test-keyprovider-file.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('keyprovider-file', test_keyprovider_file)
+
 test_id = executable('test-id',
   'test-id.c',
   dependencies : [wyrelog_dep, libchronoid_dep],

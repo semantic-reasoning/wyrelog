@@ -10,10 +10,12 @@ support files from `packaging/`.
 - Binaries: `/usr/bin/wyrelogd`, `/usr/bin/wyctl`
 - Templates: `/usr/share/wyrelog/access`
 - Daemon environment: `/etc/wyrelog/wyrelogd.env`
-- System KeyProvider state: `/etc/wyrelog/system/policy.key`
+- System KeyProvider root: `/etc/wyrelog/system/policy.key` loaded by
+  systemd as credential `wyrelog-system-policy-key`
 - System policy store: `/var/lib/wyrelog/system/policy.sqlite`
 - System audit store: `/var/log/wyrelog/system/audit.duckdb`
-- Service KeyProvider state: `/etc/wyrelog/service/policy.key`
+- Service KeyProvider root: `/etc/wyrelog/service/policy.key` loaded by
+  systemd as credential `wyrelog-service-policy-key`
 - Service policy store: `/var/lib/wyrelog/service/policy.sqlite`
 - Service audit store: `/var/log/wyrelog/service/audit.duckdb`
 - Runtime directory: `/run/wyrelog`
@@ -35,10 +37,10 @@ Wyrelog ships two daemon profiles:
 Packaged profile paths:
 
 - System policy store: `/var/lib/wyrelog/system/policy.sqlite`
-- System KeyProvider state: `/etc/wyrelog/system/policy.key`
+- System KeyProvider root: `/etc/wyrelog/system/policy.key`
 - System audit store: `/var/log/wyrelog/system/audit.duckdb`
 - Service policy store: `/var/lib/wyrelog/service/policy.sqlite`
-- Service KeyProvider state: `/etc/wyrelog/service/policy.key`
+- Service KeyProvider root: `/etc/wyrelog/service/policy.key`
 - Service audit store: `/var/log/wyrelog/service/audit.duckdb`
 - Service event spool: `/var/lib/wyrelog/service/event-spool`
 
@@ -58,7 +60,10 @@ wyrelogd --profile=service --profile-info --production
    systemd-tmpfiles --create /usr/lib/tmpfiles.d/wyrelog.conf
    ```
 
-2. Create the production KeyProvider state once:
+2. Create the production KeyProvider root once. Packaged systemd units pass
+   this file through `LoadCredential=`, so `wyrelogd` reads it as
+   `systemd-creds:wyrelog-system-policy-key` rather than opening the
+   `/etc` file directly:
 
    ```sh
    install -m 0640 -o root -g wyrelog /dev/null /etc/wyrelog/system/policy.key
@@ -78,7 +83,7 @@ PY
      --profile system \
      --template-dir /usr/share/wyrelog/access \
      --policy-db /var/lib/wyrelog/system/policy.sqlite \
-     --policy-keyprovider /etc/wyrelog/system/policy.key \
+     --policy-keyprovider file:/etc/wyrelog/system/policy.key \
      --audit-db /var/log/wyrelog/system/audit.duckdb \
      --check
    wyrelogd --template-info --template-dir /usr/share/wyrelog/access
@@ -98,14 +103,16 @@ PY
 
 ## Day-2 Operations
 
-- Template validation:
+- Template validation from an operator shell. Use `file:` for manual checks;
+  the packaged service uses `systemd-creds:` after systemd loads the
+  credential:
 
   ```sh
   wyrelogd --template-info --template-dir /usr/share/wyrelog/access
   wyrelogd --production --template-dir /usr/share/wyrelog/access \
     --profile system \
     --policy-db /var/lib/wyrelog/system/policy.sqlite \
-    --policy-keyprovider /etc/wyrelog/system/policy.key \
+    --policy-keyprovider file:/etc/wyrelog/system/policy.key \
     --audit-db /var/log/wyrelog/system/audit.duckdb --check
   ```
 
@@ -162,7 +169,7 @@ PY
    systemctl stop wyrelog-system.service
    ```
 
-2. Back up the active profile's KeyProvider state, policy store, audit
+2. Back up the active profile's KeyProvider root, policy store, audit
    store, event spool when present, and the output of
    `wyrelogd --template-info`.
 
@@ -185,7 +192,7 @@ PY
 2. Back up the current key and policy store together.
 3. Replace the active profile's `policy.key` with a new 32-byte file
    using mode `0640`, owner `root`, and group `wyrelog`.
-4. Run `wyctl key status --keyprovider PATH`.
+4. Run `wyctl key status --keyprovider file:PATH`.
 5. Run production `--check`, then start the daemon.
 
 Changing the KeyProvider root invalidates sealed policy-store material

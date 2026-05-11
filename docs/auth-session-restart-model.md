@@ -23,8 +23,11 @@ previous token state is reloaded.
 ## JWT Signing Key Custody
 
 Production JWT signing key material is rooted in the configured production
-KeyProvider path. On each daemon boot, the daemon derives a JWT root secret
-from the KeyProvider and mixes in a random boot epoch before issuing tokens.
+KeyProvider spec. Packaged Linux services use `systemd-creds:NAME`, where
+systemd exposes the credential under `$CREDENTIALS_DIRECTORY`; manual
+operator checks may use `file:PATH`. On each daemon boot, the daemon derives a
+JWT root secret from the KeyProvider and mixes in a random boot epoch before
+issuing tokens.
 The boot epoch is reflected in the JWT `kid`, so tokens from a previous
 process epoch fail the key-id gate before they can bind to live token state.
 

@@ -10,7 +10,8 @@ User=wyrelog
 Group=wyrelog
 Environment=WYL_LOG=warn
 EnvironmentFile=-/etc/wyrelog/wyrelogd.env
-ExecStart=/usr/bin/wyrelogd --production --profile=system --template-dir /usr/share/wyrelog/access --policy-db /var/lib/wyrelog/system/policy.sqlite --policy-keyprovider /etc/wyrelog/system/policy.key --audit-db /var/log/wyrelog/system/audit.duckdb --listen-port 8765
+LoadCredential=wyrelog-system-policy-key:/etc/wyrelog/system/policy.key
+ExecStart=/usr/bin/wyrelogd --production --profile=system --template-dir /usr/share/wyrelog/access --policy-db /var/lib/wyrelog/system/policy.sqlite --policy-keyprovider systemd-creds:wyrelog-system-policy-key --audit-db /var/log/wyrelog/system/audit.duckdb --listen-port 8765
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
