@@ -76,7 +76,7 @@ reload_session_snapshot (WylHandle *handle)
 static gboolean
 login_tenant_is_valid (const gchar *tenant)
 {
-  return tenant != NULL && g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0;
+  return wyl_policy_store_tenant_id_is_valid (tenant);
 }
 
 static wyrelog_error_t

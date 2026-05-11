@@ -52,12 +52,7 @@ gchar *wyl_client_dup_access_token (const WylClient * client);
 gchar *wyl_client_dup_username (const WylClient * client);
 /*
  * Returns a heap-allocated copy of the tenant currently bound to
- * |client|. v0 contract: single-tenant; the only value that can ever
- * be observed here is the canonical default ("__wr_default"). The
- * tenant accessor is retained on the public surface so callers
- * written against the v0 wire contract keep compiling once
- * multi-tenant support lands as a follow-up. Caller frees with
- * g_free or g_autofree.
+ * |client|. Caller frees with g_free or g_autofree.
  */
 gchar *wyl_client_dup_tenant (const WylClient * client);
 gchar *wyl_client_dup_principal_state (const WylClient * client);
@@ -145,13 +140,9 @@ wyrelog_error_t wyl_audit_iter_next (WylAuditIter * iter,
 /* Tenant / event */
 /*
  * Binds |client| to the named tenant for subsequent guarded HTTP
- * calls. v0 contract: single-tenant; the only value accepted is the
- * canonical default ("__wr_default"). Every other literal fails
- * closed with WYRELOG_E_INVALID and leaves the client's tenant
- * binding unchanged. Multi-tenant support is tracked as a follow-up;
- * the entry point is retained on the public surface so callers
- * written against the v0 wire contract keep compiling once that
- * widening lands.
+ * calls. The selected tenant must match the tenant already carried by
+ * the authenticated client credentials; mismatches fail closed with
+ * WYRELOG_E_INVALID and leave the client's tenant binding unchanged.
  */
 wyrelog_error_t wyl_client_tenant_select (WylClient * client,
     const gchar * tenant);

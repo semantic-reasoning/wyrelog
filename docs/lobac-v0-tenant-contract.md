@@ -1,113 +1,86 @@
-# LoBAC v0 Single-Tenant Contract
+# LoBAC Tenant Lifecycle Contract
 
 ## Overview
 
-LoBAC v0 ships as a **single-tenant** access-intelligence runtime. The
-public wire surface, the public C API, and the bootstrap policy template
-all share one canonical tenant identity. Multi-tenant capabilities
-described in the parent design (#5) and the profile-separation work (#2)
-are deferred to v1.
+LoBAC keeps `__wr_default` as the built-in tenant for compatibility, and
+adds an explicit tenant registry in the policy store for additional
+tenants. A tenant must be present and unsealed in that registry before
+the daemon accepts login, decision, policy mutation, or authenticated
+audit requests for it.
 
-## Canonical tenant
+The lower-level session API validates tenant syntax and binds the
+selected tenant into the session. The HTTP daemon remains authoritative
+for registry membership, sealed state, and cross-tenant isolation.
 
-The only accepted tenant value is the literal:
+## Default Tenant
+
+The default tenant literal is:
 
 ```
 __wr_default
 ```
 
-This value is exposed internally as the `WYL_TENANT_DEFAULT` constant
-(`wyrelog/wyl-common-private.h`) and is the only value the daemon and
-client library will accept across every surface that takes a tenant:
+It is exposed internally as `WYL_TENANT_DEFAULT`
+(`wyrelog/wyl-common-private.h`) and is seeded during policy-store schema
+creation and bootstrap template installation. The default tenant cannot
+be sealed.
 
-- `wyl_session_login` (and the libwyrelog session minting path)
-- `POST /auth/login` (HTTP login surface)
-- `POST /decide` (decision surface)
-- `GET  /policy` (policy read surface)
-- `GET  /audit` (audit query surface)
-- JWT bearer-token `claims.tenant`
-- `wyl_client_tenant_select` (C API tenant selector)
+## Tenant Lifecycle
 
-Any other literal — including the empty string, an unknown identifier,
-or a foreign-looking literal such as `evil-co` — is rejected.
+Tenant rows live in the policy store `tenants` table. The HTTP tenant
+lifecycle surface is guarded by the `wr.tenant.manage` permission on the
+default tenant.
 
-## Wire-format error codes
+| Method | Path              | Target parameter | Result |
+|--------|-------------------|------------------|--------|
+| `GET`  | `/tenants`        | none             | Lists known tenants and sealed state. |
+| `POST` | `/tenants/create` | `name`           | Creates a tenant idempotently. |
+| `POST` | `/tenants/seal`   | `name`           | Marks a tenant inactive. |
+| `POST` | `/tenants/unseal` | `name`           | Reactivates a sealed tenant. |
+| `POST` | `/tenants/delete` | `name`           | Returns `tenant_delete_unsupported`; deletion semantics are intentionally unsupported. |
 
-The HTTP gate emits two stable string codes scoped exclusively to the
-tenant check. These are defined in `wyrelog/daemon/http.c` as
-`WYL_DAEMON_ERR_TENANT_INVALID` and `WYL_DAEMON_ERR_TENANT_DENIED`:
+`tenant=` in query strings remains the request/auth tenant. Lifecycle
+targets use `name=` so target selection cannot be confused with the
+credential tenant.
 
-| Code              | HTTP status | Meaning                                                                                                  |
-|-------------------|-------------|----------------------------------------------------------------------------------------------------------|
-| `tenant_invalid`  | 400         | The request declares a tenant value the daemon does not recognise. In v0 anything other than `__wr_default` is unknown. |
-| `tenant_denied`   | 403         | The authenticated principal's tenant does not match the tenant declared on the request.                  |
+## Wire-Format Error Codes
 
-`tenant_invalid` is also emitted with HTTP 401 by the bearer-token
-verifier when a JWT carries a `claims.tenant` the daemon does not
-recognise. Status differs because the failure surfaces during auth, not
-on a malformed request body.
+The HTTP gate emits stable string codes in the JSON `error` field:
 
-The two codes are wire strings only; the existing `wyrelog_error_t`
-enum is unchanged. Clients keying on these codes can distinguish a
-malformed-tenant request from a credential/tenant mismatch without
-relying on handler-specific generic shape codes.
+| Code              | HTTP status | Meaning |
+|-------------------|-------------|---------|
+| `tenant_invalid`  | 400 or 401  | The request or credential names a syntactically invalid or unknown tenant. |
+| `tenant_sealed`   | 400 or 401  | The tenant exists but is sealed and cannot accept new authenticated work. |
+| `tenant_denied`   | 403         | The authenticated principal's tenant does not match the tenant declared on the request, or a non-default tenant attempts to mutate another tenant's scope. |
 
-## Defense in depth
+The status is 401 when the failure is detected while resolving
+credentials, and 400/403 when it is detected while validating the
+request body or query parameters.
 
-The bearer-token verifier enforces `claims.tenant == __wr_default`
-**directly**, independent of the transitive session check. Verification
-order in `resolve_bearer_session`:
+## Isolation Rules
 
-1. Verify JWT signature.
-2. Resolve the live session referenced by the token.
-3. **Direct check**: `wyl_daemon_tenant_is_known(claims.tenant)` —
-   reject with `tenant_invalid` (HTTP 401) on any non-canonical value.
-4. Equality check: `claims.tenant == session.tenant`.
+Sessions, JWT bearer credentials, refresh-token rotation, decisions,
+audit queries, and policy mutations carry a tenant binding. The daemon
+fails closed before mutation or decision when:
 
-The direct check is redundant with the session-mint gate today, but it
-stops a future relaxation upstream (for example, a multi-tenant prep
-change to `login_tenant_is_valid`) from silently relaxing JWT
-acceptance. The session-token auth path does not carry a per-token
-tenant claim and is gated by `ensure_auth_context_request_tenant`
-through the request query parameter, so no analogous check is needed
-there.
+- the request tenant is unknown or syntactically invalid;
+- the tenant exists but is sealed;
+- a live session or JWT claim is bound to a different tenant;
+- a non-default tenant attempts to mutate policy for a different scope.
 
-## Public API surface
+The default tenant retains legacy administration behavior and may manage
+other tenant scopes through the guarded policy-mutation APIs.
 
-The following public symbols exist and remain stable across v0 → v1
-for forward compatibility, but in v0 they reject any non-canonical
-value with `WYRELOG_E_INVALID`:
+## Public API Surface
+
+The public tenant symbols remain stable:
 
 - `wyl_client_tenant_select` (`wyrelog/client.h`)
-- `wyl_client_dup_tenant`     (`wyrelog/client.h`)
-- `wyl_login_req_set_tenant`  (`wyrelog/session.h`)
-- `wyl_login_req_get_tenant`  (`wyrelog/session.h`)
-- `wyl_session_dup_tenant`    (`wyrelog/session.h`)
+- `wyl_client_dup_tenant` (`wyrelog/client.h`)
+- `wyl_login_req_set_tenant` (`wyrelog/session.h`)
+- `wyl_login_req_get_tenant` (`wyrelog/session.h`)
+- `wyl_session_dup_tenant` (`wyrelog/session.h`)
 
-Callers written against the v0 wire contract will keep compiling once
-the multi-tenant widening lands; only the runtime accept-set widens.
-
-## What is NOT shipped in v0
-
-The following are explicitly out of scope for v0 and tracked as
-follow-up work against the parent multi-tenant design (#5) and the
-profile-separation issue (#2):
-
-- Tenant registry storage (no per-tenant rows in the policy store).
-- Tenant CRUD admin API (no `POST /tenants`, no listing surface).
-- Per-tenant data-encryption keys / TPM-sealed scope per tenant.
-- Cross-tenant isolation regression suite.
-- Audit-row tenant column and per-tenant audit partitioning.
-
-A v0 deployment that needs a second tenant must wait for v1; there is
-no supported workaround through configuration, environment, or runtime
-flag.
-
-## SemVer note
-
-Single-tenant is a **pre-1.0 contract**. Widening the runtime
-accept-set to admit additional tenants is an API/wire behavior change
-and requires a major-version bump (v1). Until then, both the bootstrap
-DL template (`templates/access/bootstrap.dl`) and the daemon's
-`wyl_daemon_tenant_is_known` predicate are the source of truth for the
-single accepted value.
+These APIs accept syntactically valid tenant identifiers. Registry
+membership and sealed-state checks are enforced by the daemon and policy
+store paths that perform authenticated work.

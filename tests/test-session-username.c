@@ -380,7 +380,7 @@ check_login_binds_default_tenant (void)
 }
 
 static gint
-check_login_rejects_unknown_tenant (void)
+check_login_accepts_registry_ready_tenant (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
@@ -391,15 +391,18 @@ check_login_rejects_unknown_tenant (void)
   wyl_login_req_set_tenant (req, "unknown");
 
   g_autoptr (WylSession) session = NULL;
-  if (wyl_session_login (handle, req, &session) != WYRELOG_E_INVALID)
+  if (wyl_session_login (handle, req, &session) != WYRELOG_E_OK)
     return 37;
-  if (session != NULL)
+  if (session == NULL)
     return 38;
+  g_autofree gchar *tenant = wyl_session_dup_tenant (session);
+  if (g_strcmp0 (tenant, "unknown") != 0)
+    return 52;
   return 0;
 }
 
 static gint
-check_login_rejects_unknown_tenant_before_skip_mfa (void)
+check_login_validates_tenant_before_skip_mfa (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
@@ -407,7 +410,7 @@ check_login_rejects_unknown_tenant_before_skip_mfa (void)
 
   g_autoptr (wyl_login_req_t) req = wyl_login_req_new ();
   wyl_login_req_set_username (req, "tenant-user");
-  wyl_login_req_set_tenant (req, "unknown");
+  wyl_login_req_set_tenant (req, "bad tenant");
   wyl_login_req_set_skip_mfa (req, TRUE);
 
   g_autoptr (WylSession) session = NULL;
@@ -419,20 +422,13 @@ check_login_rejects_unknown_tenant_before_skip_mfa (void)
 }
 
 /*
- * The single-tenant v0 contract rejects every tenant value other than
- * the canonical default, so a foreign-looking literal like "evil-co"
- * must fail closed at wyl_session_login with WYRELOG_E_INVALID and
- * leave the out-session NULL. Pinning a distinct literal here (in
- * addition to the existing "unknown" coverage) makes the foreign-
- * tenant rejection unambiguous and guards against a regression that
- * silently widens the accept set. The accept side is exercised
- * symbolically by binding wyl_login_req_set_tenant to
- * WYL_TENANT_DEFAULT and asserting WYRELOG_E_OK; this makes the
- * "only the default constant is accepted" rule fail loudly if either
- * the constant or the comparison drifts.
+ * Session construction accepts syntactically valid tenant ids; the
+ * daemon-owned tenant registry is responsible for deciding whether a
+ * tenant is active on the wire. Invalid tenant syntax still fails closed
+ * at the lower session boundary.
  */
 static gint
-check_login_rejects_evil_co_tenant (void)
+check_login_rejects_invalid_tenant_syntax (void)
 {
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (NULL, &handle) != WYRELOG_E_OK)
@@ -440,7 +436,7 @@ check_login_rejects_evil_co_tenant (void)
 
   g_autoptr (wyl_login_req_t) reject_req = wyl_login_req_new ();
   wyl_login_req_set_username (reject_req, "tenant-user");
-  wyl_login_req_set_tenant (reject_req, "evil-co");
+  wyl_login_req_set_tenant (reject_req, "evil co");
 
   g_autoptr (WylSession) reject_session = NULL;
   if (wyl_session_login (handle, reject_req, &reject_session)
@@ -1929,11 +1925,11 @@ main (void)
     return rc;
   if ((rc = check_login_binds_default_tenant ()) != 0)
     return rc;
-  if ((rc = check_login_rejects_unknown_tenant ()) != 0)
+  if ((rc = check_login_accepts_registry_ready_tenant ()) != 0)
     return rc;
-  if ((rc = check_login_rejects_unknown_tenant_before_skip_mfa ()) != 0)
+  if ((rc = check_login_validates_tenant_before_skip_mfa ()) != 0)
     return rc;
-  if ((rc = check_login_rejects_evil_co_tenant ()) != 0)
+  if ((rc = check_login_rejects_invalid_tenant_syntax ()) != 0)
     return rc;
   if ((rc = check_request_buffer_independent_of_session ()) != 0)
     return rc;

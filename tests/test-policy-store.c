@@ -132,6 +132,76 @@ check_store_gets_default_deployment_mode (void)
   return 0;
 }
 
+typedef struct
+{
+  guint count;
+  gboolean saw_default;
+  gboolean saw_tenant_a;
+  gboolean tenant_a_sealed;
+} TenantIterProbe;
+
+static wyrelog_error_t
+tenant_iter_probe_cb (const gchar *tenant_id, gboolean sealed,
+    gpointer user_data)
+{
+  TenantIterProbe *probe = user_data;
+  probe->count++;
+  if (g_strcmp0 (tenant_id, "__wr_default") == 0)
+    probe->saw_default = TRUE;
+  if (g_strcmp0 (tenant_id, "tenant-a") == 0) {
+    probe->saw_tenant_a = TRUE;
+    probe->tenant_a_sealed = sealed;
+  }
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_store_manages_tenant_registry (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  gboolean exists = FALSE;
+  gboolean active = FALSE;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 65;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 66;
+  if (wyl_policy_store_tenant_exists (store, "__wr_default", &exists)
+      != WYRELOG_E_OK || !exists)
+    return 67;
+  if (wyl_policy_store_tenant_is_active (store, "__wr_default", &active)
+      != WYRELOG_E_OK || !active)
+    return 68;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 69;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || created)
+    return 70;
+  if (wyl_policy_store_set_tenant_sealed (store, "tenant-a", TRUE)
+      != WYRELOG_E_OK)
+    return 71;
+  if (wyl_policy_store_tenant_is_active (store, "tenant-a", &active)
+      != WYRELOG_E_OK || active)
+    return 72;
+  if (wyl_policy_store_set_tenant_sealed (store, "__wr_default", TRUE)
+      != WYRELOG_E_POLICY)
+    return 73;
+  if (wyl_policy_store_create_tenant (store, "bad tenant", &created)
+      != WYRELOG_E_INVALID)
+    return 74;
+
+  TenantIterProbe probe = { 0 };
+  if (wyl_policy_store_foreach_tenant (store, tenant_iter_probe_cb, &probe)
+      != WYRELOG_E_OK)
+    return 75;
+  if (probe.count != 2 || !probe.saw_default || !probe.saw_tenant_a ||
+      !probe.tenant_a_sealed)
+    return 76;
+  return 0;
+}
+
 static gint
 check_store_sets_deployment_mode (void)
 {
@@ -2560,6 +2630,8 @@ main (void)
   if ((rc = check_store_rejects_invalid_args ()) != 0)
     return rc;
   if ((rc = check_store_gets_default_deployment_mode ()) != 0)
+    return rc;
+  if ((rc = check_store_manages_tenant_registry ()) != 0)
     return rc;
   if ((rc = check_store_sets_deployment_mode ()) != 0)
     return rc;

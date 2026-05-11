@@ -63,6 +63,8 @@ typedef wyrelog_error_t (*wyl_policy_audit_intention_cb) (const gchar * id,
     const gchar * deny_origin, const gchar * request_id,
     wyl_decision_t decision, const gchar * state, gint64 attempt_count,
     const gchar * last_error, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_tenant_cb) (const gchar * tenant_id,
+    gboolean sealed, gpointer user_data);
 
 /*
  * Policy authority store lifecycle wrapper.
@@ -99,6 +101,19 @@ wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *
     store, const gchar * mode);
 wyrelog_error_t wyl_policy_store_get_deployment_mode (wyl_policy_store_t *
     store, gchar ** out_mode);
+gboolean wyl_policy_store_tenant_id_is_valid (const gchar * tenant_id);
+wyrelog_error_t wyl_policy_store_ensure_default_tenant (wyl_policy_store_t *
+    store);
+wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
+    const gchar * tenant_id, gboolean * out_created);
+wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
+    const gchar * tenant_id, gboolean sealed);
+wyrelog_error_t wyl_policy_store_tenant_exists (wyl_policy_store_t * store,
+    const gchar * tenant_id, gboolean * out_exists);
+wyrelog_error_t wyl_policy_store_tenant_is_active (wyl_policy_store_t * store,
+    const gchar * tenant_id, gboolean * out_active);
+wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
+    wyl_policy_tenant_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
     const gchar * role_id, const gchar * role_name);
 wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,
