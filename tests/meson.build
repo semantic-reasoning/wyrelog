@@ -353,6 +353,36 @@ test_template_tree = executable('test-template-tree',
 
 test('template-tree', test_template_tree)
 
+test_decision_latency = executable('test-decision-latency',
+  'test-decision-latency.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+test('decision-latency', test_decision_latency,
+  timeout : 60,
+)
+
+test_hardening_fuzz = executable('test-hardening-fuzz',
+  'test-hardening-fuzz.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  dependencies : [wyrelog_dep, wirelog_dep],
+)
+
+hardening_fuzz_env = environment()
+hardening_fuzz_env.set('WYL_FUZZ_ARTIFACT_DIR',
+  meson.current_build_dir() / 'hardening-fuzz-artifacts',
+)
+
+test('hardening-fuzz', test_hardening_fuzz,
+  env : hardening_fuzz_env,
+  timeout : 60,
+)
+
 test_fsm_bisim = executable('test-fsm-bisim',
   'test-fsm-bisim.c',
   c_args : [
@@ -641,6 +671,26 @@ check_no_derived_fsm_replay = find_program(
 test('check-no-derived-fsm-replay', check_no_derived_fsm_replay,
   args : [meson.project_source_root()],
 )
+
+check_supply_chain_pins = find_program(
+  '../tools/check-supply-chain-pins.sh',
+)
+
+test('supply-chain-pins', check_supply_chain_pins,
+  args : [meson.project_source_root()],
+)
+
+if host_machine.system() != 'windows'
+  valgrind_gate = find_program(
+    '../tools/run-valgrind-gate.sh',
+  )
+
+  test('valgrind-smoke', valgrind_gate,
+    args : [test_smoke.full_path()],
+    depends : test_smoke,
+    timeout : 120,
+  )
+endif
 
 if get_option('enable_audit').allowed()
   audit_conn_test_env = environment()
