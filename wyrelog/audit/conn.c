@@ -10,12 +10,38 @@
 #define WYL_AUDIT_STREAM_AUDIT "__wyrelog.audit"
 #define WYL_AUDIT_CHECKPOINT_INTERVAL 1
 
+typedef struct
+{
+  gint64 last_sequence_no;
+  gchar *last_record_hash;
+} WylAuditChainTail;
+
 struct wyl_audit_conn_t
 {
   duckdb_database db;
   duckdb_connection conn;
   GMutex lock;
+  GHashTable *chain_tail_cache;
 };
+
+static WylAuditChainTail *
+audit_chain_tail_new (gint64 last_sequence_no, const gchar *last_record_hash)
+{
+  WylAuditChainTail *tail = g_new0 (WylAuditChainTail, 1);
+  tail->last_sequence_no = last_sequence_no;
+  tail->last_record_hash = g_strdup (last_record_hash != NULL ?
+      last_record_hash : "");
+  return tail;
+}
+
+static void
+audit_chain_tail_free (WylAuditChainTail *tail)
+{
+  if (tail == NULL)
+    return;
+  g_free (tail->last_record_hash);
+  g_free (tail);
+}
 
 gboolean
 wyl_audit_conn_stream_name_is_reserved (const gchar *stream_name)
@@ -92,6 +118,8 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
     return WYRELOG_E_INTERNAL;
   }
   g_mutex_init (&self->lock);
+  self->chain_tail_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
+      g_free, (GDestroyNotify) audit_chain_tail_free);
 
   *out_conn = self;
   return WYRELOG_E_OK;
@@ -109,6 +137,7 @@ wyl_audit_conn_close (wyl_audit_conn_t *conn)
   duckdb_disconnect (&conn->conn);
   duckdb_close (&conn->db);
   g_mutex_clear (&conn->lock);
+  g_clear_pointer (&conn->chain_tail_cache, g_hash_table_destroy);
   g_free (conn);
 }
 
@@ -428,6 +457,51 @@ get_next_chain_state (wyl_audit_conn_t *conn, const gchar *stream_name,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+get_next_chain_state_cached (wyl_audit_conn_t *conn, const gchar *stream_name,
+    gint64 *out_sequence_no, gchar **out_previous_hash)
+{
+  if (conn == NULL || stream_name == NULL || out_sequence_no == NULL ||
+      out_previous_hash == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylAuditChainTail *tail =
+      g_hash_table_lookup (conn->chain_tail_cache, stream_name);
+  if (tail == NULL) {
+    gint64 sequence_no = 0;
+    g_autofree gchar *previous_hash = NULL;
+    wyrelog_error_t rc = get_next_chain_state (conn, stream_name,
+        &sequence_no, &previous_hash);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+
+    tail = audit_chain_tail_new (sequence_no - 1, previous_hash);
+    g_hash_table_insert (conn->chain_tail_cache, g_strdup (stream_name), tail);
+  }
+
+  *out_sequence_no = tail->last_sequence_no + 1;
+  *out_previous_hash = g_strdup (tail->last_record_hash);
+  return WYRELOG_E_OK;
+}
+
+static void
+evict_chain_tail_cache (wyl_audit_conn_t *conn, const gchar *stream_name)
+{
+  if (conn == NULL || stream_name == NULL)
+    return;
+  g_hash_table_remove (conn->chain_tail_cache, stream_name);
+}
+
+static void
+update_chain_tail_cache (wyl_audit_conn_t *conn, const gchar *stream_name,
+    gint64 sequence_no, const gchar *record_hash)
+{
+  if (conn == NULL || stream_name == NULL || record_hash == NULL)
+    return;
+  g_hash_table_replace (conn->chain_tail_cache, g_strdup (stream_name),
+      audit_chain_tail_new (sequence_no, record_hash));
+}
+
 wyrelog_error_t
 wyl_audit_conn_table_exists (wyl_audit_conn_t *conn, const gchar *table_name,
     gboolean *out_exists)
@@ -468,8 +542,8 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
 
   g_autofree gchar *previous_hash = NULL;
   gint64 sequence_no = 0;
-  rc = get_next_chain_state (conn, WYL_AUDIT_STREAM_AUDIT, &sequence_no,
-      &previous_hash);
+  rc = get_next_chain_state_cached (conn, WYL_AUDIT_STREAM_AUDIT,
+      &sequence_no, &previous_hash);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autofree gchar *record_hash =
@@ -512,8 +586,10 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
   step_rc = duckdb_execute_prepared (stmt, &result);
   duckdb_destroy_result (&result);
   duckdb_destroy_prepare (&stmt);
-  if (step_rc != DuckDBSuccess)
+  if (step_rc != DuckDBSuccess) {
+    evict_chain_tail_cache (conn, WYL_AUDIT_STREAM_AUDIT);
     return WYRELOG_E_IO;
+  }
 
   if (sequence_no % WYL_AUDIT_CHECKPOINT_INTERVAL == 0) {
     static const gchar *checkpoint_sql =
@@ -533,10 +609,14 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
     step_rc = duckdb_execute_prepared (stmt, &result);
     duckdb_destroy_result (&result);
     duckdb_destroy_prepare (&stmt);
-    if (step_rc != DuckDBSuccess)
+    if (step_rc != DuckDBSuccess) {
+      evict_chain_tail_cache (conn, WYL_AUDIT_STREAM_AUDIT);
       return WYRELOG_E_POLICY;
+    }
   }
 
+  update_chain_tail_cache (conn, WYL_AUDIT_STREAM_AUDIT, sequence_no,
+      record_hash);
   *out_inserted = TRUE;
   return WYRELOG_E_OK;
 }
