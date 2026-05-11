@@ -11,6 +11,7 @@
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 
@@ -709,12 +710,8 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
     return 1812;
 
   /*
-   * The single-tenant v0 contract rejects every tenant value other
-   * than the canonical default, including foreign-looking literals
-   * such as "evil-co". This pins the rejection through the full
-   * /decide HTTP path (in addition to the JWT-claims gate exercised
-   * below) so a regression that silently widens the accept set
-   * cannot escape detection.
+   * Unregistered tenant literals such as "evil-co" fail closed
+   * before the decision path can run.
    */
   g_clear_pointer (&body, g_free);
   rc = send_raw_decide_bearer (session, "POST", base_url, "http-guard-user",
@@ -728,17 +725,12 @@ check_raw_decide_contract (SoupServer *server, WylHandle *handle,
 
 #ifdef WYL_HAS_AUDIT
   /*
-   * Defense-in-depth tenant gate on the JWT claims themselves
-   * (issue #273). Forge a token with the daemon's secret carrying
-   * a foreign tenant in the access claims; the signature verifies
-   * but resolve_bearer_session must reject the token because the
-   * claims tenant is not WYL_TENANT_DEFAULT. Today this rejection
-   * is also reachable transitively via the live_tenant comparison
-   * (every wyl_session_login() session carries the default tenant,
-   * so claims.tenant != live_tenant), but the direct claims gate
-   * makes the contract explicit so a future relaxation cannot
-   * silently widen the JWT-acceptance surface. The wire code is
-   * "tenant_invalid" with HTTP 401 (auth boundary).
+   * Defense-in-depth tenant gate on the JWT claims themselves. Forge
+   * a token with the daemon's secret carrying an unregistered tenant
+   * in the access claims; the signature verifies but
+   * resolve_bearer_session must reject the token before request
+   * authorization. The wire code is "tenant_invalid" with HTTP 401
+   * at the auth boundary.
    */
   g_autofree gchar *foreign_tenant_token = NULL;
   guint8 secret[32];
@@ -1425,12 +1417,9 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   g_clear_pointer (&body, g_free);
 
   /*
-   * Single-tenant v0 contract: a foreign-looking tenant literal on
-   * the /auth/login surface must fail closed with the stable wire
-   * code "tenant_invalid" and HTTP 400, mirroring the /decide gate
-   * above. Pinning a distinct literal here (in addition to the
-   * existing "unknown" coverage) makes the foreign-tenant rejection
-   * unambiguous on the login surface.
+   * A foreign-looking unregistered tenant literal on /auth/login
+   * must fail closed with the stable wire code "tenant_invalid" and
+   * HTTP 400, mirroring the /decide gate above.
    */
   rc = send_raw_login (session, "POST", base_url,
       "username=login-user&tenant=evil-co", &status, &body);
@@ -1871,6 +1860,24 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
+static wyrelog_error_t
+grant_tenant_manage_authority (WylHandle *handle, const gchar *subject)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
+      subject, "wr.tenant.manage", WYL_TENANT_DEFAULT);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_permission_state (store, subject,
+      "wr.tenant.manage", WYL_TENANT_DEFAULT, "armed");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
 static gboolean
 direct_permission_exists (WylHandle *handle, const gchar *subject,
     const gchar *perm, const gchar *scope)
@@ -2055,6 +2062,9 @@ check_policy_permission_mutation_contract (WylHandle *handle,
     return 164;
   if (g_strcmp0 (client_tenant, "__wr_default") != 0)
     return 165;
+  if (grant_tenant_manage_authority (handle, "http-policy-admin")
+      != WYRELOG_E_OK)
+    return 189;
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.policy.read",
@@ -2172,6 +2182,112 @@ check_policy_permission_mutation_contract (WylHandle *handle,
           "tenant-a")) {
     return 188;
   }
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *tenant_create_query =
+      g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      WYL_TENANT_DEFAULT, session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/create", tenant_create_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"tenant\":\"tenant-a\"") == NULL ||
+      strstr (body, "\"changed\":true") == NULL)
+    return 190;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/create", tenant_create_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"changed\":false") == NULL)
+    return 191;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "GET", base_url, "/tenants",
+      tenant_create_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"tenant\":\"tenant-a\"") == NULL ||
+      strstr (body, "\"tenant\":\"__wr_default\"") == NULL)
+    return 192;
+  g_clear_pointer (&body, g_free);
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  rc = send_raw_login (session, "POST", base_url,
+      "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"tenant\":\"tenant-a\"") == NULL)
+    return 193;
+  g_autofree gchar *tenant_session_token =
+      extract_json_string (body, "session_token");
+  if (tenant_session_token == NULL)
+    return 194;
+  g_clear_pointer (&body, g_free);
+
+  if (grant_policy_write_authority (handle, "tenant-user", "tenant-a")
+      != WYRELOG_E_OK)
+    return 195;
+  g_autofree gchar *cross_tenant_query =
+      g_strdup_printf ("subject=target&perm=site.policy.read&scope=tenant-b"
+      "&tenant=tenant-a&session_token=%s&guard_timestamp=123"
+      "&guard_loc_class=public&guard_risk=49", tenant_session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", cross_tenant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"tenant_denied\"") == NULL)
+    return 196;
+  if (direct_permission_exists (handle, "target", "site.policy.read",
+          "tenant-b"))
+    return 197;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *tenant_grant_query =
+      g_strdup_printf ("subject=tenant-target&perm=site.policy.read"
+      "&scope=tenant-a&tenant=tenant-a&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      tenant_session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/policy/permissions/grant", tenant_grant_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 198;
+  if (!direct_permission_exists (handle, "tenant-target", "site.policy.read",
+          "tenant-a"))
+    return 199;
+  g_clear_pointer (&body, g_free);
+
+  g_autofree gchar *tenant_seal_query =
+      g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
+      "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
+      WYL_TENANT_DEFAULT, session_token);
+  rc = send_raw_policy_mutation (session, "POST", base_url, "/tenants/seal",
+      tenant_seal_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"changed\":true") == NULL)
+    return 200;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_login (session, "POST", base_url,
+      "username=tenant-user&tenant=tenant-a&skip_mfa=true", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"tenant_sealed\"") == NULL)
+    return 201;
+  g_clear_pointer (&body, g_free);
+
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/unseal", tenant_seal_query, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 202;
   g_clear_pointer (&body, g_free);
 
   g_autofree gchar *transition_denied_query =
@@ -3078,13 +3194,9 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 #endif
 
 /*
- * Unit-style coverage for the v0 tenant-gate wire codes (issue #273).
- * Drives the http.c decision helper through the WYL_TEST_DAEMON_HTTP
- * seam so that both gate arms are exercised even though the
- * tenant_denied arm is unreachable end-to-end in v0 single-tenant mode
- * (every wyl_session_login() session today carries the default
- * tenant, so the request_tenant != auth_tenant arm fires only against
- * a synthesised auth context).
+ * Unit-style coverage for the tenant-gate wire codes. Drives the
+ * http.c decision helper through the WYL_TEST_DAEMON_HTTP seam so
+ * that both stable gate arms are exercised directly.
  */
 static gint
 check_tenant_gate_codes_contract (void)
@@ -3107,7 +3219,7 @@ check_tenant_gate_codes_contract (void)
   if (status != 0 || code != NULL)
     return 1903;
 
-  /* Reject: request tenant is not the known default. 400 tenant_invalid. */
+  /* Reject: request tenant is not known to the test seam. */
   g_clear_pointer (&code, g_free);
   status = 0;
   if (wyl_daemon_http_check_request_tenant_for_test ("unknown",
@@ -3127,11 +3239,7 @@ check_tenant_gate_codes_contract (void)
 
   /*
    * Reject: request tenant is the known default but the authenticated
-   * principal carries a different tenant. 403 tenant_denied. This is
-   * the arm that is currently unreachable end-to-end in v0 because
-   * wyl_session_login() only mints sessions for __wr_default; the
-   * unit-style check covers the wire contract ahead of C3, which
-   * adds a direct JWT-claims tenant check that can reach this arm.
+   * principal carries a different tenant. 403 tenant_denied.
    */
   g_clear_pointer (&code, g_free);
   status = 0;

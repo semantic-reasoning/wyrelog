@@ -7,14 +7,13 @@
 #include "wyl-log-private.h"
 
 /*
- * Single source of truth for the wyrelog v0 default tenant identifier.
+ * Single source of truth for the wyrelog default tenant identifier.
  *
- * The v0 single-tenant contract (issue #273) keeps wyrelog deliberately
- * single-tenant: every authenticated principal is bound to this tenant
- * and the daemon's tenant gate accepts no other value. Callers that
- * mint, validate, or compare tenant strings MUST use this constant
- * rather than re-typing the literal so that any future widening of the
- * contract changes a single point.
+ * The default tenant is seeded into every policy store and remains the
+ * compatibility tenant for deployments that do not create additional
+ * tenant rows. Callers that mint, validate, or compare the default
+ * tenant string MUST use this constant rather than re-typing the
+ * literal.
  *
  * Wire format note: this string also appears in JWT claim bodies, in
  * HTTP request query parameters (?tenant=...), and in client-side

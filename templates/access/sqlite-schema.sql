@@ -21,6 +21,21 @@ CREATE TABLE IF NOT EXISTS wyrelog_config (
 );
 
 -- ---------------------------------------------------------------------------
+-- Table: tenants
+-- Registry of known tenant ownership domains. Sealed tenants remain known
+-- but reject new login/auth/decision/mutation traffic until unsealed.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS tenants (
+    tenant_id  TEXT    PRIMARY KEY,
+    sealed     INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+INSERT OR IGNORE INTO tenants (tenant_id, sealed, created_at, updated_at)
+VALUES ('__wr_default', 0, unixepoch(), unixepoch());
+
+-- ---------------------------------------------------------------------------
 -- Table: roles
 -- Defines named roles assignable to users/services.
 -- ---------------------------------------------------------------------------

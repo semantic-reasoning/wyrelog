@@ -31,15 +31,15 @@
 #define WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA "wyl-daemon-request-id-attempted"
 
 /*
- * Stable HTTP wire-format error codes for the tenant gate. Both are
+ * Stable HTTP wire-format error codes for the tenant gate. They are
  * emitted as the "error" field of the JSON error body produced by
- * set_json_error(). They are part of the v0 single-tenant contract
- * tracked in issue #273:
+ * set_json_error():
  *
  *   tenant_invalid  - 400. The request carries a tenant query
  *                     parameter (or login body field) whose value is
- *                     not a tenant this daemon recognises. In v0 the
- *                     only known tenant is WYL_TENANT_DEFAULT.
+ *                     not a tenant this daemon recognises.
+ *   tenant_sealed   - 400. The request carries a tenant that exists
+ *                     but is sealed and cannot accept new work.
  *   tenant_denied   - 403. The authenticated principal's tenant does
  *                     not match the tenant declared on the request.
  *                     Distinct from tenant_invalid so callers can
@@ -51,6 +51,7 @@
  */
 #define WYL_DAEMON_ERR_TENANT_INVALID "tenant_invalid"
 #define WYL_DAEMON_ERR_TENANT_DENIED  "tenant_denied"
+#define WYL_DAEMON_ERR_TENANT_SEALED  "tenant_sealed"
 
 typedef struct
 {
@@ -130,10 +131,37 @@ static void set_json_error (SoupServerMessage * msg, guint status,
     const gchar * code);
 static void set_json_ok (SoupServerMessage * msg);
 
-static gboolean
-wyl_daemon_tenant_is_known (const gchar *tenant)
+static wyrelog_error_t
+tenant_active_status (WylDaemonHttpContext *ctx, const gchar *tenant,
+    gboolean *out_active)
 {
-  return g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0;
+  if (out_active != NULL)
+    *out_active = FALSE;
+  if (ctx == NULL || ctx->handle == NULL || tenant == NULL ||
+      !wyl_policy_store_tenant_id_is_valid (tenant))
+    return WYRELOG_E_INVALID;
+  return wyl_policy_store_tenant_is_active
+      (wyl_handle_get_policy_store (ctx->handle), tenant, out_active);
+}
+
+static gboolean
+tenant_is_known (WylDaemonHttpContext *ctx, const gchar *tenant)
+{
+  gboolean exists = FALSE;
+  if (ctx == NULL || ctx->handle == NULL || tenant == NULL ||
+      !wyl_policy_store_tenant_id_is_valid (tenant))
+    return FALSE;
+  if (wyl_policy_store_tenant_exists (wyl_handle_get_policy_store
+          (ctx->handle), tenant, &exists) != WYRELOG_E_OK)
+    return FALSE;
+  return exists;
+}
+
+static gboolean
+tenant_is_active (WylDaemonHttpContext *ctx, const gchar *tenant)
+{
+  gboolean active = FALSE;
+  return tenant_active_status (ctx, tenant, &active) == WYRELOG_E_OK && active;
 }
 
 static void
@@ -902,15 +930,8 @@ lookup_bearer_token (SoupServerMessage *msg)
  * Bearer-token auth resolver. Defense-in-depth tenant gate: after
  * the signature/issuer/audience/exp verifier passes and the access
  * claims are parsed, we directly require that the JWT's tenant
- * claim is one of the daemon's known tenants (today, only
- * WYL_TENANT_DEFAULT). This check is REDUNDANT with the live-session
- * comparison below, by design: today wyl_session_login() only mints
- * sessions on the default tenant, so a foreign-tenant JWT would
- * already be caught by the live_tenant != claims.tenant arm. The
- * direct check here makes the contract explicit so a future
- * relaxation upstream (e.g., letting the live session carry a
- * non-default tenant) cannot silently widen the JWT-acceptance
- * surface. On miss, we surface the stable wire code
+ * claim is one of the daemon's active tenants. On miss, we surface the
+ * stable wire code
  * WYL_DAEMON_ERR_TENANT_INVALID through *out_auth_error_code so the
  * caller can emit it instead of the generic auth_required code.
  * out_auth_error_code may be NULL; callers that don't need the
@@ -953,9 +974,10 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
    * is rejected as a tenant violation even if the transitive check
    * below would also reject it.
    */
-  if (!wyl_daemon_tenant_is_known (claims.tenant)) {
+  if (!tenant_is_active (ctx, claims.tenant)) {
     if (out_auth_error_code != NULL)
-      *out_auth_error_code = WYL_DAEMON_ERR_TENANT_INVALID;
+      *out_auth_error_code = tenant_is_known (ctx, claims.tenant) ?
+          WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID;
     wyl_jwt_access_claims_clear (&claims);
     return WYRELOG_E_POLICY;
   }
@@ -997,19 +1019,18 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
 /*
  * Session-token (cookie-equivalent) auth resolver. Same
  * defense-in-depth tenant gate as resolve_bearer_session: the
- * live session's tenant must be one of the daemon's known tenants.
- * Today wyl_session_login() only mints WYL_TENANT_DEFAULT sessions,
- * so this check is redundant; it stays as an explicit gate so a
- * future relaxation upstream cannot let a non-default tenant slip
- * through to a privileged handler. out_auth_error_code may be NULL.
+ * live session's tenant must be one of the daemon's active tenants.
+ * out_auth_error_code may be NULL.
  */
 static wyrelog_error_t
-resolve_session_token_auth (SoupServer *server, const gchar *session_token,
-    WylDaemonAuthContext *out_auth, const gchar **out_auth_error_code)
+resolve_session_token_auth (SoupServer *server, WylDaemonHttpContext *ctx,
+    const gchar *session_token, WylDaemonAuthContext *out_auth,
+    const gchar **out_auth_error_code)
 {
   if (out_auth_error_code != NULL)
     *out_auth_error_code = NULL;
-  if (server == NULL || session_token == NULL || out_auth == NULL)
+  if (server == NULL || ctx == NULL || session_token == NULL ||
+      out_auth == NULL)
     return WYRELOG_E_INVALID;
   wyl_daemon_auth_context_clear (out_auth);
 
@@ -1023,9 +1044,10 @@ resolve_session_token_auth (SoupServer *server, const gchar *session_token,
   if (username == NULL || username[0] == '\0' || tenant == NULL ||
       tenant[0] == '\0')
     return WYRELOG_E_POLICY;
-  if (!wyl_daemon_tenant_is_known (tenant)) {
+  if (!tenant_is_active (ctx, tenant)) {
     if (out_auth_error_code != NULL)
-      *out_auth_error_code = WYL_DAEMON_ERR_TENANT_INVALID;
+      *out_auth_error_code = tenant_is_known (ctx, tenant) ?
+          WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID;
     return WYRELOG_E_POLICY;
   }
 
@@ -1054,13 +1076,15 @@ lookup_request_tenant (GHashTable *query)
  * wrapper below and the WYL_TEST_DAEMON_HTTP test seam.
  */
 static guint
-decide_request_tenant_gate (const gchar *request_tenant,
+decide_request_tenant_gate (WylDaemonHttpContext *ctx,
+    const gchar *request_tenant,
     const gchar *auth_tenant, const gchar **out_code)
 {
   if (request_tenant == NULL || request_tenant[0] == '\0' ||
-      !wyl_daemon_tenant_is_known (request_tenant)) {
+      !tenant_is_active (ctx, request_tenant)) {
     if (out_code != NULL)
-      *out_code = WYL_DAEMON_ERR_TENANT_INVALID;
+      *out_code = tenant_is_known (ctx, request_tenant) ?
+          WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID;
     return 400;
   }
 
@@ -1086,12 +1110,12 @@ decide_request_tenant_gate (const gchar *request_tenant,
  */
 static gboolean
 ensure_auth_context_request_tenant (SoupServerMessage *msg, GHashTable *query,
-    const WylDaemonAuthContext *auth)
+    WylDaemonHttpContext *ctx, const WylDaemonAuthContext *auth)
 {
   const gchar *request_tenant = lookup_request_tenant (query);
   const gchar *auth_tenant = (auth != NULL) ? auth->tenant : NULL;
   const gchar *code = NULL;
-  guint status = decide_request_tenant_gate (request_tenant, auth_tenant,
+  guint status = decide_request_tenant_gate (ctx, request_tenant, auth_tenant,
       &code);
   if (status == 0)
     return TRUE;
@@ -1113,7 +1137,15 @@ wyl_daemon_http_check_request_tenant_for_test (const gchar *request_tenant,
   const gchar *effective = request_tenant != NULL ? request_tenant
       : WYL_TENANT_DEFAULT;
   const gchar *code = NULL;
-  guint status = decide_request_tenant_gate (effective, auth_tenant, &code);
+  guint status = 0;
+  if (effective == NULL || effective[0] == '\0' ||
+      g_strcmp0 (effective, WYL_TENANT_DEFAULT) != 0) {
+    status = 400;
+    code = WYL_DAEMON_ERR_TENANT_INVALID;
+  } else if (auth_tenant == NULL || g_strcmp0 (auth_tenant, effective) != 0) {
+    status = 403;
+    code = WYL_DAEMON_ERR_TENANT_DENIED;
+  }
   if (out_status != NULL)
     *out_status = status;
   if (out_code != NULL)
@@ -1423,6 +1455,9 @@ profile_events_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 static gboolean
+tenant_scope_is_allowed (const gchar * tenant, const gchar * scope);
+
+static gboolean
 authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
     GHashTable *query, WylDaemonHttpContext *ctx, const gchar *action,
     const gchar *resource, const gchar *auth_required_code,
@@ -1474,7 +1509,7 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   const gchar *auth_tenant_error = NULL;
   if (has_session_token) {
     wyrelog_error_t auth_rc =
-        resolve_session_token_auth (server, session_token, &auth,
+        resolve_session_token_auth (server, ctx, session_token, &auth,
         &auth_tenant_error);
     if (auth_rc != WYRELOG_E_OK) {
       set_json_error (msg, 401,
@@ -1490,8 +1525,13 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
       return FALSE;
     }
   }
-  if (!ensure_auth_context_request_tenant (msg, query, &auth))
+  if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))
     return FALSE;
+  if (resource != NULL &&
+      !tenant_scope_is_allowed (lookup_request_tenant (query), resource)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
+    return FALSE;
+  }
 
   g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
   g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
@@ -1595,6 +1635,69 @@ lookup_required_query_string (GHashTable *query, const gchar *name)
   return value;
 }
 
+typedef struct
+{
+  GString *json;
+  gboolean first;
+} TenantListJsonCtx;
+
+static wyrelog_error_t
+append_tenant_json (const gchar *tenant_id, gboolean sealed, gpointer user_data)
+{
+  TenantListJsonCtx *ctx = user_data;
+  if (!ctx->first)
+    g_string_append_c (ctx->json, ',');
+  ctx->first = FALSE;
+  g_string_append (ctx->json, "{\"tenant\":");
+  append_json_string (ctx->json, tenant_id);
+  g_string_append_printf (ctx->json, ",\"sealed\":%s}",
+      sealed ? "true" : "false");
+  return WYRELOG_E_OK;
+}
+
+static void
+set_tenant_mutation_json (SoupServerMessage *msg, const gchar *tenant,
+    gboolean changed)
+{
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant\":");
+  append_json_string (body, tenant);
+  g_string_append_printf (body, ",\"changed\":%s}", changed ? "true" : "false");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static gboolean
+tenant_scope_is_allowed (const gchar *tenant, const gchar *scope)
+{
+  if (g_strcmp0 (tenant, WYL_TENANT_DEFAULT) == 0)
+    return TRUE;
+  return g_strcmp0 (tenant, scope) == 0;
+}
+
+static wyrelog_error_t
+emit_tenant_lifecycle_audit (WylDaemonHttpContext *ctx, const gchar *actor,
+    const gchar *tenant, const gchar *action, const gchar *request_id)
+{
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, actor);
+  wyl_audit_event_set_action (ev, action);
+  wyl_audit_event_set_resource_id (ev, tenant);
+  wyl_audit_event_set_request_id (ev, request_id);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  return wyl_audit_emit (ctx->handle, ev);
+#else
+  (void) ctx;
+  (void) actor;
+  (void) tenant;
+  (void) action;
+  (void) request_id;
+  return WYRELOG_E_OK;
+#endif
+}
+
 static void
 set_policy_mutation_error (SoupServerMessage *msg, wyrelog_error_t rc)
 {
@@ -1617,6 +1720,142 @@ set_policy_transition_error (SoupServerMessage *msg, wyrelog_error_t rc)
     return;
   }
   set_json_error (msg, 500, "policy_mutation_failed");
+}
+
+static gboolean
+authorize_tenant_management (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx, gchar **out_actor)
+{
+  return authorize_guarded_session_action (server, msg, query, ctx,
+      "wr.tenant.manage", WYL_TENANT_DEFAULT, "tenant_auth_required",
+      "invalid_tenant_auth", "tenant_denied", "tenant_auth_failed", out_actor);
+}
+
+static void
+tenant_list_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  if (!authorize_tenant_management (server, msg, query, ctx, NULL))
+    return;
+
+  g_autoptr (GString) body = g_string_new ("{\"tenants\":[");
+  TenantListJsonCtx json_ctx = {
+    .json = body,
+    .first = TRUE,
+  };
+  wyrelog_error_t rc = wyl_policy_store_foreach_tenant
+      (wyl_handle_get_policy_store (ctx->handle), append_tenant_json,
+      &json_ctx);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "tenant_query_failed");
+    return;
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data,
+    const gchar *action)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *tenant = lookup_required_query_string (query, "name");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400, "invalid_tenant_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!authorize_tenant_management (server, msg, query, ctx, &actor))
+    return;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  gboolean changed = FALSE;
+  if (g_strcmp0 (action, "create") == 0) {
+    rc = wyl_policy_store_create_tenant (store, tenant, &changed);
+  } else if (g_strcmp0 (action, "seal") == 0) {
+    rc = wyl_policy_store_set_tenant_sealed (store, tenant, TRUE);
+    changed = rc == WYRELOG_E_OK;
+  } else if (g_strcmp0 (action, "unseal") == 0) {
+    rc = wyl_policy_store_set_tenant_sealed (store, tenant, FALSE);
+    changed = rc == WYRELOG_E_OK;
+  } else {
+    set_json_error (msg, 405, "tenant_delete_unsupported");
+    return;
+  }
+
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_tenant_request");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 403, "tenant_mutation_denied");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "tenant_mutation_failed");
+    return;
+  }
+
+  if (changed) {
+    g_autofree gchar *audit_action = g_strdup_printf ("tenant_%s", action);
+    rc = emit_tenant_lifecycle_audit (ctx, actor, tenant, audit_action,
+        ensure_request_id_header (msg));
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "tenant_mutation_failed");
+      return;
+    }
+  }
+
+  set_tenant_mutation_json (msg, tenant, changed);
+}
+
+static void
+tenant_create_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  tenant_mutation_handler (server, msg, path, query, user_data, "create");
+}
+
+static void
+tenant_seal_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  tenant_mutation_handler (server, msg, path, query, user_data, "seal");
+}
+
+static void
+tenant_unseal_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  tenant_mutation_handler (server, msg, path, query, user_data, "unseal");
+}
+
+static void
+tenant_delete_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  tenant_mutation_handler (server, msg, path, query, user_data, "delete");
 }
 
 static gboolean
@@ -1691,6 +1930,10 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
           "wr.policy.write", scope, "policy_auth_required",
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
+  if (!tenant_scope_is_allowed (lookup_request_tenant (query), scope)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
+    return;
+  }
 
   g_mutex_lock (&ctx->policy_mutation_lock);
 
@@ -1772,6 +2015,10 @@ policy_permission_transition_handler (SoupServer *server,
           "wr.policy.write", scope, "policy_auth_required",
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
+  if (!tenant_scope_is_allowed (lookup_request_tenant (query), scope)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
+    return;
+  }
 
   g_mutex_lock (&ctx->policy_mutation_lock);
 
@@ -1830,6 +2077,10 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
           "wr.policy.grant_role", scope, "policy_auth_required",
           "invalid_policy_auth", "policy_denied", "policy_auth_failed", &actor))
     return;
+  if (!tenant_scope_is_allowed (lookup_request_tenant (query), scope)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
+    return;
+  }
 
   g_mutex_lock (&ctx->policy_mutation_lock);
 
@@ -1896,6 +2147,7 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *tenant = WYL_TENANT_DEFAULT;
   const gchar *skip_mfa = NULL;
   const gchar *password = NULL;
+  WylDaemonHttpContext *ctx = user_data;
   if (query != NULL) {
     username = g_hash_table_lookup (query, "username");
     if (g_hash_table_contains (query, "tenant"))
@@ -1907,9 +2159,9 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 400, "invalid_login_request");
     return;
   }
-  if (tenant == NULL || tenant[0] == '\0' ||
-      !wyl_daemon_tenant_is_known (tenant)) {
-    set_json_error (msg, 400, WYL_DAEMON_ERR_TENANT_INVALID);
+  if (tenant == NULL || tenant[0] == '\0' || !tenant_is_active (ctx, tenant)) {
+    set_json_error (msg, 400, tenant_is_known (ctx, tenant) ?
+        WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID);
     return;
   }
   if (password != NULL) {
@@ -1926,8 +2178,6 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       return;
     }
   }
-
-  WylDaemonHttpContext *ctx = user_data;
   WylHandle *handle = ctx->handle;
   g_autoptr (wyl_login_req_t) login = wyl_login_req_new ();
   wyl_login_req_set_username (login, username);
@@ -2226,10 +2476,11 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 400, "invalid_decide_request");
     return;
   }
+  WylDaemonHttpContext *ctx = user_data;
   const gchar *tenant = lookup_request_tenant (query);
-  if (tenant == NULL || tenant[0] == '\0' ||
-      !wyl_daemon_tenant_is_known (tenant)) {
-    set_json_error (msg, 400, WYL_DAEMON_ERR_TENANT_INVALID);
+  if (tenant == NULL || tenant[0] == '\0' || !tenant_is_active (ctx, tenant)) {
+    set_json_error (msg, 400, tenant_is_known (ctx, tenant) ?
+        WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID);
     return;
   }
   gboolean has_guard_context =
@@ -2240,8 +2491,6 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 400, "invalid_decide_request");
     return;
   }
-
-  WylDaemonHttpContext *ctx = user_data;
   const gchar *bearer_token = lookup_bearer_token (msg);
   if (bearer_token == NULL || bearer_token[0] == '\0') {
     set_json_error (msg, 401, "decide_auth_required");
@@ -2256,7 +2505,7 @@ decide_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
         ? auth_tenant_error : "decide_auth_required");
     return;
   }
-  if (!ensure_auth_context_request_tenant (msg, query, &auth))
+  if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))
     return;
   if (g_strcmp0 (auth.actor, user) != 0) {
     set_json_error (msg, 403, "decide_denied");
@@ -2331,6 +2580,15 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/refresh", refresh_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
+  soup_server_add_handler (server, "/tenants", tenant_list_handler, ctx, NULL);
+  soup_server_add_handler (server, "/tenants/create", tenant_create_handler,
+      ctx, NULL);
+  soup_server_add_handler (server, "/tenants/seal", tenant_seal_handler, ctx,
+      NULL);
+  soup_server_add_handler (server, "/tenants/unseal", tenant_unseal_handler,
+      ctx, NULL);
+  soup_server_add_handler (server, "/tenants/delete", tenant_delete_handler,
+      ctx, NULL);
   soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/permissions/grant",
       policy_permission_grant_handler, ctx, NULL);

@@ -98,6 +98,7 @@ permission("wr.sys.reload_template").
 permission("wr.policy.read").
 permission("wr.policy.write").
 permission("wr.policy.grant_role").
+permission("wr.tenant.manage").
 
 // login family
 permission("wr.login.skip_mfa").
@@ -133,6 +134,7 @@ role_permission("wr.system_admin", "wr.sys.reload_template").
 role_permission("wr.system_admin", "wr.policy.read").
 role_permission("wr.system_admin", "wr.policy.write").
 role_permission("wr.system_admin", "wr.policy.grant_role").
+role_permission("wr.system_admin", "wr.tenant.manage").
 // NOTE: system_admin deliberately has no wr.audit.* — SoD with wr.auditor.
 
 role_permission("wr.auditor", "wr.audit.read").
@@ -179,23 +181,11 @@ inherits("wr.service_admin", "wr.operator").
 // System roles are flat by design; no inherits/2 under wr.sys*.
 
 // ---------------------------------------------------------------------------
-// EDB: default tenant for single-tenant installs
+// EDB: default tenant
 // ---------------------------------------------------------------------------
-// v0 ships single-tenant; the only accepted tenant value across the
-// daemon's HTTP surface, the client library, JWT claims, and every
-// `wr.*` fact in this template is the canonical default below.
-// `wr.break_glass` and the rest of the seeded `role/`, `permission/`,
-// and `role_permission/` rows are scoped to this single tenant.
-//
-// Adding additional `tenant(...)` rows here is reserved for v1 and
-// has no effect at runtime in v0: the daemon's HTTP gate
-// (`wyl_daemon_tenant_is_known` in wyrelog/daemon/http.c) rejects any
-// request bearing a tenant value other than the canonical default
-// with the stable wire-format error code `tenant_invalid` (HTTP 400)
-// or `tenant_denied` (HTTP 403). See docs/lobac-v0-tenant-contract.md
-// for the full contract, including the JWT claims defense-in-depth
-// check and the public-API surface that rejects non-canonical values
-// with `WYRELOG_E_INVALID`.
+// The default tenant is always present. Additional tenants are owned by
+// the policy-store tenant registry and managed through the daemon
+// tenant lifecycle surface.
 tenant("__wr_default").
 
 // ---------------------------------------------------------------------------
