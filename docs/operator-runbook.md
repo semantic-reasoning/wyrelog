@@ -190,14 +190,25 @@ PY
 
 1. Stop the daemon.
 2. Back up the current key and policy store together.
-3. Replace the active profile's `policy.key` with a new 32-byte file
-   using mode `0640`, owner `root`, and group `wyrelog`.
-4. Run `wyctl key status --keyprovider file:PATH`.
-5. Run production `--check`, then start the daemon.
+3. Create the new 32-byte key file using mode `0640`, owner `root`, and group
+   `wyrelog`.
+4. Verify both key specs with `wyctl key status --keyprovider file:PATH`.
+5. Rotate the encrypted policy store while the daemon is offline:
 
-Changing the KeyProvider root invalidates sealed policy-store material
-that was written under the previous root. Perform root rotation only with
-a coordinated restore or migration plan.
+   ```sh
+   wyctl key rotate \
+     --store /var/lib/wyrelog/system/policy.sqlite \
+     --from-keyprovider file:/etc/wyrelog/system/policy.key \
+     --to-keyprovider file:/etc/wyrelog/system/policy.next.key
+   ```
+
+6. Move the new key into the profile's `policy.key` location, run production
+   `--check`, then start the daemon.
+
+The rotation command verifies the existing store with the current provider,
+rewrites the store with the new provider through the encrypted store atomic
+write protocol, and leaves the previous store usable if rotation fails before
+the final rename.
 
 ## Emergency Break-Glass
 

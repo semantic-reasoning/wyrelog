@@ -77,6 +77,9 @@ wyrelog_error_t wyl_policy_store_open (const gchar * path,
     wyl_policy_store_t ** out_store);
 wyrelog_error_t wyl_policy_store_open_with_options (const
     wyl_policy_store_open_options_t * opts, wyl_policy_store_t ** out_store);
+wyrelog_error_t wyl_policy_store_rotate_keyprovider (const gchar * path,
+    const wyl_policy_store_open_options_t * old_opts,
+    const wyl_policy_store_open_options_t * new_opts);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
