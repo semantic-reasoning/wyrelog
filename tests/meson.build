@@ -41,6 +41,7 @@ if host_machine.system() != 'windows'
       python3.full_path(),
     ],
     depends : wyrelogd_exe,
+    timeout : 60,
   )
 
   wyrelogd_sigterm_cmd = '"' + wyrelogd_exe.full_path()
@@ -456,7 +457,9 @@ test_session_username = executable('test-session-username',
   dependencies : [wyrelog_dep, wirelog_dep],
 )
 
-test('session-username', test_session_username)
+test('session-username', test_session_username,
+  timeout : 60,
+)
 
 test_session_username_lifecycle = executable('test-session-username-lifecycle',
   'test-session-username.c',
