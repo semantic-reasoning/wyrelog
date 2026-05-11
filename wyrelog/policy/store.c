@@ -372,6 +372,18 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   if (path == NULL || path[0] == '\0' || (bytes == NULL && len > 0))
     return WYRELOG_E_INVALID;
 
+#ifdef G_OS_WIN32
+  /* GLib's g_file_set_contents already performs a temp-file + rename on
+     Windows. The hand-rolled _write loop below was observed to wedge
+     inside a single 288 KB write call for the full meson test budget on
+     hosted GitHub Actions runners, while g_file_set_contents completes in
+     under a second with the same payload. The Windows path therefore
+     defers to GLib and tightens the resulting file's mode to 0600. */
+  if (!g_file_set_contents (path, (const gchar *) bytes, (gssize) len, NULL))
+    return WYRELOG_E_IO;
+  (void) g_chmod (path, 0600);
+  return WYRELOG_E_OK;
+#else
   g_autofree gchar *tmp_path = g_strdup_printf ("%s%s", path,
       WYL_POLICY_STORE_TMP_SUFFIX);
   int fd = g_open (tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0600);
@@ -381,35 +393,18 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   gsize written = 0;
   while (written < len) {
     gsize remaining = len - written;
-#ifdef G_OS_WIN32
-    if (remaining > G_MAXUINT)
-      remaining = G_MAXUINT;
-#else
     if (remaining > G_MAXSSIZE)
       remaining = G_MAXSSIZE;
-#endif
-#ifdef G_OS_WIN32
-    int n = _write (fd, bytes + written, (unsigned int) remaining);
-#else
     ssize_t n = write (fd, bytes + written, remaining);
-#endif
     if (n < 0) {
       int saved_errno = errno;
-#ifdef G_OS_WIN32
-      (void) _close (fd);
-#else
       (void) close (fd);
-#endif
       errno = saved_errno;
       (void) g_remove (tmp_path);
       return WYRELOG_E_IO;
     }
     if (n == 0) {
-#ifdef G_OS_WIN32
-      (void) _close (fd);
-#else
       (void) close (fd);
-#endif
       (void) g_remove (tmp_path);
       return WYRELOG_E_IO;
     }
@@ -417,13 +412,8 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   }
 
   wyrelog_error_t rc = fsync_fd_best_effort (fd);
-#ifdef G_OS_WIN32
-  if (_close (fd) != 0)
-    rc = WYRELOG_E_IO;
-#else
   if (close (fd) != 0)
     rc = WYRELOG_E_IO;
-#endif
   if (rc != WYRELOG_E_OK) {
     (void) g_remove (tmp_path);
     return rc;
@@ -436,6 +426,7 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   }
   fsync_parent_directory_best_effort (path);
   return WYRELOG_E_OK;
+#endif
 }
 
 static wyrelog_error_t
