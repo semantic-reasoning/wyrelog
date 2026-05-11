@@ -131,7 +131,9 @@ while seen < 2:
     server.handle_request()
 PY
 HTTP_PID=$!
-for _ in 1 2 3 4 5; do
+i=0
+while [ "$i" -lt 15 ]; do
+  i=$((i + 1))
   [ -s "$TMPDIR/http.port" ] && break
   sleep 1
 done
@@ -154,7 +156,9 @@ printf '{"profile":"service","event":"existing"}' \
   >"$TMPDIR/service-drain.out" 2>"$TMPDIR/service-drain.err" &
 SERVICE_PID=$!
 HTTP_DONE=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i + 1))
   if ! kill -0 "$HTTP_PID" 2>/dev/null; then
     HTTP_DONE=1
     break
