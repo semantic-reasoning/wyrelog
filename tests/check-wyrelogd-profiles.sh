@@ -60,7 +60,9 @@ fi
   >"$TMPDIR/service-run.out" 2>"$TMPDIR/service-run.err" &
 SERVICE_PID=$!
 SPOOLED=0
-for _ in 1 2 3 4 5 6 7 8 9 10; do
+i=0
+while [ "$i" -lt 30 ]; do
+  i=$((i + 1))
   if find "$TMPDIR/service/run-spool" -name '*.event' -print -quit \
       2>/dev/null | grep -q .; then
     SPOOLED=1
