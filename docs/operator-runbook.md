@@ -9,6 +9,7 @@ support files from `packaging/`.
 
 - Binaries: `/usr/bin/wyrelogd`, `/usr/bin/wyctl`
 - Templates: `/usr/share/wyrelog/access`
+- Template release verifier: `/usr/share/wyrelog/tools/verify-template-release.sh`
 - Daemon environment: `/etc/wyrelog/wyrelogd.env`
 - System KeyProvider root: `/etc/wyrelog/system/policy.key` loaded by
   systemd as credential `wyrelog-system-policy-key`
@@ -179,12 +180,70 @@ PY
 ## Template Upgrade
 
 1. Install the new package without starting the daemon.
-2. Run `wyrelogd --template-info` and record version, hash, migration
-   count, and latest migration version.
+2. Verify the installed template tree against the release note values:
+
+   ```sh
+   /usr/share/wyrelog/tools/verify-template-release.sh \
+     /usr/bin/wyrelogd /usr/share/wyrelog/access \
+     EXPECTED_VERSION EXPECTED_SHA256 \
+     EXPECTED_MIGRATIONS EXPECTED_LATEST_MIGRATION_VERSION
+   ```
+
 3. Run production `--check` against the existing policy and audit stores.
 4. Restart the service.
-5. If readiness fails, roll back the package and restore the previous
-   template tree and policy store backup.
+5. If readiness fails, roll back by restoring the previous package, template
+   tree, policy store, audit store, and KeyProvider backup together.
+
+## Template Artifact Release And Replay Policy
+
+Template artifacts are release artifacts, not runtime secrets. The private
+Ed25519 signing keys are owned by the release custodian role and kept outside
+the deployed Wyrelog hosts. Production hosts receive only signed template
+artifacts and embedded public verification keys in `manifest.ini` and
+`migrations/*.ini`.
+
+The signing process is:
+
+1. Build the package from a tagged release commit.
+2. Generate the canonical template digest for the fixed engine load order
+   documented in `templates/access/manifest.ini`.
+3. Sign the digest with context `wyrelog-template-v0-sha256`.
+4. Sign each migration digest with context
+   `wyrelog-template-migration-v0-sha256`.
+5. Publish the package with release notes that record template version,
+   template SHA-256, migration count, latest migration version, and the
+   signing public key fingerprints.
+
+Signing-key rotation is a release event. Add the new public key to the next
+artifact manifest or migration artifact, sign the artifact with the new
+offline private key, and record the rotation in the release notes. The old
+private key must be retired from signing use after the last release that
+depends on it is published. If a signing key is suspected to be compromised,
+stop rollout, publish a superseding release signed by a new key, and reject
+the affected artifact identity in deployment automation.
+
+Downgrade and replay policy is fail-closed by default:
+
+- A package downgrade is unsupported as an in-place operation.
+- Replaying a previously signed template with an older release identity is
+  rejected by comparing `verify-template-release.sh` output against the
+  release note values approved for the deployment.
+- Rollback is restore-from-backup only: restore the previous package,
+  template tree, policy store, audit store, and KeyProvider state as one
+  consistent snapshot, then run production `--check`.
+- Supersession is the supported correction path for a bad artifact: publish a
+  new release with a new template identity and verify that exact identity on
+  every host before restart.
+
+Operator provenance verification:
+
+```sh
+wyrelogd --template-info --template-dir /usr/share/wyrelog/access
+/usr/share/wyrelog/tools/verify-template-release.sh \
+  /usr/bin/wyrelogd /usr/share/wyrelog/access \
+  EXPECTED_VERSION EXPECTED_SHA256 \
+  EXPECTED_MIGRATIONS EXPECTED_LATEST_MIGRATION_VERSION
+```
 
 ## Key Rotation
 

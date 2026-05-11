@@ -38,6 +38,7 @@ for path in \
   "$SOURCE_ROOT/packaging/wyrelogd.env" \
   "$SOURCE_ROOT/packaging/system.env" \
   "$SOURCE_ROOT/packaging/service.env" \
+  "$SOURCE_ROOT/tools/verify-template-release.sh" \
   "$SOURCE_ROOT/docs/operator-runbook.md"; do
   test -s "$path"
 done
@@ -75,6 +76,7 @@ fi
 
 INSTALL_ROOT="$TMPDIR/install"
 mkdir -p "$INSTALL_ROOT/usr/share/wyrelog" \
+  "$INSTALL_ROOT/usr/share/wyrelog/tools" \
   "$INSTALL_ROOT/etc/wyrelog" \
   "$INSTALL_ROOT/etc/wyrelog/system" \
   "$INSTALL_ROOT/etc/wyrelog/service" \
@@ -86,6 +88,9 @@ mkdir -p "$INSTALL_ROOT/usr/share/wyrelog" \
   "$INSTALL_ROOT/var/log/wyrelog/service" \
   "$INSTALL_ROOT/run/wyrelog"
 cp -R "$TEMPLATE_DIR" "$INSTALL_ROOT/usr/share/wyrelog/access"
+cp "$SOURCE_ROOT/tools/verify-template-release.sh" \
+  "$INSTALL_ROOT/usr/share/wyrelog/tools/verify-template-release.sh"
+chmod 0755 "$INSTALL_ROOT/usr/share/wyrelog/tools/verify-template-release.sh"
 
 "$PYTHON" - "$INSTALL_ROOT/etc/wyrelog/system/policy.key" <<'PY'
 import os
@@ -122,6 +127,25 @@ fi
 grep -q '^version=' "$TMPDIR/template-info.out"
 grep -q '^sha256=' "$TMPDIR/template-info.out"
 grep -q '^migrations=' "$TMPDIR/template-info.out"
+grep -q '^latest_migration_version=' "$TMPDIR/template-info.out"
+
+"$INSTALL_ROOT/usr/share/wyrelog/tools/verify-template-release.sh" \
+  "$WYRELOGD" "$TEMPLATE_INSTALL" \
+  0 0ffe885e14222878f18fc1376adf2df32efeda66fab2e8437e320d7d6928b028 \
+  1 0 >"$TMPDIR/template-release.out"
+if [ "$(cat "$TMPDIR/template-release.out")" != \
+    "status=verified version=0 sha256=0ffe885e14222878f18fc1376adf2df32efeda66fab2e8437e320d7d6928b028 migrations=1 latest_migration_version=0" ]; then
+  echo "unexpected template release verification output" >&2
+  cat "$TMPDIR/template-release.out" >&2
+  exit 1
+fi
+if "$INSTALL_ROOT/usr/share/wyrelog/tools/verify-template-release.sh" \
+    "$WYRELOGD" "$TEMPLATE_INSTALL" \
+    0 0000000000000000000000000000000000000000000000000000000000000000 \
+    1 0 >"$TMPDIR/template-replay.out" 2>"$TMPDIR/template-replay.err"; then
+  echo "template release verification accepted a stale artifact identity" >&2
+  exit 1
+fi
 
 "$WYRELOGD" --production \
   --profile system \

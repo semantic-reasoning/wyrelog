@@ -96,6 +96,11 @@ install_subdir(
   'templates/access',
   install_dir : join_paths(get_option('datadir'), 'wyrelog'),
 )
+install_data(
+  'tools/verify-template-release.sh',
+  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'tools'),
+  install_mode : 'rwxr-xr-x',
+)
 
 install_data(
   'packaging/systemd/wyrelog.service',
