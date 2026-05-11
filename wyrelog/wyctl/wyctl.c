@@ -10,6 +10,7 @@
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
 #include "wyrelog/wyl-common-private.h"
+#include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
 typedef struct
@@ -1142,7 +1143,7 @@ run_key_status (gint argc, gchar **argv)
   WyctlKeyOptions opts = { 0 };
   GOptionEntry entries[] = {
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
-        "Policy KeyProvider state file", "PATH"},
+        "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -1163,18 +1164,20 @@ run_key_status (gint argc, gchar **argv)
     return 2;
   }
 
-  g_autofree gchar *contents = NULL;
-  gsize len = 0;
-  if (!g_file_get_contents (opts.keyprovider_path, &contents, &len, NULL)) {
+  g_autoptr (wyl_keyprovider_file_t) keyprovider =
+      wyl_keyprovider_file_new_from_spec (opts.keyprovider_path);
+  if (keyprovider == NULL) {
     g_printerr ("wyctl: keyprovider unreadable\n");
     return 1;
   }
-  if (len != WYCTL_KEYPROVIDER_FILE_BYTES) {
+  const wyl_keyprovider_vtable_t *vt = wyl_keyprovider_file_get_vtable ();
+  if (vt->probe (keyprovider) != WYRELOG_E_OK) {
     g_printerr ("wyctl: keyprovider invalid\n");
     return 1;
   }
 
-  g_print ("status=ready type=file bytes=%u\n",
+  g_print ("status=ready type=%s bytes=%u\n",
+      wyl_keyprovider_file_get_source_name (keyprovider),
       (guint) WYCTL_KEYPROVIDER_FILE_BYTES);
   return 0;
 }

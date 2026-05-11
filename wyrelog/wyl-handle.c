@@ -596,7 +596,7 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
       return WYRELOG_E_POLICY;
     }
     keyprovider_state =
-        wyl_keyprovider_file_new (opts->policy_keyprovider_path);
+        wyl_keyprovider_file_new_from_spec (opts->policy_keyprovider_path);
     if (keyprovider_state == NULL) {
       WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
           "production mode keyprovider initialization failed");

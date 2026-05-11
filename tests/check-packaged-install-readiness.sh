@@ -47,6 +47,16 @@ if ! grep -q -- "--production" \
   echo "service unit does not enable production gates" >&2
   exit 1
 fi
+if ! grep -q -- "LoadCredential=wyrelog-system-policy-key:" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
+  echo "system unit does not load policy key as a systemd credential" >&2
+  exit 1
+fi
+if ! grep -q -- "--policy-keyprovider systemd-creds:wyrelog-system-policy-key" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
+  echo "system unit does not use the systemd credential KeyProvider" >&2
+  exit 1
+fi
 if ! grep -q -- "--profile=system" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
   echo "system unit does not select the system profile" >&2
@@ -98,6 +108,14 @@ if [ "$(cat "$TMPDIR/key.out")" != "status=ready type=file bytes=32" ]; then
   cat "$TMPDIR/key.out" >&2
   exit 1
 fi
+CREDENTIALS_DIRECTORY="$INSTALL_ROOT/etc/wyrelog/system" \
+  "$WYCTL" key status --keyprovider systemd-creds:policy.key \
+  >"$TMPDIR/key-creds.out"
+if [ "$(cat "$TMPDIR/key-creds.out")" != "status=ready type=systemd-creds bytes=32" ]; then
+  echo "unexpected credential key status output" >&2
+  cat "$TMPDIR/key-creds.out" >&2
+  exit 1
+fi
 
 "$WYRELOGD" --template-info --template-dir "$TEMPLATE_INSTALL" \
   >"$TMPDIR/template-info.out"
@@ -109,15 +127,24 @@ grep -q '^migrations=' "$TMPDIR/template-info.out"
   --profile system \
   --template-dir "$TEMPLATE_INSTALL" \
   --policy-db "$POLICY_DB" \
-  --policy-keyprovider "$KEY" \
+  --policy-keyprovider "file:$KEY" \
   --audit-db "$AUDIT_DB" \
+  --check
+
+CREDENTIALS_DIRECTORY="$INSTALL_ROOT/etc/wyrelog/system" \
+  "$WYRELOGD" --production \
+  --profile system \
+  --template-dir "$TEMPLATE_INSTALL" \
+  --policy-db "$POLICY_DB.credential" \
+  --policy-keyprovider systemd-creds:policy.key \
+  --audit-db "$AUDIT_DB.credential" \
   --check
 
 "$WYRELOGD" --production \
   --profile system \
   --template-dir "$TEMPLATE_INSTALL" \
   --policy-db "$POLICY_DB" \
-  --policy-keyprovider "$KEY" \
+  --policy-keyprovider "file:$KEY" \
   --audit-db "$AUDIT_DB" \
   --listen-port "$PORT" &
 PID=$!

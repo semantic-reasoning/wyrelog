@@ -47,3 +47,15 @@ PY
 "$WYRELOGD" --production --template-dir "$TEMPLATE_DIR" \
   --policy-db "$TMPDIR/prod.sqlite" \
   --policy-keyprovider "$TMPDIR/prod.key" --check
+
+if CREDENTIALS_DIRECTORY= "$WYRELOGD" --production --template-dir "$TEMPLATE_DIR" \
+    --policy-db "$TMPDIR/prod-missing-creds.sqlite" \
+    --policy-keyprovider systemd-creds:prod.key --check; then
+  echo "production mode accepted unavailable systemd credentials" >&2
+  exit 1
+fi
+
+CREDENTIALS_DIRECTORY="$TMPDIR" "$WYRELOGD" --production \
+  --template-dir "$TEMPLATE_DIR" \
+  --policy-db "$TMPDIR/prod-systemd-creds.sqlite" \
+  --policy-keyprovider systemd-creds:prod.key --check
