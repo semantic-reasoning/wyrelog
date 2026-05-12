@@ -255,6 +255,13 @@ test('policy-store', test_policy_store,
   timeout : 90,
 )
 
+test_policy_store_toctou = executable('test-policy-store-toctou',
+  'test-policy-store-toctou.c',
+  dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
+)
+
+test('policy-store-toctou', test_policy_store_toctou)
+
 test_dl_static = executable('test-dl-static',
   'test-dl-static.c',
   dependencies : [wyrelog_dep],

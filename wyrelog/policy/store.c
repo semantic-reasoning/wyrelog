@@ -1,4 +1,20 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef G_OS_WIN32
+/* Expose POSIX.1-2008 openat/renameat/unlinkat/O_NOFOLLOW/O_CLOEXEC.
+ * Must be set before any system header is pulled in. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+/* Apple SDKs gate O_NOFOLLOW (and friends) behind _DARWIN_C_SOURCE
+ * when the compiler is invoked with -std=cNN; setting _POSIX_C_SOURCE
+ * alone is not sufficient because clang predefines __STRICT_ANSI__
+ * and the Darwin headers drop __DARWIN_C_LEVEL below what
+ * sys/fcntl.h requires for O_NOFOLLOW visibility. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
+#endif
+
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -8,7 +24,10 @@
 
 #ifdef G_OS_WIN32
 #include <io.h>
+#include <windows.h>
 #else
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 #endif
 
@@ -21,6 +40,7 @@
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -50,6 +70,14 @@ struct wyl_policy_store_t
   sqlite3 *db;
   gchar *canonical_path;
   gchar *work_path;
+  /* Directory fd anchoring all openat()/renameat() calls against
+   * canonical_path. Captured once at open time so subsequent file
+   * operations cannot be redirected by a same-uid attacker swapping
+   * symlinks at the final path component. -1 when unused (in-memory
+   * stores or non-POSIX builds). */
+  int canonical_dirfd;
+  gchar *canonical_basename;
+  gchar *work_basename;
   guint8 encryption_key[WYL_POLICY_STORE_KEY_LEN];
   guint8 encryption_key_id[WYL_POLICY_STORE_KEY_ID_LEN];
   gboolean encrypted;
@@ -313,56 +341,160 @@ materialize_store_key (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
+#ifdef G_OS_WIN32
+/* TOCTOU mitigation for Windows: probe the final path component with
+ * FILE_FLAG_OPEN_REPARSE_POINT so a symlink or junction at that
+ * position is opened as itself rather than transparently followed.
+ * The handle is closed immediately after the attribute check; the
+ * read/write helpers below re-validate via their own pinned handle
+ * to close the gap between probe and I/O.
+ *
+ * Return contract mirrors the POSIX reject_if_symlink + open pair:
+ *   WYRELOG_E_OK         -- regular file present, safe to proceed
+ *   WYRELOG_E_NOT_FOUND  -- canonical absent (legitimate fresh-store)
+ *   WYRELOG_E_POLICY     -- reparse point present, refuse to follow
+ *   WYRELOG_E_IO         -- attribute query failed for another reason
+ */
+static wyrelog_error_t
+reject_reparse_point_win32 (const gchar *path)
+{
+  if (path == NULL || path[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  GError *err = NULL;
+  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, &err);
+  if (wpath == NULL) {
+    g_clear_error (&err);
+    return WYRELOG_E_INVALID;
+  }
+
+  HANDLE h = CreateFileW (wpath, FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING,
+      FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  /* Capture LastError BEFORE g_free: the Windows CRT free() forwards
+   * to HeapFree which does not document last-error preservation, so a
+   * deferred GetLastError() after free can return a stale or
+   * irrelevant code (observed in CI as a non-ENOENT classification of
+   * a legitimate fresh-store path). */
+  DWORD last_err = (h == INVALID_HANDLE_VALUE) ? GetLastError () : 0;
+  g_free (wpath);
+  if (h == INVALID_HANDLE_VALUE) {
+    if (last_err == ERROR_FILE_NOT_FOUND || last_err == ERROR_PATH_NOT_FOUND)
+      return WYRELOG_E_NOT_FOUND;
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store CreateFileW attribute probe failed");
+    return WYRELOG_E_IO;
+  }
+
+  BY_HANDLE_FILE_INFORMATION info;
+  BOOL ok = GetFileInformationByHandle (h, &info);
+  CloseHandle (h);
+  if (!ok)
+    return WYRELOG_E_IO;
+  if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store refused reparse point at canonical path");
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+/* Read the entire file at path through a CreateFileW handle that
+ * carries FILE_FLAG_OPEN_REPARSE_POINT, then ReadFile via that same
+ * handle. This pins the inode for the duration of the read so a
+ * same-user attacker cannot swap canonical to a symlink between the
+ * open-time probe and the read.
+ *
+ * If the file does not exist (legitimate fresh-store case), returns
+ * WYRELOG_E_NOT_FOUND so the caller can distinguish from a real I/O
+ * failure -- parallels the POSIX read_through_dirfd contract. */
 static wyrelog_error_t
 read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
 {
-  g_autofree gchar *contents = NULL;
-  gsize len = 0;
-
   if (path == NULL || out_bytes == NULL || out_len == NULL)
     return WYRELOG_E_INVALID;
-
   *out_bytes = NULL;
   *out_len = 0;
-  if (!g_file_get_contents (path, &contents, &len, NULL))
+
+  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wpath == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* FILE_SHARE_READ|WRITE|DELETE matches the share mode sqlite uses
+   * for the work-path handle and the share mode glib's
+   * g_file_get_contents uses internally. Restricting to FILE_SHARE_READ
+   * alone produced ERROR_SHARING_VIOLATION on the close-time persist
+   * path because sqlite still holds the work-path file open for
+   * read+write when read_whole_file is invoked from
+   * persist_policy_store_encrypted. */
+  HANDLE h = CreateFileW (wpath, GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  /* See reject_reparse_point_win32 for why LastError is captured
+   * before g_free rather than after. */
+  DWORD last_err = (h == INVALID_HANDLE_VALUE) ? GetLastError () : 0;
+  g_free (wpath);
+  if (h == INVALID_HANDLE_VALUE) {
+    if (last_err == ERROR_FILE_NOT_FOUND || last_err == ERROR_PATH_NOT_FOUND)
+      return WYRELOG_E_NOT_FOUND;
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store CreateFileW for read failed");
     return WYRELOG_E_IO;
-  *out_bytes = (guint8 *) g_steal_pointer (&contents);
+  }
+
+  BY_HANDLE_FILE_INFORMATION info;
+  if (!GetFileInformationByHandle (h, &info)) {
+    CloseHandle (h);
+    return WYRELOG_E_IO;
+  }
+  if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) {
+    CloseHandle (h);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store refused reparse point during read");
+    return WYRELOG_E_POLICY;
+  }
+  if (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+    CloseHandle (h);
+    return WYRELOG_E_POLICY;
+  }
+
+  LARGE_INTEGER fsize;
+  if (!GetFileSizeEx (h, &fsize) || fsize.QuadPart < 0
+      || (guint64) fsize.QuadPart > (guint64) G_MAXSIZE) {
+    CloseHandle (h);
+    return WYRELOG_E_IO;
+  }
+  gsize len = (gsize) fsize.QuadPart;
+  guint8 *buf = g_malloc (len > 0 ? len : 1);
+  gsize total = 0;
+  while (total < len) {
+    /* 64 KiB cap per ReadFile call. Earlier revisions used a single
+     * call sized to the full payload and were observed to wedge on
+     * hosted GitHub Actions Windows runners around 288 KiB; bounded
+     * chunks keep each syscall short. */
+    gsize remain = len - total;
+    DWORD chunk = remain > 0x10000 ? 0x10000 : (DWORD) remain;
+    DWORD got = 0;
+    if (!ReadFile (h, buf + total, chunk, &got, NULL)) {
+      g_free (buf);
+      CloseHandle (h);
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store ReadFile from canonical handle failed");
+      return WYRELOG_E_IO;
+    }
+    if (got == 0)
+      break;
+    total += got;
+  }
+  CloseHandle (h);
+  if (total != len) {
+    g_free (buf);
+    return WYRELOG_E_IO;
+  }
+  *out_bytes = buf;
   *out_len = len;
   return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-fsync_fd_best_effort (int fd)
-{
-#ifdef G_OS_WIN32
-  (void) fd;
-  return WYRELOG_E_OK;
-#else
-  return fsync (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
-#endif
-}
-
-static void
-fsync_parent_directory_best_effort (const gchar *path)
-{
-#ifdef G_OS_WIN32
-  (void) path;
-#else
-  if (path == NULL)
-    return;
-  g_autofree gchar *dir = g_path_get_dirname (path);
-  if (dir == NULL || dir[0] == '\0')
-    return;
-#ifdef O_DIRECTORY
-  int fd = g_open (dir, O_RDONLY | O_DIRECTORY, 0);
-#else
-  int fd = g_open (dir, O_RDONLY, 0);
-#endif
-  if (fd >= 0) {
-    (void) fsync (fd);
-    (void) close (fd);
-  }
-#endif
 }
 
 static wyrelog_error_t
@@ -372,61 +504,98 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
   if (path == NULL || path[0] == '\0' || (bytes == NULL && len > 0))
     return WYRELOG_E_INVALID;
 
-#ifdef G_OS_WIN32
-  /* GLib's g_file_set_contents already performs a temp-file + rename on
-     Windows. The hand-rolled _write loop below was observed to wedge
-     inside a single 288 KB write call for the full meson test budget on
-     hosted GitHub Actions runners, while g_file_set_contents completes in
-     under a second with the same payload. The Windows path therefore
-     defers to GLib and tightens the resulting file's mode to 0600. */
-  if (!g_file_set_contents (path, (const gchar *) bytes, (gssize) len, NULL))
-    return WYRELOG_E_IO;
-  (void) g_chmod (path, 0600);
-  return WYRELOG_E_OK;
-#else
+  /* Algorithm parallels the POSIX write_through_dirfd: write a sibling
+   * temp file via CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT and
+   * CREATE_NEW (refuses to clobber an existing reparse point left
+   * by a same-uid attacker), flush, then MoveFileExW onto the
+   * canonical name. MOVEFILE_WRITE_THROUGH stands in for the dirfd
+   * fsync on POSIX so the directory-entry rewrite is durable across
+   * crash. The destination is re-probed immediately before the move
+   * to refuse following a freshly-planted reparse point. */
   g_autofree gchar *tmp_path = g_strdup_printf ("%s%s", path,
       WYL_POLICY_STORE_TMP_SUFFIX);
-  int fd = g_open (tmp_path, O_WRONLY | O_CREAT | O_TRUNC | O_BINARY, 0600);
-  if (fd < 0)
-    return WYRELOG_E_IO;
-
-  gsize written = 0;
-  while (written < len) {
-    gsize remaining = len - written;
-    if (remaining > G_MAXSSIZE)
-      remaining = G_MAXSSIZE;
-    ssize_t n = write (fd, bytes + written, remaining);
-    if (n < 0) {
-      int saved_errno = errno;
-      (void) close (fd);
-      errno = saved_errno;
-      (void) g_remove (tmp_path);
-      return WYRELOG_E_IO;
-    }
-    if (n == 0) {
-      (void) close (fd);
-      (void) g_remove (tmp_path);
-      return WYRELOG_E_IO;
-    }
-    written += (gsize) n;
+  wchar_t *wtmp = (wchar_t *) g_utf8_to_utf16 (tmp_path, -1, NULL, NULL, NULL);
+  wchar_t *wdst = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wtmp == NULL || wdst == NULL) {
+    g_free (wtmp);
+    g_free (wdst);
+    return WYRELOG_E_INVALID;
   }
 
-  wyrelog_error_t rc = fsync_fd_best_effort (fd);
-  if (close (fd) != 0)
-    rc = WYRELOG_E_IO;
-  if (rc != WYRELOG_E_OK) {
-    (void) g_remove (tmp_path);
-    return rc;
-  }
+  (void) DeleteFileW (wtmp);
 
-  (void) g_chmod (tmp_path, 0600);
-  if (g_rename (tmp_path, path) != 0) {
-    (void) g_remove (tmp_path);
+  HANDLE h = CreateFileW (wtmp, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+      FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (h == INVALID_HANDLE_VALUE) {
+    g_free (wtmp);
+    g_free (wdst);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store CreateFileW for tmp write failed");
     return WYRELOG_E_IO;
   }
-  fsync_parent_directory_best_effort (path);
+
+  BY_HANDLE_FILE_INFORMATION info;
+  if (!GetFileInformationByHandle (h, &info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    CloseHandle (h);
+    (void) DeleteFileW (wtmp);
+    g_free (wtmp);
+    g_free (wdst);
+    return WYRELOG_E_POLICY;
+  }
+
+  gsize total = 0;
+  while (total < len) {
+    gsize remain = len - total;
+    DWORD chunk = remain > 0x10000 ? 0x10000 : (DWORD) remain;
+    DWORD put = 0;
+    if (!WriteFile (h, bytes + total, chunk, &put, NULL) || put == 0) {
+      CloseHandle (h);
+      (void) DeleteFileW (wtmp);
+      g_free (wtmp);
+      g_free (wdst);
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store WriteFile to tmp failed");
+      return WYRELOG_E_IO;
+    }
+    total += put;
+  }
+
+  if (!FlushFileBuffers (h)) {
+    CloseHandle (h);
+    (void) DeleteFileW (wtmp);
+    g_free (wtmp);
+    g_free (wdst);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store FlushFileBuffers of tmp failed");
+    return WYRELOG_E_IO;
+  }
+  CloseHandle (h);
+
+  DWORD dst_attrs = GetFileAttributesW (wdst);
+  if (dst_attrs != INVALID_FILE_ATTRIBUTES
+      && (dst_attrs & FILE_ATTRIBUTE_REPARSE_POINT)) {
+    (void) DeleteFileW (wtmp);
+    g_free (wtmp);
+    g_free (wdst);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store refused reparse point at canonical before rename");
+    return WYRELOG_E_POLICY;
+  }
+
+  BOOL moved = MoveFileExW (wtmp, wdst,
+      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  g_free (wtmp);
+  g_free (wdst);
+  if (!moved) {
+    (void) g_remove (tmp_path);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store MoveFileExW onto canonical failed");
+    return WYRELOG_E_IO;
+  }
+
+  (void) g_chmod (path, 0600);
   return WYRELOG_E_OK;
-#endif
 }
 
 static wyrelog_error_t
@@ -434,18 +603,309 @@ write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 {
   return write_whole_file_atomic_private (path, bytes, len);
 }
+#endif /* G_OS_WIN32 */
+
+/* TOCTOU mitigation helpers (CWE-367 / CodeQL cpp/toctou-race-condition).
+ *
+ * The encrypted policy store previously resolved store->canonical_path
+ * three times (g_file_test for existence, g_file_get_contents for read,
+ * g_file_set_contents for write). Each resolution followed symlinks and
+ * created a window for a same-uid attacker to swap the inode behind
+ * the daemon. The helpers below collapse those resolutions onto a
+ * single directory fd opened once at store-open time. All subsequent
+ * I/O against canonical_path is performed via openat()/renameat()
+ * relative to that fd with O_NOFOLLOW, so a swap at the final path
+ * component is refused (ELOOP -> WYRELOG_E_POLICY) rather than
+ * silently followed.
+ *
+ * Parent-directory symlinks remain supported -- the lstat check is on
+ * the final path component only, and the dirfd was already obtained
+ * through the parent path (e.g. /var/lib/wyrelog/) before any
+ * sensitive operations begin. Operators may continue to point
+ * /var/lib/wyrelog at a symlinked storage volume. */
+
+#ifndef G_OS_WIN32
+static wyrelog_error_t
+reject_if_symlink (const gchar *path)
+{
+  GStatBuf statbuf;
+
+  if (g_lstat (path, &statbuf) == -1) {
+    if (errno == ENOENT)
+      return WYRELOG_E_OK;
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store lstat failed for canonical path");
+    return WYRELOG_E_IO;
+  }
+
+  if (S_ISLNK (statbuf.st_mode)) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store canonical path is a symlink; refusing to open");
+    return WYRELOG_E_POLICY;
+  }
+
+  return WYRELOG_E_OK;
+}
 
 static wyrelog_error_t
-decrypt_policy_store_from_canonical (wyl_policy_store_t *store,
-    const gchar *canonical_path, const gchar *work_path)
+open_canonical_dirfd (const gchar *canonical_path, int *out_dirfd,
+    gchar **out_basename)
 {
-  g_autofree guint8 *ciphertext = NULL;
-  gsize ciphertext_len = 0;
-  wyrelog_error_t rc = read_whole_file (canonical_path, &ciphertext,
-      &ciphertext_len);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  g_autofree gchar *dir = g_path_get_dirname (canonical_path);
+  g_autofree gchar *basename = g_path_get_basename (canonical_path);
 
+  if (dir == NULL || basename == NULL || basename[0] == '\0') {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store could not split canonical path into dir+basename");
+    return WYRELOG_E_IO;
+  }
+
+  int dirfd = open (dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  if (dirfd < 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store could not open canonical directory fd");
+    return WYRELOG_E_IO;
+  }
+
+  *out_dirfd = dirfd;
+  *out_basename = g_steal_pointer (&basename);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
+    gsize *out_len)
+{
+  *out_bytes = NULL;
+  *out_len = 0;
+
+  int fd = openat (dirfd, basename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    if (errno == ENOENT)
+      return WYRELOG_E_NOT_FOUND;
+    if (errno == ELOOP) {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store refused symlinked file at canonical path");
+      return WYRELOG_E_POLICY;
+    }
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT, "policy store openat for read failed");
+    return WYRELOG_E_IO;
+  }
+
+  struct stat st;
+  if (fstat (fd, &st) != 0) {
+    close (fd);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store fstat after openat failed");
+    return WYRELOG_E_IO;
+  }
+  if (!S_ISREG (st.st_mode)) {
+    close (fd);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store canonical fd is not a regular file");
+    return WYRELOG_E_POLICY;
+  }
+  if (st.st_size < 0 || (guint64) st.st_size > (guint64) G_MAXSIZE) {
+    close (fd);
+    return WYRELOG_E_IO;
+  }
+
+  gsize len = (gsize) st.st_size;
+  guint8 *buf = g_malloc (len > 0 ? len : 1);
+  gsize total = 0;
+  while (total < len) {
+    ssize_t got = read (fd, buf + total, len - total);
+    if (got < 0) {
+      if (errno == EINTR)
+        continue;
+      g_free (buf);
+      close (fd);
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store read from canonical fd failed");
+      return WYRELOG_E_IO;
+    }
+    if (got == 0)
+      break;
+    total += (gsize) got;
+  }
+  close (fd);
+
+  if (total != len) {
+    g_free (buf);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store short read from canonical fd");
+    return WYRELOG_E_IO;
+  }
+
+  *out_bytes = buf;
+  *out_len = len;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_work_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
+    gsize *out_len)
+{
+  *out_bytes = NULL;
+  *out_len = 0;
+
+  int fd = openat (dirfd, basename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    if (errno == ELOOP) {
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store refused symlinked work path");
+      return WYRELOG_E_POLICY;
+    }
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store openat for work read failed");
+    return WYRELOG_E_IO;
+  }
+
+  struct stat st;
+  if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_size < 0
+      || (guint64) st.st_size > (guint64) G_MAXSIZE) {
+    close (fd);
+    return WYRELOG_E_IO;
+  }
+
+  gsize len = (gsize) st.st_size;
+  guint8 *buf = g_malloc (len > 0 ? len : 1);
+  gsize total = 0;
+  while (total < len) {
+    ssize_t got = read (fd, buf + total, len - total);
+    if (got < 0) {
+      if (errno == EINTR)
+        continue;
+      g_free (buf);
+      close (fd);
+      return WYRELOG_E_IO;
+    }
+    if (got == 0)
+      break;
+    total += (gsize) got;
+  }
+  close (fd);
+
+  if (total != len) {
+    g_free (buf);
+    return WYRELOG_E_IO;
+  }
+
+  *out_bytes = buf;
+  *out_len = len;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
+    gsize len)
+{
+  g_autofree gchar *tmp_basename = g_strdup_printf ("%s%s", basename,
+      WYL_POLICY_STORE_TMP_SUFFIX);
+
+  /* Best-effort sweep of any stale tmp file from a prior aborted
+   * write. ENOENT is the common case and is not an error. */
+  (void) unlinkat (dirfd, tmp_basename, 0);
+
+  int fd = openat (dirfd, tmp_basename,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store openat for write (tmp) failed");
+    return WYRELOG_E_IO;
+  }
+
+  gsize total = 0;
+  while (total < len) {
+    ssize_t put = write (fd, bytes + total, len - total);
+    if (put < 0) {
+      if (errno == EINTR)
+        continue;
+      close (fd);
+      (void) unlinkat (dirfd, tmp_basename, 0);
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store write to canonical tmp failed");
+      return WYRELOG_E_IO;
+    }
+    total += (gsize) put;
+  }
+
+  if (fsync (fd) != 0) {
+    close (fd);
+    (void) unlinkat (dirfd, tmp_basename, 0);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store fsync of canonical tmp failed");
+    return WYRELOG_E_IO;
+  }
+
+  if (close (fd) != 0) {
+    (void) unlinkat (dirfd, tmp_basename, 0);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store close of canonical tmp failed");
+    return WYRELOG_E_IO;
+  }
+
+  if (renameat (dirfd, tmp_basename, dirfd, basename) != 0) {
+    (void) unlinkat (dirfd, tmp_basename, 0);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store renameat onto canonical name failed");
+    return WYRELOG_E_IO;
+  }
+
+  /* Fsync the parent directory so the rename is durable across crash.
+   * Without this, the kernel may have flushed the new file inode but
+   * not the directory entry rewrite, leaving recovery to either lose
+   * the canonical name entirely or retain the tmp name. */
+  if (fsync (dirfd) != 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store fsync of canonical directory failed");
+    return WYRELOG_E_IO;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+write_plaintext_work_through_dirfd (int dirfd, const gchar *basename,
+    const guint8 *bytes, gsize len)
+{
+  /* Unlink any stale work file before recreating with O_NOFOLLOW. */
+  (void) unlinkat (dirfd, basename, 0);
+  int fd = openat (dirfd, basename,
+      O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (fd < 0) {
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store openat for work-path write failed");
+    return WYRELOG_E_IO;
+  }
+  gsize total = 0;
+  while (total < len) {
+    ssize_t put = write (fd, bytes + total, len - total);
+    if (put < 0) {
+      if (errno == EINTR)
+        continue;
+      close (fd);
+      WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+          "policy store write to work fd failed");
+      return WYRELOG_E_IO;
+    }
+    total += (gsize) put;
+  }
+  if (fsync (fd) != 0) {
+    close (fd);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store fsync of work fd failed");
+    return WYRELOG_E_IO;
+  }
+  close (fd);
+  return WYRELOG_E_OK;
+}
+#endif /* !G_OS_WIN32 */
+
+static wyrelog_error_t
+decrypt_policy_store_from_bytes (wyl_policy_store_t *store,
+    const guint8 *ciphertext, gsize ciphertext_len)
+{
   if (ciphertext_len < sizeof (WylPolicyStoreFileHeader))
     return WYRELOG_E_POLICY;
   const WylPolicyStoreFileHeader *header =
@@ -492,7 +952,19 @@ decrypt_policy_store_from_canonical (wyl_policy_store_t *store,
   if (decrypted_len != plaintext_len)
     return WYRELOG_E_CRYPTO;
 
-  return write_plaintext_work_file (work_path, plaintext, plaintext_len);
+#ifndef G_OS_WIN32
+  /* POSIX builds always have canonical_dirfd set when store->encrypted
+   * is true; the open path enforces the invariant. Bail with a clear
+   * error if it has been violated by a future refactor rather than
+   * fall through to the path-by-name survivor that would re-introduce
+   * the TOCTOU surface this commit closes. */
+  if (store->canonical_dirfd < 0 || store->work_basename == NULL)
+    return WYRELOG_E_INTERNAL;
+  return write_plaintext_work_through_dirfd (store->canonical_dirfd,
+      store->work_basename, plaintext, plaintext_len);
+#else
+  return write_plaintext_work_file (store->work_path, plaintext, plaintext_len);
+#endif
 }
 
 static wyrelog_error_t
@@ -752,9 +1224,21 @@ persist_policy_store_encrypted (wyl_policy_store_t *store)
 
   g_autofree guint8 *plaintext = NULL;
   gsize plaintext_len = 0;
+#ifndef G_OS_WIN32
+  /* POSIX builds always have canonical_dirfd; the open path enforces
+   * this invariant. Bail with a clear error if it's been violated by
+   * a future refactor rather than fall through to the path-by-name
+   * survivor that would re-introduce the TOCTOU surface. */
+  if (store->canonical_dirfd < 0 || store->work_basename == NULL)
+    return WYRELOG_E_INTERNAL;
+  if (read_work_through_dirfd (store->canonical_dirfd, store->work_basename,
+          &plaintext, &plaintext_len) != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
+#else
   if (read_whole_file (store->work_path, &plaintext,
           &plaintext_len) != WYRELOG_E_OK)
     return WYRELOG_E_IO;
+#endif
 
   const gsize encrypted_len = sizeof (WylPolicyStoreFileHeader)
       + crypto_aead_xchacha20poly1305_ietf_ABYTES + plaintext_len;
@@ -781,8 +1265,17 @@ persist_policy_store_encrypted (wyl_policy_store_t *store)
           - sizeof (WylPolicyStoreFileHeader)))
     return WYRELOG_E_CRYPTO;
 
+#ifndef G_OS_WIN32
+  /* POSIX builds always have canonical_dirfd; the open path enforces
+   * this invariant. */
+  if (store->canonical_dirfd < 0 || store->canonical_basename == NULL)
+    return WYRELOG_E_INTERNAL;
+  return write_through_dirfd (store->canonical_dirfd,
+      store->canonical_basename, encrypted, encrypted_len);
+#else
   return write_whole_file_atomic_private (store->canonical_path, encrypted,
       encrypted_len);
+#endif
 }
 
 wyrelog_error_t
@@ -873,6 +1366,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
   self->encrypted = opts->require_encrypted;
   self->canonical_path = g_strdup (effective_path);
+  self->canonical_dirfd = -1;
 
   const gchar *open_path = effective_path;
   if (self->encrypted) {
@@ -885,24 +1379,99 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     self->work_path = g_strdup_printf ("%s%s",
         self->canonical_path, WYL_POLICY_STORE_CLEAR_SUFFIX);
 
-    (void) g_remove (self->work_path);
+    wyrelog_error_t rc;
 
-    wyrelog_error_t rc = materialize_store_key (self, opts);
+#ifndef G_OS_WIN32
+    /* TOCTOU mitigation: refuse symlinks at the canonical path so the
+     * subsequent openat() cannot be redirected by a same-uid attacker.
+     * Parent-directory symlinks are still permitted (operators may
+     * arrange /var/lib/wyrelog/ as a symlink farm). */
+    rc = reject_if_symlink (self->canonical_path);
     if (rc != WYRELOG_E_OK) {
       cleanup_keyprovider_state (opts);
       wyl_policy_store_close (self);
       return rc;
     }
 
-    if (g_file_test (self->canonical_path, G_FILE_TEST_EXISTS)) {
-      rc = decrypt_policy_store_from_canonical (self, self->canonical_path,
-          self->work_path);
-      if (rc != WYRELOG_E_OK) {
+    rc = open_canonical_dirfd (self->canonical_path,
+        &self->canonical_dirfd, &self->canonical_basename);
+    if (rc != WYRELOG_E_OK) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return rc;
+    }
+    self->work_basename = g_strdup_printf ("%s%s",
+        self->canonical_basename, WYL_POLICY_STORE_CLEAR_SUFFIX);
+    /* Best-effort sweep of any stale work file from a prior aborted
+     * close. ENOENT is the common case. */
+    (void) unlinkat (self->canonical_dirfd, self->work_basename, 0);
+#else
+    /* Windows analogue of reject_if_symlink: refuse a reparse point
+     * (symbolic link, junction, or mount point) at the final component
+     * of the canonical path. NOT_FOUND is the fresh-store case and is
+     * not an error here; the subsequent read_whole_file call will see
+     * the same ENOENT and route through the create-new path. */
+    rc = reject_reparse_point_win32 (self->canonical_path);
+    if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return rc;
+    }
+    (void) g_remove (self->work_path);
+#endif
+
+    rc = materialize_store_key (self, opts);
+    if (rc != WYRELOG_E_OK) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return rc;
+    }
+
+#ifndef G_OS_WIN32
+    {
+      g_autofree guint8 *canonical_bytes = NULL;
+      gsize canonical_len = 0;
+      rc = read_through_dirfd (self->canonical_dirfd,
+          self->canonical_basename, &canonical_bytes, &canonical_len);
+      if (rc == WYRELOG_E_OK) {
+        rc = decrypt_policy_store_from_bytes (self, canonical_bytes,
+            canonical_len);
+        if (rc != WYRELOG_E_OK) {
+          cleanup_keyprovider_state (opts);
+          wyl_policy_store_close (self);
+          return rc;
+        }
+      } else if (rc == WYRELOG_E_NOT_FOUND) {
+        /* Fresh store: fall through and let sqlite3 create the work db. */
+      } else {
         cleanup_keyprovider_state (opts);
         wyl_policy_store_close (self);
         return rc;
       }
     }
+#else
+    {
+      g_autofree guint8 *canonical_bytes = NULL;
+      gsize canonical_len = 0;
+      rc = read_whole_file (self->canonical_path, &canonical_bytes,
+          &canonical_len);
+      if (rc == WYRELOG_E_OK) {
+        rc = decrypt_policy_store_from_bytes (self, canonical_bytes,
+            canonical_len);
+        if (rc != WYRELOG_E_OK) {
+          cleanup_keyprovider_state (opts);
+          wyl_policy_store_close (self);
+          return rc;
+        }
+      } else if (rc == WYRELOG_E_NOT_FOUND) {
+        /* Fresh store: fall through and let sqlite3 create the work db. */
+      } else {
+        cleanup_keyprovider_state (opts);
+        wyl_policy_store_close (self);
+        return rc;
+      }
+    }
+#endif
     open_path = self->work_path;
   } else {
     wyrelog_error_t rc = materialize_store_key (self, opts);
@@ -955,9 +1524,24 @@ wyl_policy_store_close (wyl_policy_store_t *store)
       (void) persist_policy_store_encrypted (store);
     sqlite3_close (store->db);
     store->db = NULL;
-    if (store->encrypted && store->work_path != NULL)
-      (void) g_remove (store->work_path);
+    if (store->encrypted) {
+#ifndef G_OS_WIN32
+      if (store->canonical_dirfd >= 0 && store->work_basename != NULL)
+        (void) unlinkat (store->canonical_dirfd, store->work_basename, 0);
+#else
+      if (store->work_path != NULL)
+        (void) g_remove (store->work_path);
+#endif
+    }
   }
+#ifndef G_OS_WIN32
+  if (store->canonical_dirfd >= 0) {
+    close (store->canonical_dirfd);
+    store->canonical_dirfd = -1;
+  }
+#endif
+  g_clear_pointer (&store->canonical_basename, g_free);
+  g_clear_pointer (&store->work_basename, g_free);
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
   policy_store_zero_key_material (store);
