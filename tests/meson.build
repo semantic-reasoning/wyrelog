@@ -215,6 +215,13 @@ if host_machine.system() != 'windows' and build_client
       python3.full_path(),
     ],
     depends : [wyctl_exe, wyrelogd_exe],
+    # This smoke test exercises the packaged template tree, production
+    # --check, credential KeyProvider setup, encrypted-store key rotation,
+    # and a live daemon readiness probe.  Keep it isolated from the heavier
+    # daemon/audit integration tests so CI runner contention does not trip
+    # Meson's default 30s timeout while still keeping a bounded deadline.
+    is_parallel : false,
+    timeout : 60,
   )
 
   test('client-audit-daemon', sh,
