@@ -2,6 +2,7 @@
 #include "daemon/runtime.h"
 
 #include <errno.h>
+#include <sys/stat.h>
 
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -38,6 +39,49 @@ count_service_profile_spool_events (const WylDaemonOptions *opts,
       (*out_pending)++;
   }
   return TRUE;
+}
+
+static gboolean
+prepare_fact_root (const WylDaemonOptions *opts, GError **error)
+{
+  if (opts->fact_root == NULL || opts->fact_root[0] == '\0')
+    return TRUE;
+
+#ifdef WYL_HAS_FACT_STORE
+  struct stat fact_root_stat;
+  if (g_mkdir_with_parents (opts->fact_root, 0700) != 0) {
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (errno),
+        "failed to create fact root directory: %s", opts->fact_root);
+    return FALSE;
+  }
+  if (!g_file_test (opts->fact_root, G_FILE_TEST_IS_DIR)) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_NOTDIR,
+        "fact root is not a directory: %s", opts->fact_root);
+    return FALSE;
+  }
+  if (g_stat (opts->fact_root, &fact_root_stat) != 0) {
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (errno),
+        "failed to stat fact root directory: %s", opts->fact_root);
+    return FALSE;
+  }
+  if ((fact_root_stat.st_mode & 077) != 0) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
+        "fact root must not be accessible by group or other users: %s",
+        opts->fact_root);
+    return FALSE;
+  }
+  if ((fact_root_stat.st_mode & 0700) != 0700) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
+        "fact root must be readable, writable, and searchable by owner: %s",
+        opts->fact_root);
+    return FALSE;
+  }
+  return TRUE;
+#else
+  g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+      "fact store support is not built in");
+  return FALSE;
+#endif
 }
 
 static gboolean
@@ -335,6 +379,11 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
   if (bootstrap_admin_requested (opts) && !audit_subsystem_enabled (opts)) {
     g_printerr ("wyrelogd: --bootstrap-admin-subject requires the audit "
         "subsystem.\n");
+    return 1;
+  }
+
+  if (!prepare_fact_root (opts, &error)) {
+    g_printerr ("wyrelogd: fact store setup failed: %s\n", error->message);
     return 1;
   }
 

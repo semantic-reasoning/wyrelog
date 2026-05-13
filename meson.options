@@ -40,11 +40,20 @@ option('enable_audit',
               + 'to opt in to the DuckDB-backed audit sink.'
 )
 
+option('enable_fact_store',
+  type : 'feature',
+  value : 'disabled',
+  description : 'Build the DuckDB-backed Datalog fact store foundation. '
+              + 'This is independent from the audit subsystem: builds with '
+              + 'enable_audit=disabled and enable_fact_store=enabled must '
+              + 'still make DuckDB available for fact storage.'
+)
+
 option('duckdb_source',
   type : 'combo',
   choices : ['prebuilt', 'subproject'],
   value : 'prebuilt',
-  description : 'How libduckdb is sourced when enable_audit is on. '
+  description : 'How libduckdb is sourced when audit or fact storage is on. '
               + '"prebuilt" downloads the upstream-published library '
               + 'binary for the host platform (fast: ~30 MB download '
               + 'and zero compile). "subproject" downloads the '

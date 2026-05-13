@@ -1,7 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#if defined(__unix__) || defined(__APPLE__)
+#define _XOPEN_SOURCE 700
+#endif
 #include "daemon/options.h"
 
 #include <errno.h>
+#ifdef G_OS_UNIX
+#include <stdlib.h>
+#endif
 #include <string.h>
 
 #define WYL_DAEMON_DEFAULT_EVENT_QUEUE_LIMIT 1024
@@ -54,6 +60,59 @@ parse_uint_arg (const gchar *value, guint min_value, guint max_value,
   return TRUE;
 }
 
+static gchar *
+path_resolve_existing_prefix (const gchar *path)
+{
+  g_autofree gchar *canon_path = g_canonicalize_filename (path, NULL);
+#ifdef G_OS_UNIX
+  g_autofree gchar *probe = g_strdup (canon_path);
+  g_autoptr (GString) suffix = g_string_new (NULL);
+
+  while (TRUE) {
+    gchar *resolved = realpath (probe, NULL);
+    if (resolved != NULL) {
+      if (suffix->len == 0)
+        return resolved;
+
+      g_autofree gchar *resolved_owner = resolved;
+      return g_build_filename (resolved_owner, suffix->str, NULL);
+    }
+
+    if (g_strcmp0 (probe, G_DIR_SEPARATOR_S) == 0)
+      return g_strdup (canon_path);
+
+    g_autofree gchar *basename = g_path_get_basename (probe);
+    g_autofree gchar *dirname = g_path_get_dirname (probe);
+    if (suffix->len == 0) {
+      g_string_assign (suffix, basename);
+    } else {
+      g_string_prepend_c (suffix, G_DIR_SEPARATOR);
+      g_string_prepend (suffix, basename);
+    }
+    g_free (probe);
+    probe = g_steal_pointer (&dirname);
+  }
+#else
+  return g_steal_pointer (&canon_path);
+#endif
+}
+
+static gboolean
+path_equal_or_contains (const gchar *root, const gchar *path)
+{
+  if (root == NULL || root[0] == '\0' || path == NULL || path[0] == '\0')
+    return FALSE;
+
+  g_autofree gchar *canon_root = path_resolve_existing_prefix (root);
+  g_autofree gchar *canon_path = path_resolve_existing_prefix (path);
+  if (g_strcmp0 (canon_root, canon_path) == 0)
+    return TRUE;
+
+  g_autofree gchar *root_prefix =
+      g_strconcat (canon_root, G_DIR_SEPARATOR_S, NULL);
+  return g_str_has_prefix (canon_path, root_prefix);
+}
+
 static void
 keyfile_take_string (GKeyFile *key_file, const gchar *key, const gchar **target)
 {
@@ -91,6 +150,8 @@ load_config_defaults (WylDaemonOptions *opts, GKeyFile *key_file)
   keyfile_take_string (key_file, "policy_keyprovider",
       &opts->policy_keyprovider_path);
   keyfile_take_string (key_file, "audit_db", &opts->audit_store_path);
+  keyfile_take_string (key_file, "fact_root", &opts->fact_root);
+  keyfile_take_string (key_file, "fact_store_mode", &opts->fact_store_mode);
   keyfile_take_string (key_file, "event_spool_dir", &opts->event_spool_dir);
   keyfile_take_string (key_file, "system_url", &opts->system_url);
   keyfile_take_owned_string (key_file, "listen_port", &opts->listen_port_arg);
@@ -140,6 +201,15 @@ default_audit_path (WylDaemonProfile profile)
       "/var/log/wyrelog/system/audit.duckdb";
 }
 
+#ifdef WYL_HAS_FACT_STORE
+static const gchar *
+default_fact_root (WylDaemonProfile profile)
+{
+  return profile == WYL_DAEMON_PROFILE_SERVICE ?
+      "/var/lib/wyrelog/service/facts" : "/var/lib/wyrelog/system/facts";
+}
+#endif
+
 static const gchar *
 default_spool_dir (WylDaemonProfile profile)
 {
@@ -165,6 +235,11 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
         "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
     {"audit-db", 0, 0, G_OPTION_ARG_STRING, &opts->audit_store_path,
         "Runtime audit sink database path", "PATH"},
+    {"fact-root", 0, 0, G_OPTION_ARG_STRING, &opts->fact_root,
+        "Datalog fact store root directory", "DIR"},
+    {"fact-store-mode", 0, 0, G_OPTION_ARG_STRING,
+          &opts->fact_store_mode,
+        "Datalog fact store layout mode: per-tenant-graph", "MODE"},
     {"system-url", 0, 0, G_OPTION_ARG_STRING, &opts->system_url,
           "System-profile daemon URL for service-profile event forwarding",
         "URL"},
@@ -259,12 +334,47 @@ wyl_daemon_options_resolve (WylDaemonOptions *opts, GError **error)
       opts->policy_keyprovider_path = default_keyprovider_path (opts->profile);
     if (opts->audit_store_path == NULL)
       opts->audit_store_path = default_audit_path (opts->profile);
+#ifdef WYL_HAS_FACT_STORE
+    if (opts->fact_root == NULL)
+      opts->fact_root = default_fact_root (opts->profile);
+#endif
+  }
+
+  if (opts->fact_store_mode == NULL &&
+      (opts->fact_root != NULL && opts->fact_root[0] != '\0'))
+    opts->fact_store_mode = "per-tenant-graph";
+  if (opts->fact_store_mode != NULL &&
+      g_strcmp0 (opts->fact_store_mode, "per-tenant-graph") != 0) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "fact store mode must be per-tenant-graph");
+    return FALSE;
+  }
+
+  if (opts->fact_root != NULL && opts->fact_root[0] != '\0') {
+    if (path_equal_or_contains (opts->fact_root, opts->policy_store_path) ||
+        path_equal_or_contains (opts->policy_store_path, opts->fact_root)) {
+      g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+          "fact root must be distinct from the policy database path");
+      return FALSE;
+    }
+    if (path_equal_or_contains (opts->fact_root, opts->audit_store_path) ||
+        path_equal_or_contains (opts->audit_store_path, opts->fact_root)) {
+      g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+          "fact root must be distinct from the audit database path");
+      return FALSE;
+    }
   }
 
   if (opts->profile == WYL_DAEMON_PROFILE_SERVICE) {
     if ((opts->production_mode || opts->show_profile_info) &&
         opts->event_spool_dir == NULL)
       opts->event_spool_dir = default_spool_dir (opts->profile);
+    if (path_equal_or_contains (opts->fact_root, opts->event_spool_dir) ||
+        path_equal_or_contains (opts->event_spool_dir, opts->fact_root)) {
+      g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+          "fact root must be distinct from the service event spool");
+      return FALSE;
+    }
   } else if (opts->system_url != NULL && opts->system_url[0] != '\0') {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
         "system-url is only valid for the service profile");

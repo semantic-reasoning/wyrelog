@@ -19,6 +19,21 @@ for raw in sys.argv[1:]:
     pathlib.Path(raw).write_bytes(os.urandom(32))
 PY
 
+FACT_ARGS=
+FACT_SYSTEM_ARGS=
+FACT_SERVICE_ARGS=
+if "$WYRELOGD" --profile=system --production --profile-info \
+    | grep -q '^fact_root=/var/lib/wyrelog/system/facts$'; then
+  FACT_ARGS=1
+  FACT_SYSTEM_ARGS="--fact-root $TMPDIR/system/facts"
+  FACT_SERVICE_ARGS="--fact-root $TMPDIR/service/facts"
+else
+  "$WYRELOGD" --profile=system --production --profile-info \
+    >"$TMPDIR/profile-system-no-fact.out"
+  grep -q '^fact_root=$' "$TMPDIR/profile-system-no-fact.out"
+  grep -q '^fact_store_mode=$' "$TMPDIR/profile-system-no-fact.out"
+fi
+
 if "$WYRELOGD" --profile=nope --check >/dev/null 2>"$TMPDIR/bad.err"; then
   echo "invalid profile was accepted" >&2
   exit 1
@@ -34,6 +49,7 @@ fi
   --policy-db "$TMPDIR/system/policy.sqlite" \
   --policy-keyprovider "$TMPDIR/system.key" \
   --audit-db "$TMPDIR/system/audit.duckdb" \
+  $FACT_SYSTEM_ARGS \
   --check
 
 "$WYRELOGD" --production --profile=service \
@@ -41,6 +57,7 @@ fi
   --policy-db "$TMPDIR/service/policy.sqlite" \
   --policy-keyprovider "$TMPDIR/service.key" \
   --audit-db "$TMPDIR/service/audit.duckdb" \
+  $FACT_SERVICE_ARGS \
   --system-url "http://127.0.0.1:1" \
   --event-spool-dir "$TMPDIR/service/event-spool" \
   --event-queue-limit 8 \
@@ -48,6 +65,10 @@ fi
 
 if [ ! -d "$TMPDIR/service/event-spool" ]; then
   echo "service profile did not create the event spool" >&2
+  exit 1
+fi
+if [ -n "$FACT_ARGS" ] && [ ! -d "$TMPDIR/service/facts" ]; then
+  echo "service profile did not create the fact root" >&2
   exit 1
 fi
 
@@ -207,6 +228,8 @@ template_dir=$TEMPLATE_DIR
 policy_db=$TMPDIR/config/policy.sqlite
 policy_keyprovider=$TMPDIR/service.key
 audit_db=$TMPDIR/config/audit.duckdb
+fact_root=$TMPDIR/config/facts
+fact_store_mode=per-tenant-graph
 system_url=http://127.0.0.1:8765
 event_spool_dir=$TMPDIR/config/event-spool
 event_queue_limit=9
@@ -218,6 +241,139 @@ EOF
   >"$TMPDIR/profile.out"
 grep -q '^profile=service$' "$TMPDIR/profile.out"
 grep -q "^policy_db=$TMPDIR/config/policy.sqlite$" "$TMPDIR/profile.out"
+grep -q "^fact_root=$TMPDIR/config/facts$" "$TMPDIR/profile.out"
+grep -q '^fact_store_mode=per-tenant-graph$' "$TMPDIR/profile.out"
 grep -q "^event_spool_dir=$TMPDIR/config/event-spool$" "$TMPDIR/profile.out"
 grep -q '^event_queue_limit=9$' "$TMPDIR/profile.out"
 grep -q '^listen_port=9876$' "$TMPDIR/profile.out"
+
+if [ -n "$FACT_ARGS" ]; then
+  "$WYRELOGD" --production --profile=system --profile-info \
+    >"$TMPDIR/profile-system-default.out"
+  grep -q '^fact_root=/var/lib/wyrelog/system/facts$' \
+    "$TMPDIR/profile-system-default.out"
+  "$WYRELOGD" --production --profile=service --profile-info \
+    >"$TMPDIR/profile-service-default.out"
+  grep -q '^fact_root=/var/lib/wyrelog/service/facts$' \
+    "$TMPDIR/profile-service-default.out"
+
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/conflict/policy.sqlite" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/conflict/audit.duckdb" \
+      --fact-root "$TMPDIR/conflict" \
+      --check >/dev/null 2>"$TMPDIR/fact-policy-conflict.err"; then
+    echo "fact root containing policy database was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the policy database path" \
+    "$TMPDIR/fact-policy-conflict.err"
+
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/policy-file" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/audit.duckdb" \
+      --fact-root "$TMPDIR/policy-file/facts" \
+      --check >/dev/null 2>"$TMPDIR/fact-under-policy-conflict.err"; then
+    echo "fact root under policy database path was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the policy database path" \
+    "$TMPDIR/fact-under-policy-conflict.err"
+
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/policy.sqlite" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/audit-file" \
+      --fact-root "$TMPDIR/audit-file/facts" \
+      --check >/dev/null 2>"$TMPDIR/fact-under-audit-conflict.err"; then
+    echo "fact root under audit database path was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the audit database path" \
+    "$TMPDIR/fact-under-audit-conflict.err"
+
+  mkdir -p "$TMPDIR/policy-real" "$TMPDIR/audit-real" "$TMPDIR/spool-real"
+  ln -s "$TMPDIR/policy-real" "$TMPDIR/policy-link"
+  ln -s "$TMPDIR/audit-real" "$TMPDIR/audit-link"
+  ln -s "$TMPDIR/spool-real" "$TMPDIR/spool-link"
+
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/policy-real/policy.sqlite" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/audit.duckdb" \
+      --fact-root "$TMPDIR/policy-link" \
+      --check >/dev/null 2>"$TMPDIR/fact-policy-symlink-conflict.err"; then
+    echo "fact root aliasing the policy database tree was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the policy database path" \
+    "$TMPDIR/fact-policy-symlink-conflict.err"
+
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/policy.sqlite" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/audit-real/audit.duckdb" \
+      --fact-root "$TMPDIR/audit-link" \
+      --check >/dev/null 2>"$TMPDIR/fact-audit-symlink-conflict.err"; then
+    echo "fact root aliasing the audit database tree was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the audit database path" \
+    "$TMPDIR/fact-audit-symlink-conflict.err"
+
+  if "$WYRELOGD" --profile=service \
+      --event-spool-dir "$TMPDIR/same-tree" \
+      --fact-root "$TMPDIR/same-tree" \
+      --check >/dev/null 2>"$TMPDIR/fact-spool-conflict.err"; then
+    echo "fact root matching event spool was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the service event spool" \
+    "$TMPDIR/fact-spool-conflict.err"
+
+  if "$WYRELOGD" --profile=service \
+      --event-spool-dir "$TMPDIR/spool-real" \
+      --fact-root "$TMPDIR/spool-link" \
+      --check >/dev/null 2>"$TMPDIR/fact-spool-symlink-conflict.err"; then
+    echo "fact root aliasing the service event spool was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be distinct from the service event spool" \
+    "$TMPDIR/fact-spool-symlink-conflict.err"
+
+  mkdir -p "$TMPDIR/open-facts"
+  chmod 0755 "$TMPDIR/open-facts"
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/open-policy.sqlite" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/open-audit.duckdb" \
+      --fact-root "$TMPDIR/open-facts" \
+      --check >/dev/null 2>"$TMPDIR/fact-open-permissions.err"; then
+    echo "group-or-other-accessible fact root was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must not be accessible by group or other users" \
+    "$TMPDIR/fact-open-permissions.err"
+
+  mkdir -p "$TMPDIR/no-write-facts"
+  chmod 0500 "$TMPDIR/no-write-facts"
+  if "$WYRELOGD" --production --profile=system \
+      --template-dir "$TEMPLATE_DIR" \
+      --policy-db "$TMPDIR/no-write-policy.sqlite" \
+      --policy-keyprovider "$TMPDIR/system.key" \
+      --audit-db "$TMPDIR/no-write-audit.duckdb" \
+      --fact-root "$TMPDIR/no-write-facts" \
+      --check >/dev/null 2>"$TMPDIR/fact-owner-permissions.err"; then
+    echo "owner-unwritable fact root was accepted" >&2
+    exit 1
+  fi
+  grep -q "fact root must be readable, writable, and searchable by owner" \
+    "$TMPDIR/fact-owner-permissions.err"
+fi

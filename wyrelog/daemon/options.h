@@ -18,6 +18,8 @@ typedef struct
   const gchar *policy_store_path;
   const gchar *policy_keyprovider_path;
   const gchar *audit_store_path;
+  const gchar *fact_root;
+  const gchar *fact_store_mode;
   const gchar *event_spool_dir;
   const gchar *system_url;
   gchar *listen_port_arg;
