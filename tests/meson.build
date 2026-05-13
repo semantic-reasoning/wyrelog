@@ -84,6 +84,19 @@ if host_machine.system() != 'windows'
       ],
       depends : wyrelogd_exe,
     )
+    if get_option('enable_audit').allowed()
+      test('wyrelogd-bootstrap-admin', sh,
+        args : [
+          meson.current_source_dir() / 'check-wyrelogd-bootstrap-admin.sh',
+          wyrelogd_exe.full_path(),
+          wyctl_exe.full_path(),
+          meson.project_source_root() / 'templates' / 'access',
+          python3.full_path(),
+        ],
+        depends : [wyrelogd_exe, wyctl_exe],
+        timeout : 60,
+      )
+    endif
   endif
 endif
 

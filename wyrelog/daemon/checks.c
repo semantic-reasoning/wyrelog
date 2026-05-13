@@ -531,6 +531,30 @@ wyl_daemon_emit_start_event (WylHandle *handle)
 #endif
 }
 
+wyrelog_error_t
+wyl_daemon_emit_bootstrap_admin_audit (WylHandle *handle,
+    const gchar *subject_id, gboolean applied)
+{
+#ifdef WYL_HAS_AUDIT
+  if (subject_id == NULL || subject_id[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  wyl_audit_event_set_subject_id (ev, "wyrelogd");
+  wyl_audit_event_set_action (ev, "bootstrap_admin_apply");
+  wyl_audit_event_set_resource_id (ev, subject_id);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  if (!applied)
+    wyl_audit_event_set_deny_reason (ev, "already_sealed_same_subject");
+  return wyl_audit_emit (handle, ev);
+#else
+  (void) handle;
+  (void) subject_id;
+  (void) applied;
+  return WYRELOG_E_OK;
+#endif
+}
+
 int
 wyl_daemon_run_checks (WylHandle *handle)
 {

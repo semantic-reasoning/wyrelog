@@ -102,6 +102,138 @@ PY
    wyctl --daemon-url http://127.0.0.1:8766 status --readiness
    ```
 
+## First-run Administrator Bootstrap
+
+A freshly provisioned policy store has no administrator and therefore no
+operator can mint a bearer token or grant any other principal a role.
+The daemon exposes two flags that, together, perform the one-shot grant
+that closes that gap. The grant is recorded in the encrypted policy
+store as a sealed marker so a second invocation with a different
+subject fails closed.
+
+The flags are:
+
+- `--bootstrap-admin-subject=SUBJECT` records `SUBJECT` as the initial
+  `wr.system_admin` role member on the default tenant.
+- `--bootstrap-admin-allow-skip-mfa` (optional) grants the same subject
+  the `wr.login.skip_mfa` direct permission so it can mint a first
+  bearer token through `/auth/login` before an IdP is wired in.
+
+Both flags are honored only on the live runtime store and are rejected
+if combined with `--check` because readiness uses a scratch store that
+would not persist the seal. The bootstrap is also rejected outright when
+the audit subsystem is disabled so no silent grant can land.
+
+### Linux / systemd
+
+Drop in an override carrying the flags through `ExecStart`. Environment
+variables are not consulted for these flags today, so pass them on the
+command line:
+
+```ini
+# /etc/systemd/system/wyrelog-system.service.d/bootstrap.conf
+[Service]
+ExecStart=
+ExecStart=/usr/bin/wyrelogd \
+  --profile system \
+  --template-dir /usr/share/wyrelog/access \
+  --policy-db /var/lib/wyrelog/system/policy.sqlite \
+  --policy-keyprovider systemd-creds:wyrelog-system-policy-key \
+  --audit-db /var/log/wyrelog/system/audit.duckdb \
+  --production \
+  --bootstrap-admin-subject=alice \
+  --bootstrap-admin-allow-skip-mfa
+```
+
+Apply and verify:
+
+```sh
+systemctl daemon-reload
+systemctl restart wyrelog-system.service
+journalctl -u wyrelog-system.service -n 50
+wyctl --daemon-url http://127.0.0.1:8765 audit query \
+  --filter 'action=bootstrap_admin_apply' \
+  --access-token-file /run/wyrelog/operator.token
+```
+
+Once `alice` has rotated to an IdP-issued bearer, drop the
+`--bootstrap-admin-allow-skip-mfa` flag from the drop-in and run
+`systemctl daemon-reload && systemctl restart wyrelog-system.service`.
+The marker and the existing role membership remain in place. The
+persisted `wr.login.skip_mfa` direct-permission grant is **not**
+removed by dropping the flag and must be revoked explicitly as
+described under "Revoking bootstrap MFA bypass" below.
+
+### Windows / Service
+
+Pass the flags through `sc.exe config` so the service binary path
+carries them as arguments:
+
+```powershell
+sc.exe config wyrelog binPath= "\"C:\Program Files\Wyrelog\wyrelogd.exe\" --profile system --template-dir \"C:\ProgramData\Wyrelog\access\" --policy-db \"C:\ProgramData\Wyrelog\system\policy.sqlite\" --policy-keyprovider file:\"C:\ProgramData\Wyrelog\system\policy.key\" --audit-db \"C:\ProgramData\Wyrelog\system\audit.duckdb\" --production --bootstrap-admin-subject=alice --bootstrap-admin-allow-skip-mfa"
+sc.exe stop wyrelog
+sc.exe start wyrelog
+```
+
+Verify through `wyctl.exe`:
+
+```powershell
+wyctl.exe --daemon-url http://127.0.0.1:8765 audit query ^
+  --filter "action=bootstrap_admin_apply" ^
+  --access-token-file C:\ProgramData\Wyrelog\operator.token
+```
+
+### Operational Notes
+
+- The flag pair is idempotent for the same subject. Leaving the flag on
+  subsequent restarts is safe and emits a no-op audit row each time
+  with `deny_reason=already_sealed_same_subject`. Operators may either
+  remove the flag after first success or leave it in place for explicit
+  intent capture.
+- A different subject after seal will fail closed with
+  `bootstrap_admin: store already sealed for <other>` and a non-zero
+  exit code. Rotation requires the original admin to grant a new admin
+  through `wyctl policy role-grant`.
+- `--bootstrap-admin-allow-skip-mfa` installs a **persisted**
+  `wr.login.skip_mfa` direct-permission grant against the bootstrap
+  subject. The grant survives daemon restarts and the flag's
+  presence/absence on subsequent boots; the flag on later boots is a
+  no-op once the seal exists. The grant must be revoked explicitly
+  once the operator has rotated to an IdP-issued bearer (see
+  "Revoking bootstrap MFA bypass" below).
+- The flag is rejected with `--check` because readiness uses a scratch
+  policy store that would not persist the seal.
+- Bootstrap is refused when the audit subsystem is disabled so the
+  grant always leaves an audit trail.
+
+### Revoking bootstrap MFA bypass
+
+The `--bootstrap-admin-allow-skip-mfa` flag installs a **persisted**
+`wr.login.skip_mfa` direct-permission grant against the bootstrap
+subject. The grant survives daemon restarts and the flag's
+presence/absence on subsequent boots, so it must be revoked
+explicitly once the operator has rotated to an IdP-issued bearer:
+
+```sh
+wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
+    --subject <bootstrap-subject> \
+    --perm wr.login.skip_mfa \
+    --scope __wr_default \
+    --access-token-file /run/wyrelog/operator.token \
+    --guard-timestamp $(date +%s) \
+    --guard-loc-class internal_network \
+    --guard-risk low
+```
+
+Verify the revoke landed by inspecting the audit trail or the
+decision-trace tool:
+
+```sh
+wyctl --daemon-url http://127.0.0.1:8765 audit query \
+  --filter 'action=permission_revoke' --limit 10 \
+  --access-token-file /run/wyrelog/operator.token
+```
+
 ## Day-2 Operations
 
 - Template validation from an operator shell. Use `file:` for manual checks;
