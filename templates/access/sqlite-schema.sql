@@ -362,6 +362,82 @@ CREATE INDEX IF NOT EXISTS idx_audit_intentions_updated
     ON audit_intentions (updated_at);
 
 -- ---------------------------------------------------------------------------
+-- Table: fact_graphs
+-- Metadata-only authority for tenant-owned fact graphs. Fact tuples and
+-- compound payloads are stored outside this policy database; this registry
+-- keeps only identity, ownership, schema version, and canonical storage
+-- locators derived by the host from the configured fact root.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_graphs (
+    tenant_id      TEXT    NOT NULL,
+    graph_id       TEXT    NOT NULL,
+    storage_uri    TEXT    NOT NULL,
+    storage_path   TEXT    NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+    owner_scope    TEXT    NOT NULL CHECK (owner_scope = tenant_id),
+    sealed         INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    sealed_at      INTEGER,
+    PRIMARY KEY (tenant_id, graph_id),
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_fact_graphs_tenant
+    ON fact_graphs (tenant_id);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_graph_relations
+-- Relation declarations available in a fact graph. No fact rows live here.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_graph_relations (
+    tenant_id     TEXT    NOT NULL,
+    graph_id      TEXT    NOT NULL,
+    relation_name TEXT    NOT NULL,
+    arity         INTEGER NOT NULL CHECK (arity > 0),
+    PRIMARY KEY (tenant_id, graph_id, relation_name),
+    FOREIGN KEY (tenant_id, graph_id)
+        REFERENCES fact_graphs (tenant_id, graph_id)
+        ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_graph_relation_columns
+-- Ordered relation schema metadata. compound_ref identifies an external value
+-- reference only; no compound payload is stored in policy SQLite.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_graph_relation_columns (
+    tenant_id     TEXT    NOT NULL,
+    graph_id      TEXT    NOT NULL,
+    relation_name TEXT    NOT NULL,
+    column_index  INTEGER NOT NULL CHECK (column_index >= 0),
+    column_name   TEXT    NOT NULL,
+    column_type   TEXT    NOT NULL CHECK
+        (column_type IN ('symbol', 'int64', 'bool', 'compound_ref')),
+    PRIMARY KEY (tenant_id, graph_id, relation_name, column_index),
+    FOREIGN KEY (tenant_id, graph_id, relation_name)
+        REFERENCES fact_graph_relations (tenant_id, graph_id, relation_name)
+        ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_graph_query_allowlist
+-- Named query metadata tied to existing permissions.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_graph_query_allowlist (
+    tenant_id              TEXT    NOT NULL,
+    graph_id               TEXT    NOT NULL,
+    query_name             TEXT    NOT NULL,
+    relation_name          TEXT    NOT NULL,
+    required_permission_id TEXT    NOT NULL,
+    max_rows               INTEGER NOT NULL CHECK (max_rows > 0),
+    PRIMARY KEY (tenant_id, graph_id, query_name),
+    FOREIGN KEY (tenant_id, graph_id, relation_name)
+        REFERENCES fact_graph_relations (tenant_id, graph_id, relation_name),
+    FOREIGN KEY (required_permission_id) REFERENCES permissions (perm_id)
+);
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically

@@ -66,6 +66,54 @@ typedef wyrelog_error_t (*wyl_policy_audit_intention_cb) (const gchar * id,
 typedef wyrelog_error_t (*wyl_policy_tenant_cb) (const gchar * tenant_id,
     gboolean sealed, gpointer user_data);
 
+typedef struct
+{
+  const gchar *column_name;
+  const gchar *column_type;
+} wyl_policy_fact_graph_column_t;
+
+typedef struct
+{
+  const gchar *relation_name;
+  const wyl_policy_fact_graph_column_t *columns;
+  gsize n_columns;
+} wyl_policy_fact_graph_relation_t;
+
+typedef struct
+{
+  const gchar *query_name;
+  const gchar *relation_name;
+  const gchar *required_permission_id;
+  guint max_rows;
+} wyl_policy_fact_graph_query_t;
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *fact_root;
+  guint32 schema_version;
+  const gchar *owner_scope;
+  const wyl_policy_fact_graph_relation_t *relations;
+  gsize n_relations;
+  const wyl_policy_fact_graph_query_t *queries;
+  gsize n_queries;
+} wyl_policy_fact_graph_create_options_t;
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *storage_uri;
+  const gchar *storage_path;
+  guint32 schema_version;
+  const gchar *owner_scope;
+  gboolean sealed;
+} wyl_policy_fact_graph_info_t;
+
+typedef wyrelog_error_t (*wyl_policy_fact_graph_cb) (const
+    wyl_policy_fact_graph_info_t * info, gpointer user_data);
+
 /*
  * Policy authority store lifecycle wrapper.
  *
@@ -117,6 +165,17 @@ wyrelog_error_t wyl_policy_store_tenant_is_active (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_active);
 wyrelog_error_t wyl_policy_store_foreach_tenant (wyl_policy_store_t * store,
     wyl_policy_tenant_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_create_fact_graph (wyl_policy_store_t * store,
+    const wyl_policy_fact_graph_create_options_t * opts,
+    gchar ** out_storage_uri);
+wyrelog_error_t wyl_policy_store_foreach_fact_graph (wyl_policy_store_t *
+    store, const gchar * tenant_id, wyl_policy_fact_graph_cb cb,
+    gpointer user_data);
+wyrelog_error_t wyl_policy_store_seal_fact_graph (wyl_policy_store_t * store,
+    const gchar * tenant_id, const gchar * graph_id);
+wyrelog_error_t wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *
+    store, const gchar * tenant_id, const gchar * graph_id,
+    gboolean * out_active);
 wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
     const gchar * role_id, const gchar * role_name);
 wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,
