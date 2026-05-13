@@ -137,6 +137,12 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.audit.write", "audit write", "critical"},
 };
 
+/* Login skip-MFA authorization is intentionally scoped to the synthetic
+ * "login" resource rather than a tenant. Keep the bootstrap grant aligned
+ * with wyl-handle.c's WYL_LOGIN_SKIP_MFA_SCOPE so a freshly bootstrapped
+ * admin can mint its first bearer token through the normal login path. */
+#define WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE "login"
+
 static const gchar *const required_tables[] = {
   "wyrelog_config",
   "tenants",
@@ -4469,16 +4475,40 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
     (void) exec_sql (store->db, "ROLLBACK;");
     return rc;
   }
+  rc = wyl_policy_store_set_session_state (store, WYL_TENANT_DEFAULT, "active");
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  rc = wyl_policy_store_append_session_event (store, WYL_TENANT_DEFAULT,
+      "request", "idle", "active", NULL);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
 
   if (allow_login_skip_mfa) {
     rc = wyl_policy_store_grant_direct_permission (store, subject_id,
-        "wr.login.skip_mfa", WYL_TENANT_DEFAULT);
+        "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE);
     if (rc != WYRELOG_E_OK) {
       (void) exec_sql (store->db, "ROLLBACK;");
       return rc;
     }
     rc = wyl_policy_store_append_direct_permission_event (store, subject_id,
-        "wr.login.skip_mfa", WYL_TENANT_DEFAULT, "grant");
+        "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "grant");
+    if (rc != WYRELOG_E_OK) {
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return rc;
+    }
+    rc = wyl_policy_store_set_permission_state (store, subject_id,
+        "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "armed");
+    if (rc != WYRELOG_E_OK) {
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return rc;
+    }
+    rc = wyl_policy_store_append_permission_state_event (store, subject_id,
+        "wr.login.skip_mfa", WYL_BOOTSTRAP_LOGIN_SKIP_MFA_SCOPE, "grant",
+        "dormant", "armed", NULL);
     if (rc != WYRELOG_E_OK) {
       (void) exec_sql (store->db, "ROLLBACK;");
       return rc;

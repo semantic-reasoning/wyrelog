@@ -116,8 +116,9 @@ The flags are:
 - `--bootstrap-admin-subject=SUBJECT` records `SUBJECT` as the initial
   `wr.system_admin` role member on the default tenant.
 - `--bootstrap-admin-allow-skip-mfa` (optional) grants the same subject
-  the `wr.login.skip_mfa` direct permission so it can mint a first
-  bearer token through `/auth/login` before an IdP is wired in.
+  the `wr.login.skip_mfa` direct permission on the synthetic `login`
+  scope so it can mint a first bearer token through `/auth/login` before an
+  IdP is wired in.
 
 Both flags are honored only on the live runtime store and are rejected
 if combined with `--check` because readiness uses a scratch store that
@@ -196,7 +197,7 @@ wyctl.exe --daemon-url http://127.0.0.1:8765 audit query ^
   through `wyctl policy role-grant`.
 - `--bootstrap-admin-allow-skip-mfa` installs a **persisted**
   `wr.login.skip_mfa` direct-permission grant against the bootstrap
-  subject. The grant survives daemon restarts and the flag's
+  subject on the `login` scope. The grant survives daemon restarts and the flag's
   presence/absence on subsequent boots; the flag on later boots is a
   no-op once the seal exists. The grant must be revoked explicitly
   once the operator has rotated to an IdP-issued bearer (see
@@ -210,7 +211,7 @@ wyctl.exe --daemon-url http://127.0.0.1:8765 audit query ^
 
 The `--bootstrap-admin-allow-skip-mfa` flag installs a **persisted**
 `wr.login.skip_mfa` direct-permission grant against the bootstrap
-subject. The grant survives daemon restarts and the flag's
+subject on the `login` scope. The grant survives daemon restarts and the flag's
 presence/absence on subsequent boots, so it must be revoked
 explicitly once the operator has rotated to an IdP-issued bearer:
 
@@ -218,7 +219,7 @@ explicitly once the operator has rotated to an IdP-issued bearer:
 wyctl --daemon-url http://127.0.0.1:8765 policy permission-revoke \
     --subject <bootstrap-subject> \
     --perm wr.login.skip_mfa \
-    --scope __wr_default \
+    --scope login \
     --access-token-file /run/wyrelog/operator.token \
     --guard-timestamp $(date +%s) \
     --guard-loc-class internal_network \
