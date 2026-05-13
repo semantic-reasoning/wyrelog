@@ -99,10 +99,10 @@ jobs:
         uses: actions/cache@v5
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-v3-2026.04.27-x64-windows-glib-sqlite3-libsodium
+          key: vcpkg-windows-v4-2026.04.27-x64-windows-glib-sqlite3-libsodium-libsoup
           restore-keys: |
             vcpkg-windows-v3-2026.04.27-x64-windows-
-            vcpkg-windows-2026.04.27-glib-sqlite3-libsodium
+            vcpkg-windows-2026.04.27-glib-sqlite3-libsodium-libsoup
 
       - name: Restore vcpkg installed tree
         id: vcpkg-installed-cache
@@ -110,7 +110,7 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_ROOT }}\installed
-          key: vcpkg-windows-installed-v1-2026.04.27-x64-windows-glib-sqlite3-libsodium
+          key: vcpkg-windows-installed-v2-2026.04.27-x64-windows-glib-sqlite3-libsodium-libsoup
           restore-keys: |
             vcpkg-windows-installed-v1-2026.04.27-x64-windows-
 
@@ -135,7 +135,7 @@ jobs:
         shell: cmd
         run: |
           @echo off
-          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows --x-abi-tools-use-exact-versions
+          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows libsoup:x64-windows --x-abi-tools-use-exact-versions
 
       - name: Save vcpkg installed tree
         if: steps.vcpkg-installed-cache.outcome == 'success' && steps.vcpkg-installed-cache.outputs.cache-hit != 'true'
@@ -159,14 +159,20 @@ jobs:
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
+          set PATH=%VCPKG_INSTALLED_DIR%\bin;%PATH%
           set CC=clang-cl
-          meson setup builddir -Denable_tpm=disabled -Denable_client=disabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
+          meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
 
       - name: Build and test (clang-cl)
         shell: cmd
         run: |
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
+          set PATH=%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          meson compile -C builddir wyctl wyrelogd
+          if not exist builddir\wyrelog\wyctl.exe exit /b 1
+          builddir\wyrelog\wyctl.exe --help >NUL
+          builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
           meson test -C builddir --print-errorlogs --suite wyrelog
 
       - name: Upload meson logs on failure
