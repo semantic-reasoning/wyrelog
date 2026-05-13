@@ -266,6 +266,33 @@ wyl_policy_store_tenant_id_is_valid (const gchar *tenant_id)
   return TRUE;
 }
 
+/* Subject-id validator for the bootstrap-admin marker. Stricter than
+ * the tenant-id validator because the bootstrap admin string is parsed
+ * out of an operator-supplied flag and is then granted system-admin
+ * role membership: no whitespace, no control bytes, no Unicode high
+ * bytes, no path separators. Length 3..128 bytes; charset is ASCII
+ * alphanumerics plus '.', '_', ':' and '-'. */
+static gboolean
+bootstrap_admin_subject_is_valid (const gchar *s)
+{
+  if (s == NULL)
+    return FALSE;
+
+  gsize len = strlen (s);
+  if (len < 3 || len > 128)
+    return FALSE;
+
+  for (const gchar * p = s; *p != '\0'; p++) {
+    guchar c = (guchar) * p;
+    if (g_ascii_isalnum (c))
+      continue;
+    if (c == '.' || c == '_' || c == ':' || c == '-')
+      continue;
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static gboolean
 path_is_memory_db (const gchar *path)
 {
@@ -1559,12 +1586,29 @@ wyl_policy_store_get_db (wyl_policy_store_t *store)
 wyrelog_error_t
 wyl_policy_store_create_schema (wyl_policy_store_t *store)
 {
+  /* wyrelog_config holds singleton config rows. Keys currently in use:
+   *   deployment_mode               - 'production' | 'development' | 'demo'
+   *   bootstrap_admin_subject       - subject id of the bootstrap admin,
+   *                                   or the 'legacy-skip' sentinel
+   *   bootstrap_admin_sealed_at_us  - wallclock us at seal time (decimal)
+   *   bootstrap_admin_allow_skip_mfa - '0' or '1'
+   * Unknown keys are tolerated by the CHECK so this column can carry
+   * forward-compatible additions, but the known keys constrain their
+   * value space. */
   static const gchar *ddl =
       "CREATE TABLE IF NOT EXISTS wyrelog_config ("
       "  config_key TEXT PRIMARY KEY,"
       "  config_value TEXT NOT NULL CHECK ("
-      "    config_key != 'deployment_mode' OR "
-      "    config_value IN ('production', 'development', 'demo')),"
+      "    (config_key = 'deployment_mode' AND "
+      "       config_value IN ('production', 'development', 'demo')) OR "
+      "    (config_key = 'bootstrap_admin_subject') OR "
+      "    (config_key = 'bootstrap_admin_sealed_at_us') OR "
+      "    (config_key = 'bootstrap_admin_allow_skip_mfa' AND "
+      "       config_value IN ('0', '1')) OR "
+      "    (config_key NOT IN ('deployment_mode', "
+      "       'bootstrap_admin_subject', 'bootstrap_admin_sealed_at_us', "
+      "       'bootstrap_admin_allow_skip_mfa'))"
+      "  ),"
       "  updated_at INTEGER NOT NULL"
       ");"
       "CREATE TABLE IF NOT EXISTS tenants ("
@@ -1817,7 +1861,41 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   rc = wyl_policy_store_ensure_default_tenant (store);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return seed_builtin_catalog (store->db);
+  rc = seed_builtin_catalog (store->db);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* One-shot backward-compat migration for pre-#305 stores: if the
+   * store already has at least one wr.system_admin role membership
+   * but no bootstrap_admin_subject marker, seal it with the
+   * 'legacy-skip' sentinel. This prevents an operator who upgrades
+   * such a store and then re-runs with --bootstrap-admin-subject
+   * from silently minting a second admin on a store that already
+   * has one. */
+  rc = exec_sql (store->db,
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "SELECT 'bootstrap_admin_subject', 'legacy-skip', unixepoch() "
+      "WHERE NOT EXISTS ("
+      "  SELECT 1 FROM wyrelog_config "
+      "  WHERE config_key = 'bootstrap_admin_subject') "
+      "  AND EXISTS ("
+      "    SELECT 1 FROM role_memberships "
+      "    WHERE role_id = 'wr.system_admin');");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (store->db,
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "SELECT 'bootstrap_admin_sealed_at_us', '0', unixepoch() "
+      "WHERE EXISTS ("
+      "  SELECT 1 FROM wyrelog_config "
+      "  WHERE config_key = 'bootstrap_admin_subject' "
+      "    AND config_value = 'legacy-skip') "
+      "  AND NOT EXISTS ("
+      "    SELECT 1 FROM wyrelog_config "
+      "    WHERE config_key = 'bootstrap_admin_sealed_at_us');");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return WYRELOG_E_OK;
 }
 
 gsize
@@ -4104,4 +4182,327 @@ wyl_policy_store_foreach_audit_event (wyl_policy_store_t *store,
 
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+/* Reads a single value from wyrelog_config. *out_value is set to NULL
+ * if the row does not exist; otherwise to a g_strdup'd copy the caller
+ * must free. */
+static wyrelog_error_t
+read_config_row (wyl_policy_store_t *store, const gchar *key, gchar **out_value)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  *out_value = NULL;
+  static const gchar *sql =
+      "SELECT config_value FROM wyrelog_config WHERE config_key = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, key)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *value = (const gchar *) sqlite3_column_text (stmt, 0);
+    *out_value = g_strdup (value);
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_bootstrap_admin (wyl_policy_store_t *store,
+    gchar **out_subject, gint64 *out_sealed_at_us)
+{
+  if (store == NULL || store->db == NULL || out_subject == NULL
+      || out_sealed_at_us == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_subject = NULL;
+  *out_sealed_at_us = 0;
+
+  g_autofree gchar *subject = NULL;
+  wyrelog_error_t rc = read_config_row (store, "bootstrap_admin_subject",
+      &subject);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (subject == NULL)
+    return WYRELOG_E_OK;
+
+  g_autofree gchar *sealed_at_us_text = NULL;
+  rc = read_config_row (store, "bootstrap_admin_sealed_at_us",
+      &sealed_at_us_text);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gint64 sealed_at_us = 0;
+  if (sealed_at_us_text != NULL) {
+    gchar *endptr = NULL;
+    sealed_at_us = g_ascii_strtoll (sealed_at_us_text, &endptr, 10);
+    if (endptr == sealed_at_us_text || (endptr != NULL && *endptr != '\0'))
+      return WYRELOG_E_POLICY;
+  }
+
+  *out_subject = g_steal_pointer (&subject);
+  *out_sealed_at_us = sealed_at_us;
+  return WYRELOG_E_OK;
+}
+
+/* Counts rows matching a single static SQL query. The caller is
+ * responsible for ensuring the query returns exactly one COUNT(*)
+ * column. */
+static wyrelog_error_t
+count_static_query (sqlite3 *db, const gchar *sql, gint64 *out_count)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  *out_count = 0;
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  *out_count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_bootstrap_admin_eligible (wyl_policy_store_t *store,
+    gboolean *out_eligible)
+{
+  if (store == NULL || store->db == NULL || out_eligible == NULL)
+    return WYRELOG_E_INVALID;
+  *out_eligible = FALSE;
+
+  gint64 marker_count = 0;
+  wyrelog_error_t rc = count_static_query (store->db,
+      "SELECT COUNT(*) FROM wyrelog_config "
+      "WHERE config_key = 'bootstrap_admin_subject';",
+      &marker_count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (marker_count > 0)
+    return WYRELOG_E_OK;
+
+  gint64 admin_member_count = 0;
+  rc = count_static_query (store->db,
+      "SELECT COUNT(*) FROM role_memberships "
+      "WHERE role_id = 'wr.system_admin';", &admin_member_count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  *out_eligible = (admin_member_count == 0);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean allow_login_skip_mfa,
+    gboolean *out_applied, gchar **out_existing_subject)
+{
+  if (store == NULL || store->db == NULL || out_applied == NULL
+      || out_existing_subject == NULL)
+    return WYRELOG_E_INVALID;
+  *out_applied = FALSE;
+  *out_existing_subject = NULL;
+
+  if (!bootstrap_admin_subject_is_valid (subject_id))
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = exec_sql (store->db, "BEGIN IMMEDIATE;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Race-safe second read: any concurrent daemon that took the
+   * IMMEDIATE lock first will have already written the marker by the
+   * time we get here. */
+  g_autofree gchar *existing = NULL;
+  rc = read_config_row (store, "bootstrap_admin_subject", &existing);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+
+  if (existing != NULL) {
+    /* 'legacy-skip' sentinel: refuse any subject. */
+    if (g_strcmp0 (existing, "legacy-skip") == 0) {
+      *out_existing_subject = g_steal_pointer (&existing);
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return WYRELOG_E_POLICY;
+    }
+    if (g_strcmp0 (existing, subject_id) == 0) {
+      /* Idempotent same-subject reapply: no writes. */
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return WYRELOG_E_OK;
+    }
+    *out_existing_subject = g_steal_pointer (&existing);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return WYRELOG_E_POLICY;
+  }
+
+  gint64 admin_member_count = 0;
+  rc = count_static_query (store->db,
+      "SELECT COUNT(*) FROM role_memberships "
+      "WHERE role_id = 'wr.system_admin';", &admin_member_count);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if (admin_member_count > 0) {
+    /* No marker but an admin already exists: refuse rather than mint
+     * a second one. This is the same shape as the create_schema
+     * legacy-skip migration but caught here for callers that bypass
+     * create_schema between operations. */
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return WYRELOG_E_POLICY;
+  }
+
+  /* Insert the marker FIRST and use NOT EXISTS so the race is closed
+   * by SQL: a concurrent transaction that already inserted the marker
+   * leaves this INSERT a no-op. */
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *insert_subject_sql =
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "SELECT 'bootstrap_admin_subject', ?, unixepoch() "
+      "WHERE NOT EXISTS ("
+      "  SELECT 1 FROM wyrelog_config "
+      "  WHERE config_key = 'bootstrap_admin_subject');";
+  rc = prepare_stmt (store->db, insert_subject_sql, &stmt);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if (sqlite3_step (stmt) != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  int subject_changes = sqlite3_changes (store->db);
+  sqlite3_finalize (stmt);
+
+  if (subject_changes == 0) {
+    /* A concurrent transaction beat us to the insert. Re-read and
+     * decide between idempotent OK and mismatch. */
+    g_autofree gchar *winner = NULL;
+    rc = read_config_row (store, "bootstrap_admin_subject", &winner);
+    if (rc != WYRELOG_E_OK) {
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return rc;
+    }
+    (void) exec_sql (store->db, "ROLLBACK;");
+    if (winner == NULL)
+      return WYRELOG_E_INTERNAL;
+    if (g_strcmp0 (winner, subject_id) == 0)
+      return WYRELOG_E_OK;
+    *out_existing_subject = g_steal_pointer (&winner);
+    return WYRELOG_E_POLICY;
+  }
+
+  gint64 sealed_at_us = g_get_real_time ();
+  g_autofree gchar *sealed_at_us_text =
+      g_strdup_printf ("%" G_GINT64_FORMAT, sealed_at_us);
+  static const gchar *insert_sealed_at_sql =
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "VALUES ('bootstrap_admin_sealed_at_us', ?, unixepoch());";
+  rc = prepare_stmt (store->db, insert_sealed_at_sql, &stmt);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if ((rc = bind_text (stmt, 1, sealed_at_us_text)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if (sqlite3_step (stmt) != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+
+  static const gchar *insert_allow_sql =
+      "INSERT INTO wyrelog_config (config_key, config_value, updated_at) "
+      "VALUES ('bootstrap_admin_allow_skip_mfa', ?, unixepoch());";
+  rc = prepare_stmt (store->db, insert_allow_sql, &stmt);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if ((rc = bind_text (stmt, 1, allow_login_skip_mfa ? "1" : "0"))
+      != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  if (sqlite3_step (stmt) != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+
+  rc = wyl_policy_store_grant_role_membership (store, subject_id,
+      "wr.system_admin", WYL_TENANT_DEFAULT);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  rc = wyl_policy_store_append_role_membership_event (store, subject_id,
+      "wr.system_admin", WYL_TENANT_DEFAULT, "grant");
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+
+  if (allow_login_skip_mfa) {
+    rc = wyl_policy_store_grant_direct_permission (store, subject_id,
+        "wr.login.skip_mfa", WYL_TENANT_DEFAULT);
+    if (rc != WYRELOG_E_OK) {
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return rc;
+    }
+    rc = wyl_policy_store_append_direct_permission_event (store, subject_id,
+        "wr.login.skip_mfa", WYL_TENANT_DEFAULT, "grant");
+    if (rc != WYRELOG_E_OK) {
+      (void) exec_sql (store->db, "ROLLBACK;");
+      return rc;
+    }
+  }
+
+  /* Validate the post-grant snapshot before COMMIT so that an SoD
+   * conflict (e.g. a pre-existing wr.auditor membership on the
+   * bootstrap subject that would collide with the wr.system_admin
+   * grant) aborts the transaction here rather than fail-loud at the
+   * next engine reload. Matches the pattern used by sibling
+   * apply_role_membership_mutation_with_audit and
+   * apply_direct_permission_mutation_with_audit. */
+  rc = wyl_policy_store_validate_snapshot (store);
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+
+  rc = exec_sql (store->db, "COMMIT;");
+  if (rc != WYRELOG_E_OK) {
+    (void) exec_sql (store->db, "ROLLBACK;");
+    return rc;
+  }
+  *out_applied = TRUE;
+  return WYRELOG_E_OK;
 }
