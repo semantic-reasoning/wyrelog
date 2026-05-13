@@ -17,4 +17,6 @@ wyl_daemon_check_permission_state_transition_ready (WylHandle * handle);
 wyrelog_error_t
 wyl_daemon_check_role_permission_snapshot_reload_ready (WylHandle * handle);
 wyrelog_error_t wyl_daemon_emit_start_event (WylHandle * handle);
+wyrelog_error_t wyl_daemon_emit_bootstrap_admin_audit (WylHandle * handle,
+    const gchar * subject_id, gboolean applied);
 int wyl_daemon_run_checks (WylHandle * handle);

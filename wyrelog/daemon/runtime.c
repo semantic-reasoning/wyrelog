@@ -13,6 +13,7 @@
 #include "daemon/delta.h"
 #include "daemon/http.h"
 #include "daemon/signals.h"
+#include "policy/store-private.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
 
@@ -308,10 +309,34 @@ quit_loop_on_early_signal (gpointer user_data)
   return G_SOURCE_CONTINUE;
 }
 
+static gboolean
+bootstrap_admin_requested (const WylDaemonOptions *opts)
+{
+  return opts->bootstrap_admin_subject != NULL &&
+      opts->bootstrap_admin_subject[0] != '\0';
+}
+
+static gboolean
+audit_subsystem_enabled (const WylDaemonOptions *opts)
+{
+#ifdef WYL_HAS_AUDIT
+  return opts->audit_store_path != NULL && opts->audit_store_path[0] != '\0';
+#else
+  (void) opts;
+  return FALSE;
+#endif
+}
+
 int
 wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 {
   g_autoptr (GError) error = NULL;
+
+  if (bootstrap_admin_requested (opts) && !audit_subsystem_enabled (opts)) {
+    g_printerr ("wyrelogd: --bootstrap-admin-subject requires the audit "
+        "subsystem.\n");
+    return 1;
+  }
 
   if (!prepare_service_profile_spool (opts, &error)) {
     g_printerr ("wyrelogd: profile setup failed: %s\n", error->message);
@@ -363,6 +388,54 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
     g_printerr ("wyrelogd: delta callback setup failed: %s\n",
         wyrelog_error_string (rc));
     return 1;
+  }
+
+  /* Bootstrap-admin first-run grant. Runs after the runtime handle is
+   * open (so the keyprovider and AEAD have already validated the policy
+   * store) and before the daemon advertises start, so the sealed marker
+   * exists before any HTTP traffic. */
+  if (bootstrap_admin_requested (opts)) {
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    gboolean applied = FALSE;
+    g_autofree gchar *existing_subject = NULL;
+    wyrelog_error_t bootstrap_rc =
+        wyl_policy_store_apply_bootstrap_admin (store,
+        opts->bootstrap_admin_subject,
+        opts->bootstrap_admin_allow_skip_mfa, &applied, &existing_subject);
+    if (bootstrap_rc == WYRELOG_E_POLICY) {
+      g_printerr ("wyrelogd: bootstrap_admin: store already sealed for %s\n",
+          existing_subject != NULL ? existing_subject : "(unknown)");
+      return 1;
+    }
+    if (bootstrap_rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: bootstrap_admin: %s\n",
+          wyrelog_error_string (bootstrap_rc));
+      return 1;
+    }
+
+    wyrelog_error_t audit_rc = wyl_daemon_emit_bootstrap_admin_audit (handle,
+        opts->bootstrap_admin_subject, applied);
+    if (audit_rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: bootstrap_admin: audit emit failed: %s\n",
+          wyrelog_error_string (audit_rc));
+      return 1;
+    }
+
+    /* No process-wide skip-MFA override is needed: when
+     * --bootstrap-admin-allow-skip-mfa is set, apply_bootstrap_admin
+     * already grants the wr.login.skip_mfa direct permission to the
+     * bootstrap subject inside the same transaction. The engine's
+     * login_skip_mfa_authz relation will admit that subject (and only
+     * that subject) without an in-process override that would otherwise
+     * admit every caller for the lifetime of the boot. The audit row
+     * is emitted before this operator-visible log line so a forensic
+     * auditor scanning for bootstrap_admin_apply sees a row whenever
+     * the line is printed; if the daemon crashes between commit and
+     * audit emit the in-store role_memberships_events row still
+     * preserves the grant. */
+    g_message ("wyrelogd: bootstrap_admin: %s for %s",
+        applied ? "applied" : "reapplied (idempotent no-op)",
+        opts->bootstrap_admin_subject);
   }
 
   rc = wyl_daemon_emit_start_event (handle);

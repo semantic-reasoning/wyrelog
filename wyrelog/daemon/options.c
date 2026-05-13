@@ -96,12 +96,23 @@ load_config_defaults (WylDaemonOptions *opts, GKeyFile *key_file)
   keyfile_take_owned_string (key_file, "listen_port", &opts->listen_port_arg);
   keyfile_take_owned_string (key_file, "event_queue_limit",
       &opts->event_queue_limit_arg);
+  keyfile_take_string (key_file, "bootstrap_admin_subject",
+      &opts->bootstrap_admin_subject);
 
   if (!opts->production_mode && g_key_file_has_key (key_file, "daemon",
           "production", NULL)) {
     g_autoptr (GError) error = NULL;
     opts->production_mode =
         g_key_file_get_boolean (key_file, "daemon", "production", &error);
+  }
+
+  if (!opts->bootstrap_admin_allow_skip_mfa &&
+      g_key_file_has_key (key_file, "daemon",
+          "bootstrap_admin_allow_skip_mfa", NULL)) {
+    g_autoptr (GError) error = NULL;
+    opts->bootstrap_admin_allow_skip_mfa =
+        g_key_file_get_boolean (key_file, "daemon",
+        "bootstrap_admin_allow_skip_mfa", &error);
   }
 }
 
@@ -179,6 +190,15 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
         "Print access template artifact identity and exit", NULL},
     {"profile-info", 0, 0, G_OPTION_ARG_NONE, &opts->show_profile_info,
         "Print resolved daemon profile configuration and exit", NULL},
+    {"bootstrap-admin-subject", 0, 0, G_OPTION_ARG_STRING,
+          &opts->bootstrap_admin_subject,
+          "Grant the wr.system_admin role to SUBJECT on a fresh policy store",
+        "SUBJECT"},
+    {"bootstrap-admin-allow-skip-mfa", 0, 0, G_OPTION_ARG_NONE,
+          &opts->bootstrap_admin_allow_skip_mfa,
+          "Grant the wr.login.skip_mfa direct permission to the bootstrap "
+          "admin so it can mint a first bearer token",
+        NULL},
     {NULL}
   };
 
@@ -248,6 +268,21 @@ wyl_daemon_options_resolve (WylDaemonOptions *opts, GError **error)
   } else if (opts->system_url != NULL && opts->system_url[0] != '\0') {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
         "system-url is only valid for the service profile");
+    return FALSE;
+  }
+
+  gboolean bootstrap_subject_set = opts->bootstrap_admin_subject != NULL &&
+      opts->bootstrap_admin_subject[0] != '\0';
+  if (bootstrap_subject_set && opts->check_only) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "--bootstrap-admin-subject must not be combined with --check; "
+        "bootstrap requires the persistent policy store.");
+    return FALSE;
+  }
+  if (opts->bootstrap_admin_allow_skip_mfa && !bootstrap_subject_set) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "--bootstrap-admin-allow-skip-mfa requires "
+        "--bootstrap-admin-subject.");
     return FALSE;
   }
 
