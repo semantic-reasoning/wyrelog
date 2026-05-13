@@ -413,6 +413,13 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
       return 1;
     }
 
+    wyrelog_error_t reload_rc = wyl_handle_reload_engine_pair (handle);
+    if (reload_rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: bootstrap_admin: reload failed: %s\n",
+          wyrelog_error_string (reload_rc));
+      return 1;
+    }
+
     wyrelog_error_t audit_rc = wyl_daemon_emit_bootstrap_admin_audit (handle,
         opts->bootstrap_admin_subject, applied);
     if (audit_rc != WYRELOG_E_OK) {
@@ -424,7 +431,8 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
     /* No process-wide skip-MFA override is needed: when
      * --bootstrap-admin-allow-skip-mfa is set, apply_bootstrap_admin
      * already grants the wr.login.skip_mfa direct permission to the
-     * bootstrap subject inside the same transaction. The engine's
+     * bootstrap subject inside the same transaction, and the engine
+     * pair is reloaded before HTTP handlers are exposed. The engine's
      * login_skip_mfa_authz relation will admit that subject (and only
      * that subject) without an in-process override that would otherwise
      * admit every caller for the lifetime of the boot. The audit row

@@ -9,6 +9,8 @@
 #   1. fresh bootstrap on an empty store seals the marker and applies
 #      the wr.system_admin role membership and the
 #      wr.login.skip_mfa direct permission;
+#   1b. the bootstrapped admin can mint a first bearer token and use it
+#      through wyctl policy mutation;
 #   2. restart with the same subject is idempotent and the marker
 #      remains stable;
 #   3. restart with a different subject fails closed with a clear
@@ -152,6 +154,45 @@ if ! wait_until_serving "$PORT"; then
   cat "$LOG.err" >&2
   exit 1
 fi
+
+TOKEN_FILE="$TMPDIR/admin1.token"
+"$PYTHON" - "http://127.0.0.1:$PORT" "$TOKEN_FILE" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+
+base_url = sys.argv[1]
+token_path = sys.argv[2]
+url = f"{base_url}/auth/login?username=admin1&skip_mfa=true"
+req = urllib.request.Request(url, method="POST")
+try:
+    with urllib.request.urlopen(req, timeout=3) as response:
+        body = json.load(response)
+except urllib.error.HTTPError as exc:
+    sys.stderr.write(f"bootstrap admin login failed: HTTP {exc.code}\n")
+    sys.stderr.write(exc.read().decode("utf-8", "replace"))
+    sys.stderr.write("\n")
+    raise SystemExit(1)
+
+token = body.get("access_token")
+if not token:
+    sys.stderr.write("bootstrap admin login response did not include access_token\n")
+    raise SystemExit(1)
+with open(token_path, "w", encoding="utf-8") as f:
+    f.write(token)
+    f.write("\n")
+PY
+
+"$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy permission-grant \
+  --subject "bootstrap-target" \
+  --perm "wr.stream.read" \
+  --scope "__wr_default" \
+  --access-token-file "$TOKEN_FILE" \
+  --guard-timestamp 123 \
+  --guard-loc-class public \
+  --guard-risk 29 >/dev/null
+
 stop_daemon
 
 if [ ! -e "$POLICY_DB" ]; then

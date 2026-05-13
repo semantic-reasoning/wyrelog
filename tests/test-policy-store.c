@@ -2925,6 +2925,26 @@ check_bootstrap_admin_applies_on_fresh_store (void)
   if (membership_count != 1)
     return 813;
 
+  gint default_scope_state_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM session_states "
+          "WHERE session_id = '__wr_default' "
+          "  AND state = 'active';", &default_scope_state_count) != 0)
+    return 816;
+  if (default_scope_state_count != 1)
+    return 817;
+
+  gint default_scope_event_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM session_events "
+          "WHERE session_id = '__wr_default' "
+          "  AND event = 'request' "
+          "  AND from_state = 'idle' "
+          "  AND to_state = 'active';", &default_scope_event_count) != 0)
+    return 818;
+  if (default_scope_event_count != 1)
+    return 819;
+
   gint skip_mfa_count = 0;
   if (count_rows (store,
           "SELECT COUNT(*) FROM direct_permissions "
@@ -3293,28 +3313,60 @@ check_bootstrap_admin_allow_skip_mfa_flag (void)
           "SELECT COUNT(*) FROM direct_permissions "
           "WHERE subject_id = 'alice.root' "
           "  AND perm_id = 'wr.login.skip_mfa' "
-          "  AND scope = '__wr_default';", &skip_mfa_count) != 0)
+          "  AND scope = 'login';", &skip_mfa_count) != 0)
     return 944;
   if (skip_mfa_count != 1)
     return 945;
 
+  gint skip_mfa_state_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM permission_states "
+          "WHERE subject_id = 'alice.root' "
+          "  AND perm_id = 'wr.login.skip_mfa' "
+          "  AND scope = 'login' "
+          "  AND state = 'armed';", &skip_mfa_state_count) != 0)
+    return 946;
+  if (skip_mfa_state_count != 1)
+    return 947;
+
+  gint skip_mfa_state_event_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM permission_state_events "
+          "WHERE subject_id = 'alice.root' "
+          "  AND perm_id = 'wr.login.skip_mfa' "
+          "  AND scope = 'login' "
+          "  AND event = 'grant' "
+          "  AND from_state = 'dormant' "
+          "  AND to_state = 'armed';", &skip_mfa_state_event_count) != 0)
+    return 948;
+  if (skip_mfa_state_event_count != 1)
+    return 949;
+
   /* Reapply with allow_login_skip_mfa = FALSE: idempotent no-op, the
-   * existing skip-mfa grant remains untouched. */
+   * existing skip-mfa grant and state remain untouched. */
   applied = TRUE;
   g_autofree gchar *existing2 = NULL;
   if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
           &applied, &existing2) != WYRELOG_E_OK)
-    return 946;
+    return 950;
   if (applied)
-    return 947;
+    return 951;
 
   if (count_rows (store,
           "SELECT COUNT(*) FROM direct_permissions "
           "WHERE subject_id = 'alice.root' "
           "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
-    return 948;
+    return 952;
   if (skip_mfa_count != 1)
-    return 949;
+    return 953;
+
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM permission_states "
+          "WHERE subject_id = 'alice.root' "
+          "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_state_count) != 0)
+    return 954;
+  if (skip_mfa_state_count != 1)
+    return 955;
 
   return 0;
 }

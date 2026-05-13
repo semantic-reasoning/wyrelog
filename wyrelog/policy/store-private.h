@@ -303,8 +303,10 @@ wyrelog_error_t wyl_policy_store_bootstrap_admin_eligible (wyl_policy_store_t *
 /* Performs the bootstrap. Inside a BEGIN IMMEDIATE transaction:
  *  - re-checks eligibility (race-safe second read)
  *  - grants role membership: subject -> 'wr.system_admin' on WYL_TENANT_DEFAULT
- *  - if allow_login_skip_mfa: grants direct permission
- *    subject + 'wr.login.skip_mfa' + WYL_TENANT_DEFAULT
+ *  - marks WYL_TENANT_DEFAULT active for policy decisions on the bootstrap
+ *    scope
+ *  - if allow_login_skip_mfa: grants and arms direct permission
+ *    subject + 'wr.login.skip_mfa' + 'login'
  *  - writes wyrelog_config rows:
  *      bootstrap_admin_subject       = <subject>
  *      bootstrap_admin_sealed_at_us  = <wallclock us>
