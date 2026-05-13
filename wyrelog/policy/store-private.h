@@ -274,4 +274,51 @@ wyrelog_error_t wyl_policy_store_delete_audit_event (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_foreach_audit_event (wyl_policy_store_t *
     store, wyl_policy_audit_event_cb cb, gpointer user_data);
 
+/* Bootstrap admin seal: a one-shot record that names which subject was
+ * granted the initial wr.system_admin role membership on a fresh store.
+ *
+ * The marker lives in wyrelog_config under three keys:
+ *   bootstrap_admin_subject       - subject id, or 'legacy-skip' sentinel
+ *   bootstrap_admin_sealed_at_us  - wallclock microseconds at seal time
+ *   bootstrap_admin_allow_skip_mfa - "0" or "1"
+ *
+ * The 'legacy-skip' sentinel exists so a dev/pre-#305 store that already
+ * carries a wr.system_admin role membership is not silently re-bootstrapped
+ * on upgrade. See the migration block in wyl_policy_store_create_schema. */
+
+/* Returns the current bootstrap-admin marker state.
+ *
+ * On success *out_subject is either NULL (no marker yet) or a freshly
+ * g_strdup'd subject id that the caller must free. *out_sealed_at_us is
+ * 0 when no marker exists or when the marker is the 'legacy-skip'
+ * sentinel. */
+wyrelog_error_t wyl_policy_store_get_bootstrap_admin (wyl_policy_store_t *
+    store, gchar ** out_subject, gint64 * out_sealed_at_us);
+
+/* TRUE iff (a) no bootstrap_admin_subject row exists, AND
+ * (b) role_memberships has no row for role_id='wr.system_admin'. */
+wyrelog_error_t wyl_policy_store_bootstrap_admin_eligible (wyl_policy_store_t *
+    store, gboolean * out_eligible);
+
+/* Performs the bootstrap. Inside a BEGIN IMMEDIATE transaction:
+ *  - re-checks eligibility (race-safe second read)
+ *  - grants role membership: subject -> 'wr.system_admin' on WYL_TENANT_DEFAULT
+ *  - if allow_login_skip_mfa: grants direct permission
+ *    subject + 'wr.login.skip_mfa' + WYL_TENANT_DEFAULT
+ *  - writes wyrelog_config rows:
+ *      bootstrap_admin_subject       = <subject>
+ *      bootstrap_admin_sealed_at_us  = <wallclock us>
+ *      bootstrap_admin_allow_skip_mfa = "1" or "0"
+ *  - COMMITs
+ *
+ * Idempotent: same subject already sealed -> WYRELOG_E_OK with
+ *   *out_applied = FALSE, no writes.
+ * Mismatch: different subject already sealed -> WYRELOG_E_POLICY with
+ *   *out_existing_subject set to the existing string (caller frees).
+ * Audit event row emission is the caller's responsibility (daemon
+ * startup path). */
+wyrelog_error_t wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *
+    store, const gchar * subject_id, gboolean allow_login_skip_mfa,
+    gboolean * out_applied, gchar ** out_existing_subject);
+
 G_END_DECLS;

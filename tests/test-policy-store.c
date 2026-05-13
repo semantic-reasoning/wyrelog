@@ -2872,6 +2872,453 @@ check_store_rejects_bad_role_permission (void)
   return 0;
 }
 
+static gint
+check_bootstrap_admin_applies_on_fresh_store (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 800;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 801;
+
+  gboolean eligible = FALSE;
+  if (wyl_policy_store_bootstrap_admin_eligible (store, &eligible)
+      != WYRELOG_E_OK)
+    return 802;
+  if (!eligible)
+    return 803;
+
+  gboolean applied = FALSE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+          &applied, &existing) != WYRELOG_E_OK)
+    return 804;
+  if (!applied)
+    return 805;
+  if (existing != NULL)
+    return 806;
+
+  if (wyl_policy_store_bootstrap_admin_eligible (store, &eligible)
+      != WYRELOG_E_OK)
+    return 807;
+  if (eligible)
+    return 808;
+
+  g_autofree gchar *subject = NULL;
+  gint64 sealed_at_us = 0;
+  if (wyl_policy_store_get_bootstrap_admin (store, &subject, &sealed_at_us)
+      != WYRELOG_E_OK)
+    return 809;
+  if (g_strcmp0 (subject, "alice.root") != 0)
+    return 810;
+  if (sealed_at_us <= 0)
+    return 811;
+
+  gint membership_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM role_memberships "
+          "WHERE subject_id = 'alice.root' "
+          "  AND role_id = 'wr.system_admin' "
+          "  AND scope = '__wr_default';", &membership_count) != 0)
+    return 812;
+  if (membership_count != 1)
+    return 813;
+
+  gint skip_mfa_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM direct_permissions "
+          "WHERE subject_id = 'alice.root' "
+          "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
+    return 814;
+  if (skip_mfa_count != 0)
+    return 815;
+
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_same_subject_is_idempotent (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 820;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 821;
+
+  gboolean applied = FALSE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+          &applied, &existing) != WYRELOG_E_OK)
+    return 822;
+  if (!applied)
+    return 823;
+
+  applied = TRUE;
+  g_autofree gchar *existing2 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+          &applied, &existing2) != WYRELOG_E_OK)
+    return 824;
+  if (applied)
+    return 825;
+  if (existing2 != NULL)
+    return 826;
+
+  gint membership_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM role_memberships "
+          "WHERE role_id = 'wr.system_admin';", &membership_count) != 0)
+    return 827;
+  if (membership_count != 1)
+    return 828;
+
+  gint marker_rows = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM wyrelog_config "
+          "WHERE config_key = 'bootstrap_admin_subject';", &marker_rows) != 0)
+    return 829;
+  if (marker_rows != 1)
+    return 830;
+
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_different_subject_is_refused (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 840;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 841;
+
+  gboolean applied = FALSE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+          &applied, &existing) != WYRELOG_E_OK)
+    return 842;
+  if (!applied)
+    return 843;
+
+  applied = TRUE;
+  g_autofree gchar *existing2 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "bob.root", FALSE,
+          &applied, &existing2) != WYRELOG_E_POLICY)
+    return 844;
+  if (applied)
+    return 845;
+  if (g_strcmp0 (existing2, "alice.root") != 0)
+    return 846;
+
+  gint membership_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM role_memberships "
+          "WHERE subject_id = 'bob.root';", &membership_count) != 0)
+    return 847;
+  if (membership_count != 0)
+    return 848;
+
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_rejects_empty_subject (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 860;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 861;
+
+  gboolean applied = TRUE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "", FALSE,
+          &applied, &existing) != WYRELOG_E_INVALID)
+    return 862;
+  if (applied)
+    return 863;
+  if (existing != NULL)
+    return 864;
+
+  applied = TRUE;
+  g_autofree gchar *existing2 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, NULL, FALSE,
+          &applied, &existing2) != WYRELOG_E_INVALID)
+    return 865;
+  if (applied)
+    return 866;
+  if (existing2 != NULL)
+    return 867;
+
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_rejects_whitespace_subject (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 870;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 871;
+
+  gboolean applied = TRUE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice root", FALSE,
+          &applied, &existing) != WYRELOG_E_INVALID)
+    return 872;
+  if (applied)
+    return 873;
+
+  applied = TRUE;
+  g_autofree gchar *existing2 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice/root", FALSE,
+          &applied, &existing2) != WYRELOG_E_INVALID)
+    return 874;
+  if (applied)
+    return 875;
+
+  applied = TRUE;
+  g_autofree gchar *existing3 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice\troot", FALSE,
+          &applied, &existing3) != WYRELOG_E_INVALID)
+    return 876;
+  if (applied)
+    return 877;
+
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_rejects_overlong_subject (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 880;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 881;
+
+  /* 129 'a's: one over the 128-byte limit. */
+  gchar overlong[130];
+  for (gsize i = 0; i < 129; i++)
+    overlong[i] = 'a';
+  overlong[129] = '\0';
+
+  gboolean applied = TRUE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, overlong, FALSE,
+          &applied, &existing) != WYRELOG_E_INVALID)
+    return 882;
+  if (applied)
+    return 883;
+
+  /* 2-char subject: under the 3-byte minimum. */
+  applied = TRUE;
+  g_autofree gchar *existing2 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "ab", FALSE,
+          &applied, &existing2) != WYRELOG_E_INVALID)
+    return 884;
+  if (applied)
+    return 885;
+
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_seal_survives_reopen (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-policy-bootstrap-XXXXXX",
+      &error);
+  if (tmpdir == NULL)
+    return 900;
+  g_autofree gchar *store_path =
+      g_build_filename (tmpdir, "policy.store", NULL);
+  g_autofree gchar *key_path = g_build_filename (tmpdir, "policy.key", NULL);
+  if (!write_policy_key (key_path, 7))
+    return 901;
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 902;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 903;
+    gboolean applied = FALSE;
+    g_autofree gchar *existing = NULL;
+    if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+            &applied, &existing) != WYRELOG_E_OK)
+      return 904;
+    if (!applied)
+      return 905;
+  }
+
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 906;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 907;
+    g_autofree gchar *subject = NULL;
+    gint64 sealed_at_us = 0;
+    if (wyl_policy_store_get_bootstrap_admin (store, &subject, &sealed_at_us)
+        != WYRELOG_E_OK)
+      return 908;
+    if (g_strcmp0 (subject, "alice.root") != 0)
+      return 909;
+    if (sealed_at_us <= 0)
+      return 910;
+    gboolean eligible = TRUE;
+    if (wyl_policy_store_bootstrap_admin_eligible (store, &eligible)
+        != WYRELOG_E_OK)
+      return 911;
+    if (eligible)
+      return 912;
+  }
+
+  (void) g_remove (store_path);
+  (void) g_remove (key_path);
+  (void) g_rmdir (tmpdir);
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_legacy_skip_migration (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *tmpdir = g_dir_make_tmp ("wyl-policy-legacy-XXXXXX",
+      &error);
+  if (tmpdir == NULL)
+    return 920;
+  g_autofree gchar *store_path =
+      g_build_filename (tmpdir, "policy.store", NULL);
+  g_autofree gchar *key_path = g_build_filename (tmpdir, "policy.key", NULL);
+  if (!write_policy_key (key_path, 11))
+    return 921;
+
+  /* Stage a pre-#305 store: schema present, an admin membership row,
+   * no bootstrap_admin_subject marker. */
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 922;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 923;
+    if (wyl_policy_store_grant_role_membership (store, "legacy.admin",
+            "wr.system_admin", "__wr_default") != WYRELOG_E_OK)
+      return 924;
+    /* Erase any marker the migration may have written so this
+     * fixture genuinely looks like a pre-#305 store on the next
+     * open. */
+    if (sqlite3_exec (wyl_policy_store_get_db (store),
+            "DELETE FROM wyrelog_config "
+            "WHERE config_key IN ('bootstrap_admin_subject',"
+            "                     'bootstrap_admin_sealed_at_us');",
+            NULL, NULL, NULL) != SQLITE_OK)
+      return 925;
+  }
+
+  /* Reopen and re-run create_schema: migration should plant the
+   * legacy-skip sentinel. */
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 926;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 927;
+
+    g_autofree gchar *subject = NULL;
+    gint64 sealed_at_us = 0;
+    if (wyl_policy_store_get_bootstrap_admin (store, &subject, &sealed_at_us)
+        != WYRELOG_E_OK)
+      return 928;
+    if (g_strcmp0 (subject, "legacy-skip") != 0)
+      return 929;
+
+    gboolean eligible = TRUE;
+    if (wyl_policy_store_bootstrap_admin_eligible (store, &eligible)
+        != WYRELOG_E_OK)
+      return 930;
+    if (eligible)
+      return 931;
+
+    /* A bootstrap attempt against a legacy-skip store must refuse
+     * and report the sentinel as the existing subject. */
+    gboolean applied = TRUE;
+    g_autofree gchar *existing = NULL;
+    if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+            &applied, &existing) != WYRELOG_E_POLICY)
+      return 932;
+    if (applied)
+      return 933;
+    if (g_strcmp0 (existing, "legacy-skip") != 0)
+      return 934;
+  }
+
+  (void) g_remove (store_path);
+  (void) g_remove (key_path);
+  (void) g_rmdir (tmpdir);
+  return 0;
+}
+
+static gint
+check_bootstrap_admin_allow_skip_mfa_flag (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 940;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 941;
+
+  gboolean applied = FALSE;
+  g_autofree gchar *existing = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", TRUE,
+          &applied, &existing) != WYRELOG_E_OK)
+    return 942;
+  if (!applied)
+    return 943;
+
+  gint skip_mfa_count = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM direct_permissions "
+          "WHERE subject_id = 'alice.root' "
+          "  AND perm_id = 'wr.login.skip_mfa' "
+          "  AND scope = '__wr_default';", &skip_mfa_count) != 0)
+    return 944;
+  if (skip_mfa_count != 1)
+    return 945;
+
+  /* Reapply with allow_login_skip_mfa = FALSE: idempotent no-op, the
+   * existing skip-mfa grant remains untouched. */
+  applied = TRUE;
+  g_autofree gchar *existing2 = NULL;
+  if (wyl_policy_store_apply_bootstrap_admin (store, "alice.root", FALSE,
+          &applied, &existing2) != WYRELOG_E_OK)
+    return 946;
+  if (applied)
+    return 947;
+
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM direct_permissions "
+          "WHERE subject_id = 'alice.root' "
+          "  AND perm_id = 'wr.login.skip_mfa';", &skip_mfa_count) != 0)
+    return 948;
+  if (skip_mfa_count != 1)
+    return 949;
+
+  return 0;
+}
+
 int
 main (void)
 {
@@ -2978,6 +3425,24 @@ main (void)
   if ((rc = check_store_rejects_bad_direct_permission ()) != 0)
     return rc;
   if ((rc = check_store_rejects_bad_role_permission ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_applies_on_fresh_store ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_same_subject_is_idempotent ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_different_subject_is_refused ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_rejects_empty_subject ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_rejects_whitespace_subject ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_rejects_overlong_subject ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_seal_survives_reopen ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_legacy_skip_migration ()) != 0)
+    return rc;
+  if ((rc = check_bootstrap_admin_allow_skip_mfa_flag ()) != 0)
     return rc;
   return 0;
 }
