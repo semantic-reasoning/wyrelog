@@ -151,10 +151,10 @@ grep -q '^latest_migration_version=' "$TMPDIR/template-info.out"
 
 "$INSTALL_ROOT/usr/share/wyrelog/tools/verify-template-release.sh" \
   "$WYRELOGD" "$TEMPLATE_INSTALL" \
-  0 0ffe885e14222878f18fc1376adf2df32efeda66fab2e8437e320d7d6928b028 \
+  0 563de2d3ebc9074d5a46a10c13d930213705e70ee2c034a328e5bf3ab8f56f4c \
   1 0 >"$TMPDIR/template-release.out"
 if [ "$(cat "$TMPDIR/template-release.out")" != \
-    "status=verified version=0 sha256=0ffe885e14222878f18fc1376adf2df32efeda66fab2e8437e320d7d6928b028 migrations=1 latest_migration_version=0" ]; then
+    "status=verified version=0 sha256=563de2d3ebc9074d5a46a10c13d930213705e70ee2c034a328e5bf3ab8f56f4c migrations=1 latest_migration_version=0" ]; then
   echo "unexpected template release verification output" >&2
   cat "$TMPDIR/template-release.out" >&2
   exit 1

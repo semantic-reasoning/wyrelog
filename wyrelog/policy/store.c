@@ -5,6 +5,9 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+#ifndef _XOPEN_SOURCE
+#define _XOPEN_SOURCE 700
+#endif
 /* Apple SDKs gate O_NOFOLLOW (and friends) behind _DARWIN_C_SOURCE
  * when the compiler is invoked with -std=cNN; setting _POSIX_C_SOURCE
  * alone is not sufficient because clang predefines __STRICT_ANSI__
@@ -17,6 +20,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include <sodium.h>
@@ -135,6 +139,11 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.audit.read", "audit read", "sensitive"},
   {"wr.audit.explain", "audit explanation read", "sensitive"},
   {"wr.audit.write", "audit write", "critical"},
+  {"wr.graph.manage", "fact graph manage", "critical"},
+  {"wr.fact.write", "fact write", "critical"},
+  {"wr.fact.read", "fact read", "sensitive"},
+  {"wr.datalog.query", "datalog query", "sensitive"},
+  {"wr.schema.manage", "fact schema manage", "critical"},
 };
 
 /* Login skip-MFA authorization is intentionally scoped to the synthetic
@@ -162,6 +171,10 @@ static const gchar *const required_tables[] = {
   "session_events",
   "audit_intentions",
   "audit_events",
+  "fact_graphs",
+  "fact_graph_relations",
+  "fact_graph_relation_columns",
+  "fact_graph_query_allowlist",
   "policy_signatures",
 };
 
@@ -1829,6 +1842,59 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON audit_intentions (action);"
       "CREATE INDEX IF NOT EXISTS idx_audit_intentions_updated "
       "  ON audit_intentions (updated_at);"
+      "CREATE TABLE IF NOT EXISTS fact_graphs ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  storage_uri TEXT NOT NULL,"
+      "  storage_path TEXT NOT NULL,"
+      "  schema_version INTEGER NOT NULL CHECK (schema_version > 0),"
+      "  owner_scope TEXT NOT NULL CHECK (owner_scope = tenant_id),"
+      "  sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),"
+      "  created_at INTEGER NOT NULL,"
+      "  updated_at INTEGER NOT NULL,"
+      "  sealed_at INTEGER,"
+      "  PRIMARY KEY (tenant_id, graph_id),"
+      "  FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+      ");"
+      "CREATE INDEX IF NOT EXISTS idx_fact_graphs_tenant "
+      "  ON fact_graphs (tenant_id);"
+      "CREATE TABLE IF NOT EXISTS fact_graph_relations ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  relation_name TEXT NOT NULL,"
+      "  arity INTEGER NOT NULL CHECK (arity > 0),"
+      "  PRIMARY KEY (tenant_id, graph_id, relation_name),"
+      "  FOREIGN KEY (tenant_id, graph_id) "
+      "    REFERENCES fact_graphs (tenant_id, graph_id) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_graph_relation_columns ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  relation_name TEXT NOT NULL,"
+      "  column_index INTEGER NOT NULL CHECK (column_index >= 0),"
+      "  column_name TEXT NOT NULL,"
+      "  column_type TEXT NOT NULL CHECK "
+      "    (column_type IN ('symbol', 'int64', 'bool', 'compound_ref')),"
+      "  PRIMARY KEY (tenant_id, graph_id, relation_name, column_index),"
+      "  FOREIGN KEY (tenant_id, graph_id, relation_name) "
+      "    REFERENCES fact_graph_relations "
+      "      (tenant_id, graph_id, relation_name) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_graph_query_allowlist ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  query_name TEXT NOT NULL,"
+      "  relation_name TEXT NOT NULL,"
+      "  required_permission_id TEXT NOT NULL,"
+      "  max_rows INTEGER NOT NULL CHECK (max_rows > 0),"
+      "  PRIMARY KEY (tenant_id, graph_id, query_name),"
+      "  FOREIGN KEY (tenant_id, graph_id, relation_name) "
+      "    REFERENCES fact_graph_relations "
+      "      (tenant_id, graph_id, relation_name),"
+      "  FOREIGN KEY (required_permission_id) REFERENCES permissions (perm_id)"
+      ");"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -2167,6 +2233,543 @@ wyl_policy_store_foreach_tenant (wyl_policy_store_t *store,
 
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static gboolean
+fact_graph_component_is_valid (const gchar *component)
+{
+  if (component == NULL)
+    return FALSE;
+
+  gsize len = strlen (component);
+  if (len == 0 || len > 128)
+    return FALSE;
+  if (g_strcmp0 (component, ".") == 0 || g_strcmp0 (component, "..") == 0)
+    return FALSE;
+
+  for (const gchar * p = component; *p != '\0'; p++) {
+    guchar c = (guchar) * p;
+    if (g_ascii_isalnum (c))
+      continue;
+    if (c == '.' || c == '_' || c == ':' || c == '-')
+      continue;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+fact_graph_customer_name_is_valid (const gchar *name)
+{
+  if (!fact_graph_component_is_valid (name))
+    return FALSE;
+  if (g_str_has_prefix (name, "wr.")
+      || g_str_has_prefix (name, "__wyrelog."))
+    return FALSE;
+  return TRUE;
+}
+
+static gboolean
+fact_graph_column_type_is_valid (const gchar *column_type)
+{
+  return g_strcmp0 (column_type, "symbol") == 0
+      || g_strcmp0 (column_type, "int64") == 0
+      || g_strcmp0 (column_type, "bool") == 0
+      || g_strcmp0 (column_type, "compound_ref") == 0;
+}
+
+static gboolean
+fact_graph_options_relation_exists (const wyl_policy_fact_graph_create_options_t
+    *opts, const gchar *relation_name)
+{
+  for (gsize i = 0; i < opts->n_relations; i++) {
+    if (g_strcmp0 (opts->relations[i].relation_name, relation_name) == 0)
+      return TRUE;
+  }
+  return FALSE;
+}
+
+static wyrelog_error_t
+validate_fact_graph_options (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts)
+{
+  if (store == NULL || store->db == NULL || opts == NULL)
+    return WYRELOG_E_INVALID;
+  if (!wyl_policy_store_tenant_id_is_valid (opts->tenant_id)
+      || !fact_graph_component_is_valid (opts->tenant_id)
+      || !fact_graph_customer_name_is_valid (opts->graph_id)
+      || opts->fact_root == NULL || opts->fact_root[0] == '\0'
+      || opts->schema_version == 0 || opts->owner_scope == NULL
+      || g_strcmp0 (opts->owner_scope, opts->tenant_id) != 0
+      || opts->relations == NULL || opts->n_relations == 0)
+    return WYRELOG_E_INVALID;
+  if (opts->queries == NULL && opts->n_queries > 0)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < opts->n_relations; i++) {
+    const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
+    if (!fact_graph_customer_name_is_valid (rel->relation_name)
+        || rel->columns == NULL || rel->n_columns == 0
+        || rel->n_columns > G_MAXINT)
+      return WYRELOG_E_POLICY;
+    for (gsize j = 0; j < i; j++) {
+      if (g_strcmp0 (opts->relations[j].relation_name, rel->relation_name) == 0)
+        return WYRELOG_E_POLICY;
+    }
+    for (gsize j = 0; j < rel->n_columns; j++) {
+      if (!fact_graph_customer_name_is_valid (rel->columns[j].column_name)
+          || !fact_graph_column_type_is_valid (rel->columns[j].column_type))
+        return WYRELOG_E_POLICY;
+      for (gsize k = 0; k < j; k++) {
+        if (g_strcmp0 (rel->columns[k].column_name,
+                rel->columns[j].column_name) == 0)
+          return WYRELOG_E_POLICY;
+      }
+    }
+  }
+
+  for (gsize i = 0; i < opts->n_queries; i++) {
+    const wyl_policy_fact_graph_query_t *query = &opts->queries[i];
+    if (!fact_graph_customer_name_is_valid (query->query_name)
+        || !fact_graph_options_relation_exists (opts, query->relation_name)
+        || query->required_permission_id == NULL
+        || query->required_permission_id[0] == '\0' || query->max_rows == 0)
+      return WYRELOG_E_POLICY;
+    gboolean permission_exists = FALSE;
+    wyrelog_error_t rc = wyl_policy_store_permission_exists (store,
+        query->required_permission_id, &permission_exists);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!permission_exists)
+      return WYRELOG_E_POLICY;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+#ifndef G_OS_WIN32
+static gboolean
+path_has_root_prefix (const gchar *root, const gchar *child)
+{
+  gsize root_len = strlen (root);
+  return g_str_has_prefix (child, root)
+      && (child[root_len] == G_DIR_SEPARATOR || child[root_len] == '\0');
+}
+
+static wyrelog_error_t
+ensure_fact_graph_dir (const gchar *path)
+{
+  GStatBuf st;
+
+  if (g_lstat (path, &st) == 0) {
+    if (S_ISLNK (st.st_mode))
+      return WYRELOG_E_POLICY;
+    if (!S_ISDIR (st.st_mode))
+      return WYRELOG_E_POLICY;
+    return WYRELOG_E_OK;
+  }
+  if (errno != ENOENT)
+    return WYRELOG_E_IO;
+  if (g_mkdir (path, 0700) != 0) {
+    if (errno == EEXIST)
+      return ensure_fact_graph_dir (path);
+    return WYRELOG_E_IO;
+  }
+  if (g_lstat (path, &st) != 0)
+    return WYRELOG_E_IO;
+  if (!S_ISDIR (st.st_mode) || S_ISLNK (st.st_mode))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+materialize_fact_graph_storage (const wyl_policy_fact_graph_create_options_t
+    *opts, gchar **out_storage_path, gchar **out_storage_uri)
+{
+  if (opts == NULL || out_storage_path == NULL || out_storage_uri == NULL)
+    return WYRELOG_E_INVALID;
+  *out_storage_path = NULL;
+  *out_storage_uri = NULL;
+
+  GStatBuf root_stat;
+  if (g_lstat (opts->fact_root, &root_stat) != 0)
+    return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  if (S_ISLNK (root_stat.st_mode) || !S_ISDIR (root_stat.st_mode))
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *root_real = realpath (opts->fact_root, NULL);
+  if (root_real == NULL)
+    return WYRELOG_E_IO;
+
+  g_autofree gchar *tenant_path =
+      g_build_filename (root_real, opts->tenant_id, NULL);
+  wyrelog_error_t rc = ensure_fact_graph_dir (tenant_path);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *tenant_real = realpath (tenant_path, NULL);
+  if (tenant_real == NULL)
+    return WYRELOG_E_IO;
+  if (!path_has_root_prefix (root_real, tenant_real))
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *graph_path =
+      g_build_filename (tenant_real, opts->graph_id, NULL);
+  rc = ensure_fact_graph_dir (graph_path);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *graph_real = realpath (graph_path, NULL);
+  if (graph_real == NULL)
+    return WYRELOG_E_IO;
+  if (!path_has_root_prefix (root_real, graph_real))
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *uri = g_filename_to_uri (graph_real, NULL, NULL);
+  if (uri == NULL)
+    return WYRELOG_E_IO;
+
+  *out_storage_path = g_steal_pointer (&graph_real);
+  *out_storage_uri = g_steal_pointer (&uri);
+  return WYRELOG_E_OK;
+}
+#endif
+
+static wyrelog_error_t
+fact_graph_existing_sealed (wyl_policy_store_t *store, const gchar *tenant_id,
+    const gchar *graph_id, gboolean *out_exists, gboolean *out_sealed)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || out_exists == NULL
+      || out_sealed == NULL)
+    return WYRELOG_E_INVALID;
+  *out_exists = FALSE;
+  *out_sealed = FALSE;
+
+  static const gchar *sql =
+      "SELECT sealed FROM fact_graphs "
+      "WHERE tenant_id = ? AND graph_id = ? LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    *out_exists = TRUE;
+    *out_sealed = sqlite3_column_int (stmt, 0) != 0;
+  }
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_ROW || step_rc == SQLITE_DONE) ?
+      WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_graph_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    const gchar *storage_path, const gchar *storage_uri)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_graphs "
+      "(tenant_id, graph_id, storage_uri, storage_path, schema_version, "
+      " owner_scope, sealed, created_at, updated_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, storage_uri)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, storage_path)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, opts->schema_version) != SQLITE_OK
+      || (rc = bind_text (stmt, 6, opts->owner_scope)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_graph_relation_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    const wyl_policy_fact_graph_relation_t *rel)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_graph_relations "
+      "(tenant_id, graph_id, relation_name, arity) VALUES (?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, rel->relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 4, rel->n_columns) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_graph_column_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    const wyl_policy_fact_graph_relation_t *rel, gsize column_index)
+{
+  sqlite3_stmt *stmt = NULL;
+  const wyl_policy_fact_graph_column_t *column = &rel->columns[column_index];
+  static const gchar *sql =
+      "INSERT INTO fact_graph_relation_columns "
+      "(tenant_id, graph_id, relation_name, column_index, column_name, "
+      " column_type) VALUES (?, ?, ?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, rel->relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 4, (sqlite3_int64) column_index)
+      != SQLITE_OK || (rc = bind_text (stmt, 5, column->column_name))
+      != WYRELOG_E_OK || (rc = bind_text (stmt, 6, column->column_type))
+      != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_graph_query_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    const wyl_policy_fact_graph_query_t *query)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_graph_query_allowlist "
+      "(tenant_id, graph_id, query_name, relation_name, "
+      " required_permission_id, max_rows) VALUES (?, ?, ?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, query->query_name)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, query->relation_name)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 5, query->required_permission_id))
+      != WYRELOG_E_OK || sqlite3_bind_int64 (stmt, 6, query->max_rows)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts, gchar **out_storage_uri)
+{
+  if (out_storage_uri != NULL)
+    *out_storage_uri = NULL;
+
+  wyrelog_error_t rc = validate_fact_graph_options (store, opts);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean tenant_exists = FALSE;
+  rc = wyl_policy_store_tenant_exists (store, opts->tenant_id, &tenant_exists);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!tenant_exists)
+    return WYRELOG_E_NOT_FOUND;
+
+  gboolean tenant_active = FALSE;
+  rc = wyl_policy_store_tenant_is_active (store, opts->tenant_id,
+      &tenant_active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!tenant_active)
+    return WYRELOG_E_POLICY;
+
+  gboolean graph_exists = FALSE;
+  gboolean graph_sealed = FALSE;
+  rc = fact_graph_existing_sealed (store, opts->tenant_id, opts->graph_id,
+      &graph_exists, &graph_sealed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (graph_exists || graph_sealed)
+    return WYRELOG_E_POLICY;
+
+#ifdef G_OS_WIN32
+  /* The registry derives storage from a canonical fact root. Until this path
+   * walk has a Win32 reparse-point-safe implementation, fail closed instead
+   * of accepting metadata that cannot be bound to a safe physical store. */
+  return WYRELOG_E_POLICY;
+#else
+  g_autofree gchar *storage_path = NULL;
+  g_autofree gchar *storage_uri = NULL;
+  rc = materialize_fact_graph_storage (opts, &storage_path, &storage_uri);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = insert_fact_graph_metadata (store, opts, storage_path, storage_uri);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_relations; i++) {
+    const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
+    rc = insert_fact_graph_relation_metadata (store, opts, rel);
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < rel->n_columns; j++)
+      rc = insert_fact_graph_column_metadata (store, opts, rel, j);
+  }
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_queries; i++)
+    rc = insert_fact_graph_query_metadata (store, opts, &opts->queries[i]);
+
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (out_storage_uri != NULL)
+    *out_storage_uri = g_strdup (storage_uri);
+  return WYRELOG_E_OK;
+#endif
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_fact_graph (wyl_policy_store_t *store,
+    const gchar *tenant_id, wyl_policy_fact_graph_cb cb, gpointer user_data)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+  if (tenant_id != NULL && !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+
+  const gchar *sql =
+      tenant_id == NULL ?
+      "SELECT tenant_id, graph_id, storage_uri, storage_path, "
+      "schema_version, owner_scope, sealed FROM fact_graphs "
+      "ORDER BY tenant_id, graph_id;" :
+      "SELECT tenant_id, graph_id, storage_uri, storage_path, "
+      "schema_version, owner_scope, sealed FROM fact_graphs "
+      "WHERE tenant_id = ? ORDER BY graph_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (tenant_id != NULL
+      && (rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    wyl_policy_fact_graph_info_t info = {
+      .tenant_id = (const gchar *) sqlite3_column_text (stmt, 0),
+      .graph_id = (const gchar *) sqlite3_column_text (stmt, 1),
+      .storage_uri = (const gchar *) sqlite3_column_text (stmt, 2),
+      .storage_path = (const gchar *) sqlite3_column_text (stmt, 3),
+      .schema_version = (guint32) sqlite3_column_int64 (stmt, 4),
+      .owner_scope = (const gchar *) sqlite3_column_text (stmt, 5),
+      .sealed = sqlite3_column_int (stmt, 6) != 0,
+    };
+    rc = cb (&info, user_data);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+
+  gboolean exists = FALSE;
+  gboolean sealed = FALSE;
+  wyrelog_error_t rc = fact_graph_existing_sealed (store, tenant_id, graph_id,
+      &exists, &sealed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!exists)
+    return WYRELOG_E_NOT_FOUND;
+  if (sealed)
+    return WYRELOG_E_OK;
+
+  static const gchar *sql =
+      "UPDATE fact_graphs "
+      "SET sealed = 1, sealed_at = unixepoch(), updated_at = unixepoch() "
+      "WHERE tenant_id = ? AND graph_id = ? AND sealed = 0;";
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, gboolean *out_active)
+{
+  if (store == NULL || store->db == NULL || out_active == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+  *out_active = FALSE;
+
+  gboolean graph_exists = FALSE;
+  gboolean graph_sealed = FALSE;
+  wyrelog_error_t rc = fact_graph_existing_sealed (store, tenant_id, graph_id,
+      &graph_exists, &graph_sealed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!graph_exists)
+    return WYRELOG_E_OK;
+
+  gboolean tenant_active = FALSE;
+  rc = wyl_policy_store_tenant_is_active (store, tenant_id, &tenant_active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_active = tenant_active && !graph_sealed;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

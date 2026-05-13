@@ -124,6 +124,13 @@ permission("wr.audit.read").
 permission("wr.audit.explain").
 permission("wr.audit.write").              // only system_agent
 
+// fact graph family
+permission("wr.graph.manage").
+permission("wr.fact.write").
+permission("wr.fact.read").
+permission("wr.datalog.query").
+permission("wr.schema.manage").
+
 // ---------------------------------------------------------------------------
 // EDB: role_permission facts (seed)
 // ---------------------------------------------------------------------------
@@ -135,6 +142,11 @@ role_permission("wr.system_admin", "wr.policy.read").
 role_permission("wr.system_admin", "wr.policy.write").
 role_permission("wr.system_admin", "wr.policy.grant_role").
 role_permission("wr.system_admin", "wr.tenant.manage").
+role_permission("wr.system_admin", "wr.graph.manage").
+role_permission("wr.system_admin", "wr.schema.manage").
+role_permission("wr.system_admin", "wr.fact.write").
+role_permission("wr.system_admin", "wr.fact.read").
+role_permission("wr.system_admin", "wr.datalog.query").
 // NOTE: system_admin deliberately has no wr.audit.* — SoD with wr.auditor.
 
 role_permission("wr.auditor", "wr.audit.read").
@@ -165,6 +177,11 @@ role_permission("wr.service_admin", "wr.svc.admin").
 role_permission("wr.service_admin", "wr.svc.grant_role").
 role_permission("wr.service_admin", "wr.policy.read").
 role_permission("wr.service_admin", "wr.policy.write").
+role_permission("wr.service_admin", "wr.graph.manage").
+role_permission("wr.service_admin", "wr.schema.manage").
+role_permission("wr.service_admin", "wr.fact.write").
+role_permission("wr.service_admin", "wr.fact.read").
+role_permission("wr.service_admin", "wr.datalog.query").
 
 role_permission("wr.security_officer", "wr.svc.freeze").
 role_permission("wr.security_officer", "wr.svc.unfreeze").
@@ -172,6 +189,10 @@ role_permission("wr.security_officer", "wr.svc.unfreeze").
 
 role_permission("wr.svc_agent", "wr.stream.read").
 role_permission("wr.svc_agent", "wr.svc.read_decision").
+role_permission("wr.svc_agent", "wr.fact.write").
+
+role_permission("wr.analyst", "wr.fact.read").
+role_permission("wr.analyst", "wr.datalog.query").
 
 // ---------------------------------------------------------------------------
 // EDB: inheritance (service profile only; depth <= 3 enforced by host)
