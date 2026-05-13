@@ -68,6 +68,16 @@ if ! grep -q -- "--profile=service" \
   echo "service unit does not select the service profile" >&2
   exit 1
 fi
+if ! grep -q -- "/var/lib/wyrelog/system/facts" \
+    "$SOURCE_ROOT/packaging/tmpfiles.d/wyrelog.conf"; then
+  echo "tmpfiles does not create the system fact root" >&2
+  exit 1
+fi
+if ! grep -q -- "/var/lib/wyrelog/service/facts" \
+    "$SOURCE_ROOT/packaging/tmpfiles.d/wyrelog.conf"; then
+  echo "tmpfiles does not create the service fact root" >&2
+  exit 1
+fi
 if ! grep -q "WYL_LOG=warn" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog.service"; then
   echo "service unit does not set production log ceiling" >&2
@@ -82,11 +92,15 @@ mkdir -p "$INSTALL_ROOT/usr/share/wyrelog" \
   "$INSTALL_ROOT/etc/wyrelog/service" \
   "$INSTALL_ROOT/var/lib/wyrelog" \
   "$INSTALL_ROOT/var/lib/wyrelog/system" \
+  "$INSTALL_ROOT/var/lib/wyrelog/system/facts" \
   "$INSTALL_ROOT/var/lib/wyrelog/service" \
+  "$INSTALL_ROOT/var/lib/wyrelog/service/facts" \
   "$INSTALL_ROOT/var/log/wyrelog" \
   "$INSTALL_ROOT/var/log/wyrelog/system" \
   "$INSTALL_ROOT/var/log/wyrelog/service" \
   "$INSTALL_ROOT/run/wyrelog"
+chmod 0700 "$INSTALL_ROOT/var/lib/wyrelog/system/facts" \
+  "$INSTALL_ROOT/var/lib/wyrelog/service/facts"
 cp -R "$TEMPLATE_DIR" "$INSTALL_ROOT/usr/share/wyrelog/access"
 cp "$SOURCE_ROOT/tools/verify-template-release.sh" \
   "$INSTALL_ROOT/usr/share/wyrelog/tools/verify-template-release.sh"
@@ -104,7 +118,13 @@ PY
 TEMPLATE_INSTALL="$INSTALL_ROOT/usr/share/wyrelog/access"
 POLICY_DB="$INSTALL_ROOT/var/lib/wyrelog/system/policy.sqlite"
 AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/system/audit.duckdb"
+FACT_ROOT="$INSTALL_ROOT/var/lib/wyrelog/system/facts"
 KEY="$INSTALL_ROOT/etc/wyrelog/system/policy.key"
+FACT_ARGS=
+if "$WYRELOGD" --profile=system --production --profile-info \
+    | grep -q '^fact_root=/var/lib/wyrelog/system/facts$'; then
+  FACT_ARGS="--fact-root $FACT_ROOT"
+fi
 BASE_URL="http://127.0.0.1:$PORT"
 
 "$WYCTL" key status --keyprovider "$KEY" >"$TMPDIR/key.out"
@@ -153,7 +173,12 @@ fi
   --policy-db "$POLICY_DB" \
   --policy-keyprovider "file:$KEY" \
   --audit-db "$AUDIT_DB" \
+  $FACT_ARGS \
   --check
+if [ -n "$FACT_ARGS" ]; then
+  printf 'fact-root-writable\n' >"$FACT_ROOT/.write-check"
+  test -s "$FACT_ROOT/.write-check"
+fi
 
 ROTATE_DB="$INSTALL_ROOT/var/lib/wyrelog/system/rotate.sqlite"
 ROTATE_AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/system/rotate-audit.duckdb"
@@ -172,6 +197,7 @@ PY
   --policy-db "$ROTATE_DB" \
   --policy-keyprovider "file:$KEY" \
   --audit-db "$ROTATE_AUDIT_DB" \
+  $FACT_ARGS \
   --check
 "$WYCTL" key rotate --store "$ROTATE_DB" \
   --from-keyprovider "file:$KEY" \
@@ -199,6 +225,7 @@ CREDENTIALS_DIRECTORY="$INSTALL_ROOT/etc/wyrelog/system" \
   --policy-db "$POLICY_DB.credential" \
   --policy-keyprovider systemd-creds:policy.key \
   --audit-db "$AUDIT_DB.credential" \
+  $FACT_ARGS \
   --check
 
 "$WYRELOGD" --production \
@@ -207,6 +234,7 @@ CREDENTIALS_DIRECTORY="$INSTALL_ROOT/etc/wyrelog/system" \
   --policy-db "$POLICY_DB" \
   --policy-keyprovider "file:$KEY" \
   --audit-db "$AUDIT_DB" \
+  $FACT_ARGS \
   --listen-port "$PORT" &
 PID=$!
 

@@ -18,7 +18,12 @@ sodium_dep = dependency('libsodium', required : true)
 sqlite_dep = dependency('sqlite3', required : true)
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
+enable_fact_store_opt = get_option('enable_fact_store')
 enable_break_glass_opt = get_option('enable_break_glass')
+if enable_fact_store_opt.allowed() and host_machine.system() == 'windows'
+  error('enable_fact_store requires Unix path isolation semantics; '
+      + 'disable enable_fact_store for native Windows builds.')
+endif
 if enable_break_glass_opt and not enable_audit_opt.allowed()
   # The break-glass override path emits an audit event with a stable
   # reason code on every arming and every override decision. Without
@@ -30,7 +35,7 @@ if enable_break_glass_opt and not enable_audit_opt.allowed()
       + '(auto or enabled); the override path needs a durable audit '
       + 'sink for reason-code emission.')
 endif
-if enable_audit_opt.allowed()
+if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
   duckdb_source = get_option('duckdb_source')
   if duckdb_source == 'prebuilt'
     if host_machine.system() == 'linux'

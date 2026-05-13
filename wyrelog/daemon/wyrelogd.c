@@ -93,6 +93,10 @@ main (int argc, char **argv)
         "");
     g_print ("audit_db=%s\n",
         opts.audit_store_path != NULL ? opts.audit_store_path : "");
+    g_print ("fact_root=%s\n", opts.fact_root != NULL ? opts.fact_root : "");
+    g_print ("fact_store_mode=%s\n",
+        (opts.fact_root != NULL && opts.fact_root[0] != '\0' &&
+            opts.fact_store_mode != NULL) ? opts.fact_store_mode : "");
     g_print ("listen_port=%d\n", opts.listen_port);
     g_print ("system_url=%s\n", opts.system_url != NULL ? opts.system_url : "");
     g_print ("event_spool_dir=%s\n",
