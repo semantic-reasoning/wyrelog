@@ -88,6 +88,8 @@ wyrelog_error_t wyl_engine_inspect_template_artifact (const gchar *
     gboolean require_manifest, WylTemplateArtifactInfo * info_out);
 wyrelog_error_t wyl_engine_open_with_options (const gchar * template_dir,
     guint32 num_workers, gboolean require_template_manifest, WylEngine ** out);
+wyrelog_error_t wyl_engine_open_source (const gchar * dl_src,
+    guint32 num_workers, WylEngine ** out);
 
 /*
  * wyl_engine_make_compound:
