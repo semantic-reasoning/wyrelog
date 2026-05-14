@@ -15,10 +15,12 @@ support files from `packaging/`.
   systemd as credential `wyrelog-system-policy-key`
 - System policy store: `/var/lib/wyrelog/system/policy.sqlite`
 - System audit store: `/var/log/wyrelog/system/audit.duckdb`
+- System Datalog fact root: `/var/lib/wyrelog/system/facts`
 - Service KeyProvider root: `/etc/wyrelog/service/policy.key` loaded by
   systemd as credential `wyrelog-service-policy-key`
 - Service policy store: `/var/lib/wyrelog/service/policy.sqlite`
 - Service audit store: `/var/log/wyrelog/service/audit.duckdb`
+- Service Datalog fact root: `/var/lib/wyrelog/service/facts`
 - Runtime directory: `/run/wyrelog`
 - HTTP listen port: `127.0.0.1:8765` unless overridden by the service file
 - Production log policy: compile release builds with
@@ -40,9 +42,11 @@ Packaged profile paths:
 - System policy store: `/var/lib/wyrelog/system/policy.sqlite`
 - System KeyProvider root: `/etc/wyrelog/system/policy.key`
 - System audit store: `/var/log/wyrelog/system/audit.duckdb`
+- System Datalog fact root: `/var/lib/wyrelog/system/facts`
 - Service policy store: `/var/lib/wyrelog/service/policy.sqlite`
 - Service KeyProvider root: `/etc/wyrelog/service/policy.key`
 - Service audit store: `/var/log/wyrelog/service/audit.duckdb`
+- Service Datalog fact root: `/var/lib/wyrelog/service/facts`
 - Service event spool: `/var/lib/wyrelog/service/event-spool`
 
 Inspect the resolved profile contract with:
@@ -86,6 +90,7 @@ PY
      --policy-db /var/lib/wyrelog/system/policy.sqlite \
      --policy-keyprovider file:/etc/wyrelog/system/policy.key \
      --audit-db /var/log/wyrelog/system/audit.duckdb \
+     --fact-root /var/lib/wyrelog/system/facts \
      --check
    wyrelogd --template-info --template-dir /usr/share/wyrelog/access
    wyctl key status --keyprovider /etc/wyrelog/system/policy.key
@@ -234,6 +239,113 @@ wyctl --daemon-url http://127.0.0.1:8765 audit query \
   --filter 'action=permission_revoke' --limit 10 \
   --access-token-file /run/wyrelog/operator.token
 ```
+
+## Datalog Product Flow
+
+Wyrelog is a Datalog storage and inference engine. The packaged access-control
+policy is the default policy template for the daemon, while Datalog facts live in
+separate per-tenant, per-graph stores. Keep these paths physically separate:
+
+- Policy DB: encrypted SQLite authority store, for example
+  `/var/lib/wyrelog/system/policy.sqlite`.
+- Audit DB: DuckDB audit sink, for example
+  `/var/log/wyrelog/system/audit.duckdb`.
+- Fact DBs: DuckDB files below the fact root, for example
+  `/var/lib/wyrelog/system/facts/<tenant>/<graph>/facts.duckdb`.
+
+Back up and restore those stores as separate artifacts. Do not place the policy
+or audit DB under the fact root. The static packaged units rely on the daemon's
+profile defaults for the fact root so the same unit files remain valid for
+builds with and without fact-store support; pass `--fact-root` explicitly in
+manual checks or local deployments that enable Datalog fact storage.
+
+The commands below show a complete local product flow on the default tenant.
+Replace `alice` and the paths for your deployment.
+
+```sh
+BASE_URL=http://127.0.0.1:8765
+TOKEN=/run/wyrelog/operator.token
+TENANT=__wr_default
+GRAPH=orders
+
+wyrelogd --production \
+  --profile system \
+  --template-dir /usr/share/wyrelog/access \
+  --policy-db /var/lib/wyrelog/system/policy.sqlite \
+  --policy-keyprovider file:/etc/wyrelog/system/policy.key \
+  --audit-db /var/log/wyrelog/system/audit.duckdb \
+  --fact-root /var/lib/wyrelog/system/facts \
+  --bootstrap-admin-subject alice \
+  --bootstrap-admin-allow-skip-mfa \
+  --listen-port 8765
+```
+
+Mint the first token and arm the packaged administrator's Datalog authorities on
+the tenant scope. The bootstrap role already grants these permissions; the
+permission-state transition records that the operator intentionally armed them
+for this scope.
+
+```sh
+python3 - <<'PY'
+import json, urllib.request
+url = "http://127.0.0.1:8765/auth/login?username=alice&tenant=__wr_default&skip_mfa=true"
+req = urllib.request.Request(url, method="POST")
+with urllib.request.urlopen(req) as response:
+    token = json.load(response)["access_token"]
+open("/run/wyrelog/operator.token", "w", encoding="utf-8").write(token + "\n")
+PY
+
+for perm in wr.graph.manage wr.schema.manage wr.fact.write wr.datalog.query; do
+  curl -fsS -X POST \
+    -H "Authorization: Bearer $(cat "$TOKEN")" \
+    "$BASE_URL/policy/permissions/transition?subject=alice&perm=$perm&scope=$TENANT&event=grant&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+done
+```
+
+Run the graph, schema, fact, and query commands through `wyctl`:
+
+```sh
+wyctl --daemon-url "$BASE_URL" graph create \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+wyctl --daemon-url "$BASE_URL" fact schema register \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders --schema-version 1 \
+  --columns order_id:symbol,amount:int64 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+printf 'order_id,amount\no-1,42\n' >/tmp/orders.csv
+wyctl --daemon-url "$BASE_URL" fact put \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace shop --relation orders --schema-version 1 \
+  --batch-id orders-1 --idempotency-key orders-1 \
+  --format csv --input /tmp/orders.csv \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+wyctl --daemon-url "$BASE_URL" datalog query \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --query 'orders(O,A)' --output json --limit 10 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+To verify recovery, restart `wyrelogd` with the same policy DB, audit DB, key,
+and fact root. Mint a fresh token after restart and run the same
+`wyctl datalog query`; the fact graph is replayed from the per-graph DuckDB fact
+store. Check graph health with:
+
+```sh
+curl -fsS "$BASE_URL/facts/status"
+```
+
+A single corrupted graph should report a degraded graph entry while unrelated
+graphs remain queryable. Stop the daemon before repairing or replacing a damaged
+`facts.duckdb`, restore only the affected `<tenant>/<graph>` fact directory,
+restart, then confirm `/facts/status` returns `"status":"ready"`.
 
 ## Day-2 Operations
 

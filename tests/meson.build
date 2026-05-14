@@ -283,6 +283,21 @@ if host_machine.system() != 'windows' and build_client
     timeout : 60,
   )
 
+  if get_option('enable_audit').allowed() and get_option('enable_fact_store').allowed()
+    test('wyrelogd-datalog-product-flow', sh,
+      args : [
+        meson.current_source_dir() / 'check-wyrelogd-datalog-product-flow.sh',
+        wyrelogd_exe.full_path(),
+        wyctl_exe.full_path(),
+        meson.project_source_root() / 'templates' / 'access',
+        python3.full_path(),
+      ],
+      depends : [wyctl_exe, wyrelogd_exe],
+      is_parallel : false,
+      timeout : 90,
+    )
+  endif
+
   test('client-audit-daemon', sh,
     args : [
       meson.current_source_dir() / 'check-client-audit-daemon.sh',
