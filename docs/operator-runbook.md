@@ -528,6 +528,111 @@ audit store, and KeyProvider state. Stop the daemon, restore the previous
 artifacts, run production `--check`, start the service, and verify
 readiness with `wyctl status --readiness`.
 
+## wyrelogd Configuration File
+
+`wyrelogd` accepts a `--config PATH` flag that points at a GLib keyfile
+(INI-format) configuration. Every key the file supports has an
+equivalent CLI flag; the CLI value wins when both are present, so the
+config file fills in the gaps for values that are static for a given
+deployment. There is intentionally no GSettings integration on the
+daemon side — system services run under systemd or the Windows Service
+Manager, where dconf / GSettings has no session bus and per-user
+semantics are the wrong granularity. The keyfile + CLI + systemd
+`EnvironmentFile=` triplet covers every legitimate daemon-config
+shape.
+
+### File Layout
+
+A single `[daemon]` section. Booleans use the GLib `true`/`false`
+literals; integers and strings are unquoted.
+
+```ini
+[daemon]
+profile = system
+template_dir = /usr/share/wyrelog/access
+policy_db = /var/lib/wyrelog/system/policy.sqlite
+policy_keyprovider = systemd-creds:wyrelog-system-policy-key
+audit_db = /var/log/wyrelog/system/audit.duckdb
+fact_root = /var/lib/wyrelog/system/facts
+fact_store_mode = per-tenant-graph
+event_spool_dir = /var/lib/wyrelog/system/event-spool
+system_url = http://127.0.0.1:8765
+listen_port = 8765
+event_queue_limit = 1024
+production = true
+bootstrap_admin_subject = wr.admin
+bootstrap_admin_allow_skip_mfa = false
+```
+
+### Key Reference
+
+| Key | Type | Equivalent CLI flag | Purpose |
+|-----|------|---------------------|---------|
+| `profile` | string | `--profile` | `system` or `service`. Selects the profile defaults and the listen-port default (8765 vs 8766). |
+| `template_dir` | string | `--template-dir` | Access policy template directory. |
+| `policy_db` | string | `--policy-db` | Path to the encrypted policy authority database. |
+| `policy_keyprovider` | string | `--policy-keyprovider` | KeyProvider spec for `policy_db`. `systemd-creds:NAME` or `file:PATH`. |
+| `audit_db` | string | `--audit-db` | Runtime audit sink database path. |
+| `fact_root` | string | `--fact-root` | Root directory for the Datalog fact store. |
+| `fact_store_mode` | string | `--fact-store-mode` | Layout mode for the fact store. Currently only `per-tenant-graph`. |
+| `event_spool_dir` | string | `--event-spool-dir` | Service-profile disk spool directory. |
+| `system_url` | string | `--system-url` | System-profile daemon URL the service-profile daemon forwards events to. |
+| `listen_port` | int | `--listen-port` | HTTP listen port. `0` selects an ephemeral port (used by integration tests). |
+| `event_queue_limit` | int | `--event-queue-limit` | Maximum pending service-profile spool files. |
+| `production` | bool | `--production` | Enables the fail-closed production startup gates. |
+| `bootstrap_admin_subject` | string | `--bootstrap-admin-subject` | Grants the `wr.system_admin` role to this subject on a fresh policy store. One-shot bootstrap aid. |
+| `bootstrap_admin_allow_skip_mfa` | bool | `--bootstrap-admin-allow-skip-mfa` | Grants `wr.login.skip_mfa` to the bootstrap admin so it can mint a first bearer token. |
+
+### Precedence
+
+CLI flags always win. The config file fills in values that the CLI
+left unset. There is no second-level merging; if you write a value
+in the config file and you also pass `--foo` on the command line,
+the CLI value is used as-is (the config-file value is not consulted
+even as a fallback for partial overrides).
+
+`/etc/wyrelog/wyrelogd.env` (the systemd `EnvironmentFile=`) carries
+process-level environment variables (`WYL_LOG`, `WYL_CONFIG`, etc.),
+not daemon-config keys. The two are complementary, not redundant:
+the env file controls what the systemd-launched process sees in
+its environment; the config file controls what the daemon's option
+parser inflates into `WylDaemonOptions`.
+
+### systemd Wiring
+
+A typical service unit threads the config file through the daemon's
+`--config` flag:
+
+```ini
+[Service]
+EnvironmentFile=/etc/wyrelog/wyrelogd.env
+ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production
+```
+
+The packaged unit ships with this shape; operator customization should
+edit `wyrelogd.conf` rather than redefining the entire `ExecStart`.
+
+### Why No GSettings on the Daemon
+
+The wyctl client uses GSettings (see the next section) because it
+runs in an operator's interactive session where dconf is available
+and per-user defaults are the right granularity. The daemon faces
+the opposite constraints:
+
+- System services usually have no D-Bus session bus, so the default
+  dconf backend would fail-soft to "no defaults" anyway.
+- Daemon config is a deployment-level concern that wants
+  configuration-management tooling (Ansible, Puppet, NixOS, Chef) to
+  control. Those tools manage files in `/etc`, not dconf databases.
+- The same dconf store is operator-writable by design. Trusting it
+  for daemon startup would let a compromised operator session pivot
+  to changing daemon behaviour on the next restart.
+
+These trade-offs make GKeyFile + `/etc/wyrelog/wyrelogd.conf` the
+right surface for `wyrelogd`. The wyctl GSettings layer below is
+deliberately *not* shared with the daemon — the audit trail and the
+threat model both prefer the explicit separation.
+
 ## wyctl Configuration and Token-File Safety
 
 `wyctl` reads operator-static defaults from GSettings so common flags do
@@ -536,6 +641,15 @@ loaded only from a protected on-disk token file. Explicit CLI flags always
 override GSettings. The GSettings store records only the *path* to the
 token file; the bytes themselves never live in dconf, the keyfile backend,
 or any other GSettings backing store.
+
+Daemon defaults live in `/etc/wyrelog/wyrelogd.conf` (see the previous
+section) — wyctl and wyrelogd intentionally do **not** share a single
+GSettings tree. The same value (e.g. `tenant`) lives in two places by
+design because each surface answers a different question: the daemon
+config decides what tenants the daemon will service, the wyctl
+defaults decide which tenant the operator at this workstation routes
+their CLI calls to. Keeping the two explicit makes audit-trail review
+honest about which surface acted.
 
 ### Schema Overview
 
