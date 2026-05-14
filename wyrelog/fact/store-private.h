@@ -39,6 +39,8 @@ void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 
 duckdb_connection wyl_fact_store_get_connection (wyl_fact_store_t * store);
+void wyl_fact_store_lock (wyl_fact_store_t * store);
+void wyl_fact_store_unlock (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_create_schema (wyl_fact_store_t * store);
 wyrelog_error_t wyl_fact_store_table_exists (wyl_fact_store_t * store,
     const gchar * table_name, gboolean * out_exists);

@@ -284,6 +284,17 @@ if get_option('enable_fact_store').allowed()
   )
 
   test('fact-store', test_fact_store)
+
+  test_fact_compound = executable('test-fact-compound',
+    'test-fact-compound.c',
+    c_args : [
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    ],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+  )
+
+  test('fact-compound', test_fact_compound)
 endif
 
 test_policy_store_toctou = executable('test-policy-store-toctou',
