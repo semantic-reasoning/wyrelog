@@ -151,8 +151,20 @@ typedef struct
   gboolean visible;
 } wyl_policy_fact_relation_schema_column_info_t;
 
+typedef struct
+{
+  gchar *namespace_id;
+  gchar *relation_name;
+  guint32 schema_version;
+  gchar *query_name;
+  gchar *required_permission_id;
+  guint max_rows;
+} wyl_policy_fact_relation_query_info_t;
+
 void wyl_policy_fact_relation_schema_columns_free
     (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns);
+void wyl_policy_fact_relation_query_info_clear
+    (wyl_policy_fact_relation_query_info_t * info);
 
 /*
  * Policy authority store lifecycle wrapper.
@@ -226,6 +238,10 @@ wyrelog_error_t wyl_policy_store_load_fact_relation_schema_columns
     gboolean * out_relation_visible,
     wyl_policy_fact_relation_schema_column_info_t ** out_columns,
     gsize * out_n_columns);
+wyrelog_error_t wyl_policy_store_load_fact_relation_query
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, const gchar * query_name,
+    wyl_policy_fact_relation_query_info_t * out_info);
 wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
     const gchar * role_id, const gchar * role_name);
 wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,

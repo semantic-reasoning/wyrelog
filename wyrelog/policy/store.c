@@ -3060,6 +3060,14 @@ wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
     rc = insert_fact_relation_schema_column_metadata (store, opts, i);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_queries; i++)
     rc = insert_fact_relation_query_metadata (store, opts, &opts->queries[i]);
+  if (rc == WYRELOG_E_OK && opts->n_queries == 0 && opts->relation_visible) {
+    const wyl_policy_fact_relation_schema_query_t default_query = {
+      .query_name = opts->relation_name,
+      .required_permission_id = "wr.datalog.query",
+      .max_rows = 1000,
+    };
+    rc = insert_fact_relation_query_metadata (store, opts, &default_query);
+  }
   if (rc != WYRELOG_E_OK) {
     wyl_policy_store_rollback_mutation (store);
     return rc;
@@ -3160,6 +3168,80 @@ wyl_policy_store_load_fact_relation_schema_columns (wyl_policy_store_t *store,
 
   *out_columns = columns;
   *out_n_columns = len;
+  return WYRELOG_E_OK;
+}
+
+void wyl_policy_fact_relation_query_info_clear
+    (wyl_policy_fact_relation_query_info_t * info)
+{
+  if (info == NULL)
+    return;
+  g_clear_pointer (&info->namespace_id, g_free);
+  g_clear_pointer (&info->relation_name, g_free);
+  g_clear_pointer (&info->query_name, g_free);
+  g_clear_pointer (&info->required_permission_id, g_free);
+  memset (info, 0, sizeof (*info));
+}
+
+wyrelog_error_t
+wyl_policy_store_load_fact_relation_query (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *query_name,
+    wyl_policy_fact_relation_query_info_t *out_info)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (out_info != NULL)
+    memset (out_info, 0, sizeof (*out_info));
+  if (store == NULL || store->db == NULL || out_info == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !fact_graph_customer_name_is_valid (query_name))
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT namespace_id, relation_name, schema_version, query_name, "
+      "required_permission_id, max_rows "
+      "FROM fact_relation_query_allowlist "
+      "WHERE tenant_id = ? AND graph_id = ? AND query_name = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, query_name)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  out_info->namespace_id =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+  out_info->relation_name =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 1));
+  out_info->schema_version = (guint32) sqlite3_column_int64 (stmt, 2);
+  out_info->query_name =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 3));
+  out_info->required_permission_id =
+      g_strdup ((const gchar *) sqlite3_column_text (stmt, 4));
+  out_info->max_rows = (guint) sqlite3_column_int64 (stmt, 5);
+  sqlite3_finalize (stmt);
+
+  if (out_info->namespace_id == NULL || out_info->relation_name == NULL
+      || out_info->query_name == NULL || out_info->required_permission_id
+      == NULL || out_info->schema_version == 0 || out_info->max_rows == 0) {
+    wyl_policy_fact_relation_query_info_clear (out_info);
+    return WYRELOG_E_NOMEM;
+  }
   return WYRELOG_E_OK;
 }
 

@@ -960,6 +960,60 @@ wyl_handle_get_fact_graph_engine (WylHandle *self, const gchar *tenant_id,
   return engine;
 }
 
+typedef struct
+{
+  WylEngine *engine;
+  wyl_fact_graph_tuple_cb cb;
+  gpointer user_data;
+} FactGraphSnapshotCtx;
+
+static void
+fact_graph_snapshot_tuple_trampoline (const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  FactGraphSnapshotCtx *ctx = user_data;
+  ctx->cb (ctx->engine, relation, row, ncols, ctx->user_data);
+}
+
+wyrelog_error_t
+wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *relation,
+    wyl_fact_graph_tuple_cb cb, gpointer user_data)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
+      || graph_id == NULL || relation == NULL || cb == NULL
+      || self->fact_graph_engines == NULL || self->fact_graph_statuses == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *key = fact_graph_key (tenant_id, graph_id);
+  g_mutex_lock (&self->fact_graphs_lock);
+  wyl_fact_graph_status_t *status =
+      g_hash_table_lookup (self->fact_graph_statuses, key);
+  if (status == NULL) {
+    g_mutex_unlock (&self->fact_graphs_lock);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (!status->queryable) {
+    g_mutex_unlock (&self->fact_graphs_lock);
+    return WYRELOG_E_POLICY;
+  }
+  WylEngine *engine = g_hash_table_lookup (self->fact_graph_engines, key);
+  if (engine == NULL) {
+    g_mutex_unlock (&self->fact_graphs_lock);
+    return WYRELOG_E_NOT_FOUND;
+  }
+
+  FactGraphSnapshotCtx ctx = {
+    .engine = engine,
+    .cb = cb,
+    .user_data = user_data,
+  };
+  wyrelog_error_t rc = wyl_engine_snapshot (engine, relation,
+      fact_graph_snapshot_tuple_trampoline, &ctx);
+  g_mutex_unlock (&self->fact_graphs_lock);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_handle_foreach_fact_graph_status (WylHandle *self,
     wyl_fact_graph_status_cb cb, gpointer user_data)

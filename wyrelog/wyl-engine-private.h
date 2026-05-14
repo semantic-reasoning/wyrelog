@@ -44,6 +44,7 @@ struct _WylEngine
   wirelog_easy_session_t *session;
   /* Logical path strings for diagnostic logging only; freed in finalize. */
   gchar *dl_src_logical_paths[WYL_ENGINE_TEMPLATE_COUNT];
+  GHashTable *symbols_by_id;    /* gint64* -> gchar*, private reverse map. */
   wyl_engine_mode_t mode;       /* Latched at first step or snapshot. */
   wyl_engine_owner_t owner;     /* Handle pair role, or standalone. */
   WylDeltaCookie *delta_cookie; /* Heap-owned, NULL when no cb. */
@@ -114,6 +115,7 @@ wyrelog_error_t wyl_engine_make_compound (WylEngine * self,
 void wyl_engine_set_owner (WylEngine * self, wyl_engine_owner_t owner);
 wyrelog_error_t wyl_engine_owned_intern_symbol (WylEngine * self,
     const gchar * symbol, gint64 * out_id);
+gchar *wyl_engine_owned_dup_interned_symbol (WylEngine * self, gint64 id);
 wyrelog_error_t wyl_engine_owned_make_compound (WylEngine * self,
     const gchar * functor, const wirelog_compound_arg_t * args, gsize nargs,
     gint64 * out_id);

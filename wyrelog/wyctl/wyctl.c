@@ -105,6 +105,19 @@ typedef struct
 
 typedef struct
 {
+  gchar *tenant;
+  gchar *graph;
+  gchar *query;
+  gchar *output;
+  gchar *limit_arg;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlDatalogQueryOptions;
+
+typedef struct
+{
   gchar *keyprovider_path;
   gchar *store_path;
   gchar *from_keyprovider_path;
@@ -1551,6 +1564,109 @@ run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+static gboolean
+parse_query_limit (const gchar *raw, guint *out_limit)
+{
+  if (out_limit == NULL)
+    return FALSE;
+  if (raw == NULL) {
+    *out_limit = 0;
+    return TRUE;
+  }
+  if (raw[0] == '\0')
+    return FALSE;
+  errno = 0;
+  gchar *end = NULL;
+  guint64 parsed = g_ascii_strtoull (raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || parsed == 0 ||
+      parsed > G_MAXUINT)
+    return FALSE;
+  *out_limit = (guint) parsed;
+  return TRUE;
+}
+
+static int
+run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  WyctlDatalogQueryOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"query", 0, 0, G_OPTION_ARG_STRING, &opts.query, "Relation query",
+        "ATOM"},
+    {"output", 0, 0, G_OPTION_ARG_STRING, &opts.output, "Output format",
+        "json"},
+    {"limit", 0, 0, G_OPTION_ARG_STRING, &opts.limit_arg, "Row limit", "N"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog datalog query");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected datalog query argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (opts.graph == NULL || opts.graph[0] == '\0' || opts.query == NULL ||
+      opts.query[0] == '\0') {
+    g_printerr ("wyctl: missing datalog query target option\n");
+    return 2;
+  }
+  if (opts.output != NULL && g_strcmp0 (opts.output, "json") != 0) {
+    g_printerr ("wyctl: unsupported --output\n");
+    return 2;
+  }
+  guint limit = 0;
+  if (!parse_query_limit (opts.limit_arg, &limit)) {
+    g_printerr ("wyctl: invalid --limit\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (global_opts, opts.tenant,
+      opts.access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  g_autofree gchar *json = NULL;
+  wyrelog_error_t rc = wyl_client_datalog_query_json (client, opts.tenant,
+      opts.graph, opts.query, limit, guard_timestamp, opts.guard_loc_class,
+      guard_risk, &json);
+  int exit_rc = fact_remote_exit (client, "datalog query", rc,
+      "datalog_query_failed");
+  if (exit_rc == 0)
+    g_print ("%s\n", json);
+  return exit_rc;
+}
+
+static int
+run_datalog (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing datalog command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "query") == 0)
+    return run_datalog_query (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown datalog command: %s\n", argv[1]);
+  return 2;
+}
+
 static int
 run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -1868,6 +1984,8 @@ main (int argc, char **argv)
     return run_graph (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "fact") == 0)
     return run_fact (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "datalog") == 0)
+    return run_datalog (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "audit") == 0)
     return run_audit (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "key") == 0)
