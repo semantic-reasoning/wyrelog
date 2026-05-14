@@ -246,6 +246,46 @@ test_owner_mismatch_via_classifier (void)
   g_unlink (path);
 }
 
+/* Windows-attribute classifier tests. These run on every platform
+ * because the classifier is pure bit math — no Win32 API is needed.
+ * They lock the rejection rules so a future Windows-side regression
+ * (e.g. failing to refuse a reparse point) is visible on the Linux
+ * CI before any Windows tester sees it. */
+#define WYCTL_WIN_ATTR_READONLY 0x00000001u
+#define WYCTL_WIN_ATTR_NORMAL 0x00000080u
+#define WYCTL_WIN_ATTR_REPARSE_POINT 0x00000400u
+
+static void
+test_windows_attrs_accept_readonly (void)
+{
+  g_assert_cmpint (wyctl_token_file_classify_windows_attrs
+      (WYCTL_WIN_ATTR_READONLY), ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_classify_windows_attrs
+      (WYCTL_WIN_ATTR_READONLY | WYCTL_WIN_ATTR_NORMAL), ==,
+      WYCTL_TOKEN_FILE_OK);
+}
+
+static void
+test_windows_attrs_reject_not_readonly (void)
+{
+  /* Plain file with no read-only bit. */
+  g_assert_cmpint (wyctl_token_file_classify_windows_attrs
+      (WYCTL_WIN_ATTR_NORMAL), ==, WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY);
+  g_assert_cmpint (wyctl_token_file_classify_windows_attrs (0), ==,
+      WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY);
+}
+
+static void
+test_windows_attrs_reject_reparse_point (void)
+{
+  /* Reparse-point set even if read-only is also set: refuse. */
+  g_assert_cmpint (wyctl_token_file_classify_windows_attrs
+      (WYCTL_WIN_ATTR_REPARSE_POINT | WYCTL_WIN_ATTR_READONLY), ==,
+      WYCTL_TOKEN_FILE_SYMLINK);
+  g_assert_cmpint (wyctl_token_file_classify_windows_attrs
+      (WYCTL_WIN_ATTR_REPARSE_POINT), ==, WYCTL_TOKEN_FILE_SYMLINK);
+}
+
 static void
 test_status_message_table_has_no_token_placeholder (void)
 {
@@ -295,5 +335,11 @@ main (int argc, char **argv)
       test_owner_mismatch_via_classifier);
   g_test_add_func ("/wyctl/token-file/status-message-no-token",
       test_status_message_table_has_no_token_placeholder);
+  g_test_add_func ("/wyctl/token-file/windows-attrs-accept-readonly",
+      test_windows_attrs_accept_readonly);
+  g_test_add_func ("/wyctl/token-file/windows-attrs-reject-not-readonly",
+      test_windows_attrs_reject_not_readonly);
+  g_test_add_func ("/wyctl/token-file/windows-attrs-reject-reparse-point",
+      test_windows_attrs_reject_reparse_point);
   return g_test_run ();
 }

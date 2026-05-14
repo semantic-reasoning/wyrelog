@@ -68,6 +68,24 @@ wyctl_token_file_classify_stat (const struct stat *st, uid_t euid)
 }
 #endif
 
+/* Pure attribute-bit-mask classifier (Windows semantics). Compiled
+ * on every platform so the Linux unit-test runner exercises the
+ * Windows rejection rules with synthetic inputs. */
+WyctlTokenFileStatus
+wyctl_token_file_classify_windows_attrs (guint32 attrs)
+{
+  /* FILE_ATTRIBUTE_REPARSE_POINT — symlink, mountpoint, or any
+   * other reparse target. We refuse the same way the POSIX path
+   * refuses a terminal symlink. */
+  if (attrs & 0x00000400u)
+    return WYCTL_TOKEN_FILE_SYMLINK;
+  /* FILE_ATTRIBUTE_READONLY missing — the issue requires at least
+   * this much hardening on Windows. */
+  if ((attrs & 0x00000001u) == 0)
+    return WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY;
+  return WYCTL_TOKEN_FILE_OK;
+}
+
 WyctlTokenFileStatus
 wyctl_token_file_read (const gchar *path, gchar **out_token)
 {
@@ -79,12 +97,72 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
     return WYCTL_TOKEN_FILE_MISSING_PATH;
 
 #ifdef G_OS_WIN32
-  /* Stubbed for commit 6 to wire GetFileAttributesW + read-only
-   * attribute + reparse-point rejection. The status is selected so
-   * any caller that mistakenly ships without the Windows path lit
-   * fails closed. */
-  (void) path;
-  return WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY;
+  /* Convert the operator-supplied UTF-8 path to UTF-16 for the
+   * Win32 wide-string API. */
+  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wpath == NULL)
+    return WYCTL_TOKEN_FILE_IO;
+
+  DWORD attrs = GetFileAttributesW (wpath);
+  if (attrs == INVALID_FILE_ATTRIBUTES) {
+    DWORD err = GetLastError ();
+    g_free (wpath);
+    if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
+      return WYCTL_TOKEN_FILE_NOT_FOUND;
+    return WYCTL_TOKEN_FILE_IO;
+  }
+
+  WyctlTokenFileStatus classify =
+      wyctl_token_file_classify_windows_attrs ((guint32) attrs);
+  if (classify != WYCTL_TOKEN_FILE_OK) {
+    g_free (wpath);
+    return classify;
+  }
+
+  HANDLE h = CreateFileW (wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  g_free (wpath);
+  if (h == INVALID_HANDLE_VALUE)
+    return WYCTL_TOKEN_FILE_IO;
+
+  gsize cap = WYCTL_TOKEN_FILE_MAX_BYTES;
+  gchar *buf = g_malloc (cap + 1);
+  gsize got = 0;
+  while (got < cap) {
+    DWORD chunk = (DWORD) (cap - got);
+    DWORD read_n = 0;
+    if (!ReadFile (h, buf + got, chunk, &read_n, NULL)) {
+      CloseHandle (h);
+      g_free (buf);
+      return WYCTL_TOKEN_FILE_IO;
+    }
+    if (read_n == 0)
+      break;
+    got += (gsize) read_n;
+  }
+  if (got >= cap) {
+    gchar overflow = 0;
+    DWORD probe = 0;
+    if (ReadFile (h, &overflow, 1, &probe, NULL) && probe > 0) {
+      CloseHandle (h);
+      g_free (buf);
+      return WYCTL_TOKEN_FILE_TOO_LARGE;
+    }
+  }
+  CloseHandle (h);
+  buf[got] = '\0';
+
+  if (got == 0) {
+    g_free (buf);
+    return WYCTL_TOKEN_FILE_EMPTY;
+  }
+  if (memchr (buf, '\0', got) != NULL) {
+    g_free (buf);
+    return WYCTL_TOKEN_FILE_INVALID_BYTES;
+  }
+
+  *out_token = buf;
+  return WYCTL_TOKEN_FILE_OK;
 #else
   int fd = open (path, O_NOFOLLOW | O_CLOEXEC | O_RDONLY | O_NOCTTY);
   if (fd < 0) {
