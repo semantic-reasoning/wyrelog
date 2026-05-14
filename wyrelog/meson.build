@@ -140,6 +140,14 @@ if build_client
     dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep],
     install : true,
   )
+
+  install_data(
+    'wyctl/org.wyrelog.wyctl.gschema.xml',
+    install_dir : get_option('datadir') / 'glib-2.0' / 'schemas',
+  )
+
+  gnome = import('gnome')
+  gnome.post_install(glib_compile_schemas : true)
 else
   wyrelog_client_dep = disabler()
   wyctl_exe = disabler()
