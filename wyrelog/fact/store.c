@@ -3,6 +3,8 @@
 
 #include <string.h>
 
+#include "compound-private.h"
+
 struct wyl_fact_store_t
 {
   duckdb_database db;
@@ -390,6 +392,20 @@ wyl_fact_store_get_connection (wyl_fact_store_t *store)
   return store->conn;
 }
 
+void
+wyl_fact_store_lock (wyl_fact_store_t *store)
+{
+  if (store != NULL)
+    g_mutex_lock (&store->lock);
+}
+
+void
+wyl_fact_store_unlock (wyl_fact_store_t *store)
+{
+  if (store != NULL)
+    g_mutex_unlock (&store->lock);
+}
+
 wyrelog_error_t
 wyl_fact_store_create_schema (wyl_fact_store_t *store)
 {
@@ -436,6 +452,31 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
     rc = reject_audit_database_unlocked (store);
   g_mutex_unlock (&store->lock);
   return rc;
+}
+
+static wyrelog_error_t
+validate_batch_compound_refs (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch)
+{
+  for (gsize i = 0; i < batch->n_rows; i++) {
+    for (gsize j = 0; j < schema->n_columns; j++) {
+      if (g_strcmp0 (schema->columns[j].column_type, "compound_ref") != 0)
+        continue;
+      const wyl_fact_value_t *value = &batch->rows[i].values[j];
+      if (value->type == WYL_FACT_VALUE_NULL)
+        continue;
+      gboolean exists = FALSE;
+      wyrelog_error_t rc = wyl_fact_compound_ref_exists (store,
+          batch->tenant_id, batch->graph_id, batch->namespace_id,
+          value->as.compound_ref, &exists);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      if (!exists)
+        return WYRELOG_E_POLICY;
+    }
+  }
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -802,6 +843,9 @@ wyl_fact_store_append_batch (wyl_fact_store_t *store,
     return rc;
   g_autofree gchar *table = NULL;
   rc = wyl_fact_store_ensure_projection (store, schema, &table);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = validate_batch_compound_refs (store, schema, batch);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autofree gchar *content_hash = batch_content_hash (schema, batch);
