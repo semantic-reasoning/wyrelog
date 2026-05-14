@@ -64,6 +64,47 @@ typedef struct
 
 typedef struct
 {
+  gchar *tenant;
+  gchar *graph;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlGraphOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
+  gchar *namespace_id;
+  gchar *relation;
+  gchar *schema_version_arg;
+  gchar *columns_arg;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactSchemaOptions;
+
+typedef struct
+{
+  gchar *tenant;
+  gchar *graph;
+  gchar *namespace_id;
+  gchar *relation;
+  gchar *schema_version_arg;
+  gchar *batch_id;
+  gchar *idempotency_key;
+  gchar *format;
+  gchar *input;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlFactPutOptions;
+
+typedef struct
+{
   gchar *keyprovider_path;
   gchar *store_path;
   gchar *from_keyprovider_path;
@@ -141,6 +182,23 @@ parse_nonnegative_int64 (const gchar *raw, gint64 *out_value)
     return FALSE;
 
   *out_value = parsed;
+  return TRUE;
+}
+
+static gboolean
+parse_positive_uint32 (const gchar *raw, guint32 *out_value)
+{
+  if (raw == NULL || raw[0] == '\0' || out_value == NULL)
+    return FALSE;
+
+  errno = 0;
+  gchar *end = NULL;
+  gint64 parsed = g_ascii_strtoll (raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || parsed < 1 ||
+      parsed > G_MAXUINT32)
+    return FALSE;
+
+  *out_value = (guint32) parsed;
   return TRUE;
 }
 
@@ -1072,6 +1130,427 @@ run_policy (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+static gboolean
+parse_guard_options (const gchar *timestamp_arg, const gchar *loc_class,
+    const gchar *risk_arg, gint64 *out_timestamp, gint64 *out_risk)
+{
+  if (!parse_nonnegative_int64 (timestamp_arg, out_timestamp)) {
+    g_printerr ("wyctl: invalid --guard-timestamp\n");
+    return FALSE;
+  }
+  if (loc_class == NULL || !wyl_guard_loc_class_is_valid (loc_class)) {
+    g_printerr ("wyctl: invalid --guard-loc-class\n");
+    return FALSE;
+  }
+  if (!parse_nonnegative_int64 (risk_arg, out_risk) || *out_risk > 100) {
+    g_printerr ("wyctl: invalid --guard-risk\n");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static int
+create_fact_client (const WyctlOptions *global_opts, const gchar *tenant,
+    const gchar *access_token_file, WylClient **out_client)
+{
+  if (out_client == NULL)
+    return 2;
+  *out_client = NULL;
+  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+    g_printerr ("wyctl: missing daemon URL\n");
+    return 2;
+  }
+  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  guint timeout_ms = 0;
+  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+  if (tenant == NULL || tenant[0] == '\0') {
+    g_printerr ("wyctl: missing --tenant\n");
+    return 2;
+  }
+
+  g_autofree gchar *access_token = NULL;
+  int token_rc = load_access_token_file (access_token_file, &access_token);
+  if (token_rc != 0)
+    return token_rc;
+
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+      wyl_client_set_bearer_credentials (client, access_token, tenant)
+      != WYRELOG_E_OK) {
+    g_printerr ("wyctl: invalid fact credentials\n");
+    return 2;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+  *out_client = g_steal_pointer (&client);
+  return 0;
+}
+
+static int
+fact_remote_exit (WylClient *client, const gchar *command,
+    wyrelog_error_t rc, const gchar *fallback_code)
+{
+  if (rc == WYRELOG_E_OK)
+    return 0;
+  g_autofree gchar *code = client != NULL ?
+      wyl_client_dup_last_error_code (client) : NULL;
+  const gchar *shown = code != NULL ? code : fallback_code;
+  if (shown == NULL)
+    shown = "failed";
+  g_printerr ("wyctl: %s failed: %s\n", command, shown);
+  guint status = client != NULL ? wyl_client_get_last_http_status (client) : 0;
+  if (rc == WYRELOG_E_INVALID)
+    return status == 0 ? 2 : 3;
+  if (rc == WYRELOG_E_AUTH)
+    return 6;
+  if (rc == WYRELOG_E_POLICY)
+    return 4;
+  return 5;
+}
+
+static int
+run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  WyctlGraphOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog graph create");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected graph create argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (opts.graph == NULL || opts.graph[0] == '\0') {
+    g_printerr ("wyctl: missing --graph\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (global_opts, opts.tenant,
+      opts.access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  wyrelog_error_t rc = wyl_client_graph_create (client, opts.tenant,
+      opts.graph, guard_timestamp, opts.guard_loc_class, guard_risk);
+  int exit_rc = fact_remote_exit (client, "graph create", rc,
+      "graph_create_failed");
+  if (exit_rc == 0)
+    g_print ("ok\n");
+  return exit_rc;
+}
+
+static int
+run_graph (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing graph command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "create") == 0)
+    return run_graph_create (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown graph command: %s\n", argv[1]);
+  return 2;
+}
+
+static void
+client_fact_columns_clear (WylClientFactColumn *columns, gsize n_columns)
+{
+  for (gsize i = 0; i < n_columns; i++) {
+    g_free ((gchar *) columns[i].name);
+    g_free ((gchar *) columns[i].type);
+  }
+  g_free (columns);
+}
+
+static gboolean
+parse_columns_arg (const gchar *raw, WylClientFactColumn **out_columns,
+    gsize *out_n_columns)
+{
+  if (out_columns == NULL || out_n_columns == NULL || raw == NULL ||
+      raw[0] == '\0')
+    return FALSE;
+  *out_columns = NULL;
+  *out_n_columns = 0;
+  g_auto (GStrv) entries = g_strsplit (raw, ",", -1);
+  g_autoptr (GArray) cols = g_array_new (FALSE, TRUE,
+      sizeof (WylClientFactColumn));
+  for (gsize i = 0; entries[i] != NULL; i++) {
+    if (entries[i][0] == '\0')
+      return FALSE;
+    gchar *sep = strchr (entries[i], ':');
+    if (sep == NULL || sep == entries[i] || sep[1] == '\0' ||
+        strchr (sep + 1, ':') != NULL)
+      return FALSE;
+    *sep = '\0';
+    WylClientFactColumn col = {
+      .name = g_strdup (entries[i]),
+      .type = g_strdup (sep + 1),
+      .nullable = FALSE,
+      .visible = TRUE,
+    };
+    g_array_append_val (cols, col);
+  }
+  if (cols->len == 0)
+    return FALSE;
+  *out_n_columns = cols->len;
+  *out_columns = (WylClientFactColumn *) g_array_free (g_steal_pointer (&cols),
+      FALSE);
+  return TRUE;
+}
+
+static int
+run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlFactSchemaOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
+        "NS"},
+    {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
+        "REL"},
+    {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
+        "Schema version", "N"},
+    {"columns", 0, 0, G_OPTION_ARG_STRING, &opts.columns_arg,
+        "Columns as name:type,...", "COLUMNS"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog fact schema register");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact schema register argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+  if (opts.graph == NULL || opts.graph[0] == '\0' || opts.namespace_id == NULL
+      || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
+      opts.relation[0] == '\0') {
+    g_printerr ("wyctl: missing fact schema target option\n");
+    return 2;
+  }
+  guint32 schema_version = 0;
+  if (!parse_positive_uint32 (opts.schema_version_arg, &schema_version)) {
+    g_printerr ("wyctl: invalid --schema-version\n");
+    return 2;
+  }
+  WylClientFactColumn *columns = NULL;
+  gsize n_columns = 0;
+  if (!parse_columns_arg (opts.columns_arg, &columns, &n_columns)) {
+    g_printerr ("wyctl: invalid --columns\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk)) {
+    client_fact_columns_clear (columns, n_columns);
+    return 2;
+  }
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (global_opts, opts.tenant,
+      opts.access_token_file, &client);
+  if (client_rc != 0) {
+    client_fact_columns_clear (columns, n_columns);
+    return client_rc;
+  }
+  wyrelog_error_t rc = wyl_client_fact_schema_register (client, opts.tenant,
+      opts.graph, opts.namespace_id, opts.relation, schema_version, columns,
+      n_columns, guard_timestamp, opts.guard_loc_class, guard_risk);
+  client_fact_columns_clear (columns, n_columns);
+  int exit_rc = fact_remote_exit (client, "fact schema register", rc,
+      "schema_register_failed");
+  if (exit_rc == 0)
+    g_print ("ok\n");
+  return exit_rc;
+}
+
+static gchar *
+convert_csv_to_tsv (const gchar *input, gsize size)
+{
+  g_autoptr (GString) out = g_string_sized_new (size);
+  for (gsize i = 0; i < size; i++) {
+    if (input[i] == '"' || input[i] == '\t')
+      return NULL;
+    g_string_append_c (out, input[i] == ',' ? '\t' : input[i]);
+  }
+  return g_string_free (g_steal_pointer (&out), FALSE);
+}
+
+static int
+run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  WyctlFactPutOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"graph", 0, 0, G_OPTION_ARG_STRING, &opts.graph, "Graph", "GRAPH"},
+    {"namespace", 0, 0, G_OPTION_ARG_STRING, &opts.namespace_id, "Namespace",
+        "NS"},
+    {"relation", 0, 0, G_OPTION_ARG_STRING, &opts.relation, "Relation",
+        "REL"},
+    {"schema-version", 0, 0, G_OPTION_ARG_STRING, &opts.schema_version_arg,
+        "Schema version", "N"},
+    {"batch-id", 0, 0, G_OPTION_ARG_STRING, &opts.batch_id, "Batch id",
+        "ID"},
+    {"idempotency-key", 0, 0, G_OPTION_ARG_STRING, &opts.idempotency_key,
+        "Idempotency key", "KEY"},
+    {"format", 0, 0, G_OPTION_ARG_STRING, &opts.format, "Input format",
+        "csv|tsv"},
+    {"input", 0, 0, G_OPTION_ARG_STRING, &opts.input, "Input file", "PATH"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new
+      ("- wyrelog fact put");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected fact put argument: %s\n", argv[1]);
+    return 2;
+  }
+  if (opts.graph == NULL || opts.graph[0] == '\0' || opts.namespace_id == NULL
+      || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
+      opts.relation[0] == '\0' || opts.batch_id == NULL ||
+      opts.batch_id[0] == '\0' || opts.idempotency_key == NULL ||
+      opts.idempotency_key[0] == '\0') {
+    g_printerr ("wyctl: missing fact put target option\n");
+    return 2;
+  }
+  guint32 schema_version = 0;
+  if (!parse_positive_uint32 (opts.schema_version_arg, &schema_version)) {
+    g_printerr ("wyctl: invalid --schema-version\n");
+    return 2;
+  }
+  if (opts.format == NULL || (g_strcmp0 (opts.format, "csv") != 0 &&
+          g_strcmp0 (opts.format, "tsv") != 0)) {
+    g_printerr ("wyctl: unsupported --format\n");
+    return 2;
+  }
+  if (opts.input == NULL || opts.input[0] == '\0') {
+    g_printerr ("wyctl: missing --input\n");
+    return 2;
+  }
+  g_autofree gchar *input = NULL;
+  gsize input_size = 0;
+  if (!g_file_get_contents (opts.input, &input, &input_size, &error)) {
+    g_printerr ("wyctl: unable to read fact input\n");
+    return 2;
+  }
+  g_autofree gchar *payload = NULL;
+  gsize payload_size = input_size;
+  if (g_strcmp0 (opts.format, "csv") == 0) {
+    payload = convert_csv_to_tsv (input, input_size);
+    if (payload == NULL) {
+      g_printerr ("wyctl: invalid csv input\n");
+      return 2;
+    }
+    payload_size = strlen (payload);
+  } else {
+    payload = g_steal_pointer (&input);
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (global_opts, opts.tenant,
+      opts.access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+  g_autoptr (WylClientFactAppendResult) result = NULL;
+  wyrelog_error_t rc = wyl_client_fact_put_batch (client, opts.tenant,
+      opts.graph, opts.namespace_id, opts.relation, schema_version,
+      opts.batch_id, opts.idempotency_key, (const guint8 *) payload,
+      payload_size, guard_timestamp, opts.guard_loc_class, guard_risk,
+      &result);
+  int exit_rc = fact_remote_exit (client, "fact put", rc,
+      "fact_append_failed");
+  if (exit_rc == 0)
+    g_print ("%s\n", wyl_client_fact_append_result_get_inserted (result) ?
+        "inserted" : "duplicate");
+  return exit_rc;
+}
+
+static int
+run_fact_schema (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing fact schema command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "register") == 0)
+    return run_fact_schema_register (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown fact schema command: %s\n", argv[1]);
+  return 2;
+}
+
+static int
+run_fact (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing fact command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "schema") == 0)
+    return run_fact_schema (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "put") == 0)
+    return run_fact_put (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown fact command: %s\n", argv[1]);
+  return 2;
+}
+
 static int
 run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
@@ -1385,6 +1864,10 @@ main (int argc, char **argv)
     return run_status (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "policy") == 0)
     return run_policy (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "graph") == 0)
+    return run_graph (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "fact") == 0)
+    return run_fact (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "audit") == 0)
     return run_audit (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "key") == 0)
