@@ -205,6 +205,37 @@ test_client_audit_daemon = executable('test-client-audit-daemon',
 )
 
 if build_client and host_machine.system() != 'windows'
+  glib_compile_schemas_prog = find_program('glib-compile-schemas')
+
+  wyctl_gschema_staged = configure_file(
+    input : '../wyrelog/wyctl/org.wyrelog.wyctl.gschema.xml',
+    output : 'org.wyrelog.wyctl.gschema.xml',
+    copy : true,
+  )
+
+  wyctl_gschemas_compiled = custom_target('wyctl-gschemas-compiled',
+    input : wyctl_gschema_staged,
+    output : 'gschemas.compiled',
+    command : [glib_compile_schemas_prog, '--strict',
+               '--targetdir=@OUTDIR@', meson.current_build_dir()],
+    build_by_default : true,
+  )
+
+  wyctl_gsettings_test_env = environment()
+  wyctl_gsettings_test_env.set('GSETTINGS_SCHEMA_DIR',
+    meson.current_build_dir())
+  wyctl_gsettings_test_env.set('GSETTINGS_BACKEND', 'memory')
+
+  test_wyctl_gschema = executable('test-wyctl-gschema',
+    'test-wyctl-gschema.c',
+    dependencies : [glib_dep, gio_dep],
+  )
+
+  test('wyctl-gschema', test_wyctl_gschema,
+    depends : wyctl_gschemas_compiled,
+    env : wyctl_gsettings_test_env,
+  )
+
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
     c_args : [

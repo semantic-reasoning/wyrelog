@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<schemalist>
+  <enum id="org.wyrelog.wyctl.GuardTimestampMode">
+    <value nick="none" value="0"/>
+    <value nick="now" value="1"/>
+  </enum>
+
+  <schema id="org.wyrelog.wyctl" path="/org/wyrelog/wyctl/">
+    <key name="daemon-url" type="s">
+      <default>""</default>
+      <summary>Default wyrelogd URL</summary>
+      <description>
+        URL of the wyrelogd daemon used when --daemon-url is omitted on
+        the command line. Empty string means "no default; the CLI flag
+        must be provided."
+      </description>
+    </key>
+
+    <key name="default-tenant" type="s">
+      <default>""</default>
+      <summary>Default tenant identifier</summary>
+      <description>
+        Tenant value used when --tenant is omitted. Empty string means
+        "no default; the CLI flag must be provided."
+      </description>
+    </key>
+
+    <key name="default-graph" type="s">
+      <default>""</default>
+      <summary>Default graph identifier</summary>
+      <description>
+        Graph value used when --graph is omitted. Empty string means
+        "no default; the CLI flag must be provided."
+      </description>
+    </key>
+
+    <key name="access-token-file" type="s">
+      <default>""</default>
+      <summary>Path to the bearer access token file</summary>
+      <description>
+        Filesystem path used when --access-token-file is omitted.
+        The file must be a regular file owned by the invoking user
+        with mode 0600 or stricter; symlinks and broader permissions
+        are rejected before any daemon request is sent. The schema
+        stores only the path, never the token bytes.
+      </description>
+    </key>
+
+    <key name="default-timeout-ms" type="u">
+      <default>2000</default>
+      <summary>Default request timeout in milliseconds</summary>
+      <description>
+        Timeout used when --timeout-ms is omitted. Must lie in the
+        same 1..60000 range the CLI enforces.
+      </description>
+    </key>
+
+    <key name="default-guard-loc-class" type="s">
+      <default>""</default>
+      <summary>Default location class for guard evaluation</summary>
+      <description>
+        Value used when --guard-loc-class is omitted. Empty string
+        means "no default; the CLI flag must be provided."
+      </description>
+    </key>
+
+    <key name="default-guard-risk" type="i">
+      <default>-1</default>
+      <summary>Default risk score for guard evaluation</summary>
+      <description>
+        Value used when --guard-risk is omitted. Valid scores are
+        0..100; -1 is the "unset" sentinel because 0 is a real
+        guard-risk value.
+      </description>
+    </key>
+
+    <key name="default-guard-timestamp-mode" enum="org.wyrelog.wyctl.GuardTimestampMode">
+      <default>"none"</default>
+      <summary>Strategy for filling guard timestamps</summary>
+      <description>
+        "none" preserves the historical behaviour where
+        --guard-timestamp must be supplied on every invocation.
+        "now" causes wyctl to substitute the current wall-clock
+        timestamp when the flag is omitted. A frozen literal default
+        is intentionally not offered, because operator workstations
+        would replay the same timestamp across invocations.
+      </description>
+    </key>
+  </schema>
+</schemalist>
