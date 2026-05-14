@@ -63,6 +63,22 @@ WyctlTokenFileStatus wyctl_token_file_classify_stat (const struct stat *st,
     uid_t euid);
 #endif
 
+/* Pure-function classifier for the Windows GetFileAttributesW result.
+ * Operates on a plain guint32 bit mask so it can be exercised from
+ * the Linux unit-test runner without linking any Win32 API: the
+ * caller supplies synthetic attribute bits and the classifier
+ * applies the read-only / reparse-point rules.
+ *
+ * The two attribute literals we care about are stable across every
+ * supported Windows SDK:
+ *   FILE_ATTRIBUTE_READONLY      = 0x00000001
+ *   FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
+ *
+ * Returns WYCTL_TOKEN_FILE_SYMLINK if the reparse-point bit is set,
+ * WYCTL_TOKEN_FILE_WINDOWS_NOT_READONLY if the read-only bit is
+ * unset, and WYCTL_TOKEN_FILE_OK otherwise. */
+WyctlTokenFileStatus wyctl_token_file_classify_windows_attrs (guint32 attrs);
+
 /* Human-readable diagnostic string for a status code. The returned
  * string contains a single '%s' placeholder for the path (except
  * for WYCTL_TOKEN_FILE_MISSING_PATH whose message stands alone,
