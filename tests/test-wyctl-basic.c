@@ -2394,6 +2394,76 @@ test_status_cli_overrides_gsettings (void)
           "from-gsettings.example.invalid"));
 }
 
+/* Drive a wyctl subcommand with GSettings carrying daemon-url and
+ * the CLI omitting --daemon-url. The diagnostic must reference the
+ * GSettings URL, proving the resolver fan-out applies to the named
+ * subcommand and not only to `status`. */
+static void
+assert_subcommand_resolves_daemon_url_from_gsettings (gchar **subcommand_argv,
+    gsize subcommand_argv_len)
+{
+  g_autofree gchar *literal =
+      gvariant_literal_for_string ("http://127.0.0.1:1");
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
+
+  GPtrArray *argv = g_ptr_array_new ();
+  g_ptr_array_add (argv, WYL_TEST_WYCTL_PATH);
+  for (gsize i = 0; i < subcommand_argv_len; i++)
+    g_ptr_array_add (argv, subcommand_argv[i]);
+  g_ptr_array_add (argv, NULL);
+
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env ((gchar **) argv->pdata, envp, &stdout_buf, &stderr_buf,
+      &wait_status);
+  g_ptr_array_free (argv, TRUE);
+  remove_dir_recursive (xdg);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  /* Either the daemon-unavailable diagnostic mentions the GSettings
+   * URL (probe was attempted with that URL), or the subcommand
+   * surfaces "daemon unavailable" with the URL. The kill-switch
+   * companion test rules out the missing-URL diagnostic. */
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: daemon unavailable: http://127.0.0.1:1"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+}
+
+static void
+test_policy_check_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "policy", "check",
+    "--user", "alice",
+    "--permission", "read",
+    "--resource", "doc/1",
+    "--access-token-file", "/dev/null",
+    "--timeout-ms", "100",
+  };
+  assert_subcommand_resolves_daemon_url_from_gsettings (subcommand,
+      G_N_ELEMENTS (subcommand));
+}
+
+static void
+test_audit_query_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "audit", "query",
+    "--limit", "1",
+    "--access-token-file", "/dev/null",
+    "--guard-timestamp", "0",
+    "--guard-loc-class", "internal",
+    "--guard-risk", "0",
+    "--timeout-ms", "100",
+  };
+  assert_subcommand_resolves_daemon_url_from_gsettings (subcommand,
+      G_N_ELEMENTS (subcommand));
+}
+
 static void
 test_status_kill_switch_disables_gsettings (void)
 {
@@ -2478,6 +2548,10 @@ main (int argc, char **argv)
       test_status_cli_overrides_gsettings);
   g_test_add_func ("/wyctl/status-kill-switch-disables-gsettings",
       test_status_kill_switch_disables_gsettings);
+  g_test_add_func ("/wyctl/policy-check-gsettings-supplies-daemon-url",
+      test_policy_check_gsettings_supplies_daemon_url);
+  g_test_add_func ("/wyctl/audit-query-gsettings-supplies-daemon-url",
+      test_audit_query_gsettings_supplies_daemon_url);
 
   return g_test_run ();
 }
