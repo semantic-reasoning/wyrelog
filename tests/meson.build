@@ -257,7 +257,8 @@ if build_client and host_machine.system() != 'windows'
   )
 
   test('wyctl-basic', test_wyctl_basic,
-    depends : wyctl_exe,
+    depends : [wyctl_exe, wyctl_gschemas_compiled],
+    env : wyctl_gsettings_test_env,
     timeout : 60,
   )
 

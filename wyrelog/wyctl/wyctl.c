@@ -13,6 +13,7 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
+#include "wyctl-config.h"
 
 typedef struct
 {
@@ -20,6 +21,11 @@ typedef struct
   gchar *timeout_ms_arg;
   gboolean show_version;
   gboolean readiness;
+  /* Borrowed pointer to the GSettings handle opened once in main().
+   * NULL when the schema is not installed or the operator set
+   * WYCTL_DISABLE_GSETTINGS=1; the resolver treats NULL as "no
+   * fallback available". */
+  GSettings *settings;
 } WyctlOptions;
 
 typedef struct
@@ -628,25 +634,34 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
 
-  if (opts.daemon_url == NULL || opts.daemon_url[0] == '\0') {
+  /* Resolve the CLI flags against GSettings defaults. The resolver
+   * returns an owned copy or NULL; the original opts.* slots stay
+   * owned by GOptionContext so we never assign back into them. */
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option (opts.daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (opts.timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
 
-  if (!daemon_url_is_valid (opts.daemon_url)) {
+  if (!daemon_url_is_valid (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
 
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (opts.timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
 
   g_autofree gchar *uri =
-      opts.readiness ? build_readyz_json_uri (opts.daemon_url) :
-      build_healthz_uri (opts.daemon_url);
+      opts.readiness ? build_readyz_json_uri (daemon_url) :
+      build_healthz_uri (daemon_url);
   guint status = 0;
   g_autofree gchar *body = NULL;
   int probe_rc = send_status_probe (uri, timeout_ms, &status, &body);
@@ -655,7 +670,7 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
   if (probe_rc != 0) {
-    g_printerr ("wyctl: daemon unavailable: %s\n", opts.daemon_url);
+    g_printerr ("wyctl: daemon unavailable: %s\n", daemon_url);
     return 1;
   }
 
@@ -667,7 +682,7 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
         return 1;
       }
     }
-    g_printerr ("wyctl: daemon unavailable: %s\n", opts.daemon_url);
+    g_printerr ("wyctl: daemon unavailable: %s\n", daemon_url);
     return 1;
   }
 
@@ -1964,6 +1979,14 @@ main (int argc, char **argv)
     g_printerr ("wyctl: %s\n", error->message);
     return 2;
   }
+
+  /* Open the GSettings handle once and thread it into every
+   * subcommand via WyctlOptions so the resolver can supply defaults
+   * for unset CLI flags. NULL when the schema is missing or the
+   * operator set WYCTL_DISABLE_GSETTINGS=1; the resolver tolerates
+   * that and degrades to CLI-only. */
+  g_autoptr (GSettings) settings = wyctl_open_settings ();
+  opts.settings = settings;
 
   if (opts.show_version) {
     g_print ("%s\n", wyrelog_version_string ());

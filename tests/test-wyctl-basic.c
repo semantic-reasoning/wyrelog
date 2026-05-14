@@ -20,6 +20,100 @@ run_child (gchar **argv, gchar **stdout_buf, gchar **stderr_buf,
   g_assert_no_error (error);
 }
 
+static void
+run_child_with_env (gchar **argv, gchar **envp, gchar **stdout_buf,
+    gchar **stderr_buf, gint *wait_status)
+{
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (g_spawn_sync (NULL, argv, envp, G_SPAWN_DEFAULT, NULL, NULL,
+          stdout_buf, stderr_buf, wait_status, &error));
+  g_assert_no_error (error);
+}
+
+/* Build a temporary XDG_CONFIG_HOME directory that holds a GSettings
+ * keyfile with the supplied org.wyrelog.wyctl values, and return the
+ * directory path (owned by caller). Caller must remove the directory
+ * tree when done. Both key and value arrays are NULL-terminated and
+ * must have matching length; values are stringified GVariant
+ * literals so the GSettings keyfile backend reads them as the
+ * declared schema type. */
+static gchar *
+make_keyfile_xdg_dir (const gchar *const *keys, const gchar *const *values)
+{
+  g_autoptr (GError) error = NULL;
+  gchar *xdg = g_dir_make_tmp ("wyctl-xdg-XXXXXX", &error);
+  g_assert_no_error (error);
+
+  g_autofree gchar *settings_dir = g_build_filename (xdg, "glib-2.0",
+      "settings", NULL);
+  g_assert_cmpint (g_mkdir_with_parents (settings_dir, 0700), ==, 0);
+
+  g_autofree gchar *keyfile_path = g_build_filename (settings_dir, "keyfile",
+      NULL);
+  g_autoptr (GKeyFile) keyfile = g_key_file_new ();
+  for (gsize i = 0; keys != NULL && keys[i] != NULL; i++) {
+    g_assert_nonnull (values[i]);
+    g_key_file_set_string (keyfile, "org/wyrelog/wyctl", keys[i], values[i]);
+  }
+  g_assert_true (g_key_file_save_to_file (keyfile, keyfile_path, &error));
+  g_assert_no_error (error);
+
+  return xdg;
+}
+
+static gchar *
+gvariant_literal_for_string (const gchar *value)
+{
+  g_autoptr (GVariant) variant = g_variant_new_string (value);
+  return g_variant_print (variant, FALSE);
+}
+
+static void
+remove_dir_recursive (const gchar *path)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GFile) file = g_file_new_for_path (path);
+  /* Walk and unlink children. Tests stage only files we wrote, so the
+   * iteration is small. */
+  g_autoptr (GFileEnumerator) en = g_file_enumerate_children (file,
+      G_FILE_ATTRIBUTE_STANDARD_NAME ","
+      G_FILE_ATTRIBUTE_STANDARD_TYPE, G_FILE_QUERY_INFO_NOFOLLOW_SYMLINKS,
+      NULL, &error);
+  if (en != NULL) {
+    while (TRUE) {
+      g_autoptr (GFileInfo) info = g_file_enumerator_next_file (en, NULL,
+          &error);
+      if (info == NULL)
+        break;
+      g_autofree gchar *child = g_build_filename (path,
+          g_file_info_get_name (info), NULL);
+      if (g_file_info_get_file_type (info) == G_FILE_TYPE_DIRECTORY)
+        remove_dir_recursive (child);
+      else
+        g_unlink (child);
+    }
+  }
+  g_clear_error (&error);
+  g_rmdir (path);
+}
+
+/* Build an envp derived from the current process environment, with
+ * GSettings pointed at the keyfile backend in xdg_dir. Caller frees
+ * with g_strfreev. */
+static gchar **
+build_gsettings_envp (const gchar *xdg_dir, gboolean disable_gsettings)
+{
+  gchar **envp = g_get_environ ();
+  envp = g_environ_setenv (envp, "XDG_CONFIG_HOME", xdg_dir, TRUE);
+  envp = g_environ_setenv (envp, "GSETTINGS_BACKEND", "keyfile", TRUE);
+  if (disable_gsettings)
+    envp = g_environ_setenv (envp, "WYCTL_DISABLE_GSETTINGS", "1", TRUE);
+  else
+    envp = g_environ_unsetenv (envp, "WYCTL_DISABLE_GSETTINGS");
+  return envp;
+}
+
 static gboolean
 wait_status_is_success (gint wait_status)
 {
@@ -2234,6 +2328,103 @@ test_policy_role_validation (void)
   g_unlink (token_path);
 }
 
+static void
+test_status_gsettings_supplies_daemon_url (void)
+{
+  /* When --daemon-url is omitted the resolver must read the URL from
+   * GSettings and the daemon-unavailable diagnostic must reference
+   * that URL (proving the resolver fed the probe). */
+  g_autofree gchar *literal =
+      gvariant_literal_for_string ("http://127.0.0.1:1");
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
+
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "status",
+    "--timeout-ms",
+    "100",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  remove_dir_recursive (xdg);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: daemon unavailable: http://127.0.0.1:1"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+}
+
+static void
+test_status_cli_overrides_gsettings (void)
+{
+  /* GSettings carries a URL we want to be ignored; the CLI value
+   * must win and the diagnostic must mention the CLI URL. */
+  g_autofree gchar *literal =
+      gvariant_literal_for_string ("http://from-gsettings.example.invalid");
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, FALSE);
+
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "status",
+    "--daemon-url",
+    "http://127.0.0.1:1",
+    "--timeout-ms",
+    "100",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  remove_dir_recursive (xdg);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: daemon unavailable: http://127.0.0.1:1"));
+  g_assert_null (g_strstr_len (stderr_buf, -1,
+          "from-gsettings.example.invalid"));
+}
+
+static void
+test_status_kill_switch_disables_gsettings (void)
+{
+  /* GSettings carries a URL but WYCTL_DISABLE_GSETTINGS=1 must keep
+   * wyctl from consulting it; with no CLI URL the existing
+   * missing-daemon-URL diagnostic must fire. */
+  g_autofree gchar *literal =
+      gvariant_literal_for_string ("http://from-gsettings.example.invalid");
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir (keys, values);
+  g_auto (GStrv) envp = build_gsettings_envp (xdg, TRUE);
+
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "status",
+    "--timeout-ms",
+    "100",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child_with_env (argv, envp, &stdout_buf, &stderr_buf, &wait_status);
+  remove_dir_recursive (xdg);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "daemon unavailable:"));
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2281,6 +2472,12 @@ main (int argc, char **argv)
   g_test_add_func ("/wyctl/audit-help", test_audit_help);
   g_test_add_func ("/wyctl/audit-validation", test_audit_validation);
   g_test_add_func ("/wyctl/audit-query", test_audit_query);
+  g_test_add_func ("/wyctl/status-gsettings-supplies-daemon-url",
+      test_status_gsettings_supplies_daemon_url);
+  g_test_add_func ("/wyctl/status-cli-overrides-gsettings",
+      test_status_cli_overrides_gsettings);
+  g_test_add_func ("/wyctl/status-kill-switch-disables-gsettings",
+      test_status_kill_switch_disables_gsettings);
 
   return g_test_run ();
 }
