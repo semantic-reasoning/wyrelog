@@ -527,3 +527,202 @@ Rollback requires the previous package, template identity, policy store,
 audit store, and KeyProvider state. Stop the daemon, restore the previous
 artifacts, run production `--check`, start the service, and verify
 readiness with `wyctl status --readiness`.
+
+## wyctl Configuration and Token-File Safety
+
+`wyctl` reads operator-static defaults from GSettings so common flags do
+not need to be repeated on every invocation, while bearer-token bytes are
+loaded only from a protected on-disk token file. Explicit CLI flags always
+override GSettings. The GSettings store records only the *path* to the
+token file; the bytes themselves never live in dconf, the keyfile backend,
+or any other GSettings backing store.
+
+### Schema Overview
+
+- Schema id: `org.wyrelog.wyctl`
+- Schema path: `/org/wyrelog/wyctl/`
+- Install location: `${datadir}/glib-2.0/schemas/org.wyrelog.wyctl.gschema.xml`
+- After install the package runs `glib-compile-schemas` against the
+  schemas directory to refresh `gschemas.compiled`. Manual installs that
+  copy the schema in place must run `glib-compile-schemas
+  ${datadir}/glib-2.0/schemas` afterwards or wyctl will silently fall
+  back to CLI-only mode.
+
+### Key Reference
+
+| Key | Type | Default | Purpose |
+|-----|------|---------|---------|
+| `daemon-url` | `s` | `""` | URL of `wyrelogd` when `--daemon-url` is omitted. Empty = "no default; CLI must supply." |
+| `default-tenant` | `s` | `""` | Tenant id used when `--tenant` is omitted (same empty-is-unset convention). |
+| `default-graph` | `s` | `""` | Graph id used when `--graph` is omitted. |
+| `access-token-file` | `s` | `""` | Filesystem path to the bearer token file used when `--access-token-file` is omitted. Path only. |
+| `default-timeout-ms` | `u` | `2000` | Request timeout in milliseconds used when `--timeout-ms` is omitted. Re-validated by wyctl's CLI parser (`1..60000`). |
+| `default-guard-loc-class` | `s` | `""` | Location class used when `--guard-loc-class` is omitted. |
+| `default-guard-risk` | `i` | `-1` | Risk score (0..100) used when `--guard-risk` is omitted. `-1` is the "unset" sentinel because `0` is a real risk score. |
+| `default-guard-timestamp-mode` | `s` | `"none"` | Strategy for filling `--guard-timestamp` when omitted. `"none"` preserves the historical "must be supplied" behaviour; `"now"` is reserved for a future commit that fills the current wall-clock time. |
+
+Example: configure the operator workstation once and let every wyctl
+invocation pick up the defaults.
+
+```sh
+gsettings set org.wyrelog.wyctl daemon-url 'http://127.0.0.1:8765'
+gsettings set org.wyrelog.wyctl default-tenant 'system'
+gsettings set org.wyrelog.wyctl default-graph 'production'
+gsettings set org.wyrelog.wyctl access-token-file "$HOME/.config/wyrelog/access-token"
+gsettings set org.wyrelog.wyctl default-timeout-ms 5000
+```
+
+### Precedence Rule
+
+For every flag covered above, the resolved value is the first non-empty
+of:
+
+1. **CLI flag** (`--daemon-url X`). An empty-string CLI value
+   (`--daemon-url ""`) is treated as a deliberate operator value, not
+   as absence, and falls into the existing per-flag validation paths.
+2. **GSettings value** for the corresponding schema key. The schema's
+   empty-string defaults encode "unset" — wyctl never fabricates a
+   default URL or tenant from those.
+3. **Unset** — the existing per-flag "missing" diagnostic fires
+   (`wyctl: missing daemon URL`, `wyctl: missing --tenant`, etc.).
+
+### Kill Switch: `WYCTL_DISABLE_GSETTINGS`
+
+Set `WYCTL_DISABLE_GSETTINGS=1` (the **literal string `1`** — `true`,
+`yes`, `on` are not honoured) to skip the GSettings lookup entirely.
+Useful for:
+
+- CI containers without a dconf daemon.
+- Reproducible CLI-only runs in incident-response workflows.
+- Bisecting a misconfigured operator workstation.
+
+With the kill switch set, wyctl behaves exactly as the pre-GSettings
+build did: every flag is sourced from `argv` or the per-flag missing
+diagnostic fires.
+
+### Token-File Permission Requirements (POSIX)
+
+Before any daemon request is sent, `wyctl` opens the access-token file
+with `open(O_NOFOLLOW | O_CLOEXEC | O_RDONLY | O_NOCTTY)` and applies
+the following checks on the resulting file descriptor (no second
+path-based syscall is issued, so the safety check has no TOCTOU window
+between stat and read):
+
+1. **Regular file** — directories, devices, sockets, FIFOs are
+   rejected with `wyctl: access token file is not a regular file: <path>`.
+2. **Owned by the invoking user** (`st.st_uid == geteuid()`) — rejected
+   with `wyctl: access token file not owned by current user: <path>`.
+3. **No group/other permission bits** — the mask
+   `(S_IRWXG | S_IRWXO)` must be zero. `0600` and `0400` are accepted;
+   `0640`, `0604`, `0660`, etc. are rejected with
+   `wyctl: access token file permissions too broad (require 0600): <path>`.
+4. **Not a terminal symlink** — `O_NOFOLLOW` refuses the open and
+   reports `wyctl: access token file is a symlink (refusing to follow): <path>`.
+5. **Bounded read** — the token must be 65,536 bytes or less. Larger
+   files fail with `wyctl: access token file too large: <path>`.
+
+The check is the chokepoint every subcommand reaches before any
+`wyl_client_*` HTTP call. Operators who see a token-file diagnostic
+can be confident the daemon was never contacted.
+
+#### Intermediate-Path Symlinks (Scope Statement)
+
+`O_NOFOLLOW` only refuses a terminal symlink. Intermediate path
+components are still resolved normally, so a setup where a parent
+directory is itself a symlink — or where a non-owner can write to a
+parent directory and substitute one — falls outside the safety
+guarantee. **Every directory on the path to the token file must be
+owned by the invoking user and not group/world-writable.** A typical
+safe layout is `~/.config/wyrelog/access-token` where `~/.config` is
+already operator-owned with the standard `0700` mode.
+
+Closing the intermediate-component window would require
+Linux-only `openat2(RESOLVE_BENEATH)`. That is explicitly out of scope
+for the GA hardening pass.
+
+### Token-File Permission Requirements (Windows)
+
+On Windows wyctl applies a smaller but still fail-closed check:
+
+1. `FILE_ATTRIBUTE_REPARSE_POINT` must NOT be set on the file — that
+   covers symbolic links, directory junctions, and any third-party
+   reparse target. Rejected with
+   `wyctl: access token file is a symlink (refusing to follow): <path>`.
+2. `FILE_ATTRIBUTE_READONLY` must be set — operators mark the file
+   read-only via `attrib +R <path>` to opt into the check. Rejected
+   with `wyctl: access token file not marked read-only: <path>`.
+
+Full ACL validation is reserved for a future hardening pass; the
+diagnostic `wyctl: access token file ACL validation unavailable: <path>`
+is allocated for that landing and is **not emitted** by the current
+binary.
+
+### Diagnostic Message Catalog
+
+When the token-file safety check refuses the file, exactly one of the
+following lines is written to stderr. Each diagnostic is greppable as
+a literal substring so operator tooling can route automatically.
+
+| Failure | Diagnostic (stderr) |
+|---------|--------------------|
+| Missing path or `--access-token-file=""` | `wyctl: missing --access-token-file` |
+| File not found | `wyctl: access token file not found: <path>` |
+| Terminal symlink (POSIX) or reparse point (Windows) | `wyctl: access token file is a symlink (refusing to follow): <path>` |
+| Non-regular file (FIFO, device, socket, directory) | `wyctl: access token file is not a regular file: <path>` |
+| Owned by another user | `wyctl: access token file not owned by current user: <path>` |
+| Group or other permission bits set | `wyctl: access token file permissions too broad (require 0600): <path>` |
+| Read failed for another reason | `wyctl: unable to read access token file: <path>` |
+| File is zero bytes | `wyctl: empty access token file: <path>` |
+| File contains an embedded NUL or fails normalization | `wyctl: invalid access token file: <path>` |
+| File exceeds the 64 KiB cap | `wyctl: access token file too large: <path>` |
+| Read-only attribute missing (Windows) | `wyctl: access token file not marked read-only: <path>` |
+
+For each failure the process exits with status `2` and **no HTTP
+request is sent** to the daemon — the contract is enforced by both
+unit tests and end-to-end integration tests that assert the absence
+of `daemon unavailable` / `<op> failed` diagnostics under unsafe
+token configurations.
+
+### Operator Setup Recipe (POSIX)
+
+```sh
+# Create the per-user wyrelog config directory.
+install -d -m 0700 "$HOME/.config/wyrelog"
+
+# Write the bearer token. Use install + redirect rather than echo
+# to avoid the token landing in shell history.
+install -m 0600 /dev/null "$HOME/.config/wyrelog/access-token"
+printf '%s' "$WYRELOG_TOKEN" > "$HOME/.config/wyrelog/access-token"
+
+# Point GSettings at the file.
+gsettings set org.wyrelog.wyctl access-token-file \
+  "$HOME/.config/wyrelog/access-token"
+
+# Verify wyctl can read it.
+wyctl status
+
+# Remove the env var so the token is no longer in memory.
+unset WYRELOG_TOKEN
+```
+
+### Operator Setup Recipe (Windows)
+
+```pwsh
+$WyrelogDir = "$Env:USERPROFILE\.config\wyrelog"
+New-Item -ItemType Directory -Force -Path $WyrelogDir | Out-Null
+
+# Write the bearer token (PowerShell will not echo it back).
+Set-Content -Path "$WyrelogDir\access-token" -Value $Env:WYRELOG_TOKEN -NoNewline
+
+# Mark the file read-only — required by the Windows safety check.
+attrib +R "$WyrelogDir\access-token"
+
+# Point GSettings at the file.
+gsettings set org.wyrelog.wyctl access-token-file "$WyrelogDir\access-token"
+
+# Verify wyctl can read it.
+wyctl status
+
+# Remove the env var so the token is no longer in memory.
+Remove-Item Env:WYRELOG_TOKEN
+```
