@@ -18,6 +18,10 @@
 #include "wyl-permission-scope-private.h"
 #include "policy/store-private.h"
 
+#ifdef WYL_HAS_FACT_STORE
+#include "fact/replay-private.h"
+#endif
+
 #define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
 #define WYL_LOGIN_SKIP_MFA_SCOPE "login"
 
@@ -71,6 +75,9 @@ struct _WylHandle
   gpointer delta_callback_user_data;
   GPtrArray *pending_deltas;
   wyl_policy_store_t *policy_store;
+#ifdef WYL_HAS_FACT_STORE
+  GHashTable *fact_graph_engines;
+#endif
   gboolean login_skip_mfa_allowed;
   gboolean engine_pair_poisoned;
   gboolean require_template_manifest;
@@ -168,6 +175,9 @@ wyl_handle_finalize (GObject *object)
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
+#ifdef WYL_HAS_FACT_STORE
+  g_clear_pointer (&self->fact_graph_engines, g_hash_table_unref);
+#endif
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
@@ -208,6 +218,10 @@ wyl_handle_init (WylHandle *self)
   self->created_at_us = g_get_real_time ();
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
+#ifdef WYL_HAS_FACT_STORE
+  self->fact_graph_engines =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
+#endif
   self->pending_deltas =
       g_ptr_array_new_with_free_func (wyl_pending_delta_free);
   /*
@@ -628,6 +642,13 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
       return rc;
     }
   }
+#ifdef WYL_HAS_FACT_STORE
+  rc = wyl_handle_replay_fact_graphs (self, NULL);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+#endif
 #ifdef WYL_HAS_AUDIT
   /* Open the runtime audit sink and replay durable Policy DB audit rows into
    * it. Public wyl_init() passes NULL and therefore keeps the sink in-memory;
@@ -685,6 +706,10 @@ wyl_shutdown (WylHandle *handle)
   g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
+#ifdef WYL_HAS_FACT_STORE
+  if (handle->fact_graph_engines != NULL)
+    g_hash_table_remove_all (handle->fact_graph_engines);
+#endif
   handle->engine_pair_poisoned = FALSE;
   clear_pending_deltas (handle);
   g_clear_pointer (&handle->template_dir, g_free);
@@ -880,6 +905,44 @@ wyl_handle_get_policy_store (WylHandle *self)
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return self->policy_store;
 }
+
+#ifdef WYL_HAS_FACT_STORE
+static gchar *
+fact_graph_key (const gchar *tenant_id, const gchar *graph_id)
+{
+  return g_strdup_printf ("%s\n%s", tenant_id, graph_id);
+}
+
+wyrelog_error_t
+wyl_handle_replay_fact_graphs (WylHandle *self,
+    wyl_fact_replay_summary_t *out_summary)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->policy_store == NULL || self->fact_graph_engines == NULL)
+    return WYRELOG_E_INVALID;
+
+  /*
+   * Generic fact graphs live in separate graph-local read engines rather than
+   * the policy read/delta pair.  Replay therefore happens before graph query
+   * snapshots, and repeated replay replaces the graph engine, making the load
+   * lifecycle idempotent without appending duplicate EDB rows.
+   */
+  return wyl_fact_replay_policy_graphs (self->policy_store,
+      self->fact_graph_engines, out_summary);
+}
+
+WylEngine *
+wyl_handle_get_fact_graph_engine (WylHandle *self, const gchar *tenant_id,
+    const gchar *graph_id)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  if (tenant_id == NULL || graph_id == NULL || self->fact_graph_engines == NULL)
+    return NULL;
+  g_autofree gchar *key = fact_graph_key (tenant_id, graph_id);
+  return g_hash_table_lookup (self->fact_graph_engines, key);
+}
+#endif
 
 void
 wyl_handle_set_login_skip_mfa_allowed (WylHandle *self, gboolean allowed)

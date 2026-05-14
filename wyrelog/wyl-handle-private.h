@@ -9,6 +9,10 @@
 #include "wyrelog/session.h"
 #include "policy/store-private.h"
 
+#ifdef WYL_HAS_FACT_STORE
+#include "fact/replay-private.h"
+#endif
+
 #ifdef WYL_HAS_AUDIT
 #include "audit/conn-private.h"
 #endif
@@ -59,6 +63,13 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
  * valid until wyl_shutdown or g_object_unref.
  */
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
+
+#ifdef WYL_HAS_FACT_STORE
+wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
+    wyl_fact_replay_summary_t * out_summary);
+WylEngine *wyl_handle_get_fact_graph_engine (WylHandle * self,
+    const gchar * tenant_id, const gchar * graph_id);
+#endif
 
 /*
  * Mints a fresh, handle-scoped wyl_session_id_t for |session| and stores
