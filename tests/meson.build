@@ -236,6 +236,18 @@ if build_client and host_machine.system() != 'windows'
     env : wyctl_gsettings_test_env,
   )
 
+  test_wyctl_config = executable('test-wyctl-config',
+    'test-wyctl-config.c',
+    '../wyrelog/wyctl/wyctl-config.c',
+    include_directories : include_directories('../wyrelog/wyctl'),
+    dependencies : [glib_dep, gio_dep],
+  )
+
+  test('wyctl-config', test_wyctl_config,
+    depends : wyctl_gschemas_compiled,
+    env : wyctl_gsettings_test_env,
+  )
+
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
     c_args : [
