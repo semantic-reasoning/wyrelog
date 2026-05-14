@@ -2394,12 +2394,20 @@ test_status_cli_overrides_gsettings (void)
           "from-gsettings.example.invalid"));
 }
 
-/* Drive a wyctl subcommand with GSettings carrying daemon-url and
- * the CLI omitting --daemon-url. The diagnostic must reference the
- * GSettings URL, proving the resolver fan-out applies to the named
- * subcommand and not only to `status`. */
+/* Drive a wyctl subcommand against a GSettings keyfile that supplies
+ * the daemon URL, with the CLI deliberately omitting --daemon-url.
+ *
+ * The contract is *not* that a specific diagnostic mentions the URL
+ * — only `run_status` echoes the URL in its failure diagnostic. The
+ * other subcommands print "wyctl: <op> failed" on transport failure
+ * without the URL. The portable proof that the resolver supplied a
+ * URL is that the subcommand made it *past* the URL-validation
+ * gate: neither "missing daemon URL" nor "invalid daemon URL"
+ * appears in stderr. The kill-switch companion proves the
+ * GSettings fallback is the only thing that could have supplied
+ * the URL. */
 static void
-assert_subcommand_resolves_daemon_url_from_gsettings (gchar **subcommand_argv,
+assert_subcommand_consumes_gsettings_daemon_url (gchar **subcommand_argv,
     gsize subcommand_argv_len)
 {
   g_autofree gchar *literal =
@@ -2424,13 +2432,8 @@ assert_subcommand_resolves_daemon_url_from_gsettings (gchar **subcommand_argv,
   remove_dir_recursive (xdg);
 
   g_assert_false (wait_status_is_success (wait_status));
-  /* Either the daemon-unavailable diagnostic mentions the GSettings
-   * URL (probe was attempted with that URL), or the subcommand
-   * surfaces "daemon unavailable" with the URL. The kill-switch
-   * companion test rules out the missing-URL diagnostic. */
-  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: daemon unavailable: http://127.0.0.1:1"));
   g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: missing daemon URL"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: invalid daemon URL"));
 }
 
 static void
@@ -2444,7 +2447,7 @@ test_policy_check_gsettings_supplies_daemon_url (void)
     "--access-token-file", "/dev/null",
     "--timeout-ms", "100",
   };
-  assert_subcommand_resolves_daemon_url_from_gsettings (subcommand,
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
       G_N_ELEMENTS (subcommand));
 }
 
@@ -2460,7 +2463,50 @@ test_audit_query_gsettings_supplies_daemon_url (void)
     "--guard-risk", "0",
     "--timeout-ms", "100",
   };
-  assert_subcommand_resolves_daemon_url_from_gsettings (subcommand,
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
+      G_N_ELEMENTS (subcommand));
+}
+
+static void
+test_fact_put_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "fact", "put",
+    "--tenant", "t",
+    "--graph", "g",
+    "--namespace", "ns",
+    "--relation", "r",
+    "--schema-version", "1",
+    "--batch-id", "b",
+    "--idempotency-key", "k",
+    "--format", "csv",
+    "--input", "/dev/null",
+    "--access-token-file", "/dev/null",
+    "--guard-timestamp", "0",
+    "--guard-loc-class", "internal",
+    "--guard-risk", "0",
+    "--timeout-ms", "100",
+  };
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
+      G_N_ELEMENTS (subcommand));
+}
+
+static void
+test_datalog_query_gsettings_supplies_daemon_url (void)
+{
+  gchar *subcommand[] = {
+    "datalog", "query",
+    "--tenant", "t",
+    "--graph", "g",
+    "--query", "rel()",
+    "--limit", "1",
+    "--access-token-file", "/dev/null",
+    "--guard-timestamp", "0",
+    "--guard-loc-class", "internal",
+    "--guard-risk", "0",
+    "--timeout-ms", "100",
+  };
+  assert_subcommand_consumes_gsettings_daemon_url (subcommand,
       G_N_ELEMENTS (subcommand));
 }
 
@@ -2552,6 +2598,10 @@ main (int argc, char **argv)
       test_policy_check_gsettings_supplies_daemon_url);
   g_test_add_func ("/wyctl/audit-query-gsettings-supplies-daemon-url",
       test_audit_query_gsettings_supplies_daemon_url);
+  g_test_add_func ("/wyctl/fact-put-gsettings-supplies-daemon-url",
+      test_fact_put_gsettings_supplies_daemon_url);
+  g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",
+      test_datalog_query_gsettings_supplies_daemon_url);
 
   return g_test_run ();
 }
