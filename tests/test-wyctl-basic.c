@@ -1,9 +1,19 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+/* Expose POSIX.1-2008 chmod-mode-t and the write(2)/symlink(2) syscalls
+ * the resolver / token-file fan-out tests use under strict c_std=c17.
+ * Must precede every system header. */
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
 #ifndef WYL_TEST_WYCTL_PATH
 #error "WYL_TEST_WYCTL_PATH is required"
@@ -1006,8 +1016,9 @@ test_policy_validation (void)
   run_child (unreadable_token_argv, &stdout_buf, &stderr_buf, &wait_status);
   g_assert_false (wait_status_is_success (wait_status));
   g_assert_cmpstr (stdout_buf, ==, "");
+  /* Updated diagnostic from the typed token-file safety helper. */
   g_assert_nonnull (g_strstr_len (stderr_buf, -1,
-          "wyctl: unable to read access token file"));
+          "wyctl: access token file not found"));
 
   g_clear_pointer (&stdout_buf, g_free);
   g_clear_pointer (&stderr_buf, g_free);
@@ -2459,7 +2470,7 @@ test_audit_query_gsettings_supplies_daemon_url (void)
     "--limit", "1",
     "--access-token-file", "/dev/null",
     "--guard-timestamp", "0",
-    "--guard-loc-class", "internal",
+    "--guard-loc-class", "trusted",
     "--guard-risk", "0",
     "--timeout-ms", "100",
   };
@@ -2483,12 +2494,100 @@ test_fact_put_gsettings_supplies_daemon_url (void)
     "--input", "/dev/null",
     "--access-token-file", "/dev/null",
     "--guard-timestamp", "0",
-    "--guard-loc-class", "internal",
+    "--guard-loc-class", "trusted",
     "--guard-risk", "0",
     "--timeout-ms", "100",
   };
   assert_subcommand_consumes_gsettings_daemon_url (subcommand,
       G_N_ELEMENTS (subcommand));
+}
+
+/* Build a temporary access-token file with the supplied contents and
+ * mode bits, returning the path. The caller g_unlinks and g_frees. */
+static gchar *
+write_token_with_mode (const gchar *contents, mode_t mode)
+{
+  g_autoptr (GError) error = NULL;
+  gchar *path = NULL;
+  gint fd = g_file_open_tmp ("wyctl-broad-token-XXXXXX", &path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  if (contents != NULL && contents[0] != '\0') {
+    gsize len = strlen (contents);
+    gsize wrote = 0;
+    while (wrote < len) {
+      ssize_t n = write (fd, contents + wrote, len - wrote);
+      g_assert_cmpint (n, >=, 0);
+      wrote += (gsize) n;
+    }
+  }
+  g_assert_true (g_close (fd, NULL));
+  g_assert_cmpint (g_chmod (path, mode), ==, 0);
+  return path;
+}
+
+/* When the access-token file is unsafe, the safety check MUST fire
+ * before any HTTP request. Witness: the subcommand's own "<op>
+ * failed" diagnostic must be absent, because reaching it requires
+ * a successful wyl_client_new + daemon probe. The
+ * permissions-too-broad diagnostic must be present in its place. */
+static void
+test_policy_check_safety_reject_prevents_http (void)
+{
+  g_autofree gchar *broad_token = write_token_with_mode ("token-1", 0640);
+
+  /* --daemon-url and --timeout-ms are global flags and must come
+   * before the subcommand name, per wyctl's CLI grammar. */
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "--timeout-ms", "100",
+    "policy", "check",
+    "--user", "alice",
+    "--permission", "wr.audit.read",
+    "--resource", "doc/42",
+    "--access-token-file", broad_token,
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_unlink (broad_token);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: access token file permissions too broad"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: policy check failed"));
+}
+
+static void
+test_audit_query_safety_reject_prevents_http (void)
+{
+  g_autofree gchar *broad_token = write_token_with_mode ("token-1", 0644);
+
+  gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "--timeout-ms", "100",
+    "audit", "query",
+    "--limit", "1",
+    "--access-token-file", broad_token,
+    "--guard-timestamp", "0",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "0",
+    NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child (argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_unlink (broad_token);
+
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: access token file permissions too broad"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "wyctl: audit query failed"));
 }
 
 static void
@@ -2502,7 +2601,7 @@ test_datalog_query_gsettings_supplies_daemon_url (void)
     "--limit", "1",
     "--access-token-file", "/dev/null",
     "--guard-timestamp", "0",
-    "--guard-loc-class", "internal",
+    "--guard-loc-class", "trusted",
     "--guard-risk", "0",
     "--timeout-ms", "100",
   };
@@ -2602,6 +2701,10 @@ main (int argc, char **argv)
       test_fact_put_gsettings_supplies_daemon_url);
   g_test_add_func ("/wyctl/datalog-query-gsettings-supplies-daemon-url",
       test_datalog_query_gsettings_supplies_daemon_url);
+  g_test_add_func ("/wyctl/policy-check-safety-reject-prevents-http",
+      test_policy_check_safety_reject_prevents_http);
+  g_test_add_func ("/wyctl/audit-query-safety-reject-prevents-http",
+      test_audit_query_safety_reject_prevents_http);
 
   return g_test_run ();
 }

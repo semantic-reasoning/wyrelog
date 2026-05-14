@@ -14,6 +14,7 @@
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 #include "wyctl-config.h"
+#include "wyctl-token-file.h"
 
 typedef struct
 {
@@ -702,6 +703,23 @@ run_status (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 0;
 }
 
+static void
+emit_token_file_diagnostic (WyctlTokenFileStatus status, const gchar *path)
+{
+  const gchar *fmt = wyctl_token_file_status_message (status);
+  if (fmt == NULL) {
+    g_printerr ("wyctl: unable to read access token file: %s\n",
+        path != NULL ? path : "(null)");
+    return;
+  }
+  if (status == WYCTL_TOKEN_FILE_MISSING_PATH) {
+    g_printerr ("%s\n", fmt);
+    return;
+  }
+  g_printerr (fmt, path != NULL ? path : "(null)");
+  g_printerr ("\n");
+}
+
 static int
 load_access_token_file (const gchar *path, gchar **out_access_token)
 {
@@ -709,28 +727,27 @@ load_access_token_file (const gchar *path, gchar **out_access_token)
     return 2;
   *out_access_token = NULL;
 
-  if (path == NULL || path[0] == '\0') {
-    g_printerr ("wyctl: missing --access-token-file\n");
+  /* Hand the path to the safety helper. The helper opens with
+   * O_NOFOLLOW + O_CLOEXEC, fstat()s the resulting fd, checks owner
+   * and mode bits against the calling euid, and only then reads
+   * bytes from the same fd it validated. No daemon request is ever
+   * sent on the failure path, because this function returns rc != 0
+   * before any wyl_client_* call. */
+  g_autofree gchar *raw = NULL;
+  WyctlTokenFileStatus rc = wyctl_token_file_read (path, &raw);
+  if (rc != WYCTL_TOKEN_FILE_OK) {
+    emit_token_file_diagnostic (rc, path);
     return 2;
   }
 
-  g_autoptr (GError) error = NULL;
-  g_autofree gchar *access_token = NULL;
-  gsize access_token_size = 0;
-  if (!g_file_get_contents (path, &access_token, &access_token_size, &error)) {
-    g_printerr ("wyctl: unable to read access token file\n");
-    return 2;
-  }
-  if (access_token_size == 0) {
-    g_printerr ("wyctl: empty access token file\n");
-    return 2;
-  }
-  if (!normalize_access_token_file (access_token, access_token_size)) {
-    g_printerr ("wyctl: invalid access token file\n");
+  gsize size = strlen (raw);
+  if (!normalize_access_token_file (raw, size)) {
+    g_printerr ("wyctl: invalid access token file: %s\n",
+        path != NULL ? path : "(null)");
     return 2;
   }
 
-  *out_access_token = g_steal_pointer (&access_token);
+  *out_access_token = g_steal_pointer (&raw);
   return 0;
 }
 
