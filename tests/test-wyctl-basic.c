@@ -535,6 +535,7 @@ test_audit_validation (void)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   gchar *missing_daemon_argv[] = {
     WYL_TEST_WYCTL_PATH,
@@ -779,6 +780,7 @@ test_policy_validation (void)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autofree gchar *empty_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-empty-token-XXXXXX", &empty_token_path, &error);
@@ -795,6 +797,7 @@ test_policy_validation (void)
   g_assert_true (g_file_set_contents (invalid_token_path, "token-1\nbad\n",
           -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (invalid_token_path, 0600), ==, 0);
 
   g_autofree gchar *nul_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-nul-token-XXXXXX", &nul_token_path, &error);
@@ -806,6 +809,7 @@ test_policy_validation (void)
     g_assert_true (g_file_set_contents (nul_token_path, token_with_nul,
             sizeof token_with_nul, &error));
     g_assert_no_error (error);
+    g_assert_cmpint (g_chmod (nul_token_path, 0600), ==, 0);
   }
 
   g_autofree gchar *leading_token_path = NULL;
@@ -817,6 +821,7 @@ test_policy_validation (void)
   g_assert_true (g_file_set_contents (leading_token_path, "\ntoken-1\n", -1,
           &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (leading_token_path, 0600), ==, 0);
 
   g_autofree gchar *trailing_blank_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-trailing-token-XXXXXX",
@@ -827,6 +832,7 @@ test_policy_validation (void)
   g_assert_true (g_file_set_contents (trailing_blank_token_path,
           "token-1\n\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (trailing_blank_token_path, 0600), ==, 0);
 
   g_autofree gchar *space_token_path = NULL;
   fd = g_file_open_tmp ("wyctl-space-token-XXXXXX", &space_token_path, &error);
@@ -836,6 +842,7 @@ test_policy_validation (void)
   g_assert_true (g_file_set_contents (space_token_path, " token-1\n", -1,
           &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (space_token_path, 0600), ==, 0);
 
   gchar *missing_resource_argv[] = {
     WYL_TEST_WYCTL_PATH,
@@ -1175,6 +1182,7 @@ run_policy_decision_case (const gchar *command, const gchar *response_body,
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -1263,6 +1271,7 @@ run_audit_query_case (const gchar *response_body, const gchar *expected_output,
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -1461,6 +1470,7 @@ run_policy_permission_success_case (const gchar *command, const gchar *path)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -1551,6 +1561,7 @@ run_policy_permission_status_case (const gchar *command, guint status,
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -1639,6 +1650,7 @@ test_policy_permission_validation (void)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   gchar *missing_subject_argv[] = {
     WYL_TEST_WYCTL_PATH,
@@ -1933,6 +1945,7 @@ run_policy_role_success_case (const gchar *command, const gchar *path)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -2021,6 +2034,7 @@ run_policy_role_status_case (const gchar *command, guint status,
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   g_autoptr (GSocketListener) listener = NULL;
   g_autofree gchar *daemon_url = listen_url_for_policy_server (&listener);
@@ -2109,6 +2123,7 @@ test_policy_role_validation (void)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, "token-1\n", -1, &error));
   g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
 
   gchar *missing_subject_argv[] = {
     WYL_TEST_WYCTL_PATH,

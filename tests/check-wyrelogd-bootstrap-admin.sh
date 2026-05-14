@@ -182,6 +182,11 @@ if not token:
 with open(token_path, "w", encoding="utf-8") as f:
     f.write(token)
     f.write("\n")
+# wyctl's token-file safety check rejects group/other permission bits.
+# Python's default open() honours the process umask, which yields 0644
+# on CI runners — chmod down so the chmod-stricter contract holds.
+import os
+os.chmod(token_path, 0o600)
 PY
 
 "$WYCTL" --daemon-url "http://127.0.0.1:$PORT" policy permission-grant \

@@ -217,6 +217,12 @@ write_token_file (const gchar *token)
   g_assert_true (g_close (fd, NULL));
   g_assert_true (g_file_set_contents (token_path, token, -1, &error));
   g_assert_no_error (error);
+  /* g_file_set_contents atomically renames a fresh tmp file over the
+   * original, applying the current umask to the new file. On CI runners
+   * with umask 0022 that yields 0644, which fails the wyctl token-file
+   * safety check. Force 0600 so the integration test continues to
+   * exercise the daemon path, not the permissions diagnostic. */
+  g_assert_cmpint (g_chmod (token_path, 0600), ==, 0);
   return token_path;
 }
 

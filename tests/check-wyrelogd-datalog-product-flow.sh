@@ -110,6 +110,10 @@ if not token:
     raise SystemExit(f"login returned no access_token: {body}")
 with open(token_path, "w", encoding="utf-8") as f:
     f.write(token + "\n")
+# wyctl rejects token files with group/other permission bits; chmod
+# down so the safety check passes regardless of the runner's umask.
+import os
+os.chmod(token_path, 0o600)
 PY
 }
 
