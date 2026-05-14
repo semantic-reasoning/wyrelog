@@ -135,7 +135,8 @@ if build_client
   )
 
   wyctl_exe = executable('wyctl',
-    files('wyctl/wyctl.c', 'wyctl/wyctl-config.c'),
+    files('wyctl/wyctl.c', 'wyctl/wyctl-config.c',
+        'wyctl/wyctl-token-file.c'),
     include_directories : wyrelog_inc,
     dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep],
     install : true,

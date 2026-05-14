@@ -248,6 +248,15 @@ if build_client and host_machine.system() != 'windows'
     env : wyctl_gsettings_test_env,
   )
 
+  test_wyctl_token_file = executable('test-wyctl-token-file',
+    'test-wyctl-token-file.c',
+    '../wyrelog/wyctl/wyctl-token-file.c',
+    include_directories : include_directories('../wyrelog/wyctl'),
+    dependencies : [glib_dep],
+  )
+
+  test('wyctl-token-file', test_wyctl_token_file)
+
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
     c_args : [
