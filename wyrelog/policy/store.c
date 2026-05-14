@@ -2382,11 +2382,14 @@ validate_fact_graph_options (wyl_policy_store_t *store,
       || !fact_graph_customer_name_is_valid (opts->graph_id)
       || opts->fact_root == NULL || opts->fact_root[0] == '\0'
       || opts->schema_version == 0 || opts->owner_scope == NULL
-      || g_strcmp0 (opts->owner_scope, opts->tenant_id) != 0
-      || opts->relations == NULL || opts->n_relations == 0)
+      || g_strcmp0 (opts->owner_scope, opts->tenant_id) != 0)
+    return WYRELOG_E_INVALID;
+  if (opts->relations == NULL && opts->n_relations > 0)
     return WYRELOG_E_INVALID;
   if (opts->queries == NULL && opts->n_queries > 0)
     return WYRELOG_E_INVALID;
+  if (opts->n_relations == 0 && opts->n_queries > 0)
+    return WYRELOG_E_POLICY;
 
   for (gsize i = 0; i < opts->n_relations; i++) {
     const wyl_policy_fact_graph_relation_t *rel = &opts->relations[i];
