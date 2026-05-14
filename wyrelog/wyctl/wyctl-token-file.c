@@ -5,13 +5,22 @@
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
 #endif
+/* Apple SDKs gate POSIX-only BSD features behind _DARWIN_C_SOURCE
+ * when the compiler is invoked under -std=cNN (clang predefines
+ * __STRICT_ANSI__). _POSIX_C_SOURCE alone does not expose
+ * O_NOFOLLOW on macOS. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 
 #include "wyctl-token-file.h"
 
 #include <errno.h>
 #include <string.h>
 
-#ifndef G_OS_WIN32
+#ifdef G_OS_WIN32
+#include <windows.h>
+#else
 #include <fcntl.h>
 #include <unistd.h>
 #endif
