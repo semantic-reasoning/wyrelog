@@ -114,6 +114,46 @@ typedef struct
 typedef wyrelog_error_t (*wyl_policy_fact_graph_cb) (const
     wyl_policy_fact_graph_info_t * info, gpointer user_data);
 
+typedef struct
+{
+  const gchar *column_name;
+  const gchar *column_type;
+  gboolean nullable;
+  gboolean visible;
+} wyl_policy_fact_relation_schema_column_t;
+
+typedef struct
+{
+  const gchar *query_name;
+  const gchar *required_permission_id;
+  guint max_rows;
+} wyl_policy_fact_relation_schema_query_t;
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *namespace_id;
+  const gchar *relation_name;
+  guint32 schema_version;
+  gboolean relation_visible;
+  const wyl_policy_fact_relation_schema_column_t *columns;
+  gsize n_columns;
+  const wyl_policy_fact_relation_schema_query_t *queries;
+  gsize n_queries;
+} wyl_policy_fact_relation_schema_options_t;
+
+typedef struct
+{
+  gchar *column_name;
+  gchar *column_type;
+  gboolean nullable;
+  gboolean visible;
+} wyl_policy_fact_relation_schema_column_info_t;
+
+void wyl_policy_fact_relation_schema_columns_free
+    (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns);
+
 /*
  * Policy authority store lifecycle wrapper.
  *
@@ -176,6 +216,16 @@ wyrelog_error_t wyl_policy_store_seal_fact_graph (wyl_policy_store_t * store,
 wyrelog_error_t wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *
     store, const gchar * tenant_id, const gchar * graph_id,
     gboolean * out_active);
+wyrelog_error_t wyl_policy_store_register_fact_relation_schema
+    (wyl_policy_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * opts);
+wyrelog_error_t wyl_policy_store_load_fact_relation_schema_columns
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, const gchar * namespace_id,
+    const gchar * relation_name, guint32 schema_version,
+    gboolean * out_relation_visible,
+    wyl_policy_fact_relation_schema_column_info_t ** out_columns,
+    gsize * out_n_columns);
 wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
     const gchar * role_id, const gchar * role_name);
 wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,

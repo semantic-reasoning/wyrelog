@@ -438,6 +438,98 @@ CREATE TABLE IF NOT EXISTS fact_graph_query_allowlist (
 );
 
 -- ---------------------------------------------------------------------------
+-- Table: fact_namespaces
+-- Tenant/graph-scoped customer namespace registry. Reserved namespaces are
+-- rejected by store-side validators. No fact rows live here.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_namespaces (
+    tenant_id    TEXT    NOT NULL,
+    graph_id     TEXT    NOT NULL,
+    namespace_id TEXT    NOT NULL,
+    visibility   INTEGER NOT NULL DEFAULT 1 CHECK (visibility IN (0, 1)),
+    created_at   INTEGER NOT NULL,
+    updated_at   INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, graph_id, namespace_id),
+    FOREIGN KEY (tenant_id, graph_id)
+        REFERENCES fact_graphs (tenant_id, graph_id)
+        ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_relation_schemas
+-- Immutable relation schema metadata keyed by tenant, graph, namespace,
+-- relation, and relation schema version.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_relation_schemas (
+    tenant_id        TEXT    NOT NULL,
+    graph_id         TEXT    NOT NULL,
+    namespace_id     TEXT    NOT NULL,
+    relation_name    TEXT    NOT NULL,
+    schema_version   INTEGER NOT NULL CHECK (schema_version > 0),
+    arity            INTEGER NOT NULL CHECK (arity > 0),
+    relation_visible INTEGER NOT NULL DEFAULT 1 CHECK
+        (relation_visible IN (0, 1)),
+    created_at       INTEGER NOT NULL,
+    updated_at       INTEGER NOT NULL,
+    PRIMARY KEY (tenant_id, graph_id, namespace_id, relation_name,
+        schema_version),
+    FOREIGN KEY (tenant_id, graph_id, namespace_id)
+        REFERENCES fact_namespaces (tenant_id, graph_id, namespace_id)
+        ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_relation_schema_columns
+-- Ordered typed column metadata for validating fact batches before append.
+-- compound_ref names a durable logical marker; raw evaluator handles are not
+-- stored in policy SQLite.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_relation_schema_columns (
+    tenant_id      TEXT    NOT NULL,
+    graph_id       TEXT    NOT NULL,
+    namespace_id   TEXT    NOT NULL,
+    relation_name  TEXT    NOT NULL,
+    schema_version INTEGER NOT NULL CHECK (schema_version > 0),
+    column_index   INTEGER NOT NULL CHECK (column_index >= 0),
+    column_name    TEXT    NOT NULL,
+    column_type    TEXT    NOT NULL CHECK
+        (column_type IN ('symbol', 'string', 'int64', 'bool',
+            'compound_ref')),
+    nullable       INTEGER NOT NULL DEFAULT 0 CHECK (nullable IN (0, 1)),
+    visible        INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),
+    PRIMARY KEY (tenant_id, graph_id, namespace_id, relation_name,
+        schema_version, column_index),
+    UNIQUE (tenant_id, graph_id, namespace_id, relation_name, schema_version,
+        column_name),
+    FOREIGN KEY (tenant_id, graph_id, namespace_id, relation_name,
+        schema_version)
+        REFERENCES fact_relation_schemas (tenant_id, graph_id, namespace_id,
+            relation_name, schema_version)
+        ON DELETE CASCADE
+);
+
+-- ---------------------------------------------------------------------------
+-- Table: fact_relation_query_allowlist
+-- Query metadata tied to an exact relation schema version.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fact_relation_query_allowlist (
+    tenant_id              TEXT    NOT NULL,
+    graph_id               TEXT    NOT NULL,
+    namespace_id           TEXT    NOT NULL,
+    relation_name          TEXT    NOT NULL,
+    schema_version         INTEGER NOT NULL CHECK (schema_version > 0),
+    query_name             TEXT    NOT NULL,
+    required_permission_id TEXT    NOT NULL,
+    max_rows               INTEGER NOT NULL CHECK (max_rows > 0),
+    PRIMARY KEY (tenant_id, graph_id, query_name),
+    FOREIGN KEY (tenant_id, graph_id, namespace_id, relation_name,
+        schema_version)
+        REFERENCES fact_relation_schemas (tenant_id, graph_id, namespace_id,
+            relation_name, schema_version),
+    FOREIGN KEY (required_permission_id) REFERENCES permissions (perm_id)
+);
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically

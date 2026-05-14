@@ -268,6 +268,14 @@ test('policy-store', test_policy_store,
   timeout : 90,
 )
 
+test_fact_schema = executable('test-fact-schema',
+  'test-fact-schema.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('fact-schema', test_fact_schema)
+
 test_policy_store_toctou = executable('test-policy-store-toctou',
   'test-policy-store-toctou.c',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],

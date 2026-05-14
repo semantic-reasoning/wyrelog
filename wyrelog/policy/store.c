@@ -175,6 +175,10 @@ static const gchar *const required_tables[] = {
   "fact_graph_relations",
   "fact_graph_relation_columns",
   "fact_graph_query_allowlist",
+  "fact_namespaces",
+  "fact_relation_schemas",
+  "fact_relation_schema_columns",
+  "fact_relation_query_allowlist",
   "policy_signatures",
 };
 
@@ -1895,6 +1899,74 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "      (tenant_id, graph_id, relation_name),"
       "  FOREIGN KEY (required_permission_id) REFERENCES permissions (perm_id)"
       ");"
+      "CREATE TABLE IF NOT EXISTS fact_namespaces ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  namespace_id TEXT NOT NULL,"
+      "  visibility INTEGER NOT NULL DEFAULT 1 CHECK (visibility IN (0, 1)),"
+      "  created_at INTEGER NOT NULL,"
+      "  updated_at INTEGER NOT NULL,"
+      "  PRIMARY KEY (tenant_id, graph_id, namespace_id),"
+      "  FOREIGN KEY (tenant_id, graph_id) "
+      "    REFERENCES fact_graphs (tenant_id, graph_id) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_relation_schemas ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  namespace_id TEXT NOT NULL,"
+      "  relation_name TEXT NOT NULL,"
+      "  schema_version INTEGER NOT NULL CHECK (schema_version > 0),"
+      "  arity INTEGER NOT NULL CHECK (arity > 0),"
+      "  relation_visible INTEGER NOT NULL DEFAULT 1 CHECK "
+      "    (relation_visible IN (0, 1)),"
+      "  created_at INTEGER NOT NULL,"
+      "  updated_at INTEGER NOT NULL,"
+      "  PRIMARY KEY (tenant_id, graph_id, namespace_id, relation_name, "
+      "    schema_version),"
+      "  FOREIGN KEY (tenant_id, graph_id, namespace_id) "
+      "    REFERENCES fact_namespaces (tenant_id, graph_id, namespace_id) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_relation_schema_columns ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  namespace_id TEXT NOT NULL,"
+      "  relation_name TEXT NOT NULL,"
+      "  schema_version INTEGER NOT NULL CHECK (schema_version > 0),"
+      "  column_index INTEGER NOT NULL CHECK (column_index >= 0),"
+      "  column_name TEXT NOT NULL,"
+      "  column_type TEXT NOT NULL CHECK "
+      "    (column_type IN ('symbol', 'string', 'int64', 'bool', "
+      "      'compound_ref')),"
+      "  nullable INTEGER NOT NULL DEFAULT 0 CHECK (nullable IN (0, 1)),"
+      "  visible INTEGER NOT NULL DEFAULT 1 CHECK (visible IN (0, 1)),"
+      "  PRIMARY KEY (tenant_id, graph_id, namespace_id, relation_name, "
+      "    schema_version, column_index),"
+      "  UNIQUE (tenant_id, graph_id, namespace_id, relation_name, "
+      "    schema_version, column_name),"
+      "  FOREIGN KEY (tenant_id, graph_id, namespace_id, relation_name, "
+      "    schema_version) REFERENCES fact_relation_schemas "
+      "      (tenant_id, graph_id, namespace_id, relation_name, "
+      "        schema_version) "
+      "    ON DELETE CASCADE"
+      ");"
+      "CREATE TABLE IF NOT EXISTS fact_relation_query_allowlist ("
+      "  tenant_id TEXT NOT NULL,"
+      "  graph_id TEXT NOT NULL,"
+      "  namespace_id TEXT NOT NULL,"
+      "  relation_name TEXT NOT NULL,"
+      "  schema_version INTEGER NOT NULL CHECK (schema_version > 0),"
+      "  query_name TEXT NOT NULL,"
+      "  required_permission_id TEXT NOT NULL,"
+      "  max_rows INTEGER NOT NULL CHECK (max_rows > 0),"
+      "  PRIMARY KEY (tenant_id, graph_id, query_name),"
+      "  FOREIGN KEY (tenant_id, graph_id, namespace_id, relation_name, "
+      "    schema_version) REFERENCES fact_relation_schemas "
+      "      (tenant_id, graph_id, namespace_id, relation_name, "
+      "        schema_version),"
+      "  FOREIGN KEY (required_permission_id) REFERENCES permissions (perm_id)"
+      ");"
       "CREATE TABLE IF NOT EXISTS policy_signatures ("
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
@@ -2263,7 +2335,7 @@ fact_graph_customer_name_is_valid (const gchar *name)
 {
   if (!fact_graph_component_is_valid (name))
     return FALSE;
-  if (g_str_has_prefix (name, "wr.")
+  if (g_strcmp0 (name, "wr") == 0 || g_str_has_prefix (name, "wr.")
       || g_str_has_prefix (name, "__wyrelog."))
     return FALSE;
   return TRUE;
@@ -2273,6 +2345,16 @@ static gboolean
 fact_graph_column_type_is_valid (const gchar *column_type)
 {
   return g_strcmp0 (column_type, "symbol") == 0
+      || g_strcmp0 (column_type, "int64") == 0
+      || g_strcmp0 (column_type, "bool") == 0
+      || g_strcmp0 (column_type, "compound_ref") == 0;
+}
+
+static gboolean
+fact_relation_schema_column_type_is_valid (const gchar *column_type)
+{
+  return g_strcmp0 (column_type, "symbol") == 0
+      || g_strcmp0 (column_type, "string") == 0
       || g_strcmp0 (column_type, "int64") == 0
       || g_strcmp0 (column_type, "bool") == 0
       || g_strcmp0 (column_type, "compound_ref") == 0;
@@ -2769,6 +2851,312 @@ wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *store,
   if (rc != WYRELOG_E_OK)
     return rc;
   *out_active = tenant_active && !graph_sealed;
+  return WYRELOG_E_OK;
+}
+
+void wyl_policy_fact_relation_schema_columns_free
+    (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns)
+{
+  if (columns == NULL)
+    return;
+  for (gsize i = 0; i < n_columns; i++) {
+    g_free (columns[i].column_name);
+    g_free (columns[i].column_type);
+  }
+  g_free (columns);
+}
+
+static wyrelog_error_t
+validate_fact_relation_schema_options (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts)
+{
+  if (store == NULL || store->db == NULL || opts == NULL)
+    return WYRELOG_E_INVALID;
+  if (!wyl_policy_store_tenant_id_is_valid (opts->tenant_id)
+      || !fact_graph_component_is_valid (opts->tenant_id)
+      || !fact_graph_customer_name_is_valid (opts->graph_id)
+      || !fact_graph_customer_name_is_valid (opts->namespace_id)
+      || !fact_graph_customer_name_is_valid (opts->relation_name)
+      || opts->schema_version == 0 || opts->columns == NULL
+      || opts->n_columns == 0 || opts->n_columns > G_MAXINT)
+    return WYRELOG_E_INVALID;
+  if (opts->queries == NULL && opts->n_queries > 0)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < opts->n_columns; i++) {
+    const wyl_policy_fact_relation_schema_column_t *column = &opts->columns[i];
+    if (!fact_graph_customer_name_is_valid (column->column_name)
+        || !fact_relation_schema_column_type_is_valid (column->column_type))
+      return WYRELOG_E_POLICY;
+    for (gsize j = 0; j < i; j++) {
+      if (g_strcmp0 (opts->columns[j].column_name, column->column_name) == 0)
+        return WYRELOG_E_POLICY;
+    }
+  }
+
+  for (gsize i = 0; i < opts->n_queries; i++) {
+    const wyl_policy_fact_relation_schema_query_t *query = &opts->queries[i];
+    if (!fact_graph_customer_name_is_valid (query->query_name)
+        || query->required_permission_id == NULL
+        || query->required_permission_id[0] == '\0' || query->max_rows == 0)
+      return WYRELOG_E_POLICY;
+    gboolean permission_exists = FALSE;
+    wyrelog_error_t rc = wyl_policy_store_permission_exists (store,
+        query->required_permission_id, &permission_exists);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!permission_exists)
+      return WYRELOG_E_POLICY;
+  }
+
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+insert_fact_namespace_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_namespaces "
+      "(tenant_id, graph_id, namespace_id, visibility, created_at, updated_at) "
+      "VALUES (?, ?, ?, 1, unixepoch(), unixepoch()) "
+      "ON CONFLICT (tenant_id, graph_id, namespace_id) DO UPDATE SET "
+      "updated_at = excluded.updated_at;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, opts->namespace_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_relation_schema_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_relation_schemas "
+      "(tenant_id, graph_id, namespace_id, relation_name, schema_version, "
+      " arity, relation_visible, created_at, updated_at) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch());";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, opts->namespace_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, opts->relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, opts->schema_version) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 6, opts->n_columns) != SQLITE_OK
+      || sqlite3_bind_int (stmt, 7, opts->relation_visible ? 1 : 0)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+insert_fact_relation_schema_column_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts, gsize column_index)
+{
+  sqlite3_stmt *stmt = NULL;
+  const wyl_policy_fact_relation_schema_column_t *column =
+      &opts->columns[column_index];
+  static const gchar *sql =
+      "INSERT INTO fact_relation_schema_columns "
+      "(tenant_id, graph_id, namespace_id, relation_name, schema_version, "
+      " column_index, column_name, column_type, nullable, visible) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, opts->namespace_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, opts->relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, opts->schema_version) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64) column_index)
+      != SQLITE_OK || (rc = bind_text (stmt, 7, column->column_name))
+      != WYRELOG_E_OK || (rc = bind_text (stmt, 8, column->column_type))
+      != WYRELOG_E_OK || sqlite3_bind_int (stmt, 9,
+          column->nullable ? 1 : 0) != SQLITE_OK
+      || sqlite3_bind_int (stmt, 10, column->visible ? 1 : 0) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+insert_fact_relation_query_metadata (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts,
+    const wyl_policy_fact_relation_schema_query_t *query)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO fact_relation_query_allowlist "
+      "(tenant_id, graph_id, namespace_id, relation_name, schema_version, "
+      " query_name, required_permission_id, max_rows) "
+      "VALUES (?, ?, ?, ?, ?, ?, ?, ?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, opts->tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, opts->graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, opts->namespace_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, opts->relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, opts->schema_version) != SQLITE_OK
+      || (rc = bind_text (stmt, 6, query->query_name)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 7, query->required_permission_id))
+      != WYRELOG_E_OK || sqlite3_bind_int64 (stmt, 8, query->max_rows)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *opts)
+{
+  wyrelog_error_t rc = validate_fact_relation_schema_options (store, opts);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  gboolean active = FALSE;
+  rc = wyl_policy_store_fact_graph_is_active (store, opts->tenant_id,
+      opts->graph_id, &active);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!active)
+    return WYRELOG_E_NOT_FOUND;
+
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = insert_fact_namespace_metadata (store, opts);
+  if (rc == WYRELOG_E_OK)
+    rc = insert_fact_relation_schema_metadata (store, opts);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_columns; i++)
+    rc = insert_fact_relation_schema_column_metadata (store, opts, i);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < opts->n_queries; i++)
+    rc = insert_fact_relation_query_metadata (store, opts, &opts->queries[i]);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_store_rollback_mutation (store);
+    return rc;
+  }
+  return wyl_policy_store_commit_mutation (store);
+}
+
+wyrelog_error_t
+wyl_policy_store_load_fact_relation_schema_columns (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    const gchar *relation_name, guint32 schema_version,
+    gboolean *out_relation_visible,
+    wyl_policy_fact_relation_schema_column_info_t **out_columns,
+    gsize *out_n_columns)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyl_policy_fact_relation_schema_column_info_t *columns = NULL;
+  gsize len = 0;
+  gsize cap = 0;
+
+  if (out_relation_visible != NULL)
+    *out_relation_visible = FALSE;
+  if (out_columns != NULL)
+    *out_columns = NULL;
+  if (out_n_columns != NULL)
+    *out_n_columns = 0;
+  if (store == NULL || store->db == NULL || out_columns == NULL
+      || out_n_columns == NULL || !wyl_policy_store_tenant_id_is_valid
+      (tenant_id) || !fact_graph_component_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !fact_graph_customer_name_is_valid (namespace_id)
+      || !fact_graph_customer_name_is_valid (relation_name)
+      || schema_version == 0)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "SELECT c.column_name, c.column_type, c.nullable, c.visible, "
+      "s.relation_visible "
+      "FROM fact_relation_schema_columns c "
+      "JOIN fact_relation_schemas s "
+      "  ON s.tenant_id = c.tenant_id AND s.graph_id = c.graph_id "
+      " AND s.namespace_id = c.namespace_id "
+      " AND s.relation_name = c.relation_name "
+      " AND s.schema_version = c.schema_version "
+      "WHERE c.tenant_id = ? AND c.graph_id = ? AND c.namespace_id = ? "
+      "  AND c.relation_name = ? AND c.schema_version = ? "
+      "ORDER BY c.column_index;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, graph_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, namespace_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, relation_name)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, schema_version) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    if (len == cap) {
+      gsize next_cap = cap == 0 ? 4 : cap * 2;
+      wyl_policy_fact_relation_schema_column_info_t *next =
+          g_renew (wyl_policy_fact_relation_schema_column_info_t, columns,
+          next_cap);
+      if (next == NULL) {
+        wyl_policy_fact_relation_schema_columns_free (columns, len);
+        sqlite3_finalize (stmt);
+        return WYRELOG_E_NOMEM;
+      }
+      memset (next + cap, 0, sizeof (*next) * (next_cap - cap));
+      columns = next;
+      cap = next_cap;
+    }
+    columns[len].column_name =
+        g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    columns[len].column_type =
+        g_strdup ((const gchar *) sqlite3_column_text (stmt, 1));
+    if (columns[len].column_name == NULL || columns[len].column_type == NULL) {
+      wyl_policy_fact_relation_schema_columns_free (columns, len + 1);
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_NOMEM;
+    }
+    columns[len].nullable = sqlite3_column_int (stmt, 2) != 0;
+    columns[len].visible = sqlite3_column_int (stmt, 3) != 0;
+    if (out_relation_visible != NULL)
+      *out_relation_visible = sqlite3_column_int (stmt, 4) != 0;
+    len++;
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE) {
+    wyl_policy_fact_relation_schema_columns_free (columns, len);
+    return WYRELOG_E_IO;
+  }
+  if (len == 0)
+    return WYRELOG_E_NOT_FOUND;
+
+  *out_columns = columns;
+  *out_n_columns = len;
   return WYRELOG_E_OK;
 }
 

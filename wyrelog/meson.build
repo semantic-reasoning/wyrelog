@@ -19,6 +19,7 @@ wyrelog_sources = files(
   'access/decision.c',
   'auth/jwt.c',
   'audit/event.c',
+  'fact/schema.c',
   'policy/store.c',
   'wyl-boot.c',
   'wyl-decide.c',
