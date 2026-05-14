@@ -15,6 +15,8 @@ struct _WylClient
   gchar *selected_tenant;
   gchar *principal_state;
   gchar *session_state;
+  gchar *last_error_code;
+  guint last_http_status;
   SoupSession *session;
   guint timeout_ms;
 };
@@ -24,6 +26,12 @@ struct _WylClientDecision
   gint decision;
   gchar *deny_reason;
   gchar *deny_origin;
+};
+
+struct _WylClientFactAppendResult
+{
+  gboolean inserted;
+  gchar *batch_id;
 };
 
 G_DEFINE_FINAL_TYPE (WylClient, wyl_client, G_TYPE_OBJECT);
@@ -54,6 +62,7 @@ wyl_client_finalize (GObject *object)
 
   g_free (self->base_url);
   wyl_client_clear_login_state (self);
+  g_free (self->last_error_code);
   g_clear_object (&self->session);
 
   G_OBJECT_CLASS (wyl_client_parent_class)->finalize (object);
@@ -159,6 +168,20 @@ wyl_client_dup_session_state (const WylClient *client)
 {
   g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
   return g_strdup (client->session_state);
+}
+
+guint
+wyl_client_get_last_http_status (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), 0);
+  return client->last_http_status;
+}
+
+gchar *
+wyl_client_dup_last_error_code (const WylClient *client)
+{
+  g_return_val_if_fail (WYL_IS_CLIENT ((WylClient *) client), NULL);
+  return g_strdup (client->last_error_code);
 }
 
 SoupSession *
@@ -569,6 +592,354 @@ wyl_client_policy_role_revoke (WylClient *client, const gchar *subject,
   return client_policy_mutation_request (client, "policy/roles/revoke",
       subject, "role", role, scope, NULL, guard_timestamp, guard_loc_class,
       guard_risk);
+}
+
+static void
+client_clear_last_http_error (WylClient *client)
+{
+  client->last_http_status = 0;
+  g_clear_pointer (&client->last_error_code, g_free);
+}
+
+static gchar *
+parse_simple_json_string_member (const gchar *data, gsize size,
+    const gchar *member)
+{
+  if (data == NULL || member == NULL)
+    return NULL;
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\":\"", member);
+  const gchar *start = g_strstr_len (data, (gssize) size, needle);
+  if (start == NULL)
+    return NULL;
+  start += strlen (needle);
+  const gchar *end = start;
+  const gchar *limit = data + size;
+  while (end < limit && *end != '"') {
+    if (*end == '\\')
+      return NULL;
+    end++;
+  }
+  if (end >= limit)
+    return NULL;
+  return g_strndup (start, (gsize) (end - start));
+}
+
+static gboolean
+parse_simple_json_bool_member (const gchar *data, gsize size,
+    const gchar *member, gboolean *out_value)
+{
+  if (data == NULL || member == NULL || out_value == NULL)
+    return FALSE;
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\":", member);
+  const gchar *start = g_strstr_len (data, (gssize) size, needle);
+  if (start == NULL)
+    return FALSE;
+  start += strlen (needle);
+  gsize remaining = (gsize) (data + size - start);
+  if (remaining >= strlen ("true") && strncmp (start, "true",
+          strlen ("true")) == 0) {
+    *out_value = TRUE;
+    return TRUE;
+  }
+  if (remaining >= strlen ("false") && strncmp (start, "false",
+          strlen ("false")) == 0) {
+    *out_value = FALSE;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static wyrelog_error_t
+client_send_fact_message (WylClient *client, SoupMessage *message,
+    GBytes **out_body)
+{
+  if (client == NULL || !WYL_IS_CLIENT (client) || message == NULL)
+    return WYRELOG_E_INVALID;
+  if (out_body != NULL)
+    *out_body = NULL;
+  client_clear_last_http_error (client);
+
+  g_autoptr (GError) error = NULL;
+  GBytes *body = soup_session_send_and_read (client->session, message, NULL,
+      &error);
+  if (body == NULL)
+    return WYRELOG_E_IO;
+
+  guint status = soup_message_get_status (message);
+  client->last_http_status = status;
+  if (status >= 200 && status < 300) {
+    if (out_body != NULL)
+      *out_body = body;
+    else
+      g_bytes_unref (body);
+    return WYRELOG_E_OK;
+  }
+
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (body, &size);
+  client->last_error_code = parse_simple_json_string_member (data, size,
+      "error");
+  g_bytes_unref (body);
+  if (status == 400)
+    return WYRELOG_E_INVALID;
+  if (status == 401)
+    return WYRELOG_E_AUTH;
+  if (status == 403 || status == 409)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_IO;
+}
+
+static gboolean
+client_guard_args_are_valid (gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
+{
+  return guard_timestamp >= 0 && guard_loc_class != NULL &&
+      wyl_guard_loc_class_is_valid (guard_loc_class) && guard_risk >= 0 &&
+      guard_risk <= 100;
+}
+
+static wyrelog_error_t
+client_fact_prepare (WylClient *client, const gchar *tenant,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gchar **out_base_url, gchar **out_access_token, gchar **out_session_token)
+{
+  if (out_base_url == NULL || out_access_token == NULL ||
+      out_session_token == NULL)
+    return WYRELOG_E_INVALID;
+  *out_base_url = NULL;
+  *out_access_token = NULL;
+  *out_session_token = NULL;
+  if (client == NULL || !WYL_IS_CLIENT (client) || tenant == NULL ||
+      tenant[0] == '\0' || !client_guard_args_are_valid (guard_timestamp,
+          guard_loc_class, guard_risk))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *bound_tenant = wyl_client_dup_tenant (client);
+  if (bound_tenant == NULL || g_strcmp0 (bound_tenant, tenant) != 0)
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
+  if (base_url == NULL)
+    return WYRELOG_E_INVALID;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+  g_autofree gchar *access_token = wyl_client_dup_access_token (client);
+  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  gboolean has_access = access_token != NULL && access_token[0] != '\0';
+  gboolean has_session = session_token != NULL && session_token[0] != '\0';
+  if (!has_access && !has_session)
+    return WYRELOG_E_INVALID;
+  *out_base_url = g_steal_pointer (&base_url);
+  *out_access_token = g_steal_pointer (&access_token);
+  *out_session_token = g_steal_pointer (&session_token);
+  return WYRELOG_E_OK;
+}
+
+static void
+client_fact_attach_auth (SoupMessage *message, const gchar *access_token)
+{
+  if (access_token != NULL && access_token[0] != '\0') {
+    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+        access_token);
+    soup_message_headers_replace (soup_message_get_request_headers (message),
+        "Authorization", authorization);
+  }
+}
+
+static gchar *
+client_fact_guard_query (const gchar *tenant, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, const gchar *session_token)
+{
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_loc = g_uri_escape_string (guard_loc_class, NULL,
+      TRUE);
+  if (session_token != NULL && session_token[0] != '\0') {
+    g_autofree gchar *escaped_session =
+        g_uri_escape_string (session_token, NULL, TRUE);
+    return g_strdup_printf ("tenant=%s&session_token=%s&guard_timestamp=%"
+        G_GINT64_FORMAT "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+        escaped_tenant, escaped_session, guard_timestamp, escaped_loc,
+        guard_risk);
+  }
+  return g_strdup_printf ("tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
+      "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT, escaped_tenant,
+      guard_timestamp, escaped_loc, guard_risk);
+}
+
+wyrelog_error_t
+wyl_client_graph_create (WylClient *client, const gchar *tenant,
+    const gchar *graph, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk)
+{
+  if (graph == NULL || graph[0] == '\0')
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+      guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+      guard_timestamp, guard_loc_class, guard_risk,
+      access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *uri = g_strdup_printf ("%s/graphs/create?%s&graph=%s",
+      base_url, guard_query, escaped_graph);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  return client_send_fact_message (client, message, NULL);
+}
+
+wyrelog_error_t
+wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const WylClientFactColumn *columns,
+    gsize n_columns, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk)
+{
+  if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
+      namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
+      schema_version == 0 || columns == NULL || n_columns == 0)
+    return WYRELOG_E_INVALID;
+  g_autoptr (GString) tsv =
+      g_string_new ("column_name\tcolumn_type\tnullable\tvisible\n");
+  for (gsize i = 0; i < n_columns; i++) {
+    if (columns[i].name == NULL || columns[i].name[0] == '\0' ||
+        columns[i].type == NULL || columns[i].type[0] == '\0' ||
+        strchr (columns[i].name, '\t') != NULL ||
+        strchr (columns[i].type, '\t') != NULL)
+      return WYRELOG_E_INVALID;
+    g_string_append_printf (tsv, "%s\t%s\t%s\t%s\n", columns[i].name,
+        columns[i].type, columns[i].nullable ? "true" : "false",
+        columns[i].visible ? "true" : "false");
+  }
+
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+      guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+      guard_timestamp, guard_loc_class, guard_risk,
+      access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *escaped_namespace = g_uri_escape_string (namespace_id,
+      NULL, TRUE);
+  g_autofree gchar *escaped_relation = g_uri_escape_string (relation, NULL,
+      TRUE);
+  g_autofree gchar *uri = g_strdup_printf
+      ("%s/facts/schema/register?%s&graph=%s&namespace=%s&relation=%s"
+      "&schema_version=%u", base_url, guard_query, escaped_graph,
+      escaped_namespace, escaped_relation, schema_version);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) body = g_bytes_new (tsv->str, tsv->len);
+  soup_message_set_request_body_from_bytes (message,
+      "text/tab-separated-values", body);
+  return client_send_fact_message (client, message, NULL);
+}
+
+wyrelog_error_t
+wyl_client_fact_put_batch (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const gchar *batch_id,
+    const gchar *idempotency_key, const guint8 *tsv_payload, gsize tsv_len,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientFactAppendResult **out_result)
+{
+  if (out_result != NULL)
+    *out_result = NULL;
+  if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
+      namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
+      schema_version == 0 || batch_id == NULL || batch_id[0] == '\0' ||
+      idempotency_key == NULL || idempotency_key[0] == '\0' ||
+      tsv_payload == NULL || tsv_len == 0)
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+      guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+      guard_timestamp, guard_loc_class, guard_risk,
+      access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *escaped_namespace = g_uri_escape_string (namespace_id,
+      NULL, TRUE);
+  g_autofree gchar *escaped_relation = g_uri_escape_string (relation, NULL,
+      TRUE);
+  g_autofree gchar *escaped_batch = g_uri_escape_string (batch_id, NULL, TRUE);
+  g_autofree gchar *escaped_key = g_uri_escape_string (idempotency_key, NULL,
+      TRUE);
+  g_autofree gchar *uri = g_strdup_printf
+      ("%s/facts/%s/%s/%s:append?%s&namespace=%s&schema_version=%u"
+      "&batch_id=%s&idempotency_key=%s", base_url, escaped_tenant,
+      escaped_graph, escaped_relation, guard_query, escaped_namespace,
+      schema_version, escaped_batch, escaped_key);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+  g_autoptr (GBytes) request_body = g_bytes_new (tsv_payload, tsv_len);
+  soup_message_set_request_body_from_bytes (message,
+      "text/tab-separated-values", request_body);
+  g_autoptr (GBytes) response_body = NULL;
+  rc = client_send_fact_message (client, message, &response_body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (out_result != NULL) {
+    gsize size = 0;
+    const gchar *data = g_bytes_get_data (response_body, &size);
+    gboolean inserted = FALSE;
+    g_autofree gchar *response_batch = parse_simple_json_string_member (data,
+        size, "batch_id");
+    if (!parse_simple_json_bool_member (data, size, "inserted", &inserted) ||
+        response_batch == NULL)
+      return WYRELOG_E_IO;
+    WylClientFactAppendResult *result = g_new0 (WylClientFactAppendResult, 1);
+    result->inserted = inserted;
+    result->batch_id = g_steal_pointer (&response_batch);
+    *out_result = result;
+  }
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_client_fact_append_result_free (WylClientFactAppendResult *result)
+{
+  if (result == NULL)
+    return;
+  g_free (result->batch_id);
+  g_free (result);
+}
+
+gboolean
+    wyl_client_fact_append_result_get_inserted
+    (const WylClientFactAppendResult * result)
+{
+  return result != NULL && result->inserted;
+}
+
+const gchar *wyl_client_fact_append_result_get_batch_id
+    (const WylClientFactAppendResult * result)
+{
+  return result != NULL ? result->batch_id : NULL;
+}
+
+gchar *wyl_client_fact_append_result_dup_batch_id
+    (const WylClientFactAppendResult * result)
+{
+  return g_strdup (wyl_client_fact_append_result_get_batch_id (result));
 }
 
 typedef struct

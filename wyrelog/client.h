@@ -30,6 +30,15 @@ G_DECLARE_FINAL_TYPE (WylAuditIter, wyl_audit_iter, WYL, AUDIT_ITER, GObject);
 #define WYL_TYPE_AUDIT_ITER (wyl_audit_iter_get_type ())
 
 typedef struct _WylClientDecision WylClientDecision;
+typedef struct _WylClientFactAppendResult WylClientFactAppendResult;
+
+typedef struct
+{
+  const gchar *name;
+  const gchar *type;
+  gboolean nullable;
+  gboolean visible;
+} WylClientFactColumn;
 
 /* Lifecycle */
 wyrelog_error_t wyl_client_new (const gchar * base_url,
@@ -57,6 +66,8 @@ gchar *wyl_client_dup_username (const WylClient * client);
 gchar *wyl_client_dup_tenant (const WylClient * client);
 gchar *wyl_client_dup_principal_state (const WylClient * client);
 gchar *wyl_client_dup_session_state (const WylClient * client);
+guint wyl_client_get_last_http_status (const WylClient * client);
+gchar *wyl_client_dup_last_error_code (const WylClient * client);
 wyrelog_error_t wyl_client_token_refresh (WylClient * client);
 wyrelog_error_t wyl_client_mfa_verify (WylClient * client, const gchar * otp);
 
@@ -131,6 +142,41 @@ wyrelog_error_t wyl_client_policy_role_revoke (WylClient * client,
     const gchar * scope,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
 
+/* Fact graph / schema / append */
+wyrelog_error_t wyl_client_graph_create (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * namespace_id,
+    const gchar * relation,
+    guint32 schema_version,
+    const WylClientFactColumn * columns,
+    gsize n_columns,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_fact_put_batch (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * namespace_id,
+    const gchar * relation,
+    guint32 schema_version,
+    const gchar * batch_id,
+    const gchar * idempotency_key,
+    const guint8 * tsv_payload,
+    gsize tsv_len,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class,
+    gint64 guard_risk, WylClientFactAppendResult ** out_result);
+void wyl_client_fact_append_result_free (WylClientFactAppendResult * result);
+gboolean wyl_client_fact_append_result_get_inserted
+    (const WylClientFactAppendResult * result);
+const gchar *wyl_client_fact_append_result_get_batch_id
+    (const WylClientFactAppendResult * result);
+gchar *wyl_client_fact_append_result_dup_batch_id
+    (const WylClientFactAppendResult * result);
+
 gchar *wyl_audit_iter_dup_query_filter (const WylAuditIter * iter);
 gchar *wyl_audit_iter_dup_request_uri (const WylAuditIter * iter);
 WylAuditEvent *wyl_audit_iter_ref_event (const WylAuditIter * iter);
@@ -155,3 +201,5 @@ const gchar *wyrelog_client_version_string (void);
 G_END_DECLS;
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
+    G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientFactAppendResult,
+    wyl_client_fact_append_result_free)
