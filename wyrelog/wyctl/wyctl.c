@@ -389,6 +389,67 @@ parse_json_code_string (const gchar **inout_p, gchar **out_value)
 }
 
 static gboolean
+skip_json_string_value (const gchar **inout_p)
+{
+  const gchar *p = skip_json_ws (*inout_p);
+  if (p == NULL || *p != '"')
+    return FALSE;
+  p++;
+  while (*p != '\0') {
+    if (*p == '\\') {
+      p++;
+      if (*p == '\0')
+        return FALSE;
+    } else if (*p == '"') {
+      *inout_p = p + 1;
+      return TRUE;
+    }
+    p++;
+  }
+  return FALSE;
+}
+
+static gboolean
+skip_json_value (const gchar **inout_p)
+{
+  const gchar *p = skip_json_ws (*inout_p);
+  if (p == NULL)
+    return FALSE;
+  if (*p == '"')
+    return skip_json_string_value (inout_p);
+  if (*p == '{' || *p == '[') {
+    gchar open = *p;
+    gchar close = open == '{' ? '}' : ']';
+    guint depth = 1;
+    p++;
+    while (*p != '\0') {
+      if (*p == '"') {
+        const gchar *string = p;
+        if (!skip_json_string_value (&string))
+          return FALSE;
+        p = string;
+        continue;
+      }
+      if (*p == open)
+        depth++;
+      else if (*p == close) {
+        depth--;
+        if (depth == 0) {
+          *inout_p = p + 1;
+          return TRUE;
+        }
+      }
+      p++;
+    }
+    return FALSE;
+  }
+  while (*p != '\0' && *p != ',' && *p != '}' && *p != ']')
+    p++;
+  *inout_p = p;
+  return TRUE;
+}
+
+static gboolean
 parse_readiness_json (const gchar *body, gchar **out_status, gchar **out_reason)
 {
   if (body == NULL || out_status == NULL || out_reason == NULL)
@@ -412,17 +473,21 @@ parse_readiness_json (const gchar *body, gchar **out_status, gchar **out_reason)
     return FALSE;
 
   p = skip_json_ws (p);
-  if (*p == ',') {
+  while (*p == ',') {
     p++;
     g_clear_pointer (&key, g_free);
-    if (!parse_json_code_string (&p, &key) || g_strcmp0 (key, "reason") != 0)
+    if (!parse_json_code_string (&p, &key))
       return FALSE;
     p = skip_json_ws (p);
     if (*p != ':')
       return FALSE;
     p++;
-    if (!parse_json_code_string (&p, out_reason))
+    if (g_strcmp0 (key, "reason") == 0) {
+      if (!parse_json_code_string (&p, out_reason))
+        return FALSE;
+    } else if (!skip_json_value (&p)) {
       return FALSE;
+    }
     p = skip_json_ws (p);
   }
 

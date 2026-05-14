@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "daemon/delta.h"
+#include "daemon/fact-status.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -1233,6 +1234,28 @@ set_status_json (SoupServerMessage *msg, guint status, const gchar *state,
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+static void
+set_readyz_json (SoupServerMessage *msg, guint status, const gchar *state,
+    const gchar *reason, WylHandle *handle)
+{
+  attach_request_id_header (msg);
+
+  g_autofree gchar *facts = wyl_daemon_fact_status_json (handle, FALSE);
+  g_autoptr (GString) body = g_string_new ("{\"status\":");
+  append_json_string (body, state);
+  if (reason != NULL) {
+    g_string_append (body, ",\"reason\":");
+    append_json_string (body, reason);
+  }
+  g_string_append (body, ",\"subsystems\":{\"facts\":");
+  g_string_append (body, facts != NULL ? facts : "{\"status\":\"disabled\"}");
+  g_string_append (body, "}}");
+
+  soup_server_message_set_status (msg, status, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
 static gboolean
 parse_int64_query_param (const gchar *value, gint64 *out_value)
 {
@@ -1373,7 +1396,7 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   const gchar *liveness_error = check_runtime_liveness_ready (ctx->runtime);
   if (liveness_error != NULL) {
     if (json)
-      set_status_json (msg, 503, "not_ready", liveness_error);
+      set_readyz_json (msg, 503, "not_ready", liveness_error, ctx->handle);
     else
       set_json_error (msg, 503, liveness_error);
     return;
@@ -1383,14 +1406,14 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   wyrelog_error_t rc = check_runtime_ready (ctx->handle, &readiness_error);
   if (rc != WYRELOG_E_OK) {
     if (json)
-      set_status_json (msg, 503, "not_ready", readiness_error);
+      set_readyz_json (msg, 503, "not_ready", readiness_error, ctx->handle);
     else
       set_json_error (msg, 503, readiness_error);
     return;
   }
 
   if (json) {
-    set_status_json (msg, 200, "ready", NULL);
+    set_readyz_json (msg, 200, "ready", NULL, ctx->handle);
     return;
   }
 
@@ -1399,6 +1422,22 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   soup_server_message_set_status (msg, 200, NULL);
   soup_server_message_set_response (msg, "text/plain", SOUP_MEMORY_COPY, body,
       strlen (body));
+}
+
+static void
+facts_status_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *body = wyl_daemon_fact_status_json (ctx->handle, TRUE);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
 }
 
 static void
@@ -2573,6 +2612,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       wyl_daemon_http_context_free);
   soup_server_add_handler (server, "/healthz", healthz_handler, NULL, NULL);
   soup_server_add_handler (server, "/readyz", readyz_handler, ctx, NULL);
+  soup_server_add_handler (server, "/facts/status", facts_status_handler, ctx,
+      NULL);
   soup_server_add_handler (server, "/profile/status", profile_status_handler,
       ctx, NULL);
   soup_server_add_handler (server, "/profile/events", profile_events_handler,

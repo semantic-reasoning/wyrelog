@@ -320,6 +320,18 @@ check_readyz_runtime_liveness_contract (const gchar *base_url,
     return 1923;
   if (status != 200 || strstr (body, "\"status\":\"ready\"") == NULL)
     return 1924;
+  if (strstr (body, "\"subsystems\"") == NULL
+      || strstr (body, "\"facts\"") == NULL
+      || strstr (body, "\"graphs_total\"") == NULL)
+    return 1929;
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_path (session, "GET", base_url, "/facts/status", &status,
+          &body) != 0)
+    return 1930;
+  if (status != 200 || strstr (body, "\"graphs_total\"") == NULL
+      || strstr (body, "\"graphs\"") == NULL)
+    return 1931;
 
   g_atomic_int_set (&runtime->delta_session_live, FALSE);
   g_clear_pointer (&body, g_free);

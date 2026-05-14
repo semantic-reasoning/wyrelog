@@ -169,6 +169,7 @@ wyrelogd_exe = executable('wyrelogd',
   files(
     'daemon/checks.c',
     'daemon/delta.c',
+    'daemon/fact-status.c',
     'daemon/http.c',
     'daemon/options.c',
     'daemon/runtime.c',
