@@ -18,7 +18,12 @@
 #include "daemon/delta.h"
 #include "daemon/http.h"
 #include "wyrelog/client.h"
+#ifdef WYL_HAS_FACT_STORE
+#include <duckdb.h>
+#include "wyrelog/fact/store-private.h"
+#endif
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
@@ -74,6 +79,131 @@ grant_policy_role_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
+#ifdef WYL_HAS_FACT_STORE
+typedef struct
+{
+  const gchar *graph_id;
+  gchar *storage_path;
+} GraphPathProbe;
+
+static wyrelog_error_t
+grant_fact_authority (WylHandle *handle, const gchar *subject)
+{
+  static const gchar *const perms[] = {
+    "wr.graph.manage",
+    "wr.schema.manage",
+    "wr.fact.write",
+  };
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  for (gsize i = 0; i < G_N_ELEMENTS (perms); i++) {
+    wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store,
+        subject, perms[i], WYL_TENANT_DEFAULT);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_policy_store_set_permission_state (store, subject, perms[i],
+        WYL_TENANT_DEFAULT, "armed");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  wyrelog_error_t rc = wyl_policy_store_set_session_state (store,
+      WYL_TENANT_DEFAULT, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
+static wyrelog_error_t
+graph_path_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
+{
+  GraphPathProbe *probe = user_data;
+  if (g_strcmp0 (info->graph_id, probe->graph_id) == 0)
+    probe->storage_path = g_strdup (info->storage_path);
+  return WYRELOG_E_OK;
+}
+
+static gchar *
+capture_graph_path (WylHandle *handle, const gchar *graph_id)
+{
+  GraphPathProbe probe = {
+    .graph_id = graph_id,
+  };
+  if (wyl_policy_store_foreach_fact_graph (wyl_handle_get_policy_store
+          (handle), WYL_TENANT_DEFAULT, graph_path_cb, &probe) != WYRELOG_E_OK)
+    return NULL;
+  return probe.storage_path;
+}
+
+static gboolean
+count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
+{
+  duckdb_result result = { 0 };
+  if (duckdb_query (conn, sql, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return FALSE;
+  }
+  *out_value = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return TRUE;
+}
+
+static gint
+check_fact_projection_count (WylHandle *handle, gint64 expected)
+{
+  g_autofree gchar *path = capture_graph_path (handle, "orders");
+  if (path == NULL)
+    return 100;
+  g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (db_path, &store) != WYRELOG_E_OK)
+    return 101;
+  const WylClientFactColumn client_columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_column_t columns[] = {
+    {client_columns[0].name, client_columns[0].type, FALSE, TRUE},
+    {client_columns[1].name, client_columns[1].type, FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = WYL_TENANT_DEFAULT,
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "orders",
+    .schema_version = 1,
+    .relation_visible = TRUE,
+    .columns = columns,
+    .n_columns = G_N_ELEMENTS (columns),
+  };
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (&schema);
+  if (table == NULL)
+    return 102;
+  gint64 count = 0;
+  g_autofree gchar *sql = g_strdup_printf ("SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (wyl_fact_store_get_connection (store), sql, &count))
+    return 103;
+  return count == expected ? 0 : 104;
+}
+
+static void
+remove_tree (const gchar *path)
+{
+  if (path == NULL)
+    return;
+  g_autoptr (GDir) dir = g_dir_open (path, 0, NULL);
+  if (dir != NULL) {
+    const gchar *name = NULL;
+    while ((name = g_dir_read_name (dir)) != NULL) {
+      g_autofree gchar *child = g_build_filename (path, name, NULL);
+      if (g_file_test (child, G_FILE_TEST_IS_DIR))
+        remove_tree (child);
+      else
+        (void) g_remove (child);
+    }
+  }
+  (void) g_rmdir (path);
+}
+#endif
+
 static gchar *
 write_token_file (const gchar *token)
 {
@@ -120,6 +250,29 @@ assert_wyctl_ok (gchar **argv)
   g_assert_cmpstr (stderr_buf, ==, "");
 }
 
+#ifdef WYL_HAS_FACT_STORE
+static void
+assert_wyctl_stdout (gchar **argv, const gchar *expected_stdout)
+{
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  g_autoptr (GError) error = NULL;
+
+  run_wyctl (argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  if (!g_spawn_check_wait_status (wait_status, &error)) {
+    g_printerr ("wyctl exited with status %d\nstdout: %s\nstderr: %s\n",
+        wait_status, stdout_buf ? stdout_buf : "(null)",
+        stderr_buf ? stderr_buf : "(null)");
+    g_clear_error (&error);
+    g_assert_not_reached ();
+  }
+  g_assert_cmpstr (stdout_buf, ==, expected_stdout);
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+#endif
+
 int
 main (void)
 {
@@ -127,9 +280,22 @@ main (void)
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
 
+#ifdef WYL_HAS_FACT_STORE
+  g_autoptr (GError) fact_root_error = NULL;
+  g_autofree gchar *fact_root = g_dir_make_tmp ("wyctl-facts-XXXXXX",
+      &fact_root_error);
+  if (fact_root == NULL)
+    return 101;
+  if (g_chmod (fact_root, 0700) != 0)
+    return 102;
+#endif
+
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .listen_port = 0,
+#ifdef WYL_HAS_FACT_STORE
+    .fact_root = fact_root,
+#endif
   };
   WylDaemonRuntime runtime = {
     .handle = handle,
@@ -178,6 +344,10 @@ main (void)
   if (grant_policy_role_authority (handle, "wyctl-policy-admin", "tenant-x")
       != WYRELOG_E_OK)
     return 9;
+#ifdef WYL_HAS_FACT_STORE
+  if (grant_fact_authority (handle, "wyctl-policy-admin") != WYRELOG_E_OK)
+    return 103;
+#endif
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_upsert_permission (store, "site.wyctl.read",
@@ -269,6 +439,79 @@ main (void)
           "site.wyctl.reader", "tenant-x", &exists) != WYRELOG_E_OK || exists)
     return 15;
 
+#ifdef WYL_HAS_FACT_STORE
+  gchar *graph_create_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "graph", "create",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_ok (graph_create_argv);
+
+  gchar *schema_register_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "schema", "register",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--columns", "order_id:symbol,amount:int64",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_ok (schema_register_argv);
+
+  g_autoptr (GError) input_error = NULL;
+  gchar *input_path = NULL;
+  gint input_fd = g_file_open_tmp ("wyctl-facts-input-XXXXXX", &input_path,
+      &input_error);
+  g_assert_no_error (input_error);
+  g_assert_cmpint (input_fd, >=, 0);
+  g_assert_true (g_close (input_fd, NULL));
+  g_assert_true (g_file_set_contents (input_path,
+          "order_id,amount\no-1,42\n", -1, &input_error));
+  g_assert_no_error (input_error);
+  g_autofree gchar *input_path_autofree = input_path;
+
+  gchar *fact_put_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "fact", "put",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--namespace", "shop",
+    "--relation", "orders",
+    "--schema-version", "1",
+    "--batch-id", "batch-1",
+    "--idempotency-key", "key-1",
+    "--format", "csv",
+    "--input", input_path,
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout (fact_put_argv, "inserted\n");
+  if (check_fact_projection_count (handle, 1) != 0)
+    return 104;
+  assert_wyctl_stdout (fact_put_argv, "duplicate\n");
+  if (check_fact_projection_count (handle, 1) != 0)
+    return 105;
+  g_unlink (input_path);
+#endif
+
   g_unlink (token_path);
 
   g_main_loop_quit (http.loop);
@@ -276,5 +519,8 @@ main (void)
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+#ifdef WYL_HAS_FACT_STORE
+  remove_tree (fact_root);
+#endif
   return 0;
 }
