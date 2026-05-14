@@ -10,6 +10,10 @@
 #include "daemon/fact-status.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
+#ifdef WYL_HAS_FACT_STORE
+#include "wyrelog/fact/schema-private.h"
+#include "wyrelog/fact/store-private.h"
+#endif
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-id-private.h"
@@ -104,6 +108,7 @@ typedef struct
   gboolean production_mode;
   WylDaemonProfile profile;
   gchar *policy_keyprovider_path;
+  gchar *fact_root;
   gchar *system_url;
   gchar *event_spool_dir;
   guint event_queue_limit;
@@ -223,6 +228,7 @@ wyl_daemon_http_context_free (gpointer data)
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   g_free (ctx->access_token_key_id);
   g_free (ctx->policy_keyprovider_path);
+  g_free (ctx->fact_root);
   g_free (ctx->system_url);
   g_free (ctx->event_spool_dir);
   g_hash_table_unref (ctx->sessions_by_token);
@@ -339,6 +345,7 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   ctx->production_mode = opts->production_mode;
   ctx->profile = opts->profile;
   ctx->policy_keyprovider_path = g_strdup (opts->policy_keyprovider_path);
+  ctx->fact_root = g_strdup (opts->fact_root);
   ctx->system_url = g_strdup (opts->system_url);
   ctx->event_spool_dir = g_strdup (opts->event_spool_dir);
   ctx->event_queue_limit = opts->event_queue_limit;
@@ -1897,6 +1904,993 @@ tenant_delete_handler (SoupServer *server, SoupServerMessage *msg,
   tenant_mutation_handler (server, msg, path, query, user_data, "delete");
 }
 
+#ifdef WYL_HAS_FACT_STORE
+static GHashTable *
+copy_query_with_tenant (GHashTable *query, const gchar *tenant)
+{
+  GHashTable *copy = g_hash_table_new (g_str_hash, g_str_equal);
+  if (query != NULL) {
+    GHashTableIter iter;
+    gpointer key = NULL;
+    gpointer value = NULL;
+    g_hash_table_iter_init (&iter, query);
+    while (g_hash_table_iter_next (&iter, &key, &value))
+      g_hash_table_insert (copy, key, value);
+  }
+  g_hash_table_replace (copy, (gpointer) "tenant", (gpointer) tenant);
+  return copy;
+}
+
+static gboolean
+query_tenant_matches (SoupServerMessage *msg, GHashTable *query,
+    const gchar *tenant)
+{
+  const gchar *declared = query != NULL ? g_hash_table_lookup (query,
+      "tenant") : NULL;
+  if (declared != NULL && !wyl_policy_store_tenant_id_is_valid (declared)) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_TENANT_INVALID);
+    return FALSE;
+  }
+  if (declared != NULL && g_strcmp0 (declared, tenant) != 0) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_TENANT_DENIED);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+parse_uint32_query_param (const gchar *value, guint32 *out_value)
+{
+  gint64 parsed = 0;
+  if (!parse_int64_query_param (value, &parsed) || parsed <= 0 ||
+      parsed > G_MAXUINT32)
+    return FALSE;
+  *out_value = (guint32) parsed;
+  return TRUE;
+}
+
+static gboolean
+fact_http_component_is_valid (const gchar *component)
+{
+  if (component == NULL)
+    return FALSE;
+  gsize len = strlen (component);
+  if (len == 0 || len > 128)
+    return FALSE;
+  if (g_strcmp0 (component, ".") == 0 || g_strcmp0 (component, "..") == 0)
+    return FALSE;
+  for (const gchar * p = component; *p != '\0'; p++) {
+    guchar c = (guchar) * p;
+    if (g_ascii_isalnum (c) || c == '.' || c == '_' || c == ':' || c == '-')
+      continue;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+fact_http_customer_name_is_valid (const gchar *name)
+{
+  return fact_http_component_is_valid (name) &&
+      g_strcmp0 (name, "wr") != 0 && !g_str_has_prefix (name, "wr.") &&
+      !g_str_has_prefix (name, "__wyrelog.");
+}
+#endif
+
+typedef struct
+{
+  GString *json;
+  gboolean first;
+} GraphListJsonCtx;
+
+static wyrelog_error_t
+append_graph_json (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
+{
+  GraphListJsonCtx *ctx = user_data;
+  if (!ctx->first)
+    g_string_append_c (ctx->json, ',');
+  ctx->first = FALSE;
+  g_string_append (ctx->json, "{\"tenant_id\":");
+  append_json_string (ctx->json, info->tenant_id);
+  g_string_append (ctx->json, ",\"graph_id\":");
+  append_json_string (ctx->json, info->graph_id);
+  g_string_append_printf (ctx->json,
+      ",\"sealed\":%s,\"schema_version\":%u}",
+      info->sealed ? "true" : "false", info->schema_version);
+  return WYRELOG_E_OK;
+}
+
+static void
+graphs_list_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400, "invalid_graph_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.graph.manage", tenant, "graph_auth_required",
+          "invalid_graph_auth", "graph_denied", "graph_auth_failed", NULL))
+    return;
+
+  g_autoptr (GString) body = g_string_new ("{\"graphs\":[");
+  GraphListJsonCtx json_ctx = {
+    .json = body,
+    .first = TRUE,
+  };
+  wyrelog_error_t rc = wyl_policy_store_foreach_fact_graph
+      (wyl_handle_get_policy_store (ctx->handle), tenant, append_graph_json,
+      &json_ctx);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "graph_query_failed");
+    return;
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+set_graph_mutation_json (SoupServerMessage *msg, const gchar *tenant,
+    const gchar *graph, const gchar *field, gboolean value)
+{
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"graph_id\":");
+  append_json_string (body, graph);
+  g_string_append_printf (body, ",\"%s\":%s}", field, value ? "true" : "false");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+graph_create_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  const gchar *graph = lookup_required_query_string (query, "graph");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) ||
+#ifdef WYL_HAS_FACT_STORE
+      !fact_http_customer_name_is_valid (graph)
+#else
+      graph == NULL
+#endif
+      ) {
+    set_json_error (msg, 400, "invalid_graph_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+#ifndef WYL_HAS_FACT_STORE
+  (void) ctx;
+  set_json_error (msg, 503, "fact_store_disabled");
+  return;
+#else
+  if (ctx->fact_root == NULL || ctx->fact_root[0] == '\0') {
+    set_json_error (msg, 503, "fact_store_disabled");
+    return;
+  }
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.graph.manage", tenant, "graph_auth_required",
+          "invalid_graph_auth", "graph_denied", "graph_auth_failed", &actor))
+    return;
+
+  wyl_policy_fact_graph_create_options_t opts = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .fact_root = ctx->fact_root,
+    .schema_version = 1,
+    .owner_scope = tenant,
+  };
+
+  g_mutex_lock (&ctx->policy_mutation_lock);
+  wyrelog_error_t rc = wyl_policy_store_create_fact_graph
+      (wyl_handle_get_policy_store (ctx->handle), &opts, NULL);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_graph_request");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, "graph_exists");
+    return;
+  }
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, "tenant_invalid");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "graph_mutation_failed");
+    return;
+  }
+
+  (void) actor;
+  set_graph_mutation_json (msg, tenant, graph, "created", TRUE);
+#endif
+}
+
+static void
+graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  const gchar *graph = lookup_required_query_string (query, "graph");
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) ||
+#ifdef WYL_HAS_FACT_STORE
+      !fact_http_customer_name_is_valid (graph)
+#else
+      graph == NULL
+#endif
+      ) {
+    set_json_error (msg, 400, "invalid_graph_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.graph.manage", tenant, "graph_auth_required",
+          "invalid_graph_auth", "graph_denied", "graph_auth_failed", NULL))
+    return;
+
+  g_mutex_lock (&ctx->policy_mutation_lock);
+  wyrelog_error_t rc = wyl_policy_store_seal_fact_graph
+      (wyl_handle_get_policy_store (ctx->handle), tenant, graph);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_graph_request");
+    return;
+  }
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "graph_mutation_failed");
+    return;
+  }
+  set_graph_mutation_json (msg, tenant, graph, "sealed", TRUE);
+}
+
+#ifdef WYL_HAS_FACT_STORE
+typedef struct
+{
+  const gchar *graph_id;
+  gboolean found;
+  wyl_policy_fact_graph_info_t info;
+  gchar *tenant_id;
+  gchar *graph_id_copy;
+  gchar *storage_uri;
+  gchar *storage_path;
+  gchar *owner_scope;
+} GraphLookupCtx;
+
+static void
+graph_lookup_clear (GraphLookupCtx *ctx)
+{
+  g_free (ctx->tenant_id);
+  g_free (ctx->graph_id_copy);
+  g_free (ctx->storage_uri);
+  g_free (ctx->storage_path);
+  g_free (ctx->owner_scope);
+}
+
+static wyrelog_error_t
+lookup_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
+{
+  GraphLookupCtx *ctx = user_data;
+  if (g_strcmp0 (info->graph_id, ctx->graph_id) != 0)
+    return WYRELOG_E_OK;
+  ctx->found = TRUE;
+  ctx->tenant_id = g_strdup (info->tenant_id);
+  ctx->graph_id_copy = g_strdup (info->graph_id);
+  ctx->storage_uri = g_strdup (info->storage_uri);
+  ctx->storage_path = g_strdup (info->storage_path);
+  ctx->owner_scope = g_strdup (info->owner_scope);
+  ctx->info.tenant_id = ctx->tenant_id;
+  ctx->info.graph_id = ctx->graph_id_copy;
+  ctx->info.storage_uri = ctx->storage_uri;
+  ctx->info.storage_path = ctx->storage_path;
+  ctx->info.schema_version = info->schema_version;
+  ctx->info.owner_scope = ctx->owner_scope;
+  ctx->info.sealed = info->sealed;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+lookup_fact_graph (wyl_policy_store_t *store, const gchar *tenant,
+    const gchar *graph, GraphLookupCtx *out)
+{
+  memset (out, 0, sizeof *out);
+  out->graph_id = graph;
+  return wyl_policy_store_foreach_fact_graph (store, tenant, lookup_graph_cb,
+      out);
+}
+
+static gboolean
+request_body_dup (SoupServerMessage *msg, gsize max_len, gchar **out_body)
+{
+  *out_body = NULL;
+  SoupMessageBody *body = soup_server_message_get_request_body (msg);
+  if (body == NULL || body->length <= 0 || body->data == NULL)
+    return FALSE;
+  if ((gsize) body->length > max_len)
+    return FALSE;
+  *out_body = g_strndup (body->data, (gsize) body->length);
+  return *out_body != NULL;
+}
+
+static gboolean
+parse_bool_token (const gchar *value, gboolean *out)
+{
+  if (g_strcmp0 (value, "true") == 0 || g_strcmp0 (value, "1") == 0) {
+    *out = TRUE;
+    return TRUE;
+  }
+  if (g_strcmp0 (value, "false") == 0 || g_strcmp0 (value, "0") == 0) {
+    *out = FALSE;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static void
+schema_columns_clear (wyl_policy_fact_relation_schema_column_t *columns,
+    gsize n_columns)
+{
+  if (columns == NULL)
+    return;
+  for (gsize i = 0; i < n_columns; i++) {
+    g_free ((gchar *) columns[i].column_name);
+    g_free ((gchar *) columns[i].column_type);
+  }
+  g_free (columns);
+}
+
+static void
+schema_columns_clear_array (GArray **cols)
+{
+  if (cols == NULL || *cols == NULL)
+    return;
+  gsize n_columns = (*cols)->len;
+  wyl_policy_fact_relation_schema_column_t *columns =
+      (wyl_policy_fact_relation_schema_column_t *) g_array_free (*cols,
+      FALSE);
+  *cols = NULL;
+  schema_columns_clear (columns, n_columns);
+}
+
+static gboolean
+parse_schema_tsv (const gchar *body,
+    wyl_policy_fact_relation_schema_column_t **out_columns,
+    gsize *out_n_columns)
+{
+  *out_columns = NULL;
+  *out_n_columns = 0;
+  g_auto (GStrv) lines = g_strsplit (body, "\n", -1);
+  g_autoptr (GArray) cols =
+      g_array_new (FALSE, TRUE,
+      sizeof (wyl_policy_fact_relation_schema_column_t));
+
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    g_strchomp (lines[i]);
+    if (lines[i][0] == '\0')
+      continue;
+    if (g_strcmp0 (lines[i], "column_name\tcolumn_type\tnullable\tvisible")
+        == 0)
+      continue;
+    g_auto (GStrv) fields = g_strsplit (lines[i], "\t", 5);
+    if (g_strv_length (fields) != 4) {
+      schema_columns_clear_array (&cols);
+      return FALSE;
+    }
+    gboolean nullable = FALSE;
+    gboolean visible = FALSE;
+    if (!parse_bool_token (fields[2], &nullable) ||
+        !parse_bool_token (fields[3], &visible)) {
+      schema_columns_clear_array (&cols);
+      return FALSE;
+    }
+    wyl_policy_fact_relation_schema_column_t col = {
+      .column_name = g_strdup (fields[0]),
+      .column_type = g_strdup (fields[1]),
+      .nullable = nullable,
+      .visible = visible,
+    };
+    g_array_append_val (cols, col);
+  }
+  if (cols->len == 0) {
+    schema_columns_clear_array (&cols);
+    return FALSE;
+  }
+  *out_n_columns = cols->len;
+  *out_columns = (wyl_policy_fact_relation_schema_column_t *)
+      g_array_free (g_steal_pointer (&cols), FALSE);
+  return TRUE;
+}
+
+static void
+fact_rows_clear (wyl_fact_row_t *rows, gsize n_rows)
+{
+  if (rows == NULL)
+    return;
+  for (gsize i = 0; i < n_rows; i++) {
+    for (gsize j = 0; j < rows[i].n_values; j++) {
+      if (rows[i].values[j].type == WYL_FACT_VALUE_SYMBOL ||
+          rows[i].values[j].type == WYL_FACT_VALUE_STRING)
+        g_free ((gchar *) rows[i].values[j].as.text);
+    }
+    g_free ((wyl_fact_value_t *) rows[i].values);
+  }
+  g_free (rows);
+}
+
+static void
+fact_rows_clear_array (GArray **rows)
+{
+  if (rows == NULL || *rows == NULL)
+    return;
+  gsize n_rows = (*rows)->len;
+  wyl_fact_row_t *row_data = (wyl_fact_row_t *) g_array_free (*rows, FALSE);
+  *rows = NULL;
+  fact_rows_clear (row_data, n_rows);
+}
+
+static gboolean
+parse_fact_value (const gchar *text,
+    const wyl_policy_fact_relation_schema_column_info_t *column,
+    wyl_fact_value_t *out)
+{
+  if ((text == NULL || text[0] == '\0' || g_strcmp0 (text, "NULL") == 0)
+      && column->nullable) {
+    out->type = WYL_FACT_VALUE_NULL;
+    return TRUE;
+  }
+  if (g_strcmp0 (column->column_type, "symbol") == 0) {
+    out->type = WYL_FACT_VALUE_SYMBOL;
+    out->as.text = g_strdup (text);
+    return out->as.text != NULL;
+  }
+  if (g_strcmp0 (column->column_type, "string") == 0) {
+    out->type = WYL_FACT_VALUE_STRING;
+    out->as.text = g_strdup (text);
+    return out->as.text != NULL;
+  }
+  if (g_strcmp0 (column->column_type, "int64") == 0) {
+    gchar *end = NULL;
+    errno = 0;
+    gint64 parsed = g_ascii_strtoll (text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0')
+      return FALSE;
+    out->type = WYL_FACT_VALUE_INT64;
+    out->as.int64_value = parsed;
+    return TRUE;
+  }
+  if (g_strcmp0 (column->column_type, "bool") == 0) {
+    gboolean parsed = FALSE;
+    if (!parse_bool_token (text, &parsed))
+      return FALSE;
+    out->type = WYL_FACT_VALUE_BOOL;
+    out->as.bool_value = parsed;
+    return TRUE;
+  }
+  if (g_strcmp0 (column->column_type, "compound_ref") == 0) {
+    gchar *end = NULL;
+    errno = 0;
+    gint64 parsed = g_ascii_strtoll (text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0')
+      return FALSE;
+    out->type = WYL_FACT_VALUE_COMPOUND_REF;
+    out->as.compound_ref = parsed;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static gboolean
+line_is_fact_header (gchar **fields,
+    const wyl_policy_fact_relation_schema_column_info_t *columns,
+    gsize n_columns)
+{
+  if (g_strv_length (fields) != n_columns)
+    return FALSE;
+  for (gsize i = 0; i < n_columns; i++) {
+    if (g_strcmp0 (fields[i], columns[i].column_name) != 0)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+parse_fact_tsv (const gchar *body,
+    const wyl_policy_fact_relation_schema_column_info_t *columns,
+    gsize n_columns, wyl_fact_row_t **out_rows, gsize *out_n_rows)
+{
+  *out_rows = NULL;
+  *out_n_rows = 0;
+  g_auto (GStrv) lines = g_strsplit (body, "\n", -1);
+  g_autoptr (GArray) rows = g_array_new (FALSE, TRUE, sizeof (wyl_fact_row_t));
+  gboolean first_data = TRUE;
+
+  for (gsize i = 0; lines[i] != NULL; i++) {
+    g_strchomp (lines[i]);
+    if (lines[i][0] == '\0')
+      continue;
+    g_auto (GStrv) fields = g_strsplit (lines[i], "\t", n_columns + 2);
+    if (first_data && line_is_fact_header (fields, columns, n_columns)) {
+      first_data = FALSE;
+      continue;
+    }
+    first_data = FALSE;
+    if (g_strv_length (fields) != n_columns) {
+      fact_rows_clear_array (&rows);
+      return FALSE;
+    }
+    wyl_fact_value_t *values = g_new0 (wyl_fact_value_t, n_columns);
+    wyl_fact_row_t row = {
+      .values = values,
+      .n_values = n_columns,
+    };
+    for (gsize j = 0; j < n_columns; j++) {
+      if (!parse_fact_value (fields[j], &columns[j], &values[j])) {
+        for (gsize k = 0; k < n_columns; k++) {
+          if (values[k].type == WYL_FACT_VALUE_SYMBOL ||
+              values[k].type == WYL_FACT_VALUE_STRING)
+            g_free ((gchar *) values[k].as.text);
+        }
+        g_free (values);
+        fact_rows_clear_array (&rows);
+        return FALSE;
+      }
+    }
+    g_array_append_val (rows, row);
+  }
+  if (rows->len == 0) {
+    fact_rows_clear_array (&rows);
+    return FALSE;
+  }
+  *out_n_rows = rows->len;
+  *out_rows = (wyl_fact_row_t *) g_array_free (g_steal_pointer (&rows), FALSE);
+  return TRUE;
+}
+
+static wyl_policy_fact_relation_schema_column_t *
+copy_schema_columns (const wyl_policy_fact_relation_schema_column_info_t *info,
+    gsize n_columns)
+{
+  wyl_policy_fact_relation_schema_column_t *columns =
+      g_new0 (wyl_policy_fact_relation_schema_column_t, n_columns);
+  for (gsize i = 0; i < n_columns; i++) {
+    columns[i].column_name = g_strdup (info[i].column_name);
+    columns[i].column_type = g_strdup (info[i].column_type);
+    columns[i].nullable = info[i].nullable;
+    columns[i].visible = info[i].visible;
+  }
+  return columns;
+}
+
+static void
+set_schema_ok_json (SoupServerMessage *msg, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation)
+{
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"tenant_id\":");
+  append_json_string (body, tenant);
+  g_string_append (body, ",\"graph_id\":");
+  append_json_string (body, graph);
+  g_string_append (body, ",\"namespace_id\":");
+  append_json_string (body, namespace_id);
+  g_string_append (body, ",\"relation_name\":");
+  append_json_string (body, relation);
+  g_string_append_c (body, '}');
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+schema_register_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  const gchar *graph = lookup_required_query_string (query, "graph");
+  const gchar *namespace_id = lookup_required_query_string (query, "namespace");
+  const gchar *relation = lookup_required_query_string (query, "relation");
+  guint32 schema_version = 0;
+  gboolean relation_visible = TRUE;
+  const gchar *visible = query != NULL ? g_hash_table_lookup (query,
+      "relation_visible") : NULL;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant) ||
+      !fact_http_customer_name_is_valid (graph) ||
+      !fact_http_customer_name_is_valid (namespace_id) ||
+      !fact_http_customer_name_is_valid (relation) ||
+      !parse_uint32_query_param (lookup_required_query_string (query,
+              "schema_version"), &schema_version) ||
+      (visible != NULL && !parse_bool_token (visible, &relation_visible))) {
+    set_json_error (msg, 400, "invalid_schema_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.schema.manage", tenant, "schema_auth_required",
+          "invalid_schema_auth", "schema_denied", "schema_auth_failed", NULL))
+    return;
+
+  GraphLookupCtx lookup = { 0 };
+  wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+      (ctx->handle), tenant, graph, &lookup);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "schema_register_failed");
+    return;
+  }
+  if (!lookup.found) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (lookup.info.sealed) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 409, "graph_sealed");
+    return;
+  }
+  graph_lookup_clear (&lookup);
+
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 1024 * 1024, &body)) {
+    set_json_error (msg, 400, "invalid_schema_payload");
+    return;
+  }
+  wyl_policy_fact_relation_schema_column_t *columns = NULL;
+  gsize n_columns = 0;
+  if (!parse_schema_tsv (body, &columns, &n_columns)) {
+    set_json_error (msg, 400, "invalid_schema_payload");
+    return;
+  }
+
+  wyl_policy_fact_relation_schema_options_t opts = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .namespace_id = namespace_id,
+    .relation_name = relation,
+    .schema_version = schema_version,
+    .relation_visible = relation_visible,
+    .columns = columns,
+    .n_columns = n_columns,
+  };
+  g_mutex_lock (&ctx->policy_mutation_lock);
+  rc = wyl_policy_store_register_fact_relation_schema
+      (wyl_handle_get_policy_store (ctx->handle), &opts);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
+  schema_columns_clear (columns, n_columns);
+  if (rc == WYRELOG_E_INVALID || rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 400, "invalid_schema_request");
+    return;
+  }
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "schema_register_failed");
+    return;
+  }
+  set_schema_ok_json (msg, tenant, graph, namespace_id, relation);
+}
+
+static gboolean
+parse_fact_append_path (const gchar *path, gchar **out_tenant,
+    gchar **out_graph, gchar **out_relation)
+{
+  *out_tenant = NULL;
+  *out_graph = NULL;
+  *out_relation = NULL;
+  if (path == NULL || !g_str_has_prefix (path, "/facts/"))
+    return FALSE;
+  const gchar *tail = path + strlen ("/facts/");
+  g_auto (GStrv) parts = g_strsplit (tail, "/", 3);
+  if (g_strv_length (parts) != 3 || !g_str_has_suffix (parts[2], ":append"))
+    return FALSE;
+  parts[2][strlen (parts[2]) - strlen (":append")] = '\0';
+  if (parts[0][0] == '\0' || parts[1][0] == '\0' || parts[2][0] == '\0')
+    return FALSE;
+  *out_tenant = g_strdup (parts[0]);
+  *out_graph = g_strdup (parts[1]);
+  *out_relation = g_strdup (parts[2]);
+  return *out_tenant != NULL && *out_graph != NULL && *out_relation != NULL;
+}
+
+static wyrelog_error_t
+emit_fact_append_audit (WylDaemonHttpContext *ctx, const gchar *actor,
+    const gchar *tenant, const gchar *graph, const gchar *namespace_id,
+    const gchar *relation, const gchar *batch_id, gboolean inserted,
+    const gchar *request_id)
+{
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  g_autofree gchar *resource = g_strdup_printf ("%s/%s/%s/%s", tenant, graph,
+      namespace_id, relation);
+  wyl_audit_event_set_subject_id (ev, actor);
+  wyl_audit_event_set_action (ev, "fact_append");
+  wyl_audit_event_set_resource_id (ev, resource);
+  wyl_audit_event_set_deny_reason (ev, batch_id);
+  wyl_audit_event_set_deny_origin (ev, inserted ? "inserted" : "duplicate");
+  wyl_audit_event_set_request_id (ev, request_id);
+  wyl_audit_event_set_decision (ev, WYL_DECISION_ALLOW);
+  return wyl_audit_emit (ctx->handle, ev);
+#else
+  (void) ctx;
+  (void) actor;
+  (void) tenant;
+  (void) graph;
+  (void) namespace_id;
+  (void) relation;
+  (void) batch_id;
+  (void) inserted;
+  (void) request_id;
+  return WYRELOG_E_OK;
+#endif
+}
+
+static void
+set_fact_append_json (SoupServerMessage *msg, const gchar *batch_id,
+    gboolean inserted)
+{
+  g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"inserted\":");
+  g_string_append (body, inserted ? "true" : "false");
+  g_string_append (body, ",\"batch_id\":");
+  append_json_string (body, batch_id);
+  g_string_append_c (body, '}');
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+facts_route_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  g_autofree gchar *tenant = NULL;
+  g_autofree gchar *graph = NULL;
+  g_autofree gchar *relation = NULL;
+  if (!parse_fact_append_path (path, &tenant, &graph, &relation) ||
+      !wyl_policy_store_tenant_id_is_valid (tenant) ||
+      !fact_http_customer_name_is_valid (graph) ||
+      !fact_http_customer_name_is_valid (relation)) {
+    set_json_error (msg, 400, "invalid_fact_request");
+    return;
+  }
+  if (!query_tenant_matches (msg, query, tenant))
+    return;
+
+  const gchar *namespace_id = lookup_required_query_string (query, "namespace");
+  const gchar *batch_id = lookup_required_query_string (query, "batch_id");
+  const gchar *idempotency_key = lookup_required_query_string (query,
+      "idempotency_key");
+  guint32 schema_version = 0;
+  if (!fact_http_customer_name_is_valid (namespace_id) || batch_id == NULL ||
+      idempotency_key == NULL ||
+      !parse_uint32_query_param (lookup_required_query_string (query,
+              "schema_version"), &schema_version)) {
+    set_json_error (msg, 400, "invalid_fact_request");
+    return;
+  }
+  const gchar *op = query != NULL ? g_hash_table_lookup (query, "op") : NULL;
+  if (op != NULL && g_strcmp0 (op, "assert") != 0) {
+    set_json_error (msg, 400, "invalid_fact_request");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
+          "wr.fact.write", tenant, "fact_auth_required", "invalid_fact_auth",
+          "fact_denied", "fact_auth_failed", &actor))
+    return;
+
+  g_mutex_lock (&ctx->policy_mutation_lock);
+  GraphLookupCtx lookup = { 0 };
+  wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+      (ctx->handle), tenant, graph, &lookup);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    set_json_error (msg, 500, "fact_append_failed");
+    return;
+  }
+  if (!lookup.found) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (lookup.info.sealed) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 409, "graph_sealed");
+    return;
+  }
+
+  gboolean relation_visible = FALSE;
+  wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;
+  gsize n_loaded = 0;
+  rc = wyl_policy_store_load_fact_relation_schema_columns
+      (wyl_handle_get_policy_store (ctx->handle), tenant, graph, namespace_id,
+      relation, schema_version, &relation_visible, &loaded, &n_loaded);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
+        rc == WYRELOG_E_NOT_FOUND ? "fact_schema_not_found" :
+        "fact_append_failed");
+    return;
+  }
+
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 1024 * 1024, &body)) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+  wyl_fact_row_t *rows = NULL;
+  gsize n_rows = 0;
+  if (!parse_fact_tsv (body, loaded, n_loaded, &rows, &n_rows)) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+
+  wyl_policy_fact_relation_schema_column_t *schema_columns =
+      copy_schema_columns (loaded, n_loaded);
+  wyl_policy_fact_relation_schema_options_t schema = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .namespace_id = namespace_id,
+    .relation_name = relation,
+    .schema_version = schema_version,
+    .relation_visible = relation_visible,
+    .columns = schema_columns,
+    .n_columns = n_loaded,
+  };
+  wyl_fact_batch_t validation_batch = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .namespace_id = namespace_id,
+    .relation_name = relation,
+    .schema_version = schema_version,
+    .rows = rows,
+    .n_rows = n_rows,
+  };
+  rc = wyl_fact_schema_validate_batch (wyl_handle_get_policy_store
+      (ctx->handle), &validation_batch, NULL);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    fact_rows_clear (rows, n_rows);
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+
+  g_autoptr (wyl_fact_store_t) fact_store = NULL;
+  g_autofree gchar *fact_db_path = g_build_filename (lookup.info.storage_path,
+      "facts.duckdb", NULL);
+  rc = wyl_fact_store_open (fact_db_path, &fact_store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_create_schema (fact_store);
+  gboolean inserted = FALSE;
+  const gchar *request_id = ensure_request_id_header (msg);
+  wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .namespace_id = namespace_id,
+    .relation_name = relation,
+    .schema_version = schema_version,
+    .source = "http",
+    .request_id = idempotency_key,
+    .idempotency_key = idempotency_key,
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = n_rows,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_append_batch (fact_store, &schema, &batch, &inserted);
+  if (rc == WYRELOG_E_OK)
+    (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
+  if (rc == WYRELOG_E_OK)
+    rc = emit_fact_append_audit (ctx, actor, tenant, graph, namespace_id,
+        relation, batch_id, inserted, request_id);
+  g_mutex_unlock (&ctx->policy_mutation_lock);
+
+  graph_lookup_clear (&lookup);
+  wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+  schema_columns_clear (schema_columns, n_loaded);
+  fact_rows_clear (rows, n_rows);
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, "fact_batch_conflict");
+    return;
+  }
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_fact_payload");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "fact_append_failed");
+    return;
+  }
+  set_fact_append_json (msg, batch_id, inserted);
+}
+#else
+static void
+schema_register_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+}
+
+static void
+facts_route_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+}
+#endif
+
 static gboolean
 ensure_policy_permission_exists (SoupServerMessage *msg,
     WylDaemonHttpContext *ctx, const gchar *perm)
@@ -2614,6 +3608,9 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/readyz", readyz_handler, ctx, NULL);
   soup_server_add_handler (server, "/facts/status", facts_status_handler, ctx,
       NULL);
+  soup_server_add_handler (server, "/facts/schema/register",
+      schema_register_handler, ctx, NULL);
+  soup_server_add_handler (server, "/facts", facts_route_handler, ctx, NULL);
   soup_server_add_handler (server, "/profile/status", profile_status_handler,
       ctx, NULL);
   soup_server_add_handler (server, "/profile/events", profile_events_handler,
@@ -2630,6 +3627,11 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       ctx, NULL);
   soup_server_add_handler (server, "/tenants/delete", tenant_delete_handler,
       ctx, NULL);
+  soup_server_add_handler (server, "/graphs/create", graph_create_handler, ctx,
+      NULL);
+  soup_server_add_handler (server, "/graphs/seal", graph_seal_handler, ctx,
+      NULL);
+  soup_server_add_handler (server, "/graphs", graphs_list_handler, ctx, NULL);
   soup_server_add_handler (server, "/decide", decide_handler, ctx, NULL);
   soup_server_add_handler (server, "/policy/permissions/grant",
       policy_permission_grant_handler, ctx, NULL);

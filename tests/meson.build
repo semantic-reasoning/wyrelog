@@ -158,6 +158,39 @@ if build_client
       timeout : 60,
     )
   endif
+
+  if get_option('enable_fact_store').allowed()
+    test_daemon_http_facts_c_args = [
+      '-DWYL_HAS_DAEMON_HTTP',
+      '-DWYL_HAS_FACT_STORE',
+      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    ]
+    test_daemon_http_facts_deps = [
+      wyrelog_dep,
+      wyrelog_client_dep,
+      libsoup_dep,
+      sodium_dep,
+      duckdb_dep,
+      sqlite_dep,
+    ]
+    if get_option('enable_audit').allowed()
+      test_daemon_http_facts_c_args += '-DWYL_HAS_AUDIT'
+      test_daemon_http_facts_deps += duckdb_dep
+    endif
+    test_daemon_http_facts = executable('test-daemon-http-facts',
+      'test-daemon-http-facts.c',
+      '../wyrelog/daemon/http.c',
+      '../wyrelog/daemon/delta.c',
+      '../wyrelog/daemon/fact-status.c',
+      c_args : test_daemon_http_facts_c_args,
+      include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+      dependencies : test_daemon_http_facts_deps,
+    )
+
+    test('daemon-http-facts', test_daemon_http_facts,
+      timeout : 60,
+    )
+  endif
 endif
 
 test_client_audit_daemon_c_args = []
