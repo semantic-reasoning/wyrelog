@@ -70,8 +70,12 @@ if get_option('enable_audit').allowed()
   wyrelog_sources += files('audit/conn.c')
   wyrelog_deps += duckdb_dep
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
-elif get_option('enable_fact_store').allowed()
-  wyrelog_deps += duckdb_dep
+endif
+if get_option('enable_fact_store').allowed()
+  wyrelog_sources += files('fact/store.c')
+  if not get_option('enable_audit').allowed()
+    wyrelog_deps += duckdb_dep
+  endif
 endif
 if get_option('enable_fact_store').allowed()
   wyrelog_c_args += '-DWYL_HAS_FACT_STORE'

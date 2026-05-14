@@ -276,6 +276,16 @@ test_fact_schema = executable('test-fact-schema',
 
 test('fact-schema', test_fact_schema)
 
+if get_option('enable_fact_store').allowed()
+  test_fact_store = executable('test-fact-store',
+    'test-fact-store.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+  )
+
+  test('fact-store', test_fact_store)
+endif
+
 test_policy_store_toctou = executable('test-policy-store-toctou',
   'test-policy-store-toctou.c',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
