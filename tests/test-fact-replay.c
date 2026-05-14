@@ -6,6 +6,7 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
 #include "wyrelog/fact/store-private.h"
@@ -383,6 +384,62 @@ assert_replayed_order_b_only (WylEngine *engine)
 
 typedef struct
 {
+  guint total;
+  guint ready;
+  guint unavailable;
+  gboolean saw_tenant_a_ready;
+  gboolean saw_tenant_b_unavailable;
+} FactStatusProbe;
+
+static wyrelog_error_t
+fact_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
+{
+  FactStatusProbe *probe = user_data;
+  probe->total++;
+  if (status->state == WYL_FACT_GRAPH_STATE_READY)
+    probe->ready++;
+  if (status->state == WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE)
+    probe->unavailable++;
+  if (g_strcmp0 (status->tenant_id, "tenant-a") == 0
+      && g_strcmp0 (status->graph_id, "orders") == 0
+      && status->state == WYL_FACT_GRAPH_STATE_READY
+      && status->queryable && status->last_error_class == NULL)
+    probe->saw_tenant_a_ready = TRUE;
+  if (g_strcmp0 (status->tenant_id, "tenant-b") == 0
+      && g_strcmp0 (status->graph_id, "orders") == 0
+      && status->state == WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE
+      && !status->queryable
+      && g_strcmp0 (status->last_error_class, "store_unavailable") == 0)
+    probe->saw_tenant_b_unavailable = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static void
+assert_handle_fact_status (WylHandle *handle)
+{
+  FactStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+          fact_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 2);
+  g_assert_cmpuint (probe.ready, ==, 1);
+  g_assert_cmpuint (probe.unavailable, ==, 1);
+  g_assert_true (probe.saw_tenant_a_ready);
+  g_assert_true (probe.saw_tenant_b_unavailable);
+
+  g_autofree gchar *json = wyl_daemon_fact_status_json (handle, TRUE);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"status\":\"degraded\""));
+  g_assert_nonnull (strstr (json, "\"tenant_id\":\"tenant-a\""));
+  g_assert_nonnull (strstr (json, "\"tenant_id\":\"tenant-b\""));
+  g_assert_nonnull (strstr (json, "\"graph_id\":\"orders\""));
+  g_assert_nonnull (strstr (json,
+          "\"last_error_class\":\"store_unavailable\""));
+  g_assert_null (strstr (json, "facts.duckdb"));
+  g_assert_null (strstr (json, "storage_path"));
+}
+
+typedef struct
+{
   const gchar *relation;
   guint count;
   gint64 handle;
@@ -588,6 +645,7 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   g_assert_nonnull (tenant_a);
   g_assert_null (tenant_b);
   assert_replayed_order_b_only (tenant_a);
+  assert_handle_fact_status (handle);
 
   wyl_fact_replay_summary_t summary = { 0 };
   g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
@@ -598,6 +656,7 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   tenant_a = wyl_handle_get_fact_graph_engine (handle, "tenant-a", "orders");
   g_assert_nonnull (tenant_a);
   assert_replayed_order_b_only (tenant_a);
+  assert_handle_fact_status (handle);
   remove_tree (root);
 #else
   g_test_skip ("fact graph path isolation is Unix-only in this build");

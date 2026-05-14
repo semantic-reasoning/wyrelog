@@ -77,6 +77,8 @@ struct _WylHandle
   wyl_policy_store_t *policy_store;
 #ifdef WYL_HAS_FACT_STORE
   GHashTable *fact_graph_engines;
+  GHashTable *fact_graph_statuses;
+  GMutex fact_graphs_lock;
 #endif
   gboolean login_skip_mfa_allowed;
   gboolean engine_pair_poisoned;
@@ -177,6 +179,8 @@ wyl_handle_finalize (GObject *object)
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
 #ifdef WYL_HAS_FACT_STORE
   g_clear_pointer (&self->fact_graph_engines, g_hash_table_unref);
+  g_clear_pointer (&self->fact_graph_statuses, g_hash_table_unref);
+  g_mutex_clear (&self->fact_graphs_lock);
 #endif
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
@@ -221,6 +225,10 @@ wyl_handle_init (WylHandle *self)
 #ifdef WYL_HAS_FACT_STORE
   self->fact_graph_engines =
       g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
+  self->fact_graph_statuses =
+      g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
+      wyl_fact_graph_status_free);
+  g_mutex_init (&self->fact_graphs_lock);
 #endif
   self->pending_deltas =
       g_ptr_array_new_with_free_func (wyl_pending_delta_free);
@@ -709,6 +717,8 @@ wyl_shutdown (WylHandle *handle)
 #ifdef WYL_HAS_FACT_STORE
   if (handle->fact_graph_engines != NULL)
     g_hash_table_remove_all (handle->fact_graph_engines);
+  if (handle->fact_graph_statuses != NULL)
+    g_hash_table_remove_all (handle->fact_graph_statuses);
 #endif
   handle->engine_pair_poisoned = FALSE;
   clear_pending_deltas (handle);
@@ -919,7 +929,8 @@ wyl_handle_replay_fact_graphs (WylHandle *self,
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || self->fact_graph_engines == NULL)
+  if (self->policy_store == NULL || self->fact_graph_engines == NULL
+      || self->fact_graph_statuses == NULL)
     return WYRELOG_E_INVALID;
 
   /*
@@ -928,8 +939,11 @@ wyl_handle_replay_fact_graphs (WylHandle *self,
    * snapshots, and repeated replay replaces the graph engine, making the load
    * lifecycle idempotent without appending duplicate EDB rows.
    */
-  return wyl_fact_replay_policy_graphs (self->policy_store,
-      self->fact_graph_engines, out_summary);
+  g_mutex_lock (&self->fact_graphs_lock);
+  wyrelog_error_t rc = wyl_fact_replay_policy_graphs (self->policy_store,
+      self->fact_graph_engines, self->fact_graph_statuses, out_summary);
+  g_mutex_unlock (&self->fact_graphs_lock);
+  return rc;
 }
 
 WylEngine *
@@ -940,7 +954,32 @@ wyl_handle_get_fact_graph_engine (WylHandle *self, const gchar *tenant_id,
   if (tenant_id == NULL || graph_id == NULL || self->fact_graph_engines == NULL)
     return NULL;
   g_autofree gchar *key = fact_graph_key (tenant_id, graph_id);
-  return g_hash_table_lookup (self->fact_graph_engines, key);
+  g_mutex_lock (&self->fact_graphs_lock);
+  WylEngine *engine = g_hash_table_lookup (self->fact_graph_engines, key);
+  g_mutex_unlock (&self->fact_graphs_lock);
+  return engine;
+}
+
+wyrelog_error_t
+wyl_handle_foreach_fact_graph_status (WylHandle *self,
+    wyl_fact_graph_status_cb cb, gpointer user_data)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), WYRELOG_E_INVALID);
+  if (cb == NULL || self->fact_graph_statuses == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&self->fact_graphs_lock);
+  GHashTableIter iter;
+  gpointer key = NULL;
+  gpointer value = NULL;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  g_hash_table_iter_init (&iter, self->fact_graph_statuses);
+  while (rc == WYRELOG_E_OK && g_hash_table_iter_next (&iter, &key, &value)) {
+    (void) key;
+    rc = cb (value, user_data);
+  }
+  g_mutex_unlock (&self->fact_graphs_lock);
+  return rc;
 }
 #endif
 

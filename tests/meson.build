@@ -123,6 +123,10 @@ if build_client
     libsoup_dep,
     sodium_dep,
   ]
+  if get_option('enable_fact_store').allowed()
+    test_daemon_http_decide_c_args += '-DWYL_HAS_FACT_STORE'
+    test_daemon_http_decide_deps += duckdb_dep
+  endif
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
     test_daemon_http_decide_deps += duckdb_dep
@@ -131,6 +135,7 @@ if build_client
     'test-daemon-http-decide.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
     c_args : test_daemon_http_decide_c_args,
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_daemon_http_decide_deps,
@@ -143,6 +148,7 @@ if build_client
       'test-daemon-http-decide.c',
       '../wyrelog/daemon/http.c',
       '../wyrelog/daemon/delta.c',
+      '../wyrelog/daemon/fact-status.c',
       c_args : test_daemon_http_decide_c_args + '-DWYL_TEST_VARIANT_AUDIT',
       include_directories : [wyrelog_inc, include_directories('../wyrelog')],
       dependencies : test_daemon_http_decide_deps,
@@ -183,22 +189,29 @@ if build_client and host_machine.system() != 'windows'
   # so the policy mutation subcommands exercise the full client -> HTTP
   # -> handler path, including bearer-only credentials and the privileged
   # operator the daemon CLI cannot seed on its own.
+  test_wyctl_policy_daemon_c_args = [
+    '-DWYL_HAS_DAEMON_HTTP',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+  ]
+  test_wyctl_policy_daemon_deps = [
+    wyrelog_dep,
+    wyrelog_client_dep,
+    libsoup_dep,
+    sodium_dep,
+  ]
+  if get_option('enable_fact_store').allowed()
+    test_wyctl_policy_daemon_c_args += '-DWYL_HAS_FACT_STORE'
+    test_wyctl_policy_daemon_deps += duckdb_dep
+  endif
   test_wyctl_policy_daemon = executable('test-wyctl-policy-daemon',
     'test-wyctl-policy-daemon.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
-    c_args : [
-      '-DWYL_HAS_DAEMON_HTTP',
-      '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
-    ],
+    '../wyrelog/daemon/fact-status.c',
+    c_args : test_wyctl_policy_daemon_c_args,
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : [
-      wyrelog_dep,
-      wyrelog_client_dep,
-      libsoup_dep,
-      sodium_dep,
-    ],
+    dependencies : test_wyctl_policy_daemon_deps,
   )
 
   test('wyctl-policy-daemon', test_wyctl_policy_daemon,
@@ -298,6 +311,7 @@ if get_option('enable_fact_store').allowed()
 
   test_fact_replay = executable('test-fact-replay',
     'test-fact-replay.c',
+    '../wyrelog/daemon/fact-status.c',
     c_args : ['-DWYL_HAS_FACT_STORE'],
     include_directories : include_directories('../wyrelog'),
     dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],

@@ -34,8 +34,40 @@ typedef struct
 {
   wyl_policy_store_t *policy;
   GHashTable *graph_engines;
+  GHashTable *graph_statuses;
   wyl_fact_replay_summary_t *summary;
 } PolicyReplayCtx;
+
+const gchar *
+wyl_fact_graph_state_name (wyl_fact_graph_state_t state)
+{
+  switch (state) {
+    case WYL_FACT_GRAPH_STATE_READY:
+      return "ready";
+    case WYL_FACT_GRAPH_STATE_DEGRADED:
+      return "degraded";
+    case WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH:
+      return "schema_mismatch";
+    case WYL_FACT_GRAPH_STATE_REPLAY_FAILED:
+      return "replay_failed";
+    case WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE:
+      return "store_unavailable";
+    default:
+      return "degraded";
+  }
+}
+
+void
+wyl_fact_graph_status_free (gpointer data)
+{
+  wyl_fact_graph_status_t *status = data;
+  if (status == NULL)
+    return;
+  g_free (status->tenant_id);
+  g_free (status->graph_id);
+  g_free (status->last_error_class);
+  g_free (status);
+}
 
 static void
 append_wirelog_identifier (GString *out, const gchar *identifier)
@@ -527,6 +559,38 @@ graph_key (const gchar *tenant_id, const gchar *graph_id)
   return g_strdup_printf ("%s\n%s", tenant_id, graph_id);
 }
 
+static wyl_fact_graph_state_t
+classify_graph_replay_failure (wyrelog_error_t rc)
+{
+  switch (rc) {
+    case WYRELOG_E_NOT_FOUND:
+    case WYRELOG_E_IO:
+      return WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE;
+    case WYRELOG_E_POLICY:
+      return WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH;
+    default:
+      return WYL_FACT_GRAPH_STATE_REPLAY_FAILED;
+  }
+}
+
+static void
+record_graph_status (GHashTable *statuses,
+    const wyl_policy_fact_graph_info_t *info, wyl_fact_graph_state_t state)
+{
+  if (statuses == NULL || info == NULL)
+    return;
+  wyl_fact_graph_status_t *status = g_new0 (wyl_fact_graph_status_t, 1);
+  status->tenant_id = g_strdup (info->tenant_id);
+  status->graph_id = g_strdup (info->graph_id);
+  status->state = state;
+  status->queryable = state == WYL_FACT_GRAPH_STATE_READY;
+  status->last_replay_at_us = g_get_real_time ();
+  if (state != WYL_FACT_GRAPH_STATE_READY)
+    status->last_error_class = g_strdup (wyl_fact_graph_state_name (state));
+  g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
+  g_hash_table_replace (statuses, g_steal_pointer (&key), status);
+}
+
 static wyrelog_error_t
 replay_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
 {
@@ -538,10 +602,13 @@ replay_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
   if (rc == WYRELOG_E_OK) {
     g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
     g_hash_table_replace (ctx->graph_engines, g_steal_pointer (&key), engine);
+    record_graph_status (ctx->graph_statuses, info, WYL_FACT_GRAPH_STATE_READY);
     ctx->summary->graphs_loaded++;
   } else {
     g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
     g_hash_table_remove (ctx->graph_engines, key);
+    record_graph_status (ctx->graph_statuses, info,
+        classify_graph_replay_failure (rc));
     ctx->summary->graphs_degraded++;
   }
   return WYRELOG_E_OK;
@@ -549,17 +616,20 @@ replay_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
 
 wyrelog_error_t
 wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
-    GHashTable *graph_engines, wyl_fact_replay_summary_t *out_summary)
+    GHashTable *graph_engines, GHashTable *graph_statuses,
+    wyl_fact_replay_summary_t *out_summary)
 {
   if (out_summary != NULL)
     memset (out_summary, 0, sizeof (*out_summary));
-  if (policy == NULL || graph_engines == NULL)
+  if (policy == NULL || graph_engines == NULL || graph_statuses == NULL)
     return WYRELOG_E_INVALID;
 
   wyl_fact_replay_summary_t summary = { 0 };
+  g_hash_table_remove_all (graph_statuses);
   PolicyReplayCtx ctx = {
     .policy = policy,
     .graph_engines = graph_engines,
+    .graph_statuses = graph_statuses,
     .summary = &summary,
   };
   wyrelog_error_t rc = wyl_policy_store_foreach_fact_graph (policy, NULL,
