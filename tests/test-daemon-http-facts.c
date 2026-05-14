@@ -133,6 +133,7 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
     "wr.graph.manage",
     "wr.schema.manage",
     "wr.fact.write",
+    "wr.datalog.query",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   for (gsize i = 0; i < G_N_ELEMENTS (perms); i++) {
@@ -353,6 +354,107 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
 
   g_clear_pointer (&body, g_free);
+  g_autofree gchar *datalog_query = g_strdup_printf ("tenant=%s&%s",
+      WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, NULL,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 401 || strstr (body, "\"datalog_auth_required\"") == NULL)
+    return 330;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, deny_token,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"datalog_denied\"") == NULL)
+    return 331;
+
+  const gchar *invalid_datalog_bodies[] = {
+    "{\"query\":\"orders(O,A) :- orders(O,A)\",\"output\":\"json\"}",
+    "{\"query\":\".decl orders(O:symbol,A:int64)\",\"output\":\"json\"}",
+    "{\"query\":\"orders(O,A);orders(O,A)\",\"output\":\"json\"}",
+    "{\"query\":\"SELECT * FROM orders\",\"output\":\"json\"}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_datalog_bodies); i++) {
+    g_clear_pointer (&body, g_free);
+    rc = send_raw (session, "POST", base_url,
+        "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+        invalid_datalog_bodies[i], &status, &body);
+    if (rc != 0)
+      return rc;
+    if (status != 400 || strstr (body, "\"invalid_datalog_request\"") == NULL)
+      return 340 + (gint) i;
+  }
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"relation\":\"orders\"") == NULL ||
+      strstr (body, "\"columns\":[\"O\",\"A\"]") == NULL ||
+      strstr (body, "{\"O\":\"o-1\",\"A\":42}") == NULL ||
+      strstr (body, "facts.duckdb") != NULL)
+    return 332;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+      "{\"query\":\"payments(P)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"datalog_relation_denied\"") == NULL)
+    return 333;
+
+  if (wyl_handle_replay_fact_graphs (handle, NULL) != WYRELOG_E_OK)
+    return 334;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+      "{\"query\":\"orders(\\\"o-1\\\",A)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "{\"A\":42}") == NULL ||
+      strstr (body, "\"row_count\":1") == NULL)
+    return 335;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *append_query_2 = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-7&"
+      "idempotency_key=key-7&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:append", append_query_2,
+      admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
+    return 336;
+  rc = check_fact_projection_row_count (handle, "orders", 2);
+  if (rc != 0)
+    return rc;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":1}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"row_count\":1") == NULL ||
+      strstr (body, "\"truncated\":true") == NULL)
+    return 337;
+
+  g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_append_query = g_strdup_printf
       ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-2&"
       "idempotency_key=key-2&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
@@ -363,7 +465,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
     return 29;
-  rc = check_fact_projection_row_count (handle, "orders", 1);
+  rc = check_fact_projection_row_count (handle, "orders", 2);
   if (rc != 0)
     return rc;
 

@@ -43,6 +43,39 @@ static gboolean parse_login_response_json (const gchar * data, gsize size,
     gchar ** out_session_state);
 
 static void
+append_json_string (GString *json, const gchar *value)
+{
+  g_string_append_c (json, '"');
+  for (const guchar * p = (const guchar *)(value != NULL ? value : "");
+      *p != '\0'; p++) {
+    switch (*p) {
+      case '"':
+        g_string_append (json, "\\\"");
+        break;
+      case '\\':
+        g_string_append (json, "\\\\");
+        break;
+      case '\n':
+        g_string_append (json, "\\n");
+        break;
+      case '\r':
+        g_string_append (json, "\\r");
+        break;
+      case '\t':
+        g_string_append (json, "\\t");
+        break;
+      default:
+        if (*p < 0x20)
+          g_string_append_printf (json, "\\u%04x", *p);
+        else
+          g_string_append_c (json, (gchar) * p);
+        break;
+    }
+  }
+  g_string_append_c (json, '"');
+}
+
+static void
 wyl_client_clear_login_state (WylClient *self)
 {
   g_clear_pointer (&self->session_token, g_free);
@@ -912,6 +945,57 @@ wyl_client_fact_put_batch (WylClient *client, const gchar *tenant,
     *out_result = result;
   }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_datalog_query_json (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *query, guint limit,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    gchar **out_json)
+{
+  if (out_json != NULL)
+    *out_json = NULL;
+  if (graph == NULL || graph[0] == '\0' || query == NULL ||
+      query[0] == '\0' || out_json == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *session_token = NULL;
+  wyrelog_error_t rc = client_fact_prepare (client, tenant, guard_timestamp,
+      guard_loc_class, guard_risk, &base_url, &access_token, &session_token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *guard_query = client_fact_guard_query (tenant,
+      guard_timestamp, guard_loc_class, guard_risk,
+      access_token != NULL && access_token[0] != '\0' ? NULL : session_token);
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_graph = g_uri_escape_string (graph, NULL, TRUE);
+  g_autofree gchar *uri = g_strdup_printf ("%s/datalog/%s/%s/query?%s",
+      base_url, escaped_tenant, escaped_graph, guard_query);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  client_fact_attach_auth (message, access_token);
+
+  g_autoptr (GString) json = g_string_new ("{\"query\":");
+  append_json_string (json, query);
+  g_string_append (json, ",\"output\":\"json\"");
+  if (limit > 0)
+    g_string_append_printf (json, ",\"limit\":%u", limit);
+  g_string_append_c (json, '}');
+  g_autoptr (GBytes) request_body = g_bytes_new (json->str, json->len);
+  soup_message_set_request_body_from_bytes (message, "application/json",
+      request_body);
+
+  g_autoptr (GBytes) response_body = NULL;
+  rc = client_send_fact_message (client, message, &response_body);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (response_body, &size);
+  *out_json = g_strndup (data, size);
+  return *out_json != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
 }
 
 void

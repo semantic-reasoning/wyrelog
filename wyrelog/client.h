@@ -169,6 +169,13 @@ wyrelog_error_t wyl_client_fact_put_batch (WylClient * client,
     gint64 guard_timestamp,
     const gchar * guard_loc_class,
     gint64 guard_risk, WylClientFactAppendResult ** out_result);
+wyrelog_error_t wyl_client_datalog_query_json (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * query,
+    guint limit,
+    gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk, gchar ** out_json);
 void wyl_client_fact_append_result_free (WylClientFactAppendResult * result);
 gboolean wyl_client_fact_append_result_get_inserted
     (const WylClientFactAppendResult * result);

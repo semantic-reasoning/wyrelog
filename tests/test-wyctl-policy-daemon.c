@@ -93,6 +93,7 @@ grant_fact_authority (WylHandle *handle, const gchar *subject)
     "wr.graph.manage",
     "wr.schema.manage",
     "wr.fact.write",
+    "wr.datalog.query",
   };
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   for (gsize i = 0; i < G_N_ELEMENTS (perms); i++) {
@@ -269,6 +270,27 @@ assert_wyctl_stdout (gchar **argv, const gchar *expected_stdout)
     g_assert_not_reached ();
   }
   g_assert_cmpstr (stdout_buf, ==, expected_stdout);
+  g_assert_cmpstr (stderr_buf, ==, "");
+}
+
+static void
+assert_wyctl_stdout_contains (gchar **argv, const gchar *needle)
+{
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  g_autoptr (GError) error = NULL;
+
+  run_wyctl (argv, &stdout_buf, &stderr_buf, &wait_status);
+
+  if (!g_spawn_check_wait_status (wait_status, &error)) {
+    g_printerr ("wyctl exited with status %d\nstdout: %s\nstderr: %s\n",
+        wait_status, stdout_buf ? stdout_buf : "(null)",
+        stderr_buf ? stderr_buf : "(null)");
+    g_clear_error (&error);
+    g_assert_not_reached ();
+  }
+  g_assert_nonnull (strstr (stdout_buf, needle));
   g_assert_cmpstr (stderr_buf, ==, "");
 }
 #endif
@@ -506,6 +528,23 @@ main (void)
   assert_wyctl_stdout (fact_put_argv, "inserted\n");
   if (check_fact_projection_count (handle, 1) != 0)
     return 104;
+  gchar *datalog_query_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", (gchar *) base_url,
+    "datalog", "query",
+    "--tenant", (gchar *) WYL_TENANT_DEFAULT,
+    "--graph", "orders",
+    "--query", "orders(O,A)",
+    "--output", "json",
+    "--limit", "10",
+    "--access-token-file", token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "trusted",
+    "--guard-risk", "29",
+    NULL,
+  };
+  assert_wyctl_stdout_contains (datalog_query_argv,
+      "\"rows\":[{\"O\":\"o-1\",\"A\":42}]");
   assert_wyctl_stdout (fact_put_argv, "duplicate\n");
   if (check_fact_projection_count (handle, 1) != 0)
     return 105;

@@ -11,6 +11,7 @@
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
 #ifdef WYL_HAS_FACT_STORE
+#include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
 #endif
@@ -2635,6 +2636,262 @@ parse_fact_append_path (const gchar *path, gchar **out_tenant,
   return *out_tenant != NULL && *out_graph != NULL && *out_relation != NULL;
 }
 
+static gboolean
+parse_datalog_query_path (const gchar *path, gchar **out_tenant,
+    gchar **out_graph)
+{
+  *out_tenant = NULL;
+  *out_graph = NULL;
+  if (path == NULL || !g_str_has_prefix (path, "/datalog/") ||
+      !g_str_has_suffix (path, "/query"))
+    return FALSE;
+  const gchar *tail = path + strlen ("/datalog/");
+  g_autofree gchar *inner = g_strndup (tail,
+      strlen (tail) - strlen ("/query"));
+  g_auto (GStrv) parts = g_strsplit (inner, "/", 2);
+  if (g_strv_length (parts) != 2 || parts[0][0] == '\0' || parts[1][0] == '\0')
+    return FALSE;
+  *out_tenant = g_strdup (parts[0]);
+  *out_graph = g_strdup (parts[1]);
+  return *out_tenant != NULL && *out_graph != NULL;
+}
+
+static const gchar *
+skip_ascii_spaces (const gchar *p)
+{
+  while (p != NULL && g_ascii_isspace (*p))
+    p++;
+  return p;
+}
+
+static gchar *
+json_dup_simple_string_member (const gchar *json, const gchar *member)
+{
+  if (json == NULL || member == NULL)
+    return NULL;
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\"", member);
+  const gchar *p = strstr (json, needle);
+  if (p == NULL)
+    return NULL;
+  p += strlen (needle);
+  p = skip_ascii_spaces (p);
+  if (*p != ':')
+    return NULL;
+  p = skip_ascii_spaces (p + 1);
+  if (*p != '"')
+    return NULL;
+  p++;
+  g_autoptr (GString) value = g_string_new (NULL);
+  while (*p != '\0' && *p != '"') {
+    if ((guchar) * p < 0x20)
+      return NULL;
+    if (*p == '\\') {
+      p++;
+      switch (*p) {
+        case '"':
+        case '\\':
+        case '/':
+          g_string_append_c (value, *p++);
+          break;
+        case 'n':
+          g_string_append_c (value, '\n');
+          p++;
+          break;
+        case 'r':
+          g_string_append_c (value, '\r');
+          p++;
+          break;
+        case 't':
+          g_string_append_c (value, '\t');
+          p++;
+          break;
+        default:
+          return NULL;
+      }
+      continue;
+    }
+    g_string_append_c (value, *p++);
+  }
+  if (*p != '"')
+    return NULL;
+  return g_string_free (g_steal_pointer (&value), FALSE);
+}
+
+static gboolean
+json_parse_simple_uint_member (const gchar *json, const gchar *member,
+    guint *out_value, gboolean *out_present)
+{
+  if (out_present != NULL)
+    *out_present = FALSE;
+  if (json == NULL || member == NULL || out_value == NULL)
+    return FALSE;
+  g_autofree gchar *needle = g_strdup_printf ("\"%s\"", member);
+  const gchar *p = strstr (json, needle);
+  if (p == NULL)
+    return TRUE;
+  if (out_present != NULL)
+    *out_present = TRUE;
+  p += strlen (needle);
+  p = skip_ascii_spaces (p);
+  if (*p != ':')
+    return FALSE;
+  p = skip_ascii_spaces (p + 1);
+  if (!g_ascii_isdigit (*p))
+    return FALSE;
+  errno = 0;
+  gchar *end = NULL;
+  guint64 parsed = g_ascii_strtoull (p, &end, 10);
+  if (errno != 0 || end == p || parsed > G_MAXUINT)
+    return FALSE;
+  *out_value = (guint) parsed;
+  return TRUE;
+}
+
+static wyrelog_error_t
+emit_datalog_query_audit (WylDaemonHttpContext *ctx, const gchar *actor,
+    const gchar *tenant, const gchar *graph, const gchar *query_name,
+    const gchar *decision, guint row_count, gboolean truncated,
+    const gchar *request_id)
+{
+#ifdef WYL_HAS_AUDIT
+  g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
+  g_autofree gchar *resource = g_strdup_printf ("%s/%s/%s", tenant, graph,
+      query_name != NULL ? query_name : "unknown");
+  g_autofree gchar *origin = g_strdup_printf ("rows=%u truncated=%s",
+      row_count, truncated ? "true" : "false");
+  wyl_audit_event_set_subject_id (ev, actor);
+  wyl_audit_event_set_action (ev, "datalog_query");
+  wyl_audit_event_set_resource_id (ev, resource);
+  wyl_audit_event_set_deny_reason (ev, decision);
+  wyl_audit_event_set_deny_origin (ev, origin);
+  wyl_audit_event_set_request_id (ev, request_id);
+  wyl_audit_event_set_decision (ev,
+      g_strcmp0 (decision, "allow") == 0 ? WYL_DECISION_ALLOW :
+      WYL_DECISION_DENY);
+  return wyl_audit_emit (ctx->handle, ev);
+#else
+  (void) ctx;
+  (void) actor;
+  (void) tenant;
+  (void) graph;
+  (void) query_name;
+  (void) decision;
+  (void) row_count;
+  (void) truncated;
+  (void) request_id;
+  return WYRELOG_E_OK;
+#endif
+}
+
+static void
+datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  g_autofree gchar *tenant = NULL;
+  g_autofree gchar *graph = NULL;
+  if (!parse_datalog_query_path (path, &tenant, &graph) ||
+      !wyl_policy_store_tenant_id_is_valid (tenant) ||
+      !fact_http_customer_name_is_valid (graph)) {
+    set_json_error (msg, 400, "invalid_datalog_request");
+    return;
+  }
+  if (!query_tenant_matches (msg, query, tenant))
+    return;
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
+          "wr.datalog.query", tenant, "datalog_auth_required",
+          "invalid_datalog_auth", "datalog_denied", "datalog_auth_failed",
+          &actor))
+    return;
+
+  GraphLookupCtx lookup = { 0 };
+  wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+      (ctx->handle), tenant, graph, &lookup);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "datalog_query_failed");
+    return;
+  }
+  if (!lookup.found) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 404, "graph_not_found");
+    return;
+  }
+  if (lookup.info.sealed) {
+    graph_lookup_clear (&lookup);
+    set_json_error (msg, 409, "graph_not_queryable");
+    return;
+  }
+  graph_lookup_clear (&lookup);
+
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 16 * 1024, &body)) {
+    set_json_error (msg, 400, "invalid_datalog_request");
+    return;
+  }
+  g_autofree gchar *query_atom = json_dup_simple_string_member (body, "query");
+  g_autofree gchar *output = json_dup_simple_string_member (body, "output");
+  guint limit = 0;
+  gboolean limit_present = FALSE;
+  if (query_atom == NULL || (output != NULL && g_strcmp0 (output, "json") != 0)
+      || !json_parse_simple_uint_member (body, "limit", &limit,
+          &limit_present) || (limit_present && limit == 0)) {
+    set_json_error (msg, 400, "invalid_datalog_request");
+    return;
+  }
+
+  const gchar *request_id = ensure_request_id_header (msg);
+  g_autofree gchar *json = NULL;
+  g_autofree gchar *query_name = NULL;
+  gboolean truncated = FALSE;
+  guint row_count = 0;
+  wyl_fact_datalog_query_options_t opts = {
+    .tenant_id = tenant,
+    .graph_id = graph,
+    .query = query_atom,
+    .limit = limit,
+    .query_id = request_id,
+  };
+  rc = wyl_fact_datalog_query_json (ctx->handle, &opts, &json, &truncated,
+      &row_count, &query_name);
+  if (rc == WYRELOG_E_INVALID) {
+    (void) emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+        "invalid", 0, FALSE, request_id);
+    set_json_error (msg, 400, "invalid_datalog_request");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY || rc == WYRELOG_E_NOT_FOUND) {
+    (void) emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+        "deny", 0, FALSE, request_id);
+    set_json_error (msg, 403, "datalog_relation_denied");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    (void) emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+        "failed", 0, FALSE, request_id);
+    set_json_error (msg, 500, "datalog_query_failed");
+    return;
+  }
+  rc = emit_datalog_query_audit (ctx, actor, tenant, graph, query_name,
+      "allow", row_count, truncated, request_id);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "datalog_query_failed");
+    return;
+  }
+
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, json, strlen (json));
+}
+
 static wyrelog_error_t
 emit_fact_append_audit (WylDaemonHttpContext *ctx, const gchar *actor,
     const gchar *tenant, const gchar *graph, const gchar *namespace_id,
@@ -2884,6 +3141,18 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
   (void) server;
+  (void) path;
+  (void) query;
+  (void) user_data;
+  set_json_error (msg, 503, "fact_store_disabled");
+}
+
+static void
+datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) msg;
   (void) path;
   (void) query;
   (void) user_data;
@@ -3611,6 +3880,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/facts/schema/register",
       schema_register_handler, ctx, NULL);
   soup_server_add_handler (server, "/facts", facts_route_handler, ctx, NULL);
+  soup_server_add_handler (server, "/datalog", datalog_query_handler, ctx,
+      NULL);
   soup_server_add_handler (server, "/profile/status", profile_status_handler,
       ctx, NULL);
   soup_server_add_handler (server, "/profile/events", profile_events_handler,

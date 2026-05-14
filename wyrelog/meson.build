@@ -72,7 +72,8 @@ if get_option('enable_audit').allowed()
   wyrelog_c_args += '-DWYL_HAS_AUDIT'
 endif
 if get_option('enable_fact_store').allowed()
-  wyrelog_sources += files('fact/compound.c', 'fact/replay.c', 'fact/store.c')
+  wyrelog_sources += files('fact/compound.c', 'fact/query.c',
+    'fact/replay.c', 'fact/store.c')
   if not get_option('enable_audit').allowed()
     wyrelog_deps += duckdb_dep
   endif

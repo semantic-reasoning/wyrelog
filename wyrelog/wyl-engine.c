@@ -528,6 +528,7 @@ wyl_engine_finalize (GObject *object)
 
   g_clear_pointer (&self->session, wirelog_easy_close);
   g_clear_pointer (&self->delta_cookie, g_free);
+  g_clear_pointer (&self->symbols_by_id, g_hash_table_unref);
 
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     g_clear_pointer (&self->dl_src_logical_paths[i], g_free);
@@ -547,6 +548,8 @@ static void
 wyl_engine_init (WylEngine *self)
 {
   self->session = NULL;
+  self->symbols_by_id =
+      g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
   self->mode = WYL_ENGINE_MODE_NONE;
   for (gsize i = 0; i < WYL_ENGINE_TEMPLATE_COUNT; i++)
     self->dl_src_logical_paths[i] = NULL;
@@ -794,6 +797,10 @@ wyl_engine_intern_symbol_unchecked (WylEngine *self, const gchar *symbol,
     return WYRELOG_E_INTERNAL;
   }
 
+  gint64 *key = g_new (gint64, 1);
+  *key = id;
+  g_hash_table_replace (self->symbols_by_id, key, g_strdup (symbol));
+
   *out_id = id;
   return WYRELOG_E_OK;
 }
@@ -814,6 +821,15 @@ wyl_engine_owned_intern_symbol (WylEngine *self, const gchar *symbol,
     gint64 *out_id)
 {
   return wyl_engine_intern_symbol_unchecked (self, symbol, out_id);
+}
+
+gchar *
+wyl_engine_owned_dup_interned_symbol (WylEngine *self, gint64 id)
+{
+  if (self == NULL || !WYL_IS_ENGINE (self) || self->symbols_by_id == NULL)
+    return NULL;
+  const gchar *symbol = g_hash_table_lookup (self->symbols_by_id, &id);
+  return g_strdup (symbol);
 }
 
 static wyrelog_error_t

@@ -69,6 +69,12 @@ wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
     wyl_fact_replay_summary_t * out_summary);
 WylEngine *wyl_handle_get_fact_graph_engine (WylHandle * self,
     const gchar * tenant_id, const gchar * graph_id);
+typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
+    const gchar * relation, const gint64 * row, guint ncols,
+    gpointer user_data);
+wyrelog_error_t wyl_handle_snapshot_fact_graph_relation (WylHandle * self,
+    const gchar * tenant_id, const gchar * graph_id, const gchar * relation,
+    wyl_fact_graph_tuple_cb cb, gpointer user_data);
 typedef wyrelog_error_t (*wyl_fact_graph_status_cb) (const
     wyl_fact_graph_status_t * status, gpointer user_data);
 wyrelog_error_t wyl_handle_foreach_fact_graph_status (WylHandle * self,
