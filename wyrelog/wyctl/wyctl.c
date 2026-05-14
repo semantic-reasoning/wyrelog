@@ -743,23 +743,31 @@ run_policy_decide_request (const WyctlOptions *global_opts,
     return 2;
   *out_result = NULL;
 
-  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
-  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+  if (!daemon_url_is_valid (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
 
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
 
   g_autoptr (WylClient) client = NULL;
-  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
           WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
@@ -866,8 +874,11 @@ run_policy_decision_command (const WyctlOptions *global_opts,
     g_printerr ("wyctl: missing --resource\n");
     return 2;
   }
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
   g_autofree gchar *access_token = NULL;
-  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  int token_rc = load_access_token_file (access_token_file, &access_token);
   if (token_rc != 0)
     return token_rc;
 
@@ -929,17 +940,28 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
     return 2;
   }
 
-  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
-  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+  if (!daemon_url_is_valid (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
 
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
@@ -962,12 +984,12 @@ run_policy_permission_mutation_command (const WyctlOptions *global_opts,
   }
 
   g_autofree gchar *access_token = NULL;
-  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  int token_rc = load_access_token_file (access_token_file, &access_token);
   if (token_rc != 0)
     return token_rc;
 
   g_autoptr (WylClient) client = NULL;
-  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
           WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
@@ -1056,17 +1078,28 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
     return 2;
   }
 
-  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
-  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+  if (!daemon_url_is_valid (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
 
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
@@ -1089,12 +1122,12 @@ run_policy_role_mutation_command (const WyctlOptions *global_opts,
   }
 
   g_autofree gchar *access_token = NULL;
-  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  int token_rc = load_access_token_file (access_token_file, &access_token);
   if (token_rc != 0)
     return token_rc;
 
   g_autoptr (WylClient) client = NULL;
-  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
           WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid policy credentials\n");
@@ -1177,23 +1210,26 @@ parse_guard_options (const gchar *timestamp_arg, const gchar *loc_class,
   return TRUE;
 }
 
+/* Build the bearer-authenticated WylClient used by the fact / graph /
+ * datalog subcommands. All values are already resolved against
+ * GSettings by the caller, so this helper does no fallback lookup. */
 static int
-create_fact_client (const WyctlOptions *global_opts, const gchar *tenant,
-    const gchar *access_token_file, WylClient **out_client)
+create_fact_client (const gchar *daemon_url, const gchar *timeout_ms_arg,
+    const gchar *tenant, const gchar *access_token_file, WylClient **out_client)
 {
   if (out_client == NULL)
     return 2;
   *out_client = NULL;
-  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
-  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+  if (!daemon_url_is_valid (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
@@ -1208,7 +1244,7 @@ create_fact_client (const WyctlOptions *global_opts, const gchar *tenant,
     return token_rc;
 
   g_autoptr (WylClient) client = NULL;
-  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token, tenant)
       != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid fact credentials\n");
@@ -1270,7 +1306,22 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: unexpected graph create argument: %s\n", argv[1]);
     return 2;
   }
-  if (opts.graph == NULL || opts.graph[0] == '\0') {
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+      global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (graph == NULL || graph[0] == '\0') {
     g_printerr ("wyctl: missing --graph\n");
     return 2;
   }
@@ -1280,12 +1331,12 @@ run_graph_create (const WyctlOptions *global_opts, gint argc, gchar **argv)
           opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (global_opts, opts.tenant,
-      opts.access_token_file, &client);
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
-  wyrelog_error_t rc = wyl_client_graph_create (client, opts.tenant,
-      opts.graph, guard_timestamp, opts.guard_loc_class, guard_risk);
+  wyrelog_error_t rc = wyl_client_graph_create (client, tenant,
+      graph, guard_timestamp, opts.guard_loc_class, guard_risk);
   int exit_rc = fact_remote_exit (client, "graph create", rc,
       "graph_create_failed");
   if (exit_rc == 0)
@@ -1391,7 +1442,22 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
         argv[1]);
     return 2;
   }
-  if (opts.graph == NULL || opts.graph[0] == '\0' || opts.namespace_id == NULL
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+      global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (graph == NULL || graph[0] == '\0' || opts.namespace_id == NULL
       || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
       opts.relation[0] == '\0') {
     g_printerr ("wyctl: missing fact schema target option\n");
@@ -1416,14 +1482,14 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
     return 2;
   }
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (global_opts, opts.tenant,
-      opts.access_token_file, &client);
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
   if (client_rc != 0) {
     client_fact_columns_clear (columns, n_columns);
     return client_rc;
   }
-  wyrelog_error_t rc = wyl_client_fact_schema_register (client, opts.tenant,
-      opts.graph, opts.namespace_id, opts.relation, schema_version, columns,
+  wyrelog_error_t rc = wyl_client_fact_schema_register (client, tenant,
+      graph, opts.namespace_id, opts.relation, schema_version, columns,
       n_columns, guard_timestamp, opts.guard_loc_class, guard_risk);
   client_fact_columns_clear (columns, n_columns);
   int exit_rc = fact_remote_exit (client, "fact schema register", rc,
@@ -1487,7 +1553,22 @@ run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: unexpected fact put argument: %s\n", argv[1]);
     return 2;
   }
-  if (opts.graph == NULL || opts.graph[0] == '\0' || opts.namespace_id == NULL
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+      global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (graph == NULL || graph[0] == '\0' || opts.namespace_id == NULL
       || opts.namespace_id[0] == '\0' || opts.relation == NULL ||
       opts.relation[0] == '\0' || opts.batch_id == NULL ||
       opts.batch_id[0] == '\0' || opts.idempotency_key == NULL ||
@@ -1533,13 +1614,13 @@ run_fact_put (const WyctlOptions *global_opts, gint argc, gchar **argv)
           opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (global_opts, opts.tenant,
-      opts.access_token_file, &client);
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
   g_autoptr (WylClientFactAppendResult) result = NULL;
-  wyrelog_error_t rc = wyl_client_fact_put_batch (client, opts.tenant,
-      opts.graph, opts.namespace_id, opts.relation, schema_version,
+  wyrelog_error_t rc = wyl_client_fact_put_batch (client, tenant,
+      graph, opts.namespace_id, opts.relation, schema_version,
       opts.batch_id, opts.idempotency_key, (const guint8 *) payload,
       payload_size, guard_timestamp, opts.guard_loc_class, guard_risk,
       &result);
@@ -1634,7 +1715,22 @@ run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
     g_printerr ("wyctl: unexpected datalog query argument: %s\n", argv[1]);
     return 2;
   }
-  if (opts.graph == NULL || opts.graph[0] == '\0' || opts.query == NULL ||
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *graph = wyctl_resolve_string_option (opts.graph,
+      global_opts->settings, "default-graph");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (graph == NULL || graph[0] == '\0' || opts.query == NULL ||
       opts.query[0] == '\0') {
     g_printerr ("wyctl: missing datalog query target option\n");
     return 2;
@@ -1654,13 +1750,13 @@ run_datalog_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
           opts.guard_risk_arg, &guard_timestamp, &guard_risk))
     return 2;
   g_autoptr (WylClient) client = NULL;
-  int client_rc = create_fact_client (global_opts, opts.tenant,
-      opts.access_token_file, &client);
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
   if (client_rc != 0)
     return client_rc;
   g_autofree gchar *json = NULL;
-  wyrelog_error_t rc = wyl_client_datalog_query_json (client, opts.tenant,
-      opts.graph, opts.query, limit, guard_timestamp, opts.guard_loc_class,
+  wyrelog_error_t rc = wyl_client_datalog_query_json (client, tenant,
+      graph, opts.query, limit, guard_timestamp, opts.guard_loc_class,
       guard_risk, &json);
   int exit_rc = fact_remote_exit (client, "datalog query", rc,
       "datalog_query_failed");
@@ -1715,17 +1811,28 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
 
-  if (global_opts->daemon_url == NULL || global_opts->daemon_url[0] == '\0') {
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings,
+      "default-timeout-ms");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (daemon_url == NULL || daemon_url[0] == '\0') {
     g_printerr ("wyctl: missing daemon URL\n");
     return 2;
   }
-  if (!daemon_url_is_valid (global_opts->daemon_url)) {
+  if (!daemon_url_is_valid (daemon_url)) {
     g_printerr ("wyctl: invalid daemon URL\n");
     return 2;
   }
 
   guint timeout_ms = 0;
-  if (!parse_timeout_ms (global_opts->timeout_ms_arg, &timeout_ms)) {
+  if (!parse_timeout_ms (timeout_ms_arg, &timeout_ms)) {
     g_printerr ("wyctl: invalid timeout\n");
     return 2;
   }
@@ -1753,12 +1860,12 @@ run_audit_query (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
 
   g_autofree gchar *access_token = NULL;
-  int token_rc = load_access_token_file (opts.access_token_file, &access_token);
+  int token_rc = load_access_token_file (access_token_file, &access_token);
   if (token_rc != 0)
     return token_rc;
 
   g_autoptr (WylClient) client = NULL;
-  if (wyl_client_new (global_opts->daemon_url, &client) != WYRELOG_E_OK ||
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK ||
       wyl_client_set_bearer_credentials (client, access_token,
           WYL_TENANT_DEFAULT) != WYRELOG_E_OK) {
     g_printerr ("wyctl: invalid audit credentials\n");
