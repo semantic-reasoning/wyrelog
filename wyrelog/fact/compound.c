@@ -540,6 +540,12 @@ loaded_term_clear (loaded_term_t *term)
   g_free (term->content_hash);
 }
 
+static gchar *
+compound_replay_cache_key (const gchar *namespace_id, gint64 compound_ref)
+{
+  return g_strdup_printf ("%s:%" G_GINT64_FORMAT, namespace_id, compound_ref);
+}
+
 static wyrelog_error_t
 load_term_unlocked (duckdb_connection conn, const gchar *tenant_id,
     const gchar *graph_id, const gchar *namespace_id, gint64 compound_ref,
@@ -592,7 +598,7 @@ load_term_unlocked (duckdb_connection conn, const gchar *tenant_id,
 static wyrelog_error_t replay_unlocked (duckdb_connection conn,
     WylEngine * engine, const gchar * tenant_id, const gchar * graph_id,
     const gchar * namespace_id, gint64 compound_ref, guint depth,
-    GHashTable * seen, gint64 * out_handle);
+    GHashTable * seen, GHashTable * handles, gint64 * out_handle);
 
 static wyrelog_error_t
 load_logical_arg_unlocked (idx_t row, duckdb_result *result,
@@ -683,7 +689,7 @@ static wyrelog_error_t
 materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
     const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
     guint depth, GHashTable *seen, const wyl_fact_compound_arg_t *logical_arg,
-    wirelog_compound_arg_t *out_arg)
+    GHashTable *handles, wirelog_compound_arg_t *out_arg)
 {
   switch (logical_arg->type) {
     case WYL_FACT_COMPOUND_ARG_SYMBOL:
@@ -711,7 +717,7 @@ materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
       gint64 child_handle = 0;
       wyrelog_error_t rc = replay_unlocked (conn, engine, tenant_id, graph_id,
           namespace_id, logical_arg->as.compound_ref, depth + 1, seen,
-          &child_handle);
+          handles, &child_handle);
       if (rc != WYRELOG_E_OK)
         return rc;
       out_arg->type = WIRELOG_TYPE_INT64;
@@ -726,10 +732,20 @@ materialize_arg_unlocked (duckdb_connection conn, WylEngine *engine,
 static wyrelog_error_t
 replay_unlocked (duckdb_connection conn, WylEngine *engine,
     const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
-    gint64 compound_ref, guint depth, GHashTable *seen, gint64 *out_handle)
+    gint64 compound_ref, guint depth, GHashTable *seen, GHashTable *handles,
+    gint64 *out_handle)
 {
   if (depth > WYL_FACT_COMPOUND_MAX_DEPTH)
     return WYRELOG_E_POLICY;
+  if (handles != NULL) {
+    g_autofree gchar *key = compound_replay_cache_key (namespace_id,
+        compound_ref);
+    gint64 *cached = g_hash_table_lookup (handles, key);
+    if (cached != NULL) {
+      *out_handle = *cached;
+      return WYRELOG_E_OK;
+    }
+  }
   if (g_hash_table_contains (seen, &compound_ref))
     return WYRELOG_E_POLICY;
   gint64 *seen_key = g_new (gint64, 1);
@@ -800,10 +816,17 @@ replay_unlocked (duckdb_connection conn, WylEngine *engine,
       (gsize) term.arity);
   for (gsize i = 0; rc == WYRELOG_E_OK && i < (gsize) term.arity; i++)
     rc = materialize_arg_unlocked (conn, engine, tenant_id, graph_id,
-        namespace_id, depth, seen, &logical_args[i], &args[i]);
+        namespace_id, depth, seen, &logical_args[i], handles, &args[i]);
   if (rc == WYRELOG_E_OK)
     rc = wyl_engine_owned_make_compound (engine, term.functor, args,
         (gsize) term.arity, out_handle);
+  if (rc == WYRELOG_E_OK && handles != NULL) {
+    g_autofree gchar *key = compound_replay_cache_key (namespace_id,
+        compound_ref);
+    gint64 *cached = g_new (gint64, 1);
+    *cached = *out_handle;
+    g_hash_table_insert (handles, g_steal_pointer (&key), cached);
+  }
   clear_logical_args (logical_args, (gsize) term.arity);
   loaded_term_clear (&term);
   g_hash_table_remove (seen, &compound_ref);
@@ -828,7 +851,31 @@ wyl_fact_compound_replay (wyl_fact_store_t *store, WylEngine *engine,
       FALSE);
   if (rc == WYRELOG_E_OK)
     rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
-        compound_ref, 0, seen, out_handle);
+        compound_ref, 0, seen, NULL, out_handle);
+  wyl_fact_store_unlock (store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_compound_replay_cached (wyl_fact_store_t *store, WylEngine *engine,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *namespace_id,
+    gint64 compound_ref, GHashTable *handles, gint64 *out_handle)
+{
+  if (out_handle != NULL)
+    *out_handle = 0;
+  if (store == NULL || engine == NULL || tenant_id == NULL || graph_id == NULL
+      || namespace_id == NULL || compound_ref <= 0 || handles == NULL
+      || out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  g_autoptr (GHashTable) seen = g_hash_table_new_full (g_int64_hash,
+      g_int64_equal, g_free, NULL);
+  wyl_fact_store_lock (store);
+  wyrelog_error_t rc = validate_scope_unlocked (conn, tenant_id, graph_id,
+      FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = replay_unlocked (conn, engine, tenant_id, graph_id, namespace_id,
+        compound_ref, 0, seen, handles, out_handle);
   wyl_fact_store_unlock (store);
   return rc;
 }

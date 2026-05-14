@@ -737,6 +737,36 @@ wyl_engine_open (const gchar *template_dir, guint32 num_workers,
       out);
 }
 
+wyrelog_error_t
+wyl_engine_open_source (const gchar *dl_src, guint32 num_workers,
+    WylEngine **out)
+{
+  if (out != NULL)
+    *out = NULL;
+  if (dl_src == NULL || out == NULL)
+    return WYRELOG_E_INVALID;
+
+  wirelog_easy_open_opts_t opts = {
+    .size = sizeof (wirelog_easy_open_opts_t),
+    .num_workers = num_workers > 0 ? num_workers : 1,
+    .eager_build = true,
+    ._reserved = NULL,
+  };
+  wirelog_easy_session_t *session = NULL;
+  wirelog_error_t wl_rc = wirelog_easy_open_opts (dl_src, &opts, &session);
+  if (wl_rc != WIRELOG_OK) {
+    if (session != NULL)
+      wirelog_easy_close (session);
+    return wyl_engine_map_wirelog_error (wl_rc);
+  }
+
+  WylEngine *engine = g_object_new (WYL_TYPE_ENGINE, NULL);
+  engine->session = session;
+  engine->mode = WYL_ENGINE_MODE_NONE;
+  *out = engine;
+  return WYRELOG_E_OK;
+}
+
 void
 wyl_engine_close (WylEngine *engine)
 {

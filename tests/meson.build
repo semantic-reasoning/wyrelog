@@ -280,7 +280,7 @@ if get_option('enable_fact_store').allowed()
   test_fact_store = executable('test-fact-store',
     'test-fact-store.c',
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep, sqlite_dep],
   )
 
   test('fact-store', test_fact_store)
@@ -295,6 +295,15 @@ if get_option('enable_fact_store').allowed()
   )
 
   test('fact-compound', test_fact_compound)
+
+  test_fact_replay = executable('test-fact-replay',
+    'test-fact-replay.c',
+    c_args : ['-DWYL_HAS_FACT_STORE'],
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+  )
+
+  test('fact-replay', test_fact_replay)
 endif
 
 test_policy_store_toctou = executable('test-policy-store-toctou',
