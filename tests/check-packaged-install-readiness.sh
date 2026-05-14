@@ -78,12 +78,76 @@ if ! grep -q -- "/var/lib/wyrelog/service/facts" \
   echo "tmpfiles does not create the service fact root" >&2
   exit 1
 fi
+if ! grep -q '^d /var/lib/wyrelog/system/facts 0700 wyrelog wyrelog -$' \
+    "$SOURCE_ROOT/packaging/tmpfiles.d/wyrelog.conf"; then
+  echo "tmpfiles system fact root does not enforce 0700 wyrelog ownership" >&2
+  exit 1
+fi
+if ! grep -q '^d /var/lib/wyrelog/service/facts 0700 wyrelog wyrelog -$' \
+    "$SOURCE_ROOT/packaging/tmpfiles.d/wyrelog.conf"; then
+  echo "tmpfiles service fact root does not enforce 0700 wyrelog ownership" >&2
+  exit 1
+fi
+if ! grep -q -- "ReadWritePaths=/var/lib/wyrelog/system" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
+  echo "system unit does not allow writes under the system state root" >&2
+  exit 1
+fi
+if ! grep -q -- "ReadWritePaths=/var/lib/wyrelog/service" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; then
+  echo "service unit does not allow writes under the service state root" >&2
+  exit 1
+fi
 if ! grep -q "WYL_LOG=warn" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog.service"; then
   echo "service unit does not set production log ceiling" >&2
   exit 1
 fi
 
+if grep -q -- "--fact-root" "$SOURCE_ROOT/packaging/systemd/wyrelog.service" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; then
+  echo "static units must rely on profile fact-root defaults for build compatibility" >&2
+  exit 1
+fi
+
+SYSTEM_PROFILE_INFO="$TMPDIR/system-profile-info.out"
+SERVICE_PROFILE_INFO="$TMPDIR/service-profile-info.out"
+"$WYRELOGD" --profile=system --profile-info --production >"$SYSTEM_PROFILE_INFO"
+"$WYRELOGD" --profile=service --profile-info --production >"$SERVICE_PROFILE_INFO"
+grep -q '^policy_db=/var/lib/wyrelog/system/policy.sqlite$' "$SYSTEM_PROFILE_INFO"
+grep -q '^audit_db=/var/log/wyrelog/system/audit.duckdb$' "$SYSTEM_PROFILE_INFO"
+grep -q '^policy_db=/var/lib/wyrelog/service/policy.sqlite$' "$SERVICE_PROFILE_INFO"
+grep -q '^audit_db=/var/log/wyrelog/service/audit.duckdb$' "$SERVICE_PROFILE_INFO"
+if grep -q '^fact_root=.' "$SYSTEM_PROFILE_INFO"; then
+  grep -q '^fact_root=/var/lib/wyrelog/system/facts$' "$SYSTEM_PROFILE_INFO"
+  grep -q '^fact_root=/var/lib/wyrelog/service/facts$' "$SERVICE_PROFILE_INFO"
+fi
+"$PYTHON" - "$SYSTEM_PROFILE_INFO" "$SERVICE_PROFILE_INFO" <<'EOF2'
+import sys
+
+def load(path):
+    out = {}
+    for line in open(path, encoding='utf-8'):
+        line = line.strip()
+        if '=' in line:
+            k, v = line.split('=', 1)
+            out[k] = v
+    return out
+for path in sys.argv[1:]:
+    info = load(path)
+    values = [info['policy_db'], info['audit_db']]
+    fact_root = info.get('fact_root')
+    if fact_root:
+        values.append(fact_root)
+    if len(set(values)) != len(values):
+        raise SystemExit(f'profile paths overlap in {path}: {values}')
+    if fact_root:
+        fact = fact_root.rstrip('/') + '/'
+        for key in ('policy_db', 'audit_db'):
+            if info[key].startswith(fact):
+                raise SystemExit(f'{key} is inside fact root in {path}')
+EOF2
 INSTALL_ROOT="$TMPDIR/install"
 mkdir -p "$INSTALL_ROOT/usr/share/wyrelog" \
   "$INSTALL_ROOT/usr/share/wyrelog/tools" \
