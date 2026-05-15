@@ -929,3 +929,22 @@ wyl_fact_store_append_batch (wyl_fact_store_t *store,
     *out_inserted = TRUE;
   return rc;
 }
+
+wyrelog_error_t
+wyl_fact_store_retract_batch (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_batch_t *batch, gboolean *out_inserted)
+{
+  if (out_inserted != NULL)
+    *out_inserted = FALSE;
+  if (batch == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_fact_store_batch_t *batch_copy = g_memdup2 (batch, sizeof (*batch));
+  if (batch_copy == NULL)
+    return WYRELOG_E_NOMEM;
+  batch_copy->op = WYL_FACT_STORE_OP_RETRACT;
+  wyrelog_error_t rc = wyl_fact_store_append_batch (store, schema, batch_copy,
+      out_inserted);
+  g_free (batch_copy);
+  return rc;
+}

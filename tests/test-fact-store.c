@@ -221,6 +221,163 @@ check_fact_store_appends_idempotently (void)
 }
 
 static gint
+check_fact_store_retracts_idempotently (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 100;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 101;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+    {"expedited", "bool", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+      G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK)
+    return 102;
+
+  /* Case 1: normal retract -> inserted=TRUE. */
+  wyl_fact_value_t assert_values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-a"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 11},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-b"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 22},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = FALSE},
+  };
+  const wyl_fact_row_t assert_rows[] = {
+    {assert_values, 3},
+    {assert_values + 3, 3},
+  };
+  const wyl_fact_store_batch_t assert_batch = {
+    .batch_id = "batch-1",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .idempotency_key = "assert:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = assert_rows,
+    .n_rows = G_N_ELEMENTS (assert_rows),
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, &schema, &assert_batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 103;
+
+  wyl_fact_value_t retract_a_values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-a"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 11},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = TRUE},
+  };
+  const wyl_fact_row_t retract_a_rows[] = {
+    {retract_a_values, 3},
+  };
+  const wyl_fact_store_batch_t retract_a_batch = {
+    .batch_id = "batch-2",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .idempotency_key = "retract:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,     /* must be overridden by retract API. */
+    .rows = retract_a_rows,
+    .n_rows = G_N_ELEMENTS (retract_a_rows),
+  };
+  inserted = FALSE;
+  if (wyl_fact_store_retract_batch (store, &schema, &retract_a_batch,
+          &inserted) != WYRELOG_E_OK || !inserted)
+    return 104;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  g_autofree gchar *order_a_valid_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
+      "AND __wyl_valid = TRUE;", table);
+  if (!count_i64 (conn, order_a_valid_sql, &count) || count != 0)
+    return 105;
+  g_autofree gchar *order_a_invalid_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
+      "AND __wyl_valid = FALSE;", table);
+  if (!count_i64 (conn, order_a_invalid_sql, &count) || count != 1)
+    return 106;
+  g_autofree gchar *order_b_valid_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-b' "
+      "AND __wyl_valid = TRUE;", table);
+  if (!count_i64 (conn, order_b_valid_sql, &count) || count != 1)
+    return 107;
+
+  /* Confirm batch op was recorded as retract. */
+  g_autofree gchar *batch_op = NULL;
+  if (!query_text (conn,
+          "SELECT op FROM fact_batches WHERE batch_id = 'batch-2';",
+          &batch_op) || g_strcmp0 (batch_op, "retract") != 0)
+    return 108;
+
+  /* Case 2: idempotent retry -> inserted=FALSE. */
+  inserted = TRUE;
+  if (wyl_fact_store_retract_batch (store, &schema, &retract_a_batch,
+          &inserted) != WYRELOG_E_OK || inserted)
+    return 110;
+
+  /* Case 3: non-existent row retract -> WYRELOG_E_OK (silent ok). */
+  wyl_fact_value_t retract_c_values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "order-c"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 99},
+    {.type = WYL_FACT_VALUE_BOOL,.as.bool_value = FALSE},
+  };
+  const wyl_fact_row_t retract_c_rows[] = {
+    {retract_c_values, 3},
+  };
+  const wyl_fact_store_batch_t retract_c_batch = {
+    .batch_id = "batch-3",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .idempotency_key = "retract:2",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = retract_c_rows,
+    .n_rows = G_N_ELEMENTS (retract_c_rows),
+  };
+  inserted = FALSE;
+  if (wyl_fact_store_retract_batch (store, &schema, &retract_c_batch,
+          &inserted) != WYRELOG_E_OK || !inserted)
+    return 120;
+  g_autofree gchar *order_c_invalid_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-c' "
+      "AND __wyl_valid = FALSE;", table);
+  if (!count_i64 (conn, order_c_invalid_sql, &count) || count != 1)
+    return 121;
+
+  /* Case 4: wrong scope retract -> WYRELOG_E_POLICY. */
+  wyl_policy_fact_relation_schema_options_t wrong_schema = schema;
+  wrong_schema.tenant_id = "tenant-b";
+  wrong_schema.graph_id = "graph-b";
+  wyl_fact_store_batch_t wrong_scope_batch = retract_a_batch;
+  wrong_scope_batch.batch_id = "batch-4";
+  wrong_scope_batch.tenant_id = "tenant-b";
+  wrong_scope_batch.graph_id = "graph-b";
+  wrong_scope_batch.idempotency_key = "retract:3";
+  if (wyl_fact_store_retract_batch (store, &wrong_schema, &wrong_scope_batch,
+          NULL) != WYRELOG_E_POLICY)
+    return 130;
+
+  return 0;
+}
+
+static gint
 check_fact_corruption_does_not_block_policy_open (void)
 {
   g_autoptr (GError) error = NULL;
@@ -423,6 +580,9 @@ int
 main (void)
 {
   gint rc = check_fact_store_appends_idempotently ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_retracts_idempotently ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_rejects_schema_drift ();
