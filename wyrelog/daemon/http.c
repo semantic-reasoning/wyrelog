@@ -2533,15 +2533,20 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *namespace_id = lookup_required_query_string (query, "namespace");
   const gchar *relation = lookup_required_query_string (query, "relation");
   guint32 schema_version = 0;
+  guint32 max_rows = 0;
   gboolean relation_visible = TRUE;
   const gchar *visible = query != NULL ? g_hash_table_lookup (query,
       "relation_visible") : NULL;
+  const gchar *max_rows_text = query != NULL ? g_hash_table_lookup (query,
+      "max_rows") : NULL;
   if (!wyl_policy_store_tenant_id_is_valid (tenant) ||
       !fact_http_customer_name_is_valid (graph) ||
       !fact_http_customer_name_is_valid (namespace_id) ||
       !fact_http_customer_name_is_valid (relation) ||
       !parse_uint32_query_param (lookup_required_query_string (query,
               "schema_version"), &schema_version) ||
+      (max_rows_text != NULL &&
+          !parse_uint32_query_param (max_rows_text, &max_rows)) ||
       (visible != NULL && !parse_bool_token (visible, &relation_visible))) {
     set_json_error (msg, 400, "invalid_schema_request");
     return;
@@ -2584,6 +2589,11 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
+  wyl_policy_fact_relation_schema_query_t schema_query = {
+    .query_name = relation,
+    .required_permission_id = "wr.datalog.query",
+    .max_rows = max_rows,
+  };
   wyl_policy_fact_relation_schema_options_t opts = {
     .tenant_id = tenant,
     .graph_id = graph,
@@ -2593,6 +2603,8 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     .relation_visible = relation_visible,
     .columns = columns,
     .n_columns = n_columns,
+    .queries = max_rows > 0 ? &schema_query : NULL,
+    .n_queries = max_rows > 0 ? 1 : 0,
   };
   g_mutex_lock (&ctx->policy_mutation_lock);
   rc = wyl_policy_store_register_fact_relation_schema

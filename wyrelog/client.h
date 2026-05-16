@@ -156,6 +156,17 @@ wyrelog_error_t wyl_client_fact_schema_register (WylClient * client,
     const WylClientFactColumn * columns,
     gsize n_columns,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
+wyrelog_error_t wyl_client_fact_schema_register_with_max_rows
+    (WylClient * client,
+    const gchar * tenant,
+    const gchar * graph,
+    const gchar * namespace_id,
+    const gchar * relation,
+    guint32 schema_version,
+    const WylClientFactColumn * columns,
+    gsize n_columns,
+    guint max_rows,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk);
 wyrelog_error_t wyl_client_fact_put_batch (WylClient * client,
     const gchar * tenant,
     const gchar * graph,

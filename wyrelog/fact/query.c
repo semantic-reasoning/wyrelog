@@ -10,7 +10,6 @@
 
 #define WYL_FACT_DATALOG_QUERY_MAX_LEN 512
 #define WYL_FACT_DATALOG_MAX_ARGS 32
-#define WYL_FACT_DATALOG_HARD_ROW_LIMIT 1000
 
 typedef enum
 {
@@ -438,7 +437,6 @@ wyl_fact_datalog_query_json (WylHandle *handle,
 
   guint limit = opts->limit == 0 ? query_info.max_rows : opts->limit;
   limit = MIN (limit, query_info.max_rows);
-  limit = MIN (limit, (guint) WYL_FACT_DATALOG_HARD_ROW_LIMIT);
   if (limit == 0)
     limit = 1;
 

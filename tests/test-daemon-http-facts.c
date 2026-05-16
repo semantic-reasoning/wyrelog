@@ -325,6 +325,17 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
       != WYRELOG_E_NOT_FOUND)
     return 26;
 
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *bad_max_rows_query = g_strdup_printf
+      ("tenant=%s&graph=orders&namespace=shop&relation=bad_rows&"
+      "schema_version=1&max_rows=0&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+      bad_max_rows_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_schema_request\"") == NULL)
+    return 260;
+
   const gchar *fact_body = "order_id\tamount\no-1\t42\n";
   g_clear_pointer (&body, g_free);
   g_autofree gchar *append_query = g_strdup_printf
@@ -453,6 +464,54 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
   if (status != 200 || strstr (body, "\"row_count\":1") == NULL ||
       strstr (body, "\"truncated\":true") == NULL)
     return 337;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *create_bulk_query = g_strdup_printf
+      ("tenant=%s&graph=bulk&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+      create_bulk_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 350;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *bulk_schema_query = g_strdup_printf
+      ("tenant=%s&graph=bulk&namespace=shop&relation=orders&"
+      "schema_version=1&max_rows=1100&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+      bulk_schema_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 351;
+
+  g_autoptr (GString) bulk_rows = g_string_new ("order_id\tamount\n");
+  for (guint i = 0; i < 1005; i++)
+    g_string_append_printf (bulk_rows, "bulk-%u\t%u\n", i, i);
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *bulk_append_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&batch_id=bulk-1&"
+      "idempotency_key=bulk-key-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/bulk/orders:append", bulk_append_query,
+      admin_token, bulk_rows->str, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
+    return 352;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *bulk_datalog_query = g_strdup_printf ("tenant=%s&%s",
+      WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"row_count\":1005") == NULL ||
+      strstr (body, "\"truncated\":false") == NULL)
+    return 353;
 
   /* Retract case 1: normal retract of o-2 -> 200 inserted=true. */
   g_clear_pointer (&body, g_free);
