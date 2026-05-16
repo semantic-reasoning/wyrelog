@@ -447,7 +447,16 @@ wyl_fact_store_create_schema (wyl_fact_store_t *store)
         "  op VARCHAR NOT NULL CHECK (op IN ('assert', 'retract')),"
         "  created_at_us BIGINT NOT NULL,"
         "  valid BOOLEAN NOT NULL,"
-        "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)" ");");
+        "  FOREIGN KEY (batch_id) REFERENCES fact_batches (batch_id)" ");"
+        "CREATE TABLE IF NOT EXISTS fact_forget_audit ("
+        "  id            BIGINT PRIMARY KEY,"
+        "  batch_id      VARCHAR NOT NULL,"
+        "  tenant_id     VARCHAR NOT NULL,"
+        "  graph_id      VARCHAR NOT NULL,"
+        "  operator      VARCHAR NOT NULL,"
+        "  reason        VARCHAR NOT NULL,"
+        "  rows_purged   BIGINT NOT NULL,"
+        "  created_at_us BIGINT NOT NULL" ");");
   if (rc == WYRELOG_E_OK)
     rc = reject_audit_database_unlocked (store);
   g_mutex_unlock (&store->lock);
