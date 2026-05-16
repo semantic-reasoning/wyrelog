@@ -1180,10 +1180,31 @@ check_fact_store_rejects_audit_shape (void)
   return 0;
 }
 
+static gint
+check_fact_forget_audit_table_exists (void)
+{
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 20;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 21;
+  gint64 count = -1;
+  if (!count_i64 (wyl_fact_store_get_connection (store),
+          "SELECT COUNT(*) FROM information_schema.tables "
+          "WHERE table_name = 'fact_forget_audit';", &count))
+    return 22;
+  if (count != 1)
+    return 23;
+  return 0;
+}
+
 int
 main (void)
 {
-  gint rc = check_fact_store_retract_by_batch_id ();
+  gint rc = check_fact_forget_audit_table_exists ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_retract_by_batch_id ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_appends_idempotently ();
