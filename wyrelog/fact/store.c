@@ -930,6 +930,11 @@ wyl_fact_store_append_batch (wyl_fact_store_t *store,
   return rc;
 }
 
+/* Retract (soft-delete) facts from the store using tombstone pattern.
+ * Records a retract batch as append-only operation. Caller retains ownership of
+ * batch.rows and batch.values members; only the struct itself is copied.
+ * out_inserted=TRUE indicates batch was recorded (regardless of matching asserts).
+ */
 wyrelog_error_t
 wyl_fact_store_retract_batch (wyl_fact_store_t *store,
     const wyl_policy_fact_relation_schema_options_t *schema,
@@ -937,8 +942,11 @@ wyl_fact_store_retract_batch (wyl_fact_store_t *store,
 {
   if (out_inserted != NULL)
     *out_inserted = FALSE;
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
   if (batch == NULL)
     return WYRELOG_E_INVALID;
+  /* Shallow copy: struct only, not pointed-to rows/values (caller-owned). */
   wyl_fact_store_batch_t *batch_copy = g_memdup2 (batch, sizeof (*batch));
   if (batch_copy == NULL)
     return WYRELOG_E_NOMEM;
