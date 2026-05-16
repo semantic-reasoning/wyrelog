@@ -553,7 +553,9 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 400 || strstr (body, "\"invalid_fact_payload\"") == NULL)
     return 29;
-  rc = check_fact_projection_row_count (handle, "orders", 2);
+  /* Projection table accumulates assert+retract ops: batch-1 (assert o-1),
+   * batch-7 (assert o-2), batch-r1 (retract o-2) = 3 physical rows. */
+  rc = check_fact_projection_row_count (handle, "orders", 3);
   if (rc != 0)
     return rc;
 
@@ -627,6 +629,32 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
     return 408;
+
+  /* Forget case 1: normal forget of batch-1 -> 200 rows_purged>=1. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *forget_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&%s", WYL_TENANT_DEFAULT,
+      FACT_GUARD);
+  rc = send_raw (session, "DELETE", base_url,
+      "/facts/__wr_default/orders/orders:forget", forget_query, admin_token,
+      "{\"batch_id\":\"batch-1\",\"operator\":\"admin\","
+      "\"reason\":\"gdpr-erasure\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL ||
+      strstr (body, "\"rows_purged\":") == NULL)
+    return 500;
+
+  /* Forget case 2: no permission -> 403 fact_denied. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "DELETE", base_url,
+      "/facts/__wr_default/orders/orders:forget", forget_query, deny_token,
+      "{\"batch_id\":\"batch-1\",\"operator\":\"deny\","
+      "\"reason\":\"test\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"fact_denied\"") == NULL)
+    return 501;
 
   return 0;
 }
