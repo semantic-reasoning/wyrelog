@@ -336,6 +336,18 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
   if (status != 400 || strstr (body, "\"invalid_schema_request\"") == NULL)
     return 260;
 
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *too_many_max_rows_query = g_strdup_printf
+      ("tenant=%s&graph=orders&namespace=shop&relation=too_many_rows&"
+      "schema_version=1&max_rows=1000001&%s", WYL_TENANT_DEFAULT,
+      FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+      too_many_max_rows_query, admin_token, schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_schema_request\"") == NULL)
+    return 261;
+
   const gchar *fact_body = "order_id\tamount\no-1\t42\n";
   g_clear_pointer (&body, g_free);
   g_autofree gchar *append_query = g_strdup_printf
@@ -487,7 +499,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return 351;
 
   g_autoptr (GString) bulk_rows = g_string_new ("order_id\tamount\n");
-  for (guint i = 0; i < 1005; i++)
+  for (guint i = 0; i < 1105; i++)
     g_string_append_printf (bulk_rows, "bulk-%u\t%u\n", i, i);
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bulk_append_query = g_strdup_printf
@@ -506,12 +518,23 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
       WYL_TENANT_DEFAULT, FACT_GUARD);
   rc = send_raw (session, "POST", base_url,
       "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
-      "{\"query\":\"orders(O,A)\",\"output\":\"json\"}", &status, &body);
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":1005}",
+      &status, &body);
   if (rc != 0)
     return rc;
   if (status != 200 || strstr (body, "\"row_count\":1005") == NULL ||
-      strstr (body, "\"truncated\":false") == NULL)
+      strstr (body, "\"truncated\":true") == NULL)
     return 353;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/bulk/query", bulk_datalog_query, admin_token,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\"}", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"row_count\":1100") == NULL ||
+      strstr (body, "\"truncated\":true") == NULL)
+    return 354;
 
   /* Retract case 1: normal retract of o-2 -> 200 inserted=true. */
   g_clear_pointer (&body, g_free);

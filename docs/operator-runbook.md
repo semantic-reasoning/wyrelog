@@ -334,7 +334,9 @@ wyctl --daemon-url "$BASE_URL" datalog query \
 ```
 
 Omit `--max-rows` during schema registration to keep the default 1000-row
-Datalog query cap.
+Datalog query cap. Set it explicitly for larger materialized JSON queries;
+accepted values are 1 through 1000000, and `wyctl datalog query --limit`
+cannot exceed the registered cap.
 
 To verify recovery, restart `wyrelogd` with the same policy DB, audit DB, key,
 and fact root. Mint a fresh token after restart and run the same

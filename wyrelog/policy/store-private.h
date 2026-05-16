@@ -10,6 +10,9 @@
 
 G_BEGIN_DECLS;
 
+#define WYL_POLICY_FACT_QUERY_DEFAULT_MAX_ROWS 1000
+#define WYL_POLICY_FACT_QUERY_MAX_ROWS 1000000
+
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
 typedef struct
