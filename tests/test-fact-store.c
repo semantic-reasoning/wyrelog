@@ -1180,6 +1180,125 @@ check_fact_store_rejects_audit_shape (void)
   return 0;
 }
 
+/* Tier-3 wyl_fact_store_forget: 2 cases. */
+
+static gint
+check_fact_forget_basic (void)
+{
+  /* Assert a batch, forget it, verify rows=0 remain in projection and
+   * fact_batches, and that fact_forget_audit has one record. */
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 2000;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2001;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+      G_N_ELEMENTS (columns));
+  g_autofree gchar *table = NULL;
+  if (wyl_fact_store_ensure_projection (store, &schema, &table)
+      != WYRELOG_E_OK)
+    return 2002;
+
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 42},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-2"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 99},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 2},
+    {values + 2, 2},
+  };
+  const wyl_fact_store_batch_t batch = {
+    .batch_id = "forget-me",
+    .tenant_id = "tenant-a",
+    .graph_id = "orders",
+    .namespace_id = "shop",
+    .relation_name = "order",
+    .schema_version = 1,
+    .source = "unit-test",
+    .idempotency_key = "forget:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = G_N_ELEMENTS (rows),
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, &schema, &batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 2003;
+
+  const wyl_fact_store_forget_options_t opts = {
+    .batch_id = "forget-me",
+    .operator_id = "admin",
+    .reason = "gdpr-erasure",
+  };
+  gsize rows_purged = 0;
+  if (wyl_fact_store_forget (store, &schema, &opts, &rows_purged)
+      != WYRELOG_E_OK || rows_purged != 2)
+    return 2004;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  gint64 count = 0;
+  g_autofree gchar *proj_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s;", table);
+  if (!count_i64 (conn, proj_sql, &count) || count != 0)
+    return 2005;
+  if (!count_i64 (conn,
+          "SELECT COUNT(*) FROM fact_batches WHERE batch_id = 'forget-me';",
+          &count) || count != 0)
+    return 2006;
+  if (!count_i64 (conn,
+          "SELECT COUNT(*) FROM fact_forget_audit;", &count) || count != 1)
+    return 2007;
+  return 0;
+}
+
+static gint
+check_fact_forget_not_found (void)
+{
+  /* Forget on a missing batch_id must return WYRELOG_E_NOT_FOUND. */
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 2100;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 2101;
+
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  wyl_policy_fact_relation_schema_options_t schema = make_schema (columns,
+      G_N_ELEMENTS (columns));
+  if (wyl_fact_store_ensure_projection (store, &schema, NULL) != WYRELOG_E_OK)
+    return 2102;
+
+  const wyl_fact_store_forget_options_t opts = {
+    .batch_id = "does-not-exist",
+    .operator_id = "admin",
+    .reason = "test",
+  };
+  if (wyl_fact_store_forget (store, &schema, &opts, NULL)
+      != WYRELOG_E_NOT_FOUND)
+    return 2103;
+  return 0;
+}
+
+static gint
+check_fact_store_forget (void)
+{
+  gint rc = check_fact_forget_basic ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_not_found ();
+  if (rc != 0)
+    return rc;
+  return 0;
+}
+
 static gint
 check_fact_forget_audit_table_exists (void)
 {
@@ -1202,6 +1321,9 @@ int
 main (void)
 {
   gint rc = check_fact_forget_audit_table_exists ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_forget ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_retract_by_batch_id ();
