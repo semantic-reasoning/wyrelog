@@ -2614,25 +2614,46 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   set_schema_ok_json (msg, tenant, graph, namespace_id, relation);
 }
 
+typedef enum
+{
+  FACT_HTTP_OP_APPEND = 0,
+  FACT_HTTP_OP_RETRACT,
+} fact_http_op_t;
+
 static gboolean
-parse_fact_append_path (const gchar *path, gchar **out_tenant,
-    gchar **out_graph, gchar **out_relation)
+parse_fact_op_path (const gchar *path, gchar **out_tenant,
+    gchar **out_graph, gchar **out_relation, fact_http_op_t *out_op)
 {
   *out_tenant = NULL;
   *out_graph = NULL;
   *out_relation = NULL;
+  if (out_op != NULL)
+    *out_op = FACT_HTTP_OP_APPEND;
   if (path == NULL || !g_str_has_prefix (path, "/facts/"))
     return FALSE;
   const gchar *tail = path + strlen ("/facts/");
   g_auto (GStrv) parts = g_strsplit (tail, "/", 3);
-  if (g_strv_length (parts) != 3 || !g_str_has_suffix (parts[2], ":append"))
+  if (g_strv_length (parts) != 3)
     return FALSE;
-  parts[2][strlen (parts[2]) - strlen (":append")] = '\0';
+  fact_http_op_t op = FACT_HTTP_OP_APPEND;
+  const gchar *suffix = NULL;
+  if (g_str_has_suffix (parts[2], ":append")) {
+    op = FACT_HTTP_OP_APPEND;
+    suffix = ":append";
+  } else if (g_str_has_suffix (parts[2], ":retract")) {
+    op = FACT_HTTP_OP_RETRACT;
+    suffix = ":retract";
+  } else {
+    return FALSE;
+  }
+  parts[2][strlen (parts[2]) - strlen (suffix)] = '\0';
   if (parts[0][0] == '\0' || parts[1][0] == '\0' || parts[2][0] == '\0')
     return FALSE;
   *out_tenant = g_strdup (parts[0]);
   *out_graph = g_strdup (parts[1]);
   *out_relation = g_strdup (parts[2]);
+  if (out_op != NULL)
+    *out_op = op;
   return *out_tenant != NULL && *out_graph != NULL && *out_relation != NULL;
 }
 
@@ -2893,17 +2914,19 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 static wyrelog_error_t
-emit_fact_append_audit (WylDaemonHttpContext *ctx, const gchar *actor,
+emit_fact_op_audit (WylDaemonHttpContext *ctx, const gchar *actor,
     const gchar *tenant, const gchar *graph, const gchar *namespace_id,
-    const gchar *relation, const gchar *batch_id, gboolean inserted,
-    const gchar *request_id)
+    const gchar *relation, const gchar *batch_id, wyl_fact_store_op_t op,
+    gboolean inserted, const gchar *request_id)
 {
 #ifdef WYL_HAS_AUDIT
   g_autoptr (WylAuditEvent) ev = wyl_audit_event_new ();
   g_autofree gchar *resource = g_strdup_printf ("%s/%s/%s/%s", tenant, graph,
       namespace_id, relation);
+  const gchar *action = (op == WYL_FACT_STORE_OP_RETRACT) ? "fact_retract" :
+      "fact_append";
   wyl_audit_event_set_subject_id (ev, actor);
-  wyl_audit_event_set_action (ev, "fact_append");
+  wyl_audit_event_set_action (ev, action);
   wyl_audit_event_set_resource_id (ev, resource);
   wyl_audit_event_set_deny_reason (ev, batch_id);
   wyl_audit_event_set_deny_origin (ev, inserted ? "inserted" : "duplicate");
@@ -2918,6 +2941,7 @@ emit_fact_append_audit (WylDaemonHttpContext *ctx, const gchar *actor,
   (void) namespace_id;
   (void) relation;
   (void) batch_id;
+  (void) op;
   (void) inserted;
   (void) request_id;
   return WYRELOG_E_OK;
@@ -2925,7 +2949,7 @@ emit_fact_append_audit (WylDaemonHttpContext *ctx, const gchar *actor,
 }
 
 static void
-set_fact_append_json (SoupServerMessage *msg, const gchar *batch_id,
+set_fact_op_json (SoupServerMessage *msg, const gchar *batch_id,
     gboolean inserted)
 {
   g_autoptr (GString) body = g_string_new ("{\"ok\":true,\"inserted\":");
@@ -2951,7 +2975,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *graph = NULL;
   g_autofree gchar *relation = NULL;
-  if (!parse_fact_append_path (path, &tenant, &graph, &relation) ||
+  fact_http_op_t op = FACT_HTTP_OP_APPEND;
+  if (!parse_fact_op_path (path, &tenant, &graph, &relation, &op) ||
       !wyl_policy_store_tenant_id_is_valid (tenant) ||
       !fact_http_customer_name_is_valid (graph) ||
       !fact_http_customer_name_is_valid (relation)) {
@@ -2973,10 +2998,15 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 400, "invalid_fact_request");
     return;
   }
-  const gchar *op = query != NULL ? g_hash_table_lookup (query, "op") : NULL;
-  if (op != NULL && g_strcmp0 (op, "assert") != 0) {
-    set_json_error (msg, 400, "invalid_fact_request");
-    return;
+  const gchar *op_param =
+      query != NULL ? g_hash_table_lookup (query, "op") : NULL;
+  if (op_param != NULL) {
+    const gchar *expected_op =
+        (op == FACT_HTTP_OP_RETRACT) ? "retract" : "assert";
+    if (g_strcmp0 (op_param, expected_op) != 0) {
+      set_json_error (msg, 400, "invalid_fact_request");
+      return;
+    }
   }
 
   WylDaemonHttpContext *ctx = user_data;
@@ -2987,13 +3017,16 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
           "fact_denied", "fact_auth_failed", &actor))
     return;
 
+  const gchar *fail_code =
+      (op == FACT_HTTP_OP_RETRACT) ? "fact_retract_failed" :
+      "fact_append_failed";
   g_mutex_lock (&ctx->policy_mutation_lock);
   GraphLookupCtx lookup = { 0 };
   wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
       (ctx->handle), tenant, graph, &lookup);
   if (rc != WYRELOG_E_OK) {
     g_mutex_unlock (&ctx->policy_mutation_lock);
-    set_json_error (msg, 500, "fact_append_failed");
+    set_json_error (msg, 500, fail_code);
     return;
   }
   if (!lookup.found) {
@@ -3019,8 +3052,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
-        rc == WYRELOG_E_NOT_FOUND ? "fact_schema_not_found" :
-        "fact_append_failed");
+        rc == WYRELOG_E_NOT_FOUND ? "fact_schema_not_found" : fail_code);
     return;
   }
 
@@ -3083,6 +3115,8 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     rc = wyl_fact_store_create_schema (fact_store);
   gboolean inserted = FALSE;
   const gchar *request_id = ensure_request_id_header (msg);
+  wyl_fact_store_op_t store_op = (op == FACT_HTTP_OP_RETRACT) ?
+      WYL_FACT_STORE_OP_RETRACT : WYL_FACT_STORE_OP_ASSERT;
   wyl_fact_store_batch_t batch = {
     .batch_id = batch_id,
     .tenant_id = tenant,
@@ -3093,17 +3127,22 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     .source = "http",
     .request_id = idempotency_key,
     .idempotency_key = idempotency_key,
-    .op = WYL_FACT_STORE_OP_ASSERT,
+    .op = store_op,
     .rows = rows,
     .n_rows = n_rows,
   };
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_store_append_batch (fact_store, &schema, &batch, &inserted);
+  if (rc == WYRELOG_E_OK) {
+    if (op == FACT_HTTP_OP_RETRACT)
+      rc = wyl_fact_store_retract_batch (fact_store, &schema, &batch,
+          &inserted);
+    else
+      rc = wyl_fact_store_append_batch (fact_store, &schema, &batch, &inserted);
+  }
   if (rc == WYRELOG_E_OK)
     (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
   if (rc == WYRELOG_E_OK)
-    rc = emit_fact_append_audit (ctx, actor, tenant, graph, namespace_id,
-        relation, batch_id, inserted, request_id);
+    rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
+        relation, batch_id, store_op, inserted, request_id);
   g_mutex_unlock (&ctx->policy_mutation_lock);
 
   graph_lookup_clear (&lookup);
@@ -3119,10 +3158,10 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, 500, "fact_append_failed");
+    set_json_error (msg, 500, fail_code);
     return;
   }
-  set_fact_append_json (msg, batch_id, inserted);
+  set_fact_op_json (msg, batch_id, inserted);
 }
 #else
 static void
