@@ -2418,7 +2418,8 @@ validate_fact_graph_options (wyl_policy_store_t *store,
     if (!fact_graph_customer_name_is_valid (query->query_name)
         || !fact_graph_options_relation_exists (opts, query->relation_name)
         || query->required_permission_id == NULL
-        || query->required_permission_id[0] == '\0' || query->max_rows == 0)
+        || query->required_permission_id[0] == '\0' || query->max_rows == 0
+        || query->max_rows > WYL_POLICY_FACT_QUERY_MAX_ROWS)
       return WYRELOG_E_POLICY;
     gboolean permission_exists = FALSE;
     wyrelog_error_t rc = wyl_policy_store_permission_exists (store,
@@ -2901,7 +2902,8 @@ validate_fact_relation_schema_options (wyl_policy_store_t *store,
     const wyl_policy_fact_relation_schema_query_t *query = &opts->queries[i];
     if (!fact_graph_customer_name_is_valid (query->query_name)
         || query->required_permission_id == NULL
-        || query->required_permission_id[0] == '\0' || query->max_rows == 0)
+        || query->required_permission_id[0] == '\0' || query->max_rows == 0
+        || query->max_rows > WYL_POLICY_FACT_QUERY_MAX_ROWS)
       return WYRELOG_E_POLICY;
     gboolean permission_exists = FALSE;
     wyrelog_error_t rc = wyl_policy_store_permission_exists (store,
@@ -3064,7 +3066,7 @@ wyl_policy_store_register_fact_relation_schema (wyl_policy_store_t *store,
     const wyl_policy_fact_relation_schema_query_t default_query = {
       .query_name = opts->relation_name,
       .required_permission_id = "wr.datalog.query",
-      .max_rows = 1000,
+      .max_rows = WYL_POLICY_FACT_QUERY_DEFAULT_MAX_ROWS,
     };
     rc = insert_fact_relation_query_metadata (store, opts, &default_query);
   }
