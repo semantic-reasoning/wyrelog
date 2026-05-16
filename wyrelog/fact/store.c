@@ -1372,3 +1372,162 @@ unlock_return:
   g_mutex_unlock (&store->lock);
   return rc;
 }
+
+/* Tier-3 hard-delete: physically removes all rows for batch_id from the
+ * projection table, fact_event_log, and fact_batches (in FK-safe order),
+ * then records the operation in fact_forget_audit.
+ *
+ * Each statement runs in autocommit mode (no explicit transaction) because
+ * DuckDB does not propagate intra-transaction DELETE visibility to FK checks
+ * within the same transaction.  The audit INSERT is the final step; if it
+ * fails the data rows are already gone and the operator must retry. */
+wyrelog_error_t
+wyl_fact_store_forget (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const wyl_fact_store_forget_options_t *opts, gsize *out_rows_purged)
+{
+  if (out_rows_purged != NULL)
+    *out_rows_purged = 0;
+  if (store == NULL || schema == NULL || opts == NULL)
+    return WYRELOG_E_INVALID;
+  if (opts->batch_id == NULL || opts->batch_id[0] == '\0'
+      || opts->operator_id == NULL || opts->operator_id[0] == '\0'
+      || opts->reason == NULL || opts->reason[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *table = wyl_fact_store_projection_table_name (schema);
+  if (table == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* Build the single-quoted, escaped batch_id literal once. */
+  g_autoptr (GString) batch_id_lit = g_string_new ("'");
+  for (const gchar * p = opts->batch_id; *p != '\0'; p++) {
+    if (*p == '\'')
+      g_string_append_c (batch_id_lit, '\'');
+    g_string_append_c (batch_id_lit, *p);
+  }
+  g_string_append_c (batch_id_lit, '\'');
+
+  g_mutex_lock (&store->lock);
+
+  /* Verify the batch exists. */
+  TriggerBatchScope scope = { 0 };
+  gboolean found = FALSE;
+  rc = lookup_batch_scope_unlocked (store, opts->batch_id, &scope, &found);
+  if (rc != WYRELOG_E_OK)
+    goto forget_unlock;
+  if (!found) {
+    rc = WYRELOG_E_NOT_FOUND;
+    goto forget_unlock;
+  }
+  trigger_batch_scope_clear (&scope);
+
+  /* Count projection rows before deletion. */
+  gint64 rows_purged = 0;
+  {
+    g_autoptr (GString) count_sql = g_string_new ("SELECT COUNT(*) FROM ");
+    append_duckdb_identifier (count_sql, table);
+    g_string_append_printf (count_sql, " WHERE __wyl_batch_id = %s;",
+        batch_id_lit->str);
+    duckdb_result result = { 0 };
+    if (duckdb_query (store->conn, count_sql->str, &result) != DuckDBSuccess) {
+      duckdb_destroy_result (&result);
+      rc = WYRELOG_E_IO;
+      goto forget_unlock;
+    }
+    rows_purged = duckdb_value_int64 (&result, 0, 0);
+    duckdb_destroy_result (&result);
+  }
+
+  /* 1. DELETE projection rows. */
+  {
+    g_autoptr (GString) sql = g_string_new ("DELETE FROM ");
+    append_duckdb_identifier (sql, table);
+    g_string_append_printf (sql, " WHERE __wyl_batch_id = %s;",
+        batch_id_lit->str);
+    rc = exec_sql (store->conn, sql->str);
+    if (rc != WYRELOG_E_OK)
+      goto forget_unlock;
+  }
+
+  /* 2. DELETE fact_event_log rows (must precede fact_batches due to FK). */
+  {
+    g_autofree gchar *sql = g_strdup_printf
+        ("DELETE FROM fact_event_log WHERE batch_id = %s;",
+        batch_id_lit->str);
+    rc = exec_sql (store->conn, sql);
+    if (rc != WYRELOG_E_OK)
+      goto forget_unlock;
+  }
+
+  /* 3. DELETE fact_batches row. */
+  {
+    g_autofree gchar *sql = g_strdup_printf
+        ("DELETE FROM fact_batches WHERE batch_id = %s;",
+        batch_id_lit->str);
+    rc = exec_sql (store->conn, sql);
+    if (rc != WYRELOG_E_OK)
+      goto forget_unlock;
+  }
+
+  /* 4. INSERT audit record. */
+  {
+    g_autoptr (GString) tid_lit = g_string_new ("'");
+    for (const gchar * p = schema->tenant_id; *p != '\0'; p++) {
+      if (*p == '\'')
+        g_string_append_c (tid_lit, '\'');
+      g_string_append_c (tid_lit, *p);
+    }
+    g_string_append_c (tid_lit, '\'');
+
+    g_autoptr (GString) gid_lit = g_string_new ("'");
+    for (const gchar * p = schema->graph_id; *p != '\0'; p++) {
+      if (*p == '\'')
+        g_string_append_c (gid_lit, '\'');
+      g_string_append_c (gid_lit, *p);
+    }
+    g_string_append_c (gid_lit, '\'');
+
+    g_autoptr (GString) op_lit = g_string_new ("'");
+    for (const gchar * p = opts->operator_id; *p != '\0'; p++) {
+      if (*p == '\'')
+        g_string_append_c (op_lit, '\'');
+      g_string_append_c (op_lit, *p);
+    }
+    g_string_append_c (op_lit, '\'');
+
+    g_autoptr (GString) reason_lit = g_string_new ("'");
+    for (const gchar * p = opts->reason; *p != '\0'; p++) {
+      if (*p == '\'')
+        g_string_append_c (reason_lit, '\'');
+      g_string_append_c (reason_lit, *p);
+    }
+    g_string_append_c (reason_lit, '\'');
+
+    gint64 now_us = g_get_real_time ();
+    g_autofree gchar *audit_sql = g_strdup_printf
+        ("INSERT INTO fact_forget_audit "
+        "(id, batch_id, tenant_id, graph_id, operator, reason, "
+        " rows_purged, created_at_us) "
+        "VALUES ("
+        "(SELECT COALESCE(MAX(id), 0) + 1 FROM fact_forget_audit),"
+        " %s, %s, %s, %s, %s," " %" G_GINT64_FORMAT ", %" G_GINT64_FORMAT ");",
+        batch_id_lit->str, tid_lit->str, gid_lit->str,
+        op_lit->str, reason_lit->str, rows_purged, now_us);
+    rc = exec_sql (store->conn, audit_sql);
+    if (rc != WYRELOG_E_OK)
+      goto forget_unlock;
+  }
+
+  if (out_rows_purged != NULL)
+    *out_rows_purged = (gsize) rows_purged;
+
+forget_unlock:
+  trigger_batch_scope_clear (&scope);
+  g_mutex_unlock (&store->lock);
+  return rc;
+}

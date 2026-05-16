@@ -64,4 +64,15 @@ wyrelog_error_t wyl_fact_store_retract_by_batch_id (wyl_fact_store_t * store,
 
 #define WYL_FACT_STORE_RETRACT_BY_BATCH_MAX_ROWS 10000
 
+typedef struct
+{
+  const gchar *batch_id;
+  const gchar *operator_id;
+  const gchar *reason;
+} wyl_fact_store_forget_options_t;
+
+wyrelog_error_t wyl_fact_store_forget (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const wyl_fact_store_forget_options_t * opts, gsize * out_rows_purged);
+
 G_END_DECLS;
