@@ -454,6 +454,94 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
       strstr (body, "\"truncated\":true") == NULL)
     return 337;
 
+  /* Retract case 1: normal retract of o-2 -> 200 inserted=true. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *retract_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r1&"
+      "idempotency_key=key-r1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract", retract_query,
+      admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL ||
+      strstr (body, "\"batch_id\":\"batch-r1\"") == NULL)
+    return 400;
+  if (wyl_handle_replay_fact_graphs (handle, NULL) != WYRELOG_E_OK)
+    return 401;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/orders/query", datalog_query, admin_token,
+      "{\"query\":\"orders(O,A)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"row_count\":1") == NULL ||
+      strstr (body, "{\"O\":\"o-1\",\"A\":42}") == NULL ||
+      strstr (body, "\"o-2\"") != NULL)
+    return 402;
+
+  /* Retract case 2: idempotent replay -> 200 inserted=false. */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract", retract_query,
+      admin_token, "order_id\tamount\no-2\t84\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":false") == NULL)
+    return 403;
+
+  /* Retract case 3: content_hash mismatch (same batch_id, different rows). */
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract", retract_query,
+      admin_token, "order_id\tamount\no-3\t99\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"fact_batch_conflict\"") == NULL)
+    return 404;
+
+  /* Retract case 4: op/path mismatch (path :retract + query op=assert). */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *mismatch_op_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r4&"
+      "idempotency_key=key-r4&op=assert&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract", mismatch_op_query,
+      admin_token, "order_id\tamount\no-1\t42\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 || strstr (body, "\"invalid_fact_request\"") == NULL)
+    return 405;
+
+  /* Retract case 5: no permission -> 403 fact_denied. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *retract_deny_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r5&"
+      "idempotency_key=key-r5&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract", retract_deny_query,
+      deny_token, "order_id\tamount\no-1\t42\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 403 || strstr (body, "\"fact_denied\"") == NULL)
+    return 406;
+
+  /* Retract case 7: missing schema -> 404 fact_schema_not_found.
+   * (Case 6 sealed-graph retract is tested after seal_query below.) */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *retract_missing_schema_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=99&batch_id=batch-r7&"
+      "idempotency_key=key-r7&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract",
+      retract_missing_schema_query, admin_token,
+      "order_id\tamount\no-1\t42\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 404 || strstr (body, "\"fact_schema_not_found\"") == NULL)
+    return 407;
+
   g_clear_pointer (&body, g_free);
   g_autofree gchar *bad_append_query = g_strdup_printf
       ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-2&"
@@ -526,6 +614,19 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
     return 32;
+
+  /* Retract case 6: sealed graph -> 409 graph_sealed. */
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *sealed_retract_query = g_strdup_printf
+      ("tenant=%s&namespace=shop&schema_version=1&batch_id=batch-r6&"
+      "idempotency_key=key-r6&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/orders/orders:retract", sealed_retract_query,
+      admin_token, "order_id\tamount\no-1\t42\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 || strstr (body, "\"graph_sealed\"") == NULL)
+    return 408;
 
   return 0;
 }
