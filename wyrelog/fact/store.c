@@ -578,7 +578,7 @@ validate_projection_shape_unlocked (wyl_fact_store_t *store,
       g_strdup_printf
       ("SELECT COUNT(*) FROM duckdb_constraints() WHERE table_name = '%s' "
       "AND constraint_type = 'UNIQUE' "
-      "AND list_count(constraint_column_names) = 2 "
+      "AND len(constraint_column_names) = 2 "
       "AND list_contains(constraint_column_names, '__wyl_batch_id') "
       "AND list_contains(constraint_column_names, '__wyl_row_index');",
       table_name);
@@ -954,5 +954,412 @@ wyl_fact_store_retract_batch (wyl_fact_store_t *store,
   wyrelog_error_t rc = wyl_fact_store_append_batch (store, schema, batch_copy,
       out_inserted);
   g_free (batch_copy);
+  return rc;
+}
+
+/* Tier-2 retract-by-batch-id: SELECT trigger metadata + valid rows, then
+ * INSERT a fresh retract batch tombstone — all under one mutex+transaction.
+ * Must NOT call wyl_fact_store_retract_batch (that would require lock release
+ * between SELECT and INSERT, opening a race window). */
+
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *namespace_id;
+  gchar *relation_name;
+  gint64 schema_version;
+  gchar *op;
+} TriggerBatchScope;
+
+static void
+trigger_batch_scope_clear (TriggerBatchScope *scope)
+{
+  if (scope == NULL)
+    return;
+  g_free (scope->tenant_id);
+  g_free (scope->graph_id);
+  g_free (scope->namespace_id);
+  g_free (scope->relation_name);
+  g_free (scope->op);
+  memset (scope, 0, sizeof (*scope));
+}
+
+static wyrelog_error_t
+lookup_batch_scope_unlocked (wyl_fact_store_t *store,
+    const gchar *trigger_batch_id, TriggerBatchScope *out_scope,
+    gboolean *out_found)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  *out_found = FALSE;
+  memset (out_scope, 0, sizeof (*out_scope));
+  static const gchar *sql =
+      "SELECT tenant_id, graph_id, namespace_id, relation_name, "
+      "schema_version, op FROM fact_batches WHERE batch_id = ?;";
+  if (duckdb_prepare (store->conn, sql, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, trigger_batch_id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+  if (duckdb_row_count (&result) == 0) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_OK;
+  }
+  if (duckdb_row_count (&result) != 1) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+  gchar *tenant = duckdb_value_varchar (&result, 0, 0);
+  gchar *graph = duckdb_value_varchar (&result, 1, 0);
+  gchar *namespace_id = duckdb_value_varchar (&result, 2, 0);
+  gchar *relation_name = duckdb_value_varchar (&result, 3, 0);
+  gint64 schema_version = duckdb_value_int64 (&result, 4, 0);
+  gchar *op = duckdb_value_varchar (&result, 5, 0);
+  out_scope->tenant_id = g_strdup (tenant);
+  out_scope->graph_id = g_strdup (graph);
+  out_scope->namespace_id = g_strdup (namespace_id);
+  out_scope->relation_name = g_strdup (relation_name);
+  out_scope->schema_version = schema_version;
+  out_scope->op = g_strdup (op);
+  duckdb_free (tenant);
+  duckdb_free (graph);
+  duckdb_free (namespace_id);
+  duckdb_free (relation_name);
+  duckdb_free (op);
+  duckdb_destroy_result (&result);
+  if (out_scope->tenant_id == NULL || out_scope->graph_id == NULL
+      || out_scope->namespace_id == NULL || out_scope->relation_name == NULL
+      || out_scope->op == NULL) {
+    trigger_batch_scope_clear (out_scope);
+    return WYRELOG_E_NOMEM;
+  }
+  *out_found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_projection_value (duckdb_result *result, idx_t col, idx_t row,
+    const wyl_policy_fact_relation_schema_column_t *column,
+    wyl_fact_value_t *out_value, gchar **out_owned_text)
+{
+  *out_owned_text = NULL;
+  if (duckdb_value_is_null (result, col, row)) {
+    if (!column->nullable)
+      return WYRELOG_E_POLICY;
+    out_value->type = WYL_FACT_VALUE_NULL;
+    return WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (column->column_type, "symbol") == 0
+      || g_strcmp0 (column->column_type, "string") == 0) {
+    gchar *raw = duckdb_value_varchar (result, col, row);
+    if (raw == NULL)
+      return WYRELOG_E_NOMEM;
+    *out_owned_text = g_strdup (raw);
+    duckdb_free (raw);
+    if (*out_owned_text == NULL)
+      return WYRELOG_E_NOMEM;
+    out_value->type = g_strcmp0 (column->column_type, "symbol") == 0
+        ? WYL_FACT_VALUE_SYMBOL : WYL_FACT_VALUE_STRING;
+    out_value->as.text = *out_owned_text;
+    return WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (column->column_type, "int64") == 0) {
+    out_value->type = WYL_FACT_VALUE_INT64;
+    out_value->as.int64_value = duckdb_value_int64 (result, col, row);
+    return WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (column->column_type, "bool") == 0) {
+    out_value->type = WYL_FACT_VALUE_BOOL;
+    out_value->as.bool_value = duckdb_value_boolean (result, col, row);
+    return WYRELOG_E_OK;
+  }
+  if (g_strcmp0 (column->column_type, "compound_ref") == 0) {
+    out_value->type = WYL_FACT_VALUE_COMPOUND_REF;
+    out_value->as.compound_ref = duckdb_value_int64 (result, col, row);
+    return WYRELOG_E_OK;
+  }
+  return WYRELOG_E_INVALID;
+}
+
+static wyrelog_error_t
+select_valid_rows_for_batch_unlocked (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *projection_table, const gchar *trigger_batch_id,
+    wyl_fact_value_t **out_values, gchar ***out_owned_strings,
+    wyl_fact_row_t **out_rows, gsize *out_n_rows)
+{
+  *out_values = NULL;
+  *out_owned_strings = NULL;
+  *out_rows = NULL;
+  *out_n_rows = 0;
+
+  g_autoptr (GString) sql = g_string_new ("SELECT ");
+  for (gsize i = 0; i < schema->n_columns; i++) {
+    if (i > 0)
+      g_string_append (sql, ", ");
+    append_duckdb_identifier (sql, schema->columns[i].column_name);
+  }
+  g_string_append (sql, " FROM ");
+  append_duckdb_identifier (sql, projection_table);
+  g_string_append (sql, " WHERE __wyl_batch_id = ? AND __wyl_valid = TRUE "
+      "ORDER BY __wyl_row_index;");
+
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  if (duckdb_prepare (store->conn, sql->str, &stmt) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_bind_varchar (stmt, 1, trigger_batch_id) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_prepare (&stmt);
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_prepare (&stmt);
+
+  idx_t n_rows = duckdb_row_count (&result);
+  if (n_rows == 0) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_OK;
+  }
+  if ((gint64) n_rows > WYL_FACT_STORE_RETRACT_BY_BATCH_MAX_ROWS) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+
+  wyl_fact_value_t *values = g_new0 (wyl_fact_value_t,
+      (gsize) n_rows * schema->n_columns);
+  gchar **owned_strings = g_new0 (gchar *,
+      (gsize) n_rows * schema->n_columns);
+  wyl_fact_row_t *rows = g_new0 (wyl_fact_row_t, (gsize) n_rows);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (idx_t r = 0; rc == WYRELOG_E_OK && r < n_rows; r++) {
+    for (gsize c = 0; rc == WYRELOG_E_OK && c < schema->n_columns; c++) {
+      gsize idx = (gsize) r * schema->n_columns + c;
+      rc = read_projection_value (&result, c, r, &schema->columns[c],
+          &values[idx], &owned_strings[idx]);
+    }
+    rows[r].values = &values[(gsize) r * schema->n_columns];
+    rows[r].n_values = schema->n_columns;
+  }
+  duckdb_destroy_result (&result);
+  if (rc != WYRELOG_E_OK) {
+    for (gsize i = 0; i < (gsize) n_rows * schema->n_columns; i++)
+      g_free (owned_strings[i]);
+    g_free (owned_strings);
+    g_free (values);
+    g_free (rows);
+    return rc;
+  }
+  *out_values = values;
+  *out_owned_strings = owned_strings;
+  *out_rows = rows;
+  *out_n_rows = (gsize) n_rows;
+  return WYRELOG_E_OK;
+}
+
+static void
+free_projection_rows (wyl_fact_value_t *values, gchar **owned_strings,
+    wyl_fact_row_t *rows, gsize n_rows, gsize n_columns)
+{
+  if (owned_strings != NULL) {
+    for (gsize i = 0; i < n_rows * n_columns; i++)
+      g_free (owned_strings[i]);
+    g_free (owned_strings);
+  }
+  g_free (values);
+  g_free (rows);
+}
+
+wyrelog_error_t
+wyl_fact_store_retract_by_batch_id (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *trigger_batch_id, const gchar *new_batch_id,
+    const gchar *source, const gchar *request_id,
+    const gchar *idempotency_key, gboolean *out_inserted, gint64 *out_row_count)
+{
+  wyrelog_error_t rc;
+  g_autofree gchar *table = NULL;
+  TriggerBatchScope scope = { 0 };
+  gboolean found = FALSE;
+  wyl_fact_value_t *select_values = NULL;
+  gchar **owned_strings = NULL;
+  wyl_fact_row_t *select_rows = NULL;
+  gsize n_select_rows = 0;
+  g_autofree gchar *content_hash = NULL;
+  duckdb_appender appender = NULL;
+  gint64 first_seq = 0;
+  gint64 created_at_us = 0;
+  wyl_fact_store_batch_t batch_meta;
+  gboolean existing = FALSE;
+  gboolean tx_open = FALSE;
+
+  if (out_inserted != NULL)
+    *out_inserted = FALSE;
+  if (out_row_count != NULL)
+    *out_row_count = 0;
+  if (store == NULL || schema == NULL || trigger_batch_id == NULL
+      || trigger_batch_id[0] == '\0' || new_batch_id == NULL
+      || new_batch_id[0] == '\0' || idempotency_key == NULL
+      || idempotency_key[0] == '\0')
+    return WYRELOG_E_INVALID;
+  rc = validate_schema_shape (schema);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  table = wyl_fact_store_projection_table_name (schema);
+  if (table == NULL)
+    return WYRELOG_E_INVALID;
+
+  memset (&batch_meta, 0, sizeof (batch_meta));
+  batch_meta.batch_id = new_batch_id;
+  batch_meta.tenant_id = schema->tenant_id;
+  batch_meta.graph_id = schema->graph_id;
+  batch_meta.namespace_id = schema->namespace_id;
+  batch_meta.relation_name = schema->relation_name;
+  batch_meta.schema_version = schema->schema_version;
+  batch_meta.source = source;
+  batch_meta.request_id = request_id;
+  batch_meta.idempotency_key = idempotency_key;
+  batch_meta.op = WYL_FACT_STORE_OP_RETRACT;
+
+  g_mutex_lock (&store->lock);
+
+  rc = reject_audit_database_unlocked (store);
+  if (rc != WYRELOG_E_OK)
+    goto unlock_return;
+  rc = validate_store_scope_unlocked (store, schema->tenant_id,
+      schema->graph_id, FALSE);
+  if (rc != WYRELOG_E_OK)
+    goto unlock_return;
+
+  rc = lookup_batch_scope_unlocked (store, trigger_batch_id, &scope, &found);
+  if (rc != WYRELOG_E_OK)
+    goto unlock_return;
+  if (!found) {
+    rc = WYRELOG_E_NOT_FOUND;
+    goto unlock_return;
+  }
+  if (g_strcmp0 (scope.op, "assert") != 0) {
+    rc = WYRELOG_E_POLICY;
+    goto unlock_return;
+  }
+  if (g_strcmp0 (scope.tenant_id, schema->tenant_id) != 0
+      || g_strcmp0 (scope.graph_id, schema->graph_id) != 0
+      || g_strcmp0 (scope.namespace_id, schema->namespace_id) != 0
+      || g_strcmp0 (scope.relation_name, schema->relation_name) != 0
+      || (guint32) scope.schema_version != schema->schema_version) {
+    rc = WYRELOG_E_POLICY;
+    goto unlock_return;
+  }
+
+  rc = select_valid_rows_for_batch_unlocked (store, schema, table,
+      trigger_batch_id, &select_values, &owned_strings, &select_rows,
+      &n_select_rows);
+  if (rc != WYRELOG_E_OK)
+    goto unlock_return;
+
+  batch_meta.rows = select_rows;
+  batch_meta.n_rows = n_select_rows;
+
+  content_hash = batch_content_hash (schema, &batch_meta);
+  if (content_hash == NULL) {
+    rc = WYRELOG_E_NOMEM;
+    goto unlock_return;
+  }
+
+  rc = existing_batch_matches_unlocked (store, &batch_meta, content_hash,
+      &existing);
+  if (rc != WYRELOG_E_OK)
+    goto unlock_return;
+  if (existing) {
+    /* Idempotent replay: same batch_id + idempotency_key match an existing
+     * retract row with identical content. Report the recorded row_count. */
+    if (out_row_count != NULL)
+      *out_row_count = (gint64) n_select_rows;
+    rc = WYRELOG_E_OK;
+    goto unlock_return;
+  }
+
+  rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  if (rc != WYRELOG_E_OK)
+    goto unlock_return;
+  tx_open = TRUE;
+  created_at_us = g_get_real_time ();
+  rc = insert_batch_unlocked (store, &batch_meta, content_hash, created_at_us);
+  if (rc == WYRELOG_E_OK && n_select_rows > 0)
+    rc = next_sequence_unlocked (store, &first_seq);
+  if (rc == WYRELOG_E_OK && n_select_rows > 0
+      && duckdb_appender_create (store->conn, NULL, table, &appender)
+      != DuckDBSuccess)
+    rc = WYRELOG_E_IO;
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < n_select_rows; i++) {
+    gint64 seq = first_seq + (gint64) i;
+    if (duckdb_appender_begin_row (appender) != DuckDBSuccess) {
+      rc = WYRELOG_E_IO;
+      break;
+    }
+    for (gsize j = 0; rc == WYRELOG_E_OK && j < schema->n_columns; j++)
+      rc = append_value (appender, &select_rows[i].values[j]);
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_varchar (appender, schema->tenant_id)
+          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_varchar (appender, schema->graph_id)
+          == DuckDBSuccess ? WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_int64 (appender, seq) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_varchar (appender, new_batch_id) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_int64 (appender, (gint64) i) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = duckdb_append_bool (appender, FALSE) == DuckDBSuccess ?
+          WYRELOG_E_OK : WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK
+        && duckdb_appender_end_row (appender) != DuckDBSuccess)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK)
+      rc = insert_event_unlocked (store, &batch_meta, seq, created_at_us);
+  }
+  if (appender != NULL) {
+    if (duckdb_appender_destroy (&appender) != DuckDBSuccess
+        && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+    appender = NULL;
+  }
+  if (rc == WYRELOG_E_OK) {
+    rc = exec_sql (store->conn, "COMMIT;");
+    tx_open = FALSE;
+  }
+
+  if (rc == WYRELOG_E_OK) {
+    if (out_inserted != NULL)
+      *out_inserted = TRUE;
+    if (out_row_count != NULL)
+      *out_row_count = (gint64) n_select_rows;
+  }
+
+unlock_return:
+  if (tx_open)
+    (void) exec_sql (store->conn, "ROLLBACK;");
+  if (appender != NULL)
+    duckdb_appender_destroy (&appender);
+  trigger_batch_scope_clear (&scope);
+  free_projection_rows (select_values, owned_strings, select_rows,
+      n_select_rows, schema->n_columns);
+  g_mutex_unlock (&store->lock);
   return rc;
 }
