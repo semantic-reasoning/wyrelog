@@ -826,11 +826,12 @@ wyl_client_graph_create (WylClient *client, const gchar *tenant,
 }
 
 wyrelog_error_t
-wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
+wyl_client_fact_schema_register_with_max_rows (WylClient *client,
+    const gchar *tenant,
     const gchar *graph, const gchar *namespace_id, const gchar *relation,
     guint32 schema_version, const WylClientFactColumn *columns,
-    gsize n_columns, gint64 guard_timestamp, const gchar *guard_loc_class,
-    gint64 guard_risk)
+    gsize n_columns, guint max_rows, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
 {
   if (graph == NULL || graph[0] == '\0' || namespace_id == NULL ||
       namespace_id[0] == '\0' || relation == NULL || relation[0] == '\0' ||
@@ -864,11 +865,14 @@ wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
       NULL, TRUE);
   g_autofree gchar *escaped_relation = g_uri_escape_string (relation, NULL,
       TRUE);
-  g_autofree gchar *uri = g_strdup_printf
-      ("%s/facts/schema/register?%s&graph=%s&namespace=%s&relation=%s"
+  g_autoptr (GString) uri = g_string_new (NULL);
+  g_string_printf (uri,
+      "%s/facts/schema/register?%s&graph=%s&namespace=%s&relation=%s"
       "&schema_version=%u", base_url, guard_query, escaped_graph,
       escaped_namespace, escaped_relation, schema_version);
-  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri);
+  if (max_rows > 0)
+    g_string_append_printf (uri, "&max_rows=%u", max_rows);
+  g_autoptr (SoupMessage) message = soup_message_new ("POST", uri->str);
   if (message == NULL)
     return WYRELOG_E_INVALID;
   client_fact_attach_auth (message, access_token);
@@ -876,6 +880,18 @@ wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
   soup_message_set_request_body_from_bytes (message,
       "text/tab-separated-values", body);
   return client_send_fact_message (client, message, NULL);
+}
+
+wyrelog_error_t
+wyl_client_fact_schema_register (WylClient *client, const gchar *tenant,
+    const gchar *graph, const gchar *namespace_id, const gchar *relation,
+    guint32 schema_version, const WylClientFactColumn *columns,
+    gsize n_columns, gint64 guard_timestamp, const gchar *guard_loc_class,
+    gint64 guard_risk)
+{
+  return wyl_client_fact_schema_register_with_max_rows (client, tenant, graph,
+      namespace_id, relation, schema_version, columns, n_columns, 0,
+      guard_timestamp, guard_loc_class, guard_risk);
 }
 
 wyrelog_error_t

@@ -313,7 +313,7 @@ wyctl --daemon-url "$BASE_URL" graph create \
 wyctl --daemon-url "$BASE_URL" fact schema register \
   --tenant "$TENANT" --graph "$GRAPH" \
   --namespace shop --relation orders --schema-version 1 \
-  --columns order_id:symbol,amount:int64 \
+  --columns order_id:symbol,amount:int64 --max-rows 1000 \
   --access-token-file "$TOKEN" \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 
@@ -332,6 +332,9 @@ wyctl --daemon-url "$BASE_URL" datalog query \
   --access-token-file "$TOKEN" \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
+
+Omit `--max-rows` during schema registration to keep the default 1000-row
+Datalog query cap.
 
 To verify recovery, restart `wyrelogd` with the same policy DB, audit DB, key,
 and fact root. Mint a fresh token after restart and run the same

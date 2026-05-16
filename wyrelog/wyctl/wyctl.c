@@ -87,6 +87,7 @@ typedef struct
   gchar *relation;
   gchar *schema_version_arg;
   gchar *columns_arg;
+  gchar *max_rows_arg;
   gchar *access_token_file;
   gchar *guard_timestamp_arg;
   gchar *guard_loc_class;
@@ -1436,6 +1437,8 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
         "Schema version", "N"},
     {"columns", 0, 0, G_OPTION_ARG_STRING, &opts.columns_arg,
         "Columns as name:type,...", "COLUMNS"},
+    {"max-rows", 0, 0, G_OPTION_ARG_STRING, &opts.max_rows_arg,
+        "Maximum rows authorized for the default relation query", "N"},
     {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
         "Bearer access token file", "PATH"},
     {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
@@ -1485,6 +1488,12 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
     g_printerr ("wyctl: invalid --schema-version\n");
     return 2;
   }
+  guint32 max_rows = 0;
+  if (opts.max_rows_arg != NULL && !parse_positive_uint32 (opts.max_rows_arg,
+          &max_rows)) {
+    g_printerr ("wyctl: invalid --max-rows\n");
+    return 2;
+  }
   WylClientFactColumn *columns = NULL;
   gsize n_columns = 0;
   if (!parse_columns_arg (opts.columns_arg, &columns, &n_columns)) {
@@ -1505,9 +1514,10 @@ run_fact_schema_register (const WyctlOptions *global_opts, gint argc,
     client_fact_columns_clear (columns, n_columns);
     return client_rc;
   }
-  wyrelog_error_t rc = wyl_client_fact_schema_register (client, tenant,
+  wyrelog_error_t rc = wyl_client_fact_schema_register_with_max_rows (client,
+      tenant,
       graph, opts.namespace_id, opts.relation, schema_version, columns,
-      n_columns, guard_timestamp, opts.guard_loc_class, guard_risk);
+      n_columns, max_rows, guard_timestamp, opts.guard_loc_class, guard_risk);
   client_fact_columns_clear (columns, n_columns);
   int exit_rc = fact_remote_exit (client, "fact schema register", rc,
       "schema_register_failed");
