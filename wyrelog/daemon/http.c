@@ -2618,6 +2618,7 @@ typedef enum
 {
   FACT_HTTP_OP_APPEND = 0,
   FACT_HTTP_OP_RETRACT,
+  FACT_HTTP_OP_FORGET,
 } fact_http_op_t;
 
 static gboolean
@@ -2643,6 +2644,9 @@ parse_fact_op_path (const gchar *path, gchar **out_tenant,
   } else if (g_str_has_suffix (parts[2], ":retract")) {
     op = FACT_HTTP_OP_RETRACT;
     suffix = ":retract";
+  } else if (g_str_has_suffix (parts[2], ":forget")) {
+    op = FACT_HTTP_OP_FORGET;
+    suffix = ":forget";
   } else {
     return FALSE;
   }
@@ -2967,10 +2971,7 @@ static void
 facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
-  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
-    set_json_error (msg, 405, "method_not_allowed");
-    return;
-  }
+  const gchar *method = soup_server_message_get_method (msg);
 
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *graph = NULL;
@@ -2983,9 +2984,144 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 400, "invalid_fact_request");
     return;
   }
+
+  /* :forget uses DELETE; :append/:retract use POST. */
+  if (op == FACT_HTTP_OP_FORGET) {
+    if (g_strcmp0 (method, "DELETE") != 0) {
+      set_json_error (msg, 405, "method_not_allowed");
+      return;
+    }
+  } else {
+    if (g_strcmp0 (method, "POST") != 0) {
+      set_json_error (msg, 405, "method_not_allowed");
+      return;
+    }
+  }
+
   if (!query_tenant_matches (msg, query, tenant))
     return;
 
+  /* --- :forget branch --- */
+  if (op == FACT_HTTP_OP_FORGET) {
+    const gchar *namespace_id =
+        lookup_required_query_string (query, "namespace");
+    guint32 schema_version = 0;
+    if (!fact_http_customer_name_is_valid (namespace_id) ||
+        !parse_uint32_query_param (lookup_required_query_string (query,
+                "schema_version"), &schema_version)) {
+      set_json_error (msg, 400, "invalid_fact_request");
+      return;
+    }
+
+    WylDaemonHttpContext *ctx = user_data;
+    g_autoptr (GHashTable) auth_query = copy_query_with_tenant (query, tenant);
+    g_autofree gchar *actor = NULL;
+    if (!authorize_guarded_session_action (server, msg, auth_query, ctx,
+            "wr.fact.write", tenant, "fact_auth_required", "invalid_fact_auth",
+            "fact_denied", "fact_auth_failed", &actor))
+      return;
+
+    g_autofree gchar *body = NULL;
+    if (!request_body_dup (msg, 4096, &body)) {
+      set_json_error (msg, 400, "invalid_fact_request");
+      return;
+    }
+    g_autofree gchar *batch_id = json_dup_simple_string_member (body,
+        "batch_id");
+    g_autofree gchar *operator_id = json_dup_simple_string_member (body,
+        "operator");
+    g_autofree gchar *reason = json_dup_simple_string_member (body, "reason");
+    if (batch_id == NULL || operator_id == NULL || reason == NULL ||
+        batch_id[0] == '\0' || operator_id[0] == '\0' || reason[0] == '\0') {
+      set_json_error (msg, 400, "invalid_fact_request");
+      return;
+    }
+
+    g_mutex_lock (&ctx->policy_mutation_lock);
+    GraphLookupCtx lookup = { 0 };
+    wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+        (ctx->handle), tenant, graph, &lookup);
+    if (rc != WYRELOG_E_OK) {
+      g_mutex_unlock (&ctx->policy_mutation_lock);
+      set_json_error (msg, 500, "fact_forget_failed");
+      return;
+    }
+    if (!lookup.found) {
+      g_mutex_unlock (&ctx->policy_mutation_lock);
+      graph_lookup_clear (&lookup);
+      set_json_error (msg, 404, "graph_not_found");
+      return;
+    }
+
+    gboolean relation_visible = FALSE;
+    wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;
+    gsize n_loaded = 0;
+    rc = wyl_policy_store_load_fact_relation_schema_columns
+        (wyl_handle_get_policy_store (ctx->handle), tenant, graph, namespace_id,
+        relation, schema_version, &relation_visible, &loaded, &n_loaded);
+    if (rc != WYRELOG_E_OK) {
+      g_mutex_unlock (&ctx->policy_mutation_lock);
+      graph_lookup_clear (&lookup);
+      set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
+          rc == WYRELOG_E_NOT_FOUND ? "fact_schema_not_found" :
+          "fact_forget_failed");
+      return;
+    }
+
+    wyl_policy_fact_relation_schema_column_t *schema_columns =
+        copy_schema_columns (loaded, n_loaded);
+    wyl_policy_fact_relation_schema_options_t schema = {
+      .tenant_id = tenant,
+      .graph_id = graph,
+      .namespace_id = namespace_id,
+      .relation_name = relation,
+      .schema_version = schema_version,
+      .relation_visible = relation_visible,
+      .columns = schema_columns,
+      .n_columns = n_loaded,
+    };
+    g_autoptr (wyl_fact_store_t) fact_store = NULL;
+    g_autofree gchar *fact_db_path =
+        g_build_filename (lookup.info.storage_path, "facts.duckdb", NULL);
+    rc = wyl_fact_store_open (fact_db_path, &fact_store);
+    gsize rows_purged = 0;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_store_create_schema (fact_store);
+    if (rc == WYRELOG_E_OK) {
+      const wyl_fact_store_forget_options_t fopts = {
+        .batch_id = batch_id,
+        .operator_id = operator_id,
+        .reason = reason,
+      };
+      rc = wyl_fact_store_forget (fact_store, &schema, &fopts, &rows_purged);
+    }
+    if (rc == WYRELOG_E_OK)
+      (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+
+    graph_lookup_clear (&lookup);
+    wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
+    schema_columns_clear (schema_columns, n_loaded);
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      set_json_error (msg, 404, "fact_batch_not_found");
+      return;
+    }
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "fact_forget_failed");
+      return;
+    }
+    g_autoptr (GString) resp = g_string_new (NULL);
+    g_string_printf (resp, "{\"ok\":true,\"rows_purged\":%zu}", rows_purged);
+    const gchar *request_id = ensure_request_id_header (msg);
+    (void) request_id;
+    attach_request_id_header (msg);
+    soup_server_message_set_status (msg, 200, NULL);
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, resp->str, resp->len);
+    return;
+  }
+
+  /* --- :append / :retract branch --- */
   const gchar *namespace_id = lookup_required_query_string (query, "namespace");
   const gchar *batch_id = lookup_required_query_string (query, "batch_id");
   const gchar *idempotency_key = lookup_required_query_string (query,
