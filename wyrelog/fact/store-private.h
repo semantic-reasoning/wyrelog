@@ -55,5 +55,13 @@ wyrelog_error_t wyl_fact_store_append_batch (wyl_fact_store_t * store,
 wyrelog_error_t wyl_fact_store_retract_batch (wyl_fact_store_t * store,
     const wyl_policy_fact_relation_schema_options_t * schema,
     const wyl_fact_store_batch_t * batch, gboolean * out_inserted);
+wyrelog_error_t wyl_fact_store_retract_by_batch_id (wyl_fact_store_t * store,
+    const wyl_policy_fact_relation_schema_options_t * schema,
+    const gchar * trigger_batch_id, const gchar * new_batch_id,
+    const gchar * source, const gchar * request_id,
+    const gchar * idempotency_key, gboolean * out_inserted,
+    gint64 * out_row_count);
+
+#define WYL_FACT_STORE_RETRACT_BY_BATCH_MAX_ROWS 10000
 
 G_END_DECLS;

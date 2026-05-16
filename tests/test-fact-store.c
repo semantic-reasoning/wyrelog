@@ -377,6 +377,610 @@ check_fact_store_retracts_idempotently (void)
   return 0;
 }
 
+/* Tier-2 wyl_fact_store_retract_by_batch_id: helpers + 10 cases. */
+typedef struct
+{
+  wyl_fact_store_t *store;
+  wyl_policy_fact_relation_schema_options_t schema;
+  gchar *table;
+} RetractByIdFixture;
+
+static gint
+retract_by_id_fixture_init (RetractByIdFixture *fix,
+    const wyl_policy_fact_relation_schema_column_t *columns, gsize n_columns)
+{
+  fix->store = NULL;
+  fix->table = NULL;
+  if (wyl_fact_store_open (NULL, &fix->store) != WYRELOG_E_OK)
+    return 1;
+  if (wyl_fact_store_create_schema (fix->store) != WYRELOG_E_OK)
+    return 2;
+  fix->schema = make_schema (columns, n_columns);
+  if (wyl_fact_store_ensure_projection (fix->store, &fix->schema, &fix->table)
+      != WYRELOG_E_OK)
+    return 3;
+  return 0;
+}
+
+static void
+retract_by_id_fixture_clear (RetractByIdFixture *fix)
+{
+  g_free (fix->table);
+  wyl_fact_store_close (fix->store);
+}
+
+static gint
+retract_by_id_seed_assert (wyl_fact_store_t *store,
+    const wyl_policy_fact_relation_schema_options_t *schema,
+    const gchar *batch_id, const gchar *idempotency_key,
+    const wyl_fact_row_t *rows, gsize n_rows)
+{
+  wyl_fact_store_batch_t batch = {
+    .batch_id = batch_id,
+    .tenant_id = schema->tenant_id,
+    .graph_id = schema->graph_id,
+    .namespace_id = schema->namespace_id,
+    .relation_name = schema->relation_name,
+    .schema_version = schema->schema_version,
+    .source = "unit-test",
+    .idempotency_key = idempotency_key,
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = rows,
+    .n_rows = n_rows,
+  };
+  gboolean inserted = FALSE;
+  if (wyl_fact_store_append_batch (store, schema, &batch, &inserted)
+      != WYRELOG_E_OK || !inserted)
+    return 1;
+  return 0;
+}
+
+static gint
+check_retract_by_id_normal_three_rows (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  gint rc_init = retract_by_id_fixture_init (&fix, columns,
+      G_N_ELEMENTS (columns));
+  if (rc_init != 0)
+    return 1000 + rc_init;
+
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 1},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-2"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 2},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-3"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 3},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 2},
+    {values + 2, 2},
+    {values + 4, 2},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "trigger-1",
+          "seed:1", rows, 3) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1010;
+  }
+
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  wyrelog_error_t rc = wyl_fact_store_retract_by_batch_id (fix.store,
+      &fix.schema, "trigger-1", "retract-1", "unit-test", "request-1",
+      "idem:retract:1", &inserted, &row_count);
+  if (rc != WYRELOG_E_OK || !inserted || row_count != 3) {
+    retract_by_id_fixture_clear (&fix);
+    return 1020;
+  }
+
+  duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
+  gint64 count = 0;
+  /* Original assert rows (trigger-1) stay physically in the table with
+   * __wyl_valid=TRUE; the retract adds NEW tombstone rows for retract-1
+   * with __wyl_valid=FALSE — it does NOT flip existing rows in-place. */
+  g_autofree gchar *trigger_valid_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = TRUE "
+      "AND __wyl_batch_id = 'trigger-1';", fix.table);
+  if (!count_i64 (conn, trigger_valid_sql, &count) || count != 3) {
+    retract_by_id_fixture_clear (&fix);
+    return 1030;
+  }
+  g_autofree gchar *invalid_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = FALSE "
+      "AND __wyl_batch_id = 'retract-1';", fix.table);
+  if (!count_i64 (conn, invalid_sql, &count) || count != 3) {
+    retract_by_id_fixture_clear (&fix);
+    return 1040;
+  }
+  g_autofree gchar *batch_op = NULL;
+  if (!query_text (conn,
+          "SELECT op FROM fact_batches WHERE batch_id = 'retract-1';",
+          &batch_op) || g_strcmp0 (batch_op, "retract") != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1050;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_idempotent_replay (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1100;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 1},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
+          "seed:1", rows, 1) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1101;
+  }
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_OK || !inserted || row_count != 1) {
+    retract_by_id_fixture_clear (&fix);
+    return 1102;
+  }
+  /* Replay with same trigger + new_batch_id + idempotency_key. */
+  inserted = TRUE;
+  row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_OK || inserted) {
+    retract_by_id_fixture_clear (&fix);
+    return 1103;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_second_retract_same_trigger (void)
+{
+  /* In the append-only tombstone model the trigger batch rows always have
+   * __wyl_valid=TRUE; each retract-by-id on the same trigger inserts a fresh
+   * set of tombstone rows with a new batch_id and __wyl_valid=FALSE.
+   * A second call with a different new_batch_id+idempotency_key must succeed
+   * (inserted=TRUE) and report row_count equal to the trigger's row count. */
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1200;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 1},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
+          "seed:1", rows, 1) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1201;
+  }
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_OK || !inserted || row_count != 1) {
+    retract_by_id_fixture_clear (&fix);
+    return 1202;
+  }
+  /* Second retract-by-id with a DIFFERENT batch_id+idempotency_key.
+   * The trigger rows are still valid in the projection table (tombstoning is
+   * append-only), so this also succeeds with row_count=1. */
+  inserted = FALSE;
+  row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new-2", "src", "req", "idem-2", &inserted, &row_count)
+      != WYRELOG_E_OK || !inserted || row_count != 1) {
+    retract_by_id_fixture_clear (&fix);
+    return 1203;
+  }
+  /* Two tombstone batches now exist. */
+  duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
+  gint64 count = 0;
+  if (!count_i64 (conn,
+          "SELECT COUNT(*) FROM fact_batches WHERE op = 'retract';",
+          &count) || count != 2) {
+    retract_by_id_fixture_clear (&fix);
+    return 1204;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_not_found (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1300;
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  wyrelog_error_t rc = wyl_fact_store_retract_by_batch_id (fix.store,
+      &fix.schema, "missing", "new-1", "src", "req", "idem-1", &inserted,
+      &row_count);
+  if (rc != WYRELOG_E_NOT_FOUND) {
+    retract_by_id_fixture_clear (&fix);
+    return 1301;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_trigger_is_retract_batch (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1400;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 1},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "seed",
+          "seed:1", rows, 1) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1401;
+  }
+  /* Make a real retract batch via Tier-1 API. */
+  wyl_fact_store_batch_t retract_batch = {
+    .batch_id = "ret",
+    .tenant_id = fix.schema.tenant_id,
+    .graph_id = fix.schema.graph_id,
+    .namespace_id = fix.schema.namespace_id,
+    .relation_name = fix.schema.relation_name,
+    .schema_version = fix.schema.schema_version,
+    .source = "unit-test",
+    .idempotency_key = "retract-batch:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,     /* overridden by Tier-1 wrapper */
+    .rows = rows,
+    .n_rows = 1,
+  };
+  if (wyl_fact_store_retract_batch (fix.store, &fix.schema, &retract_batch,
+          NULL) != WYRELOG_E_OK) {
+    retract_by_id_fixture_clear (&fix);
+    return 1402;
+  }
+  /* Now pointing retract-by-id at a retract batch must be rejected. */
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "ret",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_POLICY) {
+    retract_by_id_fixture_clear (&fix);
+    return 1403;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_scope_mismatch (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1500;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 1},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
+          "seed:1", rows, 1) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1501;
+  }
+  /* Caller schema describes a different relation than the trigger batch. */
+  wyl_policy_fact_relation_schema_options_t wrong = fix.schema;
+  wrong.relation_name = "other";
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &wrong, "trig",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_POLICY) {
+    retract_by_id_fixture_clear (&fix);
+    return 1502;
+  }
+  /* Tenant mismatch. */
+  wyl_policy_fact_relation_schema_options_t wrong_tenant = fix.schema;
+  wrong_tenant.tenant_id = "tenant-other";
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &wrong_tenant, "trig",
+          "new-2", "src", "req", "idem-2", &inserted, &row_count)
+      != WYRELOG_E_POLICY) {
+    retract_by_id_fixture_clear (&fix);
+    return 1503;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_exceeds_max_rows (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1600;
+  const gsize n_rows = WYL_FACT_STORE_RETRACT_BY_BATCH_MAX_ROWS + 1;
+  wyl_fact_value_t *values = g_new0 (wyl_fact_value_t, n_rows);
+  wyl_fact_row_t *rows = g_new0 (wyl_fact_row_t, n_rows);
+  gchar **ids = g_new0 (gchar *, n_rows);
+  for (gsize i = 0; i < n_rows; i++) {
+    ids[i] = g_strdup_printf ("o-%05" G_GSIZE_FORMAT, i);
+    values[i].type = WYL_FACT_VALUE_SYMBOL;
+    values[i].as.text = ids[i];
+    rows[i].values = &values[i];
+    rows[i].n_values = 1;
+  }
+  gint result = 0;
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "huge",
+          "seed:1", rows, n_rows) != 0) {
+    result = 1601;
+    goto cleanup;
+  }
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "huge",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_POLICY) {
+    result = 1602;
+    goto cleanup;
+  }
+cleanup:
+  for (gsize i = 0; i < n_rows; i++)
+    g_free (ids[i]);
+  g_free (ids);
+  g_free (rows);
+  g_free (values);
+  retract_by_id_fixture_clear (&fix);
+  return result;
+}
+
+static gint
+check_retract_by_id_schema_version_mismatch (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1700;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 1},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
+          "seed:1", rows, 1) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1701;
+  }
+  wyl_policy_fact_relation_schema_options_t bumped = fix.schema;
+  bumped.schema_version = 2;
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &bumped, "trig",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_POLICY) {
+    retract_by_id_fixture_clear (&fix);
+    return 1702;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_invalid_args (void)
+{
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 1) != 0)
+    return 1800;
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (NULL, &fix.schema, "trig",
+          "new", "src", "req", "idem", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1801;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, NULL, "trig",
+          "new", "src", "req", "idem", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1802;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, NULL,
+          "new", "src", "req", "idem", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1803;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "",
+          "new", "src", "req", "idem", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1804;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          NULL, "src", "req", "idem", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1805;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "", "src", "req", "idem", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1806;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new", "src", "req", NULL, &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1807;
+  }
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new", "src", "req", "", &inserted, &row_count)
+      != WYRELOG_E_INVALID) {
+    retract_by_id_fixture_clear (&fix);
+    return 1808;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_retract_by_id_partial_already_retracted (void)
+{
+  /* Three rows asserted; one row retracted via Tier-1 retract_batch first;
+   * retract-by-batch on the original trigger should retract only the
+   * remaining 2 valid rows (row_count=2). */
+  const wyl_policy_fact_relation_schema_column_t columns[] = {
+    {"order_id", "symbol", FALSE, TRUE},
+    {"amount", "int64", FALSE, TRUE},
+  };
+  RetractByIdFixture fix = { 0 };
+  if (retract_by_id_fixture_init (&fix, columns, 2) != 0)
+    return 1900;
+  wyl_fact_value_t values[] = {
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-1"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 1},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-2"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 2},
+    {.type = WYL_FACT_VALUE_SYMBOL,.as.text = "o-3"},
+    {.type = WYL_FACT_VALUE_INT64,.as.int64_value = 3},
+  };
+  const wyl_fact_row_t rows[] = {
+    {values, 2},
+    {values + 2, 2},
+    {values + 4, 2},
+  };
+  if (retract_by_id_seed_assert (fix.store, &fix.schema, "trig",
+          "seed:1", rows, 3) != 0) {
+    retract_by_id_fixture_clear (&fix);
+    return 1901;
+  }
+  /* Tier-1 retract row o-2 only (separate batch). */
+  const wyl_fact_row_t partial_rows[] = {
+    {values + 2, 2},
+  };
+  wyl_fact_store_batch_t partial = {
+    .batch_id = "partial",
+    .tenant_id = fix.schema.tenant_id,
+    .graph_id = fix.schema.graph_id,
+    .namespace_id = fix.schema.namespace_id,
+    .relation_name = fix.schema.relation_name,
+    .schema_version = fix.schema.schema_version,
+    .source = "unit-test",
+    .idempotency_key = "partial:1",
+    .op = WYL_FACT_STORE_OP_ASSERT,
+    .rows = partial_rows,
+    .n_rows = 1,
+  };
+  if (wyl_fact_store_retract_batch (fix.store, &fix.schema, &partial, NULL)
+      != WYRELOG_E_OK) {
+    retract_by_id_fixture_clear (&fix);
+    return 1902;
+  }
+  /* Retract-by-batch on trigger: the trigger batch has 3 rows with
+   * __wyl_batch_id='trig' and __wyl_valid=TRUE (tombstoning is append-only,
+   * the Tier-1 partial retract of o-2 created a separate tombstone row under
+   * batch "partial" and did NOT flip the original trigger row). So
+   * retract-by-id selects all 3 trigger rows and inserts 3 tombstone rows
+   * under new-1 with __wyl_valid=FALSE. row_count=3. */
+  gboolean inserted = FALSE;
+  gint64 row_count = -1;
+  if (wyl_fact_store_retract_by_batch_id (fix.store, &fix.schema, "trig",
+          "new-1", "src", "req", "idem-1", &inserted, &row_count)
+      != WYRELOG_E_OK || !inserted || row_count != 3) {
+    retract_by_id_fixture_clear (&fix);
+    return 1903;
+  }
+  duckdb_connection conn = wyl_fact_store_get_connection (fix.store);
+  gint64 count = 0;
+  /* 3 tombstone rows for new-1 must exist with __wyl_valid=FALSE. */
+  g_autofree gchar *tombstone_sql = g_strdup_printf
+      ("SELECT COUNT(*) FROM %s WHERE __wyl_valid = FALSE "
+      "AND __wyl_batch_id = 'new-1';", fix.table);
+  if (!count_i64 (conn, tombstone_sql, &count) || count != 3) {
+    retract_by_id_fixture_clear (&fix);
+    return 1904;
+  }
+  retract_by_id_fixture_clear (&fix);
+  return 0;
+}
+
+static gint
+check_fact_store_retract_by_batch_id (void)
+{
+  gint rc = check_retract_by_id_normal_three_rows ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_idempotent_replay ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_second_retract_same_trigger ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_not_found ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_trigger_is_retract_batch ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_scope_mismatch ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_exceeds_max_rows ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_schema_version_mismatch ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_invalid_args ();
+  if (rc != 0)
+    return rc;
+  rc = check_retract_by_id_partial_already_retracted ();
+  if (rc != 0)
+    return rc;
+  return 0;
+}
+
 static gint
 check_fact_corruption_does_not_block_policy_open (void)
 {
@@ -579,7 +1183,10 @@ check_fact_store_rejects_audit_shape (void)
 int
 main (void)
 {
-  gint rc = check_fact_store_appends_idempotently ();
+  gint rc = check_fact_store_retract_by_batch_id ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_store_appends_idempotently ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_retracts_idempotently ();
