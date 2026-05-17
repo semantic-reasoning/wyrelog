@@ -333,6 +333,61 @@ wyctl --daemon-url "$BASE_URL" datalog query \
   --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
 ```
 
+Fact mutation is schema-registered: append, retract, and forget operate only on
+relations registered through `fact schema register`. The daemon does not support
+raw Datalog atom deletion endpoints such as `DELETE /api/facts/fact(1)` or
+ad-hoc deletion of `fact(1)` without a registered relation schema. Attempts to
+mutate a relation before registering its schema fail with
+`fact_schema_not_found` on the schema-backed `/facts/<tenant>/<graph>/<relation>`
+routes.
+
+The following unary `fact(V)` flow shows the required contract for a registered
+`fact(value:int64)` relation:
+
+```sh
+GRAPH=unary
+
+wyctl --daemon-url "$BASE_URL" graph create \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+wyctl --daemon-url "$BASE_URL" fact schema register \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --namespace examples --relation fact --schema-version 1 \
+  --columns value:int64 --max-rows 1000 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+printf 'value\n1\n2\n3\n' >/tmp/fact.tsv
+curl -fsS -X POST \
+  -H "Authorization: Bearer $(cat "$TOKEN")" \
+  --data-binary @/tmp/fact.tsv \
+  "$BASE_URL/facts/$TENANT/$GRAPH/fact:append?tenant=$TENANT&namespace=examples&schema_version=1&batch_id=fact-1&idempotency_key=fact-1&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+
+wyctl --daemon-url "$BASE_URL" datalog query \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --query 'fact(V)' --output json --limit 10 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+
+printf 'value\n1\n' >/tmp/fact-retract.tsv
+curl -fsS -X POST \
+  -H "Authorization: Bearer $(cat "$TOKEN")" \
+  --data-binary @/tmp/fact-retract.tsv \
+  "$BASE_URL/facts/$TENANT/$GRAPH/fact:retract?tenant=$TENANT&namespace=examples&schema_version=1&batch_id=fact-r1&idempotency_key=fact-r1&guard_timestamp=$(date +%s)&guard_loc_class=trusted&guard_risk=29"
+
+wyctl --daemon-url "$BASE_URL" datalog query \
+  --tenant "$TENANT" --graph "$GRAPH" \
+  --query 'fact(V)' --output json --limit 10 \
+  --access-token-file "$TOKEN" \
+  --guard-timestamp $(date +%s) --guard-loc-class trusted --guard-risk 29
+```
+
+The first query returns values `1`, `2`, and `3`. The query after the retract
+returns only `2` and `3`; the raw atom `fact(1)` is not deleted through a
+separate `/api/facts` API.
+
 Omit `--max-rows` during schema registration to keep the default 1000-row
 Datalog query cap. Set it explicitly for larger materialized JSON queries;
 accepted values are 1 through 1000000, and `wyctl datalog query --limit`
