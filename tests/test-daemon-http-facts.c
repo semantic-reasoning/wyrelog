@@ -536,6 +536,95 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
       strstr (body, "\"truncated\":true") == NULL)
     return 354;
 
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *create_unary_query = g_strdup_printf
+      ("tenant=%s&graph=unary&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/graphs/create",
+      create_unary_query, admin_token, NULL, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"created\":true") == NULL)
+    return 360;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *unary_missing_schema_query = g_strdup_printf
+      ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-raw-1&"
+      "idempotency_key=fact-raw-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/unary/fact:retract", unary_missing_schema_query,
+      admin_token, "value\n1\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 404 || strstr (body, "\"fact_schema_not_found\"") == NULL)
+    return 361;
+
+  const gchar *unary_schema_body =
+      "column_name\tcolumn_type\tnullable\tvisible\n"
+      "value\tint64\tfalse\ttrue\n";
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *unary_schema_query = g_strdup_printf
+      ("tenant=%s&graph=unary&namespace=examples&relation=fact&"
+      "schema_version=1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url, "/facts/schema/register",
+      unary_schema_query, admin_token, unary_schema_body, &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"ok\":true") == NULL)
+    return 362;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *unary_append_query = g_strdup_printf
+      ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-1&"
+      "idempotency_key=fact-1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/unary/fact:append", unary_append_query,
+      admin_token, "value\n1\n2\n3\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
+    return 363;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *unary_datalog_query = g_strdup_printf ("tenant=%s&%s",
+      WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/unary/query", unary_datalog_query, admin_token,
+      "{\"query\":\"fact(V)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"relation\":\"fact\"") == NULL ||
+      strstr (body, "\"columns\":[\"V\"]") == NULL ||
+      strstr (body, "{\"V\":1}") == NULL ||
+      strstr (body, "{\"V\":2}") == NULL ||
+      strstr (body, "{\"V\":3}") == NULL ||
+      strstr (body, "\"row_count\":3") == NULL)
+    return 364;
+
+  g_clear_pointer (&body, g_free);
+  g_autofree gchar *unary_retract_query = g_strdup_printf
+      ("tenant=%s&namespace=examples&schema_version=1&batch_id=fact-r1&"
+      "idempotency_key=fact-r1&%s", WYL_TENANT_DEFAULT, FACT_GUARD);
+  rc = send_raw (session, "POST", base_url,
+      "/facts/__wr_default/unary/fact:retract", unary_retract_query,
+      admin_token, "value\n1\n", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
+    return 365;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw (session, "POST", base_url,
+      "/datalog/__wr_default/unary/query", unary_datalog_query, admin_token,
+      "{\"query\":\"fact(V)\",\"output\":\"json\",\"limit\":10}",
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"row_count\":2") == NULL ||
+      strstr (body, "{\"V\":2}") == NULL ||
+      strstr (body, "{\"V\":3}") == NULL || strstr (body, "{\"V\":1}") != NULL)
+    return 366;
+
   /* Retract case 1: normal retract of o-2 -> 200 inserted=true. */
   g_clear_pointer (&body, g_free);
   g_autofree gchar *retract_query = g_strdup_printf
