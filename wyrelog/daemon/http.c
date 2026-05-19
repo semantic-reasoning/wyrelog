@@ -3748,30 +3748,20 @@ mfa_code_is_well_formed (const gchar *code)
   return code[6] == '\0';
 }
 
-typedef struct
-{
-  const gchar *subject_id;
-  gchar *state;                 /* g_strdup; NULL when no row exists */
-} MfaPrincipalStateLookup;
-
-static wyrelog_error_t
-mfa_principal_state_cb (const gchar *subject_id, const gchar *state,
-    gpointer user_data)
-{
-  MfaPrincipalStateLookup *lookup = user_data;
-  if (lookup->state != NULL)
-    return WYRELOG_E_OK;        /* already found, drain remaining rows */
-  if (g_strcmp0 (subject_id, lookup->subject_id) == 0)
-    lookup->state = g_strdup (state);
-  return WYRELOG_E_OK;
-}
-
 /*
  * Look up the current principal_state for |subject_id| in the
  * handle-owned policy store.  Returns NULL when the subject has no
- * principal_state row (which is itself a fail-closed signal: the
- * caller may not proceed without an explicit row).  Caller frees
- * the returned string with g_free / g_autofree.
+ * principal_state row (a fail-closed signal: the caller may not
+ * proceed without an explicit row).  Caller frees the returned string
+ * with g_free / g_autofree.
+ *
+ * Issue #331 commit 5: migrated off the historical foreach-based two-
+ * step lookup (which iterated the entire principal_states table) onto
+ * the single-row accessor wyl_policy_store_get_principal_state.  The
+ * accessor distinguishes "no row" (out_found=FALSE, returns OK) from
+ * "iteration error" (returns non-OK) via the explicit |out_found|
+ * boolean, so we surface the same NULL-on-miss-or-fault semantics to
+ * the caller without ambiguity.
  */
 static gchar *
 mfa_lookup_principal_state (WylHandle *handle, const gchar *subject_id)
@@ -3781,13 +3771,21 @@ mfa_lookup_principal_state (WylHandle *handle, const gchar *subject_id)
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
     return NULL;
-  MfaPrincipalStateLookup lookup = {.subject_id = subject_id,.state = NULL };
-  if (wyl_policy_store_foreach_principal_state (store, mfa_principal_state_cb,
-          &lookup) != WYRELOG_E_OK) {
-    g_clear_pointer (&lookup.state, g_free);
+  gchar *state = NULL;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_state (store, subject_id, &state,
+          &found) != WYRELOG_E_OK) {
+    g_clear_pointer (&state, g_free);
     return NULL;
   }
-  return lookup.state;
+  if (!found) {
+    /* Defensive: get_principal_state already wrote NULL on miss, but
+     * the contract is "NULL on no-row" and we want a single belt-and-
+     * braces clear here too. */
+    g_clear_pointer (&state, g_free);
+    return NULL;
+  }
+  return state;
 }
 
 static void
