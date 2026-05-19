@@ -140,7 +140,8 @@ if build_client
     files('wyctl/wyctl.c', 'wyctl/wyctl-config.c',
         'wyctl/wyctl-token-file.c'),
     include_directories : wyrelog_inc,
-    dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep],
+    dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep,
+        sodium_dep, sqlite_dep],
     install : true,
   )
 

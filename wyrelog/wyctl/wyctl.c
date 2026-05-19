@@ -2,15 +2,19 @@
 #include <glib.h>
 #include <gio/gio.h>
 #include <libsoup/soup.h>
+#include <sodium.h>
 #include <errno.h>
+#include <stdint.h>
 #include <string.h>
 
+#include "auth/totp.h"
 #include "wyrelog/client.h"
 #include "wyrelog/decide.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
 #include "wyrelog/wyl-common-private.h"
+#include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 #include "wyctl-config.h"
@@ -131,6 +135,13 @@ typedef struct
   gchar *from_keyprovider_path;
   gchar *to_keyprovider_path;
 } WyctlKeyOptions;
+
+typedef struct
+{
+  gchar *subject;
+  gchar *store_path;
+  gchar *keyprovider_path;
+} WyctlMfaOptions;
 
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
 #define WYCTL_MAX_TIMEOUT_MS 60000
@@ -1950,6 +1961,487 @@ run_audit (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/* ----------------------------------------------------------------------
+ * wyctl mfa enroll / mfa reset (issue #331 commit 6).
+ *
+ * These two subcommands are offline operator commands: they open the
+ * policy authority store directly (mirroring `wyctl key rotate'), mint
+ * a fresh TOTP seed, print the otpauth URI and base32 secret to stdout,
+ * prompt the operator on stdin for the current 6-digit code, and only
+ * persist the enrollment row after the code verifies.  Aborts before
+ * verification (EOF / wrong code) leave the store untouched.
+ *
+ * The bootstrap auto-revoke: when the bootstrap admin enrolls for the
+ * first time, the one-shot `wr.login.skip_mfa' direct permission that
+ * the daemon armed at bootstrap is retracted in the same invocation —
+ * the admin has now demonstrated possession of the TOTP factor, so the
+ * "skip MFA" escape hatch must close.  This is the only host that
+ * retracts that permission; the daemon's verify path never does.
+ *
+ * Audit-event vocabulary (action column in audit_events):
+ *   mfa_enrolled            - successful enrollment.  resource_id carries
+ *                             the enrollment row's uuidv7 id (not the
+ *                             subject), so an auditor can correlate the
+ *                             audit row 1:1 with the totp_enrollments row.
+ *   mfa_reset               - successful reset (delete + re-enroll).
+ *                             Same resource_id convention as mfa_enrolled.
+ *   mfa_skip_mfa_revoked    - one-shot bootstrap auto-revoke side-effect.
+ *                             resource_id carries the SUBJECT (not the
+ *                             enrollment id) to match the rest of the
+ *                             direct-permission mutation audit convention:
+ *                             revokes name the principal whose grant was
+ *                             pulled, not the enrollment that triggered
+ *                             the side-effect.
+ *
+ * Footgun coverage (see #331 architect / critic brief):
+ *   F2: the audit row carries only subject_id and the enrollment record
+ *       UUIDv7 (as resource_id) — never the seed or the otpauth URI.
+ *   F4: every error path that touched the in-memory secret runs
+ *       wyl_totp_enrollment_clear before bailing, which calls
+ *       sodium_memzero on the 20-byte seed buffer.
+ */
+
+#define WYCTL_MFA_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
+#define WYCTL_MFA_LOGIN_SKIP_MFA_SCOPE "login"
+#define WYCTL_MFA_OTPAUTH_ISSUER "wyrelog"
+
+/* Per RFC 3986, percent-encode anything outside the unreserved set so
+ * the label and query-parameter segments parse cleanly under the
+ * Google Authenticator Key URI Format.  GLib's g_uri_escape_string
+ * applies RFC 3986 percent-encoding for everything outside [A-Za-z0-9]
+ * + the explicit unreserved set; we pass `reserved_chars_allowed = NULL'
+ * so ':' and '/' are encoded even though the URI grammar permits them
+ * in some contexts. */
+static gchar *
+wyctl_mfa_encode_uri_segment (const gchar *raw)
+{
+  return g_uri_escape_string (raw, NULL, FALSE);
+}
+
+/* Build the otpauth:// URI for `subject' with the given base32 secret.
+ * The issuer is "wyrelog" (hardcoded to match the brand the daemon
+ * stamps elsewhere).  Returns a freshly allocated string owned by the
+ * caller. */
+static gchar *
+wyctl_mfa_build_otpauth_uri (const gchar *subject, const gchar *base32_secret)
+{
+  g_autofree gchar *issuer_enc =
+      wyctl_mfa_encode_uri_segment (WYCTL_MFA_OTPAUTH_ISSUER);
+  g_autofree gchar *subject_enc = wyctl_mfa_encode_uri_segment (subject);
+  /* The base32 alphabet is already URL-safe; emit it verbatim so the
+   * operator can paste it into authenticator apps that expect the
+   * canonical base32 form. */
+  return g_strdup_printf
+      ("otpauth://totp/%s:%s?secret=%s&issuer=%s&algorithm=SHA1&digits=6&period=30",
+      issuer_enc, subject_enc, base32_secret, issuer_enc);
+}
+
+/* Read a single line from stdin and parse it as a 6-digit decimal code.
+ * Returns FALSE on EOF, malformed input, or a value outside [0,999999].
+ * The buffer is zeroed before return to keep the typed code out of
+ * heap residue. */
+static gboolean
+wyctl_mfa_read_six_digit_code (guint *out_code)
+{
+  gchar buf[64];
+  if (fgets (buf, (int) sizeof buf, stdin) == NULL)
+    return FALSE;
+  gsize len = strlen (buf);
+  while (len > 0
+      && (buf[len - 1] == '\n' || buf[len - 1] == '\r'
+          || buf[len - 1] == ' ' || buf[len - 1] == '\t'))
+    buf[--len] = '\0';
+  if (len != WYL_TOTP_DIGITS) {
+    sodium_memzero (buf, sizeof buf);
+    return FALSE;
+  }
+  for (gsize i = 0; i < len; i++) {
+    if (!g_ascii_isdigit (buf[i])) {
+      sodium_memzero (buf, sizeof buf);
+      return FALSE;
+    }
+  }
+  errno = 0;
+  gchar *end = NULL;
+  gint64 parsed = g_ascii_strtoll (buf, &end, 10);
+  sodium_memzero (buf, sizeof buf);
+  if (errno != 0 || end == NULL || *end != '\0' || parsed < 0
+      || parsed > 999999)
+    return FALSE;
+  *out_code = (guint) parsed;
+  return TRUE;
+}
+
+/* Open the policy store named by --store and --keyprovider.  When
+ * --keyprovider is absent the store is opened unencrypted; this is the
+ * code path test harnesses exercise.  Production operators must
+ * provide --keyprovider; the daemon refuses to load a store written
+ * unencrypted on a host that expects encryption, so this command does
+ * not enforce a policy of its own. */
+static wyrelog_error_t
+wyctl_mfa_open_store (const WyctlMfaOptions *opts, wyl_policy_store_t **out)
+{
+  if (opts->keyprovider_path != NULL && opts->keyprovider_path[0] != '\0') {
+    wyl_keyprovider_file_t *kp =
+        wyl_keyprovider_file_new_from_spec (opts->keyprovider_path);
+    if (kp == NULL)
+      return WYRELOG_E_IO;
+    wyl_policy_store_open_options_t open_opts = {
+      .path = opts->store_path,
+      .keyprovider_vtable = wyl_keyprovider_file_get_vtable (),
+      .keyprovider_state = kp,
+      .keyprovider_state_free = (void (*)(gpointer)) wyl_keyprovider_file_free,
+      .require_encrypted = TRUE,
+    };
+    return wyl_policy_store_open_with_options (&open_opts, out);
+  }
+  return wyl_policy_store_open (opts->store_path, out);
+}
+
+/* Emit a single audit_events row.  Mints a fresh UUIDv7 for the audit
+ * id so multiple invocations are distinguishable in the store. */
+static wyrelog_error_t
+wyctl_mfa_emit_audit (wyl_policy_store_t *store, const gchar *action,
+    const gchar *subject_id, const gchar *resource_id)
+{
+  wyl_id_t id = WYL_ID_NIL;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gchar id_str[WYL_ID_STRING_BUF];
+  rc = wyl_id_format (&id, id_str, sizeof id_str);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_policy_store_append_audit_event (store, id_str,
+      g_get_real_time (), subject_id, action, resource_id, NULL, "wyctl",
+      WYL_DECISION_ALLOW);
+}
+
+/* If `subject' was the bootstrap admin and currently holds the
+ * one-shot wr.login.skip_mfa direct permission, revoke it (delete the
+ * direct_permission row, fire the perm-scope FSM revoke transition,
+ * and emit an mfa_skip_mfa_revoked audit row).  No-op for any other
+ * subject or when the permission is already absent. */
+static wyrelog_error_t
+wyctl_mfa_maybe_revoke_skip_mfa (wyl_policy_store_t *store,
+    const gchar *subject)
+{
+  g_autofree gchar *bootstrap_subject = NULL;
+  gint64 sealed_us = 0;
+  wyrelog_error_t rc = wyl_policy_store_get_bootstrap_admin (store,
+      &bootstrap_subject, &sealed_us);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bootstrap_subject == NULL || g_strcmp0 (bootstrap_subject, subject) != 0)
+    return WYRELOG_E_OK;
+
+  gboolean has_perm = FALSE;
+  rc = wyl_policy_store_direct_permission_exists (store, subject,
+      WYCTL_MFA_LOGIN_SKIP_MFA_PERMISSION, WYCTL_MFA_LOGIN_SKIP_MFA_SCOPE,
+      &has_perm);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!has_perm)
+    return WYRELOG_E_OK;
+
+  /* Mint a single audit id for the revoke side-effect.  The
+   * apply_direct_permission_mutation_with_audit helper opens its own
+   * savepoint, writes the permission delete + direct_permission_event
+   * row + audit row, and validates the post-mutation snapshot. */
+  wyl_id_t id = WYL_ID_NIL;
+  rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gchar id_str[WYL_ID_STRING_BUF];
+  rc = wyl_id_format (&id, id_str, sizeof id_str);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_apply_direct_permission_mutation_with_audit (store,
+      subject, WYCTL_MFA_LOGIN_SKIP_MFA_PERMISSION,
+      WYCTL_MFA_LOGIN_SKIP_MFA_SCOPE, FALSE, id_str, g_get_real_time (),
+      subject, "mfa_skip_mfa_revoked", subject, NULL, "wyctl", NULL,
+      WYL_DECISION_ALLOW);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Drive the perm-scope FSM transition armed -> dormant so the
+   * permission_state row aligns with the absent direct_permission row.
+   * No second audit row: the transition is part of the same logical
+   * revoke and is reflected in permission_state_events. */
+  return wyl_policy_store_apply_permission_state_transition (store, subject,
+      WYCTL_MFA_LOGIN_SKIP_MFA_PERMISSION, WYCTL_MFA_LOGIN_SKIP_MFA_SCOPE,
+      "revoke", NULL);
+}
+
+/* Common enroll flow shared by `wyctl mfa enroll' and the post-delete
+ * second half of `wyctl mfa reset'.  Owns the seed buffer for the
+ * entire flow and zeroes it on every exit.  Returns 0 on success or a
+ * non-zero exit code that wyctl propagates up to main().
+ *
+ * `reset_mode' selects between the mfa_enrolled and mfa_reset audit
+ * action strings; the persisted row is identical in both cases.
+ */
+static int
+wyctl_mfa_run_enroll_flow (wyl_policy_store_t *store, const gchar *subject,
+    gboolean reset_mode)
+{
+  WylTotpEnrollment enr = { 0 };
+  enr.subject_id = g_strdup (subject);
+  enr.last_verified_step = INT64_MIN;
+  enr.enrolled_at = (gint64) (g_get_real_time () / G_USEC_PER_SEC);
+
+  g_autoptr (GError) error = NULL;
+  wyrelog_error_t rc = wyl_totp_generate_seed (enr.secret, sizeof enr.secret,
+      &error);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: totp seed generation failed: %s\n",
+        wyrelog_error_string (rc));
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  g_autofree gchar *base32_secret = NULL;
+  rc = wyl_totp_base32_encode (enr.secret, sizeof enr.secret, &base32_secret,
+      &error);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: base32 encode failed: %s\n", wyrelog_error_string (rc));
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  g_autofree gchar *otpauth = wyctl_mfa_build_otpauth_uri (subject,
+      base32_secret);
+
+  /* Secret-bearing output goes to stdout in a key=value format so an
+   * operator can pipe it into a parser, but the help text warns
+   * against piping to logs. */
+  g_print ("otpauth_uri=%s\n", otpauth);
+  g_print ("secret_base32=%s\n", base32_secret);
+  /* Flush so the operator (and the test harness reading stdout) sees
+   * the secret before we block on stdin. */
+  (void) fflush (stdout);
+
+  /* The prompt itself is interactive UX, not machine-parsed output:
+   * route it to stderr so piping stdout still leaves a visible
+   * prompt. */
+  g_printerr ("Enter the current 6-digit code from the authenticator app: ");
+  (void) fflush (stderr);
+
+  guint code = 0;
+  if (!wyctl_mfa_read_six_digit_code (&code)) {
+    g_printerr ("\nwyctl: aborted (no valid code supplied; no enrollment "
+        "written)\n");
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  gint64 now_secs = (gint64) (g_get_real_time () / G_USEC_PER_SEC);
+  guint64 matched_step = 0;
+  gboolean matched = wyl_totp_code_matches (enr.secret, sizeof enr.secret,
+      now_secs, code, &matched_step, &error);
+  if (!matched) {
+    g_printerr ("wyctl: code did not match; no enrollment written\n");
+    g_clear_error (&error);
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+  /* Set the replay watermark to the verified step so the daemon
+   * cannot accept the same code again on the very first verify. */
+  enr.last_verified_step = (gint64) matched_step;
+
+  /* Atomicity wrapper: the post-verify happy path performs up to four
+   * mutations (enrollment insert, mfa_enrolled audit row, plus the
+   * bootstrap auto-revoke's direct-permission mutation and the
+   * permission-state FSM transition).  Wrap them in a single outer
+   * savepoint so any partial failure rolls back the entire enrollment
+   * — otherwise a prefix failure could leave the bootstrap admin
+   * enrolled while wr.login.skip_mfa was still armed, creating an
+   * auth-bypass window until the operator re-ran enroll.
+   *
+   * SQLite savepoints with the same name nest as a stack: each inner
+   * `SAVEPOINT wyrelog_policy_mutation' (issued by the helpers below)
+   * pushes a new frame, and the matching RELEASE / ROLLBACK TO pops
+   * only that inner frame, leaving our outer frame intact.  See the
+   * commit-5 atomicity test for the same primitive used in
+   * apply_principal_failure. */
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: begin enrollment mutation failed: %s\n",
+        wyrelog_error_string (rc));
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  rc = wyl_policy_store_totp_enrollment_insert (store, &enr);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: enrollment insert failed: %s\n",
+        wyrelog_error_string (rc));
+    wyl_policy_store_rollback_mutation (store);
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  /* Audit (action carries the enrollment id_uuidv7 in resource_id so
+   * an operator can correlate the audit row with the totp_enrollments
+   * row).  NEVER include the seed or the otpauth URI here. */
+  rc = wyctl_mfa_emit_audit (store, reset_mode ? "mfa_reset" : "mfa_enrolled",
+      subject, enr.id_uuidv7);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: enrollment audit emit failed: %s\n",
+        wyrelog_error_string (rc));
+    wyl_policy_store_rollback_mutation (store);
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  /* Bootstrap auto-revoke: only fires for the bootstrap admin that
+   * currently holds wr.login.skip_mfa.  Runs under the same outer
+   * savepoint so a revoke failure rolls back the enrollment row and
+   * the audit row above — the operator sees a clean "no enrollment"
+   * state rather than a half-enrolled bootstrap admin with
+   * skip_mfa still armed. */
+  rc = wyctl_mfa_maybe_revoke_skip_mfa (store, subject);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: skip-mfa auto-revoke failed: %s\n",
+        wyrelog_error_string (rc));
+    wyl_policy_store_rollback_mutation (store);
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: commit enrollment mutation failed: %s\n",
+        wyrelog_error_string (rc));
+    wyl_policy_store_rollback_mutation (store);
+    wyl_totp_enrollment_clear (&enr);
+    return 1;
+  }
+
+  g_print ("status=enrolled subject=%s enrollment_id=%s\n", subject,
+      enr.id_uuidv7);
+  wyl_totp_enrollment_clear (&enr);
+  return 0;
+}
+
+static int
+wyctl_mfa_validate_common_options (const WyctlMfaOptions *opts)
+{
+  if (opts->subject == NULL || opts->subject[0] == '\0') {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  if (opts->store_path == NULL || opts->store_path[0] == '\0') {
+    g_printerr ("wyctl: missing --store\n");
+    return 2;
+  }
+  return 0;
+}
+
+static int
+run_mfa_enroll (gint argc, gchar **argv)
+{
+  WyctlMfaOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Principal subject id to enroll", "SUBJECT"},
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Policy store path (SQLite file)", "PATH"},
+    {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
+        "Optional KeyProvider spec for encrypted stores", "SPEC"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new
+      ("- enroll a subject for TOTP MFA. Output is sensitive: do NOT pipe "
+      "stdout to logs.");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected mfa enroll argument: %s\n", argv[1]);
+    return 2;
+  }
+  int validate_rc = wyctl_mfa_validate_common_options (&opts);
+  if (validate_rc != 0)
+    return validate_rc;
+
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyrelog_error_t rc = wyctl_mfa_open_store (&opts, &store);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: open store failed: %s\n", wyrelog_error_string (rc));
+    return 1;
+  }
+  return wyctl_mfa_run_enroll_flow (store, opts.subject, FALSE);
+}
+
+static int
+run_mfa_reset (gint argc, gchar **argv)
+{
+  WyctlMfaOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Principal subject id to reset", "SUBJECT"},
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Policy store path (SQLite file)", "PATH"},
+    {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
+        "Optional KeyProvider spec for encrypted stores", "SPEC"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context = g_option_context_new
+      ("- reset a subject's TOTP enrollment: deletes the prior row, then "
+      "runs the enroll flow.");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected mfa reset argument: %s\n", argv[1]);
+    return 2;
+  }
+  int validate_rc = wyctl_mfa_validate_common_options (&opts);
+  if (validate_rc != 0)
+    return validate_rc;
+
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyrelog_error_t rc = wyctl_mfa_open_store (&opts, &store);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: open store failed: %s\n", wyrelog_error_string (rc));
+    return 1;
+  }
+  /* Reset semantics: delete the existing enrollment row first.  If the
+   * follow-on enroll is aborted, the subject ends up unenrolled — the
+   * operator was explicit about resetting and the documented contract
+   * is that the prior enrollment is gone the moment they confirm. */
+  rc = wyl_policy_store_totp_enrollment_delete (store, opts.subject);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: prior enrollment delete failed: %s\n",
+        wyrelog_error_string (rc));
+    return 1;
+  }
+  return wyctl_mfa_run_enroll_flow (store, opts.subject, TRUE);
+}
+
+static int
+run_mfa (gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing mfa command (enroll | reset)\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "enroll") == 0)
+    return run_mfa_enroll (argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "reset") == 0)
+    return run_mfa_reset (argc - 1, argv + 1);
+
+  g_printerr ("wyctl: unknown mfa command: %s\n", argv[1]);
+  return 2;
+}
+
 static int
 run_key_status (gint argc, gchar **argv)
 {
@@ -2147,6 +2639,8 @@ main (int argc, char **argv)
     return run_audit (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "key") == 0)
     return run_key (argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "mfa") == 0)
+    return run_mfa (argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;

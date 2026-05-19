@@ -303,6 +303,20 @@ if build_client and host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  test_wyctl_mfa = executable('test-wyctl-mfa',
+    'test-wyctl-mfa.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep, sodium_dep],
+  )
+
+  test('wyctl-mfa', test_wyctl_mfa,
+    depends : [wyctl_exe],
+    timeout : 60,
+  )
+
   # End-to-end: drives wyctl as a subprocess against an in-process daemon
   # so the policy mutation subcommands exercise the full client -> HTTP
   # -> handler path, including bearer-only credentials and the privileged
