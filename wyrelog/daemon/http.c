@@ -3728,6 +3728,246 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       SOUP_MEMORY_COPY, body, strlen (body));
 }
 
+/*
+ * Exactly six ASCII digits 0-9.  Returns FALSE for NULL, any other
+ * length, any non-digit byte, leading sign, or whitespace.  The
+ * validator (commit 3) re-checks this with strnlen for defense in
+ * depth; this is the HTTP-layer's first-line shape gate so the
+ * route can emit invalid_mfa_request without ever touching the
+ * policy store or the session registry.
+ */
+static gboolean
+mfa_code_is_well_formed (const gchar *code)
+{
+  if (code == NULL)
+    return FALSE;
+  for (gsize i = 0; i < 6; i++) {
+    if (code[i] < '0' || code[i] > '9')
+      return FALSE;
+  }
+  return code[6] == '\0';
+}
+
+typedef struct
+{
+  const gchar *subject_id;
+  gchar *state;                 /* g_strdup; NULL when no row exists */
+} MfaPrincipalStateLookup;
+
+static wyrelog_error_t
+mfa_principal_state_cb (const gchar *subject_id, const gchar *state,
+    gpointer user_data)
+{
+  MfaPrincipalStateLookup *lookup = user_data;
+  if (lookup->state != NULL)
+    return WYRELOG_E_OK;        /* already found, drain remaining rows */
+  if (g_strcmp0 (subject_id, lookup->subject_id) == 0)
+    lookup->state = g_strdup (state);
+  return WYRELOG_E_OK;
+}
+
+/*
+ * Look up the current principal_state for |subject_id| in the
+ * handle-owned policy store.  Returns NULL when the subject has no
+ * principal_state row (which is itself a fail-closed signal: the
+ * caller may not proceed without an explicit row).  Caller frees
+ * the returned string with g_free / g_autofree.
+ */
+static gchar *
+mfa_lookup_principal_state (WylHandle *handle, const gchar *subject_id)
+{
+  if (handle == NULL || subject_id == NULL || subject_id[0] == '\0')
+    return NULL;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (store == NULL)
+    return NULL;
+  MfaPrincipalStateLookup lookup = {.subject_id = subject_id,.state = NULL };
+  if (wyl_policy_store_foreach_principal_state (store, mfa_principal_state_cb,
+          &lookup) != WYRELOG_E_OK) {
+    g_clear_pointer (&lookup.state, g_free);
+    return NULL;
+  }
+  return lookup.state;
+}
+
+static void
+mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  const gchar *session_token = NULL;
+  const gchar *code = NULL;
+  if (query != NULL) {
+    session_token = g_hash_table_lookup (query, "session_token");
+    code = g_hash_table_lookup (query, "code");
+  }
+
+  /*
+   * F5 (enumeration): a missing or empty session_token funnels into
+   * the same uniform mfa_auth_required surface that any non-resolving
+   * token uses below.  An unauthenticated probe must not be able to
+   * distinguish "no token" from "wrong token" from "stale token".
+   */
+  if (session_token == NULL || session_token[0] == '\0') {
+    set_json_error (msg, 401, "mfa_auth_required");
+    return;
+  }
+
+  /*
+   * F2 (secret echo): the code is shape-validated before any policy
+   * store work, and never logged, audited, or echoed in the response
+   * body.  set_json_error emits only the error code.
+   */
+  if (!mfa_code_is_well_formed (code)) {
+    set_json_error (msg, 400, "invalid_mfa_request");
+    return;
+  }
+
+  g_autoptr (WylSession) session =
+      wyl_daemon_http_ref_session (server, session_token);
+  if (session == NULL) {
+    set_json_error (msg, 401, "mfa_auth_required");
+    return;
+  }
+
+  g_autofree gchar *username = wyl_session_dup_username (session);
+  g_autofree gchar *session_tenant = wyl_session_dup_tenant (session);
+  if (username == NULL || username[0] == '\0' || session_tenant == NULL ||
+      session_tenant[0] == '\0') {
+    set_json_error (msg, 401, "mfa_auth_required");
+    return;
+  }
+
+  /*
+   * Tenant gate.  Mirror /auth/login: if the session's tenant has
+   * been sealed (or, defensively, removed) between login and verify,
+   * fail closed with the canonical tenant-gate code.
+   */
+  if (!tenant_is_active (ctx, session_tenant)) {
+    set_json_error (msg, 400, tenant_is_known (ctx, session_tenant) ?
+        WYL_DAEMON_ERR_TENANT_SEALED : WYL_DAEMON_ERR_TENANT_INVALID);
+    return;
+  }
+
+  /*
+   * Principal-state gate.  The session's authoritative principal_state
+   * lives in the policy store keyed by subject_id.  We require the
+   * subject to be in mfa_required to proceed.  Three cases:
+   *   - locked   -> 429 mfa_locked (issue #331 spec).
+   *   - other    -> 401 mfa_auth_required, uniform (F5).
+   *   - mfa_required -> proceed below.
+   * Note: this lookup is the only place an unauthenticated probe can
+   * influence behaviour via the session_token, and the leak surface is
+   * already bounded by the live-session gate above.
+   */
+  g_autofree gchar *principal_state =
+      mfa_lookup_principal_state (ctx->handle, username);
+  if (g_strcmp0 (principal_state, "locked") == 0) {
+    set_json_error (msg, 429, "mfa_locked");
+    return;
+  }
+  if (g_strcmp0 (principal_state, "mfa_required") != 0) {
+    set_json_error (msg, 401, "mfa_auth_required");
+    return;
+  }
+
+  /*
+   * Resolve the validator the daemon installed on this handle.  The
+   * route refuses to mint tokens if no validator has been registered
+   * - a misconfigured daemon must fail closed rather than fail open.
+   */
+  gpointer validator_user_data = NULL;
+  WylMfaValidator validator =
+      wyl_handle_get_mfa_validator (ctx->handle, &validator_user_data);
+  if (validator == NULL) {
+    set_json_error (msg, 500, "mfa_verify_failed");
+    return;
+  }
+
+  /*
+   * Drive the proof-bearing FSM primitive.  wyl_session_mfa_verify_with_proof
+   * binds the verify to THE session's subject (F5 cross-session
+   * takeover defense): we never accept a subject query parameter
+   * here, and the validator only sees the session-derived username.
+   * On success, the FSM is advanced to AUTHENTICATED before we
+   * return, mirroring login_handler's order.
+   */
+  wyrelog_error_t rc = wyl_session_mfa_verify_with_proof (ctx->handle, session,
+      code, validator, validator_user_data);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, "invalid_mfa_request");
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    /*
+     * The validator funnels enrollment-missing, wrong-code, and
+     * replay through the same WYRELOG_E_POLICY (commit 3 contract).
+     * The HTTP layer differentiates enrollment_required vs
+     * mfa_invalid by inspecting the totp_enrollment row separately
+     * (issue #331 decision 7).  This is the only place the
+     * enrollment-vs-no-enrollment bit is surfaced to the caller.
+     */
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+    if (store == NULL) {
+      set_json_error (msg, 500, "mfa_verify_failed");
+      return;
+    }
+    WylTotpEnrollment enr = { 0 };
+    gboolean found = FALSE;
+    wyrelog_error_t lookup_rc =
+        wyl_policy_store_totp_enrollment_lookup (store, username, &enr,
+        &found);
+    wyl_totp_enrollment_clear (&enr);
+    if (lookup_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "mfa_verify_failed");
+      return;
+    }
+    set_json_error (msg, 401, found ? "mfa_invalid" : "enrollment_required");
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "mfa_verify_failed");
+    return;
+  }
+
+  /*
+   * FSM has advanced to AUTHENTICATED.  Mint access + refresh tokens
+   * in the same order as login_handler's skip_mfa path so the wire
+   * shape is identical between "login with skip_mfa" and "login then
+   * verify".  Store the session-token registry row only after both
+   * tokens succeed.
+   */
+  g_autofree gchar *access_token = NULL;
+  g_autofree gchar *refresh_token = NULL;
+  rc = issue_login_access_token (ctx, session_token, username,
+      session_tenant, "authenticated", &access_token);
+  if (rc == WYRELOG_E_OK)
+    rc = issue_refresh_token (ctx, session_token, username, session_tenant,
+        &refresh_token);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "mfa_verify_failed");
+    return;
+  }
+  if (!wyl_daemon_http_context_store_session (ctx, session_token, session)) {
+    set_json_error (msg, 500, "mfa_verify_failed");
+    return;
+  }
+
+  g_autofree gchar *body = build_login_json (session_token, username,
+      session_tenant, "authenticated", access_token, refresh_token);
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body, strlen (body));
+}
+
 static void
 refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
@@ -4074,6 +4314,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/profile/events", profile_events_handler,
       ctx, NULL);
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
+  soup_server_add_handler (server, "/auth/mfa/verify", mfa_verify_handler,
+      ctx, NULL);
   soup_server_add_handler (server, "/auth/refresh", refresh_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
   soup_server_add_handler (server, "/tenants", tenant_list_handler, ctx, NULL);
