@@ -18,6 +18,7 @@ wyrelog_sources = files(
   'access/break-glass.c',
   'access/decision.c',
   'auth/jwt.c',
+  'auth/totp.c',
   'audit/event.c',
   'fact/schema.c',
   'policy/store.c',
