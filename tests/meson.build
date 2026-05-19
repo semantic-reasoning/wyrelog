@@ -428,6 +428,14 @@ test_policy_store_toctou = executable('test-policy-store-toctou',
 
 test('policy-store-toctou', test_policy_store_toctou)
 
+test_policy_store_totp = executable('test-policy-store-totp',
+  'test-policy-store-totp.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('policy-store-totp', test_policy_store_totp)
+
 test_dl_static = executable('test-dl-static',
   'test-dl-static.c',
   dependencies : [wyrelog_dep],

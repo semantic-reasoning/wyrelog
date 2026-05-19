@@ -451,4 +451,102 @@ wyrelog_error_t wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *
     store, const gchar * subject_id, gboolean allow_login_skip_mfa,
     gboolean * out_applied, gchar ** out_existing_subject);
 
+/*
+ * TOTP enrollment fact schema (issue #331).
+ *
+ * Per-subject row stored in the policy authority store carrying the
+ * RFC 6238 seed plus the replay watermark and provenance:
+ *   subject_id          - principal that owns the enrollment (PK)
+ *   secret_blob         - raw 20-byte SHA-1 seed (BLOB)
+ *   last_verified_step  - replay watermark; the integer step T that
+ *                         was last accepted. Stored as INTEGER (gint64)
+ *                         because SQLite has no native u64; callers
+ *                         that need the u64 semantics cast at the
+ *                         boundary.  The sentinel INT64_MIN means
+ *                         "never verified" and is the value any fresh
+ *                         enrollment is seeded with.
+ *   enrolled_at         - unix seconds at enrollment time
+ *   id_uuidv7           - libchronoid UUIDv7 minted via wyl_id_new;
+ *                         this is the ONLY new persistent identifier
+ *                         the TOTP feature introduces and is the
+ *                         single fact provenance handle for the
+ *                         enrollment row.
+ *
+ * Secret material lifecycle: callers MUST treat WylTotpEnrollment.secret
+ * as sensitive.  wyl_totp_enrollment_clear zeroes the seed and frees
+ * any owned strings; every helper below zeroes the secret buffer on
+ * any error path that touched it.  No helper emits secret bytes to
+ * the log or audit subsystems.
+ */
+#define WYL_TOTP_ENROLLMENT_SECRET_BYTES 20
+
+typedef struct
+{
+  gchar *subject_id;
+  guint8 secret[WYL_TOTP_ENROLLMENT_SECRET_BYTES];
+  gint64 last_verified_step;    /* INT64_MIN sentinel = never verified */
+  gint64 enrolled_at;
+  gchar *id_uuidv7;
+} WylTotpEnrollment;
+
+/* Zero the secret buffer and free the owned string fields.  NULL-safe.
+ * Always zeroes the secret bytes regardless of caller state, so it is
+ * safe to call against a partially-populated stack struct from an
+ * error path before bailing out. */
+void wyl_totp_enrollment_clear (WylTotpEnrollment * enr);
+
+/*
+ * Insert (or replace, keyed on subject_id) a TOTP enrollment row.
+ *
+ * On entry enr->id_uuidv7 is ignored; the helper mints a fresh
+ * UUIDv7 via wyl_id_new and writes it back into the caller's struct
+ * on success so the audit/event layer in commit 3 can reference the
+ * row by its persistent id without a follow-up SELECT.  enr->secret
+ * is treated as the 20-byte SHA-1 seed and is bound as a BLOB; the
+ * caller retains ownership and is responsible for zeroing its copy.
+ *
+ * Replacing an existing row resets last_verified_step and
+ * enrolled_at from the supplied struct, so a re-enroll path naturally
+ * starts the replay watermark over from INT64_MIN.
+ *
+ * Returns WYRELOG_E_INVALID for NULL inputs, empty subject_id, or
+ * a NULL enr.
+ */
+wyrelog_error_t wyl_policy_store_totp_enrollment_insert (wyl_policy_store_t *
+    store, WylTotpEnrollment * enr);
+
+/*
+ * Look up the TOTP enrollment for subject_id.  On hit, *out is
+ * populated with a freshly owned copy (caller frees via
+ * wyl_totp_enrollment_clear) and *out_found is set TRUE.  On miss,
+ * *out_found is set FALSE and *out is left as a zero-initialised
+ * shell that wyl_totp_enrollment_clear remains safe to call against.
+ *
+ * Missing rows are NOT an error.  Returns WYRELOG_E_INVALID for NULL
+ * inputs.  The secret buffer in *out is zeroed before any error
+ * return.
+ */
+wyrelog_error_t wyl_policy_store_totp_enrollment_lookup (wyl_policy_store_t *
+    store, const gchar * subject_id, WylTotpEnrollment * out,
+    gboolean * out_found);
+
+/*
+ * Atomically update the replay watermark for subject_id.  Intended as
+ * the persistence primitive that the commit-3 verify path layers an
+ * outer transaction on top of (mirroring the apply_login_state shape
+ * in wyl-session.c).  No-op (returns WYRELOG_E_OK) if subject_id has
+ * no enrollment row; callers that need a strict precondition should
+ * combine with a prior lookup.
+ */
+wyrelog_error_t wyl_policy_store_totp_enrollment_update_step
+    (wyl_policy_store_t * store, const gchar * subject_id, gint64 new_step);
+
+/*
+ * Remove the TOTP enrollment row for subject_id.  Idempotent: deleting
+ * an absent row returns WYRELOG_E_OK.  Returns WYRELOG_E_INVALID for
+ * NULL inputs.
+ */
+wyrelog_error_t wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *
+    store, const gchar * subject_id);
+
 G_END_DECLS;

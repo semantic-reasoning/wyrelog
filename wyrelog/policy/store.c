@@ -180,6 +180,7 @@ static const gchar *const required_tables[] = {
   "fact_relation_schema_columns",
   "fact_relation_query_allowlist",
   "policy_signatures",
+  "totp_enrollments",
 };
 
 static const BuiltinRole *
@@ -1971,7 +1972,19 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  policy_version INTEGER PRIMARY KEY,"
       "  policy_hash BLOB NOT NULL,"
       "  signature BLOB NOT NULL,"
-      "  signed_by TEXT NOT NULL," "  signed_at INTEGER NOT NULL" ");";
+      "  signed_by TEXT NOT NULL," "  signed_at INTEGER NOT NULL" ");"
+      /* TOTP enrollment per principal (issue #331).  secret_blob is
+       * the raw RFC 6238 SHA-1 seed (20 bytes).  last_verified_step is
+       * the replay watermark stored as INTEGER (no native u64 in
+       * SQLite); INT64_MIN means "never verified".  id_uuidv7 is the
+       * libchronoid UUIDv7 minted at insert time.  CREATE TABLE IF
+       * NOT EXISTS makes the migration onto a pre-#331 store
+       * transparent on first re-invocation of create_schema. */
+      "CREATE TABLE IF NOT EXISTS totp_enrollments ("
+      "  subject_id TEXT PRIMARY KEY,"
+      "  secret_blob BLOB NOT NULL,"
+      "  last_verified_step INTEGER NOT NULL,"
+      "  enrolled_at INTEGER NOT NULL," "  id_uuidv7 TEXT NOT NULL" ");";
 
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
@@ -5613,4 +5626,230 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
   }
   *out_applied = TRUE;
   return WYRELOG_E_OK;
+}
+
+/* ----------------------------------------------------------------------
+ * TOTP enrollment helpers (issue #331).
+ *
+ * All four helpers operate on the `totp_enrollments` table created in
+ * wyl_policy_store_create_schema.  They follow the same pattern as
+ * the role-membership helpers above: single-statement INSERT/SELECT/
+ * UPDATE/DELETE wrapped in the local prepare_stmt/bind_text/
+ * sqlite3_step boilerplate.  None of these helpers emits any log line
+ * carrying secret bytes (footgun F2): the only identifiers that may
+ * appear in error paths are subject_id and id_uuidv7.  Every error
+ * exit that already populated the in-memory secret buffer zeroes it
+ * via sodium_memzero before returning (footgun F4).
+ * ---------------------------------------------------------------------- */
+
+void
+wyl_totp_enrollment_clear (WylTotpEnrollment *enr)
+{
+  if (enr == NULL)
+    return;
+  sodium_memzero (enr->secret, sizeof enr->secret);
+  g_clear_pointer (&enr->subject_id, g_free);
+  g_clear_pointer (&enr->id_uuidv7, g_free);
+  enr->last_verified_step = 0;
+  enr->enrolled_at = 0;
+}
+
+wyrelog_error_t
+wyl_policy_store_totp_enrollment_insert (wyl_policy_store_t *store,
+    WylTotpEnrollment *enr)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || enr == NULL
+      || enr->subject_id == NULL || enr->subject_id[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  /* Mint the persistent id_uuidv7 before touching SQLite so an
+   * entropy failure does not leave a half-written row.  Discard any
+   * caller-supplied value; the helper owns id provenance. */
+  wyl_id_t id = WYL_ID_NIL;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gchar id_buf[WYL_ID_STRING_BUF];
+  rc = wyl_id_format (&id, id_buf, sizeof id_buf);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* INSERT ... ON CONFLICT(subject_id) DO UPDATE: re-enrolling the
+   * same subject overwrites the secret AND resets the watermark and
+   * enrolled_at, so the verify path cannot accept a freshly-rotated
+   * seed at a step the prior seed had already burned. */
+  static const gchar *sql =
+      "INSERT INTO totp_enrollments "
+      "  (subject_id, secret_blob, last_verified_step, enrolled_at, "
+      "   id_uuidv7) "
+      "VALUES (?, ?, ?, ?, ?) "
+      "ON CONFLICT(subject_id) DO UPDATE SET "
+      "  secret_blob = excluded.secret_blob, "
+      "  last_verified_step = excluded.last_verified_step, "
+      "  enrolled_at = excluded.enrolled_at, "
+      "  id_uuidv7 = excluded.id_uuidv7;";
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if ((rc = bind_text (stmt, 1, enr->subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  /* SQLITE_TRANSIENT makes sqlite copy the bytes immediately so the
+   * caller's secret buffer does not need to outlive the bind call. */
+  if (sqlite3_bind_blob (stmt, 2, enr->secret, (int) sizeof enr->secret,
+          SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  if (sqlite3_bind_int64 (stmt, 3, enr->last_verified_step) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  if (sqlite3_bind_int64 (stmt, 4, enr->enrolled_at) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  if ((rc = bind_text (stmt, 5, id_buf)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+
+  /* Publish the minted id back to the caller so the audit emission in
+   * commit 3 can reference the row without a follow-up SELECT. */
+  g_free (enr->id_uuidv7);
+  enr->id_uuidv7 = g_strdup (id_buf);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_totp_enrollment_lookup (wyl_policy_store_t *store,
+    const gchar *subject_id, WylTotpEnrollment *out, gboolean *out_found)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL || out == NULL
+      || out_found == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_found = FALSE;
+  /* The caller hands us a struct of unknown provenance: wipe it to a
+   * clean shell so a miss leaves the secret buffer zeroed and the
+   * owned-string pointers NULL.  wyl_totp_enrollment_clear is
+   * NULL-safe for the strings and unconditionally zeroes the secret
+   * (footgun F4). */
+  wyl_totp_enrollment_clear (out);
+
+  static const gchar *sql =
+      "SELECT subject_id, secret_blob, last_verified_step, enrolled_at, "
+      "       id_uuidv7 " "FROM totp_enrollments " "WHERE subject_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_OK;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  const gchar *db_subject = (const gchar *) sqlite3_column_text (stmt, 0);
+  const void *db_secret = sqlite3_column_blob (stmt, 1);
+  int db_secret_len = sqlite3_column_bytes (stmt, 1);
+  gint64 db_last = sqlite3_column_int64 (stmt, 2);
+  gint64 db_enrolled = sqlite3_column_int64 (stmt, 3);
+  const gchar *db_id = (const gchar *) sqlite3_column_text (stmt, 4);
+
+  if (db_secret == NULL || db_secret_len != (int) sizeof out->secret) {
+    /* Schema invariant violation: a row exists but the BLOB is the
+     * wrong length.  Treat as I/O error rather than silently fall
+     * through with a partial seed.  Zero the buffer in case anything
+     * copied in already. */
+    sodium_memzero (out->secret, sizeof out->secret);
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+
+  out->subject_id = g_strdup (db_subject != NULL ? db_subject : "");
+  memcpy (out->secret, db_secret, sizeof out->secret);
+  out->last_verified_step = db_last;
+  out->enrolled_at = db_enrolled;
+  out->id_uuidv7 = g_strdup (db_id != NULL ? db_id : "");
+
+  sqlite3_finalize (stmt);
+  *out_found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_totp_enrollment_update_step (wyl_policy_store_t *store,
+    const gchar *subject_id, gint64 new_step)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* The atomic update primitive that commit 3 will compose with the
+   * principal-state mutation in an outer transaction, mirroring
+   * apply_login_state_mutation in wyl-session.c.  Standalone the
+   * statement runs in sqlite's implicit per-statement transaction. */
+  static const gchar *sql =
+      "UPDATE totp_enrollments SET last_verified_step = ? "
+      "WHERE subject_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_bind_int64 (stmt, 1, new_step) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  if ((rc = bind_text (stmt, 2, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *store,
+    const gchar *subject_id)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  static const gchar *sql =
+      "DELETE FROM totp_enrollments WHERE subject_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
