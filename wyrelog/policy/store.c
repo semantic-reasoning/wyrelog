@@ -1762,8 +1762,17 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  ON permission_state_events (event);"
       "CREATE TABLE IF NOT EXISTS principal_states ("
       "  subject_id TEXT PRIMARY KEY,"
-      "  state TEXT NOT NULL,"
-      "  updated_at INTEGER"
+      "  state TEXT NOT NULL," "  updated_at INTEGER,"
+      /* Issue #331 commit 5: lockout counter and lock timestamp live on
+       * the principal_states row.  failed_attempt_count is the running
+       * tally of consecutive verify failures since the last successful
+       * MFA verify (or admin reset); locked_at is the unix-epoch seconds
+       * timestamp the row entered the LOCKED state, NULL otherwise.
+       * Pre-#331-commit-5 stores get these columns via the
+       * ALTER TABLE migration block below in create_schema (idempotent
+       * via PRAGMA table_info probe). */
+      "  failed_attempt_count INTEGER NOT NULL DEFAULT 0,"
+      "  locked_at INTEGER"
       ");"
       "CREATE INDEX IF NOT EXISTS idx_principal_states_state "
       "  ON principal_states (state);"
@@ -2015,6 +2024,40 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "ON audit_events (request_id);");
   if (rc != WYRELOG_E_OK)
     return rc;
+  /* Issue #331 commit 5: principal_states lockout columns migration.
+   * Pre-#331-commit-5 stores have the principal_states row but lack
+   * failed_attempt_count and locked_at.  We probe via PRAGMA table_info
+   * and ALTER TABLE ADD COLUMN only on miss, matching the audit_events
+   * migration pattern above.  ADD COLUMN with a literal DEFAULT
+   * synthesises the value for existing rows, so post-migration the
+   * counter starts at 0 (no false-lock on upgrade). */
+  gboolean has_failed_count = FALSE;
+  gboolean has_locked_at = FALSE;
+  sqlite3_stmt *ps_stmt = NULL;
+  if (sqlite3_prepare_v2 (store->db, "PRAGMA table_info(principal_states);",
+          -1, &ps_stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  while (sqlite3_step (ps_stmt) == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (ps_stmt, 1);
+    if (g_strcmp0 (name, "failed_attempt_count") == 0)
+      has_failed_count = TRUE;
+    else if (g_strcmp0 (name, "locked_at") == 0)
+      has_locked_at = TRUE;
+  }
+  sqlite3_finalize (ps_stmt);
+  if (!has_failed_count) {
+    rc = exec_sql (store->db,
+        "ALTER TABLE principal_states "
+        "ADD COLUMN failed_attempt_count INTEGER NOT NULL DEFAULT 0;");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  if (!has_locked_at) {
+    rc = exec_sql (store->db,
+        "ALTER TABLE principal_states ADD COLUMN locked_at INTEGER;");
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   rc = wyl_policy_store_ensure_default_tenant (store);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -4236,6 +4279,370 @@ wyl_policy_store_foreach_principal_state (wyl_policy_store_t *store,
 
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+/* ----------------------------------------------------------------------
+ * Single-subject principal-state accessors (issue #331 commit 5).
+ *
+ * The historical foreach-based two-step lookup in daemon/http.c iterated
+ * the entire principal_states table to surface a single subject's
+ * current state.  The accessors below replace that O(N) scan with a
+ * single-row SELECT keyed by subject_id, and surface the explicit
+ * "no row" vs "iteration error" distinction via *out_found so callers
+ * never have to grep for a NULL-string sentinel.
+ *
+ * F1 (timing): the validator hot-path calls get_principal_lock_info
+ * before any HMAC work, so the cost is one indexed SELECT regardless of
+ * the principal_states row count.  The earlier foreach-based path was a
+ * full table scan and scaled with the number of enrolled subjects -
+ * a more concerning timing differential than the validator's intentional
+ * no-enrollment vs wrong-code gap (commit-3 rationale; documented in
+ * mfa-validator.c above note_failed_attempt).
+ *
+ * F2 (secrets): no log/audit emission inside these helpers ever sees a
+ * TOTP seed or submitted code.  The only subject-bound identifiers
+ * surfaced are the subject_id passed in by the caller.
+ * ---------------------------------------------------------------------- */
+
+wyrelog_error_t
+wyl_policy_store_get_principal_state (wyl_policy_store_t *store,
+    const gchar *subject_id, gchar **out_state, gboolean *out_found)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || out_state == NULL || out_found == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_state = NULL;
+  *out_found = FALSE;
+
+  static const gchar *sql =
+      "SELECT state FROM principal_states WHERE subject_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_OK;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  const gchar *db_state = (const gchar *) sqlite3_column_text (stmt, 0);
+  *out_state = g_strdup (db_state != NULL ? db_state : "");
+  *out_found = TRUE;
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_get_principal_lock_info (wyl_policy_store_t *store,
+    const gchar *subject_id, gchar **out_state, gint64 *out_failed_count,
+    gint64 *out_locked_at, gboolean *out_found)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || out_state == NULL || out_failed_count == NULL
+      || out_locked_at == NULL || out_found == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_state = NULL;
+  *out_failed_count = 0;
+  *out_locked_at = G_MININT64;
+  *out_found = FALSE;
+
+  static const gchar *sql =
+      "SELECT state, failed_attempt_count, locked_at "
+      "FROM principal_states WHERE subject_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_OK;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  const gchar *db_state = (const gchar *) sqlite3_column_text (stmt, 0);
+  *out_state = g_strdup (db_state != NULL ? db_state : "");
+  *out_failed_count = sqlite3_column_int64 (stmt, 1);
+  if (sqlite3_column_type (stmt, 2) == SQLITE_NULL)
+    *out_locked_at = G_MININT64;
+  else
+    *out_locked_at = sqlite3_column_int64 (stmt, 2);
+  *out_found = TRUE;
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+/* Atomic FAILED_ATTEMPT mutation: increment the counter, and if the
+ * resulting value reaches |threshold|, transition the row to LOCKED in
+ * the same savepoint.  The transaction defeats the read-modify-write
+ * race that would let two concurrent failed verify attempts both see
+ * counter=N-1 and each fail to LOCK independently (commit-5 critic
+ * footgun).  The current-state read happens inside the savepoint via
+ * a SELECT, then the UPDATE writes the new counter + (conditionally)
+ * the LOCKED state and locked_at - all before COMMIT releases the
+ * savepoint.
+ */
+wyrelog_error_t
+wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
+    const gchar *subject_id, gint64 threshold, gint64 now_secs,
+    gchar **out_state, gint64 *out_count, gint64 *out_locked_at)
+{
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || out_state == NULL || out_count == NULL || out_locked_at == NULL
+      || threshold <= 0)
+    return WYRELOG_E_INVALID;
+
+  *out_state = NULL;
+  *out_count = 0;
+  *out_locked_at = G_MININT64;
+
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Phase 1: load current row inside the savepoint.  If no row exists,
+   * we materialise mfa_required with counter=1 below.  If a row exists
+   * we increment from the durable counter; the savepoint serialises
+   * concurrent failures so we never miss an increment. */
+  sqlite3_stmt *sel = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT state, failed_attempt_count FROM principal_states "
+      "WHERE subject_id = ?;", &sel);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  if ((rc = bind_text (sel, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (sel);
+    goto rollback;
+  }
+
+  gint64 next_count = 0;
+  gboolean already_locked = FALSE;
+  int step_rc = sqlite3_step (sel);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *cur_state = (const gchar *) sqlite3_column_text (sel, 0);
+    if (g_strcmp0 (cur_state, "locked") == 0)
+      already_locked = TRUE;
+    next_count = sqlite3_column_int64 (sel, 1) + 1;
+  } else if (step_rc == SQLITE_DONE) {
+    next_count = 1;
+  } else {
+    sqlite3_finalize (sel);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  sqlite3_finalize (sel);
+
+  /* Defensive: refuse to extend a lockout that is already in place.
+   * The validator gates this in production (callers only invoke after
+   * observing state=mfa_required), but this helper is library-internal
+   * and future callers - notably the wyctl tooling in commit 6 - must
+   * not be able to bump locked_at or the counter by repeatedly
+   * driving FAILED_ATTEMPT against a LOCKED row.  Return WYRELOG_E_POLICY
+   * and roll the savepoint back; no event row is emitted. */
+  if (already_locked) {
+    rc = WYRELOG_E_POLICY;
+    goto rollback;
+  }
+
+  /* Phase 2: determine final state.  Once the counter reaches the
+   * configured threshold we move the row to LOCKED with locked_at set
+   * to the caller-supplied wallclock seconds.  The threshold-cross is
+   * a one-way transition until reset_counter or apply_unlock fires.
+   *
+   * No-row materialises into mfa_required (the validator's gate ensures
+   * we never reach this helper from any other principal state), so the
+   * from_state is uniform across both the had_row and no-row branches. */
+  const gchar *next_state =
+      (next_count >= threshold) ? "locked" : "mfa_required";
+  gint64 next_locked_at = (next_count >= threshold) ? now_secs : G_MININT64;
+  const gchar *from_state = "mfa_required";
+  /* FSM-edge validation lives at the auth/validator layer (see
+   * wyl_mfa_validator_totp): the storage layer just writes the literal
+   * state strings the caller has already validated.  Cross-layer FSM
+   * drift surfaces at validator-layer tests, not here. */
+
+  /* Phase 3: write back.  INSERT ... ON CONFLICT UPDATE handles both
+   * the materialise-new-row and update-existing-row branches without
+   * a separate UPDATE OR INSERT split. */
+  sqlite3_stmt *upsert = NULL;
+  rc = prepare_stmt (store->db,
+      "INSERT INTO principal_states "
+      "  (subject_id, state, updated_at, failed_attempt_count, locked_at) "
+      "VALUES (?, ?, unixepoch(), ?, ?) "
+      "ON CONFLICT(subject_id) DO UPDATE SET "
+      "  state = excluded.state, "
+      "  updated_at = excluded.updated_at, "
+      "  failed_attempt_count = excluded.failed_attempt_count, "
+      "  locked_at = excluded.locked_at;", &upsert);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  if ((rc = bind_text (upsert, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (upsert, 2, next_state)) != WYRELOG_E_OK) {
+    sqlite3_finalize (upsert);
+    goto rollback;
+  }
+  if (sqlite3_bind_int64 (upsert, 3, next_count) != SQLITE_OK) {
+    sqlite3_finalize (upsert);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  if (next_locked_at == G_MININT64) {
+    if (sqlite3_bind_null (upsert, 4) != SQLITE_OK) {
+      sqlite3_finalize (upsert);
+      rc = WYRELOG_E_IO;
+      goto rollback;
+    }
+  } else {
+    if (sqlite3_bind_int64 (upsert, 4, next_locked_at) != SQLITE_OK) {
+      sqlite3_finalize (upsert);
+      rc = WYRELOG_E_IO;
+      goto rollback;
+    }
+  }
+  if (sqlite3_step (upsert) != SQLITE_DONE) {
+    sqlite3_finalize (upsert);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  sqlite3_finalize (upsert);
+
+  /* Phase 4: when we crossed the threshold, append a principal_event
+   * row for the lock transition so the audit ledger captures it.  The
+   * insert is inside the same savepoint, so the event is durable iff
+   * the state change is durable (no torn-state on crash). */
+  if (next_count >= threshold) {
+    /* Event-name literal "lock" matches wyl_principal_event_name's
+     * table entry for WYL_PRINCIPAL_EVENT_LOCK.  Inlined here so the
+     * storage layer does not depend on the FSM private header for
+     * what is fundamentally a string column write. */
+    rc = wyl_policy_store_append_principal_event (store, subject_id,
+        "lock", from_state, "locked", NULL);
+    if (rc != WYRELOG_E_OK)
+      goto rollback;
+  }
+
+  rc = wyl_policy_store_commit_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+
+  *out_state = g_strdup (next_state);
+  *out_count = next_count;
+  *out_locked_at = next_locked_at;
+  return WYRELOG_E_OK;
+
+rollback:
+  wyl_policy_store_rollback_mutation (store);
+  g_clear_pointer (out_state, g_free);
+  *out_count = 0;
+  *out_locked_at = G_MININT64;
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_reset_principal_failure_counter (wyl_policy_store_t *store,
+    const gchar *subject_id)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* Reset is a no-op when the row does not exist (the validator only
+   * reaches this branch after a successful TOTP match, and the verify
+   * path always materialises a row earlier via wyl-session.c on
+   * login_ok).  An UPDATE with no matching row returns SQLITE_DONE
+   * cleanly. */
+  static const gchar *sql =
+      "UPDATE principal_states SET "
+      "  failed_attempt_count = 0, "
+      "  locked_at = NULL, "
+      "  updated_at = unixepoch() " "WHERE subject_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+/* Atomic LOCKED -> UNVERIFIED transition.  The state transition and
+ * principal_event row both land inside the same savepoint so a crash
+ * mid-update cannot leave the row half-unlocked. */
+wyrelog_error_t
+wyl_policy_store_apply_principal_unlock (wyl_policy_store_t *store,
+    const gchar *subject_id)
+{
+  if (store == NULL || store->db == NULL || subject_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* FSM-edge validation is the auth/validator layer's responsibility
+   * (see wyl_mfa_validator_totp / maybe_auto_unlock).  This helper just
+   * writes the LOCKED -> UNVERIFIED literal-state transition the caller
+   * has already validated.  Keeping the FSM-step call out of storage
+   * preserves the layering rule: storage knows the string columns, the
+   * FSM table belongs to auth. */
+  wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  sqlite3_stmt *upd = NULL;
+  rc = prepare_stmt (store->db,
+      "UPDATE principal_states SET "
+      "  state = 'unverified', "
+      "  failed_attempt_count = 0, "
+      "  locked_at = NULL, "
+      "  updated_at = unixepoch() " "WHERE subject_id = ?;", &upd);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+  if ((rc = bind_text (upd, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (upd);
+    goto rollback;
+  }
+  if (sqlite3_step (upd) != SQLITE_DONE) {
+    sqlite3_finalize (upd);
+    rc = WYRELOG_E_IO;
+    goto rollback;
+  }
+  sqlite3_finalize (upd);
+
+  /* Event-name literal "unlock" matches wyl_principal_event_name's
+   * table entry for WYL_PRINCIPAL_EVENT_UNLOCK.  Inlined here so the
+   * storage layer does not pull in the FSM private header solely for
+   * a string column write. */
+  rc = wyl_policy_store_append_principal_event (store, subject_id,
+      "unlock", "locked", "unverified", NULL);
+  if (rc != WYRELOG_E_OK)
+    goto rollback;
+
+  return wyl_policy_store_commit_mutation (store);
+
+rollback:
+  wyl_policy_store_rollback_mutation (store);
+  return rc;
 }
 
 wyrelog_error_t

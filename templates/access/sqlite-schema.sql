@@ -227,9 +227,15 @@ CREATE INDEX IF NOT EXISTS idx_permission_state_events_event
 -- Durable principal authentication state mirrored into principal_state/2.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS principal_states (
-    subject_id TEXT PRIMARY KEY,
-    state      TEXT    NOT NULL,
-    updated_at INTEGER
+    subject_id           TEXT    PRIMARY KEY,
+    state                TEXT    NOT NULL,
+    updated_at           INTEGER,
+    -- Issue #331 commit 5: failed_attempt_count is the count of
+    -- consecutive verify failures since the last successful MFA verify
+    -- (or admin reset); locked_at is the unix-epoch seconds the row
+    -- entered the LOCKED state (NULL when not locked).
+    failed_attempt_count INTEGER NOT NULL DEFAULT 0,
+    locked_at            INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_principal_states_state

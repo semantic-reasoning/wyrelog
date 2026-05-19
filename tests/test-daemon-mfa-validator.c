@@ -406,6 +406,272 @@ check_validator_rejects_replay_across_restart (void)
 }
 
 static gint
+read_principal_state (WylHandle *handle, const gchar *subject_id,
+    gchar **out_state, gint64 *out_count, gint64 *out_locked_at)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  gboolean found = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_get_principal_lock_info (store,
+      subject_id, out_state, out_count, out_locked_at, &found);
+  if (rc != WYRELOG_E_OK || !found)
+    return -1;
+  return 0;
+}
+
+static gint
+check_validator_locks_after_five_failures (void)
+{
+  /* Commit-5 architect rule: five consecutive failures must transition
+   * the principal to LOCKED.  The state move is durable - it lands in
+   * the policy store's principal_states row - and the failure counter
+   * is exactly 5 on the threshold step. */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 200;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.lockout-five",
+          &session) != 0)
+    return 201;
+  if (seed_enrollment (handle, "validator.lockout-five") != 0)
+    return 202;
+
+  guint correct = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&correct, &now, &step) != 0)
+    return 203;
+  guint wrong = (correct + 1) % 1000000;
+  gchar proof[8];
+  g_snprintf (proof, sizeof proof, "%06u", wrong);
+
+  /* Five wrong attempts.  After the 5th the validator must transition
+   * the principal_state row to 'locked' atomically with the counter
+   * increment.  All five calls return E_POLICY (uniform negative). */
+  for (int i = 0; i < 5; i++) {
+    if (wyl_mfa_validator_totp (handle, session, proof, NULL)
+        != WYRELOG_E_POLICY)
+      return 210 + i;
+  }
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = 0;
+  if (read_principal_state (handle, "validator.lockout-five", &st, &count,
+          &locked_at) != 0)
+    return 220;
+  if (g_strcmp0 (st, "locked") != 0)
+    return 221;
+  if (count != 5)
+    return 222;
+  if (locked_at == G_MININT64)
+    return 223;
+  return 0;
+}
+
+static gint
+check_validator_locked_principal_rejects_without_hmac (void)
+{
+  /* When the principal is already LOCKED and the auto-unlock window is
+   * not elapsed, the validator must fail closed without consulting the
+   * TOTP enrollment (no HMAC computation, no replay-watermark advance).
+   * We assert state stays LOCKED and last_verified_step is unchanged. */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 230;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.locked-now",
+          &session) != 0)
+    return 231;
+  if (seed_enrollment (handle, "validator.locked-now") != 0)
+    return 232;
+
+  /* Drive 5 organic FAILED_ATTEMPTs to transition the principal row to
+   * LOCKED with locked_at = now (so the auto-unlock grace has not yet
+   * elapsed).  The set_principal_state("locked") shortcut used in the
+   * earlier iteration would now collide with the commit-5 iteration
+   * defensive guard (apply_principal_failure refuses to mutate a row
+   * that is already LOCKED); driving the threshold organically gives
+   * the same setup state without bypassing the helper's contract. */
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  for (int i = 0; i < 5; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0, l = 0;
+    if (wyl_policy_store_apply_principal_failure (store,
+            "validator.locked-now", 5, (gint64) time (NULL),
+            &st, &c, &l) != WYRELOG_E_OK)
+      return 234;
+  }
+
+  guint correct = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&correct, &now, &step) != 0)
+    return 235;
+  gchar proof[8];
+  g_snprintf (proof, sizeof proof, "%06u", correct);
+
+  /* Submitting the CORRECT code must still be rejected because the
+   * principal is locked. */
+  if (wyl_mfa_validator_totp (handle, session, proof, NULL)
+      != WYRELOG_E_POLICY)
+    return 236;
+  /* State must still be locked. */
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = 0;
+  if (read_principal_state (handle, "validator.locked-now", &st, &count,
+          &locked_at) != 0)
+    return 237;
+  if (g_strcmp0 (st, "locked") != 0)
+    return 238;
+  /* last_verified_step on the enrollment row must NOT have advanced
+   * (validator never consulted the secret). */
+  gint64 step_after = 0;
+  if (load_last_verified_step (handle, "validator.locked-now",
+          &step_after) != 0)
+    return 239;
+  if (step_after != INT64_MIN)
+    return 240;
+  return 0;
+}
+
+static gint
+check_validator_auto_unlocks_after_window (void)
+{
+  /* Inject a locked principal whose locked_at is 16 minutes in the past
+   * (well past the 15-min auto-unlock window).  The next validate call
+   * must transition the row LOCKED -> UNVERIFIED via the FSM UNLOCK
+   * event and return E_POLICY (the caller's session-state gate will then
+   * send the user back to re-login). */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 250;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.auto-unlock",
+          &session) != 0)
+    return 251;
+  if (seed_enrollment (handle, "validator.auto-unlock") != 0)
+    return 252;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_set_principal_state (store, "validator.auto-unlock",
+          "mfa_required") != WYRELOG_E_OK)
+    return 253;
+  /* Drive 5 failures with locked_at = now - (16 minutes). */
+  gint64 ago = (gint64) time (NULL) - (16 * 60);
+  for (int i = 0; i < 5; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0, l = 0;
+    if (wyl_policy_store_apply_principal_failure (store,
+            "validator.auto-unlock", 5, ago, &st, &c, &l) != WYRELOG_E_OK)
+      return 254;
+  }
+  /* Confirm precondition: row is locked. */
+  g_autofree gchar *pre_state = NULL;
+  gint64 pre_count = 0;
+  gint64 pre_locked_at = 0;
+  if (read_principal_state (handle, "validator.auto-unlock", &pre_state,
+          &pre_count, &pre_locked_at) != 0)
+    return 255;
+  if (g_strcmp0 (pre_state, "locked") != 0)
+    return 256;
+
+  guint correct = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&correct, &now, &step) != 0)
+    return 257;
+  gchar proof[8];
+  g_snprintf (proof, sizeof proof, "%06u", correct);
+
+  /* Call validator: must auto-unlock and return E_POLICY (session no
+   * longer in mfa_required; the verify-with-proof contract bounces
+   * because the principal is now UNVERIFIED). */
+  if (wyl_mfa_validator_totp (handle, session, proof, NULL)
+      != WYRELOG_E_POLICY)
+    return 258;
+  /* Row is now in UNVERIFIED with counter=0, locked_at NULL. */
+  g_autofree gchar *post_state = NULL;
+  gint64 post_count = -1;
+  gint64 post_locked_at = 0;
+  if (read_principal_state (handle, "validator.auto-unlock", &post_state,
+          &post_count, &post_locked_at) != 0)
+    return 259;
+  if (g_strcmp0 (post_state, "unverified") != 0)
+    return 260;
+  if (post_count != 0)
+    return 261;
+  if (post_locked_at != G_MININT64)
+    return 262;
+  return 0;
+}
+
+static gint
+check_validator_resets_counter_on_success (void)
+{
+  /* 4 failures then 1 success: the counter resets to 0 on success, so
+   * a subsequent failure starts the counter at 1, not 5. */
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 270;
+  g_autoptr (WylSession) session = NULL;
+  if (login_mfa_required_session (handle, "validator.reset-on-ok",
+          &session) != 0)
+    return 271;
+  if (seed_enrollment (handle, "validator.reset-on-ok") != 0)
+    return 272;
+
+  guint correct = 0;
+  gint64 now = 0;
+  guint64 step = 0;
+  if (compute_code_for_now (&correct, &now, &step) != 0)
+    return 273;
+  guint wrong = (correct + 1) % 1000000;
+  gchar wrong_proof[8];
+  g_snprintf (wrong_proof, sizeof wrong_proof, "%06u", wrong);
+  gchar good_proof[8];
+  g_snprintf (good_proof, sizeof good_proof, "%06u", correct);
+
+  /* 4 failures. */
+  for (int i = 0; i < 4; i++) {
+    if (wyl_mfa_validator_totp (handle, session, wrong_proof, NULL)
+        != WYRELOG_E_POLICY)
+      return 274;
+  }
+  /* Counter must be 4, not locked. */
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = 0;
+  if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
+          &locked_at) != 0)
+    return 275;
+  if (count != 4 || g_strcmp0 (st, "mfa_required") != 0)
+    return 276;
+
+  /* Success: counter goes to 0. */
+  if (wyl_mfa_validator_totp (handle, session, good_proof, NULL)
+      != WYRELOG_E_OK)
+    return 277;
+  g_clear_pointer (&st, g_free);
+  if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
+          &locked_at) != 0)
+    return 278;
+  if (count != 0)
+    return 279;
+
+  /* Next failure: counter starts at 1. */
+  if (wyl_mfa_validator_totp (handle, session, wrong_proof, NULL)
+      != WYRELOG_E_POLICY)
+    return 280;
+  g_clear_pointer (&st, g_free);
+  if (read_principal_state (handle, "validator.reset-on-ok", &st, &count,
+          &locked_at) != 0)
+    return 281;
+  if (count != 1)
+    return 282;
+  return 0;
+}
+
+static gint
 check_validator_rejects_null_handle_or_session (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -478,6 +744,14 @@ main (void)
   if ((rc = check_validator_rejects_replay_same_session ()) != 0)
     return rc;
   if ((rc = check_validator_rejects_replay_across_restart ()) != 0)
+    return rc;
+  if ((rc = check_validator_locks_after_five_failures ()) != 0)
+    return rc;
+  if ((rc = check_validator_locked_principal_rejects_without_hmac ()) != 0)
+    return rc;
+  if ((rc = check_validator_auto_unlocks_after_window ()) != 0)
+    return rc;
+  if ((rc = check_validator_resets_counter_on_success ()) != 0)
     return rc;
   if ((rc = check_validator_rejects_null_handle_or_session ()) != 0)
     return rc;

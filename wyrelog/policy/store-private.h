@@ -361,6 +361,48 @@ wyrelog_error_t wyl_policy_store_set_principal_state (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * state);
 wyrelog_error_t wyl_policy_store_foreach_principal_state (wyl_policy_store_t *
     store, wyl_policy_principal_state_cb cb, gpointer user_data);
+/* Look up the current principal_state for |subject_id|. On a row match,
+ * *out_state is set to a g_strdup'd copy (caller frees with g_free) and
+ * *out_found is set to TRUE. When no row exists, *out_state is set to
+ * NULL and *out_found is set to FALSE; the return value is still
+ * WYRELOG_E_OK. Returns WYRELOG_E_IO on an iteration error so callers
+ * can distinguish "no row" from "store fault" without re-binding the
+ * historical foreach-based two-step lookup (issue #331 commit-5). */
+wyrelog_error_t wyl_policy_store_get_principal_state (wyl_policy_store_t *
+    store, const gchar * subject_id, gchar ** out_state, gboolean * out_found);
+/* Atomic single-row read of the principal_states row including the
+ * lockout columns (failed_attempt_count, locked_at). out_state is
+ * g_strdup'd; out_locked_at is INT64_MIN when the column is NULL.
+ * out_found follows the same semantics as get_principal_state. */
+wyrelog_error_t wyl_policy_store_get_principal_lock_info
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    gchar ** out_state, gint64 * out_failed_count, gint64 * out_locked_at,
+    gboolean * out_found);
+/* Atomic mutation for a FAILED_ATTEMPT.  Inside a single savepoint:
+ *   - reads the current row (state + counter)
+ *   - if the row is missing, materialises mfa_required + counter=1
+ *   - else increments the counter
+ *   - if the resulting counter is >= |threshold|, transitions the row
+ *     to LOCKED with locked_at = |now_secs| and appends a `lock`
+ *     principal_event
+ * Returns the resulting state name in *out_state (g_strdup'd; caller
+ * frees), counter in *out_count, and locked_at in *out_locked_at
+ * (INT64_MIN when the row is not locked). The atomicity guarantee
+ * defeats the read-modify-write race on parallel verify attempts
+ * (commit-5 footgun). */
+wyrelog_error_t wyl_policy_store_apply_principal_failure
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    gint64 threshold, gint64 now_secs, gchar ** out_state,
+    gint64 * out_count, gint64 * out_locked_at);
+/* Reset the failed_attempt_count to 0 and clear locked_at.  Called on a
+ * successful TOTP verify and on auto-unlock. */
+wyrelog_error_t wyl_policy_store_reset_principal_failure_counter
+    (wyl_policy_store_t * store, const gchar * subject_id);
+/* Atomic LOCKED -> UNVERIFIED transition: clears locked_at and the
+ * counter, sets state='unverified', and appends an `unlock`
+ * principal_event row in one savepoint. */
+wyrelog_error_t wyl_policy_store_apply_principal_unlock
+    (wyl_policy_store_t * store, const gchar * subject_id);
 wyrelog_error_t wyl_policy_store_append_principal_event (wyl_policy_store_t *
     store, const gchar * subject_id, const gchar * event,
     const gchar * from_state, const gchar * to_state, gint64 * out_event_id);

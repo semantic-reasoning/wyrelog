@@ -1681,8 +1681,13 @@ check_store_grants_role_inheritance (void)
 
   if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
     return 48;
-  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
-    return 49;
+  {
+    wyrelog_error_t _dbg_rc = wyl_policy_store_create_schema (store);
+    if (_dbg_rc != WYRELOG_E_OK) {
+      g_printerr ("DEBUG inheritance create_schema rc=%d\n", (int) _dbg_rc);
+      return 49;
+    }
+  }
   if (wyl_policy_store_upsert_role (store, "site.child-role", "child role")
       != WYRELOG_E_OK)
     return 58;
@@ -2580,6 +2585,588 @@ check_store_sets_principal_state (void)
     return 84;
   if (expect.matches != 1)
     return 85;
+  return 0;
+}
+
+static gint
+check_store_get_principal_state_round_trip (void)
+{
+  /* Commit-5: forward flag from architect.  The new public accessor
+   * wyl_policy_store_get_principal_state replaces the historical
+   * foreach-based two-step lookup in daemon/http.c.  This test
+   * exercises: (a) the missing-row branch returns out_found=FALSE with
+   * *out_state=NULL, (b) the row-present branch round-trips state, and
+   * (c) the helper rejects NULL pointers without touching the store. */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1500;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1501;
+
+  /* Missing row: out_found=FALSE, *out_state=NULL, return OK. */
+  g_autofree gchar *missing = (gchar *) 0x1;    /* deliberate sentinel */
+  gboolean found = TRUE;
+  if (wyl_policy_store_get_principal_state (store, "no-such-subject",
+          &missing, &found) != WYRELOG_E_OK)
+    return 1502;
+  if (found)
+    return 1503;
+  if (missing != NULL)
+    return 1504;
+
+  /* Row present: round-trip a value via the existing set_principal_state. */
+  if (wyl_policy_store_set_principal_state (store, "subject-A",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1505;
+  g_autofree gchar *state_a = NULL;
+  gboolean found_a = FALSE;
+  if (wyl_policy_store_get_principal_state (store, "subject-A", &state_a,
+          &found_a) != WYRELOG_E_OK)
+    return 1506;
+  if (!found_a)
+    return 1507;
+  if (g_strcmp0 (state_a, "mfa_required") != 0)
+    return 1508;
+
+  /* Updated row: re-read picks up the new value. */
+  if (wyl_policy_store_set_principal_state (store, "subject-A",
+          "authenticated") != WYRELOG_E_OK)
+    return 1509;
+  g_clear_pointer (&state_a, g_free);
+  if (wyl_policy_store_get_principal_state (store, "subject-A", &state_a,
+          &found_a) != WYRELOG_E_OK)
+    return 1510;
+  if (!found_a)
+    return 1511;
+  if (g_strcmp0 (state_a, "authenticated") != 0)
+    return 1512;
+
+  /* NULL-input shape check. */
+  if (wyl_policy_store_get_principal_state (NULL, "subject-A", &state_a,
+          &found_a) != WYRELOG_E_INVALID)
+    return 1513;
+  if (wyl_policy_store_get_principal_state (store, NULL, &state_a,
+          &found_a) != WYRELOG_E_INVALID)
+    return 1514;
+  if (wyl_policy_store_get_principal_state (store, "subject-A", NULL,
+          &found_a) != WYRELOG_E_INVALID)
+    return 1515;
+  if (wyl_policy_store_get_principal_state (store, "subject-A", &state_a,
+          NULL) != WYRELOG_E_INVALID)
+    return 1516;
+  return 0;
+}
+
+static gint
+check_store_apply_principal_failure_increments_counter (void)
+{
+  /* Commit-5: each call increments the failure counter atomically.
+   * Below the |threshold| the row stays in mfa_required; locked_at
+   * remains NULL (surfaced as INT64_MIN). */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1520;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1521;
+  if (wyl_policy_store_set_principal_state (store, "lockout.below",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1522;
+
+  for (gint64 expected = 1; expected <= 4; expected++) {
+    g_autofree gchar *st = NULL;
+    gint64 count = -1;
+    gint64 locked_at = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.below",
+            5, 100000, &st, &count, &locked_at) != WYRELOG_E_OK)
+      return 1523;
+    if (g_strcmp0 (st, "mfa_required") != 0)
+      return 1524;
+    if (count != expected)
+      return 1525;
+    if (locked_at != G_MININT64)
+      return 1526;
+  }
+  return 0;
+}
+
+static gint
+check_store_apply_principal_failure_transitions_to_locked (void)
+{
+  /* Threshold hit on the 5th call: state moves to locked, locked_at is
+   * the |now_secs| passed in, and the counter equals the threshold. */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1530;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1531;
+  if (wyl_policy_store_set_principal_state (store, "lockout.cross",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1532;
+
+  gint64 final_locked_at = 0;
+  for (gint64 i = 1; i <= 5; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 count = -1;
+    gint64 locked_at = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.cross",
+            5, 200000 + i, &st, &count, &locked_at) != WYRELOG_E_OK)
+      return 1533;
+    if (i < 5) {
+      if (g_strcmp0 (st, "mfa_required") != 0)
+        return 1534;
+      if (locked_at != G_MININT64)
+        return 1535;
+    } else {
+      if (g_strcmp0 (st, "locked") != 0)
+        return 1536;
+      if (count != 5)
+        return 1537;
+      if (locked_at != 200000 + 5)
+        return 1538;
+      final_locked_at = locked_at;
+    }
+  }
+
+  /* Reload the row via the new public accessor: still locked, same
+   * counter, same locked_at.  The persistence guarantee is verified by
+   * walking the row through a separate read. */
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = -1;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lockout.cross", &st,
+          &count, &locked_at, &found) != WYRELOG_E_OK)
+    return 1539;
+  if (!found)
+    return 1540;
+  if (g_strcmp0 (st, "locked") != 0)
+    return 1541;
+  if (count != 5)
+    return 1542;
+  if (locked_at != final_locked_at)
+    return 1543;
+  return 0;
+}
+
+static gint
+check_store_apply_principal_failure_survives_reopen (void)
+{
+  /* Critic-flagged invariant: lockout state durable across daemon
+   * restart.  Drive 5 failures, close the store, reopen, assert state
+   * is still locked with locked_at preserved.  Uses an encrypted store
+   * on disk so the reopen actually touches the same SQLite file. */
+  g_autofree gchar *root = g_dir_make_tmp ("wyl-store-lockout-XXXXXX", NULL);
+  if (root == NULL)
+    return 1550;
+  g_autofree gchar *db_path = g_build_filename (root, "policy-store.db", NULL);
+  gint rc_inner = 0;
+
+  /* Phase 1: open, populate. */
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    wyl_policy_store_open_options_t opts = {
+      .path = db_path,
+      .require_encrypted = FALSE,
+    };
+    if (wyl_policy_store_open_with_options (&opts, &store) != WYRELOG_E_OK) {
+      rc_inner = 1551;
+      goto cleanup;
+    }
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK) {
+      rc_inner = 1552;
+      goto cleanup;
+    }
+    if (wyl_policy_store_set_principal_state (store, "lockout.persist",
+            "mfa_required") != WYRELOG_E_OK) {
+      rc_inner = 1553;
+      goto cleanup;
+    }
+    for (gint64 i = 1; i <= 5; i++) {
+      g_autofree gchar *st = NULL;
+      gint64 count = -1;
+      gint64 locked_at = 0;
+      if (wyl_policy_store_apply_principal_failure (store, "lockout.persist",
+              5, 300000 + i, &st, &count, &locked_at) != WYRELOG_E_OK) {
+        rc_inner = 1554;
+        goto cleanup;
+      }
+    }
+  }
+
+  /* Phase 2: reopen, assert lockout is still present. */
+  {
+    g_autoptr (wyl_policy_store_t) store2 = NULL;
+    wyl_policy_store_open_options_t opts = {
+      .path = db_path,
+      .require_encrypted = FALSE,
+    };
+    if (wyl_policy_store_open_with_options (&opts, &store2) != WYRELOG_E_OK) {
+      rc_inner = 1555;
+      goto cleanup;
+    }
+    g_autofree gchar *st = NULL;
+    gint64 count = -1;
+    gint64 locked_at = 0;
+    gboolean found = FALSE;
+    if (wyl_policy_store_get_principal_lock_info (store2, "lockout.persist",
+            &st, &count, &locked_at, &found) != WYRELOG_E_OK) {
+      rc_inner = 1556;
+      goto cleanup;
+    }
+    if (!found || g_strcmp0 (st, "locked") != 0 || count != 5
+        || locked_at != 300000 + 5) {
+      rc_inner = 1557;
+      goto cleanup;
+    }
+  }
+
+cleanup:
+  (void) g_unlink (db_path);
+  (void) g_rmdir (root);
+  return rc_inner;
+}
+
+static gint
+check_store_reset_principal_failure_counter (void)
+{
+  /* On a successful TOTP verify the validator resets the counter and
+   * clears locked_at; this helper exercises that primitive directly. */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1560;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1561;
+  if (wyl_policy_store_set_principal_state (store, "lockout.reset",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1562;
+
+  /* Bump the counter to 4 (below threshold). */
+  for (gint64 i = 1; i <= 4; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0;
+    gint64 l = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.reset",
+            5, 400000 + i, &st, &c, &l) != WYRELOG_E_OK)
+      return 1563;
+  }
+
+  /* Reset; counter must be 0, locked_at NULL (INT64_MIN). */
+  if (wyl_policy_store_reset_principal_failure_counter (store,
+          "lockout.reset") != WYRELOG_E_OK)
+    return 1564;
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = -1;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lockout.reset", &st,
+          &count, &locked_at, &found) != WYRELOG_E_OK)
+    return 1565;
+  if (!found || count != 0 || locked_at != G_MININT64)
+    return 1566;
+
+  /* A subsequent failure restarts the counter at 1. */
+  g_autofree gchar *st2 = NULL;
+  gint64 c2 = 0;
+  gint64 l2 = 0;
+  if (wyl_policy_store_apply_principal_failure (store, "lockout.reset", 5,
+          500000, &st2, &c2, &l2) != WYRELOG_E_OK)
+    return 1567;
+  if (c2 != 1 || g_strcmp0 (st2, "mfa_required") != 0)
+    return 1568;
+  return 0;
+}
+
+static gint
+check_store_apply_principal_failure_sequential_race (void)
+{
+  /* Critic-flagged read-modify-write race: 5 sequential failures must
+   * end at counter=5 with the row in LOCKED state, and any further
+   * FAILED_ATTEMPT against the LOCKED row must be refused with
+   * WYRELOG_E_POLICY without bumping the counter or locked_at (the
+   * commit-5 iteration LOW #2 defensive guard).  Concurrent threads
+   * are not exercised here because the daemon serialises mutations on
+   * the policy store's single sqlite connection via the existing
+   * SAVEPOINT primitive (which is composed inside apply_principal_failure).
+   * The atomicity guarantee we lock down here is: each call observes
+   * the durable counter from the prior call, no "AT MOST one locks"
+   * regression where a stale read leaves the row stuck below threshold. */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1580;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1581;
+  if (wyl_policy_store_set_principal_state (store, "lockout.race",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1582;
+
+  /* Five successful failures, threshold cross on the fifth. */
+  for (gint i = 0; i < 5; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0;
+    gint64 l = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.race",
+            5, 700000 + i, &st, &c, &l) != WYRELOG_E_OK)
+      return 1583;
+  }
+
+  /* Sixth call against the LOCKED row: must return WYRELOG_E_POLICY,
+   * counter/locked_at unchanged. */
+  {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0;
+    gint64 l = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.race",
+            5, 700100, &st, &c, &l) != WYRELOG_E_POLICY)
+      return 1589;
+  }
+
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = -1;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lockout.race", &st,
+          &count, &locked_at, &found) != WYRELOG_E_OK)
+    return 1584;
+  if (!found)
+    return 1585;
+  /* Counter is pinned at the threshold value (5) once the row is
+   * LOCKED; the sixth call did NOT bump anything. */
+  if (count != 5)
+    return 1586;
+  if (g_strcmp0 (st, "locked") != 0)
+    return 1587;
+  if (locked_at == G_MININT64)
+    return 1588;
+  return 0;
+}
+
+static gint
+check_store_apply_principal_unlock (void)
+{
+  /* LOCKED -> UNVERIFIED atomic transition: state moves to unverified,
+   * locked_at and counter both clear, and a principal_event row of
+   * shape (subject, 'unlock', 'locked', 'unverified') is appended. */
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1570;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1571;
+  if (wyl_policy_store_set_principal_state (store, "lockout.unlock",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1572;
+  for (gint64 i = 1; i <= 5; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0;
+    gint64 l = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.unlock",
+            5, 600000 + i, &st, &c, &l) != WYRELOG_E_OK)
+      return 1573;
+  }
+  if (wyl_policy_store_apply_principal_unlock (store, "lockout.unlock")
+      != WYRELOG_E_OK)
+    return 1574;
+  g_autofree gchar *st = NULL;
+  gint64 count = -1;
+  gint64 locked_at = -1;
+  gboolean found = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lockout.unlock", &st,
+          &count, &locked_at, &found) != WYRELOG_E_OK)
+    return 1575;
+  if (!found || g_strcmp0 (st, "unverified") != 0 || count != 0
+      || locked_at != G_MININT64)
+    return 1576;
+  return 0;
+}
+
+/* Issue #331 commit 5 iteration (LOW #2): apply_principal_failure
+ * MUST refuse to extend a lockout when the row is already LOCKED.  The
+ * validator's lockout gate prevents this in production, but the helper
+ * is library-internal and future callers (e.g. wyctl in commit 6)
+ * must not be able to bump locked_at or the counter by re-driving
+ * FAILED_ATTEMPT against a LOCKED row.  The helper returns
+ * WYRELOG_E_POLICY, leaves locked_at and the counter untouched, and
+ * emits no extra principal_event row. */
+static gint
+check_store_apply_principal_failure_refuses_already_locked (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 1580;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 1581;
+  if (wyl_policy_store_set_principal_state (store, "lockout.relock",
+          "mfa_required") != WYRELOG_E_OK)
+    return 1582;
+
+  /* Drive the subject across the 5-failure threshold to LOCKED. */
+  for (gint64 i = 1; i <= 5; i++) {
+    g_autofree gchar *st = NULL;
+    gint64 c = 0;
+    gint64 l = 0;
+    if (wyl_policy_store_apply_principal_failure (store, "lockout.relock",
+            5, 700000 + i, &st, &c, &l) != WYRELOG_E_OK)
+      return 1583;
+  }
+
+  /* Capture the original locked_at + counter for the post-condition. */
+  g_autofree gchar *st_before = NULL;
+  gint64 count_before = -1;
+  gint64 locked_at_before = -1;
+  gboolean found_before = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lockout.relock",
+          &st_before, &count_before, &locked_at_before, &found_before)
+      != WYRELOG_E_OK)
+    return 1584;
+  if (!found_before || g_strcmp0 (st_before, "locked") != 0
+      || count_before != 5 || locked_at_before != 700005)
+    return 1585;
+
+  /* Count the principal_event rows once before the second-LOCK attempt
+   * so we can prove no new event was appended. */
+  gint events_before = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM principal_events "
+          "WHERE subject_id = 'lockout.relock';", &events_before) != 0)
+    return 1586;
+
+  /* Re-drive FAILED_ATTEMPT against the already-LOCKED row with a
+   * later wallclock so a buggy implementation that overwrote locked_at
+   * would be detectable. */
+  g_autofree gchar *st_attempt = NULL;
+  gint64 c_attempt = 0;
+  gint64 l_attempt = 0;
+  wyrelog_error_t relock_rc =
+      wyl_policy_store_apply_principal_failure (store, "lockout.relock", 5,
+      800000, &st_attempt, &c_attempt, &l_attempt);
+  if (relock_rc != WYRELOG_E_POLICY)
+    return 1587;
+  /* Out-params on the refuse path should not leak partial state. */
+  if (st_attempt != NULL || c_attempt != 0 || l_attempt != G_MININT64)
+    return 1588;
+
+  /* The persisted row must be unchanged: same state, same counter,
+   * same locked_at - the second FAILED_ATTEMPT did NOT bump anything. */
+  g_autofree gchar *st_after = NULL;
+  gint64 count_after = -1;
+  gint64 locked_at_after = -1;
+  gboolean found_after = FALSE;
+  if (wyl_policy_store_get_principal_lock_info (store, "lockout.relock",
+          &st_after, &count_after, &locked_at_after, &found_after)
+      != WYRELOG_E_OK)
+    return 1589;
+  if (!found_after || g_strcmp0 (st_after, "locked") != 0
+      || count_after != count_before || locked_at_after != locked_at_before)
+    return 1590;
+
+  /* No additional principal_event row should have been emitted. */
+  gint events_after = 0;
+  if (count_rows (store,
+          "SELECT COUNT(*) FROM principal_events "
+          "WHERE subject_id = 'lockout.relock';", &events_after) != 0)
+    return 1591;
+  if (events_after != events_before)
+    return 1592;
+
+  return 0;
+}
+
+/* Issue #331 commit 5 iteration (LOW #4): legacy-schema migration.
+ * A pre-#331-commit-5 store has principal_states with three columns
+ * (subject_id, state, updated_at) - no failed_attempt_count, no
+ * locked_at.  On reopen, create_schema's PRAGMA table_info / ALTER
+ * TABLE ADD COLUMN block must back-fill the new columns idempotently,
+ * preserving the existing rows' subject_id / state / updated_at and
+ * defaulting the new columns to (0, NULL). */
+static gint
+check_store_principal_states_legacy_schema_migration (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *tmpdir =
+      g_dir_make_tmp ("wyl-policy-ps-legacy-XXXXXX", &error);
+  if (tmpdir == NULL)
+    return 1600;
+  g_autofree gchar *store_path =
+      g_build_filename (tmpdir, "policy.store", NULL);
+  g_autofree gchar *key_path = g_build_filename (tmpdir, "policy.key", NULL);
+  if (!write_policy_key (key_path, 17))
+    return 1601;
+
+  /* Phase A: stand up the store with the full modern schema, then
+   * mutate principal_states down to the legacy three-column shape and
+   * insert a hand-rolled legacy row.  We drop and recreate the table
+   * to model a store written by a pre-#331-commit-5 binary. */
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 1602;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 1603;
+    if (sqlite3_exec (wyl_policy_store_get_db (store),
+            "DROP TABLE principal_states;"
+            "CREATE TABLE principal_states ("
+            "  subject_id TEXT PRIMARY KEY,"
+            "  state TEXT NOT NULL,"
+            "  updated_at INTEGER"
+            ");"
+            "INSERT INTO principal_states (subject_id, state, updated_at) "
+            "  VALUES ('legacy.user', 'mfa_required', 1234567);",
+            NULL, NULL, NULL) != SQLITE_OK)
+      return 1604;
+  }
+
+  /* Phase B: reopen; create_schema's ALTER TABLE ADD COLUMN block
+   * should back-fill failed_attempt_count and locked_at on the
+   * existing row without disturbing the columns that were already
+   * there. */
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, key_path, &store)
+        != WYRELOG_E_OK)
+      return 1605;
+    if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+      return 1606;
+
+    /* The new columns must be present and defaulted to (0, NULL) on
+     * the migrated row.  Use the lock_info accessor so we exercise
+     * the same SELECT path that the validator uses in production. */
+    g_autofree gchar *st = NULL;
+    gint64 count = -1;
+    gint64 locked_at = -1;
+    gboolean found = FALSE;
+    if (wyl_policy_store_get_principal_lock_info (store, "legacy.user",
+            &st, &count, &locked_at, &found) != WYRELOG_E_OK)
+      return 1607;
+    if (!found)
+      return 1608;
+    if (g_strcmp0 (st, "mfa_required") != 0)
+      return 1609;
+    if (count != 0)
+      return 1610;
+    if (locked_at != G_MININT64)
+      return 1611;
+
+    /* Cross-check updated_at preservation via a raw SELECT - the
+     * lock_info accessor does not expose it. */
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+            "SELECT updated_at FROM principal_states "
+            "WHERE subject_id = 'legacy.user';", -1, &stmt, NULL)
+        != SQLITE_OK)
+      return 1612;
+    if (sqlite3_step (stmt) != SQLITE_ROW) {
+      sqlite3_finalize (stmt);
+      return 1613;
+    }
+    gint64 updated_at = sqlite3_column_int64 (stmt, 0);
+    sqlite3_finalize (stmt);
+    if (updated_at != 1234567)
+      return 1614;
+  }
+
+  (void) g_remove (store_path);
+  (void) g_remove (key_path);
+  (void) g_rmdir (tmpdir);
   return 0;
 }
 
@@ -3931,6 +4518,24 @@ main (void)
       != 0)
     return rc;
   if ((rc = check_store_sets_principal_state ()) != 0)
+    return rc;
+  if ((rc = check_store_get_principal_state_round_trip ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_failure_increments_counter ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_failure_transitions_to_locked ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_failure_survives_reopen ()) != 0)
+    return rc;
+  if ((rc = check_store_reset_principal_failure_counter ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_failure_sequential_race ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_unlock ()) != 0)
+    return rc;
+  if ((rc = check_store_apply_principal_failure_refuses_already_locked ()) != 0)
+    return rc;
+  if ((rc = check_store_principal_states_legacy_schema_migration ()) != 0)
     return rc;
   if ((rc = check_store_sets_session_state ()) != 0)
     return rc;
