@@ -542,3 +542,26 @@ CREATE TABLE IF NOT EXISTS policy_signatures (
     signed_by      TEXT    NOT NULL,   -- security_officer identifier
     signed_at      INTEGER NOT NULL    -- Unix epoch (seconds)
 );
+
+-- ---------------------------------------------------------------------------
+-- Table: totp_enrollments
+-- Per-principal TOTP enrollment (issue #331).  One row per subject
+-- holds the RFC 6238 SHA-1 seed plus the replay watermark.  The seed
+-- is the raw 20-byte BLOB; encryption-at-rest is provided by the
+-- enclosing policy-store XChaCha20-Poly1305 envelope.
+--
+--   subject_id          principal that owns this enrollment (PK)
+--   secret_blob         20-byte SHA-1 seed
+--   last_verified_step  replay watermark; INT64_MIN sentinel means
+--                       "never verified" (no native u64 in SQLite, so
+--                       the u64 step counter is cast to gint64)
+--   enrolled_at         unix seconds at enrollment time
+--   id_uuidv7           libchronoid UUIDv7 minted via wyl_id_new
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS totp_enrollments (
+    subject_id         TEXT    PRIMARY KEY,
+    secret_blob        BLOB    NOT NULL,
+    last_verified_step INTEGER NOT NULL,
+    enrolled_at        INTEGER NOT NULL,
+    id_uuidv7          TEXT    NOT NULL
+);
