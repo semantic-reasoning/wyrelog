@@ -619,6 +619,14 @@ test_jwt = executable('test-jwt',
 
 test('jwt', test_jwt)
 
+test_totp = executable('test-totp',
+  'test-totp.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep],
+)
+
+test('totp', test_totp)
+
 test_handle_id = executable('test-handle-id',
   'test-handle-id.c',
   dependencies : [wyrelog_dep],
