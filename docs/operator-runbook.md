@@ -240,6 +240,234 @@ wyctl --daemon-url http://127.0.0.1:8765 audit query \
   --access-token-file /run/wyrelog/operator.token
 ```
 
+## TOTP Multi-Factor Authentication (MFA)
+
+Wyrelog ships a built-in RFC 6238 TOTP validator so a fresh install can
+reach an authenticated bearer token without an external IdP. Enrollments
+live as `totp_enrollment` facts in the encrypted policy store, sealed
+through the same KeyProvider as every other policy fact. There is no
+separate MFA database, no shared secret leaves the policy store, and no
+user-side backup codes are supported in v0 — recovery is admin reset only.
+
+The flow assumes the policy store, KeyProvider, and audit subsystem are
+already configured per the sections above.
+
+### First-Install Bootstrap
+
+The supported first-install path threads MFA enrollment off the
+bootstrap admin grant. Start `wyrelogd` with both bootstrap flags:
+
+```sh
+wyrelogd --production \
+  --profile system \
+  --template-dir /usr/share/wyrelog/access \
+  --policy-db /var/lib/wyrelog/system/policy.sqlite \
+  --policy-keyprovider file:/etc/wyrelog/system/policy.key \
+  --audit-db /var/log/wyrelog/system/audit.duckdb \
+  --bootstrap-admin-subject=alice \
+  --bootstrap-admin-allow-skip-mfa
+```
+
+At this point `alice` can log in through `/auth/login?…&skip_mfa=true`
+because the bootstrap flag installed the `wr.login.skip_mfa` direct
+permission. Enroll `alice`'s TOTP factor from an operator shell that has
+read access to the policy store and the KeyProvider:
+
+```sh
+wyctl mfa enroll \
+  --subject alice \
+  --store /var/lib/wyrelog/system/policy.sqlite \
+  --keyprovider file:/etc/wyrelog/system/policy.key
+```
+
+`wyctl mfa enroll` prints the `otpauth://` URI and the base32 secret on
+stdout, then prompts on stderr for the current 6-digit code. The
+operator scans the URI in an authenticator app (Google Authenticator,
+Authy, 1Password, Bitwarden — all consume the same URI format) and
+types the displayed code. On a valid code the enrollment fact lands,
+and the `wr.login.skip_mfa` permission on the bootstrap subject is
+**auto-revoked in the same transaction**. From this point on, `alice`
+must present a TOTP code to log in; the bootstrap escape no longer
+works for that subject.
+
+The bootstrap auto-revoke step is intentionally one-shot. Enrolling any
+non-bootstrap subject is a no-op for the revoke step because they
+never held `wr.login.skip_mfa` in the first place.
+
+### Enrolling Additional Admins
+
+Use the same command for every subsequent admin. The bootstrap
+auto-revoke branch is skipped silently for subjects that do not hold
+`wr.login.skip_mfa`:
+
+```sh
+wyctl mfa enroll \
+  --subject bob \
+  --store /var/lib/wyrelog/system/policy.sqlite \
+  --keyprovider file:/etc/wyrelog/system/policy.key
+```
+
+The subject must already exist as a principal in the policy store
+(typically through `wyctl policy role-grant`). Enrollment does not
+create principals — it only attaches a TOTP factor to one.
+
+### Recovery and Reset
+
+There are no user-side backup codes in v0. The only recovery path is
+an operator with direct access to the policy store and the KeyProvider
+running `wyctl mfa reset`:
+
+```sh
+wyctl mfa reset \
+  --subject alice \
+  --store /var/lib/wyrelog/system/policy.sqlite \
+  --keyprovider file:/etc/wyrelog/system/policy.key
+```
+
+`wyctl mfa reset` deletes the existing enrollment fact and runs a fresh
+enroll flow against the same subject. The new seed and otpauth URI are
+emitted on stdout exactly as in the first-install case. Because the
+enrollment row is replaced, the failure counter and any active lockout
+state are implicitly reset.
+
+**Abort semantics**: if the operator aborts mid-reset — EOF on the
+prompt, an invalid code, or any other non-zero exit — the subject is
+left **unenrolled**. The reset is not "undone" back to the previous
+seed; the previous enrollment was already deleted by the first
+mutation. Operators should not assume an aborted reset preserves the
+old enrollment. Re-run `wyctl mfa enroll` against the same subject to
+finish the recovery.
+
+### Atomicity and Re-run Safety
+
+`wyctl mfa enroll` wraps every mutation (enrollment fact insert,
+bootstrap permission revoke, audit row) in a single policy-store
+savepoint. Partial failure rolls back cleanly: if the enroll command
+exits non-zero, no state changed.
+
+`wyctl mfa reset` does **not** have that property. The reset path
+deletes the prior enrollment row as its first action and commits that
+delete independently, **before** the new enroll flow's savepoint
+opens. This is a deliberate contract, not a UX edge case: the moment
+an operator runs `wyctl mfa reset`, the prior TOTP seed is gone and
+cannot be recovered. If the follow-on enroll is aborted — EOF on the
+prompt, a wrong code, any non-zero exit — the subject is left
+**unenrolled**, exactly as documented under "Abort semantics" above.
+Operators running `wyctl mfa reset` during incident response must
+treat the delete as irreversible.
+
+The contract is:
+
+- If `wyctl mfa enroll` exits non-zero, re-run the command. No state
+  changed; the bootstrap auto-revoke step is idempotent for an
+  already-revoked subject and a no-op for non-bootstrap subjects.
+- If `wyctl mfa reset` exits non-zero, the prior enrollment row has
+  already been deleted. The subject is unenrolled. Re-run `wyctl mfa
+  enroll` against the same subject to finish the recovery.
+
+There is no separate "rollback" command — re-running `wyctl mfa
+enroll` is the recovery path for both failure modes.
+
+### Lockout Behavior
+
+The TOTP validator drives the existing principal FSM:
+
+- After **5 consecutive wrong codes** the principal transitions to
+  `LOCKED`. `/auth/mfa/verify` returns `429 mfa_locked` until the lock
+  expires.
+- After **15 minutes**, the lock auto-clears and the principal state
+  returns to `UNVERIFIED`. The user must re-login from `/auth/login`
+  to obtain a fresh `mfa_required` session token before retrying
+  `/auth/mfa/verify`.
+- `wyctl mfa reset` implicitly clears the failure counter because the
+  enrollment row is replaced. Operators do not have a separate
+  "unlock without reseed" command in v0.
+
+Lockout state is durable across daemon restarts — it lives in the
+policy store, not in process memory.
+
+### HTTP API Summary
+
+The login flow is two HTTP calls. `/auth/login` returns a short-lived
+session token that cannot mint access or refresh tokens on its own;
+`/auth/mfa/verify` exchanges that session token plus a current TOTP
+code for the access and refresh tokens.
+
+```
+POST /auth/login?username=<subject>&tenant=<tenant>
+  -> 200 { session_token, principal_state: "mfa_required" }
+
+POST /auth/mfa/verify?session_token=<token>&code=NNNNNN
+  -> 200 { access_token, refresh_token, principal_state: "authenticated" }
+  -> 400 invalid_mfa_request   (malformed query)
+  -> 400 tenant_sealed | tenant_invalid
+                               (session's tenant no longer active)
+  -> 401 mfa_auth_required     (missing or unknown session token)
+  -> 401 mfa_invalid           (wrong code)
+  -> 401 enrollment_required   (subject has no totp_enrollment fact)
+  -> 429 mfa_locked            (5+ failures within 15 min)
+  -> 500 mfa_verify_failed     (counter persistence IO error)
+```
+
+`/auth/login` does not enumerate enrolled vs unenrolled subjects: an
+unenrolled but otherwise-valid subject still receives an `mfa_required`
+session, and only `/auth/mfa/verify` surfaces `enrollment_required`.
+
+**Bootstrap escape**: `POST /auth/login?…&skip_mfa=true` works **only**
+for subjects holding the `wr.login.skip_mfa` permission. After the
+bootstrap admin completes `wyctl mfa enroll`, that permission is
+auto-revoked and the escape no longer works for the bootstrap subject.
+Any other subject that has never held `wr.login.skip_mfa` is
+unaffected — the escape was never a general login mode.
+
+### Stdout Secrecy
+
+`wyctl mfa enroll` and `wyctl mfa reset` write the `otpauth://` URI and
+the base32 secret to **stdout**. The prompt for the current code and
+all diagnostics go to **stderr**. Do not pipe stdout to a log file, a
+journal, or a CI artifact — the seed bytes leak through that path.
+
+A typical safe operator session keeps stdout attached to the
+controlling terminal and lets the authenticator app consume the
+displayed URI directly. If stdout must be captured for tooling, treat
+the captured file as a sealed secret with the same handling as the
+KeyProvider key file.
+
+### otpauth URI Compatibility
+
+The emitted URI follows the Google Authenticator key-URI format:
+
+```
+otpauth://totp/wyrelog:<subject>?secret=BASE32&issuer=wyrelog&algorithm=SHA1&digits=6&period=30
+```
+
+`algorithm=SHA1`, `digits=6`, `period=30`, ±1 step skew. The format is
+consumed without modification by Google Authenticator, Authy,
+1Password, Bitwarden, and any other authenticator that accepts the
+Google key-URI shape. ASCII QR rendering inside `wyctl` is intentionally
+out of scope — operators who want a QR can pipe the URI through
+`qrencode -t ANSI` or paste it into the authenticator app's manual
+import flow.
+
+### Threat-Model Notes
+
+- **Scope**: the built-in validator handles only the TOTP factor.
+  Bearer-token issuance, storage, and revocation are unchanged from
+  the rest of the daemon's auth path — access and refresh tokens are
+  minted by the daemon and held in its in-memory state map. Token
+  revocation is still "restart the daemon"; there is no
+  per-token revoke API in v0.
+- **Backup codes**: explicitly not supported in v0. The lost-device
+  recovery path is a privileged operator running `wyctl mfa reset`.
+  Operators should plan for that access (a second admin with store +
+  KeyProvider access, or a documented break-glass procedure) before
+  enrolling MFA on the only admin account.
+- **Store-access privilege**: anyone with write access to the policy
+  store path AND the KeyProvider can mint or reset any subject's TOTP
+  enrollment. The encrypted policy store is the trust anchor for MFA;
+  protect the KeyProvider key file with the same care as the bootstrap
+  marker.
+
 ## Datalog Product Flow
 
 Wyrelog is a Datalog storage and inference engine. The packaged access-control
