@@ -159,6 +159,38 @@ if build_client
     )
   endif
 
+  test_daemon_http_mfa_c_args = [
+    '-DWYL_HAS_DAEMON_HTTP',
+    '-DWYL_TEST_DAEMON_HTTP',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ]
+  test_daemon_http_mfa_deps = [
+    wyrelog_dep,
+    wyrelog_client_dep,
+    libsoup_dep,
+    sodium_dep,
+    sqlite_dep,
+  ]
+  if get_option('enable_fact_store').allowed()
+    test_daemon_http_mfa_c_args += '-DWYL_HAS_FACT_STORE'
+    test_daemon_http_mfa_deps += duckdb_dep
+  endif
+  if get_option('enable_audit').allowed()
+    test_daemon_http_mfa_c_args += '-DWYL_HAS_AUDIT'
+    test_daemon_http_mfa_deps += duckdb_dep
+  endif
+  test_daemon_http_mfa = executable('test-daemon-http-mfa',
+    'test-daemon-http-mfa.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    c_args : test_daemon_http_mfa_c_args,
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_daemon_http_mfa_deps,
+  )
+
+  test('daemon-http-mfa', test_daemon_http_mfa, timeout : 60)
+
   if get_option('enable_fact_store').allowed()
     test_daemon_http_facts_c_args = [
       '-DWYL_HAS_DAEMON_HTTP',
