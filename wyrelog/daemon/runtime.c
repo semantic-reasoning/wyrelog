@@ -10,6 +10,7 @@
 #include <libsoup/soup.h>
 #endif
 
+#include "auth/mfa-validator.h"
 #include "daemon/checks.h"
 #include "daemon/delta.h"
 #include "daemon/http.h"
@@ -303,7 +304,17 @@ open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
 #endif
   };
 
-  return wyl_handle_open_with_options (&open_opts, out_handle);
+  wyrelog_error_t rc = wyl_handle_open_with_options (&open_opts, out_handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  /* Install the daemon-default TOTP MFA validator (issue #331 commit 3).
+   * The commit-4 HTTP /auth/mfa/verify route resolves this through
+   * wyl_handle_get_mfa_validator so the validator and its user_data
+   * are reachable without an out-of-band registration table.  The
+   * setter is total: it always succeeds. */
+  wyl_handle_set_mfa_validator (*out_handle, wyl_mfa_validator_totp, NULL);
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
