@@ -84,6 +84,15 @@ struct _WylHandle
   gboolean engine_pair_poisoned;
   gboolean require_template_manifest;
   /*
+   * Default WylMfaValidator installed by the daemon init path so the
+   * commit-4 HTTP /auth/mfa/verify route can resolve a validator
+   * without an out-of-band table.  The library boot path does not
+   * touch these fields; they remain NULL unless wyl_handle_set_mfa_validator
+   * is called explicitly.
+   */
+  WylMfaValidator mfa_validator;
+  gpointer mfa_validator_user_data;
+  /*
    * Per-handle registry mapping wyl_session_id_t to live WylSession*.
    * Strong references; sessions stay alive at least until handle
    * finalize. The registry exists so wyl_session_logout (which only
@@ -1063,6 +1072,24 @@ wyl_handle_get_login_skip_mfa_allowed (WylHandle *self)
           &deployment_mode) != WYRELOG_E_OK)
     return FALSE;
   return g_strcmp0 (deployment_mode, "production") != 0;
+}
+
+void
+wyl_handle_set_mfa_validator (WylHandle *self, WylMfaValidator validator,
+    gpointer user_data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  self->mfa_validator = validator;
+  self->mfa_validator_user_data = (validator != NULL) ? user_data : NULL;
+}
+
+WylMfaValidator
+wyl_handle_get_mfa_validator (WylHandle *self, gpointer *out_user_data)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  if (out_user_data != NULL)
+    *out_user_data = self->mfa_validator_user_data;
+  return self->mfa_validator;
 }
 
 wyrelog_error_t

@@ -151,6 +151,24 @@ gboolean wyl_handle_get_login_skip_mfa_override_allowed (WylHandle * self);
 gboolean wyl_handle_get_login_skip_mfa_allowed (WylHandle * self);
 
 /*
+ * Per-handle default WylMfaValidator pointer.  The daemon init path
+ * (runtime.c) installs wyl_mfa_validator_totp here so the commit-4
+ * HTTP /auth/mfa/verify route can resolve it without an out-of-band
+ * registry.  Callers that want a different validator (e.g. tests)
+ * override with wyl_handle_set_mfa_validator before the route fires.
+ *
+ * The setter is NULL-safe; passing a NULL |validator| clears the slot.
+ * The getter returns the registered pointer (or NULL when unset) and,
+ * if |out_user_data| is non-NULL, copies the registered user_data
+ * companion pointer.  The pointers are valid for the lifetime of the
+ * handle; releasing |user_data| is the caller's responsibility.
+ */
+void wyl_handle_set_mfa_validator (WylHandle * self, WylMfaValidator validator,
+    gpointer user_data);
+WylMfaValidator wyl_handle_get_mfa_validator (WylHandle * self,
+    gpointer * out_user_data);
+
+/*
  * Applies a permission-state transition to the handle-owned policy store, then
  * reloads the engine pair so perm_state/4 and perm_state_fired/7 reflect the
  * durable state. The policy store commit is the source of truth: if reload

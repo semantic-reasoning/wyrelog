@@ -436,6 +436,17 @@ test_policy_store_totp = executable('test-policy-store-totp',
 
 test('policy-store-totp', test_policy_store_totp)
 
+test_daemon_mfa_validator = executable('test-daemon-mfa-validator',
+  'test-daemon-mfa-validator.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
+)
+
+test('daemon-mfa-validator', test_daemon_mfa_validator)
+
 test_dl_static = executable('test-dl-static',
   'test-dl-static.c',
   dependencies : [wyrelog_dep],
