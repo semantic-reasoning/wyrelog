@@ -38,9 +38,34 @@ for path in \
   "$SOURCE_ROOT/packaging/wyrelogd.env" \
   "$SOURCE_ROOT/packaging/system.env" \
   "$SOURCE_ROOT/packaging/service.env" \
+  "$SOURCE_ROOT/packaging/wyrelog/examples/wyrelogd-system.conf.example" \
+  "$SOURCE_ROOT/packaging/wyrelog/examples/wyrelogd-service.conf.example" \
   "$SOURCE_ROOT/tools/verify-template-release.sh" \
   "$SOURCE_ROOT/docs/operator-runbook.md"; do
   test -s "$path"
+done
+
+# Profile-unit ExecStart shape: post-issue-#335 the system/service units
+# load all settings from /etc/wyrelog/wyrelogd.conf via --config. The
+# operational source of truth for per-flag values now lives in the
+# example conf files installed under ${datadir}/wyrelog/examples/, so
+# the assertions for policy_keyprovider, profile, etc. were migrated
+# from inspecting the unit ExecStart to inspecting those examples.
+SYSTEM_EXAMPLE="$SOURCE_ROOT/packaging/wyrelog/examples/wyrelogd-system.conf.example"
+SERVICE_EXAMPLE="$SOURCE_ROOT/packaging/wyrelog/examples/wyrelogd-service.conf.example"
+for unit in \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service" \
+    "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; do
+  if ! grep -q -- \
+      "^ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production$" \
+      "$unit"; then
+    echo "profile unit $unit does not invoke wyrelogd via --config" >&2
+    exit 1
+  fi
+  if ! grep -q -- "^ReadOnlyPaths=/etc/wyrelog/wyrelogd.conf$" "$unit"; then
+    echo "profile unit $unit does not pin conf file read-only" >&2
+    exit 1
+  fi
 done
 
 if ! grep -q -- "--production" \
@@ -53,19 +78,22 @@ if ! grep -q -- "LoadCredential=wyrelog-system-policy-key:" \
   echo "system unit does not load policy key as a systemd credential" >&2
   exit 1
 fi
-if ! grep -q -- "--policy-keyprovider systemd-creds:wyrelog-system-policy-key" \
-    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
-  echo "system unit does not use the systemd credential KeyProvider" >&2
+if ! grep -q -- "^policy_keyprovider=systemd-creds:wyrelog-system-policy-key$" \
+    "$SYSTEM_EXAMPLE"; then
+  echo "system example conf does not use the systemd credential KeyProvider" >&2
   exit 1
 fi
-if ! grep -q -- "--profile=system" \
-    "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service"; then
-  echo "system unit does not select the system profile" >&2
+if ! grep -q -- "^policy_keyprovider=systemd-creds:wyrelog-service-policy-key$" \
+    "$SERVICE_EXAMPLE"; then
+  echo "service example conf does not use the systemd credential KeyProvider" >&2
   exit 1
 fi
-if ! grep -q -- "--profile=service" \
-    "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; then
-  echo "service unit does not select the service profile" >&2
+if ! grep -q -- "^profile=system$" "$SYSTEM_EXAMPLE"; then
+  echo "system example conf does not select the system profile" >&2
+  exit 1
+fi
+if ! grep -q -- "^profile=service$" "$SERVICE_EXAMPLE"; then
+  echo "service example conf does not select the service profile" >&2
   exit 1
 fi
 if ! grep -q -- "/var/lib/wyrelog/system/facts" \
@@ -108,6 +136,14 @@ if grep -q -- "--fact-root" "$SOURCE_ROOT/packaging/systemd/wyrelog.service" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog-system.service" \
     "$SOURCE_ROOT/packaging/systemd/wyrelog-service.service"; then
   echo "static units must rely on profile fact-root defaults for build compatibility" >&2
+  exit 1
+fi
+# Mirror the rule into the example conf files: the operator-facing
+# templates must rely on options.c profile defaults for fact_root so
+# the policy/audit/fact paths stay consistent with the daemon's
+# resolve-time defaults.
+if grep -q '^fact_root=' "$SYSTEM_EXAMPLE" "$SERVICE_EXAMPLE"; then
+  echo "example conf files must rely on profile fact_root defaults" >&2
   exit 1
 fi
 

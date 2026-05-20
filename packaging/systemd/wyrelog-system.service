@@ -11,7 +11,7 @@ Group=wyrelog
 Environment=WYL_LOG=warn
 EnvironmentFile=-/etc/wyrelog/system.env
 LoadCredential=wyrelog-system-policy-key:/etc/wyrelog/system/policy.key
-ExecStart=/usr/bin/wyrelogd --production --profile=system --template-dir /usr/share/wyrelog/access --policy-db /var/lib/wyrelog/system/policy.sqlite --policy-keyprovider systemd-creds:wyrelog-system-policy-key --audit-db /var/log/wyrelog/system/audit.duckdb --listen-port 8765
+ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production
 Restart=on-failure
 RestartSec=5s
 NoNewPrivileges=true
@@ -19,6 +19,11 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadOnlyPaths=/etc/wyrelog /usr/share/wyrelog
+# Defense-in-depth: the line above already covers /etc/wyrelog/, but
+# pinning the conf file explicitly survives a future drop-in that
+# relaxes the directory rule. The daemon also gates on mode/owner at
+# open(2) (wyl_daemon_options_resolve in wyrelog/daemon/options.c).
+ReadOnlyPaths=/etc/wyrelog/wyrelogd.conf
 ReadWritePaths=/var/lib/wyrelog/system /var/log/wyrelog/system /run/wyrelog
 RuntimeDirectory=wyrelog
 RuntimeDirectoryMode=0750
