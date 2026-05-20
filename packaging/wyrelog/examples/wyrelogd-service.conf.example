@@ -1,0 +1,30 @@
+# wyrelogd service profile -- example configuration
+#
+# This file MUST be installed as root:wyrelog 0640.
+# Looser permissions cause `wyrelogd --production` to refuse to start.
+#
+# Copy to /etc/wyrelog/wyrelogd.conf and edit values for your site.
+# The keys below mirror the flags currently carried by
+# packaging/systemd/wyrelog-service.service ExecStart byte-for-byte; once
+# the unit's ExecStart flips to `--config /etc/wyrelog/wyrelogd.conf`,
+# this file IS the operational source of truth.
+#
+# Reference: docs/operator-runbook.md "Why No GSettings on the Daemon"
+
+[daemon]
+profile=service
+template_dir=/usr/share/wyrelog/access
+policy_db=/var/lib/wyrelog/service/policy.sqlite
+policy_keyprovider=systemd-creds:wyrelog-service-policy-key
+audit_db=/var/log/wyrelog/service/audit.duckdb
+system_url=http://127.0.0.1:8765
+event_spool_dir=/var/lib/wyrelog/service/event-spool
+event_queue_limit=1024
+listen_port=8766
+
+# DELETE AFTER FIRST SUCCESSFUL BOOT.
+# wyrelogd will WARN on every --profile-info while either of these
+# keys is present in /etc/wyrelog/wyrelogd.conf.
+#
+# bootstrap_admin_subject=
+# bootstrap_admin_allow_skip_mfa=false

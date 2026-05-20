@@ -127,6 +127,16 @@ install_data(
   'packaging/service.env',
   install_dir : join_paths(get_option('sysconfdir'), 'wyrelog'),
 )
+# Documentation-only wyrelogd.conf examples for each profile. Installed
+# under ${datadir}/wyrelog/examples/ (NOT /etc/) so the operator must
+# explicitly copy and chmod 0640 before wyrelogd will load the file;
+# shipping into /etc/ would risk silently overriding a site config or
+# leaving world-readable secrets-adjacent settings on disk.
+install_data(
+  'packaging/wyrelog/examples/wyrelogd-system.conf.example',
+  'packaging/wyrelog/examples/wyrelogd-service.conf.example',
+  install_dir : join_paths(get_option('datadir'), 'wyrelog', 'examples'),
+)
 
 # Install git pre-commit hook for code style checking
 git_hook_script = find_program('hooks/pre-commit.hook')
