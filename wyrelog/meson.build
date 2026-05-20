@@ -157,7 +157,7 @@ else
   wyctl_exe = disabler()
 endif
 
-wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep, wirelog_dep]
+wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep, sqlite_dep, wirelog_dep]
 wyrelogd_c_args = [
   '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
 ]

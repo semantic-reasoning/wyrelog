@@ -2,13 +2,30 @@
 #if defined(__unix__) || defined(__APPLE__)
 #define _XOPEN_SOURCE 700
 #endif
+/* macOS hides Darwin-specific fcntl flags (notably O_NOFOLLOW) when
+ * _XOPEN_SOURCE is set strict; _DARWIN_C_SOURCE restores them without
+ * loosening the POSIX surface elsewhere. */
+#if defined(__APPLE__)
+#define _DARWIN_C_SOURCE 1
+#endif
 #include "daemon/options.h"
 
 #include <errno.h>
 #ifdef G_OS_UNIX
+#include <fcntl.h>
 #include <stdlib.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 #include <string.h>
+
+#include "wyl-log-private.h"
+
+/* Conf-file size ceiling (defense-in-depth). The parser tolerates
+ * arbitrarily large keyfiles; we cap at 64 KiB so a hostile or
+ * accidentally-large conf cannot exhaust memory or hide a tail of
+ * malicious content past where an operator would skim. */
+#define WYL_DAEMON_CONF_MAX_BYTES (64 * 1024)
 
 #define WYL_DAEMON_DEFAULT_EVENT_QUEUE_LIMIT 1024
 
@@ -113,6 +130,11 @@ path_equal_or_contains (const gchar *root, const gchar *path)
   return g_str_has_prefix (canon_path, root_prefix);
 }
 
+/* keyfile_take_string and keyfile_take_owned_string differ only in
+ * the type of *target (const gchar ** vs gchar **). Both early-return
+ * when *target is already set so a prior CLI value overrides anything
+ * supplied via the keyfile -- this asymmetry is load-bearing for the
+ * "CLI overrides conf" contract and must not be flattened. */
 static void
 keyfile_take_string (GKeyFile *key_file, const gchar *key, const gchar **target)
 {
@@ -175,6 +197,168 @@ load_config_defaults (WylDaemonOptions *opts, GKeyFile *key_file)
         g_key_file_get_boolean (key_file, "daemon",
         "bootstrap_admin_allow_skip_mfa", &error);
   }
+}
+
+/* conf_file_open_safely -- TOCTOU-safe conf-file loader.
+ *
+ * Why this exists:
+ *   The conf file ships secrets-adjacent settings (bootstrap_admin_*,
+ *   policy_keyprovider, paths to the policy authority store). Reading
+ *   it with g_key_file_load_from_file leaves three windows open:
+ *
+ *     1. The path may resolve to a symlink the operator did not write.
+ *        O_NOFOLLOW closes that window at open(2) time -- ELOOP fires
+ *        before any byte is read.
+ *     2. The path may be group/world writable, letting a same-uid
+ *        attacker rewrite it between checks. fstat()ing the fd we
+ *        already hold removes the time-of-check/time-of-use gap;
+ *        whatever inode we examined is the inode we read from.
+ *     3. The file may be enormous or non-regular (FIFO, char device).
+ *        The size cap and S_ISREG check both defuse that.
+ *
+ * Behavior matrix (locked):
+ *   production + unsafe  -> return FALSE with greppable error token
+ *                           "wyrelogd: conf: refusing <path>: <reason>".
+ *   production + safe    -> return TRUE, *out_data populated.
+ *   non-prod  + unsafe   -> WYL_LOG_WARN with "wyrelogd: conf:" prefix
+ *                           (no "refusing"), continue and return TRUE
+ *                           with the file content. Hard failures
+ *                           (ELOOP, non-regular, size cap, I/O error)
+ *                           always return FALSE regardless of mode.
+ *   non-prod  + safe     -> return TRUE silently.
+ *
+ * Non-UNIX (Windows) skips the stat-based perm check but still routes
+ * through g_file_get_contents so the caller observes the same
+ * (data, len) shape. Size cap is enforced on both platforms after the
+ * content is in hand.
+ *
+ * Linkage note: declared with WYL_OPTIONS_TEST_INTERNAL so that the
+ * unit-test binary (tests/test-daemon-options.c) can call this gate
+ * directly. Production builds keep it file-local (static); the test
+ * build defines WYL_OPTIONS_TEST_INTERNAL to elide the static keyword
+ * so the symbol becomes externally linkable. There is no other
+ * supported caller. */
+#ifndef WYL_OPTIONS_TEST_INTERNAL
+#define WYL_OPTIONS_TEST_INTERNAL static
+#endif
+
+WYL_OPTIONS_TEST_INTERNAL gboolean
+conf_file_open_safely (const gchar *path, gboolean production,
+    gchar **out_data, gsize *out_len, GError **error)
+{
+  g_return_val_if_fail (path != NULL, FALSE);
+  g_return_val_if_fail (out_data != NULL, FALSE);
+  g_return_val_if_fail (out_len != NULL, FALSE);
+
+  *out_data = NULL;
+  *out_len = 0;
+
+#ifdef G_OS_UNIX
+  int fd = open (path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  if (fd < 0) {
+    int saved = errno;
+    if (saved == ELOOP) {
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+          "wyrelogd: conf: refusing %s: symlink not permitted", path);
+    } else {
+      g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved),
+          "wyrelogd: conf: refusing %s: open failed: %s",
+          path, g_strerror (saved));
+    }
+    return FALSE;
+  }
+
+  struct stat st = { 0 };
+  if (fstat (fd, &st) != 0) {
+    int saved = errno;
+    close (fd);
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved),
+        "wyrelogd: conf: refusing %s: fstat failed: %s",
+        path, g_strerror (saved));
+    return FALSE;
+  }
+
+  if (!S_ISREG (st.st_mode)) {
+    close (fd);
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "wyrelogd: conf: refusing %s: not a regular file", path);
+    return FALSE;
+  }
+
+  if (st.st_size < 0 || (guint64) st.st_size > WYL_DAEMON_CONF_MAX_BYTES) {
+    close (fd);
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "wyrelogd: conf: refusing %s: size %" G_GINT64_FORMAT
+        " exceeds %d-byte cap",
+        path, (gint64) st.st_size, WYL_DAEMON_CONF_MAX_BYTES);
+    return FALSE;
+  }
+
+  gboolean group_or_world_writable = (st.st_mode & (S_IWGRP | S_IWOTH)) != 0;
+  if (group_or_world_writable) {
+    if (production) {
+      close (fd);
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+          "wyrelogd: conf: refusing %s: mode 0%o is group/world writable",
+          path, (unsigned int) (st.st_mode & 07777));
+      return FALSE;
+    }
+    /* Non-production: emit a WARN but keep going so dev workflows are
+     * not broken. The prefix omits "refusing" so a greppable
+     * differentiator survives. */
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "wyrelogd: conf: %s mode 0%o is group/world writable; "
+        "tighten to 0640 before enabling --production",
+        path, (unsigned int) (st.st_mode & 07777));
+  }
+
+  g_autofree gchar *buf = g_malloc0 ((gsize) st.st_size + 1);
+  gsize total = 0;
+  while (total < (gsize) st.st_size) {
+    ssize_t n = read (fd, buf + total, (gsize) st.st_size - total);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      int saved = errno;
+      close (fd);
+      g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved),
+          "wyrelogd: conf: refusing %s: read failed: %s",
+          path, g_strerror (saved));
+      return FALSE;
+    }
+    if (n == 0)
+      break;
+    total += (gsize) n;
+  }
+  close (fd);
+
+  *out_data = g_steal_pointer (&buf);
+  *out_len = total;
+  return TRUE;
+#else
+  /* Windows: no fstat-based mode check; we still cap the payload size
+   * and rely on filesystem ACLs to gate write access. The error-string
+   * shape stays identical so callers can pattern-match on the same
+   * "wyrelogd: conf:" prefix. */
+  (void) production;
+  g_autofree gchar *data = NULL;
+  gsize len = 0;
+  GError *load_error = NULL;
+  if (!g_file_get_contents (path, &data, &len, &load_error)) {
+    g_propagate_prefixed_error (error, load_error,
+        "wyrelogd: conf: refusing %s: ", path);
+    return FALSE;
+  }
+  if (len > WYL_DAEMON_CONF_MAX_BYTES) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+        "wyrelogd: conf: refusing %s: size %" G_GSIZE_FORMAT
+        " exceeds %d-byte cap", path, len, WYL_DAEMON_CONF_MAX_BYTES);
+    return FALSE;
+  }
+  *out_data = g_steal_pointer (&data);
+  *out_len = len;
+  return TRUE;
+#endif
 }
 
 static const gchar *
@@ -290,9 +474,18 @@ wyl_daemon_options_resolve (WylDaemonOptions *opts, GError **error)
   g_return_val_if_fail (opts != NULL, FALSE);
 
   if (opts->config_path != NULL && opts->config_path[0] != '\0') {
+    g_autofree gchar *data = NULL;
+    gsize len = 0;
+    /* TOCTOU-safe: gate on the inode we will read from. The perm
+     * check executes BEFORE any keyfile parsing -- so a hostile or
+     * accidentally-loose conf cannot inject secrets-adjacent settings
+     * under --production. */
+    if (!conf_file_open_safely (opts->config_path, opts->production_mode,
+            &data, &len, error))
+      return FALSE;
     g_autoptr (GKeyFile) key_file = g_key_file_new ();
-    if (!g_key_file_load_from_file (key_file, opts->config_path,
-            G_KEY_FILE_NONE, error))
+    if (!g_key_file_load_from_data (key_file, data, len, G_KEY_FILE_NONE,
+            error))
       return FALSE;
     load_config_defaults (opts, key_file);
   }
