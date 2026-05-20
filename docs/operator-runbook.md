@@ -311,6 +311,34 @@ The subject must already exist as a principal in the policy store
 (typically through `wyctl policy role-grant`). Enrollment does not
 create principals — it only attaches a TOTP factor to one.
 
+### Setting defaults via GSettings
+
+Operators who enroll multiple subjects against the same policy store and
+KeyProvider can stop repeating `--store` and `--keyprovider` on every
+invocation by setting the two GSettings keys once:
+
+```sh
+gsettings set org.wyrelog.wyctl default-policy-store /var/lib/wyrelog/policy.sqlite
+gsettings set org.wyrelog.wyctl default-keyprovider systemd-creds:wyrelog-policy
+```
+
+After this, `sudo wyctl mfa enroll --subject alice` (no `--store`, no
+`--keyprovider`) resolves both paths from GSettings. `--subject` is
+**not** a GSettings-backed key — it is always passed explicitly per
+enrollment, because every enrollment targets exactly one principal.
+
+Precedence is **CLI > GSettings > error**: an explicit `--store` or
+`--keyprovider` on the command line still wins over the GSettings value,
+and if neither is set the existing per-flag missing diagnostic fires.
+The existing kill switch `WYCTL_DISABLE_GSETTINGS=1` (the literal
+string `1`) disables the GSettings fallback uniformly across all wyctl
+subcommands, including the mfa subcommands, restoring the pre-GSettings
+"CLI-or-nothing" behaviour for incident-response or CI runs.
+
+See the *wyctl Configuration and Token-File Safety* section below for
+the full key reference and the surrounding precedence/kill-switch
+machinery.
+
 ### Recovery and Reset
 
 There are no user-side backup codes in v0. The only recovery path is
@@ -928,7 +956,12 @@ not need to be repeated on every invocation, while bearer-token bytes are
 loaded only from a protected on-disk token file. Explicit CLI flags always
 override GSettings. The GSettings store records only the *path* to the
 token file; the bytes themselves never live in dconf, the keyfile backend,
-or any other GSettings backing store.
+or any other GSettings backing store. The same path-only / spec-only
+discipline applies to the MFA defaults: `default-policy-store` records
+the policy-store path, and `default-keyprovider` records the KeyProvider
+*spec string* (e.g. `file:/etc/wyrelog/policy.key`,
+`systemd-creds:wyrelog-policy`). The KeyProvider key material, the TOTP
+seed bytes, and the policy-store contents never live in GSettings.
 
 Daemon defaults live in `/etc/wyrelog/wyrelogd.conf` (see the previous
 section) — wyctl and wyrelogd intentionally do **not** share a single
@@ -962,6 +995,8 @@ honest about which surface acted.
 | `default-guard-loc-class` | `s` | `""` | Location class used when `--guard-loc-class` is omitted. |
 | `default-guard-risk` | `i` | `-1` | Risk score (0..100) used when `--guard-risk` is omitted. `-1` is the "unset" sentinel because `0` is a real risk score. |
 | `default-guard-timestamp-mode` | `s` | `"none"` | Strategy for filling `--guard-timestamp` when omitted. `"none"` preserves the historical "must be supplied" behaviour; `"now"` is reserved for a future commit that fills the current wall-clock time. |
+| `default-policy-store` | `s` | `""` | Backs `--store` for `wyctl mfa enroll|reset`. Policy-store path (SQLite file). Empty = "no default; CLI must supply." |
+| `default-keyprovider` | `s` | `""` | Backs `--keyprovider` for `wyctl mfa enroll|reset`. KeyProvider spec (e.g. `file:/etc/wyrelog/policy.key`). Empty = "no default; CLI must supply." |
 
 Example: configure the operator workstation once and let every wyctl
 invocation pick up the defaults.
@@ -987,6 +1022,13 @@ of:
    default URL or tenant from those.
 3. **Unset** — the existing per-flag "missing" diagnostic fires
    (`wyctl: missing daemon URL`, `wyctl: missing --tenant`, etc.).
+
+The `wyctl mfa enroll` and `wyctl mfa reset` subcommands participate in
+the same resolver pipeline: `--store` falls back to `default-policy-store`
+and `--keyprovider` falls back to `default-keyprovider` under the same
+precedence rule (CLI > GSettings > missing-flag diagnostic). The
+`WYCTL_DISABLE_GSETTINGS=1` kill switch documented below disables the
+fallback uniformly across all wyctl subcommands, mfa included.
 
 ### Kill Switch: `WYCTL_DISABLE_GSETTINGS`
 
