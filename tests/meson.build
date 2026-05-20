@@ -44,6 +44,22 @@ if host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  # Subprocess-level coverage for the --config TOCTOU gate and the
+  # --profile-info bootstrap-key staleness probe. The in-process unit
+  # tests (test-daemon-options) reach the helpers via reference
+  # implementations; this test drives the daemon binary end-to-end so
+  # the real open(2)/fstat(2)/sqlite3 paths are exercised.
+  test('wyrelogd-conf-gate', sh,
+    args : [
+      meson.current_source_dir() / 'check-wyrelogd-conf-gate.sh',
+      wyrelogd_exe.full_path(),
+      meson.project_source_root() / 'templates' / 'access',
+      python3.full_path(),
+    ],
+    depends : wyrelogd_exe,
+    timeout : 60,
+  )
+
   wyrelogd_sigterm_cmd = '"' + wyrelogd_exe.full_path()
   wyrelogd_sigterm_cmd += '" --template-dir "'
   wyrelogd_sigterm_cmd += meson.project_source_root() / 'templates' / 'access'
