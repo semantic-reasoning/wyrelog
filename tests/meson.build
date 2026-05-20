@@ -499,6 +499,20 @@ test_daemon_mfa_validator = executable('test-daemon-mfa-validator',
 
 test('daemon-mfa-validator', test_daemon_mfa_validator)
 
+test_daemon_options = executable('test-daemon-options',
+  'test-daemon-options.c',
+  '../wyrelog/daemon/options.c',
+  c_args : [
+    # Elide `static` on conf_file_open_safely so the test binary can
+    # link the gate directly. Production builds keep it file-local.
+    '-DWYL_OPTIONS_TEST_INTERNAL=',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, glib_dep],
+)
+
+test('daemon-options', test_daemon_options)
+
 test_dl_static = executable('test-dl-static',
   'test-dl-static.c',
   dependencies : [wyrelog_dep],
