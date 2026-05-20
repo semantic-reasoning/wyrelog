@@ -2339,7 +2339,7 @@ wyctl_mfa_validate_common_options (const WyctlMfaOptions *opts)
 }
 
 static int
-run_mfa_enroll (gint argc, gchar **argv)
+run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   WyctlMfaOptions opts = { 0 };
   GOptionEntry entries[] = {
@@ -2364,6 +2364,19 @@ run_mfa_enroll (gint argc, gchar **argv)
     g_printerr ("wyctl: unexpected mfa enroll argument: %s\n", argv[1]);
     return 2;
   }
+
+  /* Resolve --store and --keyprovider against GSettings defaults.  The
+   * resolver returns an owned copy or NULL; the original opts.* slots
+   * stay owned by GOptionContext, so we keep the resolved values in
+   * g_autofree locals and rebind opts.* to them before validation. */
+  g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
+      global_opts->settings, "default-policy-store");
+  g_autofree gchar *keyprovider_path =
+      wyctl_resolve_string_option (opts.keyprovider_path,
+      global_opts->settings, "default-keyprovider");
+  opts.store_path = store_path;
+  opts.keyprovider_path = keyprovider_path;
+
   int validate_rc = wyctl_mfa_validate_common_options (&opts);
   if (validate_rc != 0)
     return validate_rc;
@@ -2378,7 +2391,7 @@ run_mfa_enroll (gint argc, gchar **argv)
 }
 
 static int
-run_mfa_reset (gint argc, gchar **argv)
+run_mfa_reset (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   WyctlMfaOptions opts = { 0 };
   GOptionEntry entries[] = {
@@ -2403,6 +2416,16 @@ run_mfa_reset (gint argc, gchar **argv)
     g_printerr ("wyctl: unexpected mfa reset argument: %s\n", argv[1]);
     return 2;
   }
+
+  /* Mirror the resolver/ownership pattern from run_mfa_enroll. */
+  g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
+      global_opts->settings, "default-policy-store");
+  g_autofree gchar *keyprovider_path =
+      wyctl_resolve_string_option (opts.keyprovider_path,
+      global_opts->settings, "default-keyprovider");
+  opts.store_path = store_path;
+  opts.keyprovider_path = keyprovider_path;
+
   int validate_rc = wyctl_mfa_validate_common_options (&opts);
   if (validate_rc != 0)
     return validate_rc;
@@ -2427,16 +2450,16 @@ run_mfa_reset (gint argc, gchar **argv)
 }
 
 static int
-run_mfa (gint argc, gchar **argv)
+run_mfa (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
     g_printerr ("wyctl: missing mfa command (enroll | reset)\n");
     return 2;
   }
   if (g_strcmp0 (argv[1], "enroll") == 0)
-    return run_mfa_enroll (argc - 1, argv + 1);
+    return run_mfa_enroll (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "reset") == 0)
-    return run_mfa_reset (argc - 1, argv + 1);
+    return run_mfa_reset (global_opts, argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown mfa command: %s\n", argv[1]);
   return 2;
@@ -2640,7 +2663,7 @@ main (int argc, char **argv)
   if (g_strcmp0 (argv[1], "key") == 0)
     return run_key (argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "mfa") == 0)
-    return run_mfa (argc - 1, argv + 1);
+    return run_mfa (&opts, argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;

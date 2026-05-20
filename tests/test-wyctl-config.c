@@ -20,6 +20,8 @@ fresh_settings (void)
     "default-guard-loc-class",
     "default-guard-risk",
     "default-guard-timestamp-mode",
+    "default-policy-store",
+    "default-keyprovider",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (keys); i++)
     g_settings_reset (settings, keys[i]);
@@ -126,6 +128,79 @@ test_resolve_uint_no_settings_returns_null (void)
 }
 
 static void
+test_resolve_string_policy_store_cli_wins (void)
+{
+  g_autoptr (GSettings) settings = fresh_settings ();
+  g_settings_set_string (settings, "default-policy-store",
+      "/var/lib/wyrelog/from-gsettings.sqlite");
+
+  g_autofree gchar *resolved =
+      wyctl_resolve_string_option ("/tmp/from-cli.sqlite", settings,
+      "default-policy-store");
+  g_assert_cmpstr (resolved, ==, "/tmp/from-cli.sqlite");
+}
+
+static void
+test_resolve_string_policy_store_falls_back_to_settings (void)
+{
+  g_autoptr (GSettings) settings = fresh_settings ();
+  g_settings_set_string (settings, "default-policy-store",
+      "/var/lib/wyrelog/from-gsettings.sqlite");
+
+  g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
+      "default-policy-store");
+  g_assert_cmpstr (resolved, ==, "/var/lib/wyrelog/from-gsettings.sqlite");
+}
+
+static void
+test_resolve_string_policy_store_empty_settings_is_unset (void)
+{
+  g_autoptr (GSettings) settings = fresh_settings ();
+  /* Schema default is the empty string. Symmetry with daemon-url:
+     no CLI value + empty-string in GSettings must surface as NULL so
+     the caller's "missing --store" diagnostic fires unchanged. */
+  g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
+      "default-policy-store");
+  g_assert_null (resolved);
+}
+
+static void
+test_resolve_string_keyprovider_cli_wins (void)
+{
+  g_autoptr (GSettings) settings = fresh_settings ();
+  g_settings_set_string (settings, "default-keyprovider",
+      "systemd-creds:wyrelog-policy-from-gsettings");
+
+  g_autofree gchar *resolved =
+      wyctl_resolve_string_option ("file:/etc/wyrelog/keyprovider.key",
+      settings, "default-keyprovider");
+  g_assert_cmpstr (resolved, ==, "file:/etc/wyrelog/keyprovider.key");
+}
+
+static void
+test_resolve_string_keyprovider_falls_back_to_settings (void)
+{
+  g_autoptr (GSettings) settings = fresh_settings ();
+  g_settings_set_string (settings, "default-keyprovider",
+      "systemd-creds:wyrelog-policy");
+
+  g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
+      "default-keyprovider");
+  g_assert_cmpstr (resolved, ==, "systemd-creds:wyrelog-policy");
+}
+
+static void
+test_resolve_string_keyprovider_empty_settings_is_unset (void)
+{
+  g_autoptr (GSettings) settings = fresh_settings ();
+  /* Empty-string symmetry: matches the daemon-url test at line ~78
+     and the policy-store equivalent above. */
+  g_autofree gchar *resolved = wyctl_resolve_string_option (NULL, settings,
+      "default-keyprovider");
+  g_assert_null (resolved);
+}
+
+static void
 test_open_settings_respects_kill_switch (void)
 {
   /* WYCTL_DISABLE_GSETTINGS=1 must short-circuit before any schema
@@ -187,6 +262,22 @@ main (int argc, char **argv)
       test_resolve_uint_renders_settings_value);
   g_test_add_func ("/wyctl/config/resolve-uint/no-settings-returns-null",
       test_resolve_uint_no_settings_returns_null);
+  g_test_add_func ("/wyctl/config/resolve-string/policy-store-cli-wins",
+      test_resolve_string_policy_store_cli_wins);
+  g_test_add_func
+      ("/wyctl/config/resolve-string/policy-store-falls-back-to-settings",
+      test_resolve_string_policy_store_falls_back_to_settings);
+  g_test_add_func
+      ("/wyctl/config/resolve-string/policy-store-empty-settings-is-unset",
+      test_resolve_string_policy_store_empty_settings_is_unset);
+  g_test_add_func ("/wyctl/config/resolve-string/keyprovider-cli-wins",
+      test_resolve_string_keyprovider_cli_wins);
+  g_test_add_func
+      ("/wyctl/config/resolve-string/keyprovider-falls-back-to-settings",
+      test_resolve_string_keyprovider_falls_back_to_settings);
+  g_test_add_func
+      ("/wyctl/config/resolve-string/keyprovider-empty-settings-is-unset",
+      test_resolve_string_keyprovider_empty_settings_is_unset);
   g_test_add_func ("/wyctl/config/open/respects-kill-switch",
       test_open_settings_respects_kill_switch);
   g_test_add_func ("/wyctl/config/open/handle-when-schema-present",

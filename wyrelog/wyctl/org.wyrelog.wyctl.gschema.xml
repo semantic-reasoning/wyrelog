@@ -87,5 +87,32 @@
         would replay the same timestamp across invocations.
       </description>
     </key>
+
+    <key name="default-policy-store" type="s">
+      <default>""</default>
+      <summary>Default policy store path for offline subcommands</summary>
+      <description>
+        Filesystem path used when --store is omitted by an offline
+        wyctl subcommand (currently `mfa enroll` / `mfa reset`).
+        Empty string means "no default; the CLI flag must be
+        provided." The key is named `default-policy-store` rather
+        than `default-store` so the schema is unambiguous about
+        which kind of store the path refers to — wyctl's offline
+        subcommands operate on policy stores, never the fact store
+        or any other store wyrelog persists.
+      </description>
+    </key>
+
+    <key name="default-keyprovider" type="s">
+      <default>""</default>
+      <summary>Default KeyProvider spec for encrypted policy stores</summary>
+      <description>
+        KeyProvider spec used when --keyprovider is omitted by an
+        offline wyctl subcommand. Accepts the same `systemd-creds:NAME`
+        and `file:PATH` forms the CLI flag does. Empty string means
+        "no default; the CLI flag must be provided." The schema stores
+        only the spec string, never key material.
+      </description>
+    </key>
   </schema>
 </schemalist>

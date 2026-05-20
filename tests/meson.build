@@ -312,8 +312,14 @@ if build_client and host_machine.system() != 'windows'
     dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep, sodium_dep],
   )
 
+  # The MFA harness now exercises the GSettings fallback for --store /
+  # --keyprovider (issue #333), so it needs the compiled schema on
+  # GSETTINGS_SCHEMA_DIR and the memory backend, just like the
+  # wyctl-config / wyctl-basic tests.  Per-test XDG-keyfile fixtures
+  # then layer a real GSettings keyfile on top of that schema dir.
   test('wyctl-mfa', test_wyctl_mfa,
-    depends : [wyctl_exe],
+    depends : [wyctl_exe, wyctl_gschemas_compiled],
+    env : wyctl_gsettings_test_env,
     timeout : 60,
   )
 
