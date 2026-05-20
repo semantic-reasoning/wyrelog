@@ -895,7 +895,7 @@ bootstrap_admin_allow_skip_mfa = false
 | `system_url` | string | `--system-url` | System-profile daemon URL the service-profile daemon forwards events to. |
 | `listen_port` | int | `--listen-port` | HTTP listen port. `0` selects an ephemeral port (used by integration tests). |
 | `event_queue_limit` | int | `--event-queue-limit` | Maximum pending service-profile spool files. |
-| `production` | bool | `--production` | Enables the fail-closed production startup gates. |
+| `production` | bool | `--production` | Enables the fail-closed production startup gates. CLI and conf are OR-combined; see "Production Mode Precedence". |
 | `bootstrap_admin_subject` | string | `--bootstrap-admin-subject` | Grants the `wr.system_admin` role to this subject on a fresh policy store. One-shot bootstrap aid. |
 | `bootstrap_admin_allow_skip_mfa` | bool | `--bootstrap-admin-allow-skip-mfa` | Grants `wr.login.skip_mfa` to the bootstrap admin so it can mint a first bearer token. |
 
@@ -916,17 +916,263 @@ parser inflates into `WylDaemonOptions`.
 
 ### systemd Wiring
 
-A typical service unit threads the config file through the daemon's
-`--config` flag:
+The packaged units (`wyrelog-system.service`, `wyrelog-service.service`)
+thread the config file through the daemon's `--config` flag and pin
+production gating with `--production`:
 
 ```ini
 [Service]
-EnvironmentFile=/etc/wyrelog/wyrelogd.env
+Environment=WYL_LOG=warn
+EnvironmentFile=-/etc/wyrelog/system.env
 ExecStart=/usr/bin/wyrelogd --config /etc/wyrelog/wyrelogd.conf --production
+ProtectSystem=strict
+ReadOnlyPaths=/etc/wyrelog /usr/share/wyrelog
+ReadOnlyPaths=/etc/wyrelog/wyrelogd.conf
 ```
 
-The packaged unit ships with this shape; operator customization should
-edit `wyrelogd.conf` rather than redefining the entire `ExecStart`.
+Operator customization should edit `wyrelogd.conf` rather than redefining
+the entire `ExecStart`. The `ProtectSystem=strict` and `ReadOnlyPaths=`
+lines are the parent-directory defense against attacker-controlled
+symlink swaps of `/etc/wyrelog/` itself — drop-ins that override
+`ExecStart=` must preserve them.
+
+### Migration Recipe
+
+Example conf files ship under `${datadir}/wyrelog/examples/` (not in
+`/etc/`) so the operator must explicitly copy them into place. The
+canonical recipe for the system profile:
+
+```sh
+sudo install -d -m 0750 -o root -g wyrelog /etc/wyrelog
+sudo cp /usr/share/wyrelog/examples/wyrelogd-system.conf.example \
+    /etc/wyrelog/wyrelogd.conf
+sudo chown root:wyrelog /etc/wyrelog/wyrelogd.conf
+sudo chmod 0640 /etc/wyrelog/wyrelogd.conf
+sudo systemctl restart wyrelog-system.service
+```
+
+Same for the service profile:
+
+```sh
+sudo install -d -m 0750 -o root -g wyrelog /etc/wyrelog
+sudo cp /usr/share/wyrelog/examples/wyrelogd-service.conf.example \
+    /etc/wyrelog/wyrelogd.conf
+sudo chown root:wyrelog /etc/wyrelog/wyrelogd.conf
+sudo chmod 0640 /etc/wyrelog/wyrelogd.conf
+sudo systemctl restart wyrelog-service.service
+```
+
+Create the conf file **before** restarting wyrelogd. The shipped
+`ExecStart=` passes `--config /etc/wyrelog/wyrelogd.conf`; the daemon
+exits nonzero when that path is missing, which then drives the
+systemd `Restart=` loop until the file appears. Operators who want a
+different path must override `ExecStart=` via a drop-in.
+
+### Conf File Permission Gate
+
+`wyrelogd` opens the conf file through a TOCTOU-safe gate
+(`conf_file_open_safely` in `wyrelog/daemon/options.c`) with the
+following matrix:
+
+| Condition | `--production` behavior | Non-production behavior |
+|-----------|-------------------------|-------------------------|
+| `S_IWGRP` or `S_IWOTH` set on conf | refuse to start, error prefix `wyrelogd: conf: refusing` | WARN with prefix `wyrelogd: conf:` (no "refusing"), continue |
+| Symlink at conf path (`O_NOFOLLOW` -> `ELOOP`) | refuse to start | refuse to start |
+| Conf is not a regular file (FIFO, char device) | refuse to start | refuse to start |
+| Conf size > 64 KiB (`WYL_DAEMON_CONF_MAX_BYTES` in `wyrelog/daemon/options.c`) | refuse to start | refuse to start |
+| I/O error during read | refuse to start | refuse to start |
+
+Required posture: `0640 root:wyrelog`. The size cap and S_ISREG check
+are hard failures regardless of `--production`. The mode check is the
+only condition that downgrades to WARN outside production so dev
+workflows are not broken; production deployments always reject loose
+modes.
+
+**Defense-in-depth caveat.** `O_NOFOLLOW` guards only the final path
+component. A compromised packaging step that makes `/etc/wyrelog`
+itself a symlink to attacker-controlled space is NOT caught by the
+daemon gate alone. The packaged unit's `ProtectSystem=strict` and
+`ReadOnlyPaths=/etc/wyrelog` lines provide the parent-directory
+defense — preserve them in any custom drop-in.
+
+### Production Mode Precedence
+
+`--production` and the `production` conf key are NOT mutually
+exclusive. The effective production mode is:
+
+```
+production_mode = (CLI --production) OR (conf [daemon] production = true)
+```
+
+Either source can promote the daemon into fail-closed production
+mode. The conf path is wired in `wyrelog/daemon/options.c:179-184`:
+when the CLI did not set `--production`, the loader reads the
+boolean `production` key from the `[daemon]` section via
+`g_key_file_get_boolean`. This is logical-OR, not "CLI overrides".
+
+Operationally:
+
+- **Explicit production boot** (current packaged default):
+  pass `--production` on the unit's `ExecStart=`. Visible in
+  `systemctl status` output, auditable via `journalctl`, and
+  cannot be inadvertently softened by an unrelated conf edit.
+- **Explicit non-production boot**: BOTH gates must be off.
+  Drop `--production` from `ExecStart=` (via a drop-in) AND ensure
+  the conf either omits `production=` entirely or sets
+  `production=false`. Leaving `production=true` in the conf will
+  re-enable fail-closed mode even when the CLI flag is absent.
+
+Why the CLI flag is the preferred surface despite the OR-merge:
+its presence is greppable in `systemctl status` and journal logs,
+giving operators a single visible witness for boot intent. The
+conf key exists for completeness but is the easier surface for a
+conf-write attacker to flip in either direction:
+
+- Attacker with conf-write can pin `production=true` invisibly; an
+  operator following a "drop `--production` for dev WARN-downgrade"
+  recipe then gets unexpected fail-closed mode.
+- Conversely, a non-production host that inherits a conf with
+  `production=false` (or, equivalently, the key absent and CLI flag
+  absent) silently runs without fail-closed gates.
+
+The packaged unit keeps `--production` on `ExecStart=` for that
+visibility reason; do not remove it from `ExecStart=` without
+auditing the conf as well.
+
+### Diagnostic / Query Flags (Not Config-Eligible)
+
+The following CLI flags cannot be expressed in the conf file. They
+exit the daemon after printing, so they have no startup steady-state
+to configure:
+
+- `--check` — load policy templates and exit. Used by package
+  pre-/post-install hooks and human dry-runs.
+- `--version` — print the wyrelog version string and exit.
+- `--template-version` — print the access template version and exit.
+- `--template-info` — print the access template artifact identity
+  (signature, hash, timestamps) and exit.
+- `--profile-info` — print the resolved daemon profile configuration
+  (the value of every `WylDaemonOptions` field after merging CLI, conf,
+  and defaults) and exit. Also runs the bootstrap-key staleness probe
+  described below.
+- `--config PATH` — the path to the conf file itself. The path of the
+  conf is necessarily a CLI argument.
+
+### Bootstrap-Key Staleness WARN
+
+When `--profile-info` runs against a conf that still carries
+`bootstrap_admin_subject` or `bootstrap_admin_allow_skip_mfa=true`,
+`wyrelogd` probes the policy store for any subject row
+(`maybe_warn_stale_bootstrap_key` and `policy_store_probe_subjects`
+in `wyrelog/daemon/wyrelogd.c`) and emits one of two greppable lines
+to stderr:
+
+```
+wyrelogd: bootstrap_admin: stale-key subject=<id> allow_skip_mfa=<bool> (...)
+```
+
+emitted when the probe confirms at least one subject row exists.
+The greppable stable prefix is `wyrelogd: bootstrap_admin: stale-key
+subject=` — operators should anchor scripts on that token, not on
+the parenthetical hint. The hint itself takes one of two concrete
+shapes depending on which bootstrap keys are present:
+
+When only `bootstrap_admin_subject` is set in the conf:
+
+```
+... (remove bootstrap_admin_subject from /etc/wyrelog/wyrelogd.conf and restart)
+```
+
+When both `bootstrap_admin_subject` and
+`bootstrap_admin_allow_skip_mfa` are set:
+
+```
+... (remove bootstrap_admin_subject and bootstrap_admin_allow_skip_mfa from /etc/wyrelog/wyrelogd.conf and restart)
+```
+
+And:
+
+```
+wyrelogd: bootstrap_admin: indeterminate subject=<sanitized> allow_skip_mfa=<bool> (policy store unreadable: <reason>) -- cannot confirm bootstrap key is fresh
+```
+
+emitted when the probe cannot authoritatively answer (path unset,
+sqlite open failure, schema missing, step error). The `indeterminate`
+line exists so an attacker who can write the conf cannot silence the
+staleness signal by also corrupting the policy store — operators get
+a different greppable token instead of silence.
+
+The subject string is sanitized through a dmesg-style hex-escape
+(non-printable bytes rendered as `\xNN`) before stderr emission. The
+conf file is exactly the write surface an attacker would use to plant
+ANSI/CSI/OSC escape sequences; piping it verbatim through stderr at
+onboarding time would let the attacker spoof terminal output.
+
+Migration practice: delete the `bootstrap_admin_*` keys from
+`/etc/wyrelog/wyrelogd.conf` after first successful boot. The
+shipped example confs leave both keys commented out for exactly this
+reason.
+
+The stable greppable token discipline (anchor scripts on
+`wyrelogd: bootstrap_admin: stale-key subject=` rather than on the
+parenthetical remediation hint) mirrors the lesson from #331
+commit 7 — false runbook claims about message wording got caught
+as BLOCKERs during review there, so this runbook commits to the
+stable prefix as the authoritative interface.
+
+### Log Verbosity Is an Env Variable
+
+There is no `log_level=` conf key. Operators set log verbosity via
+the systemd unit's `Environment=` (or a drop-in). The grammar
+(`wyl_log_internal_parse_spec` in `wyrelog/wyl-log.c`) is:
+
+```
+SECTION:LEVEL[,SECTION:LEVEL...]
+```
+
+Bare-level strings like `WYL_LOG=info` are **silently dropped** at
+the `g_strv_length(parts) != 2` continue in `wyl-log.c:92` — they
+match no section and never raise any threshold. Two correct forms:
+
+```ini
+[Service]
+# Section-specific: raise boot to info, leave policy at warn
+Environment=WYL_LOG=boot:info,policy:warn
+```
+
+```ini
+[Service]
+# Wildcard: apply one level to every section
+Environment=WYL_LOG=*:info
+```
+
+Valid section tokens (case-insensitive): `boot`, `policy`, `session`,
+`decision`, `audit`, `io`, `general`, plus the wildcard `*`. Valid
+levels: `none`, `error`, `warn`, `info`, `debug`, `trace`. Unknown
+sections are silently ignored (an operator typo must not destabilise
+the daemon; documented in the K4 design note in `wyl-log.c`).
+
+Note: the packaged unit ships `Environment=WYL_LOG=warn`. By the
+grammar above this is a **no-op** — it parses to zero entries and
+leaves every section at the compile-time default (which happens to
+be `WARN`, set in `wyl_log_internal_parse_spec`). The value is
+preserved as an explicit-intent marker and to keep the line slot
+available for forward-compatible grammar extensions; operators
+should not interpret its presence as evidence that any level is
+actually being enforced.
+
+### Fact-Store Defaults
+
+`fact_root` and `fact_store_mode` are valid conf keys, but the
+shipped example confs do **not** set them. The daemon defaults apply
+when the keys are absent:
+
+- `fact_root` defaults to `/var/lib/wyrelog/system/facts` (system
+  profile) or `/var/lib/wyrelog/service/facts` (service profile).
+- `fact_store_mode` defaults to `per-tenant-graph`.
+
+Operators may add explicit values to the conf if they need
+non-default paths or a future store layout.
 
 ### Why No GSettings on the Daemon
 
