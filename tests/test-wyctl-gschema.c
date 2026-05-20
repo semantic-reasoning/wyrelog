@@ -38,6 +38,8 @@ test_schema_keys_and_types (void)
     {"default-guard-loc-class", G_VARIANT_TYPE_STRING},
     {"default-guard-risk", G_VARIANT_TYPE_INT32},
     {"default-guard-timestamp-mode", G_VARIANT_TYPE_STRING},
+    {"default-policy-store", G_VARIANT_TYPE_STRING},
+    {"default-keyprovider", G_VARIANT_TYPE_STRING},
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (expected); i++) {
@@ -89,6 +91,8 @@ test_schema_defaults_safe (void)
     "default-graph",
     "access-token-file",
     "default-guard-loc-class",
+    "default-policy-store",
+    "default-keyprovider",
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (string_keys); i++) {

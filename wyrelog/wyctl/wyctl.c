@@ -2365,10 +2365,14 @@ run_mfa_enroll (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
 
-  /* Resolve --store and --keyprovider against GSettings defaults.  The
-   * resolver returns an owned copy or NULL; the original opts.* slots
-   * stay owned by GOptionContext, so we keep the resolved values in
-   * g_autofree locals and rebind opts.* to them before validation. */
+  /* Resolve --store and --keyprovider from CLI / GSettings (CLI wins;
+   * empty falls back to the default-policy-store / default-keyprovider
+   * keys). The resolved values live in the g_autofree locals; we
+   * overwrite opts.store_path / opts.keyprovider_path so downstream
+   * validation/open sees the resolved value. The original
+   * GOptionContext-owned strings in those slots are dropped (small
+   * one-shot leak absorbed at CLI tear-down — same pattern as
+   * elsewhere in wyctl). */
   g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
       global_opts->settings, "default-policy-store");
   g_autofree gchar *keyprovider_path =
@@ -2417,7 +2421,14 @@ run_mfa_reset (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return 2;
   }
 
-  /* Mirror the resolver/ownership pattern from run_mfa_enroll. */
+  /* Resolve --store and --keyprovider from CLI / GSettings (CLI wins;
+   * empty falls back to the default-policy-store / default-keyprovider
+   * keys). The resolved values live in the g_autofree locals; we
+   * overwrite opts.store_path / opts.keyprovider_path so downstream
+   * validation/open sees the resolved value. The original
+   * GOptionContext-owned strings in those slots are dropped (small
+   * one-shot leak absorbed at CLI tear-down — same pattern as
+   * elsewhere in wyctl). */
   g_autofree gchar *store_path = wyctl_resolve_string_option (opts.store_path,
       global_opts->settings, "default-policy-store");
   g_autofree gchar *keyprovider_path =
