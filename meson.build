@@ -64,31 +64,68 @@ else
   duckdb_dep = disabler()
 endif
 
-wirelog_proj = subproject(
-  'wirelog',
-  default_options : ['tests=false', 'documentation=false'],
-)
-wirelog_consumer_args = []
-if host_machine.system() == 'windows'
-  wirelog_consumer_args += ['-DWIRELOG_BUILDING']
-endif
-wirelog_dep = declare_dependency(
-  link_with : wirelog_proj.get_variable('wirelog_lib'),
-  include_directories : [
-    wirelog_proj.get_variable('wirelog_inc'),
-    wirelog_proj.get_variable('wirelog_src_inc'),
-  ],
-  compile_args : wirelog_consumer_args,
-)
+wirelog_version = '>= 0.44.0'
+libchronoid_version = '>= 1.0.2'
+force_fallback_for = get_option('force_fallback_for')
+wrap_mode = get_option('wrap_mode')
 
-libchronoid_proj = subproject(
-  'libchronoid',
-  default_options : ['tests=false', 'cli=false'],
-)
-libchronoid_dep = declare_dependency(
-  link_with : libchronoid_proj.get_variable('chronoid_lib'),
-  include_directories : libchronoid_proj.get_variable('inc'),
-)
+wirelog_force_fallback = wrap_mode == 'forcefallback' or 'wirelog' in force_fallback_for
+wirelog_dep = disabler()
+if not wirelog_force_fallback
+  wirelog_dep = dependency('wirelog',
+    version : wirelog_version,
+    required : false,
+    allow_fallback : false,
+  )
+endif
+if not wirelog_dep.found()
+  if wrap_mode == 'nofallback'
+    error(('Dependency wirelog @0@ was not found and --wrap-mode=nofallback '
+        + 'disables subproject fallback.').format(wirelog_version))
+  endif
+  wirelog_proj = subproject(
+    'wirelog',
+    version : wirelog_version,
+    default_options : ['tests=false', 'documentation=false'],
+  )
+  wirelog_consumer_args = []
+  if host_machine.system() == 'windows'
+    wirelog_consumer_args += ['-DWIRELOG_BUILDING']
+  endif
+  wirelog_dep = declare_dependency(
+    link_with : wirelog_proj.get_variable('wirelog_lib'),
+    include_directories : [
+      wirelog_proj.get_variable('wirelog_inc'),
+      wirelog_proj.get_variable('wirelog_src_inc'),
+    ],
+    compile_args : wirelog_consumer_args,
+  )
+endif
+
+libchronoid_force_fallback = wrap_mode == 'forcefallback' or 'libchronoid' in force_fallback_for
+libchronoid_dep = disabler()
+if not libchronoid_force_fallback
+  libchronoid_dep = dependency('libchronoid',
+    version : libchronoid_version,
+    required : false,
+    allow_fallback : false,
+  )
+endif
+if not libchronoid_dep.found()
+  if wrap_mode == 'nofallback'
+    error(('Dependency libchronoid @0@ was not found and --wrap-mode=nofallback '
+        + 'disables subproject fallback.').format(libchronoid_version))
+  endif
+  libchronoid_proj = subproject(
+    'libchronoid',
+    version : libchronoid_version,
+    default_options : ['tests=false', 'cli=false'],
+  )
+  libchronoid_dep = declare_dependency(
+    link_with : libchronoid_proj.get_variable('chronoid_lib'),
+    include_directories : libchronoid_proj.get_variable('inc'),
+  )
+endif
 
 subdir('wyrelog')
 subdir('tests')
