@@ -6,17 +6,23 @@ set -eu
 ROOT=${1:-.}
 status=0
 
+is_ignored_top_level_redirect_wrap() {
+  wrap=$1
+
+  case "$wrap" in
+    "$ROOT"/subprojects/nanoarrow.wrap|"$ROOT"/subprojects/xxhash.wrap) ;;
+    *) return 1 ;;
+  esac
+
+  name=$(basename "$wrap")
+  expected_target="wirelog/subprojects/$name"
+
+  grep -q '^\[wrap-redirect\]$' "$wrap" \
+    && grep -q "^filename = $expected_target\$" "$wrap"
+}
+
 check_wrap_file() {
   wrap=$1
-  case "$(basename "$wrap")" in
-    nanoarrow.wrap|xxhash.wrap)
-      if ! grep -q '^filename = wirelog/subprojects/' "$wrap"; then
-        echo "$wrap: redirect must point at vendored wirelog subproject wrap" >&2
-        status=1
-      fi
-      return
-      ;;
-  esac
 
   if grep -q '^\[wrap-file\]' "$wrap"; then
     for key in source_url source_filename source_hash directory; do
@@ -52,6 +58,9 @@ check_wrap_file() {
 
 for wrap in "$ROOT"/subprojects/*.wrap; do
   [ -e "$wrap" ] || continue
+  if is_ignored_top_level_redirect_wrap "$wrap"; then
+    continue
+  fi
   check_wrap_file "$wrap"
 done
 
@@ -68,6 +77,10 @@ done
 if [ -d "$ROOT/subprojects/packagecache" ]; then
   missing=0
   for wrap in "$ROOT"/subprojects/*.wrap; do
+    [ -e "$wrap" ] || continue
+    if is_ignored_top_level_redirect_wrap "$wrap"; then
+      continue
+    fi
     filename=$(sed -n 's/^source_filename = //p' "$wrap" | head -n 1)
     if [ -n "$filename" ] && [ ! -f "$ROOT/subprojects/packagecache/$filename" ]; then
       echo "$wrap: packagecache missing $filename" >&2
