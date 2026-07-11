@@ -300,10 +300,13 @@ check_fact_store_retracts_idempotently (void)
 
   duckdb_connection conn = wyl_fact_store_get_connection (store);
   gint64 count = 0;
+  /* Retraction is append-only: preserve the original valid assert row and
+   * append an invalid tombstone. Replay applies both events in sequence to
+   * derive the effective state; the projection table itself retains both. */
   g_autofree gchar *order_a_valid_sql = g_strdup_printf
       ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
       "AND __wyl_valid = TRUE;", table);
-  if (!count_i64 (conn, order_a_valid_sql, &count) || count != 0)
+  if (!count_i64 (conn, order_a_valid_sql, &count) || count != 1)
     return 105;
   g_autofree gchar *order_a_invalid_sql = g_strdup_printf
       ("SELECT COUNT(*) FROM %s WHERE order_id = 'order-a' "
