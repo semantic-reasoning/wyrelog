@@ -8,6 +8,7 @@
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/engine.h"
+#include "wyrelog/wyl-engine-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -104,7 +105,8 @@ open_shipment_engine (gchar **tmpdir_out, WylEngine **out_engine)
     rmdir_recursive (dir);
     return WYRELOG_E_IO;
   }
-  wyrelog_error_t rc = wyl_engine_open (dir, 1, out_engine);
+  /* Manifest authenticity is outside these synthetic evaluator fixtures. */
+  wyrelog_error_t rc = wyl_engine_open_with_options (dir, 1, FALSE, out_engine);
   if (rc != WYRELOG_E_OK) {
     rmdir_recursive (dir);
     return rc;
