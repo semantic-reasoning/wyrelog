@@ -110,7 +110,8 @@ open_engine_from_compound_templates (gchar **tmpdir_out, WylEngine **out)
     return WYRELOG_E_IO;
   }
 
-  wyrelog_error_t rc = wyl_engine_open (tmpdir, 1, out);
+  /* Manifest authenticity is outside these synthetic evaluator fixtures. */
+  wyrelog_error_t rc = wyl_engine_open_with_options (tmpdir, 1, FALSE, out);
   if (rc != WYRELOG_E_OK) {
     rmdir_recursive (tmpdir);
     return rc;
