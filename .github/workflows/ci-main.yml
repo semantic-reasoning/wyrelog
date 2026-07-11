@@ -80,9 +80,14 @@ jobs:
       VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows
       VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
       VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-binary-cache,readwrite"
+      SCCACHE_GHA_ENABLED: "true"
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
 
       - name: Remove system vcpkg
         shell: bash
@@ -160,7 +165,7 @@ jobs:
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
           set PATH=%VCPKG_INSTALLED_DIR%\bin;%PATH%
-          set CC=clang-cl
+          set CC=sccache clang-cl
           meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
 
       - name: Build and test (clang-cl)
@@ -174,6 +179,12 @@ jobs:
           builddir\wyrelog\wyctl.exe --help >NUL
           builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
           meson test -C builddir --print-errorlogs --suite wyrelog
+
+      - name: Show sccache statistics
+        if: always()
+        shell: bash
+        run: |
+          "${SCCACHE_PATH}" --show-stats
 
       - name: Upload meson logs on failure
         if: failure()
