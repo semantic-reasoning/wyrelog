@@ -121,9 +121,11 @@ if ! grep -q "event spool queue limit reached" "$TMPDIR/full-spool.err"; then
   exit 1
 fi
 
-"$PYTHON" - "$TMPDIR/http.port" "$TMPDIR/http.requests" <<'PY' &
-from http.server import BaseHTTPRequestHandler, HTTPServer
+"$PYTHON" - "$TMPDIR/http.port" "$TMPDIR/http.requests" \
+  2>"$TMPDIR/http.err" <<'PY' &
+from http.server import BaseHTTPRequestHandler
 import pathlib
+from socketserver import TCPServer
 import sys
 
 port_path = pathlib.Path(sys.argv[1])
@@ -146,8 +148,8 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
-server = HTTPServer(("127.0.0.1", 0), Handler)
-port_path.write_text(str(server.server_port), encoding="utf-8")
+server = TCPServer(("127.0.0.1", 0), Handler)
+port_path.write_text(str(server.server_address[1]), encoding="utf-8")
 while seen < 2:
     server.handle_request()
 PY
@@ -160,7 +162,14 @@ while [ "$i" -lt 15 ]; do
 done
 if [ ! -s "$TMPDIR/http.port" ]; then
   echo "test HTTP endpoint did not start" >&2
+  if kill -0 "$HTTP_PID" 2>/dev/null; then
+    echo "test HTTP endpoint process is still running" >&2
+  else
+    echo "test HTTP endpoint process exited before startup" >&2
+  fi
+  cat "$TMPDIR/http.err" >&2
   kill "$HTTP_PID" 2>/dev/null || true
+  wait "$HTTP_PID" 2>/dev/null || true
   exit 1
 fi
 HTTP_PORT=$(cat "$TMPDIR/http.port")
