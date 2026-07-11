@@ -24,9 +24,8 @@ typedef struct
   const gchar *template_dir;
   const gchar *policy_store_path;
   const gchar *policy_keyprovider_path;
-#ifdef WYL_HAS_AUDIT
+  /* Consumed only by audit builds; unconditional to keep the layout stable. */
   const gchar *audit_store_path;
-#endif
   gboolean production_mode;
   gboolean require_template_manifest;
 } WylHandleOpenOptions;

@@ -481,6 +481,7 @@ if get_option('enable_fact_store').allowed()
   test_fact_replay = executable('test-fact-replay',
     'test-fact-replay.c',
     '../wyrelog/daemon/fact-status.c',
+    # Keep this consumer audit-macro-unaware to cover cross-TU layout stability.
     c_args : ['-DWYL_HAS_FACT_STORE'],
     include_directories : include_directories('../wyrelog'),
     dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
