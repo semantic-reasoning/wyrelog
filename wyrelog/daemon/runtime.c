@@ -278,16 +278,34 @@ drain_service_profile_spool_tick (gpointer user_data)
 #endif
 
 static void
-cleanup_readiness_policy_db (gpointer data)
+cleanup_readiness_store (gpointer data)
 {
   gchar *path = data;
   if (path == NULL)
     return;
 
   g_autofree gchar *clear_path = g_strdup_printf ("%s.clear", path);
+  g_autofree gchar *wal_path = g_strdup_printf ("%s.wal", path);
+  g_autofree gchar *sqlite_wal_path = g_strdup_printf ("%s-wal", path);
+  g_autofree gchar *sqlite_shm_path = g_strdup_printf ("%s-shm", path);
   (void) g_remove (path);
   (void) g_remove (clear_path);
+  (void) g_remove (wal_path);
+  (void) g_remove (sqlite_wal_path);
+  (void) g_remove (sqlite_shm_path);
   g_free (path);
+}
+
+static wyrelog_error_t
+make_readiness_store_path (const gchar *pattern, gchar **out_path)
+{
+  g_autoptr (GError) error = NULL;
+  gint fd = g_file_open_tmp (pattern, out_path, &error);
+  if (fd < 0)
+    return WYRELOG_E_IO;
+  (void) g_close (fd, NULL);
+  (void) g_remove (*out_path);
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -325,14 +343,19 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
   *out_handle = NULL;
 
   g_autofree gchar *scratch_policy_store = NULL;
+  g_autofree gchar *scratch_audit_store = NULL;
   if (opts->production_mode) {
-    g_autoptr (GError) error = NULL;
-    gint fd = g_file_open_tmp ("wyrelog-readiness-policy-XXXXXX.sqlite",
-        &scratch_policy_store, &error);
-    if (fd < 0)
-      return WYRELOG_E_IO;
-    (void) g_close (fd, NULL);
-    (void) g_remove (scratch_policy_store);
+    wyrelog_error_t rc =
+        make_readiness_store_path ("wyrelog-readiness-policy-XXXXXX.sqlite",
+        &scratch_policy_store);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+#ifdef WYL_HAS_AUDIT
+    rc = make_readiness_store_path ("wyrelog-readiness-audit-XXXXXX.duckdb",
+        &scratch_audit_store);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+#endif
   }
 
   /* Readiness probes intentionally run against scratch stores: the checks
@@ -343,13 +366,26 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
     .policy_keyprovider_path = opts->policy_keyprovider_path,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
+#ifdef WYL_HAS_AUDIT
+    .audit_store_path = scratch_audit_store,
+#endif
   };
 
   wyrelog_error_t rc = wyl_handle_open_with_options (&open_opts, out_handle);
-  if (rc == WYRELOG_E_OK && scratch_policy_store != NULL) {
+  if (rc != WYRELOG_E_OK) {
+    cleanup_readiness_store (g_steal_pointer (&scratch_policy_store));
+    cleanup_readiness_store (g_steal_pointer (&scratch_audit_store));
+    return rc;
+  }
+  if (scratch_policy_store != NULL) {
     g_object_set_data_full (G_OBJECT (*out_handle),
         "wyl-readiness-policy-db", g_steal_pointer (&scratch_policy_store),
-        cleanup_readiness_policy_db);
+        cleanup_readiness_store);
+  }
+  if (scratch_audit_store != NULL) {
+    g_object_set_data_full (G_OBJECT (*out_handle),
+        "wyl-readiness-audit-db", g_steal_pointer (&scratch_audit_store),
+        cleanup_readiness_store);
   }
   return rc;
 }
