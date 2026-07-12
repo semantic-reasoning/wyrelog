@@ -116,9 +116,10 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
     "has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).",
     "has_permission(U, P, S) :- direct_permission(U, P, S).",
     "can_read_audit(U) :- has_permission(U, \"wr.audit.read\", _).",
-    "can_manage_role(U, R) :-\n"
-        "    has_permission(U, \"wr.svc.grant_role\", _),\n"
-        "    role(R),\n" "    !role_security_officer(R).",
+    "can_manage_role(U, R) :-",
+    "has_permission(U, \"wr.svc.grant_role\", _),",
+    "role(R),",
+    "!role_security_officer(R).",
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (snippets); i++) {
