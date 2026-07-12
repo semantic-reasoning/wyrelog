@@ -10,6 +10,8 @@
 #include "daemon/fact-status.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
+#include "wyrelog/auth/mfa-enrollment-private.h"
+#include "wyrelog/auth/totp.h"
 #ifdef WYL_HAS_FACT_STORE
 #include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
@@ -32,6 +34,7 @@
 #define WYL_DAEMON_JWT_BOOT_EPOCH_CONTEXT "wyrelog.jwt.hs256.boot_epoch.v1"
 #define WYL_DAEMON_REFRESH_TTL_SECONDS 86400
 #define WYL_DAEMON_REFRESH_GRACE_SECONDS 30
+#define WYL_DAEMON_MFA_ENROLL_TTL_SECONDS 300
 #define WYL_DAEMON_REQUEST_ID_HEADER "X-Wyrelog-Request-Id"
 #define WYL_DAEMON_REQUEST_ID_DATA "wyl-daemon-request-id"
 #define WYL_DAEMON_REQUEST_ID_ATTEMPTED_DATA "wyl-daemon-request-id-attempted"
@@ -58,6 +61,19 @@
 #define WYL_DAEMON_ERR_TENANT_INVALID "tenant_invalid"
 #define WYL_DAEMON_ERR_TENANT_DENIED  "tenant_denied"
 #define WYL_DAEMON_ERR_TENANT_SEALED  "tenant_sealed"
+
+typedef gchar WylSensitiveChar;
+
+static void
+wyl_sensitive_string_free (WylSensitiveChar *value)
+{
+  if (value == NULL)
+    return;
+  sodium_memzero (value, strlen (value));
+  g_free (value);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylSensitiveChar, wyl_sensitive_string_free);
 
 typedef struct
 {
@@ -101,6 +117,16 @@ typedef struct
 
 typedef struct
 {
+  gchar *challenge;
+  gchar *session_id;
+  gchar *actor;
+  gchar *subject;
+  guint8 secret[WYL_TOTP_SEED_BYTES];
+  gint64 expires_at_monotonic_us;
+} WylMfaEnrollChallenge;
+
+typedef struct
+{
   WylHandle *handle;
   WylDaemonRuntime *runtime;
   guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
@@ -116,6 +142,7 @@ typedef struct
   GHashTable *sessions_by_token;
   GHashTable *access_tokens_by_jti;
   GHashTable *refresh_tokens_by_token;
+  GHashTable *mfa_enroll_challenges;
   /*
    * Set of session_token strings that have entered the logout
    * teardown path. Once a session is in this set, both
@@ -134,6 +161,7 @@ typedef struct
 } WylDaemonHttpContext;
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
+static gboolean mfa_code_is_well_formed (const gchar * code);
 static void set_json_error (SoupServerMessage * msg, guint status,
     const gchar * code);
 static void set_json_ok (SoupServerMessage * msg);
@@ -219,6 +247,39 @@ wyl_refresh_token_state_free (gpointer data)
 }
 
 static void
+wyl_mfa_enroll_challenge_free (gpointer data)
+{
+  WylMfaEnrollChallenge *challenge = data;
+  if (challenge == NULL)
+    return;
+  sodium_memzero (challenge->secret, sizeof challenge->secret);
+  g_free (challenge->challenge);
+  g_free (challenge->session_id);
+  g_free (challenge->actor);
+  g_free (challenge->subject);
+  g_free (challenge);
+}
+
+typedef struct
+{
+  const gchar *actor;
+  const gchar *session_id;
+  gint64 now_monotonic_us;
+} WylMfaChallengePrune;
+
+static gboolean
+wyl_mfa_enroll_challenge_should_remove (gpointer key, gpointer value,
+    gpointer user_data)
+{
+  (void) key;
+  WylMfaEnrollChallenge *challenge = value;
+  WylMfaChallengePrune *prune = user_data;
+  return challenge->expires_at_monotonic_us <= prune->now_monotonic_us ||
+      (g_strcmp0 (challenge->actor, prune->actor) == 0 &&
+      g_strcmp0 (challenge->session_id, prune->session_id) == 0);
+}
+
+static void
 wyl_daemon_http_context_free (gpointer data)
 {
   WylDaemonHttpContext *ctx = data;
@@ -235,6 +296,7 @@ wyl_daemon_http_context_free (gpointer data)
   g_hash_table_unref (ctx->sessions_by_token);
   g_hash_table_unref (ctx->access_tokens_by_jti);
   g_hash_table_unref (ctx->refresh_tokens_by_token);
+  g_hash_table_unref (ctx->mfa_enroll_challenges);
   g_clear_pointer (&ctx->revoked_session_tokens, g_hash_table_unref);
   g_mutex_clear (&ctx->lock);
   g_mutex_clear (&ctx->policy_mutation_lock);
@@ -356,6 +418,8 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
       g_free, wyl_access_token_state_free);
   ctx->refresh_tokens_by_token = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, wyl_refresh_token_state_free);
+  ctx->mfa_enroll_challenges = g_hash_table_new_full (g_str_hash, g_str_equal,
+      g_free, wyl_mfa_enroll_challenge_free);
   ctx->revoked_session_tokens = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, NULL);
   g_mutex_init (&ctx->lock);
@@ -3620,6 +3684,361 @@ policy_role_revoke_handler (SoupServer *server, SoupServerMessage *msg,
   role_membership_mutation_handler (server, msg, path, query, user_data, FALSE);
 }
 
+static gchar *
+mfa_enroll_build_otpauth_uri (const gchar *subject, const gchar *secret)
+{
+  g_autofree gchar *subject_encoded = g_uri_escape_string (subject, NULL,
+      FALSE);
+  return g_strdup_printf ("otpauth://totp/wyrelog:%s?secret=%s&issuer="
+      "wyrelog&algorithm=SHA1&digits=6&period=30", subject_encoded, secret);
+}
+
+typedef struct
+{
+  const gchar *subject;
+  gboolean found;
+} MfaEnrollSubjectLookup;
+
+static wyrelog_error_t
+mfa_enroll_find_subject (const gchar *subject, const gchar *role,
+    const gchar *scope, gpointer user_data)
+{
+  (void) role;
+  (void) scope;
+  MfaEnrollSubjectLookup *lookup = user_data;
+  if (g_strcmp0 (subject, lookup->subject) == 0)
+    lookup->found = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
+    GHashTable *query, WylDaemonHttpContext *ctx,
+    WylDaemonAuthContext *out_auth)
+{
+  const gchar *bearer = lookup_bearer_token (msg);
+  if (bearer == NULL || bearer[0] == '\0' ||
+      (query != NULL && g_hash_table_contains (query, "session_token"))) {
+    set_json_error (msg, 401, "mfa_enroll_auth_required");
+    return FALSE;
+  }
+  g_autofree gchar *actor = NULL;
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.policy.write", WYL_TENANT_DEFAULT, "mfa_enroll_auth_required",
+          "invalid_mfa_enroll_request", "mfa_enroll_denied",
+          "mfa_enroll_failed", &actor))
+    return FALSE;
+  const gchar *tenant_error = NULL;
+  if (resolve_bearer_session (server, ctx, bearer, out_auth,
+          &tenant_error) != WYRELOG_E_OK ||
+      g_strcmp0 (actor, out_auth->actor) != 0) {
+    set_json_error (msg, 401, "mfa_enroll_auth_required");
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+mfa_enroll_subject_exists (WylDaemonHttpContext *ctx, const gchar *subject)
+{
+  gboolean found = FALSE;
+  g_autofree gchar *state = NULL;
+  if (subject == NULL || subject[0] == '\0' || strlen (subject) > 256)
+    return FALSE;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
+  if (wyl_policy_store_get_principal_state (store, subject, &state,
+          &found) != WYRELOG_E_OK)
+    return FALSE;
+  if (found)
+    return TRUE;
+  MfaEnrollSubjectLookup lookup = {.subject = subject };
+  return wyl_policy_store_foreach_role_membership (store,
+      mfa_enroll_find_subject, &lookup) == WYRELOG_E_OK && lookup.found;
+}
+
+static gboolean
+mfa_enroll_request_body_dup (SoupServerMessage *msg, gsize max_len,
+    gchar **out_body)
+{
+  *out_body = NULL;
+  SoupMessageBody *body = soup_server_message_get_request_body (msg);
+  if (body == NULL || body->length <= 0 || body->data == NULL ||
+      (gsize) body->length > max_len)
+    return FALSE;
+  *out_body = g_strndup (body->data, (gsize) body->length);
+  return *out_body != NULL;
+}
+
+static const gchar *
+mfa_enroll_skip_spaces (const gchar *cursor)
+{
+  while (cursor != NULL && g_ascii_isspace (*cursor))
+    cursor++;
+  return cursor;
+}
+
+static gboolean
+mfa_enroll_parse_json_string (const gchar **cursor, gchar **out)
+{
+  const gchar *p = mfa_enroll_skip_spaces (*cursor);
+  if (*p++ != '"')
+    return FALSE;
+  g_autoptr (GString) value = g_string_new (NULL);
+  while (*p != '\0' && *p != '"') {
+    if ((guchar) * p < 0x20)
+      return FALSE;
+    if (*p == '\\') {
+      p++;
+      if (*p != '"' && *p != '\\' && *p != '/')
+        return FALSE;
+    }
+    g_string_append_c (value, *p++);
+  }
+  if (*p++ != '"')
+    return FALSE;
+  *cursor = p;
+  *out = g_string_free (g_steal_pointer (&value), FALSE);
+  return TRUE;
+}
+
+static gboolean
+mfa_enroll_parse_json_object (const gchar *json, const gchar **names,
+    gchar **values, gsize n_members)
+{
+  for (gsize i = 0; i < n_members; i++)
+    values[i] = NULL;
+  const gchar *p = mfa_enroll_skip_spaces (json);
+  if (*p++ != '{')
+    return FALSE;
+  for (gsize parsed = 0; parsed < n_members; parsed++) {
+    g_autofree gchar *key = NULL;
+    g_autoptr (WylSensitiveChar) value = NULL;
+    if (!mfa_enroll_parse_json_string (&p, &key))
+      goto fail;
+    p = mfa_enroll_skip_spaces (p);
+    if (*p++ != ':' || !mfa_enroll_parse_json_string (&p, &value))
+      goto fail;
+    gsize slot = n_members;
+    for (gsize i = 0; i < n_members; i++) {
+      if (g_strcmp0 (key, names[i]) == 0) {
+        slot = i;
+        break;
+      }
+    }
+    if (slot == n_members || values[slot] != NULL)
+      goto fail;
+    values[slot] = g_steal_pointer (&value);
+    p = mfa_enroll_skip_spaces (p);
+    if (parsed + 1 < n_members) {
+      if (*p++ != ',')
+        goto fail;
+    } else if (*p++ != '}') {
+      goto fail;
+    }
+  }
+  if (*mfa_enroll_skip_spaces (p) == '\0')
+    return TRUE;
+
+fail:
+  for (gsize i = 0; i < n_members; i++) {
+    wyl_sensitive_string_free (values[i]);
+    values[i] = NULL;
+  }
+  return FALSE;
+}
+
+static void
+mfa_enroll_start_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  if (!mfa_enroll_authorize (server, msg, query, ctx, &auth))
+    return;
+  g_autofree gchar *body = NULL;
+  if (!mfa_enroll_request_body_dup (msg, 4096, &body)) {
+    set_json_error (msg, 400, "invalid_mfa_enroll_request");
+    return;
+  }
+  const gchar *member_names[] = { "subject" };
+  gchar *member_values[1] = { NULL };
+  if (!mfa_enroll_parse_json_object (body, member_names, member_values, 1)) {
+    set_json_error (msg, 400, "invalid_mfa_enroll_request");
+    return;
+  }
+  g_autofree gchar *subject = member_values[0];
+  if (subject[0] == '\0') {
+    set_json_error (msg, 400, "invalid_mfa_enroll_request");
+    return;
+  }
+  if (!mfa_enroll_subject_exists (ctx, subject)) {
+    set_json_error (msg, 404, "mfa_enroll_subject_not_found");
+    return;
+  }
+
+  WylMfaEnrollChallenge *challenge = g_new0 (WylMfaEnrollChallenge, 1);
+  if (new_token_id_string (&challenge->challenge) != WYRELOG_E_OK ||
+      wyl_totp_generate_seed (challenge->secret, sizeof challenge->secret,
+          NULL) != WYRELOG_E_OK) {
+    wyl_mfa_enroll_challenge_free (challenge);
+    set_json_error (msg, 500, "mfa_enroll_failed");
+    return;
+  }
+  challenge->session_id = g_strdup (auth.session_id);
+  challenge->actor = g_strdup (auth.actor);
+  challenge->subject = g_strdup (subject);
+  challenge->expires_at_monotonic_us = g_get_monotonic_time () +
+      WYL_DAEMON_MFA_ENROLL_TTL_SECONDS * G_USEC_PER_SEC;
+  g_autoptr (WylSensitiveChar) base32 = NULL;
+  if (wyl_totp_base32_encode (challenge->secret, sizeof challenge->secret,
+          &base32, NULL) != WYRELOG_E_OK) {
+    wyl_mfa_enroll_challenge_free (challenge);
+    set_json_error (msg, 500, "mfa_enroll_failed");
+    return;
+  }
+  g_autoptr (WylSensitiveChar) uri = mfa_enroll_build_otpauth_uri (subject,
+      base32);
+  g_autofree gchar *challenge_id = g_strdup (challenge->challenge);
+  g_mutex_lock (&ctx->lock);
+  WylMfaChallengePrune prune = {
+    .actor = auth.actor,
+    .session_id = auth.session_id,
+    .now_monotonic_us = g_get_monotonic_time (),
+  };
+  g_hash_table_foreach_remove (ctx->mfa_enroll_challenges,
+      wyl_mfa_enroll_challenge_should_remove, &prune);
+  g_hash_table_replace (ctx->mfa_enroll_challenges,
+      g_strdup (challenge->challenge), challenge);
+  g_mutex_unlock (&ctx->lock);
+
+  g_autoptr (GString) response = g_string_new ("{\"challenge\":");
+  append_json_string (response, challenge_id);
+  g_string_append (response, ",\"otpauth_uri\":");
+  append_json_string (response, uri);
+  g_string_append (response, ",\"secret_base32\":");
+  append_json_string (response, base32);
+  g_string_append_c (response, '}');
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      response->str, response->len);
+  sodium_memzero (response->str, response->len);
+}
+
+static void
+mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  if (!mfa_enroll_authorize (server, msg, query, ctx, &auth))
+    return;
+  g_autoptr (WylSensitiveChar) body = NULL;
+  if (!mfa_enroll_request_body_dup (msg, 4096, &body)) {
+    set_json_error (msg, 400, "invalid_mfa_enroll_request");
+    return;
+  }
+  const gchar *member_names[] = { "challenge", "code" };
+  gchar *member_values[2] = { NULL, NULL };
+  if (!mfa_enroll_parse_json_object (body, member_names, member_values, 2)) {
+    set_json_error (msg, 400, "invalid_mfa_enroll_request");
+    return;
+  }
+  g_autofree gchar *challenge_id = member_values[0];
+  g_autoptr (WylSensitiveChar) code_text = member_values[1];
+  if (strlen (challenge_id) > 128 || !mfa_code_is_well_formed (code_text)) {
+    set_json_error (msg, 400, "invalid_mfa_enroll_request");
+    return;
+  }
+
+  gpointer stolen_key = NULL;
+  WylMfaEnrollChallenge *challenge = NULL;
+  gboolean challenge_authorized = FALSE;
+  g_mutex_lock (&ctx->lock);
+  challenge = g_hash_table_lookup (ctx->mfa_enroll_challenges, challenge_id);
+  if (challenge != NULL && challenge->expires_at_monotonic_us <=
+      g_get_monotonic_time ()) {
+    g_hash_table_remove (ctx->mfa_enroll_challenges, challenge_id);
+    challenge = NULL;
+  } else if (challenge != NULL &&
+      g_strcmp0 (challenge->session_id, auth.session_id) == 0 &&
+      g_strcmp0 (challenge->actor, auth.actor) == 0) {
+    challenge_authorized = TRUE;
+    g_hash_table_steal_extended (ctx->mfa_enroll_challenges, challenge_id,
+        &stolen_key, (gpointer *) & challenge);
+  }
+  g_mutex_unlock (&ctx->lock);
+  g_free (stolen_key);
+  if (!challenge_authorized) {
+    set_json_error (msg, 401, "invalid_mfa_enroll_challenge");
+    return;
+  }
+  guint code = (guint) g_ascii_strtoull (code_text, NULL, 10);
+  guint64 matched_step = 0;
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  if (!wyl_totp_code_matches (challenge->secret, sizeof challenge->secret,
+          now, code, &matched_step, NULL)) {
+    wyl_mfa_enroll_challenge_free (challenge);
+    set_json_error (msg, 401, "invalid_mfa_enroll_code");
+    return;
+  }
+
+  g_mutex_lock (&ctx->policy_mutation_lock);
+  if (!mfa_enroll_subject_exists (ctx, challenge->subject)) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    wyl_mfa_enroll_challenge_free (challenge);
+    set_json_error (msg, 404, "mfa_enroll_subject_not_found");
+    return;
+  }
+  WylTotpEnrollment existing = { 0 };
+  gboolean already_enrolled = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_totp_enrollment_lookup
+      (wyl_handle_get_policy_store (ctx->handle), challenge->subject,
+      &existing, &already_enrolled);
+  wyl_totp_enrollment_clear (&existing);
+  if (rc != WYRELOG_E_OK || already_enrolled) {
+    g_mutex_unlock (&ctx->policy_mutation_lock);
+    wyl_mfa_enroll_challenge_free (challenge);
+    set_json_error (msg, already_enrolled ? 409 : 500,
+        already_enrolled ? "mfa_already_enrolled" : "mfa_enroll_failed");
+    return;
+  }
+  WylTotpEnrollment enrollment = { 0 };
+  enrollment.subject_id = g_strdup (challenge->subject);
+  memcpy (enrollment.secret, challenge->secret, sizeof enrollment.secret);
+  enrollment.last_verified_step = (gint64) matched_step;
+  enrollment.enrolled_at = now;
+  rc = wyl_mfa_enrollment_commit
+      (wyl_handle_get_policy_store (ctx->handle), &enrollment, auth.actor,
+      ensure_request_id_header (msg), "wyrelogd", FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_reload_engine_pair (ctx->handle);
+#ifdef WYL_HAS_AUDIT
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_load_policy_store_audit_events (ctx->handle);
+#endif
+  g_mutex_unlock (&ctx->policy_mutation_lock);
+  wyl_totp_enrollment_clear (&enrollment);
+  wyl_mfa_enroll_challenge_free (challenge);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, rc == WYRELOG_E_POLICY ? 404 : 500,
+        rc == WYRELOG_E_POLICY ? "mfa_enroll_subject_not_found" :
+        "mfa_enroll_failed");
+    return;
+  }
+  set_json_ok (msg);
+}
+
 static void
 login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     GHashTable *query, gpointer user_data)
@@ -4314,6 +4733,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/auth/login", login_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/mfa/verify", mfa_verify_handler,
       ctx, NULL);
+  soup_server_add_handler (server, "/auth/mfa/enroll/start",
+      mfa_enroll_start_handler, ctx, NULL);
+  soup_server_add_handler (server, "/auth/mfa/enroll/confirm",
+      mfa_enroll_confirm_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/refresh", refresh_handler, ctx, NULL);
   soup_server_add_handler (server, "/auth/logout", logout_handler, ctx, NULL);
   soup_server_add_handler (server, "/tenants", tenant_list_handler, ctx, NULL);
