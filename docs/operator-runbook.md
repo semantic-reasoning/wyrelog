@@ -271,7 +271,27 @@ wyrelogd --production \
 At this point `alice` can log in through `/auth/login?…&skip_mfa=true`
 because the bootstrap flag installed the `wr.login.skip_mfa` direct
 permission. Enroll `alice`'s TOTP factor from an operator shell that has
-read access to the policy store and the KeyProvider:
+read access to the bootstrap access token:
+
+```sh
+wyctl mfa enroll \
+  --subject alice \
+  --access-token-file /run/wyrelog/bootstrap.token
+```
+
+This is the recommended online form. It asks the running daemon to create a
+short-lived, actor- and session-bound enrollment challenge, prints the
+`otpauth://` URI, prompts for the current code, and confirms the enrollment
+without opening the daemon-owned encrypted policy store a second time. The
+access token must authorize `wr.policy.write`. Do not combine
+`--access-token-file` with `--store` or `--keyprovider`.
+The daemon keeps at most one pending challenge for an authenticated session,
+uses a monotonic five-minute expiry, and consumes the challenge on every
+confirmation attempt. A mistyped code therefore requires restarting
+`wyctl mfa enroll`; this one-shot behavior prevents online guessing and replay.
+
+For maintenance or recovery while the daemon is stopped, the offline form is
+still available:
 
 ```sh
 wyctl mfa enroll \
@@ -296,34 +316,37 @@ never held `wr.login.skip_mfa` in the first place.
 
 ### Enrolling Additional Admins
 
-Use the same command for every subsequent admin. The bootstrap
-auto-revoke branch is skipped silently for subjects that do not hold
-`wr.login.skip_mfa`:
+Use authenticated online enrollment for every subsequent admin. This keeps
+the running daemon as the sole owner of the encrypted policy store. The
+bootstrap auto-revoke branch is skipped silently for subjects that do not
+hold `wr.login.skip_mfa`:
 
 ```sh
-wyctl mfa enroll \
+wyctl --daemon-url http://127.0.0.1:8765 mfa enroll \
   --subject bob \
-  --store /var/lib/wyrelog/system/policy.sqlite \
-  --keyprovider file:/etc/wyrelog/system/policy.key
+  --access-token-file /run/wyrelog/admin.token
 ```
 
-The subject must already exist as a principal in the policy store
-(typically through `wyctl policy role-grant`). Enrollment does not
-create principals — it only attaches a TOTP factor to one.
+The subject must already have an authoritative policy identity, typically a
+role membership created through `wyctl policy role-grant`. Enrollment does
+not grant roles or permissions; it only attaches a TOTP factor.
 
-### Setting defaults via GSettings
+### Offline Maintenance Defaults via GSettings
 
-Operators who enroll multiple subjects against the same policy store and
-KeyProvider can stop repeating `--store` and `--keyprovider` on every
-invocation by setting the two GSettings keys once:
+Direct `--store` / `--keyprovider` enrollment, including their GSettings
+fallbacks, is only for maintenance or recovery while `wyrelogd` is stopped.
+Never use it against the encrypted store owned by a running daemon. During a
+daemon-stopped maintenance window, operators can stop repeating the paths by
+setting the two GSettings keys once:
 
 ```sh
 gsettings set org.wyrelog.wyctl default-policy-store /var/lib/wyrelog/policy.sqlite
 gsettings set org.wyrelog.wyctl default-keyprovider systemd-creds:wyrelog-policy
 ```
 
-After this, `sudo wyctl mfa enroll --subject alice` (no `--store`, no
-`--keyprovider`) resolves both paths from GSettings. `--subject` is
+After this, and only while the daemon is stopped,
+`sudo wyctl mfa enroll --subject alice` (no `--store`, no `--keyprovider`)
+resolves both paths from GSettings. `--subject` is
 **not** a GSettings-backed key — it is always passed explicitly per
 enrollment, because every enrollment targets exactly one principal.
 
@@ -1241,8 +1264,8 @@ honest about which surface acted.
 | `default-guard-loc-class` | `s` | `""` | Location class used when `--guard-loc-class` is omitted. |
 | `default-guard-risk` | `i` | `-1` | Risk score (0..100) used when `--guard-risk` is omitted. `-1` is the "unset" sentinel because `0` is a real risk score. |
 | `default-guard-timestamp-mode` | `s` | `"none"` | Strategy for filling `--guard-timestamp` when omitted. `"none"` preserves the historical "must be supplied" behaviour; `"now"` is reserved for a future commit that fills the current wall-clock time. |
-| `default-policy-store` | `s` | `""` | Backs `--store` for `wyctl mfa enroll|reset`. Policy-store path (SQLite file). Empty = "no default; CLI must supply." |
-| `default-keyprovider` | `s` | `""` | Backs `--keyprovider` for `wyctl mfa enroll|reset`. KeyProvider spec (e.g. `file:/etc/wyrelog/policy.key`). Empty = "no default; CLI must supply." |
+| `default-policy-store` | `s` | `""` | Backs offline `--store` for daemon-stopped `wyctl mfa enroll|reset` maintenance or recovery. Empty = "no default; CLI must supply." |
+| `default-keyprovider` | `s` | `""` | Backs offline `--keyprovider` for daemon-stopped `wyctl mfa enroll|reset` maintenance or recovery. Empty = "no default; CLI must supply." |
 
 Example: configure the operator workstation once and let every wyctl
 invocation pick up the defaults.
@@ -1269,8 +1292,8 @@ of:
 3. **Unset** — the existing per-flag "missing" diagnostic fires
    (`wyctl: missing daemon URL`, `wyctl: missing --tenant`, etc.).
 
-The `wyctl mfa enroll` and `wyctl mfa reset` subcommands participate in
-the same resolver pipeline: `--store` falls back to `default-policy-store`
+The offline, daemon-stopped forms of `wyctl mfa enroll` and
+`wyctl mfa reset` participate in the same resolver pipeline: `--store` falls back to `default-policy-store`
 and `--keyprovider` falls back to `default-keyprovider` under the same
 precedence rule (CLI > GSettings > missing-flag diagnostic). The
 `WYCTL_DISABLE_GSETTINGS=1` kill switch documented below disables the
