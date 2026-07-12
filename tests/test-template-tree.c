@@ -116,6 +116,9 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
     "has_permission(U, P, S) :- effective_member(U, R, S), effective_permission(R, P).",
     "has_permission(U, P, S) :- direct_permission(U, P, S).",
     "can_read_audit(U) :- has_permission(U, \"wr.audit.read\", _).",
+    "can_manage_role(U, R) :-\n"
+        "    has_permission(U, \"wr.svc.grant_role\", _),\n"
+        "    role(R),\n" "    !role_security_officer(R).",
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (snippets); i++) {
@@ -153,10 +156,10 @@ check_bootstrap_seed_consistency (void)
   g_autoptr (GHashTable) permissions = g_hash_table_new_full (g_str_hash,
       g_str_equal, g_free, NULL);
 
-  rc = collect_template_facts (contents, "role(", roles);
+  rc = collect_template_facts (contents, "role(\"", roles);
   if (rc != 0)
     return 31;
-  rc = collect_template_facts (contents, "permission(", permissions);
+  rc = collect_template_facts (contents, "permission(\"", permissions);
   if (rc != 0)
     return 32;
 
