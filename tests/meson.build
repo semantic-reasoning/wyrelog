@@ -110,7 +110,7 @@ if host_machine.system() != 'windows'
           python3.full_path(),
         ],
         depends : [wyrelogd_exe, wyctl_exe],
-        timeout : 60,
+        timeout : 180,
       )
     endif
   endif

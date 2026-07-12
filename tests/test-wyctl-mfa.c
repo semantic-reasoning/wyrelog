@@ -1039,6 +1039,27 @@ test_mfa_enroll_empty_gsettings_string_is_unset (void)
   g_assert_nonnull (g_strstr_len (err->str, -1, "wyctl: missing --store"));
 }
 
+static void
+test_mfa_online_enroll_validates_gsettings_daemon_url (void)
+{
+  g_autofree gchar *literal = gvariant_literal_for_string_mfa ("not-a-url");
+  const gchar *keys[] = { "daemon-url", NULL };
+  const gchar *values[] = { literal, NULL };
+  g_autofree gchar *xdg = make_keyfile_xdg_dir_mfa (keys, values);
+  g_auto (GStrv) envp = build_mfa_gsettings_envp (xdg, FALSE);
+  const gchar *argv[] = {
+    WYL_TEST_WYCTL_PATH, "mfa", "enroll", "--subject", "alice.online",
+    "--access-token-file", "/unused/token", NULL,
+  };
+  g_autoptr (GString) out = g_string_new (NULL);
+  g_autoptr (GString) err = g_string_new (NULL);
+  gint rc = run_wyctl_mfa_argv_env (argv, envp, WYCTL_TEST_FEED_EOF, NULL,
+      out, err);
+  remove_dir_recursive_mfa (xdg);
+  g_assert_cmpint (rc, ==, 2);
+  g_assert_nonnull (g_strstr_len (err->str, -1, "invalid daemon URL"));
+}
+
 /* (7) The same matrix for `mfa reset': populated GSettings, no CLI,
  *     reset path must consume the GSettings value.  Seeds an existing
  *     enrollment row first so the delete-then-enroll path actually
@@ -1188,6 +1209,8 @@ main (int argc, char **argv)
       test_mfa_enroll_gsettings_backing_store_has_no_secrets);
   g_test_add_func ("/wyctl/mfa/enroll-empty-gsettings-string-is-unset",
       test_mfa_enroll_empty_gsettings_string_is_unset);
+  g_test_add_func ("/wyctl/mfa/online-enroll-validates-gsettings-daemon-url",
+      test_mfa_online_enroll_validates_gsettings_daemon_url);
   g_test_add_func ("/wyctl/mfa/reset-gsettings-supplies-store",
       test_mfa_reset_gsettings_supplies_store);
   g_test_add_func ("/wyctl/mfa/enroll-gsettings-supplies-keyprovider",
