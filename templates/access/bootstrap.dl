@@ -259,6 +259,7 @@ can_read_audit(U) :- has_permission(U, "wr.audit.read", _).
 
 can_manage_role(U, R) :-
     has_permission(U, "wr.svc.grant_role", _),
+    role(R),
     !role_security_officer(R).
 
 // ---------------------------------------------------------------------------
