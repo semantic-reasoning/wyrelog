@@ -45,6 +45,7 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
 #include "wyrelog/wyl-log-private.h"
+#include "store-lease-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -72,13 +73,14 @@ G_STATIC_ASSERT (WYL_POLICY_STORE_MAGIC_LEN == 5);
 struct wyl_policy_store_t
 {
   sqlite3 *db;
+  wyl_policy_store_lease_t *lease;
   gchar *canonical_path;
   gchar *work_path;
-  /* Directory fd anchoring all openat()/renameat() calls against
-   * canonical_path. Captured once at open time so subsequent file
-   * operations cannot be redirected by a same-uid attacker swapping
-   * symlinks at the final path component. -1 when unused (in-memory
-   * stores or non-POSIX builds). */
+  /* Directory fd anchoring Wyrelog-owned openat()/renameat() calls against
+   * canonical_path. SQLite opens the main database and later auxiliary files
+   * by pathname throughout the store lifetime, so the resolved namespace must
+   * satisfy docs/developer-lifecycle.md until close completes. -1 when unused
+   * (in-memory stores or non-POSIX builds). */
   int canonical_dirfd;
   gchar *canonical_basename;
   gchar *work_basename;
@@ -687,8 +689,9 @@ materialize_store_key (wyl_policy_store_t *store,
  * FILE_FLAG_OPEN_REPARSE_POINT so a symlink or junction at that
  * position is opened as itself rather than transparently followed.
  * The handle is closed immediately after the attribute check; the
- * read/write helpers below re-validate via their own pinned handle
- * to close the gap between probe and I/O.
+ * read/write helpers below perform their own handle-based reparse
+ * validation for each Wyrelog-owned operation. This does not pin
+ * SQLite's later pathname-derived VFS opens.
  *
  * Return contract mirrors the POSIX reject_if_symlink + open pair:
  *   WYRELOG_E_OK         -- regular file present, safe to proceed
@@ -946,73 +949,21 @@ write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 }
 #endif /* G_OS_WIN32 */
 
-/* TOCTOU mitigation helpers (CWE-367 / CodeQL cpp/toctou-race-condition).
+/* Pinned canonical-file helpers (CWE-367 / CodeQL
+ * cpp/toctou-race-condition).
  *
- * The encrypted policy store previously resolved store->canonical_path
- * three times (g_file_test for existence, g_file_get_contents for read,
- * g_file_set_contents for write). Each resolution followed symlinks and
- * created a window for a same-uid attacker to swap the inode behind
- * the daemon. The helpers below collapse those resolutions onto a
- * single directory fd opened once at store-open time. All subsequent
- * I/O against canonical_path is performed via openat()/renameat()
- * relative to that fd with O_NOFOLLOW, so a swap at the final path
- * component is refused (ELOOP -> WYRELOG_E_POLICY) rather than
- * silently followed.
- *
- * Parent-directory symlinks remain supported -- the lstat check is on
- * the final path component only, and the dirfd was already obtained
- * through the parent path (e.g. /var/lib/wyrelog/) before any
- * sensitive operations begin. Operators may continue to point
- * /var/lib/wyrelog at a symlinked storage volume. */
+ * After the lease resolves a trusted parent, Wyrelog-owned canonical reads,
+ * encrypted persistence, and clear-work cleanup use its retained directory
+ * fd with O_NOFOLLOW. SQLite itself still opens the encrypted clear-work
+ * database, or the plaintext provider-backed canonical database, by the
+ * lease-resolved pathname. The namespace therefore MUST satisfy the
+ * operator-owned, non-replaceable deployment contract in
+ * docs/developer-lifecycle.md for the entire store lifetime. Pre/post parent
+ * checks bracket only the initial main-database sqlite3_open_v2(). Later VFS
+ * opens for journal, WAL, SHM, temporary, and other files are pathname-derived
+ * and unpinned; namespace changes after the post-open check are not detected. */
 
 #ifndef G_OS_WIN32
-static wyrelog_error_t
-reject_if_symlink (const gchar *path)
-{
-  GStatBuf statbuf;
-
-  if (g_lstat (path, &statbuf) == -1) {
-    if (errno == ENOENT)
-      return WYRELOG_E_OK;
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store lstat failed for canonical path");
-    return WYRELOG_E_IO;
-  }
-
-  if (S_ISLNK (statbuf.st_mode)) {
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store canonical path is a symlink; refusing to open");
-    return WYRELOG_E_POLICY;
-  }
-
-  return WYRELOG_E_OK;
-}
-
-static wyrelog_error_t
-open_canonical_dirfd (const gchar *canonical_path, int *out_dirfd,
-    gchar **out_basename)
-{
-  g_autofree gchar *dir = g_path_get_dirname (canonical_path);
-  g_autofree gchar *basename = g_path_get_basename (canonical_path);
-
-  if (dir == NULL || basename == NULL || basename[0] == '\0') {
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store could not split canonical path into dir+basename");
-    return WYRELOG_E_IO;
-  }
-
-  int dirfd = open (dir, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-  if (dirfd < 0) {
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store could not open canonical directory fd");
-    return WYRELOG_E_IO;
-  }
-
-  *out_dirfd = dirfd;
-  *out_basename = g_steal_pointer (&basename);
-  return WYRELOG_E_OK;
-}
-
 static wyrelog_error_t
 read_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
     gsize *out_len)
@@ -1709,6 +1660,26 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   self->canonical_path = g_strdup (effective_path);
   self->canonical_dirfd = -1;
 
+  gboolean provider_backed = opts->require_encrypted
+      || (opts->keyprovider_vtable != NULL && opts->keyprovider_state != NULL);
+  if (!path_is_memory_db (effective_path) && provider_backed) {
+    wyrelog_error_t lease_rc = wyl_policy_store_lease_acquire (effective_path,
+        &self->lease);
+    if (lease_rc != WYRELOG_E_OK) {
+      cleanup_keyprovider_state (opts);
+      wyl_policy_store_close (self);
+      return lease_rc;
+    }
+    g_free (self->canonical_path);
+    self->canonical_path =
+        g_strdup (wyl_policy_store_lease_resolved_path (self->lease));
+#ifndef G_OS_WIN32
+    self->canonical_dirfd = wyl_policy_store_lease_parent_dirfd (self->lease);
+    self->canonical_basename =
+        g_strdup (wyl_policy_store_lease_basename (self->lease));
+#endif
+  }
+
   const gchar *open_path = effective_path;
   if (self->encrypted) {
     if (path_is_memory_db (effective_path)) {
@@ -1723,24 +1694,9 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     wyrelog_error_t rc;
 
 #ifndef G_OS_WIN32
-    /* TOCTOU mitigation: refuse symlinks at the canonical path so the
-     * subsequent openat() cannot be redirected by a same-uid attacker.
-     * Parent-directory symlinks are still permitted (operators may
-     * arrange /var/lib/wyrelog/ as a symlink farm). */
-    rc = reject_if_symlink (self->canonical_path);
-    if (rc != WYRELOG_E_OK) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return rc;
-    }
-
-    rc = open_canonical_dirfd (self->canonical_path,
-        &self->canonical_dirfd, &self->canonical_basename);
-    if (rc != WYRELOG_E_OK) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return rc;
-    }
+    /* The lease owns the retained parent dirfd used by Wyrelog's encrypted
+     * canonical reads, persistence, and work-file cleanup. SQLite opens the
+     * work database itself by the resolved pathname. */
     self->work_basename = g_strdup_printf ("%s%s",
         self->canonical_basename, WYL_POLICY_STORE_CLEAR_SUFFIX);
     /* Best-effort sweep of any stale work file from a prior aborted
@@ -1821,6 +1777,15 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
       wyl_policy_store_close (self);
       return rc;
     }
+    if (self->lease != NULL)
+      open_path = self->canonical_path;
+  }
+
+  if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)
+      != WYRELOG_E_OK) {
+    cleanup_keyprovider_state (opts);
+    wyl_policy_store_close (self);
+    return WYRELOG_E_POLICY;
   }
 
   if (sqlite3_open_v2 (open_path, &self->db,
@@ -1832,6 +1797,15 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     cleanup_keyprovider_state (opts);
     wyl_policy_store_close (self);
     return WYRELOG_E_IO;
+  }
+
+  if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)
+      != WYRELOG_E_OK) {
+    sqlite3_close (self->db);
+    self->db = NULL;
+    cleanup_keyprovider_state (opts);
+    wyl_policy_store_close (self);
+    return WYRELOG_E_POLICY;
   }
 
   const gchar *open_pragmas = self->encrypted ?
@@ -1876,7 +1850,7 @@ wyl_policy_store_close (wyl_policy_store_t *store)
     }
   }
 #ifndef G_OS_WIN32
-  if (store->canonical_dirfd >= 0) {
+  if (store->lease == NULL && store->canonical_dirfd >= 0) {
     close (store->canonical_dirfd);
     store->canonical_dirfd = -1;
   }
@@ -1886,6 +1860,8 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
   policy_store_zero_key_material (store);
+  wyl_policy_store_lease_release (store->lease);
+  store->lease = NULL;
   g_free (store);
 }
 

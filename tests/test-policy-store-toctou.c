@@ -13,15 +13,20 @@
 /* Regression tests for CodeQL alert #7 (cpp/toctou-race-condition,
  * CWE-367) on wyrelog/policy/store.c.
  *
- * The encrypted policy store now performs all canonical-path I/O
+ * The encrypted policy store now performs its own canonical envelope I/O
  * through pinned-handle primitives:
  *   POSIX  -- directory fd captured at open time, O_NOFOLLOW on every
- *             openat(), explicit lstat reject on the final component.
+ *             openat() of the final component.
  *   Win32  -- CreateFileW with FILE_FLAG_OPEN_REPARSE_POINT plus an
  *             attribute check via GetFileInformationByHandle; reparse
  *             points (symlinks, junctions, mount points) are refused
  *             before keyprovider materialization.
- * These tests exercise the four behavioral contracts on both legs.
+ * SQLite still opens its main database and later auxiliary files by
+ * lease-resolved pathnames throughout the store lifetime; only the initial
+ * main-database open has pre/post parent checks. The full-lifetime trusted
+ * namespace requirement is documented separately. These tests exercise the
+ * four pinned Wyrelog-I/O behavioral contracts on both legs; they do not claim
+ * to pin SQLite VFS opens or the canonical SQLite inode.
  * The two symlink-creation cases require Developer Mode (Win10 1703+)
  * on Windows; runs that lack SeCreateSymbolicLinkPrivilege skip those
  * cases with a printf rather than failing. */
@@ -61,10 +66,8 @@ static int
 create_file_symlink (const gchar *target, const gchar *linkpath)
 {
 #ifdef G_OS_WIN32
-  wchar_t *wtarget =
-      (wchar_t *) g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
-  wchar_t *wlink =
-      (wchar_t *) g_utf8_to_utf16 (linkpath, -1, NULL, NULL, NULL);
+  wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
+  wchar_t *wlink = (wchar_t *) g_utf8_to_utf16 (linkpath, -1, NULL, NULL, NULL);
   if (wtarget == NULL || wlink == NULL) {
     g_free (wtarget);
     g_free (wlink);
@@ -86,10 +89,8 @@ static int
 create_dir_symlink (const gchar *target, const gchar *linkpath)
 {
 #ifdef G_OS_WIN32
-  wchar_t *wtarget =
-      (wchar_t *) g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
-  wchar_t *wlink =
-      (wchar_t *) g_utf8_to_utf16 (linkpath, -1, NULL, NULL, NULL);
+  wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
+  wchar_t *wlink = (wchar_t *) g_utf8_to_utf16 (linkpath, -1, NULL, NULL, NULL);
   if (wtarget == NULL || wlink == NULL) {
     g_free (wtarget);
     g_free (wlink);
@@ -97,7 +98,7 @@ create_dir_symlink (const gchar *target, const gchar *linkpath)
   }
   BOOL ok = CreateSymbolicLinkW (wlink, wtarget,
       SYMBOLIC_LINK_FLAG_DIRECTORY
-          | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
+      | SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE);
   if (!ok)
     ok = CreateSymbolicLinkW (wlink, wtarget, SYMBOLIC_LINK_FLAG_DIRECTORY);
   g_free (wtarget);

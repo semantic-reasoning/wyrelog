@@ -48,6 +48,12 @@ typedef enum wyrelog_error_t
    * from genuine misuse.
    */
   WYRELOG_E_BREAK_GLASS_DISABLED = -10,
+  /*
+   * A non-blocking exclusive resource lease is already held by another
+   * store handle or process. Callers may retry after the current owner
+   * closes; other filesystem and locking failures remain WYRELOG_E_IO.
+   */
+  WYRELOG_E_BUSY = -11,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);

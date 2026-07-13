@@ -54,6 +54,13 @@ typedef struct wyl_sealed_blob_t
   gsize len;
 } wyl_sealed_blob_t;
 
+/* KeyProvider operations are split into operational callbacks
+ * (probe/seal/unseal/derive) and the lifecycle callback (wipe). Policy-store
+ * ownership and exact callback counts are specified by
+ * wyl_policy_store_open_options_t in policy/store-private.h and by
+ * docs/developer-lifecycle.md. In particular, a policy-store WYRELOG_E_BUSY
+ * return invokes zero operational callbacks but still invokes lifecycle
+ * cleanup for transferred state exactly as that contract requires. */
 typedef struct wyl_keyprovider_vtable_t
 {
   /* Verify that the backing key material is reachable and the
@@ -79,8 +86,8 @@ typedef struct wyl_keyprovider_vtable_t
   wyrelog_error_t (*derive) (gpointer self,
       const gchar * label, guint8 * out_key, gsize out_len);
 
-  /* Zero out any in-memory copies the implementation holds. Called
-   * during shutdown and on error paths. */
+  /* Lifecycle callback: zero out any in-memory copies the implementation
+   * holds. Policy-store calls obey the ownership contract referenced above. */
   void (*wipe) (gpointer self);
 } wyl_keyprovider_vtable_t;
 

@@ -28,6 +28,8 @@ wyrelog_error_string (wyrelog_error_t err)
     case WYRELOG_E_BREAK_GLASS_DISABLED:
       return "break-glass override is disabled in this build or not "
           "armed at runtime";
+    case WYRELOG_E_BUSY:
+      return "resource is busy";
   }
   return "unknown error";
 }
