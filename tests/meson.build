@@ -1089,6 +1089,28 @@ test('check-no-derived-fsm-replay', check_no_derived_fsm_replay,
   args : [meson.project_source_root()],
 )
 
+check_no_daemon_policy_mutation_lock = find_program(
+  '../tools/check-no-daemon-policy-mutation-lock.sh',
+)
+daemon_guard_cc = meson.get_compiler('c').cmd_array()
+
+test('check-no-daemon-policy-mutation-lock',
+  check_no_daemon_policy_mutation_lock,
+  args : [meson.project_source_root()] + daemon_guard_cc,
+)
+
+check_no_daemon_policy_mutation_lock_self_test = find_program(
+  'check-no-daemon-policy-mutation-lock-self-test.sh',
+)
+
+test('check-no-daemon-policy-mutation-lock-self-test',
+  check_no_daemon_policy_mutation_lock_self_test,
+  args : [
+    check_no_daemon_policy_mutation_lock.full_path(),
+    meson.project_source_root(),
+  ] + daemon_guard_cc,
+)
+
 check_supply_chain_pins = find_program(
   '../tools/check-supply-chain-pins.sh',
 )

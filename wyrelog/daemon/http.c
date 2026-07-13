@@ -159,8 +159,35 @@ typedef struct
    */
   GHashTable *revoked_session_tokens;
   GMutex lock;
-  GMutex policy_mutation_lock;
 } WylDaemonHttpContext;
+
+typedef struct
+{
+  WylServiceAuthWriteLease *lease;
+} WylDaemonPolicyWrite;
+
+static void
+wyl_daemon_policy_write_clear (WylDaemonPolicyWrite *write)
+{
+  if (write->lease == NULL)
+    return;
+  g_assert_cmpint (wyl_service_auth_write_lease_release (write->lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (write->lease);
+  write->lease = NULL;
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylDaemonPolicyWrite,
+    wyl_daemon_policy_write_clear);
+
+static wyrelog_error_t
+wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
+    WylDaemonPolicyWrite *write)
+{
+  return wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
+      &write->lease);
+}
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
 static gboolean mfa_code_is_well_formed (const gchar * code);
@@ -301,7 +328,6 @@ wyl_daemon_http_context_free (gpointer data)
   g_hash_table_unref (ctx->mfa_enroll_challenges);
   g_clear_pointer (&ctx->revoked_session_tokens, g_hash_table_unref);
   g_mutex_clear (&ctx->lock);
-  g_mutex_clear (&ctx->policy_mutation_lock);
   g_clear_pointer (&ctx->service_auth_registry,
       wyl_service_auth_registry_unref);
   g_free (ctx);
@@ -438,7 +464,6 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   ctx->revoked_session_tokens = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, NULL);
   g_mutex_init (&ctx->lock);
-  g_mutex_init (&ctx->policy_mutation_lock);
   rc = wyl_daemon_http_context_rotate_access_token_key (ctx);
   if (rc != WYRELOG_E_OK) {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
@@ -1914,8 +1939,20 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   if (!authorize_tenant_management (server, msg, query, ctx, &actor))
     return;
 
+  if (g_strcmp0 (action, "create") != 0
+      && g_strcmp0 (action, "seal") != 0 && g_strcmp0 (action, "unseal") != 0) {
+    set_json_error (msg, 405, "tenant_delete_unsupported");
+    return;
+  }
+
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "tenant_mutation_failed");
+    return;
+  }
+
   wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
-  wyrelog_error_t rc = WYRELOG_E_OK;
   gboolean changed = FALSE;
   if (g_strcmp0 (action, "create") == 0) {
     rc = wyl_policy_store_create_tenant (store, tenant, &changed);
@@ -1925,9 +1962,6 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   } else if (g_strcmp0 (action, "unseal") == 0) {
     rc = wyl_policy_store_set_tenant_sealed (store, tenant, FALSE);
     changed = rc == WYRELOG_E_OK;
-  } else {
-    set_json_error (msg, 405, "tenant_delete_unsupported");
-    return;
   }
 
   if (rc == WYRELOG_E_INVALID) {
@@ -2186,10 +2220,11 @@ graph_create_handler (SoupServer *server, SoupServerMessage *msg,
     .owner_scope = tenant,
   };
 
-  g_mutex_lock (&ctx->policy_mutation_lock);
-  wyrelog_error_t rc = wyl_policy_store_create_fact_graph
-      (wyl_handle_get_policy_store (ctx->handle), &opts, NULL);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_create_fact_graph
+        (wyl_handle_get_policy_store (ctx->handle), &opts, NULL);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -2242,10 +2277,11 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
           "invalid_graph_auth", "graph_denied", "graph_auth_failed", NULL))
     return;
 
-  g_mutex_lock (&ctx->policy_mutation_lock);
-  wyrelog_error_t rc = wyl_policy_store_seal_fact_graph
-      (wyl_handle_get_policy_store (ctx->handle), tenant, graph);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_seal_fact_graph
+        (wyl_handle_get_policy_store (ctx->handle), tenant, graph);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -2637,8 +2673,15 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
           "invalid_schema_auth", "schema_denied", "schema_auth_failed", NULL))
     return;
 
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "schema_register_failed");
+    return;
+  }
+
   GraphLookupCtx lookup = { 0 };
-  wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+  rc = lookup_fact_graph (wyl_handle_get_policy_store
       (ctx->handle), tenant, graph, &lookup);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "schema_register_failed");
@@ -2685,10 +2728,8 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     .queries = max_rows > 0 ? &schema_query : NULL,
     .n_queries = max_rows > 0 ? 1 : 0,
   };
-  g_mutex_lock (&ctx->policy_mutation_lock);
   rc = wyl_policy_store_register_fact_relation_schema
       (wyl_handle_get_policy_store (ctx->handle), &opts);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
   schema_columns_clear (columns, n_columns);
   if (rc == WYRELOG_E_INVALID || rc == WYRELOG_E_POLICY) {
     set_json_error (msg, 400, "invalid_schema_request");
@@ -3112,6 +3153,13 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
             "fact_denied", "fact_auth_failed", &actor))
       return;
 
+    g_auto (WylDaemonPolicyWrite) write = { 0 };
+    wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+    if (rc != WYRELOG_E_OK) {
+      set_json_error (msg, 500, "fact_forget_failed");
+      return;
+    }
+
     g_autofree gchar *body = NULL;
     if (!request_body_dup (msg, 4096, &body)) {
       set_json_error (msg, 400, "invalid_fact_request");
@@ -3128,17 +3176,14 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       return;
     }
 
-    g_mutex_lock (&ctx->policy_mutation_lock);
     GraphLookupCtx lookup = { 0 };
-    wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+    rc = lookup_fact_graph (wyl_handle_get_policy_store
         (ctx->handle), tenant, graph, &lookup);
     if (rc != WYRELOG_E_OK) {
-      g_mutex_unlock (&ctx->policy_mutation_lock);
       set_json_error (msg, 500, "fact_forget_failed");
       return;
     }
     if (!lookup.found) {
-      g_mutex_unlock (&ctx->policy_mutation_lock);
       graph_lookup_clear (&lookup);
       set_json_error (msg, 404, "graph_not_found");
       return;
@@ -3151,7 +3196,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
         (wyl_handle_get_policy_store (ctx->handle), tenant, graph, namespace_id,
         relation, schema_version, &relation_visible, &loaded, &n_loaded);
     if (rc != WYRELOG_E_OK) {
-      g_mutex_unlock (&ctx->policy_mutation_lock);
       graph_lookup_clear (&lookup);
       set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
           rc == WYRELOG_E_NOT_FOUND ? "fact_schema_not_found" :
@@ -3188,7 +3232,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     }
     if (rc == WYRELOG_E_OK)
       (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
-    g_mutex_unlock (&ctx->policy_mutation_lock);
 
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
@@ -3247,23 +3290,25 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   const gchar *fail_code =
       (op == FACT_HTTP_OP_RETRACT) ? "fact_retract_failed" :
       "fact_append_failed";
-  g_mutex_lock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, fail_code);
+    return;
+  }
   GraphLookupCtx lookup = { 0 };
-  wyrelog_error_t rc = lookup_fact_graph (wyl_handle_get_policy_store
+  rc = lookup_fact_graph (wyl_handle_get_policy_store
       (ctx->handle), tenant, graph, &lookup);
   if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     set_json_error (msg, 500, fail_code);
     return;
   }
   if (!lookup.found) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     set_json_error (msg, 404, "graph_not_found");
     return;
   }
   if (lookup.info.sealed) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     set_json_error (msg, 409, "graph_sealed");
     return;
@@ -3276,7 +3321,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       (wyl_handle_get_policy_store (ctx->handle), tenant, graph, namespace_id,
       relation, schema_version, &relation_visible, &loaded, &n_loaded);
   if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     set_json_error (msg, rc == WYRELOG_E_NOT_FOUND ? 404 : 500,
         rc == WYRELOG_E_NOT_FOUND ? "fact_schema_not_found" : fail_code);
@@ -3285,7 +3329,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
 
   g_autofree gchar *body = NULL;
   if (!request_body_dup (msg, 1024 * 1024, &body)) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
     set_json_error (msg, 400, "invalid_fact_payload");
@@ -3294,7 +3337,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_fact_row_t *rows = NULL;
   gsize n_rows = 0;
   if (!parse_fact_tsv (body, loaded, n_loaded, &rows, &n_rows)) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
     set_json_error (msg, 400, "invalid_fact_payload");
@@ -3325,7 +3367,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   rc = wyl_fact_schema_validate_batch (wyl_handle_get_policy_store
       (ctx->handle), &validation_batch, NULL);
   if (rc != WYRELOG_E_OK) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
     schema_columns_clear (schema_columns, n_loaded);
@@ -3370,7 +3411,6 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   if (rc == WYRELOG_E_OK)
     rc = emit_fact_op_audit (ctx, actor, tenant, graph, namespace_id,
         relation, batch_id, store_op, inserted, request_id);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
 
   graph_lookup_clear (&lookup);
   wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
@@ -3503,14 +3543,16 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  g_mutex_lock (&ctx->policy_mutation_lock);
-
-  if (!ensure_policy_permission_exists (msg, ctx, perm)) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_policy_mutation_error (msg, rc);
     return;
   }
 
-  wyrelog_error_t rc;
+  if (!ensure_policy_permission_exists (msg, ctx, perm))
+    return;
+
   if (grant) {
     g_autoptr (wyl_grant_req_t) req = wyl_grant_req_new ();
     wyl_grant_req_set_subject_id (req, subject);
@@ -3530,12 +3572,10 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc != WYRELOG_E_OK) {
     set_policy_mutation_error (msg, rc);
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
   }
 
   set_json_ok (msg);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
 }
 
 static void
@@ -3588,12 +3628,15 @@ policy_permission_transition_handler (SoupServer *server,
     return;
   }
 
-  g_mutex_lock (&ctx->policy_mutation_lock);
-
-  if (!ensure_policy_permission_exists (msg, ctx, perm)) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_policy_transition_error (msg, rc);
     return;
   }
+
+  if (!ensure_policy_permission_exists (msg, ctx, perm))
+    return;
 
   g_autoptr (WylAuditEvent) audit_event = NULL;
   g_autofree gchar *audit_action = NULL;
@@ -3608,16 +3651,14 @@ policy_permission_transition_handler (SoupServer *server,
   wyl_audit_event_set_request_id (audit_event, ensure_request_id_header (msg));
   wyl_audit_event_set_decision (audit_event, WYL_DECISION_ALLOW);
 
-  wyrelog_error_t rc = wyl_handle_apply_permission_state_transition
+  rc = wyl_handle_apply_permission_state_transition
       (ctx->handle, subject, perm, scope, event, audit_event, NULL);
   if (rc != WYRELOG_E_OK) {
     set_policy_transition_error (msg, rc);
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
   }
 
   set_json_ok (msg);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
 }
 
 static void
@@ -3650,14 +3691,16 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  g_mutex_lock (&ctx->policy_mutation_lock);
-
-  if (!ensure_policy_role_exists (msg, ctx, role)) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    set_policy_mutation_error (msg, rc);
     return;
   }
 
-  wyrelog_error_t rc;
+  if (!ensure_policy_role_exists (msg, ctx, role))
+    return;
+
   if (grant) {
     g_autoptr (wyl_role_grant_req_t) req = wyl_role_grant_req_new ();
     wyl_role_grant_req_set_subject_id (req, subject);
@@ -3677,12 +3720,10 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (rc != WYRELOG_E_OK) {
     set_policy_mutation_error (msg, rc);
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     return;
   }
 
   set_json_ok (msg);
-  g_mutex_unlock (&ctx->policy_mutation_lock);
 }
 
 static void
@@ -4008,21 +4049,25 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  g_mutex_lock (&ctx->policy_mutation_lock);
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    wyl_mfa_enroll_challenge_free (challenge);
+    set_json_error (msg, 500, "mfa_enroll_failed");
+    return;
+  }
   if (!mfa_enroll_subject_exists (ctx, challenge->subject)) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     wyl_mfa_enroll_challenge_free (challenge);
     set_json_error (msg, 404, "mfa_enroll_subject_not_found");
     return;
   }
   WylTotpEnrollment existing = { 0 };
   gboolean already_enrolled = FALSE;
-  wyrelog_error_t rc = wyl_policy_store_totp_enrollment_lookup
+  rc = wyl_policy_store_totp_enrollment_lookup
       (wyl_handle_get_policy_store (ctx->handle), challenge->subject,
       &existing, &already_enrolled);
   wyl_totp_enrollment_clear (&existing);
   if (rc != WYRELOG_E_OK || already_enrolled) {
-    g_mutex_unlock (&ctx->policy_mutation_lock);
     wyl_mfa_enroll_challenge_free (challenge);
     set_json_error (msg, already_enrolled ? 409 : 500,
         already_enrolled ? "mfa_already_enrolled" : "mfa_enroll_failed");
@@ -4042,7 +4087,6 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_load_policy_store_audit_events (ctx->handle);
 #endif
-  g_mutex_unlock (&ctx->policy_mutation_lock);
   wyl_totp_enrollment_clear (&enrollment);
   wyl_mfa_enroll_challenge_free (challenge);
   if (rc != WYRELOG_E_OK) {
