@@ -359,11 +359,25 @@ typedef struct
   wyrelog_error_t rc;
 } CloseThread;
 
+typedef struct
+{
+  WylHandle *handle;
+  wyrelog_error_t rc;
+} HandleShutdownThread;
+
 static gpointer
 close_thread (gpointer data)
 {
   CloseThread *close = data;
   close->rc = wyl_service_auth_authority_close (close->authority);
+  return NULL;
+}
+
+static gpointer
+handle_shutdown_thread (gpointer data)
+{
+  HandleShutdownThread *shutdown = data;
+  shutdown->rc = wyl_handle_shutdown_ordered (shutdown->handle);
   return NULL;
 }
 
@@ -402,6 +416,62 @@ test_close_wakes_and_drains (void)
   g_thread_join (g_steal_pointer (&closer));
   g_assert_cmpint (writer.rc, ==, WYRELOG_E_BUSY);
   g_assert_cmpint (close.rc, ==, WYRELOG_E_OK);
+  lease_thread_clear (&writer);
+  lease_thread_clear (&reader);
+}
+
+static void
+test_handle_shutdown_wakes_queued_leases_and_drains_pins (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *holder = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
+          handle, NULL, &holder), ==, WYRELOG_E_OK);
+
+  /* An owner must not transition its own authority into CLOSING. */
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_BUSY);
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_false (snapshot.closing);
+
+  LeaseThread reader = { 0 };
+  LeaseThread writer = { 0 };
+  lease_thread_init (&reader, authority, handle);
+  lease_thread_init (&writer, authority, handle);
+  g_autoptr (GThread) reader_handle = g_thread_new ("queued-reader",
+      reader_thread, &reader);
+  g_autoptr (GThread) writer_handle = g_thread_new ("queued-writer",
+      writer_thread, &writer);
+  wait_for_snapshot (authority, reader_is_waiting_behind_writer);
+
+  /* Both waiters have already pinned the store before joining the queue. */
+  HandleShutdownThread shutdown = { handle, WYRELOG_E_INTERNAL };
+  g_autoptr (GThread) shutdown_handle = g_thread_new ("handle-shutdown",
+      handle_shutdown_thread, &shutdown);
+  wait_for_snapshot (authority, authority_is_closing);
+  g_assert_true (wyl_handle_get_policy_store (handle) == store);
+
+  g_thread_join (g_steal_pointer (&reader_handle));
+  g_thread_join (g_steal_pointer (&writer_handle));
+  g_assert_cmpint (reader.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_BUSY);
+  g_assert_true (wyl_handle_get_policy_store (handle) == store);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_release (holder), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (holder);
+  g_thread_join (g_steal_pointer (&shutdown_handle));
+  g_assert_cmpint (shutdown.rc, ==, WYRELOG_E_OK);
+  g_assert_null (wyl_handle_get_policy_store (handle));
+
+  WylServiceAuthReadLease *rejected = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &rejected), ==, WYRELOG_E_BUSY);
+  g_assert_null (rejected);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
   lease_thread_clear (&writer);
   lease_thread_clear (&reader);
 }
@@ -654,26 +724,12 @@ typedef struct
   GCond changed;
   WylHandle *handle;
   wyl_policy_store_t *store;
-  gboolean pin_reached;
-  gboolean release_pin;
   gboolean shutdown_started;
   gboolean transaction_started;
   gboolean finish_transaction;
   wyrelog_error_t begin_rc;
   wyrelog_error_t rollback_rc;
 } PinShutdownRace;
-
-static void
-pin_shutdown_checkpoint (gpointer data)
-{
-  PinShutdownRace *race = data;
-  g_mutex_lock (&race->mutex);
-  race->pin_reached = TRUE;
-  g_cond_broadcast (&race->changed);
-  while (!race->release_pin)
-    g_cond_wait (&race->changed, &race->mutex);
-  g_mutex_unlock (&race->mutex);
-}
 
 static gpointer
 pin_shutdown_begin_thread (gpointer data)
@@ -728,14 +784,13 @@ test_authority_transaction_pin_precedes_shutdown (void)
   };
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
-  wyl_handle_policy_store_set_pin_checkpoint (handle,
-      pin_shutdown_checkpoint, &race);
 
   g_autoptr (GThread) begin = g_thread_new ("pin-before-shutdown",
       pin_shutdown_begin_thread, &race);
   g_mutex_lock (&race.mutex);
-  while (!race.pin_reached)
+  while (!race.transaction_started)
     g_cond_wait (&race.changed, &race.mutex);
+  g_assert_cmpint (race.begin_rc, ==, WYRELOG_E_OK);
   g_mutex_unlock (&race.mutex);
 
   g_autoptr (GThread) shutdown = g_thread_new ("shutdown-after-pin",
@@ -743,20 +798,17 @@ test_authority_transaction_pin_precedes_shutdown (void)
   g_mutex_lock (&race.mutex);
   while (!race.shutdown_started)
     g_cond_wait (&race.changed, &race.mutex);
-  race.release_pin = TRUE;
-  g_cond_broadcast (&race.changed);
   g_mutex_unlock (&race.mutex);
 
-  g_thread_join (g_steal_pointer (&shutdown));
+  wait_for_snapshot (wyl_handle_get_service_auth_authority (handle),
+      authority_is_closing);
   g_mutex_lock (&race.mutex);
-  while (!race.transaction_started)
-    g_cond_wait (&race.changed, &race.mutex);
-  g_assert_cmpint (race.begin_rc, ==, WYRELOG_E_OK);
   g_assert_true (wyl_handle_get_policy_store (handle) == race.store);
   race.finish_transaction = TRUE;
   g_cond_broadcast (&race.changed);
   g_mutex_unlock (&race.mutex);
   g_thread_join (g_steal_pointer (&begin));
+  g_thread_join (g_steal_pointer (&shutdown));
 
   g_assert_cmpint (race.rollback_rc, ==, WYRELOG_E_OK);
   g_assert_null (wyl_handle_get_policy_store (handle));
@@ -856,6 +908,8 @@ main (int argc, char **argv)
       test_writer_cancellation_restores_progress);
   g_test_add_func ("/service-auth/authority/close-drain",
       test_close_wakes_and_drains);
+  g_test_add_func ("/service-auth/authority/handle-shutdown-drains-pins",
+      test_handle_shutdown_wakes_queued_leases_and_drains_pins);
   g_test_add_func ("/service-auth/transaction/commit-claim",
       test_authority_transaction_commit_and_claim);
   g_test_add_func ("/service-auth/transaction/rollback-cleanup",

@@ -30,6 +30,10 @@ gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
     const gchar * refresh_token);
 gboolean wyl_daemon_http_session_is_revoked (SoupServer * server,
     const gchar * session_token);
+typedef void (*WylDaemonPolicyWriteCheckpoint) (gpointer data);
+/* Runs a representative daemon policy mutation while holding its WRITE lease. */
+wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
+    WylDaemonPolicyWriteCheckpoint checkpoint, gpointer data);
 /*
  * Test seam: drive the tenant-gate cross-check between the tenant
  * declared by the request (request_tenant, may be NULL meaning "no

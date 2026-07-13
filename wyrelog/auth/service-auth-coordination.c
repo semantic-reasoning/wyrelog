@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "service-auth-coordination-private.h"
 
+#include "wyrelog/wyl-handle-private.h"
+
 typedef enum
 {
   WYL_SERVICE_AUTH_LEASE_ACTIVE,
@@ -20,6 +22,8 @@ struct _WylServiceAuthAuthority
   guint waiting_writers;
   gboolean writer_active;
   gboolean closing;
+  void (*close_checkpoint) (gpointer data);
+  gpointer close_checkpoint_data;
   guint64 next_serial;
   guint64 writer_serial;
 };
@@ -99,6 +103,7 @@ struct _WylServiceAuthReadLease
   GThread *owner;
   guint64 serial;
   WylServiceAuthLeaseState state;
+  wyl_policy_store_t *pinned_store;
 };
 
 struct _WylServiceAuthWriteLease
@@ -109,6 +114,7 @@ struct _WylServiceAuthWriteLease
   guint64 serial;
   WylServiceAuthLeaseState state;
   gboolean transaction_claimed;
+  wyl_policy_store_t *pinned_store;
 };
 
 static gboolean
@@ -211,6 +217,12 @@ wyl_service_auth_authority_acquire_read (WylServiceAuthAuthority *authority,
       || !rank_can_enter (handle, WYL_SERVICE_AUTH_RANK_COORDINATION))
     return WYRELOG_E_BUSY;
 
+  wyl_policy_store_t *pinned_store = NULL;
+  wyrelog_error_t pin_rc = wyl_handle_policy_store_pin_current (handle,
+      &pinned_store);
+  if (pin_rc != WYRELOG_E_OK)
+    return pin_rc;
+
   wyl_service_auth_authority_ref (authority);
   g_object_ref (handle);
   gulong cancel_id = connect_cancellable (cancellable, authority);
@@ -251,10 +263,12 @@ wyl_service_auth_authority_acquire_read (WylServiceAuthAuthority *authority,
     lease->owner = thread;
     lease->serial = serial;
     lease->state = WYL_SERVICE_AUTH_LEASE_ACTIVE;
+    lease->pinned_store = pinned_store;
     g_assert_cmpint (wyl_service_auth_rank_enter (handle,
             WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
     *out_lease = lease;
   } else {
+    wyl_handle_policy_store_unpin (handle, pinned_store);
     g_object_unref (handle);
     wyl_service_auth_authority_unref (authority);
   }
@@ -274,6 +288,12 @@ wyl_service_auth_authority_acquire_write (WylServiceAuthAuthority *authority,
   if (authority->handle != handle
       || !rank_can_enter (handle, WYL_SERVICE_AUTH_RANK_COORDINATION))
     return WYRELOG_E_BUSY;
+
+  wyl_policy_store_t *pinned_store = NULL;
+  wyrelog_error_t pin_rc = wyl_handle_policy_store_pin_current (handle,
+      &pinned_store);
+  if (pin_rc != WYRELOG_E_OK)
+    return pin_rc;
 
   wyl_service_auth_authority_ref (authority);
   g_object_ref (handle);
@@ -314,10 +334,12 @@ wyl_service_auth_authority_acquire_write (WylServiceAuthAuthority *authority,
     lease->owner = thread;
     lease->serial = serial;
     lease->state = WYL_SERVICE_AUTH_LEASE_ACTIVE;
+    lease->pinned_store = pinned_store;
     g_assert_cmpint (wyl_service_auth_rank_enter (handle,
             WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
     *out_lease = lease;
   } else {
+    wyl_handle_policy_store_unpin (handle, pinned_store);
     g_object_unref (handle);
     wyl_service_auth_authority_unref (authority);
   }
@@ -384,6 +406,24 @@ wyl_service_auth_write_lease_validate (WylServiceAuthWriteLease *lease,
 }
 
 wyrelog_error_t
+wyl_service_auth_write_lease_get_policy_store (WylServiceAuthWriteLease *lease,
+    WylHandle *handle, wyl_policy_store_t **out_store)
+{
+  if (out_store != NULL)
+    *out_store = NULL;
+  if (lease == NULL || !WYL_IS_HANDLE (handle) || out_store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_locked (lease, handle);
+  if (rc == WYRELOG_E_OK && lease->pinned_store == NULL)
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    *out_store = lease->pinned_store;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_service_auth_write_lease_claim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle) {
   if (lease == NULL || !WYL_IS_HANDLE (handle))
@@ -431,6 +471,10 @@ wyl_service_auth_read_lease_release (WylServiceAuthReadLease *lease)
     g_cond_broadcast (&authority->changed);
   }
   g_mutex_unlock (&authority->mutex);
+  if (rc == WYRELOG_E_OK) {
+    wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
+    lease->pinned_store = NULL;
+  }
   return rc;
 }
 
@@ -454,6 +498,10 @@ wyl_service_auth_write_lease_release (WylServiceAuthWriteLease *lease)
     g_cond_broadcast (&authority->changed);
   }
   g_mutex_unlock (&authority->mutex);
+  if (rc == WYRELOG_E_OK) {
+    wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
+    lease->pinned_store = NULL;
+  }
   return rc;
 }
 
@@ -497,11 +545,30 @@ wyl_service_auth_authority_close (WylServiceAuthAuthority *authority)
   }
   authority->closing = TRUE;
   g_cond_broadcast (&authority->changed);
+  void (*checkpoint) (gpointer data) = authority->close_checkpoint;
+  gpointer checkpoint_data = authority->close_checkpoint_data;
+  authority->close_checkpoint = NULL;
+  authority->close_checkpoint_data = NULL;
+  g_mutex_unlock (&authority->mutex);
+  if (checkpoint != NULL)
+    checkpoint (checkpoint_data);
+  g_mutex_lock (&authority->mutex);
   while (authority->active_readers > 0 || authority->writer_active
       || authority->waiting_readers > 0 || authority->waiting_writers > 0)
     g_cond_wait (&authority->changed, &authority->mutex);
   g_mutex_unlock (&authority->mutex);
   return WYRELOG_E_OK;
+}
+
+void wyl_service_auth_authority_set_close_checkpoint
+    (WylServiceAuthAuthority * authority,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (authority != NULL);
+  g_mutex_lock (&authority->mutex);
+  authority->close_checkpoint = checkpoint;
+  authority->close_checkpoint_data = data;
+  g_mutex_unlock (&authority->mutex);
 }
 
 void

@@ -76,6 +76,8 @@ struct _WylHandle
   GPtrArray *pending_deltas;
   wyl_policy_store_t *policy_store;
   GMutex policy_store_lifecycle_mutex;
+  GCond policy_store_lifecycle_changed;
+  GHashTable *policy_store_pin_owners;
   guint policy_store_active_operations;
   gboolean policy_store_shutdown_pending;
   gboolean policy_store_shutdown_completing;
@@ -193,23 +195,6 @@ flush_pending_deltas (WylHandle *self)
   clear_pending_deltas (self);
 }
 
-static gboolean
-wyl_handle_begin_shutdown_completion_locked (WylHandle *self,
-    wyl_policy_store_t **out_store)
-{
-  *out_store = NULL;
-  if (!self->policy_store_shutdown_pending
-      || self->policy_store_shutdown_completing
-      || self->policy_store_shutdown_completed
-      || self->policy_store_active_operations > 0)
-    return FALSE;
-
-  *out_store = self->policy_store;
-  self->policy_store = NULL;
-  self->policy_store_shutdown_completing = TRUE;
-  return TRUE;
-}
-
 static void wyl_handle_complete_shutdown (WylHandle * self,
     wyl_policy_store_t * detached_store);
 
@@ -218,11 +203,7 @@ wyl_handle_finalize (GObject *object)
 {
   WylHandle *self = WYL_HANDLE (object);
 
-  if (self->service_auth_authority != NULL)
-    g_assert_cmpint (wyl_service_auth_authority_close
-        (self->service_auth_authority), ==, WYRELOG_E_OK);
-
-  wyl_shutdown (self);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (self), ==, WYRELOG_E_OK);
   g_assert_null (self->policy_store);
   g_assert_true (self->policy_store_shutdown_completed);
   g_clear_object (&self->read_engine);
@@ -235,6 +216,8 @@ wyl_handle_finalize (GObject *object)
 #endif
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
+  g_clear_pointer (&self->policy_store_pin_owners, g_hash_table_unref);
+  g_cond_clear (&self->policy_store_lifecycle_changed);
   g_mutex_clear (&self->policy_store_lifecycle_mutex);
   g_clear_pointer (&self->service_auth_authority,
       wyl_service_auth_authority_unref);
@@ -275,6 +258,9 @@ wyl_handle_init (WylHandle *self)
   self->created_at_us = g_get_real_time ();
   self->service_auth_authority = wyl_service_auth_authority_new (self);
   g_mutex_init (&self->policy_store_lifecycle_mutex);
+  g_cond_init (&self->policy_store_lifecycle_changed);
+  self->policy_store_pin_owners = g_hash_table_new (g_direct_hash,
+      g_direct_equal);
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 #ifdef WYL_HAS_FACT_STORE
@@ -760,18 +746,62 @@ wyl_shutdown (WylHandle *handle)
   if (handle == NULL)
     return;
 
+  (void) wyl_handle_shutdown_ordered (handle);
+}
+
+wyrelog_error_t
+wyl_handle_shutdown_ordered (WylHandle *handle)
+{
+  if (!WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+
   wyl_policy_store_t *detached_store = NULL;
   g_mutex_lock (&handle->policy_store_lifecycle_mutex);
   if (handle->policy_store_shutdown_completed) {
     g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
-    return;
+    return WYRELOG_E_OK;
+  }
+  if (GPOINTER_TO_UINT (g_hash_table_lookup
+          (handle->policy_store_pin_owners, g_thread_self ())) > 0) {
+    g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+    return WYRELOG_E_BUSY;
+  }
+  if (handle->policy_store_shutdown_pending
+      || handle->policy_store_shutdown_completing) {
+    while (!handle->policy_store_shutdown_completed
+        && (handle->policy_store_shutdown_pending
+            || handle->policy_store_shutdown_completing))
+      g_cond_wait (&handle->policy_store_lifecycle_changed,
+          &handle->policy_store_lifecycle_mutex);
+    wyrelog_error_t rc = handle->policy_store_shutdown_completed
+        ? WYRELOG_E_OK : WYRELOG_E_BUSY;
+    g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+    return rc;
   }
   handle->policy_store_shutdown_pending = TRUE;
-  gboolean complete = wyl_handle_begin_shutdown_completion_locked (handle,
-      &detached_store);
   g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
-  if (complete)
-    wyl_handle_complete_shutdown (handle, detached_store);
+
+  wyrelog_error_t rc = wyl_service_auth_authority_close
+      (handle->service_auth_authority);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_lock (&handle->policy_store_lifecycle_mutex);
+    handle->policy_store_shutdown_pending = FALSE;
+    g_cond_broadcast (&handle->policy_store_lifecycle_changed);
+    g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+    return rc;
+  }
+
+  g_mutex_lock (&handle->policy_store_lifecycle_mutex);
+  while (handle->policy_store_active_operations > 0)
+    g_cond_wait (&handle->policy_store_lifecycle_changed,
+        &handle->policy_store_lifecycle_mutex);
+  detached_store = handle->policy_store;
+  handle->policy_store = NULL;
+  handle->policy_store_shutdown_completing = TRUE;
+  g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+
+  wyl_handle_complete_shutdown (handle, detached_store);
+  return WYRELOG_E_OK;
 }
 
 static void
@@ -810,7 +840,9 @@ wyl_handle_complete_shutdown (WylHandle *handle,
   g_mutex_lock (&handle->policy_store_lifecycle_mutex);
   g_assert_true (handle->policy_store_shutdown_completing);
   handle->policy_store_shutdown_completing = FALSE;
+  handle->policy_store_shutdown_pending = FALSE;
   handle->policy_store_shutdown_completed = TRUE;
+  g_cond_broadcast (&handle->policy_store_lifecycle_changed);
   g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
 }
 
@@ -1164,11 +1196,23 @@ wyl_handle_policy_store_pin_current (WylHandle *self,
     checkpoint (checkpoint_data);
   wyrelog_error_t rc = !self->policy_store_shutdown_pending
       && !self->policy_store_shutdown_completing
-      && !self->policy_store_shutdown_completed
-      && self->policy_store != NULL ? WYRELOG_E_OK : WYRELOG_E_BUSY;
+      && !self->policy_store_shutdown_completed ? WYRELOG_E_OK : WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK) {
-    self->policy_store_active_operations++;
-    *out_store = self->policy_store;
+    if (self->policy_store_active_operations == G_MAXUINT) {
+      rc = WYRELOG_E_INTERNAL;
+    } else {
+      GThread *owner = g_thread_self ();
+      guint owner_pins = GPOINTER_TO_UINT (g_hash_table_lookup
+          (self->policy_store_pin_owners, owner));
+      if (owner_pins == G_MAXUINT) {
+        rc = WYRELOG_E_INTERNAL;
+      } else {
+        self->policy_store_active_operations++;
+        g_hash_table_insert (self->policy_store_pin_owners, owner,
+            GUINT_TO_POINTER (owner_pins + 1));
+        *out_store = self->policy_store;
+      }
+    }
   }
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
   return rc;
@@ -1182,13 +1226,18 @@ wyl_handle_policy_store_unpin (WylHandle *self,
   g_mutex_lock (&self->policy_store_lifecycle_mutex);
   g_assert_true (self->policy_store == expected_store);
   g_assert_cmpuint (self->policy_store_active_operations, >, 0);
+  GThread *owner = g_thread_self ();
+  guint owner_pins = GPOINTER_TO_UINT (g_hash_table_lookup
+      (self->policy_store_pin_owners, owner));
+  g_assert_cmpuint (owner_pins, >, 0);
+  if (owner_pins == 1)
+    g_hash_table_remove (self->policy_store_pin_owners, owner);
+  else
+    g_hash_table_insert (self->policy_store_pin_owners, owner,
+        GUINT_TO_POINTER (owner_pins - 1));
   self->policy_store_active_operations--;
-  wyl_policy_store_t *detached_store = NULL;
-  gboolean complete = wyl_handle_begin_shutdown_completion_locked (self,
-      &detached_store);
+  g_cond_broadcast (&self->policy_store_lifecycle_changed);
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
-  if (complete)
-    wyl_handle_complete_shutdown (self, detached_store);
 }
 
 void
