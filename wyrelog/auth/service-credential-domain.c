@@ -11,6 +11,80 @@ pin_policy_store (WylHandle *handle, wyl_policy_store_t **out_store)
   return wyl_handle_policy_store_pin_current (handle, out_store);
 }
 
+typedef struct
+{
+  WylHandle *handle;
+  wyl_policy_store_t *store;
+  WylServiceAuthWriteLease *lease;
+  WylServiceAuthorityTransaction *transaction;
+  gboolean owns_handle_pin;
+} ServiceMutation;
+
+static wyrelog_error_t
+service_mutation_begin (WylHandle *handle, ServiceMutation *mutation)
+{
+  memset (mutation, 0, sizeof *mutation);
+  mutation->handle = handle;
+  wyrelog_error_t rc = pin_policy_store (handle, &mutation->store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  mutation->owns_handle_pin = TRUE;
+  rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+      &mutation->lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_mutation_start_transaction (ServiceMutation *mutation)
+{
+  return wyl_policy_store_service_authority_transaction_begin
+      (mutation->store, mutation->handle, mutation->lease,
+      &mutation->transaction);
+}
+
+static wyrelog_error_t
+service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
+{
+  wyrelog_error_t result = operation;
+  if (mutation->transaction != NULL) {
+    wyrelog_error_t terminal = operation == WYRELOG_E_OK ?
+        wyl_policy_store_service_authority_transaction_commit
+        (mutation->transaction) :
+        wyl_policy_store_service_authority_transaction_rollback
+        (mutation->transaction);
+    if (operation == WYRELOG_E_OK)
+      result = terminal;
+    else if (terminal != WYRELOG_E_OK)
+      result = terminal;
+    if (wyl_policy_store_service_authority_transaction_is_poisoned
+        (mutation->store)) {
+      wyrelog_error_t abort_rc =
+          wyl_policy_store_service_authority_transaction_abort
+          (mutation->transaction);
+      if (abort_rc != WYRELOG_E_OK)
+        result = abort_rc;
+    }
+    wyl_policy_store_service_authority_transaction_free (mutation->transaction);
+    mutation->transaction = NULL;
+  }
+  if (mutation->lease != NULL) {
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release (mutation->lease);
+    if (result == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
+      result = release_rc;
+    wyl_service_auth_write_lease_free (mutation->lease);
+    mutation->lease = NULL;
+  }
+  if (mutation->owns_handle_pin) {
+    wyl_handle_policy_store_unpin (mutation->handle, mutation->store);
+    mutation->owns_handle_pin = FALSE;
+  }
+  return result;
+}
+
 void
 wyl_service_principal_clear (wyl_service_principal_t *principal)
 {
@@ -59,14 +133,16 @@ wyl_service_principal_create (WylHandle *handle, const gchar *subject_id,
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
-  wyl_policy_store_t *store = NULL;
-  wyrelog_error_t rc = pin_policy_store (handle, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_principal_info_t stored = { 0 };
-  rc = wyl_policy_store_create_service_principal (store, subject_id,
-      display_name, actor_subject_id, request_id, &stored);
-  wyl_handle_policy_store_unpin (handle, store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_create_service_principal_core
+        (mutation.transaction, mutation.store, subject_id, display_name,
+        actor_subject_id, request_id, &stored);
+  rc = service_mutation_finish (&mutation, rc);
   return finish_principal_result (rc, &stored, out);
 }
 
@@ -123,14 +199,16 @@ wyl_service_principal_disable (WylHandle *handle, const gchar *subject_id,
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
-  wyl_policy_store_t *store = NULL;
-  wyrelog_error_t rc = pin_policy_store (handle, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_principal_info_t stored = { 0 };
-  rc = wyl_policy_store_disable_service_principal (store, subject_id,
-      actor_subject_id, request_id, &stored);
-  wyl_handle_policy_store_unpin (handle, store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_disable_service_principal_core
+        (mutation.transaction, mutation.store, subject_id, actor_subject_id,
+        request_id, &stored);
+  rc = service_mutation_finish (&mutation, rc);
   return finish_principal_result (rc, &stored, out);
 }
 
@@ -189,15 +267,23 @@ wyl_service_credential_issue (WylHandle *handle, const gchar *subject_id,
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
-  wyl_policy_store_t *store = NULL;
-  wyrelog_error_t rc = pin_policy_store (handle, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_credential_info_t stored = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
-  rc = wyl_policy_store_issue_service_credential (store, subject_id,
-      tenant_id, actor_subject_id, request_id, expires_at_us, &stored, &secret);
-  wyl_handle_policy_store_unpin (handle, store);
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_ensure_service_cvk_for_issuance (mutation.store,
+        &cvk, &cvk_len);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_issue_service_credential_core
+        (mutation.transaction, mutation.store, subject_id, tenant_id,
+        actor_subject_id, request_id, expires_at_us, NULL, cvk, cvk_len,
+        &stored, &secret);
+  rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK) {
     copy_credential (&stored, &out->credential);
     out->secret = secret;
@@ -293,14 +379,16 @@ wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
     wyl_service_credential_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
-  wyl_policy_store_t *store = NULL;
-  wyrelog_error_t rc = pin_policy_store (handle, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_credential_info_t stored = { 0 };
-  rc = wyl_policy_store_revoke_service_credential (store, credential_id,
-      actor_subject_id, request_id, &stored);
-  wyl_handle_policy_store_unpin (handle, store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_revoke_service_credential_core
+        (mutation.transaction, mutation.store, credential_id,
+        actor_subject_id, request_id, &stored);
+  rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK)
     copy_credential (&stored, out);
   wyl_policy_service_credential_info_clear (&stored);
@@ -318,18 +406,28 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
-  wyl_policy_store_t *store = NULL;
-  wyrelog_error_t rc = pin_policy_store (handle, &store);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_credential_info_t stored = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
-  rc = wyl_policy_store_rotate_service_credential (store, old_credential_id,
-      actor_subject_id, request_id, new_expires_at_us,
-      runtime != NULL ? runtime->now_us : NULL,
-      runtime != NULL ? runtime->data : NULL,
-      runtime != NULL ? runtime->credential_runtime : NULL, &stored, &secret);
-  wyl_handle_policy_store_unpin (handle, store);
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_materialize_service_cvk_existing (mutation.store,
+        &cvk, &cvk_len);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_rotate_service_credential_core
+        (mutation.transaction, mutation.store, old_credential_id,
+        actor_subject_id, request_id, new_expires_at_us,
+        runtime != NULL ? runtime->now_us : NULL,
+        runtime != NULL ? runtime->data : NULL,
+        runtime != NULL ? runtime->credential_runtime : NULL, cvk, cvk_len,
+        &stored, &secret);
+  rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK) {
     copy_credential (&stored, &out->credential);
     out->secret = secret;

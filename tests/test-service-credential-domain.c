@@ -539,6 +539,151 @@ test_same_thread_callback_reentry_is_busy (void)
   wyl_service_credential_secret_clear (&secret);
 }
 
+typedef struct
+{
+  WylHandle *handle;
+  wyrelog_error_t rc;
+  wyl_service_principal_t principal;
+} ContendingPrincipal;
+
+static gpointer
+contending_principal_thread (gpointer data)
+{
+  ContendingPrincipal *contender = data;
+  contender->rc = wyl_service_principal_create (contender->handle,
+      "svc:authority:contender", "contender", "admin",
+      "authority-contender", &contender->principal);
+  return NULL;
+}
+
+typedef struct
+{
+  CollisionRuntime collision;
+  WylHandle *handle;
+  ContendingPrincipal contender;
+  GThread *thread;
+  gboolean entered;
+  wyrelog_error_t reentry_rc;
+} AuthorityRuntime;
+
+static int
+authority_random (gpointer data, guint8 *out, gsize len)
+{
+  AuthorityRuntime *runtime = data;
+  if (!runtime->entered) {
+    runtime->entered = TRUE;
+    wyl_service_principal_t reentrant = { 0 };
+    runtime->reentry_rc = wyl_service_principal_create (runtime->handle,
+        "svc:authority:reentrant", "reentrant", "admin",
+        "authority-reentrant", &reentrant);
+    wyl_service_principal_clear (&reentrant);
+    runtime->contender.handle = runtime->handle;
+    runtime->contender.rc = WYRELOG_E_INTERNAL;
+    runtime->thread = g_thread_new ("authority-contender",
+        contending_principal_thread, &runtime->contender);
+
+    gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+    for (;;) {
+      WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+      wyl_service_auth_authority_snapshot
+          (wyl_handle_get_service_auth_authority (runtime->handle), &snapshot);
+      if (snapshot.waiting_writers == 1)
+        break;
+      g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+      g_thread_yield ();
+    }
+  }
+  memset (out, 0x7c, len);
+  return 0;
+}
+
+static void
+test_authority_contention_reentry_and_snapshot (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:authority:worker");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:authority:worker", "tenant-a", "admin", "authority-old", 0,
+          &old), ==, WYRELOG_E_OK);
+
+  AuthorityRuntime state = {
+    .handle = handle,
+    .reentry_rc = WYRELOG_E_INTERNAL,
+  };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    authority_random, &state,
+  };
+  wyl_service_credential_rotate_runtime_t runtime = {
+    .credential_runtime = &credential_runtime,
+  };
+  wyl_service_credential_issue_result_t rotated = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          old.credential.credential_id, "admin", "authority-rotate", 0,
+          &runtime, &rotated), ==, WYRELOG_E_OK);
+  g_assert_true (state.entered);
+  g_assert_cmpint (state.reentry_rc, ==, WYRELOG_E_BUSY);
+  g_thread_join (state.thread);
+  g_assert_cmpint (state.contender.rc, ==, WYRELOG_E_OK);
+
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (handle), &snapshot);
+  g_assert_false (snapshot.writer_active);
+  g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_principals WHERE subject_id IN "
+          "('svc:authority:contender','svc:authority:reentrant');"), ==, 1);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials WHERE state='active';"),
+      ==, 1);
+  wyl_service_principal_clear (&state.contender.principal);
+  wyl_service_credential_issue_result_clear (&rotated);
+  wyl_service_credential_issue_result_clear (&old);
+}
+
+static void
+test_authority_commit_fault_withholds_secret (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:authority:fault");
+  wyl_policy_store_service_authority_transaction_fail_once
+      (store_of (handle), WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE);
+  wyl_service_credential_issue_result_t result = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:authority:fault", "tenant-a", "admin", "authority-fault", 0,
+          &result), ==, WYRELOG_E_IO);
+  g_assert_null (result.secret);
+  g_assert_null (result.credential.credential_id);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests WHERE "
+          "request_id='authority-fault';"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events WHERE "
+          "request_id='authority-fault';"), ==, 0);
+
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (handle), &snapshot);
+  g_assert_false (snapshot.writer_active);
+  g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:authority:fault", "tenant-a", "admin", "authority-retry", 0,
+          &result), ==, WYRELOG_E_OK);
+  g_assert_nonnull (result.secret);
+  wyl_service_credential_issue_result_clear (&result);
+}
+
 static void
 test_id_collision_retry_and_wipe (void)
 {
@@ -1607,6 +1752,11 @@ main (int argc, char **argv)
       test_id_collision_retry_and_wipe);
   g_test_add_func ("/auth/service-credential/same-thread-callback-reentry",
       test_same_thread_callback_reentry_is_busy);
+  g_test_add_func
+      ("/auth/service-credential/authority-contention-reentry-snapshot",
+      test_authority_contention_reentry_and_snapshot);
+  g_test_add_func ("/auth/service-credential/authority-commit-no-secret",
+      test_authority_commit_fault_withholds_secret);
   g_test_add_func ("/auth/service-credential/verify-expiry-clock-inside-gate",
       test_verify_expiry_clock_inside_gate);
   g_test_add_func ("/auth/service-credential/verify-fail-closed-read-only",

@@ -427,6 +427,45 @@ test_ledger_integrity (void)
       (wyl_handle_get_policy_store (handle)), ==, WYRELOG_E_POLICY);
 }
 
+static void
+test_authority_core_owns_single_transaction (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  WylServiceAuthorityTransaction *transaction = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &transaction), ==, WYRELOG_E_OK);
+
+  wyl_policy_service_principal_info_t principal = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_service_principal (store,
+          "svc:authority:legacy", "legacy", "admin", "authority-legacy",
+          &principal), ==, WYRELOG_E_BUSY);
+  g_assert_null (principal.subject_id);
+  g_assert_cmpint (wyl_policy_store_create_service_principal_core
+      (transaction, store, "svc:authority:core", "core", "admin",
+          "authority-core", &principal), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (transaction), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&principal);
+  principal.subject_id = g_strdup ("populated");
+  g_assert_cmpint (wyl_policy_store_create_service_principal_core
+      (transaction, store, "svc:authority:invalid", "invalid", "admin",
+          "authority-invalid", &principal), ==, WYRELOG_E_INVALID);
+  g_assert_null (principal.subject_id);
+  wyl_policy_store_service_authority_transaction_free (transaction);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+  g_assert_cmpint (scalar_int64 (handle_db (handle),
+          "SELECT count(*) FROM service_principals WHERE subject_id LIKE "
+          "'svc:authority:%';"), ==, 1);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -445,6 +484,8 @@ main (int argc, char **argv)
       test_local_failure_rolls_back);
   g_test_add_func ("/auth/service-principal/ledger-integrity",
       test_ledger_integrity);
+  g_test_add_func ("/auth/service-principal/authority-core-single-transaction",
+      test_authority_core_owns_single_transaction);
   g_test_add_func ("/auth/service-principal/restart-replay-overflow",
       test_restart_replay_and_overflow);
   return g_test_run ();
