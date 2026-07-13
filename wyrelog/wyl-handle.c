@@ -75,6 +75,7 @@ struct _WylHandle
   gpointer delta_callback_user_data;
   GPtrArray *pending_deltas;
   wyl_policy_store_t *policy_store;
+  WylServiceAuthAuthority *service_auth_authority;
 #ifdef WYL_HAS_FACT_STORE
   GHashTable *fact_graph_engines;
   GHashTable *fact_graph_statuses;
@@ -126,6 +127,13 @@ struct _WylHandle
 };
 
 G_DEFINE_FINAL_TYPE (WylHandle, wyl_handle, G_TYPE_OBJECT);
+
+WylServiceAuthAuthority *
+wyl_handle_get_service_auth_authority (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
+  return self->service_auth_authority;
+}
 
 static void
 wyl_pending_delta_free (gpointer data)
@@ -183,6 +191,10 @@ wyl_handle_finalize (GObject *object)
 {
   WylHandle *self = WYL_HANDLE (object);
 
+  if (self->service_auth_authority != NULL)
+    g_assert_cmpint (wyl_service_auth_authority_close
+        (self->service_auth_authority), ==, WYRELOG_E_OK);
+
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
@@ -194,6 +206,8 @@ wyl_handle_finalize (GObject *object)
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
   g_clear_pointer (&self->policy_store, wyl_policy_store_close);
+  g_clear_pointer (&self->service_auth_authority,
+      wyl_service_auth_authority_unref);
   g_clear_pointer (&self->sessions_by_id, g_hash_table_unref);
   g_mutex_clear (&self->sessions_lock);
 #ifdef WYL_HAS_BREAK_GLASS
@@ -229,6 +243,7 @@ wyl_handle_init (WylHandle *self)
   if (wyl_id_new (&self->id) != WYRELOG_E_OK)
     g_error ("wyl_handle_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
+  self->service_auth_authority = wyl_service_auth_authority_new (self);
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 #ifdef WYL_HAS_FACT_STORE

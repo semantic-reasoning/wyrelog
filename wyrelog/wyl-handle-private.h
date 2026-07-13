@@ -8,6 +8,7 @@
 #include "wyrelog/audit.h"
 #include "wyrelog/session.h"
 #include "policy/store-private.h"
+#include "auth/service-auth-coordination-private.h"
 
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/replay-private.h"
@@ -62,6 +63,10 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
  * valid until wyl_shutdown or g_object_unref.
  */
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
+
+/* Borrowed handle-owned service-auth coordination authority. */
+WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
+    (WylHandle * self);
 
 #ifdef WYL_HAS_FACT_STORE
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
