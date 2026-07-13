@@ -185,6 +185,7 @@ endif
 wyrelogd_exe = executable('wyrelogd',
   files(
     'daemon/checks.c',
+    'daemon/auth-registry-private.c',
     'daemon/delta.c',
     'daemon/fact-status.c',
     'daemon/http.c',

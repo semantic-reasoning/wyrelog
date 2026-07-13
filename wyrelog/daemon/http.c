@@ -6,6 +6,7 @@
 #include <sodium.h>
 #include <string.h>
 
+#include "daemon/auth-registry-private.h"
 #include "daemon/delta.h"
 #include "daemon/fact-status.h"
 #include "wyrelog/wyrelog.h"
@@ -129,6 +130,7 @@ typedef struct
 {
   WylHandle *handle;
   WylDaemonRuntime *runtime;
+  WylServiceAuthRegistry *service_auth_registry;
   guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
   gchar *access_token_key_id;
   gboolean access_token_secret_ready;
@@ -300,6 +302,8 @@ wyl_daemon_http_context_free (gpointer data)
   g_clear_pointer (&ctx->revoked_session_tokens, g_hash_table_unref);
   g_mutex_clear (&ctx->lock);
   g_mutex_clear (&ctx->policy_mutation_lock);
+  g_clear_pointer (&ctx->service_auth_registry,
+      wyl_service_auth_registry_unref);
   g_free (ctx);
 }
 
@@ -401,8 +405,19 @@ static WylDaemonHttpContext *
 wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
     WylDaemonRuntime *runtime, GError **error)
 {
-  WylDaemonHttpContext *ctx = g_new0 (WylDaemonHttpContext, 1);
+  WylServiceAuthRegistry *service_auth_registry = NULL;
+  wyrelog_error_t rc;
 
+  rc = wyl_service_auth_registry_new (&service_auth_registry);
+  if (rc != WYRELOG_E_OK) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+        "service auth registry initialization failed: %s",
+        wyrelog_error_string (rc));
+    return NULL;
+  }
+
+  WylDaemonHttpContext *ctx = g_new0 (WylDaemonHttpContext, 1);
+  ctx->service_auth_registry = service_auth_registry;
   ctx->handle = handle;
   ctx->runtime = runtime;
   ctx->production_mode = opts->production_mode;
@@ -424,7 +439,7 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
       g_free, NULL);
   g_mutex_init (&ctx->lock);
   g_mutex_init (&ctx->policy_mutation_lock);
-  wyrelog_error_t rc = wyl_daemon_http_context_rotate_access_token_key (ctx);
+  rc = wyl_daemon_http_context_rotate_access_token_key (ctx);
   if (rc != WYRELOG_E_OK) {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
         "JWT signing key initialization failed: %s", wyrelog_error_string (rc));

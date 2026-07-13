@@ -151,6 +151,7 @@ if build_client
   endif
   test_daemon_http_decide = executable('test-daemon-http-decide',
     'test-daemon-http-decide.c',
+    '../wyrelog/daemon/auth-registry-private.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
     '../wyrelog/daemon/fact-status.c',
@@ -164,6 +165,7 @@ if build_client
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
       'test-daemon-http-decide.c',
+      '../wyrelog/daemon/auth-registry-private.c',
       '../wyrelog/daemon/http.c',
       '../wyrelog/daemon/delta.c',
       '../wyrelog/daemon/fact-status.c',
@@ -199,6 +201,7 @@ if build_client
   endif
   test_daemon_http_mfa = executable('test-daemon-http-mfa',
     'test-daemon-http-mfa.c',
+    '../wyrelog/daemon/auth-registry-private.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
     '../wyrelog/daemon/fact-status.c',
@@ -229,6 +232,7 @@ if build_client
     endif
     test_daemon_http_facts = executable('test-daemon-http-facts',
       'test-daemon-http-facts.c',
+      '../wyrelog/daemon/auth-registry-private.c',
       '../wyrelog/daemon/http.c',
       '../wyrelog/daemon/delta.c',
       '../wyrelog/daemon/fact-status.c',
@@ -362,6 +366,7 @@ if build_client and host_machine.system() != 'windows'
   endif
   test_wyctl_policy_daemon = executable('test-wyctl-policy-daemon',
     'test-wyctl-policy-daemon.c',
+    '../wyrelog/daemon/auth-registry-private.c',
     '../wyrelog/daemon/http.c',
     '../wyrelog/daemon/delta.c',
     '../wyrelog/daemon/fact-status.c',
