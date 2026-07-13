@@ -223,6 +223,34 @@ test_runtime_and_template_fingerprints (void)
 }
 
 static void
+test_service_subject_parser (void)
+{
+  static const gchar *const valid[] = {
+    "svc:a", "svc:a.b_c-d", "svc:tenant:Worker-9", "svc:0:Z",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (valid); i++)
+    g_assert_true (wyl_policy_service_subject_is_valid (valid[i],
+            strlen (valid[i])));
+  static const gchar *const invalid[] = {
+    "", "svc:", "SVC:a", "Svc:a", "svc::a", "svc:a:", "svc:-a",
+    "svc:a-", "svc:.a", "svc:a.", "svc:a/b", "svc:a b", "svc:a\n",
+    "svc:\303\251", "service:a", "svc:wr.",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
+    g_assert_false (wyl_policy_service_subject_is_valid (invalid[i],
+            strlen (invalid[i])));
+  static const gchar embedded_nul[] = { 's', 'v', 'c', ':', 'a', 0, 'b' };
+  g_assert_false (wyl_policy_service_subject_is_valid (embedded_nul,
+          sizeof embedded_nul));
+  gchar too_long[129];
+  memset (too_long, 'a', sizeof too_long);
+  memcpy (too_long, "svc:", 4);
+  g_assert_false (wyl_policy_service_subject_is_valid (too_long,
+          sizeof too_long));
+  g_assert_false (wyl_policy_service_subject_is_valid (NULL, 5));
+}
+
+static void
 insert_fixture_principal (sqlite3 *db)
 {
   exec_ok (db,
@@ -345,6 +373,10 @@ test_collision_policy (void)
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_fixture_principal (db);
+  wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
+          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
 
   exec_ok (db,
       "INSERT INTO role_memberships(subject_id,role_id,scope,granted_at,granted_by)"
@@ -353,12 +385,17 @@ test_collision_policy (void)
       " VALUES('svc:tenant-a:worker','wr.fact.read','tenant-a',1);");
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
+          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
 
   exec_ok (db,
       "INSERT INTO principal_states(subject_id,state,updated_at)"
       " VALUES('svc:tenant-a:worker','idle',1);");
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
+          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM principal_states WHERE subject_id='svc:tenant-a:worker';"
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"
@@ -366,6 +403,8 @@ test_collision_policy (void)
       " ('svc:tenant-a:worker',zeroblob(20),-1,1,'totp-id');");
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
+          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM totp_enrollments WHERE subject_id='svc:tenant-a:worker';"
       "INSERT INTO wyrelog_config(config_key,config_value,updated_at)"
@@ -374,12 +413,16 @@ test_collision_policy (void)
       " VALUES('bootstrap_admin_sealed_at_us','1',1);");
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
+          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
   exec_ok (db,
       "DELETE FROM wyrelog_config WHERE config_key LIKE 'bootstrap_admin_%';"
       "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
       " VALUES('svc:tenant-a:worker','wr.login.skip_mfa','login',1);");
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
+          "svc:tenant-a:worker", &kind), ==, WYRELOG_E_POLICY);
 }
 
 static void
@@ -388,23 +431,51 @@ test_unregistered_legacy_service_artifacts (void)
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
-  exec_ok (wyl_policy_store_get_db (store),
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
       "INSERT INTO role_memberships(subject_id,role_id,scope,granted_at,granted_by)"
       " VALUES('svc:legacy','wr.viewer','__wr_default',1,'admin');"
       "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
-      " VALUES('svc:legacy','wr.fact.read','__wr_default',1);"
-      "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
-      " VALUES('svc:legacy','wr.login.skip_mfa','login',1);"
+      " VALUES('svc:legacy','wr.fact.read','__wr_default',1);");
+  wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_SERVICE;
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
+          &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
+
+  exec_ok (db,
       "INSERT INTO principal_states(subject_id,state,updated_at)"
-      " VALUES('svc:legacy','idle',1);"
+      " VALUES('svc:legacy','idle',1);");
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
+          &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
+  exec_ok (db,
+      "DELETE FROM principal_states WHERE subject_id='svc:legacy';"
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"
       " enrolled_at,id_uuidv7) VALUES"
-      " ('svc:legacy',zeroblob(20),-1,1,'legacy-service-totp');"
+      " ('svc:legacy',zeroblob(20),-1,1,'legacy-service-totp');");
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
+          &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
+  exec_ok (db,
+      "DELETE FROM totp_enrollments WHERE subject_id='svc:legacy';"
       "INSERT INTO wyrelog_config(config_key,config_value,updated_at)"
       " VALUES('bootstrap_admin_subject','svc:legacy',1);");
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
+          &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
+  exec_ok (db,
+      "DELETE FROM wyrelog_config WHERE config_key='bootstrap_admin_subject';"
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at)"
+      " VALUES('svc:legacy','wr.login.skip_mfa','login',1);");
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:legacy",
+          &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_HUMAN);
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
-  g_assert_cmpint (scalar_int64 (wyl_policy_store_get_db (store),
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "svc:unknown",
+          &kind), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
+  g_assert_cmpint (scalar_int64 (db,
           "SELECT count(*) FROM service_principals"
           " WHERE subject_id='svc:legacy';"), ==, 0);
 }
@@ -548,6 +619,257 @@ test_corruption_matrix (void)
     g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
         WYRELOG_E_POLICY);
   }
+}
+
+static wyrelog_error_t
+collect_principal (const wyl_policy_service_principal_info_t *info,
+    gpointer user_data)
+{
+  g_ptr_array_add (user_data, g_strdup (info->subject_id));
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+collect_credential (const wyl_policy_service_credential_info_t *info,
+    gpointer user_data)
+{
+  g_assert_cmpuint (info->salt[0], ==, 0);
+  g_assert_cmpuint (info->verifier[0], ==, 0);
+  g_ptr_array_add (user_data, g_strdup (info->credential_id));
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+collect_principal_event (const wyl_policy_service_principal_event_info_t *info,
+    gpointer user_data)
+{
+  g_ptr_array_add (user_data, g_strdup (info->event));
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+collect_credential_event (const wyl_policy_service_credential_event_info_t
+    *info, gpointer user_data)
+{
+  g_ptr_array_add (user_data, g_strdup (info->event));
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+reject_principal (const wyl_policy_service_principal_info_t *info,
+    gpointer user_data)
+{
+  (void) info;
+  (void) user_data;
+  return WYRELOG_E_INTERNAL;
+}
+
+static void
+assert_principal_cleared (const wyl_policy_service_principal_info_t *info)
+{
+  g_assert_null (info->subject_id);
+  g_assert_null (info->display_name);
+  g_assert_cmpuint (info->generation, ==, 0);
+  g_assert_cmpint (info->created_at_us, ==, 0);
+}
+
+static void
+assert_credential_cleared (const wyl_policy_service_credential_info_t *info)
+{
+  g_assert_null (info->credential_id);
+  g_assert_null (info->subject_id);
+  g_assert_null (info->tenant_id);
+  g_assert_cmpuint (info->generation, ==, 0);
+  for (gsize i = 0; i < sizeof info->salt; i++)
+    g_assert_cmpuint (info->salt[i], ==, 0);
+  for (gsize i = 0; i < sizeof info->verifier; i++)
+    g_assert_cmpuint (info->verifier[i], ==, 0);
+}
+
+static void
+assert_cvk_cleared (const wyl_policy_service_cvk_info_t *info)
+{
+  g_assert_null (info->sealed_cvk);
+  g_assert_cmpuint (info->sealed_cvk_len, ==, 0);
+  g_assert_cmpuint (info->generation, ==, 0);
+  for (gsize i = 0; i < sizeof info->provider_binding; i++)
+    g_assert_cmpuint (info->provider_binding[i], ==, 0);
+}
+
+static void
+test_read_only_service_schema_access (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_fixture_principal (db);
+  exec_ok (db,
+      "INSERT INTO service_principals"
+      " (subject_id,display_name,state,generation,created_by,created_at_us,updated_at_us)"
+      " VALUES('svc:a','a','active',1,'admin',1,1);"
+      "INSERT INTO service_credentials"
+      " (credential_id,credential_format_version,subject_id,tenant_id,generation,"
+      " state,verifier_version,salt,verifier,created_by,created_at_us,updated_at_us)"
+      " VALUES('cred-b',1,'svc:tenant-a:worker','tenant-a',1,'active',1,"
+      " zeroblob(16),zeroblob(32),'admin',1,1);"
+      "INSERT INTO service_credentials"
+      " (credential_id,credential_format_version,subject_id,tenant_id,generation,"
+      " state,verifier_version,salt,verifier,created_by,created_at_us,updated_at_us)"
+      " VALUES('cred-a',1,'svc:tenant-a:worker','tenant-a',1,'active',1,"
+      " zeroblob(16),zeroblob(32),'admin',1,1);"
+      "INSERT INTO service_credential_cvk"
+      " (slot,generation,envelope_format_version,provider_binding,sealed_cvk,"
+      " created_at_us,updated_at_us) VALUES(1,2,1,zeroblob(32),x'010203',1,2);"
+      "INSERT INTO service_principal_events"
+      " (subject_id,event,from_state,to_state,generation,actor_subject_id,"
+      " request_id,created_at_us) VALUES"
+      " ('svc:tenant-a:worker','disabled','active','disabled',2,'admin','r2',3);"
+      "INSERT INTO service_principal_events"
+      " (subject_id,event,from_state,to_state,generation,actor_subject_id,"
+      " request_id,created_at_us) VALUES"
+      " ('svc:tenant-a:worker','created',NULL,'active',1,'admin','r1',2);"
+      "INSERT INTO service_credential_events"
+      " (credential_id,subject_id,tenant_id,event,from_state,to_state,generation,"
+      " actor_subject_id,request_id,created_at_us) VALUES"
+      " ('cred-a','svc:tenant-a:worker','tenant-a','revoked','active','revoked',"
+      " 2,'admin','r2',3);"
+      "INSERT INTO service_credential_events"
+      " (credential_id,subject_id,tenant_id,event,from_state,to_state,generation,"
+      " actor_subject_id,request_id,created_at_us) VALUES"
+      " ('cred-a','svc:tenant-a:worker','tenant-a','issued',NULL,'active',"
+      " 1,'admin','r1',2);");
+
+  wyl_policy_service_principal_info_t principal = { 0 };
+  g_assert_cmpint (wyl_policy_store_lookup_service_principal (store,
+          "svc:tenant-a:worker", &principal), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (principal.display_name, ==, "worker");
+  g_assert_cmpint (wyl_policy_store_lookup_service_principal (store, "svc:a",
+          &principal), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (principal.subject_id, ==, "svc:a");
+  g_assert_cmpint (wyl_policy_store_lookup_service_principal (store,
+          "svc:missing", &principal), ==, WYRELOG_E_NOT_FOUND);
+  assert_principal_cleared (&principal);
+  g_assert_cmpint (wyl_policy_store_lookup_service_principal (store, "bad",
+          &principal), ==, WYRELOG_E_INVALID);
+  assert_principal_cleared (&principal);
+
+  g_autoptr (GPtrArray) rows = g_ptr_array_new_with_free_func (g_free);
+  g_assert_cmpint (wyl_policy_store_foreach_service_principal (store,
+          collect_principal, rows), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (rows->len, ==, 2);
+  g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "svc:a");
+  g_assert_cmpint (wyl_policy_store_foreach_service_principal (store,
+          reject_principal, NULL), ==, WYRELOG_E_INTERNAL);
+
+  wyl_policy_service_credential_info_t credential = { 0 };
+  g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-a",
+          "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (credential.credential_id, ==, "cred-a");
+  g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-b",
+          "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (credential.credential_id, ==, "cred-b");
+  g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-a",
+          "svc:tenant-a:worker", "__wr_default", &credential), ==,
+      WYRELOG_E_NOT_FOUND);
+  assert_credential_cleared (&credential);
+  g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, "cred-a",
+          "svc:tenant-a:worker", "tenant-a", &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_lookup_service_credential (store, NULL,
+          "svc:tenant-a:worker", "tenant-a", &credential), ==,
+      WYRELOG_E_INVALID);
+  assert_credential_cleared (&credential);
+  g_ptr_array_set_size (rows, 0);
+  g_assert_cmpint (wyl_policy_store_foreach_service_credential (store,
+          "svc:tenant-a:worker", "tenant-a", collect_credential, rows), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "cred-a");
+  g_assert_cmpstr (g_ptr_array_index (rows, 1), ==, "cred-b");
+
+  wyl_policy_service_cvk_info_t cvk = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &cvk), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (cvk.generation, ==, 2);
+  g_assert_cmpuint (cvk.sealed_cvk_len, ==, 3);
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &cvk), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (cvk.sealed_cvk_len, ==, 3);
+  exec_ok (db, "DELETE FROM service_credential_cvk;");
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &cvk), ==,
+      WYRELOG_E_NOT_FOUND);
+  assert_cvk_cleared (&cvk);
+  exec_ok (db,
+      "INSERT INTO service_credential_cvk"
+      " (slot,generation,envelope_format_version,provider_binding,sealed_cvk,"
+      " created_at_us,updated_at_us) VALUES(1,3,1,zeroblob(32),x'04',3,3);");
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &cvk), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (NULL, &cvk), ==,
+      WYRELOG_E_INVALID);
+  assert_cvk_cleared (&cvk);
+
+  g_ptr_array_set_size (rows, 0);
+  g_assert_cmpint (wyl_policy_store_foreach_service_principal_event (store,
+          "svc:tenant-a:worker", collect_principal_event, rows), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "created");
+  g_assert_cmpstr (g_ptr_array_index (rows, 1), ==, "disabled");
+  g_ptr_array_set_size (rows, 0);
+  g_assert_cmpint (wyl_policy_store_foreach_service_credential_event (store,
+          "cred-a", "svc:tenant-a:worker", "tenant-a",
+          collect_credential_event, rows), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (g_ptr_array_index (rows, 0), ==, "issued");
+  g_assert_cmpstr (g_ptr_array_index (rows, 1), ==, "revoked");
+  g_assert_cmpint (wyl_policy_store_foreach_service_credential_event (store,
+          "cred-a", "svc:tenant-a:worker", "__wr_default",
+          collect_credential_event, rows), ==, WYRELOG_E_OK);
+
+  wyl_policy_service_principal_event_info_t principal_event = {
+    .event_id = 1,
+    .subject_id = g_strdup ("svc:a"),
+    .event = g_strdup ("created")
+  };
+  wyl_policy_service_principal_event_info_clear (&principal_event);
+  g_assert_cmpint (principal_event.event_id, ==, 0);
+  g_assert_null (principal_event.subject_id);
+  wyl_policy_service_credential_event_info_t credential_event = {
+    .event_id = 1,
+    .credential_id = g_strdup ("cred-a"),
+    .subject_id = g_strdup ("svc:a")
+  };
+  wyl_policy_service_credential_event_info_clear (&credential_event);
+  g_assert_cmpint (credential_event.event_id, ==, 0);
+  g_assert_null (credential_event.credential_id);
+}
+
+static void
+test_malformed_service_row_read (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db, "PRAGMA foreign_keys=OFF;DROP TABLE service_principals;"
+      "CREATE TABLE service_principals(subject_id TEXT,display_name TEXT,"
+      " state TEXT,generation INTEGER,created_by TEXT,created_at_us INTEGER,"
+      " updated_at_us INTEGER,disabled_by TEXT,disabled_at_us INTEGER);"
+      "INSERT INTO service_principals VALUES"
+      " (CAST(x'7376633a610062' AS TEXT),'bad','active',1,'admin',1,1,NULL,NULL);");
+  g_assert_cmpint (wyl_policy_store_foreach_service_principal (store,
+          collect_principal, NULL), ==, WYRELOG_E_POLICY);
+  exec_ok (db, "DELETE FROM service_principals;"
+      "INSERT INTO service_principals VALUES"
+      " ('SVC:a','bad','active',1,'admin',1,1,NULL,NULL);");
+  wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
+  g_assert_cmpint (wyl_policy_store_get_principal_kind (store, "SVC:a",
+          &kind), ==, WYRELOG_E_POLICY);
+  exec_ok (db, "DELETE FROM service_principals;"
+      "INSERT INTO service_principals VALUES"
+      " ('svc:bad','bad','corrupt',1,'admin',1,1,NULL,NULL);");
+  wyl_policy_service_principal_info_t principal = { 0 };
+  g_assert_cmpint (wyl_policy_store_lookup_service_principal (store, "svc:bad",
+          &principal), ==, WYRELOG_E_POLICY);
+  assert_principal_cleared (&principal);
 }
 
 static const gchar legacy_parent_ddl[] =
@@ -953,6 +1275,8 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/policy/service-schema/subject-parser",
+      test_service_subject_parser);
   g_test_add_func ("/policy/service-schema/runtime-template-fingerprint",
       test_runtime_and_template_fingerprints);
   g_test_add_func ("/policy/service-schema/constraints",
@@ -963,6 +1287,10 @@ main (int argc, char **argv)
       test_unregistered_legacy_service_artifacts);
   g_test_add_func ("/policy/service-schema/corruption-matrix",
       test_corruption_matrix);
+  g_test_add_func ("/policy/service-schema/read-only-access",
+      test_read_only_service_schema_access);
+  g_test_add_func ("/policy/service-schema/malformed-row-read",
+      test_malformed_service_row_read);
   g_test_add_func ("/policy/service-schema/old-store-subset",
       test_old_store_subset_migration);
   g_test_add_func ("/policy/service-schema/plaintext-legacy",

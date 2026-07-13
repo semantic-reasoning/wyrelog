@@ -164,6 +164,108 @@ typedef struct
   guint max_rows;
 } wyl_policy_fact_relation_query_info_t;
 
+typedef enum
+{
+  WYL_POLICY_PRINCIPAL_KIND_UNKNOWN = 0,
+  WYL_POLICY_PRINCIPAL_KIND_HUMAN,
+  WYL_POLICY_PRINCIPAL_KIND_SERVICE,
+} wyl_policy_principal_kind_t;
+
+typedef struct
+{
+  gchar *subject_id;
+  gchar *display_name;
+  gchar *state;
+  guint64 generation;
+  gchar *created_by;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+  gchar *disabled_by;
+  gint64 disabled_at_us;
+} wyl_policy_service_principal_info_t;
+
+typedef struct
+{
+  gchar *credential_id;
+  guint32 credential_format_version;
+  gchar *subject_id;
+  gchar *tenant_id;
+  guint64 generation;
+  gchar *state;
+  guint32 verifier_version;
+  guint8 salt[16];
+  guint8 verifier[32];
+  gchar *created_by;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+  gint64 expires_at_us;
+  gint64 last_used_at_us;
+  gchar *revoked_by;
+  gint64 revoked_at_us;
+  gchar *rotated_from_id;
+} wyl_policy_service_credential_info_t;
+
+typedef struct
+{
+  guint64 generation;
+  guint32 envelope_format_version;
+  guint8 provider_binding[32];
+  guint8 *sealed_cvk;
+  gsize sealed_cvk_len;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+} wyl_policy_service_cvk_info_t;
+
+typedef struct
+{
+  gint64 event_id;
+  gchar *subject_id;
+  gchar *event;
+  gchar *from_state;
+  gchar *to_state;
+  guint64 generation;
+  gchar *actor_subject_id;
+  gchar *request_id;
+  gint64 created_at_us;
+} wyl_policy_service_principal_event_info_t;
+
+typedef struct
+{
+  gint64 event_id;
+  gchar *credential_id;
+  gchar *subject_id;
+  gchar *tenant_id;
+  gchar *event;
+  gchar *from_state;
+  gchar *to_state;
+  guint64 generation;
+  gchar *actor_subject_id;
+  gchar *request_id;
+  gchar *related_credential_id;
+  gint64 created_at_us;
+} wyl_policy_service_credential_event_info_t;
+
+typedef wyrelog_error_t (*wyl_policy_service_principal_cb) (const
+    wyl_policy_service_principal_info_t * info, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_service_credential_cb) (const
+    wyl_policy_service_credential_info_t * info, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_service_principal_event_cb) (const
+    wyl_policy_service_principal_event_info_t * info, gpointer user_data);
+typedef wyrelog_error_t (*wyl_policy_service_credential_event_cb) (const
+    wyl_policy_service_credential_event_info_t * info, gpointer user_data);
+
+gboolean wyl_policy_service_subject_is_valid (const gchar * subject_id,
+    gsize subject_id_len);
+void wyl_policy_service_principal_info_clear
+    (wyl_policy_service_principal_info_t * info);
+void wyl_policy_service_credential_info_clear
+    (wyl_policy_service_credential_info_t * info);
+void wyl_policy_service_cvk_info_clear (wyl_policy_service_cvk_info_t * info);
+void wyl_policy_service_principal_event_info_clear
+    (wyl_policy_service_principal_event_info_t * info);
+void wyl_policy_service_credential_event_info_clear
+    (wyl_policy_service_credential_event_info_t * info);
+
 void wyl_policy_fact_relation_schema_columns_free
     (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns);
 void wyl_policy_fact_relation_query_info_clear
@@ -197,6 +299,37 @@ wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_service_schema
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
+
+/* Owned-output contract for the service lookup/load APIs below:
+ * - On first use, the caller MUST pass an output initialized to { 0 }.
+ * - A later call may reuse an object previously populated by the matching API;
+ *   the API clears its owned fields before validating any other argument.
+ * - Input strings MUST NOT alias strings owned by the output object.
+ * - Success transfers ownership of output fields to the caller. Every failure
+ *   leaves the output cleared, including fixed and dynamically sized secrets.
+ * Foreach callback rows are borrowed and remain valid only during the callback.
+ */
+wyrelog_error_t wyl_policy_store_get_principal_kind (wyl_policy_store_t * store,
+    const gchar * subject_id, wyl_policy_principal_kind_t * out_kind);
+wyrelog_error_t wyl_policy_store_lookup_service_principal (wyl_policy_store_t *
+    store, const gchar * subject_id, wyl_policy_service_principal_info_t * out);
+wyrelog_error_t wyl_policy_store_foreach_service_principal (wyl_policy_store_t *
+    store, wyl_policy_service_principal_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_lookup_service_credential (wyl_policy_store_t *
+    store, const gchar * credential_id, const gchar * subject_id,
+    const gchar * tenant_id, wyl_policy_service_credential_info_t * out);
+wyrelog_error_t wyl_policy_store_foreach_service_credential (wyl_policy_store_t
+    * store, const gchar * subject_id, const gchar * tenant_id,
+    wyl_policy_service_credential_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_load_service_cvk (wyl_policy_store_t * store,
+    wyl_policy_service_cvk_info_t * out);
+wyrelog_error_t wyl_policy_store_foreach_service_principal_event
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    wyl_policy_service_principal_event_cb cb, gpointer user_data);
+wyrelog_error_t wyl_policy_store_foreach_service_credential_event
+    (wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * subject_id, const gchar * tenant_id,
+    wyl_policy_service_credential_event_cb cb, gpointer user_data);
 gsize wyl_policy_store_required_table_count (void);
 const gchar *wyl_policy_store_required_table_name (gsize idx);
 gsize wyl_policy_store_builtin_role_count (void);

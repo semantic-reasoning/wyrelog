@@ -3927,6 +3927,725 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
   return found ? WYRELOG_E_POLICY : WYRELOG_E_OK;
 }
 
+static gboolean
+service_subject_component_char (guint8 c)
+{
+  return g_ascii_isalnum (c) || c == '.' || c == '_' || c == '-';
+}
+
+gboolean
+wyl_policy_service_subject_is_valid (const gchar *subject_id,
+    gsize subject_id_len)
+{
+  if (subject_id == NULL || subject_id_len < 5 || subject_id_len > 128
+      || memcmp (subject_id, "svc:", 4) != 0)
+    return FALSE;
+  gsize component_start = 4;
+  for (gsize i = 4; i <= subject_id_len; i++) {
+    if (i < subject_id_len && subject_id[i] != ':') {
+      guint8 c = (guint8) subject_id[i];
+      if (c == 0 || c > 0x7f || !service_subject_component_char (c))
+        return FALSE;
+      continue;
+    }
+    if (i == component_start
+        || !g_ascii_isalnum ((guint8) subject_id[component_start])
+        || !g_ascii_isalnum ((guint8) subject_id[i - 1]))
+      return FALSE;
+    component_start = i + 1;
+  }
+  return TRUE;
+}
+
+void wyl_policy_service_principal_info_clear
+    (wyl_policy_service_principal_info_t * info)
+{
+  if (info == NULL)
+    return;
+  g_free (info->subject_id);
+  g_free (info->display_name);
+  g_free (info->state);
+  g_free (info->created_by);
+  g_free (info->disabled_by);
+  memset (info, 0, sizeof (*info));
+}
+
+void wyl_policy_service_credential_info_clear
+    (wyl_policy_service_credential_info_t * info)
+{
+  if (info == NULL)
+    return;
+  g_free (info->credential_id);
+  g_free (info->subject_id);
+  g_free (info->tenant_id);
+  g_free (info->state);
+  g_free (info->created_by);
+  g_free (info->revoked_by);
+  g_free (info->rotated_from_id);
+  sodium_memzero (info->salt, sizeof info->salt);
+  sodium_memzero (info->verifier, sizeof info->verifier);
+  memset (info, 0, sizeof (*info));
+}
+
+void
+wyl_policy_service_cvk_info_clear (wyl_policy_service_cvk_info_t *info)
+{
+  if (info == NULL)
+    return;
+  sodium_memzero (info->provider_binding, sizeof info->provider_binding);
+  if (info->sealed_cvk != NULL) {
+    sodium_memzero (info->sealed_cvk, info->sealed_cvk_len);
+    g_free (info->sealed_cvk);
+  }
+  memset (info, 0, sizeof (*info));
+}
+
+void wyl_policy_service_principal_event_info_clear
+    (wyl_policy_service_principal_event_info_t * info)
+{
+  if (info == NULL)
+    return;
+  g_free (info->subject_id);
+  g_free (info->event);
+  g_free (info->from_state);
+  g_free (info->to_state);
+  g_free (info->actor_subject_id);
+  g_free (info->request_id);
+  memset (info, 0, sizeof (*info));
+}
+
+void wyl_policy_service_credential_event_info_clear
+    (wyl_policy_service_credential_event_info_t * info)
+{
+  if (info == NULL)
+    return;
+  g_free (info->credential_id);
+  g_free (info->subject_id);
+  g_free (info->tenant_id);
+  g_free (info->event);
+  g_free (info->from_state);
+  g_free (info->to_state);
+  g_free (info->actor_subject_id);
+  g_free (info->request_id);
+  g_free (info->related_credential_id);
+  memset (info, 0, sizeof (*info));
+}
+
+static wyrelog_error_t
+read_owned_text (sqlite3_stmt *stmt, int column, gboolean nullable,
+    gsize min_len, gsize max_len, gchar **out)
+{
+  *out = NULL;
+  int type = sqlite3_column_type (stmt, column);
+  if (type == SQLITE_NULL)
+    return nullable ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (type != SQLITE_TEXT)
+    return WYRELOG_E_POLICY;
+  const gchar *value = (const gchar *) sqlite3_column_text (stmt, column);
+  int bytes = sqlite3_column_bytes (stmt, column);
+  if (value == NULL || bytes < 0 || (gsize) bytes < min_len
+      || (gsize) bytes > max_len || memchr (value, 0, (gsize) bytes) != NULL)
+    return WYRELOG_E_POLICY;
+  *out = g_strndup (value, (gsize) bytes);
+  return *out != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+static wyrelog_error_t
+read_positive_u64 (sqlite3_stmt *stmt, int column, guint64 *out)
+{
+  if (sqlite3_column_type (stmt, column) != SQLITE_INTEGER)
+    return WYRELOG_E_POLICY;
+  gint64 value = sqlite3_column_int64 (stmt, column);
+  if (value < 1)
+    return WYRELOG_E_POLICY;
+  *out = (guint64) value;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+read_positive_i64 (sqlite3_stmt *stmt, int column, gboolean nullable,
+    gint64 *out)
+{
+  *out = 0;
+  if (sqlite3_column_type (stmt, column) == SQLITE_NULL)
+    return nullable ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (sqlite3_column_type (stmt, column) != SQLITE_INTEGER)
+    return WYRELOG_E_POLICY;
+  *out = sqlite3_column_int64 (stmt, column);
+  return *out > 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+read_fixed_blob (sqlite3_stmt *stmt, int column, guint8 *out, gsize len)
+{
+  if (sqlite3_column_type (stmt, column) != SQLITE_BLOB
+      || sqlite3_column_bytes (stmt, column) != (int) len)
+    return WYRELOG_E_POLICY;
+  const guint8 *value = sqlite3_column_blob (stmt, column);
+  if (value == NULL)
+    return WYRELOG_E_POLICY;
+  memcpy (out, value, len);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+parse_service_principal_row (sqlite3_stmt *stmt,
+    wyl_policy_service_principal_info_t *out)
+{
+  memset (out, 0, sizeof (*out));
+  wyrelog_error_t rc = read_owned_text (stmt, 0, FALSE, 5, 128,
+      &out->subject_id);
+  if (rc == WYRELOG_E_OK && !wyl_policy_service_subject_is_valid
+      (out->subject_id, strlen (out->subject_id)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 1, FALSE, 1, 256, &out->display_name);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 2, FALSE, 1, 16, &out->state);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 3, &out->generation);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 4, FALSE, 1, 128, &out->created_by);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 5, FALSE, &out->created_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 6, FALSE, &out->updated_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 7, TRUE, 1, 128, &out->disabled_by);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 8, TRUE, &out->disabled_at_us);
+  if (rc == WYRELOG_E_OK && ((g_str_equal (out->state, "active")
+              && (out->disabled_by != NULL || out->disabled_at_us != 0))
+          || (g_str_equal (out->state, "disabled")
+              && (out->disabled_by == NULL || out->disabled_at_us == 0))
+          || (!g_str_equal (out->state, "active")
+              && !g_str_equal (out->state, "disabled"))
+          || (out->disabled_at_us != 0
+              && out->disabled_at_us < out->created_at_us)
+          || out->updated_at_us < out->created_at_us))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_principal_info_clear (out);
+  return rc;
+}
+
+static wyrelog_error_t
+parse_service_credential_row (sqlite3_stmt *stmt,
+    wyl_policy_service_credential_info_t *out)
+{
+  memset (out, 0, sizeof (*out));
+  guint64 version = 0;
+  wyrelog_error_t rc = read_owned_text (stmt, 0, FALSE, 1, 128,
+      &out->credential_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 1, &version);
+  if (rc == WYRELOG_E_OK && version > G_MAXUINT32)
+    rc = WYRELOG_E_POLICY;
+  out->credential_format_version = (guint32) version;
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 2, FALSE, 5, 128, &out->subject_id);
+  if (rc == WYRELOG_E_OK && !wyl_policy_service_subject_is_valid
+      (out->subject_id, strlen (out->subject_id)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 3, FALSE, 1, 128, &out->tenant_id);
+  if (rc == WYRELOG_E_OK
+      && !wyl_policy_store_tenant_id_is_valid (out->tenant_id))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 4, &out->generation);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 5, FALSE, 1, 16, &out->state);
+  version = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 6, &version);
+  if (rc == WYRELOG_E_OK && version > G_MAXUINT32)
+    rc = WYRELOG_E_POLICY;
+  out->verifier_version = (guint32) version;
+  if (rc == WYRELOG_E_OK)
+    rc = read_fixed_blob (stmt, 7, out->salt, sizeof out->salt);
+  if (rc == WYRELOG_E_OK)
+    rc = read_fixed_blob (stmt, 8, out->verifier, sizeof out->verifier);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 9, FALSE, 1, 128, &out->created_by);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 10, FALSE, &out->created_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 11, FALSE, &out->updated_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 12, TRUE, &out->expires_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 13, TRUE, &out->last_used_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 14, TRUE, 1, 128, &out->revoked_by);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 15, TRUE, &out->revoked_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 16, TRUE, 1, 128, &out->rotated_from_id);
+  if (rc == WYRELOG_E_OK && ((g_str_equal (out->state, "active")
+              && (out->revoked_by != NULL || out->revoked_at_us != 0))
+          || (g_str_equal (out->state, "revoked")
+              && (out->revoked_by == NULL || out->revoked_at_us == 0))
+          || (!g_str_equal (out->state, "active")
+              && !g_str_equal (out->state, "revoked"))
+          || (out->revoked_at_us != 0
+              && out->revoked_at_us < out->created_at_us)
+          || out->updated_at_us < out->created_at_us
+          || (out->expires_at_us != 0
+              && out->expires_at_us <= out->created_at_us)
+          || (out->last_used_at_us != 0
+              && out->last_used_at_us < out->created_at_us)
+          || (out->rotated_from_id != NULL
+              && g_str_equal (out->rotated_from_id, out->credential_id))))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_credential_info_clear (out);
+  return rc;
+}
+
+static wyrelog_error_t
+bind_service_filter (sqlite3_stmt *stmt, const gchar *credential_id,
+    const gchar *subject_id, const gchar *tenant_id)
+{
+  int index = 1;
+  wyrelog_error_t rc;
+  if (credential_id != NULL
+      && (rc = bind_text (stmt, index++, credential_id)) != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, index++, subject_id)) != WYRELOG_E_OK)
+    return rc;
+  return bind_text (stmt, index, tenant_id);
+}
+
+static gboolean
+credential_filter_is_valid (const gchar *credential_id,
+    const gchar *subject_id, const gchar *tenant_id)
+{
+  return (credential_id == NULL
+      || (credential_id[0] != '\0' && strlen (credential_id) <= 128))
+      && subject_id != NULL
+      && wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
+      && wyl_policy_store_tenant_id_is_valid (tenant_id);
+}
+
+wyrelog_error_t
+wyl_policy_store_get_principal_kind (wyl_policy_store_t *store,
+    const gchar *subject_id, wyl_policy_principal_kind_t *out_kind)
+{
+  if (out_kind != NULL)
+    *out_kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
+  if (store == NULL || store->db == NULL || subject_id == NULL
+      || subject_id[0] == '\0' || strlen (subject_id) > 256 || out_kind == NULL)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *service_sql =
+      "SELECT subject_id FROM service_principals WHERE subject_id=?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, service_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  gboolean registered = step_rc == SQLITE_ROW;
+  if (registered) {
+    const gchar *stored = (const gchar *) sqlite3_column_text (stmt, 0);
+    int len = sqlite3_column_bytes (stmt, 0);
+    if (sqlite3_column_type (stmt, 0) != SQLITE_TEXT || stored == NULL
+        || len < 0 || memchr (stored, 0, (gsize) len) != NULL
+        || !wyl_policy_service_subject_is_valid (stored, (gsize) len)) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_ROW && step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+
+  const gchar *artifact_sql =
+      "SELECT 1 FROM principal_states WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM totp_enrollments WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM direct_permissions"
+      " WHERE subject_id=? AND perm_id='wr.login.skip_mfa' "
+      "UNION ALL SELECT 1 FROM wyrelog_config"
+      " WHERE config_key='bootstrap_admin_subject' AND config_value=?"
+      " AND config_value<>'legacy-skip' LIMIT 1;";
+  rc = prepare_stmt (store->db, artifact_sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  for (int i = 1; i <= 4; i++) {
+    if ((rc = bind_text (stmt, i, subject_id)) != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_ROW && step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (registered && step_rc == SQLITE_ROW)
+    return WYRELOG_E_POLICY;
+  *out_kind = registered ? WYL_POLICY_PRINCIPAL_KIND_SERVICE :
+      (step_rc == SQLITE_ROW ? WYL_POLICY_PRINCIPAL_KIND_HUMAN :
+      WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_lookup_service_principal (wyl_policy_store_t *store,
+    const gchar *subject_id, wyl_policy_service_principal_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_principal_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL || subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id)))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT subject_id,display_name,state,generation,created_by,created_at_us,"
+      "updated_at_us,disabled_by,disabled_at_us FROM service_principals"
+      " WHERE subject_id=?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    rc = parse_service_principal_row (stmt, out);
+  else
+    rc = step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_service_principal (wyl_policy_store_t *store,
+    wyl_policy_service_principal_cb cb, gpointer user_data)
+{
+  if (store == NULL || store->db == NULL || cb == NULL)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT subject_id,display_name,state,generation,created_by,created_at_us,"
+      "updated_at_us,disabled_by,disabled_at_us FROM service_principals"
+      " ORDER BY subject_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    wyl_policy_service_principal_info_t info = { 0 };
+    rc = parse_service_principal_row (stmt, &info);
+    if (rc == WYRELOG_E_OK)
+      rc = cb (&info, user_data);
+    wyl_policy_service_principal_info_clear (&info);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static const gchar service_credential_columns[] =
+    "credential_id,credential_format_version,subject_id,tenant_id,generation,"
+    "state,verifier_version,salt,verifier,created_by,created_at_us,updated_at_us,"
+    "expires_at_us,last_used_at_us,revoked_by,revoked_at_us,rotated_from_id";
+
+wyrelog_error_t
+wyl_policy_store_lookup_service_credential (wyl_policy_store_t *store,
+    const gchar *credential_id, const gchar *subject_id,
+    const gchar *tenant_id, wyl_policy_service_credential_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL
+      || credential_id == NULL
+      || !credential_filter_is_valid (credential_id, subject_id, tenant_id))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *sql = g_strdup_printf ("SELECT %s FROM service_credentials"
+      " WHERE credential_id=? AND subject_id=? AND tenant_id=?;",
+      service_credential_columns);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_service_filter (stmt, credential_id, subject_id, tenant_id))
+      != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    rc = parse_service_credential_row (stmt, out);
+  else
+    rc = step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_service_credential (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *tenant_id,
+    wyl_policy_service_credential_cb cb, gpointer user_data)
+{
+  if (store == NULL || store->db == NULL || cb == NULL
+      || !credential_filter_is_valid (NULL, subject_id, tenant_id))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *sql = g_strdup_printf ("SELECT %s FROM service_credentials"
+      " WHERE subject_id=? AND tenant_id=? ORDER BY generation,credential_id;",
+      service_credential_columns);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_service_filter (stmt, NULL, subject_id, tenant_id))
+      != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    wyl_policy_service_credential_info_t info = { 0 };
+    rc = parse_service_credential_row (stmt, &info);
+    if (rc == WYRELOG_E_OK)
+      rc = cb (&info, user_data);
+    wyl_policy_service_credential_info_clear (&info);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_load_service_cvk (wyl_policy_store_t *store,
+    wyl_policy_service_cvk_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_cvk_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT slot,generation,envelope_format_version,provider_binding,"
+      "sealed_cvk,created_at_us,updated_at_us FROM service_credential_cvk"
+      " WHERE slot=1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (step_rc != SQLITE_ROW || sqlite3_column_type (stmt, 0) != SQLITE_INTEGER
+      || sqlite3_column_int64 (stmt, 0) != 1) {
+    sqlite3_finalize (stmt);
+    return step_rc == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+  guint64 version = 0;
+  rc = read_positive_u64 (stmt, 1, &out->generation);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 2, &version);
+  if (rc == WYRELOG_E_OK && version > G_MAXUINT32)
+    rc = WYRELOG_E_POLICY;
+  out->envelope_format_version = (guint32) version;
+  if (rc == WYRELOG_E_OK)
+    rc = read_fixed_blob (stmt, 3, out->provider_binding,
+        sizeof out->provider_binding);
+  if (rc == WYRELOG_E_OK) {
+    if (sqlite3_column_type (stmt, 4) != SQLITE_BLOB
+        || sqlite3_column_bytes (stmt, 4) < 1
+        || sqlite3_column_bytes (stmt, 4) > 65536) {
+      rc = WYRELOG_E_POLICY;
+    } else {
+      out->sealed_cvk_len = (gsize) sqlite3_column_bytes (stmt, 4);
+      out->sealed_cvk = g_memdup2 (sqlite3_column_blob (stmt, 4),
+          out->sealed_cvk_len);
+      if (out->sealed_cvk == NULL)
+        rc = WYRELOG_E_NOMEM;
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 5, FALSE, &out->created_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 6, FALSE, &out->updated_at_us);
+  if (rc == WYRELOG_E_OK && out->updated_at_us < out->created_at_us)
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_cvk_info_clear (out);
+  return rc;
+}
+
+static wyrelog_error_t
+parse_service_principal_event_row (sqlite3_stmt *stmt,
+    wyl_policy_service_principal_event_info_t *out)
+{
+  memset (out, 0, sizeof (*out));
+  wyrelog_error_t rc = read_positive_i64 (stmt, 0, FALSE, &out->event_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 1, FALSE, 5, 128, &out->subject_id);
+  if (rc == WYRELOG_E_OK && !wyl_policy_service_subject_is_valid
+      (out->subject_id, strlen (out->subject_id)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 2, FALSE, 1, 16, &out->event);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 3, TRUE, 1, 16, &out->from_state);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 4, FALSE, 1, 16, &out->to_state);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 5, &out->generation);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 6, FALSE, 1, 128, &out->actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 7, TRUE, 1, 256, &out->request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 8, FALSE, &out->created_at_us);
+  if (rc == WYRELOG_E_OK && !((g_str_equal (out->event, "created")
+              && out->from_state == NULL
+              && g_str_equal (out->to_state, "active"))
+          || (g_str_equal (out->event, "disabled")
+              && g_strcmp0 (out->from_state, "active") == 0
+              && g_str_equal (out->to_state, "disabled"))))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_principal_event_info_clear (out);
+  return rc;
+}
+
+static wyrelog_error_t
+parse_service_credential_event_row (sqlite3_stmt *stmt,
+    wyl_policy_service_credential_event_info_t *out)
+{
+  memset (out, 0, sizeof (*out));
+  wyrelog_error_t rc = read_positive_i64 (stmt, 0, FALSE, &out->event_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 1, FALSE, 1, 128, &out->credential_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 2, FALSE, 5, 128, &out->subject_id);
+  if (rc == WYRELOG_E_OK && !wyl_policy_service_subject_is_valid
+      (out->subject_id, strlen (out->subject_id)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 3, FALSE, 1, 128, &out->tenant_id);
+  if (rc == WYRELOG_E_OK
+      && !wyl_policy_store_tenant_id_is_valid (out->tenant_id))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 4, FALSE, 1, 16, &out->event);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 5, TRUE, 1, 16, &out->from_state);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 6, FALSE, 1, 16, &out->to_state);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 7, &out->generation);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 8, FALSE, 1, 128, &out->actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 9, TRUE, 1, 256, &out->request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_owned_text (stmt, 10, TRUE, 1, 128, &out->related_credential_id);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_i64 (stmt, 11, FALSE, &out->created_at_us);
+  if (rc == WYRELOG_E_OK && !(((g_str_equal (out->event, "issued")
+                  || g_str_equal (out->event, "rotated"))
+              && out->from_state == NULL
+              && g_str_equal (out->to_state, "active"))
+          || (g_str_equal (out->event, "revoked")
+              && g_strcmp0 (out->from_state, "active") == 0
+              && g_str_equal (out->to_state, "revoked"))))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_credential_event_info_clear (out);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_service_principal_event (wyl_policy_store_t *store,
+    const gchar *subject_id, wyl_policy_service_principal_event_cb cb,
+    gpointer user_data)
+{
+  if (store == NULL || store->db == NULL || cb == NULL || subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id)))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT event_id,subject_id,event,from_state,to_state,generation,"
+      "actor_subject_id,request_id,created_at_us FROM service_principal_events"
+      " WHERE subject_id=? ORDER BY created_at_us,event_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    wyl_policy_service_principal_event_info_t info = { 0 };
+    rc = parse_service_principal_event_row (stmt, &info);
+    if (rc == WYRELOG_E_OK)
+      rc = cb (&info, user_data);
+    wyl_policy_service_principal_event_info_clear (&info);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+wyl_policy_store_foreach_service_credential_event (wyl_policy_store_t *store,
+    const gchar *credential_id, const gchar *subject_id,
+    const gchar *tenant_id, wyl_policy_service_credential_event_cb cb,
+    gpointer user_data)
+{
+  if (store == NULL || store->db == NULL || cb == NULL
+      || credential_id == NULL
+      || !credential_filter_is_valid (credential_id, subject_id, tenant_id))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT event_id,credential_id,subject_id,tenant_id,event,from_state,"
+      "to_state,generation,actor_subject_id,request_id,related_credential_id,"
+      "created_at_us FROM service_credential_events WHERE credential_id=?"
+      " AND subject_id=? AND tenant_id=? ORDER BY created_at_us,event_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_service_filter (stmt, credential_id, subject_id, tenant_id))
+      != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    wyl_policy_service_credential_event_info_t info = { 0 };
+    rc = parse_service_credential_event_row (stmt, &info);
+    if (rc == WYRELOG_E_OK)
+      rc = cb (&info, user_data);
+    wyl_policy_service_credential_event_info_clear (&info);
+    if (rc != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
 wyrelog_error_t
 wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
 {
