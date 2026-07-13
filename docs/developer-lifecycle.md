@@ -93,3 +93,32 @@ provider is validated and used. An old-provider failure, including
 key, moves new-provider ownership into the store, releases the old provider
 while the lease is held, and closes the store; failures restore the old key and
 release both providers exactly once.
+
+## Service credential verification key
+
+The service credential CVK is created only by the issuance path. The
+existing-only path never creates authority: an empty store returns
+`WYRELOG_E_NOT_FOUND`, while credentials without the singleton CVK row are a
+policy-corruption failure. Both paths reject an outer SQLite transaction and
+serialize their top-level `BEGIN IMMEDIATE` transaction with a per-store
+mutex. A newly generated or unsealed CVK becomes observable through the
+store's borrowed cache only after the database commit succeeds.
+
+The cache is a locked, store-owned 124-byte version-1 envelope. It is wiped,
+unlocked, and freed at store close. The envelope binds its fixed magic,
+domain, version, singleton slot, generation, provider binding, and 32-byte CVK
+at fixed byte offsets. The provider binding is derived under the KeyProvider
+label `wyrelog.service-credential.cvk.provider-binding.v1` and a separately
+domain-separated keyed BLAKE2b transcript. Provider outputs are always
+released with the producing provider's `clear_sealed_blob` callback.
+
+The optional CVK runtime table is shallow-copied at store open. Its callbacks
+and `data` pointer are borrowed; no ownership is transferred. The callback
+code and data context must outlive the store and remain valid through the end
+of `wyl_policy_store_close()`.
+
+Until credential-preserving CVK resealing is implemented, root-provider
+rotation fails with `WYRELOG_E_POLICY` when the singleton CVK row is present.
+This gate runs before any operational callback on the new provider, preserving
+the old canonical store. Rotation without a CVK row continues to use the
+existing store-key rotation path.

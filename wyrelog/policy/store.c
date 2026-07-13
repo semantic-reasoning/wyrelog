@@ -41,6 +41,7 @@
 
 #include "store-private.h"
 
+#include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
@@ -56,6 +57,35 @@
 #define WYL_POLICY_STORE_MAGIC "WYLPS"
 #define WYL_POLICY_STORE_MAGIC_LEN 5
 #define WYL_POLICY_STORE_FORMAT_VERSION 1
+
+#define WYL_SERVICE_CVK_ENVELOPE_BYTES 124u
+#define WYL_SERVICE_CVK_MAGIC_OFFSET 0u
+#define WYL_SERVICE_CVK_MAGIC_BYTES 8u
+#define WYL_SERVICE_CVK_DOMAIN_OFFSET 8u
+#define WYL_SERVICE_CVK_DOMAIN_BYTES 40u
+#define WYL_SERVICE_CVK_VERSION_OFFSET 48u
+#define WYL_SERVICE_CVK_SLOT_OFFSET 49u
+#define WYL_SERVICE_CVK_GENERATION_OFFSET 50u
+#define WYL_SERVICE_CVK_BINDING_OFFSET 58u
+#define WYL_SERVICE_CVK_CVK_LEN_OFFSET 90u
+#define WYL_SERVICE_CVK_CVK_OFFSET 92u
+#define WYL_SERVICE_CVK_ENVELOPE_VERSION 1u
+#define WYL_SERVICE_CVK_SLOT 1u
+#define WYL_SERVICE_CVK_GENERATION 1u
+#define WYL_SERVICE_CVK_BINDING_BYTES 32u
+#define WYL_SERVICE_CVK_MAGIC "WYLCVK1\0"
+#define WYL_SERVICE_CVK_DOMAIN "wyrelog.service-credential.cvk-envelope"
+#define WYL_SERVICE_CVK_BINDING_LABEL \
+  "wyrelog.service-credential.cvk.provider-binding.v1"
+#define WYL_SERVICE_CVK_BINDING_DOMAIN \
+  "wyrelog.service-credential.cvk.provider-binding"
+
+G_STATIC_ASSERT (sizeof (WYL_SERVICE_CVK_MAGIC) - 1
+    == WYL_SERVICE_CVK_MAGIC_BYTES);
+G_STATIC_ASSERT (sizeof (WYL_SERVICE_CVK_DOMAIN) ==
+    WYL_SERVICE_CVK_DOMAIN_BYTES);
+G_STATIC_ASSERT (WYL_SERVICE_CVK_CVK_OFFSET +
+    WYL_SERVICE_CREDENTIAL_CVK_BYTES == WYL_SERVICE_CVK_ENVELOPE_BYTES);
 
 typedef struct
 {
@@ -100,7 +130,110 @@ struct wyl_policy_store_t
   gboolean encrypted;
   gboolean key_materialized;
   gboolean suppress_close_persist;
+  GMutex service_cvk_mutex;
+  wyl_policy_store_cvk_runtime_t service_cvk_runtime;
+  guint8 *service_cvk_envelope;
 };
+
+static gpointer
+cvk_default_alloc (gpointer data, gsize size)
+{
+  (void) data;
+  return sodium_malloc (size);
+}
+
+static int
+cvk_default_lock (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  return sodium_mlock (ptr, size);
+}
+
+static void
+cvk_default_wipe (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  sodium_memzero (ptr, size);
+}
+
+static int
+cvk_default_unlock (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  return sodium_munlock (ptr, size);
+}
+
+static void
+cvk_default_free (gpointer data, gpointer ptr)
+{
+  (void) data;
+  sodium_free (ptr);
+}
+
+static int
+cvk_default_random (gpointer data, guint8 *out, gsize len)
+{
+  (void) data;
+  randombytes_buf (out, len);
+  return 0;
+}
+
+static gint64
+cvk_default_now_us (gpointer data)
+{
+  (void) data;
+  return g_get_real_time ();
+}
+
+static wyrelog_error_t
+cvk_runtime_snapshot (const wyl_policy_store_cvk_runtime_t *runtime,
+    wyl_policy_store_cvk_runtime_t *out)
+{
+  if (sodium_init () < 0)
+    return WYRELOG_E_CRYPTO;
+  if (runtime == NULL) {
+    *out = (wyl_policy_store_cvk_runtime_t) {
+    .secure_alloc = cvk_default_alloc,.secure_lock =
+          cvk_default_lock,.secure_wipe = cvk_default_wipe,.secure_unlock =
+          cvk_default_unlock,.secure_free = cvk_default_free,.fill_random =
+          cvk_default_random,.now_us = cvk_default_now_us,};
+  } else {
+    *out = *runtime;
+  }
+  if (out->secure_alloc == NULL || out->secure_lock == NULL
+      || out->secure_wipe == NULL || out->secure_unlock == NULL
+      || out->secure_free == NULL || out->fill_random == NULL
+      || out->now_us == NULL)
+    return WYRELOG_E_INVALID;
+  return WYRELOG_E_OK;
+}
+
+static guint8 *
+cvk_locked_alloc (wyl_policy_store_t *store, gsize size)
+{
+  wyl_policy_store_cvk_runtime_t *runtime = &store->service_cvk_runtime;
+  guint8 *ptr = runtime->secure_alloc (runtime->data, size);
+  if (ptr == NULL)
+    return NULL;
+  if (runtime->secure_lock (runtime->data, ptr, size) != 0) {
+    runtime->secure_wipe (runtime->data, ptr, size);
+    runtime->secure_free (runtime->data, ptr);
+    return NULL;
+  }
+  runtime->secure_wipe (runtime->data, ptr, size);
+  return ptr;
+}
+
+static void
+cvk_locked_free (wyl_policy_store_t *store, guint8 *ptr, gsize size)
+{
+  if (ptr == NULL)
+    return;
+  wyl_policy_store_cvk_runtime_t *runtime = &store->service_cvk_runtime;
+  runtime->secure_wipe (runtime->data, ptr, size);
+  (void) runtime->secure_unlock (runtime->data, ptr, size);
+  runtime->secure_free (runtime->data, ptr);
+}
 
 typedef struct
 {
@@ -1682,6 +1815,18 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
   rc = wyl_policy_store_create_schema (store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
+  gboolean service_cvk_present = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = query_has_rows (store->db,
+        "SELECT 1 FROM service_credential_cvk WHERE slot=1;",
+        &service_cvk_present);
+  if (rc == WYRELOG_E_OK && service_cvk_present) {
+    /* The validated old-provider work database is unchanged. The row gate is
+     * an intentional no-op, so close must not rewrite the encrypted canonical
+     * file with a fresh nonce and violate byte-for-byte failure atomicity. */
+    store->suppress_close_persist = TRUE;
+    rc = WYRELOG_E_POLICY;
+  }
   if (rc == WYRELOG_E_OK)
     rc = owned_keyprovider_validate (&new_provider);
   if (rc == WYRELOG_E_OK && !new_provider.owned)
@@ -1730,11 +1875,17 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     effective_path = ":memory:";
 
   wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
+  g_mutex_init (&self->service_cvk_mutex);
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
   self->canonical_path = g_strdup (effective_path);
   self->canonical_dirfd = -1;
   wyrelog_error_t rc = WYRELOG_E_OK;
+
+  rc = cvk_runtime_snapshot (opts->service_cvk_runtime,
+      &self->service_cvk_runtime);
+  if (rc != WYRELOG_E_OK)
+    goto fail;
 
   gboolean provider_backed = opts->require_encrypted || self->keyprovider.owned;
   if (!path_is_memory_db (effective_path) && provider_backed) {
@@ -1920,6 +2071,9 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   }
 #endif
   policy_store_zero_key_material (store);
+  cvk_locked_free (store, store->service_cvk_envelope,
+      WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  store->service_cvk_envelope = NULL;
   owned_keyprovider_release (&store->rotation_cleanup_keyprovider);
   owned_keyprovider_release (&store->keyprovider);
   wyl_policy_store_lease_release (store->lease);
@@ -1928,6 +2082,7 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_clear_pointer (&store->work_basename, g_free);
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
+  g_mutex_clear (&store->service_cvk_mutex);
   g_free (store);
 }
 
@@ -4526,6 +4681,380 @@ wyl_policy_store_load_service_cvk (wyl_policy_store_t *store,
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_cvk_info_clear (out);
   return rc;
+}
+
+static void
+cvk_put_u64_be (guint8 out[8], guint64 value)
+{
+  for (gint i = 7; i >= 0; i--) {
+    out[i] = (guint8) value;
+    value >>= 8;
+  }
+}
+
+static guint64
+cvk_get_u64_be (const guint8 in[8])
+{
+  guint64 value = 0;
+  for (guint i = 0; i < 8; i++)
+    value = (value << 8) | in[i];
+  return value;
+}
+
+static wyrelog_error_t
+service_cvk_provider_binding (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *provider, guint8 out[WYL_SERVICE_CVK_BINDING_BYTES])
+{
+  if (provider == NULL || !provider->owned)
+    return WYRELOG_E_POLICY;
+  gsize state_len = crypto_generichash_statebytes ();
+  gsize scratch_len = state_len + 2 * WYL_SERVICE_CVK_BINDING_BYTES;
+  guint8 *scratch = cvk_locked_alloc (store, scratch_len);
+  if (scratch == NULL)
+    return WYRELOG_E_NOMEM;
+  crypto_generichash_state *state = (crypto_generichash_state *) scratch;
+  guint8 *derived = scratch + state_len;
+  guint8 *digest = derived + WYL_SERVICE_CVK_BINDING_BYTES;
+  wyrelog_error_t rc = provider->vtable.derive (provider->state,
+      WYL_SERVICE_CVK_BINDING_LABEL, derived,
+      WYL_SERVICE_CVK_BINDING_BYTES);
+  if (rc != WYRELOG_E_OK) {
+    rc = WYRELOG_E_CRYPTO;
+    goto out;
+  }
+  static const guint8 suffix[2] = { 0x00, 0x01 };
+  int failed = crypto_generichash_init (state, derived,
+      WYL_SERVICE_CVK_BINDING_BYTES, WYL_SERVICE_CVK_BINDING_BYTES);
+  if (failed == 0)
+    failed = crypto_generichash_update (state,
+        (const guint8 *) WYL_SERVICE_CVK_BINDING_DOMAIN,
+        sizeof (WYL_SERVICE_CVK_BINDING_DOMAIN) - 1);
+  if (failed == 0)
+    failed = crypto_generichash_update (state, suffix, sizeof suffix);
+  if (failed == 0)
+    failed = crypto_generichash_final (state, digest,
+        WYL_SERVICE_CVK_BINDING_BYTES);
+  if (failed != 0) {
+    rc = WYRELOG_E_CRYPTO;
+    goto out;
+  }
+  memcpy (out, digest, WYL_SERVICE_CVK_BINDING_BYTES);
+  rc = WYRELOG_E_OK;
+out:
+  cvk_locked_free (store, scratch, scratch_len);
+  return rc;
+}
+
+static void
+service_cvk_build_envelope (guint8 envelope[WYL_SERVICE_CVK_ENVELOPE_BYTES],
+    guint64 generation,
+    const guint8 binding[WYL_SERVICE_CVK_BINDING_BYTES],
+    const guint8 cvk[WYL_SERVICE_CREDENTIAL_CVK_BYTES])
+{
+  g_return_if_fail (generation >= 1 && generation <= G_MAXINT64);
+  memcpy (envelope + WYL_SERVICE_CVK_MAGIC_OFFSET, WYL_SERVICE_CVK_MAGIC,
+      WYL_SERVICE_CVK_MAGIC_BYTES);
+  memcpy (envelope + WYL_SERVICE_CVK_DOMAIN_OFFSET, WYL_SERVICE_CVK_DOMAIN,
+      WYL_SERVICE_CVK_DOMAIN_BYTES);
+  envelope[WYL_SERVICE_CVK_VERSION_OFFSET] = WYL_SERVICE_CVK_ENVELOPE_VERSION;
+  envelope[WYL_SERVICE_CVK_SLOT_OFFSET] = WYL_SERVICE_CVK_SLOT;
+  cvk_put_u64_be (envelope + WYL_SERVICE_CVK_GENERATION_OFFSET, generation);
+  memcpy (envelope + WYL_SERVICE_CVK_BINDING_OFFSET, binding,
+      WYL_SERVICE_CVK_BINDING_BYTES);
+  envelope[WYL_SERVICE_CVK_CVK_LEN_OFFSET] = 0x00;
+  envelope[WYL_SERVICE_CVK_CVK_LEN_OFFSET + 1] =
+      WYL_SERVICE_CREDENTIAL_CVK_BYTES;
+  memcpy (envelope + WYL_SERVICE_CVK_CVK_OFFSET, cvk,
+      WYL_SERVICE_CREDENTIAL_CVK_BYTES);
+}
+
+static wyrelog_error_t
+service_cvk_seal_envelope (WylOwnedKeyProvider *provider,
+    const guint8 envelope[WYL_SERVICE_CVK_ENVELOPE_BYTES],
+    wyl_sealed_blob_t *out_blob)
+{
+  *out_blob = (wyl_sealed_blob_t) {
+  0};
+  if (provider == NULL || !provider->owned)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = provider->vtable.seal (provider->state, envelope,
+      WYL_SERVICE_CVK_ENVELOPE_BYTES, out_blob);
+  if (rc != WYRELOG_E_OK || out_blob->bytes == NULL || out_blob->len == 0
+      || out_blob->len > 65536 || out_blob->len > G_MAXINT)
+    return WYRELOG_E_CRYPTO;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_cvk_validate_envelope (const guint8 *envelope, guint64 generation,
+    const guint8 binding[WYL_SERVICE_CVK_BINDING_BYTES])
+{
+  if (memcmp (envelope + WYL_SERVICE_CVK_MAGIC_OFFSET, WYL_SERVICE_CVK_MAGIC,
+          WYL_SERVICE_CVK_MAGIC_BYTES) != 0
+      || memcmp (envelope + WYL_SERVICE_CVK_DOMAIN_OFFSET,
+          WYL_SERVICE_CVK_DOMAIN, WYL_SERVICE_CVK_DOMAIN_BYTES) != 0
+      || envelope[WYL_SERVICE_CVK_VERSION_OFFSET]
+      != WYL_SERVICE_CVK_ENVELOPE_VERSION
+      || envelope[WYL_SERVICE_CVK_SLOT_OFFSET] != WYL_SERVICE_CVK_SLOT
+      || cvk_get_u64_be (envelope + WYL_SERVICE_CVK_GENERATION_OFFSET)
+      != generation
+      || envelope[WYL_SERVICE_CVK_CVK_LEN_OFFSET] != 0
+      || envelope[WYL_SERVICE_CVK_CVK_LEN_OFFSET + 1]
+      != WYL_SERVICE_CREDENTIAL_CVK_BYTES)
+    return WYRELOG_E_POLICY;
+  if (sodium_memcmp (envelope + WYL_SERVICE_CVK_BINDING_OFFSET, binding,
+          WYL_SERVICE_CVK_BINDING_BYTES) != 0)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_cvk_begin (wyl_policy_store_t *store)
+{
+  if (!sqlite3_get_autocommit (store->db))
+    return WYRELOG_E_BUSY;
+  int sql_rc = sqlite3_exec (store->db, "BEGIN IMMEDIATE;", NULL, NULL, NULL);
+  if (sql_rc == SQLITE_BUSY || sql_rc == SQLITE_LOCKED)
+    return WYRELOG_E_BUSY;
+  return sql_rc == SQLITE_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_cvk_unseal_validate (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *provider,
+    const wyl_policy_service_cvk_info_t *info, guint8 **out_envelope)
+{
+  if (info->generation > G_MAXINT64
+      || info->envelope_format_version != WYL_SERVICE_CVK_ENVELOPE_VERSION)
+    return WYRELOG_E_POLICY;
+  guint8 binding[WYL_SERVICE_CVK_BINDING_BYTES];
+  wyrelog_error_t rc = service_cvk_provider_binding (store, provider, binding);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sodium_memcmp (binding, info->provider_binding, sizeof binding) != 0) {
+    sodium_memzero (binding, sizeof binding);
+    return WYRELOG_E_CRYPTO;
+  }
+  guint8 *envelope = cvk_locked_alloc (store,
+      WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  if (envelope == NULL) {
+    sodium_memzero (binding, sizeof binding);
+    return WYRELOG_E_NOMEM;
+  }
+  wyl_sealed_blob_t blob = {
+    .bytes = info->sealed_cvk,
+    .len = info->sealed_cvk_len,
+  };
+  gsize written = 0;
+  rc = provider->vtable.unseal (provider->state, &blob,
+      envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES, &written);
+  if (rc != WYRELOG_E_OK || written != WYL_SERVICE_CVK_ENVELOPE_BYTES) {
+    rc = WYRELOG_E_CRYPTO;
+    goto fail;
+  }
+  rc = service_cvk_validate_envelope (envelope, info->generation, binding);
+  if (rc != WYRELOG_E_OK)
+    goto fail;
+  sodium_memzero (binding, sizeof binding);
+  *out_envelope = envelope;
+  return WYRELOG_E_OK;
+fail:
+  sodium_memzero (binding, sizeof binding);
+  cvk_locked_free (store, envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  return rc;
+}
+
+static wyrelog_error_t
+service_cvk_insert_initial (wyl_policy_store_t *store, guint8 **out_envelope)
+{
+  WylOwnedKeyProvider *provider = &store->keyprovider;
+  if (!provider->owned)
+    return WYRELOG_E_POLICY;
+  guint8 binding[WYL_SERVICE_CVK_BINDING_BYTES];
+  wyrelog_error_t rc = service_cvk_provider_binding (store, provider, binding);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint8 *envelope = cvk_locked_alloc (store,
+      WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  if (envelope == NULL) {
+    sodium_memzero (binding, sizeof binding);
+    return WYRELOG_E_NOMEM;
+  }
+  guint8 *cvk = cvk_locked_alloc (store, WYL_SERVICE_CREDENTIAL_CVK_BYTES);
+  if (cvk == NULL) {
+    rc = WYRELOG_E_NOMEM;
+    goto fail;
+  }
+  if (store->service_cvk_runtime.fill_random (store->service_cvk_runtime.data,
+          cvk, WYL_SERVICE_CREDENTIAL_CVK_BYTES) != 0) {
+    rc = WYRELOG_E_CRYPTO;
+    goto fail_cvk;
+  }
+  service_cvk_build_envelope (envelope, WYL_SERVICE_CVK_GENERATION, binding,
+      cvk);
+  cvk_locked_free (store, cvk, WYL_SERVICE_CREDENTIAL_CVK_BYTES);
+  cvk = NULL;
+  wyl_sealed_blob_t sealed = { 0 };
+  rc = service_cvk_seal_envelope (provider, envelope, &sealed);
+  if (rc != WYRELOG_E_OK)
+    goto fail_blob;
+  gint64 now_us =
+      store->service_cvk_runtime.now_us (store->service_cvk_runtime.data);
+  if (now_us <= 0) {
+    rc = WYRELOG_E_IO;
+    goto fail_blob;
+  }
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO service_credential_cvk"
+      "(slot,generation,envelope_format_version,provider_binding,sealed_cvk,"
+      "created_at_us,updated_at_us) VALUES(1,1,1,?,?,?,?);";
+  rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_blob (stmt, 1, binding, sizeof binding,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 2, sealed.bytes, (int) sealed.len,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 3, now_us) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 4, now_us) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+fail_blob:
+  provider->vtable.clear_sealed_blob (provider->state, &sealed);
+  if (rc != WYRELOG_E_OK)
+    goto fail;
+  sodium_memzero (binding, sizeof binding);
+  *out_envelope = envelope;
+  return WYRELOG_E_OK;
+fail_cvk:
+  cvk_locked_free (store, cvk, WYL_SERVICE_CREDENTIAL_CVK_BYTES);
+fail:
+  sodium_memzero (binding, sizeof binding);
+  cvk_locked_free (store, envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  return rc;
+}
+
+static wyrelog_error_t
+service_cvk_materialize (wyl_policy_store_t *store, gboolean allow_create,
+    const guint8 **out_cvk, gsize *out_len)
+{
+  *out_cvk = NULL;
+  *out_len = 0;
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+  if (!store->keyprovider.owned)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&store->service_cvk_mutex);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  rc = service_cvk_begin (store);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  gboolean transaction = TRUE;
+  wyl_policy_service_cvk_info_t info = { 0 };
+  guint8 *candidate = NULL;
+  rc = wyl_policy_store_validate_service_schema (store);
+  if (rc != WYRELOG_E_OK)
+    goto finish_transaction;
+  if (store->service_cvk_envelope != NULL)
+    goto commit;
+  rc = wyl_policy_store_load_service_cvk (store, &info);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    gboolean credentials = FALSE;
+    rc = query_has_rows (store->db,
+        "SELECT 1 FROM service_credentials LIMIT 1;", &credentials);
+    if (rc == WYRELOG_E_OK && credentials)
+      rc = WYRELOG_E_POLICY;
+    else if (rc == WYRELOG_E_OK && allow_create)
+      rc = service_cvk_insert_initial (store, &candidate);
+    else if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_NOT_FOUND;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = service_cvk_unseal_validate (store, &store->keyprovider, &info,
+        &candidate);
+  }
+  wyl_policy_service_cvk_info_clear (&info);
+commit:
+  if (rc == WYRELOG_E_OK) {
+    rc = exec_sql (store->db, "COMMIT;");
+    if (rc == WYRELOG_E_OK) {
+      transaction = FALSE;
+      if (store->service_cvk_envelope == NULL) {
+        store->service_cvk_envelope = candidate;
+        candidate = NULL;
+      }
+      *out_cvk = store->service_cvk_envelope + WYL_SERVICE_CVK_CVK_OFFSET;
+      *out_len = WYL_SERVICE_CREDENTIAL_CVK_BYTES;
+    }
+  } else if (rc == WYRELOG_E_NOT_FOUND) {
+    wyrelog_error_t commit_rc = exec_sql (store->db, "COMMIT;");
+    if (commit_rc == WYRELOG_E_OK)
+      transaction = FALSE;
+    else
+      rc = commit_rc;
+  }
+finish_transaction:
+  if (transaction)
+    (void) exec_sql (store->db, "ROLLBACK;");
+  cvk_locked_free (store, candidate, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+out:
+  g_mutex_unlock (&store->service_cvk_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_materialize_service_cvk_existing (wyl_policy_store_t *store,
+    const guint8 **out_cvk, gsize *out_len)
+{
+  if (out_cvk == NULL || out_len == NULL)
+    return WYRELOG_E_INVALID;
+  return service_cvk_materialize (store, FALSE, out_cvk, out_len);
+}
+
+wyrelog_error_t
+wyl_policy_store_ensure_service_cvk_for_issuance (wyl_policy_store_t *store,
+    const guint8 **out_cvk, gsize *out_len)
+{
+  if (out_cvk == NULL || out_len == NULL)
+    return WYRELOG_E_INVALID;
+  return service_cvk_materialize (store, TRUE, out_cvk, out_len);
+}
+
+wyrelog_error_t
+wyl_policy_store_verify_service_credential_secret (wyl_policy_store_t *store,
+    const wyl_policy_service_credential_info_t *credential,
+    const gchar *presented_secret, gsize presented_secret_len,
+    gboolean *out_match)
+{
+  if (store == NULL || credential == NULL || presented_secret == NULL
+      || out_match == NULL)
+    return WYRELOG_E_INVALID;
+  if (credential->credential_format_version
+      != WYL_SERVICE_CREDENTIAL_FORMAT_VERSION
+      || credential->verifier_version
+      != WYL_SERVICE_CREDENTIAL_VERIFIER_VERSION
+      || !wyl_service_credential_id_is_canonical (credential->credential_id,
+          credential->credential_id != NULL
+          ? strlen (credential->credential_id) : 0)
+      || !wyl_policy_service_subject_is_valid (credential->subject_id,
+          credential->subject_id != NULL ? strlen (credential->subject_id) : 0)
+      || !wyl_policy_store_tenant_id_is_valid (credential->tenant_id))
+    return WYRELOG_E_POLICY;
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  wyrelog_error_t rc =
+      wyl_policy_store_materialize_service_cvk_existing (store, &cvk, &cvk_len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_service_credential_verify (credential->credential_format_version,
+      credential->verifier_version, cvk, cvk_len, credential->credential_id,
+      strlen (credential->credential_id), credential->tenant_id,
+      strlen (credential->tenant_id), credential->subject_id,
+      strlen (credential->subject_id), credential->salt,
+      sizeof credential->salt, credential->verifier,
+      sizeof credential->verifier, presented_secret, presented_secret_len,
+      out_match);
 }
 
 static wyrelog_error_t

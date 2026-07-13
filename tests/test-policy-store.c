@@ -544,8 +544,29 @@ check_encrypted_policy_store_hardening_and_rotation (void)
   }
 
   if (rotate_encrypted_policy_store (store_path, old_key_path, new_key_path)
-      != WYRELOG_E_OK)
+      != WYRELOG_E_POLICY)
     return 324;
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, old_key_path, &store)
+        != WYRELOG_E_OK)
+      return 338;
+    wyl_policy_service_cvk_info_t cvk = { 0 };
+    if (wyl_policy_store_load_service_cvk (store, &cvk) != WYRELOG_E_OK
+        || cvk.sealed_cvk_len != 3
+        || memcmp (cvk.sealed_cvk, "\x01\x02\x03", 3) != 0) {
+      wyl_policy_service_cvk_info_clear (&cvk);
+      return 339;
+    }
+    wyl_policy_service_cvk_info_clear (&cvk);
+    if (sqlite3_exec (wyl_policy_store_get_db (store),
+            "DELETE FROM service_credential_cvk;", NULL, NULL, NULL)
+        != SQLITE_OK)
+      return 340;
+  }
+  if (rotate_encrypted_policy_store (store_path, old_key_path, new_key_path)
+      != WYRELOG_E_OK)
+    return 341;
   g_clear_pointer (&wrong_store, wyl_policy_store_close);
   if (open_encrypted_policy_store (store_path, old_key_path, &wrong_store)
       == WYRELOG_E_OK)
@@ -561,13 +582,9 @@ check_encrypted_policy_store_hardening_and_rotation (void)
     if (g_strcmp0 (mode, "development") != 0)
       return 328;
     wyl_policy_service_cvk_info_t cvk = { 0 };
-    if (wyl_policy_store_load_service_cvk (store, &cvk) != WYRELOG_E_OK)
+    if (wyl_policy_store_load_service_cvk (store, &cvk)
+        != WYRELOG_E_NOT_FOUND)
       return 334;
-    if (cvk.sealed_cvk_len != 3
-        || memcmp (cvk.sealed_cvk, "\x01\x02\x03", 3) != 0) {
-      wyl_policy_service_cvk_info_clear (&cvk);
-      return 335;
-    }
     wyl_policy_service_cvk_info_clear (&cvk);
   }
 
@@ -586,13 +603,9 @@ check_encrypted_policy_store_hardening_and_rotation (void)
     if (g_strcmp0 (mode, "development") != 0)
       return 332;
     wyl_policy_service_cvk_info_t cvk = { 0 };
-    if (wyl_policy_store_load_service_cvk (store, &cvk) != WYRELOG_E_OK)
+    if (wyl_policy_store_load_service_cvk (store, &cvk)
+        != WYRELOG_E_NOT_FOUND)
       return 336;
-    if (cvk.sealed_cvk_len != 3
-        || memcmp (cvk.sealed_cvk, "\x01\x02\x03", 3) != 0) {
-      wyl_policy_service_cvk_info_clear (&cvk);
-      return 337;
-    }
     wyl_policy_service_cvk_info_clear (&cvk);
   }
 

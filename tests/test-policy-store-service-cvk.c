@@ -1,0 +1,968 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <sodium.h>
+#include <sqlite3.h>
+#include <string.h>
+
+#include "auth/service-credential-private.h"
+#include "policy/store-private.h"
+
+#define ENVELOPE_BYTES 124u
+#define CVK_OFFSET 92u
+#define FIXTURE_ID "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
+#define FIXTURE_SECRET "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8"
+
+typedef struct
+{
+  gchar events[512];
+  guint n_events;
+} SharedTrace;
+
+typedef struct
+{
+  guint probes;
+  guint derives;
+  guint seals;
+  guint unseals;
+  guint clears;
+  guint wipes;
+  guint binding_derives;
+  guint store_derives;
+  gboolean fail_binding_derive;
+  gboolean fail_seal;
+  gboolean fail_unseal;
+  gssize unseal_written_override;
+  SharedTrace *trace;
+} TestProvider;
+
+static void
+trace_event (SharedTrace *trace, gchar value)
+{
+  if (trace == NULL)
+    return;
+  g_assert_cmpuint (trace->n_events, <, G_N_ELEMENTS (trace->events));
+  trace->events[trace->n_events++] = value;
+}
+
+static wyrelog_error_t
+provider_probe (gpointer data)
+{
+  TestProvider *p = data;
+  p->probes++;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+provider_derive (gpointer data, const gchar *label, guint8 *out, gsize len)
+{
+  TestProvider *p = data;
+  p->derives++;
+  g_assert_cmpuint (len, ==, 32);
+  if (g_str_equal (label, "wyrelog.service-credential.cvk.provider-binding.v1")) {
+    p->binding_derives++;
+    if (p->fail_binding_derive)
+      return WYRELOG_E_CRYPTO;
+    for (gsize i = 0; i < len; i++)
+      out[i] = (guint8) i;
+  } else {
+    p->store_derives++;
+    g_assert_cmpstr (label, ==, "policy_store_v1");
+    for (gsize i = 0; i < len; i++)
+      out[i] = (guint8) (0x40 + i);
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+provider_seal (gpointer data, const guint8 *plaintext, gsize len,
+    wyl_sealed_blob_t *out)
+{
+  TestProvider *p = data;
+  p->seals++;
+  *out = (wyl_sealed_blob_t) {
+  0};
+  if (p->fail_seal)
+    return WYRELOG_E_CRYPTO;
+  out->bytes = g_malloc (len);
+  out->len = len;
+  for (gsize i = 0; i < len; i++)
+    out->bytes[i] = plaintext[i] ^ 0xa5;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+provider_unseal (gpointer data, const wyl_sealed_blob_t *blob, guint8 *out,
+    gsize capacity, gsize *written)
+{
+  TestProvider *p = data;
+  p->unseals++;
+  if (p->fail_unseal)
+    return WYRELOG_E_CRYPTO;
+  if (capacity < blob->len)
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < blob->len; i++)
+    out[i] = blob->bytes[i] ^ 0xa5;
+  *written = p->unseal_written_override > 0
+      ? (gsize) p->unseal_written_override : blob->len;
+  return WYRELOG_E_OK;
+}
+
+static void
+provider_wipe (gpointer data)
+{
+  TestProvider *p = data;
+  p->wipes++;
+  trace_event (p->trace, 'P');
+}
+
+static void
+provider_clear (gpointer data, wyl_sealed_blob_t *blob)
+{
+  TestProvider *p = data;
+  p->clears++;
+  if (blob != NULL && blob->bytes != NULL) {
+    sodium_memzero (blob->bytes, blob->len);
+    g_free (blob->bytes);
+  }
+  if (blob != NULL)
+    *blob = (wyl_sealed_blob_t) {
+    0};
+}
+
+static const wyl_keyprovider_vtable_t provider_vtable = {
+  .probe = provider_probe,
+  .seal = provider_seal,
+  .unseal = provider_unseal,
+  .derive = provider_derive,
+  .wipe = provider_wipe,
+  .clear_sealed_blob = provider_clear,
+};
+
+typedef struct
+{
+  guint allocs;
+  guint locks;
+  guint wipes;
+  guint unlocks;
+  guint frees;
+  guint rng_calls;
+  guint clock_calls;
+  guint fail_alloc_at;
+  guint fail_lock_at;
+  gboolean fail_rng;
+  gchar events[256];
+  guint n_events;
+  SharedTrace *trace;
+} TestRuntime;
+
+static void
+event (TestRuntime *r, gchar value)
+{
+  g_assert_cmpuint (r->n_events, <, G_N_ELEMENTS (r->events));
+  r->events[r->n_events++] = value;
+  trace_event (r->trace, value);
+}
+
+static gpointer
+runtime_alloc (gpointer data, gsize size)
+{
+  TestRuntime *r = data;
+  r->allocs++;
+  event (r, 'A');
+  return r->fail_alloc_at == r->allocs ? NULL : g_malloc (size);
+}
+
+static int
+runtime_lock (gpointer data, gpointer ptr, gsize size)
+{
+  TestRuntime *r = data;
+  (void) ptr;
+  (void) size;
+  r->locks++;
+  event (r, 'L');
+  return r->fail_lock_at == r->locks ? -1 : 0;
+}
+
+static void
+runtime_wipe (gpointer data, gpointer ptr, gsize size)
+{
+  TestRuntime *r = data;
+  r->wipes++;
+  event (r, 'W');
+  sodium_memzero (ptr, size);
+}
+
+static int
+runtime_unlock (gpointer data, gpointer ptr, gsize size)
+{
+  TestRuntime *r = data;
+  (void) ptr;
+  (void) size;
+  r->unlocks++;
+  event (r, 'U');
+  return 0;
+}
+
+static void
+runtime_free (gpointer data, gpointer ptr)
+{
+  TestRuntime *r = data;
+  r->frees++;
+  event (r, 'F');
+  g_free (ptr);
+}
+
+static int
+runtime_random (gpointer data, guint8 *out, gsize len)
+{
+  TestRuntime *r = data;
+  r->rng_calls++;
+  event (r, 'R');
+  if (r->fail_rng)
+    return -1;
+  g_assert_cmpuint (len, ==, 32);
+  for (gsize i = 0; i < len; i++)
+    out[i] = (guint8) (0x80 + i);
+  return 0;
+}
+
+static gint64
+runtime_now (gpointer data)
+{
+  TestRuntime *r = data;
+  r->clock_calls++;
+  event (r, 'T');
+  return 123456789;
+}
+
+static wyl_policy_store_cvk_runtime_t
+make_runtime (TestRuntime *state)
+{
+  return (wyl_policy_store_cvk_runtime_t) {
+  .secure_alloc = runtime_alloc,.secure_lock = runtime_lock,.secure_wipe =
+        runtime_wipe,.secure_unlock = runtime_unlock,.secure_free =
+        runtime_free,.fill_random = runtime_random,.now_us =
+        runtime_now,.data = state,};
+}
+
+static wyrelog_error_t
+open_store (const gchar *path, TestProvider *provider, TestRuntime *state,
+    wyl_policy_store_t **out)
+{
+  wyl_policy_store_cvk_runtime_t runtime = make_runtime (state);
+  wyl_policy_store_open_options_t opts = {
+    .path = path,
+    .keyprovider_vtable = &provider_vtable,
+    .keyprovider_state = provider,
+    .require_encrypted = path != NULL,
+    .service_cvk_runtime = &runtime,
+  };
+  return wyl_policy_store_open_with_options (&opts, out);
+}
+
+static void
+expected_binding (guint8 out[32])
+{
+  guint8 key[32];
+  for (guint i = 0; i < sizeof key; i++)
+    key[i] = (guint8) i;
+  crypto_generichash_state state;
+  g_assert_cmpint (crypto_generichash_init (&state, key, sizeof key, 32), ==,
+      0);
+  const gchar *domain = "wyrelog.service-credential.cvk.provider-binding";
+  g_assert_cmpint (crypto_generichash_update (&state,
+          (const guint8 *) domain, strlen (domain)), ==, 0);
+  const guint8 suffix[] = { 0, 1 };
+  g_assert_cmpint (crypto_generichash_update (&state, suffix, sizeof suffix),
+      ==, 0);
+  g_assert_cmpint (crypto_generichash_final (&state, out, 32), ==, 0);
+  sodium_memzero (&state, sizeof state);
+  sodium_memzero (key, sizeof key);
+}
+
+static void
+expected_envelope (guint8 out[ENVELOPE_BYTES])
+{
+  memset (out, 0, ENVELOPE_BYTES);
+  memcpy (out, "WYLCVK1\0", 8);
+  memcpy (out + 8, "wyrelog.service-credential.cvk-envelope", 40);
+  out[48] = 1;
+  out[49] = 1;
+  out[57] = 1;
+  expected_binding (out + 58);
+  out[90] = 0;
+  out[91] = 32;
+  for (guint i = 0; i < 32; i++)
+    out[CVK_OFFSET + i] = (guint8) (0x80 + i);
+}
+
+typedef struct
+{
+  wyl_policy_store_t *store;
+  GMutex *mutex;
+  GCond *cond;
+  guint *ready;
+  gboolean *go;
+  wyrelog_error_t rc;
+  const guint8 *cvk;
+  gsize len;
+} EnsureThread;
+
+static gpointer
+ensure_thread (gpointer data)
+{
+  EnsureThread *t = data;
+  g_mutex_lock (t->mutex);
+  (*t->ready)++;
+  g_cond_broadcast (t->cond);
+  while (!*t->go)
+    g_cond_wait (t->cond, t->mutex);
+  g_mutex_unlock (t->mutex);
+  t->rc = wyl_policy_store_ensure_service_cvk_for_issuance (t->store,
+      &t->cvk, &t->len);
+  return NULL;
+}
+
+static gboolean
+contains_bytes (const guint8 *haystack, gsize haystack_len,
+    const guint8 *needle, gsize needle_len)
+{
+  if (needle_len > haystack_len)
+    return FALSE;
+  for (gsize i = 0; i <= haystack_len - needle_len; i++)
+    if (memcmp (haystack + i, needle, needle_len) == 0)
+      return TRUE;
+  return FALSE;
+}
+
+static void
+assert_file_omits (const gchar *path, const guint8 *needle, gsize needle_len)
+{
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &len, NULL));
+  g_assert_false (contains_bytes ((const guint8 *) contents, len, needle,
+          needle_len));
+}
+
+static void
+test_fixture_concurrency_and_reopen (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *missing = (const guint8 *) 0x1;
+  gsize missing_len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (missing);
+  g_assert_cmpuint (missing_len, ==, 0);
+
+  GMutex mutex;
+  GCond cond;
+  g_mutex_init (&mutex);
+  g_cond_init (&cond);
+  guint ready = 0;
+  gboolean go = FALSE;
+  EnsureThread calls[8];
+  GThread *threads[8];
+  for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
+    calls[i] = (EnsureThread) {
+    .store = store,.mutex = &mutex,.cond = &cond,.ready = &ready,.go = &go,};
+    threads[i] = g_thread_new ("cvk-ensure", ensure_thread, &calls[i]);
+  }
+  g_mutex_lock (&mutex);
+  while (ready != G_N_ELEMENTS (calls))
+    g_cond_wait (&cond, &mutex);
+  go = TRUE;
+  g_cond_broadcast (&cond);
+  g_mutex_unlock (&mutex);
+  for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
+    g_thread_join (threads[i]);
+    g_assert_cmpint (calls[i].rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (calls[i].len, ==, 32);
+    g_assert_true (calls[i].cvk == calls[0].cvk);
+  }
+  g_mutex_clear (&mutex);
+  g_cond_clear (&cond);
+  g_assert_cmpuint (runtime.rng_calls, ==, 1);
+  g_assert_cmpuint (provider.seals, ==, 1);
+
+  wyl_policy_service_cvk_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &info), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (info.sealed_cvk_len, ==, ENVELOPE_BYTES);
+  guint8 decoded[ENVELOPE_BYTES];
+  for (guint i = 0; i < sizeof decoded; i++)
+    decoded[i] = info.sealed_cvk[i] ^ 0xa5;
+  guint8 expected[ENVELOPE_BYTES];
+  expected_envelope (expected);
+  g_assert_cmpmem (decoded, sizeof decoded, expected, sizeof expected);
+  g_assert_false (contains_bytes (info.sealed_cvk, info.sealed_cvk_len,
+          expected + CVK_OFFSET, 32));
+  wyl_policy_service_cvk_info_clear (&info);
+  g_autofree gchar *work_path = g_strdup_printf ("%s.wyrelog-clear", path);
+  assert_file_omits (work_path, expected + CVK_OFFSET, 32);
+
+  g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
+  missing = (const guint8 *) 0x1;
+  missing_len = 99;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &missing, &missing_len), ==, WYRELOG_E_BUSY);
+  g_assert_null (missing);
+  g_assert_cmpuint (missing_len, ==, 0);
+  wyl_policy_store_rollback_mutation (store);
+  wyl_policy_store_close (store);
+  assert_file_omits (path, expected + CVK_OFFSET, 32);
+
+  TestProvider reopened_provider = { 0 };
+  TestRuntime reopened_runtime = { 0 };
+  SharedTrace close_trace = { 0 };
+  reopened_provider.trace = &close_trace;
+  reopened_runtime.trace = &close_trace;
+  store = NULL;
+  g_assert_cmpint (open_store (path, &reopened_provider, &reopened_runtime,
+          &store), ==, WYRELOG_E_OK);
+  g_mutex_init (&mutex);
+  g_cond_init (&cond);
+  ready = 0;
+  go = FALSE;
+  for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
+    calls[i] = (EnsureThread) {
+    .store = store,.mutex = &mutex,.cond = &cond,.ready = &ready,.go = &go,};
+    threads[i] = g_thread_new ("cvk-reopen", ensure_thread, &calls[i]);
+  }
+  g_mutex_lock (&mutex);
+  while (ready != G_N_ELEMENTS (calls))
+    g_cond_wait (&cond, &mutex);
+  go = TRUE;
+  g_cond_broadcast (&cond);
+  g_mutex_unlock (&mutex);
+  for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
+    g_thread_join (threads[i]);
+    g_assert_cmpint (calls[i].rc, ==, WYRELOG_E_OK);
+    g_assert_true (calls[i].cvk == calls[0].cvk);
+  }
+  g_mutex_clear (&mutex);
+  g_cond_clear (&cond);
+  const guint8 *reopened_cvk = calls[0].cvk;
+  gsize reopened_len = calls[0].len;
+  g_assert_cmpuint (reopened_runtime.rng_calls, ==, 0);
+  g_assert_cmpuint (reopened_provider.binding_derives, ==, 1);
+  g_assert_cmpuint (reopened_provider.unseals, ==, 1);
+  g_assert_cmpmem (reopened_cvk, reopened_len, expected + CVK_OFFSET, 32);
+
+  wyl_service_credential_secret_t *parsed = NULL;
+  g_assert_cmpint (wyl_service_credential_secret_parse (1, FIXTURE_SECRET,
+          strlen (FIXTURE_SECRET), &parsed), ==, WYRELOG_E_OK);
+  wyl_policy_service_credential_info_t credential = {
+    .credential_id = (gchar *) FIXTURE_ID,
+    .credential_format_version = 1,
+    .subject_id = (gchar *) "svc:tenant-a:worker",
+    .tenant_id = (gchar *) "tenant-a",
+    .verifier_version = 1,
+  };
+  for (guint i = 0; i < sizeof credential.salt; i++)
+    credential.salt[i] = (guint8) (0x10 + i);
+  g_assert_cmpint (wyl_service_credential_verifier_compute (1, reopened_cvk,
+          reopened_len, credential.credential_id,
+          strlen (credential.credential_id), credential.tenant_id,
+          strlen (credential.tenant_id), credential.subject_id,
+          strlen (credential.subject_id), credential.salt,
+          sizeof credential.salt, parsed, credential.verifier,
+          sizeof credential.verifier), ==, WYRELOG_E_OK);
+  wyl_service_credential_secret_clear (&parsed);
+  gboolean match = FALSE;
+  g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
+          &credential, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
+      WYRELOG_E_OK);
+  g_assert_true (match);
+  credential.verifier_version = 2;
+  match = TRUE;
+  g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
+          &credential, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (match);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE service_credential_cvk SET envelope_format_version=2;",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+  close_trace.n_events = 0;
+  wyl_policy_store_close (store);
+  g_assert_cmpuint (close_trace.n_events, >=, 4);
+  g_assert_cmpmem (close_trace.events + close_trace.n_events - 4, 4, "WUFP", 4);
+
+  TestProvider version_provider = { 0 };
+  TestRuntime version_runtime = { 0 };
+  store = NULL;
+  g_assert_cmpint (open_store (path, &version_provider, &version_runtime,
+          &store), ==, WYRELOG_E_OK);
+  const guint8 *bad_version_cvk = (const guint8 *) 0x1;
+  gsize bad_version_len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &bad_version_cvk, &bad_version_len), ==, WYRELOG_E_POLICY);
+  g_assert_null (bad_version_cvk);
+  g_assert_cmpuint (bad_version_len, ==, 0);
+  g_assert_cmpuint (version_provider.unseals, ==, 0);
+  wyl_policy_store_close (store);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_absent_with_credentials_is_policy (void)
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const gchar *sql =
+      "INSERT INTO tenants VALUES('tenant-a',0,1,1);"
+      "INSERT INTO service_principals"
+      "(subject_id,display_name,state,generation,created_by,created_at_us,"
+      "updated_at_us) VALUES('svc:tenant-a:worker','worker','active',1,"
+      "'admin',1,1);"
+      "INSERT INTO service_credentials"
+      "(credential_id,credential_format_version,subject_id,tenant_id,"
+      "generation,state,verifier_version,salt,verifier,created_by,"
+      "created_at_us,updated_at_us) VALUES('" FIXTURE_ID
+      "',1,'svc:tenant-a:worker','tenant-a',1,'active',1,zeroblob(16),"
+      "zeroblob(32),'admin',1,1);";
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), sql, NULL,
+          NULL, NULL), ==, SQLITE_OK);
+  const guint8 *cvk = (const guint8 *) 0x1;
+  gsize len = 99;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_POLICY);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  g_assert_cmpuint (runtime.rng_calls, ==, 0);
+  g_assert_cmpuint (provider.seals, ==, 0);
+  wyl_policy_store_close (store);
+}
+
+static void
+assert_ensure_failure (TestRuntime *runtime, TestProvider *provider,
+    wyrelog_error_t expected)
+{
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (NULL, provider, runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *cvk = (const guint8 *) 0x1;
+  gsize len = 99;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, expected);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  wyl_policy_store_close (store);
+}
+
+static void
+test_fault_cleanup (void)
+{
+  TestProvider provider = { 0 };
+  TestRuntime alloc = {.fail_alloc_at = 1 };
+  assert_ensure_failure (&alloc, &provider, WYRELOG_E_NOMEM);
+
+  provider = (TestProvider) {
+  0};
+  TestRuntime lock = {.fail_lock_at = 1 };
+  assert_ensure_failure (&lock, &provider, WYRELOG_E_NOMEM);
+  g_assert_cmpuint (lock.unlocks, ==, 0);
+  g_assert_cmpuint (lock.frees, ==, 1);
+
+  provider = (TestProvider) {
+  0};
+  TestRuntime second_alloc = {.fail_alloc_at = 2 };
+  assert_ensure_failure (&second_alloc, &provider, WYRELOG_E_NOMEM);
+  g_assert_cmpuint (second_alloc.allocs, ==, 2);
+  g_assert_cmpuint (second_alloc.unlocks, ==, 1);
+  g_assert_cmpuint (second_alloc.frees, ==, 1);
+
+  provider = (TestProvider) {
+  0};
+  TestRuntime second_lock = {.fail_lock_at = 2 };
+  assert_ensure_failure (&second_lock, &provider, WYRELOG_E_NOMEM);
+  g_assert_cmpuint (second_lock.locks, ==, 2);
+  g_assert_cmpuint (second_lock.unlocks, ==, 1);
+  g_assert_cmpuint (second_lock.frees, ==, 2);
+
+  provider = (TestProvider) {
+  0};
+  TestRuntime third_alloc = {.fail_alloc_at = 3 };
+  assert_ensure_failure (&third_alloc, &provider, WYRELOG_E_NOMEM);
+  g_assert_cmpuint (third_alloc.allocs, ==, 3);
+  g_assert_cmpuint (third_alloc.unlocks, ==, 2);
+  g_assert_cmpuint (third_alloc.frees, ==, 2);
+
+  provider = (TestProvider) {
+  0};
+  TestRuntime third_lock = {.fail_lock_at = 3 };
+  assert_ensure_failure (&third_lock, &provider, WYRELOG_E_NOMEM);
+  g_assert_cmpuint (third_lock.locks, ==, 3);
+  g_assert_cmpuint (third_lock.unlocks, ==, 2);
+  g_assert_cmpuint (third_lock.frees, ==, 3);
+
+  provider = (TestProvider) {
+  0};
+  TestRuntime rng = {.fail_rng = TRUE };
+  assert_ensure_failure (&rng, &provider, WYRELOG_E_CRYPTO);
+  g_assert_cmpuint (rng.rng_calls, ==, 1);
+  g_assert_cmpuint (provider.seals, ==, 0);
+  g_assert_cmpuint (rng.unlocks, ==, rng.frees);
+
+  provider = (TestProvider) {
+  .fail_seal = TRUE};
+  TestRuntime seal = { 0 };
+  assert_ensure_failure (&seal, &provider, WYRELOG_E_CRYPTO);
+  g_assert_cmpuint (provider.clears, ==, 1);
+  g_assert_cmpuint (seal.unlocks, ==, seal.frees);
+  g_assert_cmpuint (seal.n_events, >=, 3);
+  g_assert_cmpmem (seal.events + seal.n_events - 3, 3, "WUF", 3);
+}
+
+static int
+deny_commit (gpointer data, int action, const char *arg1, const char *arg2,
+    const char *db_name, const char *trigger)
+{
+  (void) data;
+  (void) arg2;
+  (void) db_name;
+  (void) trigger;
+  return action == SQLITE_TRANSACTION && g_strcmp0 (arg1, "COMMIT") == 0
+      ? SQLITE_DENY : SQLITE_OK;
+}
+
+static void
+test_commit_before_cache (void)
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_set_authorizer (db, deny_commit, NULL), ==,
+      SQLITE_OK);
+  const guint8 *cvk = (const guint8 *) 0x1;
+  gsize len = 99;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_IO);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  g_assert_cmpint (sqlite3_set_authorizer (db, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+          "SELECT count(*) FROM service_credential_cvk;", -1, &stmt, NULL),
+      ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int (stmt, 0), ==, 0);
+  sqlite3_finalize (stmt);
+  g_assert_cmpuint (runtime.rng_calls, ==, 1);
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (runtime.rng_calls, ==, 2);
+  g_assert_cmpuint (provider.seals, ==, 2);
+  g_assert_cmpuint (provider.clears, ==, 2);
+  wyl_policy_store_close (store);
+}
+
+static void
+test_unseal_failure_is_closed (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-unseal-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *cvk = NULL;
+  gsize len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (store);
+
+  TestProvider failing = {.fail_unseal = TRUE };
+  TestRuntime reopened_runtime = { 0 };
+  store = NULL;
+  g_assert_cmpint (open_store (path, &failing, &reopened_runtime, &store), ==,
+      WYRELOG_E_OK);
+  cvk = (const guint8 *) 0x1;
+  len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &cvk, &len), ==, WYRELOG_E_CRYPTO);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  g_assert_cmpuint (failing.unseals, ==, 1);
+  wyl_policy_store_close (store);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+assert_authenticated_inner_tamper_is_policy (gsize offset, guint8 mask)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-inner-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *cvk = NULL;
+  gsize len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_OK);
+
+  wyl_policy_service_cvk_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &info), ==,
+      WYRELOG_E_OK);
+  guint8 envelope[ENVELOPE_BYTES];
+  gsize written = 0;
+  wyl_sealed_blob_t original = {
+    .bytes = info.sealed_cvk,
+    .len = info.sealed_cvk_len,
+  };
+  g_assert_cmpint (provider_unseal (&provider, &original, envelope,
+          sizeof envelope, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (written, ==, sizeof envelope);
+  envelope[offset] ^= mask;
+  wyl_sealed_blob_t resealed = { 0 };
+  g_assert_cmpint (provider_seal (&provider, envelope, sizeof envelope,
+          &resealed), ==, WYRELOG_E_OK);
+  sodium_memzero (envelope, sizeof envelope);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+          "UPDATE service_credential_cvk SET sealed_cvk=? WHERE slot=1;", -1,
+          &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob (stmt, 1, resealed.bytes,
+          (int) resealed.len, SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  provider_clear (&provider, &resealed);
+  wyl_policy_service_cvk_info_clear (&info);
+  wyl_policy_store_close (store);
+
+  TestProvider reopened_provider = { 0 };
+  TestRuntime reopened_runtime = { 0 };
+  store = NULL;
+  g_assert_cmpint (open_store (path, &reopened_provider, &reopened_runtime,
+          &store), ==, WYRELOG_E_OK);
+  cvk = (const guint8 *) 0x1;
+  len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &cvk, &len), ==, WYRELOG_E_POLICY);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  g_assert_cmpuint (reopened_provider.unseals, ==, 1);
+  wyl_policy_store_close (store);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_authenticated_inner_tamper_is_policy (void)
+{
+  assert_authenticated_inner_tamper_is_policy (58, 1);
+  assert_authenticated_inner_tamper_is_policy (57, 3);
+  assert_authenticated_inner_tamper_is_policy (91, 1);
+}
+
+static void
+test_providerless_is_policy (void)
+{
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_cvk_runtime_t cvk_runtime = make_runtime (&runtime);
+  wyl_policy_store_open_options_t opts = {
+    .service_cvk_runtime = &cvk_runtime,
+  };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *cvk = (const guint8 *) 0x1;
+  gsize len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &cvk, &len), ==, WYRELOG_E_POLICY);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  cvk = (const guint8 *) 0x1;
+  len = 99;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_POLICY);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  g_assert_cmpuint (runtime.allocs, ==, 0);
+  g_assert_cmpuint (runtime.rng_calls, ==, 0);
+  g_assert_true (sqlite3_get_autocommit (wyl_policy_store_get_db (store)));
+  wyl_policy_store_close (store);
+}
+
+static void
+assert_schema_gate (const gchar *mutation)
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), mutation,
+          NULL, NULL, NULL), ==, SQLITE_OK);
+  const guint8 *cvk = (const guint8 *) 0x1;
+  gsize len = 99;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_POLICY);
+  g_assert_null (cvk);
+  g_assert_cmpuint (len, ==, 0);
+  g_assert_cmpuint (provider.binding_derives, ==, 0);
+  g_assert_cmpuint (provider.unseals, ==, 0);
+  g_assert_cmpuint (provider.seals, ==, 0);
+  g_assert_cmpuint (runtime.rng_calls, ==, 0);
+  g_assert_true (sqlite3_get_autocommit (wyl_policy_store_get_db (store)));
+  wyl_policy_store_close (store);
+}
+
+static void
+test_schema_gate_precedes_crypto (void)
+{
+  assert_schema_gate ("DROP TRIGGER trg_service_credential_events_no_delete;");
+  assert_schema_gate ("DROP INDEX idx_service_credentials_tenant_state_expiry;"
+      "CREATE INDEX idx_service_credentials_tenant_state_expiry"
+      " ON service_credentials(state,tenant_id,expires_at_us);");
+  assert_schema_gate
+      ("CREATE TRIGGER trg_service_extra BEFORE INSERT ON service_principals"
+      " BEGIN SELECT 1; END;");
+}
+
+static void
+create_persisted_cvk (const gchar *path)
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *cvk = NULL;
+  gsize len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &len), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (store);
+}
+
+static void
+test_binding_and_unseal_boundaries (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-boundary-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  create_persisted_cvk (path);
+
+  TestProvider provider = {.fail_binding_derive = TRUE };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  const guint8 *cvk = (const guint8 *) 0x1;
+  gsize len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &cvk, &len), ==, WYRELOG_E_CRYPTO);
+  g_assert_cmpuint (provider.binding_derives, ==, 1);
+  g_assert_cmpuint (provider.unseals, ==, 0);
+  wyl_policy_store_close (store);
+
+  for (guint i = 0; i < 2; i++) {
+    provider = (TestProvider) {
+    .unseal_written_override = i == 0 ? 123 : 125};
+    runtime = (TestRuntime) {
+    0};
+    store = NULL;
+    g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+        WYRELOG_E_OK);
+    cvk = (const guint8 *) 0x1;
+    len = 99;
+    g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+            &cvk, &len), ==, WYRELOG_E_CRYPTO);
+    g_assert_null (cvk);
+    g_assert_cmpuint (provider.unseals, ==, 1);
+    wyl_policy_store_close (store);
+  }
+
+  provider = (TestProvider) {
+  0};
+  runtime = (TestRuntime) {
+  0};
+  store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE service_credential_cvk SET provider_binding=zeroblob(32);",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+  wyl_policy_store_close (store);
+  provider = (TestProvider) {
+  0};
+  runtime = (TestRuntime) {
+  0};
+  store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  cvk = (const guint8 *) 0x1;
+  len = 99;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &cvk, &len), ==, WYRELOG_E_CRYPTO);
+  g_assert_cmpuint (provider.unseals, ==, 0);
+  wyl_policy_store_close (store);
+
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+int
+main (int argc, char **argv)
+{
+  g_test_init (&argc, &argv, NULL);
+  g_assert_cmpint (sodium_init (), >=, 0);
+  g_test_add_func ("/policy-store-service-cvk/fixture-concurrency-reopen",
+      test_fixture_concurrency_and_reopen);
+  g_test_add_func ("/policy-store-service-cvk/fault-cleanup",
+      test_fault_cleanup);
+  g_test_add_func ("/policy-store-service-cvk/absent-with-credentials",
+      test_absent_with_credentials_is_policy);
+  g_test_add_func ("/policy-store-service-cvk/commit-before-cache",
+      test_commit_before_cache);
+  g_test_add_func ("/policy-store-service-cvk/unseal-failure",
+      test_unseal_failure_is_closed);
+  g_test_add_func ("/policy-store-service-cvk/inner-binding-tamper",
+      test_authenticated_inner_tamper_is_policy);
+  g_test_add_func ("/policy-store-service-cvk/providerless",
+      test_providerless_is_policy);
+  g_test_add_func ("/policy-store-service-cvk/schema-gate",
+      test_schema_gate_precedes_crypto);
+  g_test_add_func ("/policy-store-service-cvk/crypto-boundaries",
+      test_binding_and_unseal_boundaries);
+  return g_test_run ();
+}

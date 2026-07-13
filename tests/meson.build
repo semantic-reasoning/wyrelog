@@ -777,6 +777,14 @@ test_service_credential = executable('test-service-credential',
 
 test('service-credential', test_service_credential)
 
+test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
+  'test-policy-store-service-cvk.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+test('policy-store-service-cvk', test_policy_store_service_cvk)
+
 test_handle_id = executable('test-handle-id',
   'test-handle-id.c',
   dependencies : [wyrelog_dep],
