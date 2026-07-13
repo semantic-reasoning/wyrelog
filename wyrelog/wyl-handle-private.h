@@ -63,6 +63,12 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
  * valid until wyl_shutdown or g_object_unref.
  */
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
+/*
+ * Ordered private shutdown used by the public void wrapper and finalization.
+ * Returns BUSY without changing lifecycle state when called by a thread that
+ * owns a policy-store pin or service-auth lease.
+ */
+wyrelog_error_t wyl_handle_shutdown_ordered (WylHandle * self);
 wyrelog_error_t wyl_handle_policy_store_pin_current (WylHandle * self,
     wyl_policy_store_t ** out_store);
 void wyl_handle_policy_store_unpin (WylHandle * self,

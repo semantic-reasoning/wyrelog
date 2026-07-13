@@ -164,6 +164,7 @@ typedef struct
 typedef struct
 {
   WylServiceAuthWriteLease *lease;
+  wyl_policy_store_t *store;    /* borrowed from the lease-owned pin */
 } WylDaemonPolicyWrite;
 
 static void
@@ -175,6 +176,7 @@ wyl_daemon_policy_write_clear (WylDaemonPolicyWrite *write)
       WYRELOG_E_OK);
   wyl_service_auth_write_lease_free (write->lease);
   write->lease = NULL;
+  write->store = NULL;
 }
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylDaemonPolicyWrite,
@@ -184,9 +186,15 @@ static wyrelog_error_t
 wyl_daemon_policy_write_acquire (WylDaemonHttpContext *ctx,
     WylDaemonPolicyWrite *write)
 {
-  return wyl_service_auth_authority_acquire_write
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
       (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
       &write->lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_write_lease_get_policy_store (write->lease,
+        ctx->handle, &write->store);
+  if (rc != WYRELOG_E_OK)
+    wyl_daemon_policy_write_clear (write);
+  return rc;
 }
 
 static WylDaemonHttpContext *wyl_daemon_http_get_context (SoupServer * server);
@@ -793,6 +801,24 @@ wyl_daemon_http_ref_session (SoupServer *server, const gchar *session_token)
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_policy_write_for_test (SoupServer *server,
+    WylDaemonPolicyWriteCheckpoint checkpoint, gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (checkpoint != NULL)
+    checkpoint (data);
+  return wyl_policy_store_set_tenant_sealed (write.store,
+      WYL_TENANT_DEFAULT, FALSE);
+}
+
 gboolean
 wyl_daemon_http_remove_session_for_test (SoupServer *server,
     const gchar *session_token)

@@ -27,6 +27,126 @@ typedef struct
 
 typedef struct
 {
+  GMutex mutex;
+  GCond changed;
+  SoupServer *server;
+  WylHandle *handle;
+  gboolean write_entered;
+  gboolean close_entered;
+  gboolean close_observed;
+  gboolean allow_write;
+  wyrelog_error_t write_rc;
+  wyrelog_error_t shutdown_rc;
+} DaemonPolicyShutdownRace;
+
+static void
+daemon_policy_write_checkpoint (gpointer data)
+{
+  DaemonPolicyShutdownRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->write_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->allow_write)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static void
+daemon_policy_close_checkpoint (gpointer data)
+{
+  DaemonPolicyShutdownRace *race = data;
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (race->handle), &snapshot);
+  g_mutex_lock (&race->mutex);
+  race->close_observed = snapshot.closing;
+  race->close_entered = TRUE;
+  g_cond_broadcast (&race->changed);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+daemon_policy_write_thread (gpointer data)
+{
+  DaemonPolicyShutdownRace *race = data;
+  race->write_rc = wyl_daemon_http_policy_write_for_test (race->server,
+      daemon_policy_write_checkpoint, race);
+  return NULL;
+}
+
+static gpointer
+daemon_policy_shutdown_thread (gpointer data)
+{
+  DaemonPolicyShutdownRace *race = data;
+  race->shutdown_rc = wyl_handle_shutdown_ordered (race->handle);
+  return NULL;
+}
+
+static gint
+check_daemon_policy_write_shutdown_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1900;
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts,
+      handle, &error);
+  if (server == NULL)
+    return 1901;
+
+  DaemonPolicyShutdownRace race = {
+    .server = server,
+    .handle = handle,
+    .write_rc = WYRELOG_E_INTERNAL,
+    .shutdown_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GThread) writer = g_thread_new ("daemon-policy-write",
+      daemon_policy_write_thread, &race);
+  g_mutex_lock (&race.mutex);
+  while (!race.write_entered)
+    g_cond_wait (&race.changed, &race.mutex);
+  g_mutex_unlock (&race.mutex);
+
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  wyl_service_auth_authority_set_close_checkpoint (authority,
+      daemon_policy_close_checkpoint, &race);
+  g_autoptr (GThread) shutdown = g_thread_new ("daemon-policy-shutdown",
+      daemon_policy_shutdown_thread, &race);
+  g_mutex_lock (&race.mutex);
+  while (!race.close_entered)
+    g_cond_wait (&race.changed, &race.mutex);
+  gboolean store_was_live = wyl_handle_get_policy_store (handle) != NULL;
+  race.allow_write = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&writer));
+  g_thread_join (g_steal_pointer (&shutdown));
+  gint rc = race.close_observed ? 0 : 1902;
+  if (rc == 0 && !store_was_live)
+    rc = 1903;
+  if (rc == 0 && race.write_rc != WYRELOG_E_OK)
+    rc = 1904;
+  if (rc == 0 && race.shutdown_rc != WYRELOG_E_OK)
+    rc = 1905;
+  if (rc == 0 && wyl_handle_get_policy_store (handle) != NULL)
+    rc = 1906;
+  if (rc == 0 && wyl_handle_shutdown_ordered (handle) != WYRELOG_E_OK)
+    rc = 1907;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  soup_server_disconnect (server);
+  return rc;
+}
+
+typedef struct
+{
   const gchar *subject_id;
   const gchar *action;
   const gchar *resource_id;
@@ -3300,6 +3420,10 @@ main (void)
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
     return tenant_gate_rc;
+
+  gint policy_shutdown_rc = check_daemon_policy_write_shutdown_contract ();
+  if (policy_shutdown_rc != 0)
+    return policy_shutdown_rc;
 
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)

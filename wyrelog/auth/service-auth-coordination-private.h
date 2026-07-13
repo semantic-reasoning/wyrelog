@@ -9,6 +9,7 @@
 G_BEGIN_DECLS typedef struct _WylServiceAuthAuthority WylServiceAuthAuthority;
 typedef struct _WylServiceAuthReadLease WylServiceAuthReadLease;
 typedef struct _WylServiceAuthWriteLease WylServiceAuthWriteLease;
+typedef struct wyl_policy_store_t wyl_policy_store_t;
 
 typedef enum
 {
@@ -57,6 +58,10 @@ wyrelog_error_t wyl_service_auth_read_lease_validate
     (WylServiceAuthReadLease * lease, WylHandle * handle);
 wyrelog_error_t wyl_service_auth_write_lease_validate
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
+/* Borrowed for the lifetime of a valid lease; the lease owns the store pin. */
+wyrelog_error_t wyl_service_auth_write_lease_get_policy_store
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    wyl_policy_store_t ** out_store);
 /*
  * A store authority transaction claims a live WRITE lease for its complete
  * lifetime. These helpers are private to that transaction implementation.
@@ -77,6 +82,10 @@ void wyl_service_auth_write_lease_free (WylServiceAuthWriteLease * lease);
 void wyl_service_auth_authority_snapshot
     (WylServiceAuthAuthority * authority,
     WylServiceAuthAuthoritySnapshot * out_snapshot);
+/* Test-only, one-shot checkpoint after OPEN -> CLOSING linearizes. */
+void wyl_service_auth_authority_set_close_checkpoint
+    (WylServiceAuthAuthority * authority,
+    void (*checkpoint) (gpointer data), gpointer data);
 
 /* Private deterministic fault seams for serial-validation tests. */
 void wyl_service_auth_read_lease_test_corrupt_serial
