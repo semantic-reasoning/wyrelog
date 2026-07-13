@@ -769,6 +769,14 @@ test_totp = executable('test-totp',
 
 test('totp', test_totp)
 
+test_service_credential = executable('test-service-credential',
+  'test-service-credential.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep],
+)
+
+test('service-credential', test_service_credential)
+
 test_handle_id = executable('test-handle-id',
   'test-handle-id.c',
   dependencies : [wyrelog_dep],
