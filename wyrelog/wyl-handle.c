@@ -75,6 +75,13 @@ struct _WylHandle
   gpointer delta_callback_user_data;
   GPtrArray *pending_deltas;
   wyl_policy_store_t *policy_store;
+  GMutex policy_store_lifecycle_mutex;
+  guint policy_store_active_operations;
+  gboolean policy_store_shutdown_pending;
+  gboolean policy_store_shutdown_completing;
+  gboolean policy_store_shutdown_completed;
+  void (*policy_store_pin_checkpoint) (gpointer data);
+  gpointer policy_store_pin_checkpoint_data;
   WylServiceAuthAuthority *service_auth_authority;
 #ifdef WYL_HAS_FACT_STORE
   GHashTable *fact_graph_engines;
@@ -186,6 +193,26 @@ flush_pending_deltas (WylHandle *self)
   clear_pending_deltas (self);
 }
 
+static gboolean
+wyl_handle_begin_shutdown_completion_locked (WylHandle *self,
+    wyl_policy_store_t **out_store)
+{
+  *out_store = NULL;
+  if (!self->policy_store_shutdown_pending
+      || self->policy_store_shutdown_completing
+      || self->policy_store_shutdown_completed
+      || self->policy_store_active_operations > 0)
+    return FALSE;
+
+  *out_store = self->policy_store;
+  self->policy_store = NULL;
+  self->policy_store_shutdown_completing = TRUE;
+  return TRUE;
+}
+
+static void wyl_handle_complete_shutdown (WylHandle * self,
+    wyl_policy_store_t * detached_store);
+
 static void
 wyl_handle_finalize (GObject *object)
 {
@@ -195,6 +222,9 @@ wyl_handle_finalize (GObject *object)
     g_assert_cmpint (wyl_service_auth_authority_close
         (self->service_auth_authority), ==, WYRELOG_E_OK);
 
+  wyl_shutdown (self);
+  g_assert_null (self->policy_store);
+  g_assert_true (self->policy_store_shutdown_completed);
   g_clear_object (&self->read_engine);
   g_clear_object (&self->delta_engine);
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
@@ -205,7 +235,7 @@ wyl_handle_finalize (GObject *object)
 #endif
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
-  g_clear_pointer (&self->policy_store, wyl_policy_store_close);
+  g_mutex_clear (&self->policy_store_lifecycle_mutex);
   g_clear_pointer (&self->service_auth_authority,
       wyl_service_auth_authority_unref);
   g_clear_pointer (&self->sessions_by_id, g_hash_table_unref);
@@ -244,6 +274,7 @@ wyl_handle_init (WylHandle *self)
     g_error ("wyl_handle_init: failed to mint identifier");
   self->created_at_us = g_get_real_time ();
   self->service_auth_authority = wyl_service_auth_authority_new (self);
+  g_mutex_init (&self->policy_store_lifecycle_mutex);
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 #ifdef WYL_HAS_FACT_STORE
@@ -729,13 +760,31 @@ wyl_shutdown (WylHandle *handle)
   if (handle == NULL)
     return;
 
+  wyl_policy_store_t *detached_store = NULL;
+  g_mutex_lock (&handle->policy_store_lifecycle_mutex);
+  if (handle->policy_store_shutdown_completed) {
+    g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+    return;
+  }
+  handle->policy_store_shutdown_pending = TRUE;
+  gboolean complete = wyl_handle_begin_shutdown_completion_locked (handle,
+      &detached_store);
+  g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
+  if (complete)
+    wyl_handle_complete_shutdown (handle, detached_store);
+}
+
+static void
+wyl_handle_complete_shutdown (WylHandle *handle,
+    wyl_policy_store_t *detached_store)
+{
+
 #ifdef WYL_HAS_AUDIT
   /* Close the audit log before tearing down so any pending writers
    * see the close in deterministic order. finalize is NULL-safe and
    * will not double-close. */
   g_clear_pointer (&handle->audit_conn, wyl_audit_conn_close);
 #endif
-  g_clear_pointer (&handle->policy_store, wyl_policy_store_close);
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
 #ifdef WYL_HAS_FACT_STORE
@@ -756,6 +805,13 @@ wyl_shutdown (WylHandle *handle)
   g_object_set_qdata (G_OBJECT (handle),
       wyl_handle_engine_delta_step_fault_once_quark (), NULL);
   g_hash_table_remove_all (handle->engine_symbols_by_id);
+  wyl_policy_store_close (detached_store);
+
+  g_mutex_lock (&handle->policy_store_lifecycle_mutex);
+  g_assert_true (handle->policy_store_shutdown_completing);
+  handle->policy_store_shutdown_completing = FALSE;
+  handle->policy_store_shutdown_completed = TRUE;
+  g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
 }
 
 gchar *
@@ -1085,7 +1141,65 @@ wyl_policy_store_t *
 wyl_handle_get_policy_store (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
-  return self->policy_store;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  wyl_policy_store_t *store = self->policy_store;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return store;
+}
+
+wyrelog_error_t
+wyl_handle_policy_store_pin_current (WylHandle *self,
+    wyl_policy_store_t **out_store)
+{
+  if (out_store != NULL)
+    *out_store = NULL;
+  if (!WYL_IS_HANDLE (self) || out_store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  void (*checkpoint) (gpointer data) = self->policy_store_pin_checkpoint;
+  gpointer checkpoint_data = self->policy_store_pin_checkpoint_data;
+  self->policy_store_pin_checkpoint = NULL;
+  self->policy_store_pin_checkpoint_data = NULL;
+  if (checkpoint != NULL)
+    checkpoint (checkpoint_data);
+  wyrelog_error_t rc = !self->policy_store_shutdown_pending
+      && !self->policy_store_shutdown_completing
+      && !self->policy_store_shutdown_completed
+      && self->policy_store != NULL ? WYRELOG_E_OK : WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK) {
+    self->policy_store_active_operations++;
+    *out_store = self->policy_store;
+  }
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return rc;
+}
+
+void
+wyl_handle_policy_store_unpin (WylHandle *self,
+    wyl_policy_store_t *expected_store)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  g_assert_true (self->policy_store == expected_store);
+  g_assert_cmpuint (self->policy_store_active_operations, >, 0);
+  self->policy_store_active_operations--;
+  wyl_policy_store_t *detached_store = NULL;
+  gboolean complete = wyl_handle_begin_shutdown_completion_locked (self,
+      &detached_store);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  if (complete)
+    wyl_handle_complete_shutdown (self, detached_store);
+}
+
+void
+wyl_handle_policy_store_set_pin_checkpoint (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  self->policy_store_pin_checkpoint = checkpoint;
+  self->policy_store_pin_checkpoint_data = data;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
 }
 
 #ifdef WYL_HAS_FACT_STORE

@@ -7,6 +7,7 @@
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
 #include "wyrelog/auth/service-credential-private.h"
+#include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/wyl-traits-private.h"
 
 G_BEGIN_DECLS;
@@ -15,6 +16,25 @@ G_BEGIN_DECLS;
 #define WYL_POLICY_FACT_QUERY_MAX_ROWS 1000000
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
+typedef struct _WylServiceAuthorityTransaction WylServiceAuthorityTransaction;
+
+typedef enum
+{
+  WYL_SERVICE_AUTHORITY_TXN_ACTIVE,
+  WYL_SERVICE_AUTHORITY_TXN_COMMITTED,
+  WYL_SERVICE_AUTHORITY_TXN_ROLLED_BACK,
+  WYL_SERVICE_AUTHORITY_TXN_FAILED_COMMIT,
+  WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK,
+} WylServiceAuthorityTransactionState;
+
+typedef enum
+{
+  WYL_POLICY_AUTHORITY_TXN_FAIL_NONE,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_ROLLBACK,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK,
+} WylPolicyAuthorityTransactionFailStage;
 
 typedef struct wyl_policy_store_cvk_runtime_t
 {
@@ -388,6 +408,52 @@ wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_service_schema
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
+
+/*
+ * Starts a non-nestable SQLite savepoint while claiming |write_lease| and
+ * owning the store's service-domain gate and lifecycle lock. The lease, store,
+ * and handle must all belong to the same live handle. Terminal transactions
+ * retain their result metadata until freed, but own no locks or lease claim.
+ */
+wyrelog_error_t wyl_policy_store_service_authority_transaction_begin
+    (wyl_policy_store_t * store, WylHandle * handle,
+    WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction);
+wyrelog_error_t wyl_policy_store_service_authority_transaction_commit
+    (WylServiceAuthorityTransaction * transaction);
+wyrelog_error_t wyl_policy_store_service_authority_transaction_rollback
+    (WylServiceAuthorityTransaction * transaction);
+wyrelog_error_t wyl_policy_store_service_authority_transaction_abort
+    (WylServiceAuthorityTransaction * transaction);
+WylServiceAuthorityTransactionState
+    wyl_policy_store_service_authority_transaction_get_state
+    (const WylServiceAuthorityTransaction * transaction);
+wyrelog_error_t
+wyl_policy_store_service_authority_transaction_get_primary_result (const
+    WylServiceAuthorityTransaction * transaction);
+wyrelog_error_t
+wyl_policy_store_service_authority_transaction_get_cleanup_result (const
+    WylServiceAuthorityTransaction * transaction);
+int
+wyl_policy_store_service_authority_transaction_get_primary_sqlite_extended_error
+    (const WylServiceAuthorityTransaction * transaction);
+int
+wyl_policy_store_service_authority_transaction_get_recovery_sqlite_extended_error
+    (const WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_set_abort_checkpoint
+    (WylServiceAuthorityTransaction * transaction,
+    void (*checkpoint) (gpointer data), gpointer data);
+void wyl_policy_store_service_authority_transaction_free
+    (WylServiceAuthorityTransaction * transaction);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityTransaction,
+    wyl_policy_store_service_authority_transaction_free);
+
+/* Deterministic private fault and observation seams for transaction tests. */
+void wyl_policy_store_service_authority_transaction_fail_once
+    (wyl_policy_store_t * store, WylPolicyAuthorityTransactionFailStage stage);
+gboolean wyl_policy_store_service_authority_transaction_is_poisoned
+    (wyl_policy_store_t * store);
 
 /* Owned-output contract for the service lookup/load APIs below:
  * - On first use, the caller MUST pass an output initialized to { 0 }.

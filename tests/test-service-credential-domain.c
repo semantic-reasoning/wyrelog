@@ -487,6 +487,58 @@ test_random (gpointer data, guint8 *out, gsize len)
   return 0;
 }
 
+typedef struct
+{
+  CollisionRuntime collision;
+  wyl_policy_store_t *store;
+  wyrelog_error_t reentry_rc;
+  gboolean attempted;
+} ReentryRuntime;
+
+static int
+reentry_random (gpointer data, guint8 *out, gsize len)
+{
+  ReentryRuntime *runtime = data;
+  if (!runtime->attempted) {
+    runtime->attempted = TRUE;
+    wyl_policy_service_principal_info_t principal = { 0 };
+    runtime->reentry_rc = wyl_policy_store_create_service_principal
+        (runtime->store, "svc:callback:reentry", "reentry", "admin",
+        "callback-reentry", &principal);
+    wyl_policy_service_principal_info_clear (&principal);
+  }
+  memset (out, 0x6b, len);
+  return 0;
+}
+
+static void
+test_same_thread_callback_reentry_is_busy (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  prepare_authority (fixture.handle, "svc:callback:worker");
+  ReentryRuntime state = {
+    .store = store_of (fixture.handle),
+    .reentry_rc = WYRELOG_E_OK,
+  };
+  wyl_service_credential_runtime_t runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    reentry_random, &state,
+  };
+  wyl_policy_service_credential_info_t info = { 0 };
+  wyl_service_credential_secret_t *secret = NULL;
+  g_assert_cmpint (wyl_policy_store_issue_service_credential_with_runtime
+      (state.store, "svc:callback:worker", "tenant-a", "admin",
+          "callback-outer", 0, &runtime, &info, &secret), ==, WYRELOG_E_OK);
+  g_assert_true (state.attempted);
+  g_assert_cmpint (state.reentry_rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (scalar (db_of (fixture.handle),
+          "SELECT count(*) FROM service_principals "
+          "WHERE subject_id='svc:callback:reentry';"), ==, 0);
+  wyl_policy_service_credential_info_clear (&info);
+  wyl_service_credential_secret_clear (&secret);
+}
+
 static void
 test_id_collision_retry_and_wipe (void)
 {
@@ -1553,6 +1605,8 @@ main (int argc, char **argv)
       test_fault_rollback);
   g_test_add_func ("/auth/service-credential/id-collision-wipe",
       test_id_collision_retry_and_wipe);
+  g_test_add_func ("/auth/service-credential/same-thread-callback-reentry",
+      test_same_thread_callback_reentry_is_busy);
   g_test_add_func ("/auth/service-credential/verify-expiry-clock-inside-gate",
       test_verify_expiry_clock_inside_gate);
   g_test_add_func ("/auth/service-credential/verify-fail-closed-read-only",

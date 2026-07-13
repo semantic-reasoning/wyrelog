@@ -5,6 +5,12 @@
 
 #include "wyrelog/wyl-handle-private.h"
 
+static wyrelog_error_t
+pin_policy_store (WylHandle *handle, wyl_policy_store_t **out_store)
+{
+  return wyl_handle_policy_store_pin_current (handle, out_store);
+}
+
 void
 wyl_service_principal_clear (wyl_service_principal_t *principal)
 {
@@ -53,10 +59,14 @@ wyl_service_principal_create (WylHandle *handle, const gchar *subject_id,
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = pin_policy_store (handle, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   wyl_policy_service_principal_info_t stored = { 0 };
-  wyrelog_error_t rc = wyl_policy_store_create_service_principal
-      (wyl_handle_get_policy_store (handle), subject_id, display_name,
-      actor_subject_id, request_id, &stored);
+  rc = wyl_policy_store_create_service_principal (store, subject_id,
+      display_name, actor_subject_id, request_id, &stored);
+  wyl_handle_policy_store_unpin (handle, store);
   return finish_principal_result (rc, &stored, out);
 }
 
@@ -113,10 +123,14 @@ wyl_service_principal_disable (WylHandle *handle, const gchar *subject_id,
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = pin_policy_store (handle, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   wyl_policy_service_principal_info_t stored = { 0 };
-  wyrelog_error_t rc = wyl_policy_store_disable_service_principal
-      (wyl_handle_get_policy_store (handle), subject_id, actor_subject_id,
-      request_id, &stored);
+  rc = wyl_policy_store_disable_service_principal (store, subject_id,
+      actor_subject_id, request_id, &stored);
+  wyl_handle_policy_store_unpin (handle, store);
   return finish_principal_result (rc, &stored, out);
 }
 
@@ -175,11 +189,15 @@ wyl_service_credential_issue (WylHandle *handle, const gchar *subject_id,
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = pin_policy_store (handle, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   wyl_policy_service_credential_info_t stored = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
-  wyrelog_error_t rc = wyl_policy_store_issue_service_credential
-      (wyl_handle_get_policy_store (handle), subject_id, tenant_id,
-      actor_subject_id, request_id, expires_at_us, &stored, &secret);
+  rc = wyl_policy_store_issue_service_credential (store, subject_id,
+      tenant_id, actor_subject_id, request_id, expires_at_us, &stored, &secret);
+  wyl_handle_policy_store_unpin (handle, store);
   if (rc == WYRELOG_E_OK) {
     copy_credential (&stored, &out->credential);
     out->secret = secret;
@@ -275,10 +293,14 @@ wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
     wyl_service_credential_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = pin_policy_store (handle, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   wyl_policy_service_credential_info_t stored = { 0 };
-  wyrelog_error_t rc = wyl_policy_store_revoke_service_credential
-      (wyl_handle_get_policy_store (handle), credential_id, actor_subject_id,
-      request_id, &stored);
+  rc = wyl_policy_store_revoke_service_credential (store, credential_id,
+      actor_subject_id, request_id, &stored);
+  wyl_handle_policy_store_unpin (handle, store);
   if (rc == WYRELOG_E_OK)
     copy_credential (&stored, out);
   wyl_policy_service_credential_info_clear (&stored);
@@ -296,14 +318,18 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = pin_policy_store (handle, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   wyl_policy_service_credential_info_t stored = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
-  wyrelog_error_t rc = wyl_policy_store_rotate_service_credential
-      (wyl_handle_get_policy_store (handle), old_credential_id,
+  rc = wyl_policy_store_rotate_service_credential (store, old_credential_id,
       actor_subject_id, request_id, new_expires_at_us,
       runtime != NULL ? runtime->now_us : NULL,
       runtime != NULL ? runtime->data : NULL,
       runtime != NULL ? runtime->credential_runtime : NULL, &stored, &secret);
+  wyl_handle_policy_store_unpin (handle, store);
   if (rc == WYRELOG_E_OK) {
     copy_credential (&stored, &out->credential);
     out->secret = secret;

@@ -337,17 +337,26 @@ validate_read_locked (WylServiceAuthReadLease *lease, WylHandle *handle)
 }
 
 static wyrelog_error_t
-validate_write_locked (WylServiceAuthWriteLease *lease, WylHandle *handle)
+validate_write_locked_at_rank (WylServiceAuthWriteLease *lease,
+    WylHandle *handle, WylServiceAuthRank rank)
 {
   if (lease->state != WYL_SERVICE_AUTH_LEASE_ACTIVE
       || lease->owner != g_thread_self () || lease->handle != handle
       || lease->authority->handle != handle || lease->serial == 0
-      || !rank_is_top (handle, WYL_SERVICE_AUTH_RANK_COORDINATION)
+      || !rank_is_top (handle, rank)
       || !lease->authority->writer_active
       || lease->authority->writer_owner != lease->owner
       || lease->authority->writer_serial != lease->serial)
     return WYRELOG_E_INVALID;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_write_locked (WylServiceAuthWriteLease *lease, WylHandle *handle)
+{
+  return validate_write_locked_at_rank (lease, handle,
+      lease->transaction_claimed ? WYL_SERVICE_AUTH_RANK_STORE
+      : WYL_SERVICE_AUTH_RANK_COORDINATION);
 }
 
 wyrelog_error_t
@@ -395,7 +404,8 @@ wyrelog_error_t
   if (lease == NULL || !WYL_IS_HANDLE (handle))
     return WYRELOG_E_INVALID;
   g_mutex_lock (&lease->authority->mutex);
-  wyrelog_error_t rc = validate_write_locked (lease, handle);
+  wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
+      WYL_SERVICE_AUTH_RANK_COORDINATION);
   if (rc == WYRELOG_E_OK && !lease->transaction_claimed)
     rc = WYRELOG_E_INVALID;
   if (rc == WYRELOG_E_OK)

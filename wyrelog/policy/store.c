@@ -46,6 +46,7 @@
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
 #include "wyrelog/wyl-log-private.h"
+#include "wyrelog/wyl-handle-private.h"
 #include "store-lease-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
@@ -134,11 +135,121 @@ struct wyl_policy_store_t
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
+  gint service_authority_transaction_active;
+  gint service_authority_transaction_poisoned;
+  gint service_authority_abort_allowed;
+  GThread *service_authority_poison_owner;
+  guint64 next_service_authority_transaction_id;
+    WylPolicyAuthorityTransactionFailStage
+      service_authority_transaction_fail_once;
   gboolean service_lifecycle_fail_commit_once;
   wyl_policy_service_rotate_fail_stage_t service_rotate_fail_once;
   wyl_policy_store_cvk_runtime_t service_cvk_runtime;
   guint8 *service_cvk_envelope;
 };
+
+struct _WylServiceAuthorityTransaction
+{
+  wyl_policy_store_t *store;
+  WylHandle *handle;
+  WylServiceAuthWriteLease *write_lease;        /* claimed; borrowed */
+  GThread *owner;
+  gchar *savepoint;
+  WylServiceAuthorityTransactionState state;
+  wyrelog_error_t primary_result;
+  wyrelog_error_t cleanup_result;
+  int primary_sqlite_extended_error;
+  int recovery_sqlite_extended_error;
+  WylPolicyAuthorityTransactionFailStage fault;
+  gboolean owns_store_locks;
+  gboolean owns_handle_pin;
+  void (*abort_checkpoint) (gpointer data);
+  gpointer abort_checkpoint_data;
+};
+
+typedef struct
+{
+  wyl_policy_store_t *stores[4];
+  guint depth;
+} WylServiceStoreScope;
+
+static GPrivate service_store_scope = G_PRIVATE_INIT (g_free);
+
+static wyrelog_error_t
+service_store_scope_enter (wyl_policy_store_t *store)
+{
+  WylServiceStoreScope *scope = g_private_get (&service_store_scope);
+  if (scope == NULL) {
+    scope = g_new0 (WylServiceStoreScope, 1);
+    g_private_set (&service_store_scope, scope);
+  }
+  if (scope->depth == G_N_ELEMENTS (scope->stores))
+    return WYRELOG_E_BUSY;
+  for (guint i = 0; i < scope->depth; i++)
+    if (scope->stores[i] == store)
+      return WYRELOG_E_BUSY;
+  scope->stores[scope->depth++] = store;
+  return WYRELOG_E_OK;
+}
+
+static void
+service_store_scope_leave (wyl_policy_store_t *store)
+{
+  WylServiceStoreScope *scope = g_private_get (&service_store_scope);
+  g_assert_nonnull (scope);
+  g_assert_cmpuint (scope->depth, >, 0);
+  g_assert_true (scope->stores[scope->depth - 1] == store);
+  scope->stores[--scope->depth] = NULL;
+  if (scope->depth == 0)
+    g_private_replace (&service_store_scope, NULL);
+}
+
+static gboolean
+service_authority_store_unavailable (wyl_policy_store_t *store)
+{
+  return g_atomic_int_get (&store->service_authority_transaction_active)
+      || g_atomic_int_get (&store->service_authority_transaction_poisoned);
+}
+
+static wyrelog_error_t
+service_mutation_scope_enter (wyl_policy_store_t *store)
+{
+  if (service_authority_store_unavailable (store))
+    return WYRELOG_E_BUSY;
+  return service_store_scope_enter (store);
+}
+
+static void
+service_mutation_scope_leave (wyl_policy_store_t *store)
+{
+  service_store_scope_leave (store);
+}
+
+static int
+service_authority_poison_authorizer (gpointer data, int action,
+    const gchar *arg1, const gchar *arg2, const gchar *database,
+    const gchar *trigger)
+{
+  wyl_policy_store_t *store = data;
+  (void) arg1;
+  (void) arg2;
+  (void) database;
+  (void) trigger;
+  if (g_atomic_int_get (&store->service_authority_abort_allowed)
+      && store->service_authority_poison_owner == g_thread_self ()
+      && action == SQLITE_TRANSACTION && g_strcmp0 (arg1, "ROLLBACK") == 0)
+    return SQLITE_OK;
+  return SQLITE_DENY;
+}
+
+static void
+service_authority_poison (wyl_policy_store_t *store, GThread *owner)
+{
+  store->service_authority_poison_owner = owner;
+  g_atomic_int_set (&store->service_authority_transaction_poisoned, TRUE);
+  (void) sqlite3_set_authorizer (store->db,
+      service_authority_poison_authorizer, store);
+}
 
 static wyrelog_error_t prepare_keyprovider_rotation_work
     (wyl_policy_store_t * store, WylOwnedKeyProvider * new_provider,
@@ -1920,6 +2031,366 @@ wyl_policy_store_rollback_mutation (wyl_policy_store_t *store)
   (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_policy_mutation;");
 }
 
+static wyrelog_error_t
+service_authority_transaction_exec (WylServiceAuthorityTransaction *txn,
+    const gchar *operation)
+{
+  g_autofree gchar *sql = g_strdup_printf ("%s %s;", operation,
+      txn->savepoint);
+  return exec_sql (txn->store->db, sql);
+}
+
+static int
+service_authority_fault_authorizer (gpointer data, int action,
+    const gchar *arg1, const gchar *arg2, const gchar *database,
+    const gchar *trigger)
+{
+  WylServiceAuthorityTransaction *txn = data;
+  (void) database;
+  (void) trigger;
+  if (action == SQLITE_SAVEPOINT
+      && g_strcmp0 (arg2, txn->savepoint) == 0
+      && (g_strcmp0 (arg1, "RELEASE") == 0
+          || g_strcmp0 (arg1, "ROLLBACK") == 0))
+    return SQLITE_DENY;
+  return SQLITE_OK;
+}
+
+static wyrelog_error_t
+service_authority_transaction_fault_exec (WylServiceAuthorityTransaction *txn,
+    const gchar *operation, int *out_extended_error)
+{
+  (void) sqlite3_set_authorizer (txn->store->db,
+      service_authority_fault_authorizer, txn);
+  wyrelog_error_t rc = service_authority_transaction_exec (txn, operation);
+  *out_extended_error = sqlite3_extended_errcode (txn->store->db);
+  (void) sqlite3_set_authorizer (txn->store->db, NULL, NULL);
+  return rc;
+}
+
+/*
+ * Restore autocommit without ever releasing a savepoint whose rollback failed:
+ * RELEASE would commit its writes. Because begin rejects nesting, a fallback
+ * full ROLLBACK can only affect this authority transaction.
+ */
+static wyrelog_error_t
+service_authority_transaction_restore (WylServiceAuthorityTransaction *txn)
+{
+  if (sqlite3_get_autocommit (txn->store->db))
+    return WYRELOG_E_OK;
+  if (txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_ROLLBACK
+      || txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK)
+    return service_authority_transaction_fault_exec (txn,
+        "ROLLBACK TO SAVEPOINT", &txn->recovery_sqlite_extended_error);
+
+  wyrelog_error_t primary = service_authority_transaction_exec (txn,
+      "ROLLBACK TO SAVEPOINT");
+  if (primary != WYRELOG_E_OK)
+    txn->recovery_sqlite_extended_error = sqlite3_extended_errcode
+        (txn->store->db);
+  if (primary == WYRELOG_E_OK) {
+    wyrelog_error_t release = service_authority_transaction_exec (txn,
+        "RELEASE SAVEPOINT");
+    if (release == WYRELOG_E_OK)
+      return WYRELOG_E_OK;
+    primary = release;
+    txn->recovery_sqlite_extended_error = sqlite3_extended_errcode
+        (txn->store->db);
+  }
+
+  /* Best-effort recovery after either rollback or release failed. */
+  (void) exec_sql (txn->store->db, "ROLLBACK;");
+  return primary;
+}
+
+static void
+service_authority_transaction_finish (WylServiceAuthorityTransaction *txn)
+{
+  g_assert_true (txn->owns_store_locks);
+  if (!sqlite3_get_autocommit (txn->store->db)) {
+    service_authority_poison (txn->store, txn->owner);
+    return;
+  }
+  g_atomic_int_set (&txn->store->service_authority_transaction_active, FALSE);
+  g_mutex_unlock (&txn->store->service_lifecycle_mutex);
+  g_mutex_unlock (&txn->store->service_domain_gate_mutex);
+  txn->owns_store_locks = FALSE;
+
+  wyrelog_error_t rank_rc = wyl_service_auth_rank_leave (txn->handle,
+      WYL_SERVICE_AUTH_RANK_STORE);
+  wyrelog_error_t unclaim_rc =
+      wyl_service_auth_write_lease_unclaim_transaction (txn->write_lease,
+      txn->handle);
+  if (rank_rc != WYRELOG_E_OK || unclaim_rc != WYRELOG_E_OK) {
+    service_authority_poison (txn->store, txn->owner);
+    if (txn->cleanup_result == WYRELOG_E_OK)
+      txn->cleanup_result = WYRELOG_E_INTERNAL;
+  }
+  service_mutation_scope_leave (txn->store);
+  wyl_handle_policy_store_unpin (txn->handle, txn->store);
+  txn->owns_handle_pin = FALSE;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_begin
+    (wyl_policy_store_t * store, WylHandle * handle,
+    WylServiceAuthWriteLease * write_lease,
+    WylServiceAuthorityTransaction ** out_transaction) {
+  if (out_transaction != NULL)
+    *out_transaction = NULL;
+  if (store == NULL || !WYL_IS_HANDLE (handle)
+      || write_lease == NULL || out_transaction == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_policy_store_t *pinned_store = NULL;
+  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (handle,
+      &pinned_store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (pinned_store != store) {
+    wyl_handle_policy_store_unpin (handle, pinned_store);
+    return WYRELOG_E_INVALID;
+  }
+  if (store->db == NULL) {
+    wyl_handle_policy_store_unpin (handle, store);
+    return WYRELOG_E_INVALID;
+  }
+  rc = service_mutation_scope_enter (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_handle_policy_store_unpin (handle, store);
+    return rc;
+  }
+
+  rc = wyl_service_auth_write_lease_claim_transaction (write_lease, handle);
+  if (rc != WYRELOG_E_OK) {
+    service_mutation_scope_leave (store);
+    wyl_handle_policy_store_unpin (handle, store);
+    return rc;
+  }
+  rc = wyl_service_auth_rank_enter (handle, WYL_SERVICE_AUTH_RANK_STORE);
+  if (rc != WYRELOG_E_OK) {
+    g_assert_cmpint (wyl_service_auth_write_lease_unclaim_transaction
+        (write_lease, handle), ==, WYRELOG_E_OK);
+    service_mutation_scope_leave (store);
+    wyl_handle_policy_store_unpin (handle, store);
+    return rc;
+  }
+
+  g_mutex_lock (&store->service_domain_gate_mutex);
+  g_mutex_lock (&store->service_lifecycle_mutex);
+  if (service_authority_store_unavailable (store)
+      || !sqlite3_get_autocommit (store->db)
+      || store->next_service_authority_transaction_id == 0) {
+    g_mutex_unlock (&store->service_lifecycle_mutex);
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    g_assert_cmpint (wyl_service_auth_rank_leave (handle,
+            WYL_SERVICE_AUTH_RANK_STORE), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_auth_write_lease_unclaim_transaction
+        (write_lease, handle), ==, WYRELOG_E_OK);
+    service_mutation_scope_leave (store);
+    wyl_handle_policy_store_unpin (handle, store);
+    return WYRELOG_E_BUSY;
+  }
+
+  WylServiceAuthorityTransaction *txn =
+      g_new0 (WylServiceAuthorityTransaction, 1);
+  txn->store = store;
+  txn->handle = g_object_ref (handle);
+  txn->write_lease = write_lease;
+  txn->owner = g_thread_self ();
+  txn->savepoint =
+      g_strdup_printf ("wyrelog_service_authority_%" G_GUINT64_FORMAT,
+      store->next_service_authority_transaction_id++);
+  txn->state = WYL_SERVICE_AUTHORITY_TXN_ACTIVE;
+  txn->primary_result = WYRELOG_E_OK;
+  txn->cleanup_result = WYRELOG_E_OK;
+  txn->fault = store->service_authority_transaction_fail_once;
+  store->service_authority_transaction_fail_once =
+      WYL_POLICY_AUTHORITY_TXN_FAIL_NONE;
+  txn->owns_store_locks = TRUE;
+  txn->owns_handle_pin = TRUE;
+  g_atomic_int_set (&store->service_authority_transaction_active, TRUE);
+
+  rc = service_authority_transaction_exec (txn, "SAVEPOINT");
+  if (rc != WYRELOG_E_OK) {
+    txn->primary_result = rc;
+    txn->state = WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK;
+    service_authority_transaction_finish (txn);
+    g_clear_object (&txn->handle);
+    g_free (txn->savepoint);
+    g_free (txn);
+    return rc;
+  }
+  *out_transaction = txn;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_commit
+    (WylServiceAuthorityTransaction * txn) {
+  if (txn == NULL || txn->state != WYL_SERVICE_AUTHORITY_TXN_ACTIVE
+      || txn->owner != g_thread_self () || !txn->owns_store_locks)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate
+      (txn->write_lease, txn->handle);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (txn->store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_schema (txn->store);
+  if (rc == WYRELOG_E_OK) {
+    if (txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE
+        || txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK) {
+      rc = service_authority_transaction_fault_exec (txn,
+          "RELEASE SAVEPOINT", &txn->primary_sqlite_extended_error);
+    } else {
+      rc = service_authority_transaction_exec (txn, "RELEASE SAVEPOINT");
+      if (rc != WYRELOG_E_OK)
+        txn->primary_sqlite_extended_error = sqlite3_extended_errcode
+            (txn->store->db);
+      if (rc == WYRELOG_E_OK
+          && txn->fault == WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER)
+        rc = WYRELOG_E_IO;
+    }
+  }
+
+  txn->primary_result = rc;
+  if (rc == WYRELOG_E_OK) {
+    txn->state = WYL_SERVICE_AUTHORITY_TXN_COMMITTED;
+  } else {
+    txn->cleanup_result = service_authority_transaction_restore (txn);
+    txn->state = WYL_SERVICE_AUTHORITY_TXN_FAILED_COMMIT;
+  }
+  service_authority_transaction_finish (txn);
+  return txn->primary_result;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_rollback
+    (WylServiceAuthorityTransaction * txn) {
+  if (txn == NULL || txn->state != WYL_SERVICE_AUTHORITY_TXN_ACTIVE
+      || txn->owner != g_thread_self () || !txn->owns_store_locks)
+    return WYRELOG_E_INVALID;
+
+  txn->primary_result = service_authority_transaction_restore (txn);
+  txn->cleanup_result = txn->primary_result;
+  txn->state = txn->primary_result == WYRELOG_E_OK
+      ? WYL_SERVICE_AUTHORITY_TXN_ROLLED_BACK
+      : WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK;
+  service_authority_transaction_finish (txn);
+  return txn->primary_result;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_abort
+    (WylServiceAuthorityTransaction * txn) {
+  if (txn == NULL || txn->owner != g_thread_self ()
+      || !txn->owns_store_locks || sqlite3_get_autocommit (txn->store->db))
+    return WYRELOG_E_INVALID;
+  if ((txn->state != WYL_SERVICE_AUTHORITY_TXN_FAILED_COMMIT
+          && txn->state != WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK)
+      || !g_atomic_int_get
+      (&txn->store->service_authority_transaction_poisoned))
+    return WYRELOG_E_INVALID;
+
+  g_atomic_int_set (&txn->store->service_authority_abort_allowed, TRUE);
+  if (txn->abort_checkpoint != NULL)
+    txn->abort_checkpoint (txn->abort_checkpoint_data);
+  wyrelog_error_t rc = exec_sql (txn->store->db, "ROLLBACK;");
+  if (rc != WYRELOG_E_OK && txn->recovery_sqlite_extended_error == SQLITE_OK)
+    txn->recovery_sqlite_extended_error = sqlite3_extended_errcode
+        (txn->store->db);
+  g_atomic_int_set (&txn->store->service_authority_abort_allowed, FALSE);
+  if (rc != WYRELOG_E_OK || !sqlite3_get_autocommit (txn->store->db))
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_IO;
+
+  (void) sqlite3_set_authorizer (txn->store->db, NULL, NULL);
+  txn->store->service_authority_poison_owner = NULL;
+  g_atomic_int_set (&txn->store->service_authority_transaction_poisoned, FALSE);
+  service_authority_transaction_finish (txn);
+  return WYRELOG_E_OK;
+}
+
+WylServiceAuthorityTransactionState
+    wyl_policy_store_service_authority_transaction_get_state
+    (const WylServiceAuthorityTransaction * txn)
+{
+  return txn != NULL ? txn->state : WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_get_primary_result
+    (const WylServiceAuthorityTransaction * txn)
+{
+  return txn != NULL ? txn->primary_result : WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_get_cleanup_result
+    (const WylServiceAuthorityTransaction * txn)
+{
+  return txn != NULL ? txn->cleanup_result : WYRELOG_E_INVALID;
+}
+
+int
+wyl_policy_store_service_authority_transaction_get_primary_sqlite_extended_error
+    (const WylServiceAuthorityTransaction *txn)
+{
+  return txn != NULL ? txn->primary_sqlite_extended_error : SQLITE_MISUSE;
+}
+
+int
+wyl_policy_store_service_authority_transaction_get_recovery_sqlite_extended_error
+    (const WylServiceAuthorityTransaction *txn)
+{
+  return txn != NULL ? txn->recovery_sqlite_extended_error : SQLITE_MISUSE;
+}
+
+void wyl_policy_store_service_authority_transaction_set_abort_checkpoint
+    (WylServiceAuthorityTransaction * txn, void (*checkpoint) (gpointer data),
+    gpointer data)
+{
+  if (txn == NULL)
+    return;
+  txn->abort_checkpoint = checkpoint;
+  txn->abort_checkpoint_data = checkpoint != NULL ? data : NULL;
+}
+
+void wyl_policy_store_service_authority_transaction_free
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn == NULL)
+    return;
+  if (txn->state == WYL_SERVICE_AUTHORITY_TXN_ACTIVE) {
+    if (txn->owner != g_thread_self ())
+      return;
+    (void) wyl_policy_store_service_authority_transaction_rollback (txn);
+  }
+  if (txn->owns_store_locks)
+    return;
+  g_clear_object (&txn->handle);
+  g_free (txn->savepoint);
+  g_free (txn);
+}
+
+void wyl_policy_store_service_authority_transaction_fail_once
+    (wyl_policy_store_t * store, WylPolicyAuthorityTransactionFailStage stage)
+{
+  if (store == NULL || stage < WYL_POLICY_AUTHORITY_TXN_FAIL_NONE
+      || stage > WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK)
+    return;
+  g_mutex_lock (&store->service_lifecycle_mutex);
+  store->service_authority_transaction_fail_once = stage;
+  g_mutex_unlock (&store->service_lifecycle_mutex);
+}
+
+gboolean
+    wyl_policy_store_service_authority_transaction_is_poisoned
+    (wyl_policy_store_t * store) {
+  if (store == NULL)
+    return TRUE;
+  return g_atomic_int_get (&store->service_authority_transaction_poisoned);
+}
+
 wyrelog_error_t
 wyl_policy_store_rotate_keyprovider (const gchar *path,
     const wyl_policy_store_open_options_t *old_opts,
@@ -2010,6 +2481,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   g_mutex_init (&self->service_cvk_mutex);
   g_mutex_init (&self->service_domain_gate_mutex);
   g_mutex_init (&self->service_lifecycle_mutex);
+  self->next_service_authority_transaction_id = 1;
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
   self->canonical_path = g_strdup (effective_path);
@@ -4879,6 +5351,11 @@ wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
+  rc = service_mutation_scope_enter (store);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
   g_mutex_lock (&store->service_domain_gate_mutex);
   g_mutex_lock (&store->service_lifecycle_mutex);
   rc = wyl_policy_store_begin_mutation (store);
@@ -4927,6 +5404,7 @@ wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
     wyl_policy_store_rollback_mutation (store);
   g_mutex_unlock (&store->service_lifecycle_mutex);
   g_mutex_unlock (&store->service_domain_gate_mutex);
+  service_mutation_scope_leave (store);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
@@ -4957,6 +5435,11 @@ wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
+  rc = service_mutation_scope_enter (store);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
   g_mutex_lock (&store->service_domain_gate_mutex);
   g_mutex_lock (&store->service_lifecycle_mutex);
   rc = wyl_policy_store_begin_mutation (store);
@@ -5012,6 +5495,7 @@ wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
     wyl_policy_store_rollback_mutation (store);
   g_mutex_unlock (&store->service_lifecycle_mutex);
   g_mutex_unlock (&store->service_domain_gate_mutex);
+  service_mutation_scope_leave (store);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
@@ -5904,6 +6388,9 @@ wyrelog_error_t
    * issuer cannot start a second SQLite transaction in that narrow window.
    * The required inner order remains CVK ensure/unlock, lifecycle mutex,
    * savepoint. */
+  wyrelog_error_t scope_rc = service_mutation_scope_enter (store);
+  if (scope_rc != WYRELOG_E_OK)
+    return scope_rc;
   g_mutex_lock (&store->service_domain_gate_mutex);
   guint8 fingerprint[crypto_generichash_BYTES];
   wyrelog_error_t rc = service_credential_issue_fingerprint (subject_id,
@@ -5916,6 +6403,7 @@ wyrelog_error_t
   if (rc != WYRELOG_E_OK) {
     sodium_memzero (fingerprint, sizeof fingerprint);
     g_mutex_unlock (&store->service_domain_gate_mutex);
+    service_mutation_scope_leave (store);
     return rc;
   }
 
@@ -5993,6 +6481,7 @@ wyrelog_error_t
   }
   wyl_service_credential_secret_clear (&secret);
   g_mutex_unlock (&store->service_domain_gate_mutex);
+  service_mutation_scope_leave (store);
   return rc;
 }
 
@@ -6207,6 +6696,11 @@ wyl_policy_store_revoke_service_credential (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
+  rc = service_mutation_scope_enter (store);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
   g_mutex_lock (&store->service_domain_gate_mutex);
   g_mutex_lock (&store->service_lifecycle_mutex);
   rc = wyl_policy_store_begin_mutation (store);
@@ -6261,6 +6755,7 @@ wyl_policy_store_revoke_service_credential (wyl_policy_store_t *store,
     wyl_policy_store_rollback_mutation (store);
   g_mutex_unlock (&store->service_lifecycle_mutex);
   g_mutex_unlock (&store->service_domain_gate_mutex);
+  service_mutation_scope_leave (store);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_credential_info_clear (out);
   return rc;
@@ -6440,6 +6935,11 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
     return rc;
   }
 
+  rc = service_mutation_scope_enter (store);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
   g_mutex_lock (&store->service_domain_gate_mutex);
   gint64 now_us = now_us_cb (now_data);
   if (now_us <= 0) {
@@ -6588,6 +7088,7 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
 unlock_gate:
   sodium_memzero (fingerprint, sizeof fingerprint);
   g_mutex_unlock (&store->service_domain_gate_mutex);
+  service_mutation_scope_leave (store);
   return rc;
 }
 

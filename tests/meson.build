@@ -795,7 +795,7 @@ test('daemon-auth-registry', test_daemon_auth_registry)
 test_service_auth_coordination = executable('test-service-auth-coordination',
   'test-service-auth-coordination.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  dependencies : [wyrelog_dep],
+  dependencies : [wyrelog_dep, sqlite_dep],
 )
 
 test('service-auth-coordination', test_service_auth_coordination,
