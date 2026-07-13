@@ -4243,6 +4243,30 @@ wyl_policy_service_subject_is_valid (const gchar *subject_id,
   return TRUE;
 }
 
+gboolean
+wyl_policy_subject_has_service_prefix (const gchar *subject_id)
+{
+  return subject_id != NULL && g_str_has_prefix (subject_id, "svc:");
+}
+
+static wyrelog_error_t
+service_authorization_subject_check (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean human_only)
+{
+  if (!wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_OK;
+  if (human_only)
+    return WYRELOG_E_POLICY;
+
+  wyl_policy_principal_kind_t kind = WYL_POLICY_PRINCIPAL_KIND_UNKNOWN;
+  wyrelog_error_t rc = wyl_policy_store_get_principal_kind (store, subject_id,
+      &kind);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return kind == WYL_POLICY_PRINCIPAL_KIND_SERVICE ? WYRELOG_E_OK :
+      WYRELOG_E_POLICY;
+}
+
 void wyl_policy_service_principal_info_clear
     (wyl_policy_service_principal_info_t * info)
 {
@@ -5708,13 +5732,18 @@ wyl_policy_store_grant_direct_permission (wyl_policy_store_t *store,
       || perm_id == NULL || scope == NULL)
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t rc = service_authorization_subject_check (store,
+      subject_id, g_str_equal (perm_id, "wr.login.skip_mfa"));
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   static const gchar *sql =
       "INSERT INTO direct_permissions "
       "  (subject_id, perm_id, scope, granted_at) "
       "VALUES (?, ?, ?, unixepoch()) "
       "ON CONFLICT(subject_id, perm_id, scope) DO UPDATE SET "
       "  granted_at = excluded.granted_at;";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
@@ -5738,6 +5767,9 @@ wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || subject_id == NULL
       || perm_id == NULL || scope == NULL)
     return WYRELOG_E_INVALID;
+
+  /* Revocation is a repair operation: legacy unregistered service subjects
+   * and registered services with human-only grants must remain removable. */
 
   static const gchar *sql =
       "DELETE FROM direct_permissions "
@@ -5963,11 +5995,21 @@ wyl_policy_store_append_direct_permission_event (wyl_policy_store_t *store,
       || perm_id == NULL || scope == NULL || operation == NULL)
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  /* A revoke event is the durable half of destructive repair and therefore
+   * follows the same exception as the deletion it records. */
+  if (!g_str_equal (operation, "revoke")) {
+    rc = service_authorization_subject_check (store, subject_id,
+        g_str_equal (perm_id, "wr.login.skip_mfa"));
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
   static const gchar *sql =
       "INSERT INTO direct_permission_events "
       "  (subject_id, perm_id, scope, operation, created_at) "
       "VALUES (?, ?, ?, ?, unixepoch());";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
@@ -6026,6 +6068,8 @@ wyl_policy_store_set_permission_state (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || subject_id == NULL
       || perm_id == NULL || scope == NULL || state == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO permission_states "
@@ -6061,6 +6105,8 @@ wyl_policy_store_permission_state_exists (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   *out_exists = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
   static const gchar *sql =
       "SELECT 1 FROM permission_states "
       "WHERE subject_id = ? AND perm_id = ? AND scope = ?;";
@@ -6099,6 +6145,8 @@ wyl_policy_store_permission_state_is (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   *out_matches = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
   static const gchar *sql =
       "SELECT 1 FROM permission_states "
       "WHERE subject_id = ? AND perm_id = ? AND scope = ? AND state = ?;";
@@ -6137,6 +6185,8 @@ wyl_policy_store_get_permission_state (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   *out_state = NULL;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
   static const gchar *sql =
       "SELECT state FROM permission_states "
       "WHERE subject_id = ? AND perm_id = ? AND scope = ?;";
@@ -6212,6 +6262,8 @@ wyl_policy_store_append_permission_state_event (wyl_policy_store_t *store,
       || perm_id == NULL || scope == NULL || event == NULL
       || from_state == NULL || to_state == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO permission_state_events "
@@ -6258,6 +6310,8 @@ wyrelog_error_t
   if (store == NULL || store->db == NULL || subject_id == NULL
       || perm_id == NULL || scope == NULL || event == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   wyl_perm_event_t ev = wyl_perm_event_from_name (event);
   if (ev == WYL_PERM_EVENT_LAST_)
@@ -6381,6 +6435,8 @@ wyl_policy_store_set_principal_state (wyl_policy_store_t *store,
 
   if (store == NULL || store->db == NULL || subject_id == NULL || state == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO principal_states (subject_id, state, updated_at) "
@@ -6466,6 +6522,8 @@ wyl_policy_store_get_principal_state (wyl_policy_store_t *store,
 
   *out_state = NULL;
   *out_found = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "SELECT state FROM principal_states WHERE subject_id = ?;";
@@ -6509,6 +6567,8 @@ wyl_policy_store_get_principal_lock_info (wyl_policy_store_t *store,
   *out_failed_count = 0;
   *out_locked_at = G_MININT64;
   *out_found = FALSE;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "SELECT state, failed_attempt_count, locked_at "
@@ -6561,10 +6621,11 @@ wyl_policy_store_apply_principal_failure (wyl_policy_store_t *store,
       || out_state == NULL || out_count == NULL || out_locked_at == NULL
       || threshold <= 0)
     return WYRELOG_E_INVALID;
-
   *out_state = NULL;
   *out_count = 0;
   *out_locked_at = G_MININT64;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   wyrelog_error_t rc = wyl_policy_store_begin_mutation (store);
   if (rc != WYRELOG_E_OK)
@@ -6716,6 +6777,8 @@ wyl_policy_store_reset_principal_failure_counter (wyl_policy_store_t *store,
 
   if (store == NULL || store->db == NULL || subject_id == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   /* Reset is a no-op when the row does not exist (the validator only
    * reaches this branch after a successful TOTP match, and the verify
@@ -6748,6 +6811,8 @@ wyl_policy_store_apply_principal_unlock (wyl_policy_store_t *store,
 {
   if (store == NULL || store->db == NULL || subject_id == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   /* FSM-edge validation is the auth/validator layer's responsibility
    * (see wyl_mfa_validator_totp / maybe_auto_unlock).  This helper just
@@ -6805,6 +6870,8 @@ wyl_policy_store_append_principal_event (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || subject_id == NULL
       || event == NULL || from_state == NULL || to_state == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO principal_events "
@@ -6880,6 +6947,8 @@ wyl_policy_store_set_session_state (wyl_policy_store_t *store,
 
   if (store == NULL || store->db == NULL || session_id == NULL || state == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (session_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO session_states (session_id, state, updated_at) "
@@ -6940,6 +7009,8 @@ wyl_policy_store_append_session_event (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || session_id == NULL
       || event == NULL || from_state == NULL || to_state == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (session_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "INSERT INTO session_events "
@@ -7230,13 +7301,18 @@ wyl_policy_store_grant_role_membership (wyl_policy_store_t *store,
       || role_id == NULL || scope == NULL)
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t rc = service_authorization_subject_check (store,
+      subject_id, FALSE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
   static const gchar *sql =
       "INSERT INTO role_memberships "
       "  (subject_id, role_id, scope, granted_at) "
       "VALUES (?, ?, ?, unixepoch()) "
       "ON CONFLICT(subject_id, role_id, scope) DO UPDATE SET "
       "  granted_at = excluded.granted_at;";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
@@ -7260,6 +7336,8 @@ wyl_policy_store_revoke_role_membership (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || subject_id == NULL
       || role_id == NULL || scope == NULL)
     return WYRELOG_E_INVALID;
+
+  /* Keep legacy namespace collisions remediable while grants remain guarded. */
 
   static const gchar *sql =
       "DELETE FROM role_memberships "
@@ -7418,11 +7496,19 @@ wyl_policy_store_append_role_membership_event (wyl_policy_store_t *store,
       || role_id == NULL || scope == NULL || operation == NULL)
     return WYRELOG_E_INVALID;
 
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  /* Repair revocations must be able to append their matching event. */
+  if (!g_str_equal (operation, "revoke")) {
+    rc = service_authorization_subject_check (store, subject_id, FALSE);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
   static const gchar *sql =
       "INSERT INTO role_membership_events "
       "  (subject_id, role_id, scope, operation, created_at) "
       "VALUES (?, ?, ?, ?, unixepoch());";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
@@ -7970,6 +8056,8 @@ wyl_policy_store_apply_bootstrap_admin (wyl_policy_store_t *store,
   *out_applied = FALSE;
   *out_existing_subject = NULL;
 
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
   if (!bootstrap_admin_subject_is_valid (subject_id))
     return WYRELOG_E_INVALID;
 
@@ -8220,6 +8308,8 @@ wyl_policy_store_totp_enrollment_insert (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || enr == NULL
       || enr->subject_id == NULL || enr->subject_id[0] == '\0')
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (enr->subject_id))
+    return WYRELOG_E_POLICY;
 
   /* Mint the persistent id_uuidv7 before touching SQLite so an
    * entropy failure does not leave a half-written row.  Discard any
@@ -8304,6 +8394,8 @@ wyl_policy_store_totp_enrollment_lookup (wyl_policy_store_t *store,
    * NULL-safe for the strings and unconditionally zeroes the secret
    * (footgun F4). */
   wyl_totp_enrollment_clear (out);
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   static const gchar *sql =
       "SELECT subject_id, secret_blob, last_verified_step, enrolled_at, "
@@ -8362,6 +8454,8 @@ wyl_policy_store_totp_enrollment_update_step (wyl_policy_store_t *store,
 
   if (store == NULL || store->db == NULL || subject_id == NULL)
     return WYRELOG_E_INVALID;
+  if (wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_POLICY;
 
   /* The atomic update primitive that commit 3 will compose with the
    * principal-state mutation in an outer transaction, mirroring
@@ -8395,6 +8489,9 @@ wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *store,
 
   if (store == NULL || store->db == NULL || subject_id == NULL)
     return WYRELOG_E_INVALID;
+
+  /* Deletion is intentionally allowed for legacy `svc:` enrollment repair;
+   * insert, lookup and watermark update remain human-only. */
 
   static const gchar *sql =
       "DELETE FROM totp_enrollments WHERE subject_id = ?;";

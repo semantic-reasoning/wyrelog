@@ -777,6 +777,14 @@ test_service_credential = executable('test-service-credential',
 
 test('service-credential', test_service_credential)
 
+test_policy_service_namespace = executable('test-policy-service-namespace',
+  'test-policy-service-namespace.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+test('policy-service-namespace', test_policy_service_namespace)
+
 test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
   'test-policy-store-service-cvk.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
