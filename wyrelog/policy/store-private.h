@@ -17,6 +17,8 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 typedef struct _WylServiceAuthorityTransaction WylServiceAuthorityTransaction;
+typedef struct _WylServiceAuthorityCommitEvidence
+    WylServiceAuthorityCommitEvidence;
 
 typedef enum
 {
@@ -446,13 +448,52 @@ void wyl_policy_store_service_authority_transaction_set_abort_checkpoint
 void wyl_policy_store_service_authority_transaction_free
     (WylServiceAuthorityTransaction * transaction);
 
+wyrelog_error_t wyl_policy_store_service_authority_prepare_commit_evidence
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    WylServiceAuthorityCommitEvidence ** out_evidence);
+WylServiceAuthorityCommitEvidence
+    * wyl_policy_store_service_authority_commit_evidence_ref
+    (WylServiceAuthorityCommitEvidence * evidence);
+void wyl_policy_store_service_authority_commit_evidence_unref
+    (WylServiceAuthorityCommitEvidence * evidence);
+wyrelog_error_t
+    wyl_policy_store_service_authority_commit_evidence_validate_pending
+    (WylServiceAuthorityCommitEvidence * evidence,
+    WylServiceAuthorityTransaction * transaction, WylHandle * handle,
+    wyl_policy_store_t * store);
+wyrelog_error_t
+    wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+    (WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,
+    wyl_policy_store_t * store);
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+    (WylServiceAuthorityCommitEvidence * evidence,
+    WylServiceAuthWriteLease * write_lease, WylHandle * handle,
+    wyl_policy_store_t * expected_store, guint64 expected_transaction_serial);
+guint64 wyl_policy_store_service_authority_transaction_get_serial
+    (const WylServiceAuthorityTransaction * transaction);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityTransaction,
     wyl_policy_store_service_authority_transaction_free);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityCommitEvidence,
+    wyl_policy_store_service_authority_commit_evidence_unref);
 
 /* Deterministic private fault and observation seams for transaction tests. */
 void wyl_policy_store_service_authority_transaction_fail_once
     (wyl_policy_store_t * store, WylPolicyAuthorityTransactionFailStage stage);
-gboolean wyl_policy_store_service_authority_transaction_is_poisoned
+void
+wyl_policy_store_service_authority_transaction_fail_evidence_allocation_once
+    (WylServiceAuthorityTransaction * transaction);
+guint
+    wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+    (const WylServiceAuthorityTransaction * transaction);
+gboolean
+    wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
+    (WylServiceAuthorityCommitEvidence * evidence);
+gboolean
+    wyl_policy_store_service_authority_transaction_is_poisoned
     (wyl_policy_store_t * store);
 
 /* Owned-output contract for the service lookup/load APIs below:

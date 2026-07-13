@@ -73,6 +73,9 @@ wyrelog_error_t wyl_service_auth_write_lease_validate_operation
 wyrelog_error_t wyl_service_auth_write_lease_get_policy_store
     (WylServiceAuthWriteLease * lease, WylHandle * handle,
     wyl_policy_store_t ** out_store);
+wyrelog_error_t wyl_service_auth_write_lease_get_serial
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    guint64 * out_serial);
 /*
  * Monotonically fails closed the service branch. Only the current owner of an
  * ACTIVE same-handle WRITE lease may set it; the first valid reason wins.

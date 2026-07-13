@@ -78,6 +78,8 @@ struct _WylHandle
   GMutex policy_store_lifecycle_mutex;
   GCond policy_store_lifecycle_changed;
   GHashTable *policy_store_pin_owners;
+  guint64 policy_store_generation;
+  gboolean policy_store_generation_exhausted;
   guint policy_store_active_operations;
   gboolean policy_store_shutdown_pending;
   gboolean policy_store_shutdown_completing;
@@ -698,6 +700,16 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     g_object_unref (self);
     return rc;
   }
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  if (self->policy_store_generation_exhausted
+      || self->policy_store_generation == G_MAXUINT64) {
+    self->policy_store_generation_exhausted = TRUE;
+    g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+    g_object_unref (self);
+    return WYRELOG_E_INTERNAL;
+  }
+  self->policy_store_generation++;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
   rc = wyl_policy_store_create_schema (self->policy_store);
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
@@ -817,6 +829,10 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
         &handle->policy_store_lifecycle_mutex);
   detached_store = handle->policy_store;
   handle->policy_store = NULL;
+  if (handle->policy_store_generation == G_MAXUINT64)
+    handle->policy_store_generation_exhausted = TRUE;
+  else if (!handle->policy_store_generation_exhausted)
+    handle->policy_store_generation++;
   handle->policy_store_shutdown_completing = TRUE;
   g_mutex_unlock (&handle->policy_store_lifecycle_mutex);
 
@@ -1257,6 +1273,66 @@ wyl_handle_policy_store_unpin (WylHandle *self,
         GUINT_TO_POINTER (owner_pins - 1));
   self->policy_store_active_operations--;
   g_cond_broadcast (&self->policy_store_lifecycle_changed);
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+}
+
+wyrelog_error_t
+wyl_handle_policy_store_capture_generation (WylHandle *self,
+    wyl_policy_store_t *expected_store, guint64 *out_generation)
+{
+  if (out_generation != NULL)
+    *out_generation = 0;
+  if (!WYL_IS_HANDLE (self) || expected_store == NULL || out_generation == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  wyrelog_error_t rc = self->policy_store_generation_exhausted
+      || self->policy_store != expected_store
+      || self->policy_store_generation == 0 ? WYRELOG_E_INVALID
+      : self->policy_store_shutdown_pending
+      || self->policy_store_shutdown_completing
+      || self->policy_store_shutdown_completed ? WYRELOG_E_BUSY : WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK)
+    *out_generation = self->policy_store_generation;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_handle_policy_store_validate_generation (WylHandle *self,
+    wyl_policy_store_t *expected_store, guint64 generation)
+{
+  if (!WYL_IS_HANDLE (self) || expected_store == NULL || generation == 0)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  wyrelog_error_t rc = self->policy_store_generation_exhausted
+      || self->policy_store != expected_store
+      || self->policy_store_generation != generation ? WYRELOG_E_INVALID
+      : self->policy_store_shutdown_pending
+      || self->policy_store_shutdown_completing
+      || self->policy_store_shutdown_completed ? WYRELOG_E_BUSY : WYRELOG_E_OK;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+  return rc;
+}
+
+void
+wyl_handle_policy_store_test_advance_generation (WylHandle *self)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  if (self->policy_store_generation == G_MAXUINT64)
+    self->policy_store_generation_exhausted = TRUE;
+  else if (!self->policy_store_generation_exhausted)
+    self->policy_store_generation++;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+}
+
+void
+wyl_handle_policy_store_test_set_generation_max (WylHandle *self)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  if (!self->policy_store_generation_exhausted)
+    self->policy_store_generation = G_MAXUINT64;
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
 }
 

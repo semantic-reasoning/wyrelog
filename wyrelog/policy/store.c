@@ -148,6 +148,26 @@ struct wyl_policy_store_t
   guint8 *service_cvk_envelope;
 };
 
+typedef enum
+{
+  WYL_SERVICE_AUTHORITY_EVIDENCE_PENDING,
+  WYL_SERVICE_AUTHORITY_EVIDENCE_COMMITTED,
+  WYL_SERVICE_AUTHORITY_EVIDENCE_INVALID,
+} WylServiceAuthorityEvidenceState;
+
+struct _WylServiceAuthorityCommitEvidence
+{
+  gint refs;
+  GMutex mutex;
+  WylHandle *handle;
+  WylServiceAuthAuthority *authority_identity;  /* borrowed from handle */
+  guint64 store_generation;
+  guint64 transaction_serial;
+  guint64 write_lease_serial;
+  WylServiceAuthorityEvidenceState state;
+  GThread *pending_owner;
+};
+
 struct _WylServiceAuthorityTransaction
 {
   wyl_policy_store_t *store;
@@ -165,6 +185,11 @@ struct _WylServiceAuthorityTransaction
   gboolean owns_handle_pin;
   void (*abort_checkpoint) (gpointer data);
   gpointer abort_checkpoint_data;
+  guint64 serial;
+  WylServiceAuthorityCommitEvidence *commit_evidence;
+  gboolean durable_operation_started;
+  gboolean fail_evidence_allocation_once;
+  guint evidence_allocation_count;
 };
 
 typedef struct
@@ -2040,6 +2065,44 @@ service_authority_transaction_exec (WylServiceAuthorityTransaction *txn,
   return exec_sql (txn->store->db, sql);
 }
 
+WylServiceAuthorityCommitEvidence
+    * wyl_policy_store_service_authority_commit_evidence_ref
+    (WylServiceAuthorityCommitEvidence * evidence) {
+  g_return_val_if_fail (evidence != NULL, NULL);
+  gint refs = g_atomic_int_get (&evidence->refs);
+  while (refs > 0 && refs < G_MAXINT) {
+    if (g_atomic_int_compare_and_exchange (&evidence->refs, refs, refs + 1))
+      return evidence;
+    refs = g_atomic_int_get (&evidence->refs);
+  }
+  return NULL;
+}
+
+void wyl_policy_store_service_authority_commit_evidence_unref
+    (WylServiceAuthorityCommitEvidence * evidence)
+{
+  if (evidence == NULL || !g_atomic_int_dec_and_test (&evidence->refs))
+    return;
+  g_clear_object (&evidence->handle);
+  g_mutex_clear (&evidence->mutex);
+  g_free (evidence);
+}
+
+static void
+    service_authority_commit_evidence_transition
+    (WylServiceAuthorityCommitEvidence * evidence,
+    WylServiceAuthorityEvidenceState state)
+{
+  if (evidence == NULL)
+    return;
+  g_mutex_lock (&evidence->mutex);
+  g_assert_cmpint (evidence->state, ==, WYL_SERVICE_AUTHORITY_EVIDENCE_PENDING);
+  evidence->state = state;
+  if (state != WYL_SERVICE_AUTHORITY_EVIDENCE_PENDING)
+    evidence->pending_owner = NULL;
+  g_mutex_unlock (&evidence->mutex);
+}
+
 static int
 service_authority_fault_authorizer (gpointer data, int action,
     const gchar *arg1, const gchar *arg2, const gchar *database,
@@ -2197,9 +2260,10 @@ wyrelog_error_t
   txn->handle = g_object_ref (handle);
   txn->write_lease = write_lease;
   txn->owner = g_thread_self ();
+  txn->serial = store->next_service_authority_transaction_id++;
   txn->savepoint =
       g_strdup_printf ("wyrelog_service_authority_%" G_GUINT64_FORMAT,
-      store->next_service_authority_transaction_id++);
+      txn->serial);
   txn->state = WYL_SERVICE_AUTHORITY_TXN_ACTIVE;
   txn->primary_result = WYRELOG_E_OK;
   txn->cleanup_result = WYRELOG_E_OK;
@@ -2231,6 +2295,7 @@ wyrelog_error_t
       || txn->owner != g_thread_self () || !txn->owns_store_locks)
     return WYRELOG_E_INVALID;
 
+  gboolean release_succeeded = FALSE;
   wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
       (txn->write_lease, txn->handle);
   if (rc == WYRELOG_E_OK)
@@ -2244,6 +2309,10 @@ wyrelog_error_t
           "RELEASE SAVEPOINT", &txn->primary_sqlite_extended_error);
     } else {
       rc = service_authority_transaction_exec (txn, "RELEASE SAVEPOINT");
+      release_succeeded = rc == WYRELOG_E_OK;
+      if (release_succeeded)
+        service_authority_commit_evidence_transition (txn->commit_evidence,
+            WYL_SERVICE_AUTHORITY_EVIDENCE_COMMITTED);
       if (rc != WYRELOG_E_OK)
         txn->primary_sqlite_extended_error = sqlite3_extended_errcode
             (txn->store->db);
@@ -2254,6 +2323,9 @@ wyrelog_error_t
   }
 
   txn->primary_result = rc;
+  if (!release_succeeded)
+    service_authority_commit_evidence_transition (txn->commit_evidence,
+        WYL_SERVICE_AUTHORITY_EVIDENCE_INVALID);
   if (rc == WYRELOG_E_OK) {
     txn->state = WYL_SERVICE_AUTHORITY_TXN_COMMITTED;
   } else {
@@ -2276,6 +2348,8 @@ wyrelog_error_t
   txn->state = txn->primary_result == WYRELOG_E_OK
       ? WYL_SERVICE_AUTHORITY_TXN_ROLLED_BACK
       : WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK;
+  service_authority_commit_evidence_transition (txn->commit_evidence,
+      WYL_SERVICE_AUTHORITY_EVIDENCE_INVALID);
   service_authority_transaction_finish (txn);
   return txn->primary_result;
 }
@@ -2367,6 +2441,8 @@ void wyl_policy_store_service_authority_transaction_free
   }
   if (txn->owns_store_locks)
     return;
+  g_clear_pointer (&txn->commit_evidence,
+      wyl_policy_store_service_authority_commit_evidence_unref);
   g_clear_object (&txn->handle);
   g_free (txn->savepoint);
   g_free (txn);
@@ -2381,6 +2457,21 @@ void wyl_policy_store_service_authority_transaction_fail_once
   g_mutex_lock (&store->service_lifecycle_mutex);
   store->service_authority_transaction_fail_once = stage;
   g_mutex_unlock (&store->service_lifecycle_mutex);
+}
+
+void
+wyl_policy_store_service_authority_transaction_fail_evidence_allocation_once
+    (WylServiceAuthorityTransaction *txn)
+{
+  if (txn != NULL)
+    txn->fail_evidence_allocation_once = TRUE;
+}
+
+guint
+    wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+    (const WylServiceAuthorityTransaction * txn)
+{
+  return txn != NULL ? txn->evidence_allocation_count : 0;
 }
 
 gboolean
@@ -5311,7 +5402,7 @@ service_domain_finish_mutation (wyl_policy_store_t *store)
 }
 
 static wyrelog_error_t
-    service_authority_transaction_validate_core
+    service_authority_transaction_validate_active
     (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store)
 {
   if (txn == NULL || store == NULL || txn->store != store
@@ -5322,6 +5413,176 @@ static wyrelog_error_t
     return WYRELOG_E_INVALID;
   return wyl_service_auth_write_lease_validate_operation (txn->write_lease,
       txn->handle);
+}
+
+static wyrelog_error_t
+    service_authority_transaction_validate_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store)
+{
+  wyrelog_error_t rc = service_authority_transaction_validate_active (txn,
+      store);
+  if (rc == WYRELOG_E_OK)
+    txn->durable_operation_started = TRUE;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_prepare_commit_evidence
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    WylServiceAuthorityCommitEvidence ** out_evidence) {
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = service_authority_transaction_validate_active (txn,
+      store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (txn->durable_operation_started || txn->commit_evidence != NULL)
+    return WYRELOG_E_BUSY;
+  if (txn->fail_evidence_allocation_once) {
+    txn->fail_evidence_allocation_once = FALSE;
+    return WYRELOG_E_NOMEM;
+  }
+
+  guint64 store_generation = 0;
+  rc = wyl_handle_policy_store_capture_generation (txn->handle, store,
+      &store_generation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint64 write_lease_serial = 0;
+  rc = wyl_service_auth_write_lease_get_serial (txn->write_lease,
+      txn->handle, &write_lease_serial);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylServiceAuthorityCommitEvidence *evidence =
+      g_try_new0 (WylServiceAuthorityCommitEvidence, 1);
+  if (evidence == NULL)
+    return WYRELOG_E_NOMEM;
+  g_atomic_int_set (&evidence->refs, 1);
+  g_mutex_init (&evidence->mutex);
+  evidence->handle = g_object_ref (txn->handle);
+  evidence->authority_identity =
+      wyl_handle_get_service_auth_authority (txn->handle);
+  evidence->store_generation = store_generation;
+  evidence->transaction_serial = txn->serial;
+  evidence->write_lease_serial = write_lease_serial;
+  evidence->state = WYL_SERVICE_AUTHORITY_EVIDENCE_PENDING;
+  evidence->pending_owner = txn->owner;
+  txn->commit_evidence = evidence;
+  txn->evidence_allocation_count++;
+  *out_evidence =
+      wyl_policy_store_service_authority_commit_evidence_ref (evidence);
+  if (*out_evidence == NULL) {
+    txn->commit_evidence = NULL;
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+    return WYRELOG_E_INTERNAL;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_commit_evidence_validate_pending
+    (WylServiceAuthorityCommitEvidence * evidence,
+    WylServiceAuthorityTransaction * txn, WylHandle * handle,
+    wyl_policy_store_t * store) {
+  if (evidence == NULL || txn == NULL || !WYL_IS_HANDLE (handle)
+      || store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&evidence->mutex);
+  gboolean valid = evidence->state == WYL_SERVICE_AUTHORITY_EVIDENCE_PENDING
+      && evidence->pending_owner == g_thread_self ()
+      && evidence->handle == handle && txn->commit_evidence == evidence
+      && txn->serial == evidence->transaction_serial;
+  g_mutex_unlock (&evidence->mutex);
+  if (!valid)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = service_authority_transaction_validate_active (txn,
+      store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_policy_store_validate_generation (handle, store,
+      evidence->store_generation);
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+    (WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,
+    wyl_policy_store_t * store) {
+  if (evidence == NULL || !WYL_IS_HANDLE (handle) || store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&evidence->mutex);
+  gboolean valid =
+      evidence->state == WYL_SERVICE_AUTHORITY_EVIDENCE_COMMITTED
+      && evidence->handle == handle
+      && evidence->authority_identity ==
+      wyl_handle_get_service_auth_authority (handle)
+      && evidence->transaction_serial != 0;
+  guint64 generation = evidence->store_generation;
+  g_mutex_unlock (&evidence->mutex);
+  if (!valid)
+    return WYRELOG_E_INVALID;
+  return wyl_handle_policy_store_validate_generation (handle, store,
+      generation);
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+    (WylServiceAuthorityCommitEvidence * evidence,
+    WylServiceAuthWriteLease * write_lease, WylHandle * handle,
+    wyl_policy_store_t * expected_store, guint64 expected_transaction_serial) {
+  if (evidence == NULL || write_lease == NULL || !WYL_IS_HANDLE (handle)
+      || expected_store == NULL || expected_transaction_serial == 0)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *leased_store = NULL;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store
+      (write_lease, handle, &leased_store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (leased_store != expected_store)
+    return WYRELOG_E_INVALID;
+  guint64 active_lease_serial = 0;
+  rc = wyl_service_auth_write_lease_get_serial (write_lease, handle,
+      &active_lease_serial);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_mutex_lock (&evidence->mutex);
+  gboolean valid =
+      evidence->state == WYL_SERVICE_AUTHORITY_EVIDENCE_COMMITTED
+      && evidence->handle == handle
+      && evidence->authority_identity ==
+      wyl_handle_get_service_auth_authority (handle)
+      && evidence->transaction_serial == expected_transaction_serial
+      && evidence->write_lease_serial == active_lease_serial;
+  guint64 generation = evidence->store_generation;
+  g_mutex_unlock (&evidence->mutex);
+  if (!valid)
+    return WYRELOG_E_INVALID;
+  return wyl_handle_policy_store_validate_generation (handle, expected_store,
+      generation);
+}
+
+guint64
+    wyl_policy_store_service_authority_transaction_get_serial
+    (const WylServiceAuthorityTransaction * txn)
+{
+  return txn != NULL && txn->owner == g_thread_self ()
+      && txn->state == WYL_SERVICE_AUTHORITY_TXN_ACTIVE
+      && txn->owns_store_locks ? txn->serial : 0;
+}
+
+gboolean
+    wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
+    (WylServiceAuthorityCommitEvidence * evidence) {
+  if (evidence == NULL || g_atomic_int_get (&evidence->refs) != 1)
+    return FALSE;
+  g_atomic_int_set (&evidence->refs, G_MAXINT);
+  gboolean rejected =
+      wyl_policy_store_service_authority_commit_evidence_ref (evidence) == NULL;
+  g_atomic_int_set (&evidence->refs, 1);
+  return rejected;
 }
 
 void wyl_policy_store_service_lifecycle_fail_commit_once

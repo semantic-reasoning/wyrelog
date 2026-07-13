@@ -671,7 +671,6 @@ static void
   WylServiceAuthorityTransaction *txn = NULL;
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
       (store, handle, lease, &txn), ==, WYRELOG_E_OK);
-
   const gchar *tables[] = {
     "service_principals",
     "service_credentials",
@@ -1167,6 +1166,291 @@ test_authority_transaction_preserves_commit_cleanup_failure (void)
   wyl_service_auth_write_lease_free (lease);
 }
 
+typedef struct
+{
+  WylServiceAuthorityCommitEvidence *evidence;
+  WylHandle *handle;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} EvidenceValidationThread;
+
+typedef struct
+{
+  WylServiceAuthorityTransaction *transaction;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} EvidencePrepareThread;
+
+static gpointer
+commit_evidence_prepare_thread (gpointer data)
+{
+  EvidencePrepareThread *prepare = data;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  prepare->rc = wyl_policy_store_service_authority_prepare_commit_evidence
+      (prepare->transaction, prepare->store, &evidence);
+  g_assert_null (evidence);
+  return NULL;
+}
+
+static gpointer
+committed_evidence_validation_thread (gpointer data)
+{
+  EvidenceValidationThread *validation = data;
+  WylServiceAuthorityCommitEvidence *evidence =
+      wyl_policy_store_service_authority_commit_evidence_ref
+      (validation->evidence);
+  validation->rc =
+      wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, validation->handle, validation->store);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  return NULL;
+}
+
+static void
+test_authority_commit_evidence_commit_and_lifetime (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (WylHandle) other = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  guint64 transaction_serial =
+      wyl_policy_store_service_authority_transaction_get_serial (txn);
+  g_assert_cmpuint (transaction_serial, >, 0);
+
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  EvidencePrepareThread prepare = { txn, store, WYRELOG_E_OK };
+  g_autoptr (GThread) prepare_thread = g_thread_new ("evidence-prepare",
+      commit_evidence_prepare_thread, &prepare);
+  g_thread_join (g_steal_pointer (&prepare_thread));
+  g_assert_cmpint (prepare.rc, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn,
+          wyl_handle_get_policy_store (other), &evidence), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (evidence);
+  wyl_policy_store_service_authority_transaction_fail_evidence_allocation_once
+      (txn);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_NOMEM);
+  g_assert_null (evidence);
+  g_assert_cmpuint
+      (wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+      (txn), ==, 0);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_OK);
+  g_assert_nonnull (evidence);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_pending
+      (evidence, txn, handle, store), ==, WYRELOG_E_OK);
+  WylServiceAuthorityCommitEvidence *duplicate = NULL;
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &duplicate), ==, WYRELOG_E_BUSY);
+  g_assert_null (duplicate);
+
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_OK);
+  g_assert_cmpuint
+      (wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+      (txn), ==, 1);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_pending
+      (evidence, txn, handle, store), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, lease, handle, store, transaction_serial), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, lease, handle, store, transaction_serial + 1), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, lease, other, wyl_handle_get_policy_store (other),
+          transaction_serial), ==, WYRELOG_E_INVALID);
+  wyl_policy_store_service_authority_transaction_free (txn);
+
+  txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  guint64 next_transaction_serial =
+      wyl_policy_store_service_authority_transaction_get_serial (txn);
+  g_assert_cmpuint (next_transaction_serial, !=, transaction_serial);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, lease, handle, store, next_transaction_serial), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+
+  EvidenceValidationThread validation = { evidence, handle, store,
+    WYRELOG_E_INTERNAL
+  };
+  g_autoptr (GThread) thread = g_thread_new ("evidence-validation",
+      committed_evidence_validation_thread, &validation);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (validation.rc, ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, lease, handle, store, transaction_serial), ==,
+      WYRELOG_E_INVALID);
+  wyl_service_auth_write_lease_free (lease);
+  WylServiceAuthWriteLease *other_lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &other_lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, other_lease, handle, store, transaction_serial), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (other_lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (other_lease);
+  g_assert_true
+      (wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
+      (evidence));
+  wyl_handle_policy_store_test_advance_generation (handle);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_INVALID);
+  wyl_handle_policy_store_test_set_generation_max (handle);
+  wyl_handle_policy_store_test_advance_generation (handle);
+  guint64 exhausted_generation = 0;
+  g_assert_cmpint (wyl_handle_policy_store_capture_generation (handle, store,
+          &exhausted_generation), ==, WYRELOG_E_INVALID);
+  g_assert_cmpuint (exhausted_generation, ==, 0);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+}
+
+static void
+test_authority_commit_evidence_invalid_paths (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+
+  WylServiceAuthorityTransaction *txn = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_service_principal_core (txn, store,
+          NULL, NULL, NULL, NULL, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_BUSY);
+  g_assert_null (evidence);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+
+  txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_INVALID);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+
+  txn = NULL;
+  evidence = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_INVALID);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+
+  txn = NULL;
+  evidence = NULL;
+  wyl_policy_store_service_authority_transaction_fail_once (store,
+      WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  guint64 release_after_serial =
+      wyl_policy_store_service_authority_transaction_get_serial (txn);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_OK);
+  sqlite_exec_ok (wyl_policy_store_get_db (store),
+      "PRAGMA user_version = 371;");
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_IO);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
+          "PRAGMA user_version;"), ==, 371);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (evidence, lease, handle, store, release_after_serial), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_authority_commit_evidence_does_not_block_shutdown (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylServiceAuthorityTransaction) txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_OK);
+  g_clear_pointer (&txn, wyl_policy_store_service_authority_transaction_free);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+
+  HandleShutdownThread shutdown = { handle, WYRELOG_E_INTERNAL };
+  g_autoptr (GThread) thread = g_thread_new ("evidence-shutdown",
+      handle_shutdown_thread, &shutdown);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (shutdown.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_INVALID);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1209,5 +1493,11 @@ main (int argc, char **argv)
       test_authority_transaction_preserves_commit_cleanup_failure);
   g_test_add_func ("/service-auth/transaction/pin-precedes-shutdown",
       test_authority_transaction_pin_precedes_shutdown);
+  g_test_add_func ("/service-auth/evidence/commit-lifetime",
+      test_authority_commit_evidence_commit_and_lifetime);
+  g_test_add_func ("/service-auth/evidence/invalid-paths",
+      test_authority_commit_evidence_invalid_paths);
+  g_test_add_func ("/service-auth/evidence/shutdown",
+      test_authority_commit_evidence_does_not_block_shutdown);
   return g_test_run ();
 }
