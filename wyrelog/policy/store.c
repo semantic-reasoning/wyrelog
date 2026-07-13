@@ -5287,7 +5287,7 @@ service_domain_append_principal_event (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
-service_domain_finish_mutation (wyl_policy_store_t *store)
+service_domain_validate_mutation (wyl_policy_store_t *store)
 {
   wyrelog_error_t rc = wyl_policy_store_validate_snapshot (store);
   if (rc == WYRELOG_E_OK)
@@ -5295,12 +5295,32 @@ service_domain_finish_mutation (wyl_policy_store_t *store)
   if (rc == WYRELOG_E_OK && store->service_lifecycle_fail_commit_once) {
     store->service_lifecycle_fail_commit_once = FALSE;
     rc = WYRELOG_E_IO;
-  } else if (rc == WYRELOG_E_OK) {
-    rc = wyl_policy_store_commit_mutation (store);
   }
+  return rc;
+}
+
+static wyrelog_error_t
+service_domain_finish_mutation (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = service_domain_validate_mutation (store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_commit_mutation (store);
   if (rc != WYRELOG_E_OK)
     wyl_policy_store_rollback_mutation (store);
   return rc;
+}
+
+static wyrelog_error_t
+    service_authority_transaction_validate_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store)
+{
+  if (txn == NULL || store == NULL || txn->store != store
+      || txn->owner != g_thread_self ()
+      || txn->state != WYL_SERVICE_AUTHORITY_TXN_ACTIVE
+      || !txn->owns_store_locks || !txn->owns_handle_pin
+      || !g_atomic_int_get (&store->service_authority_transaction_active))
+    return WYRELOG_E_INVALID;
+  return WYRELOG_E_OK;
 }
 
 void wyl_policy_store_service_lifecycle_fail_commit_once
@@ -5324,11 +5344,11 @@ wyl_policy_store_service_rotate_fail_once (wyl_policy_store_t *store,
   g_mutex_unlock (&store->service_lifecycle_mutex);
 }
 
-wyrelog_error_t
-wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
+static wyrelog_error_t
+service_principal_create_impl (wyl_policy_store_t *store,
     const gchar *subject_id, const gchar *display_name,
     const gchar *actor_subject_id, const gchar *request_id,
-    wyl_policy_service_principal_info_t *out)
+    wyl_policy_service_principal_info_t *out, gboolean authority_owned)
 {
   if (out != NULL)
     wyl_policy_service_principal_info_clear (out);
@@ -5351,14 +5371,16 @@ wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
-  rc = service_mutation_scope_enter (store);
-  if (rc != WYRELOG_E_OK) {
-    sodium_memzero (fingerprint, sizeof fingerprint);
-    return rc;
+  if (!authority_owned) {
+    rc = service_mutation_scope_enter (store);
+    if (rc != WYRELOG_E_OK) {
+      sodium_memzero (fingerprint, sizeof fingerprint);
+      return rc;
+    }
+    g_mutex_lock (&store->service_domain_gate_mutex);
+    g_mutex_lock (&store->service_lifecycle_mutex);
   }
-  g_mutex_lock (&store->service_domain_gate_mutex);
-  g_mutex_lock (&store->service_lifecycle_mutex);
-  rc = wyl_policy_store_begin_mutation (store);
+  rc = authority_owned ? WYRELOG_E_OK : wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
     rc = service_domain_claim_request (store, request_id, "principal_create",
         subject_id, fingerprint, now_us);
@@ -5399,21 +5421,50 @@ wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_lookup_service_principal (store, subject_id, out);
   if (rc == WYRELOG_E_OK)
-    rc = service_domain_finish_mutation (store);
-  else
+    rc = authority_owned ? service_domain_validate_mutation (store) :
+        service_domain_finish_mutation (store);
+  else if (!authority_owned)
     wyl_policy_store_rollback_mutation (store);
-  g_mutex_unlock (&store->service_lifecycle_mutex);
-  g_mutex_unlock (&store->service_domain_gate_mutex);
-  service_mutation_scope_leave (store);
+  if (!authority_owned) {
+    g_mutex_unlock (&store->service_lifecycle_mutex);
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    service_mutation_scope_leave (store);
+  }
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
 }
 
 wyrelog_error_t
-wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
+wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *display_name,
+    const gchar *actor_subject_id, const gchar *request_id,
+    wyl_policy_service_principal_info_t *out)
+{
+  return service_principal_create_impl (store, subject_id, display_name,
+      actor_subject_id, request_id, out, FALSE);
+}
+
+wyrelog_error_t
+    wyl_policy_store_create_service_principal_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * subject_id, const gchar * display_name,
+    const gchar * actor_subject_id, const gchar * request_id,
+    wyl_policy_service_principal_info_t * out)
+{
+  if (out != NULL)
+    wyl_policy_service_principal_info_clear (out);
+  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+      store);
+  return rc == WYRELOG_E_OK ? service_principal_create_impl (store,
+      subject_id, display_name, actor_subject_id, request_id, out, TRUE) : rc;
+}
+
+static wyrelog_error_t
+service_principal_disable_impl (wyl_policy_store_t *store,
     const gchar *subject_id, const gchar *actor_subject_id,
-    const gchar *request_id, wyl_policy_service_principal_info_t *out)
+    const gchar *request_id, wyl_policy_service_principal_info_t *out,
+    gboolean authority_owned)
 {
   if (out != NULL)
     wyl_policy_service_principal_info_clear (out);
@@ -5435,14 +5486,16 @@ wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
-  rc = service_mutation_scope_enter (store);
-  if (rc != WYRELOG_E_OK) {
-    sodium_memzero (fingerprint, sizeof fingerprint);
-    return rc;
+  if (!authority_owned) {
+    rc = service_mutation_scope_enter (store);
+    if (rc != WYRELOG_E_OK) {
+      sodium_memzero (fingerprint, sizeof fingerprint);
+      return rc;
+    }
+    g_mutex_lock (&store->service_domain_gate_mutex);
+    g_mutex_lock (&store->service_lifecycle_mutex);
   }
-  g_mutex_lock (&store->service_domain_gate_mutex);
-  g_mutex_lock (&store->service_lifecycle_mutex);
-  rc = wyl_policy_store_begin_mutation (store);
+  rc = authority_owned ? WYRELOG_E_OK : wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
     rc = service_domain_claim_request (store, request_id, "principal_disable",
         subject_id, fingerprint, now_us);
@@ -5490,15 +5543,41 @@ wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_lookup_service_principal (store, subject_id, out);
   if (rc == WYRELOG_E_OK)
-    rc = service_domain_finish_mutation (store);
-  else
+    rc = authority_owned ? service_domain_validate_mutation (store) :
+        service_domain_finish_mutation (store);
+  else if (!authority_owned)
     wyl_policy_store_rollback_mutation (store);
-  g_mutex_unlock (&store->service_lifecycle_mutex);
-  g_mutex_unlock (&store->service_domain_gate_mutex);
-  service_mutation_scope_leave (store);
+  if (!authority_owned) {
+    g_mutex_unlock (&store->service_lifecycle_mutex);
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    service_mutation_scope_leave (store);
+  }
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *actor_subject_id,
+    const gchar *request_id, wyl_policy_service_principal_info_t *out)
+{
+  return service_principal_disable_impl (store, subject_id, actor_subject_id,
+      request_id, out, FALSE);
+}
+
+wyrelog_error_t
+    wyl_policy_store_disable_service_principal_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * subject_id, const gchar * actor_subject_id,
+    const gchar * request_id, wyl_policy_service_principal_info_t * out)
+{
+  if (out != NULL)
+    wyl_policy_service_principal_info_clear (out);
+  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+      store);
+  return rc == WYRELOG_E_OK ? service_principal_disable_impl (store,
+      subject_id, actor_subject_id, request_id, out, TRUE) : rc;
 }
 
 wyrelog_error_t
@@ -6361,14 +6440,15 @@ service_credential_append_issued_event (wyl_policy_store_t *store,
   return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
-wyrelog_error_t
-    wyl_policy_store_issue_service_credential_with_runtime
+static wyrelog_error_t
+    service_credential_issue_impl
     (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * tenant_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 expires_at_us,
     const wyl_service_credential_runtime_t * runtime,
+    const guint8 * authority_cvk, gsize authority_cvk_len,
     wyl_policy_service_credential_info_t * out,
-    wyl_service_credential_secret_t ** out_secret)
+    wyl_service_credential_secret_t ** out_secret, gboolean authority_owned)
 {
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
@@ -6388,22 +6468,30 @@ wyrelog_error_t
    * issuer cannot start a second SQLite transaction in that narrow window.
    * The required inner order remains CVK ensure/unlock, lifecycle mutex,
    * savepoint. */
-  wyrelog_error_t scope_rc = service_mutation_scope_enter (store);
-  if (scope_rc != WYRELOG_E_OK)
-    return scope_rc;
-  g_mutex_lock (&store->service_domain_gate_mutex);
+  if (authority_owned
+      && (authority_cvk == NULL
+          || authority_cvk_len != WYL_SERVICE_CREDENTIAL_CVK_BYTES))
+    return WYRELOG_E_INVALID;
+  if (!authority_owned) {
+    wyrelog_error_t scope_rc = service_mutation_scope_enter (store);
+    if (scope_rc != WYRELOG_E_OK)
+      return scope_rc;
+    g_mutex_lock (&store->service_domain_gate_mutex);
+  }
   guint8 fingerprint[crypto_generichash_BYTES];
   wyrelog_error_t rc = service_credential_issue_fingerprint (subject_id,
       tenant_id, actor_subject_id, expires_at_us, fingerprint);
-  const guint8 *cvk = NULL;
-  gsize cvk_len = 0;
-  if (rc == WYRELOG_E_OK)
+  const guint8 *cvk = authority_cvk;
+  gsize cvk_len = authority_cvk_len;
+  if (rc == WYRELOG_E_OK && !authority_owned)
     rc = wyl_policy_store_ensure_service_cvk_for_issuance (store, &cvk,
         &cvk_len);
   if (rc != WYRELOG_E_OK) {
     sodium_memzero (fingerprint, sizeof fingerprint);
-    g_mutex_unlock (&store->service_domain_gate_mutex);
-    service_mutation_scope_leave (store);
+    if (!authority_owned) {
+      g_mutex_unlock (&store->service_domain_gate_mutex);
+      service_mutation_scope_leave (store);
+    }
     return rc;
   }
 
@@ -6411,11 +6499,12 @@ wyrelog_error_t
   rc = service_domain_new_audit_id (audit_id);
   wyl_service_credential_material_t material = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
-  g_mutex_lock (&store->service_lifecycle_mutex);
+  if (!authority_owned)
+    g_mutex_lock (&store->service_lifecycle_mutex);
   now_us = g_get_real_time ();
   if (rc == WYRELOG_E_OK && expires_at_us != 0 && expires_at_us <= now_us)
     rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK && !authority_owned)
     rc = wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
     rc = service_domain_claim_request (store, request_id, "credential_issue",
@@ -6467,10 +6556,12 @@ wyrelog_error_t
     rc = wyl_policy_store_lookup_service_credential (store,
         material.credential_id, subject_id, tenant_id, out);
   if (rc == WYRELOG_E_OK)
-    rc = service_domain_finish_mutation (store);
-  else
+    rc = authority_owned ? service_domain_validate_mutation (store) :
+        service_domain_finish_mutation (store);
+  else if (!authority_owned)
     wyl_policy_store_rollback_mutation (store);
-  g_mutex_unlock (&store->service_lifecycle_mutex);
+  if (!authority_owned)
+    g_mutex_unlock (&store->service_lifecycle_mutex);
 
   wyl_service_credential_material_clear (&material);
   if (rc == WYRELOG_E_OK) {
@@ -6480,9 +6571,46 @@ wyrelog_error_t
     wyl_policy_service_credential_info_clear (out);
   }
   wyl_service_credential_secret_clear (&secret);
-  g_mutex_unlock (&store->service_domain_gate_mutex);
-  service_mutation_scope_leave (store);
+  if (!authority_owned) {
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    service_mutation_scope_leave (store);
+  }
   return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_issue_service_credential_with_runtime
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 expires_at_us,
+    const wyl_service_credential_runtime_t * runtime,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret)
+{
+  return service_credential_issue_impl (store, subject_id, tenant_id,
+      actor_subject_id, request_id, expires_at_us, runtime, NULL, 0, out,
+      out_secret, FALSE);
+}
+
+wyrelog_error_t
+    wyl_policy_store_issue_service_credential_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * subject_id, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 expires_at_us, const wyl_service_credential_runtime_t * runtime,
+    const guint8 * cvk, gsize cvk_len,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (out_secret != NULL)
+    wyl_service_credential_secret_clear (out_secret);
+  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+      store);
+  return rc == WYRELOG_E_OK ? service_credential_issue_impl (store,
+      subject_id, tenant_id, actor_subject_id, request_id, expires_at_us,
+      runtime, cvk, cvk_len, out, out_secret, TRUE) : rc;
 }
 
 wyrelog_error_t
@@ -6669,10 +6797,11 @@ service_credential_append_revoked_event (wyl_policy_store_t *store,
   return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
-wyrelog_error_t
-wyl_policy_store_revoke_service_credential (wyl_policy_store_t *store,
+static wyrelog_error_t
+service_credential_revoke_impl (wyl_policy_store_t *store,
     const gchar *credential_id, const gchar *actor_subject_id,
-    const gchar *request_id, wyl_policy_service_credential_info_t *out)
+    const gchar *request_id, wyl_policy_service_credential_info_t *out,
+    gboolean authority_owned)
 {
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
@@ -6696,14 +6825,16 @@ wyl_policy_store_revoke_service_credential (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
-  rc = service_mutation_scope_enter (store);
-  if (rc != WYRELOG_E_OK) {
-    sodium_memzero (fingerprint, sizeof fingerprint);
-    return rc;
+  if (!authority_owned) {
+    rc = service_mutation_scope_enter (store);
+    if (rc != WYRELOG_E_OK) {
+      sodium_memzero (fingerprint, sizeof fingerprint);
+      return rc;
+    }
+    g_mutex_lock (&store->service_domain_gate_mutex);
+    g_mutex_lock (&store->service_lifecycle_mutex);
   }
-  g_mutex_lock (&store->service_domain_gate_mutex);
-  g_mutex_lock (&store->service_lifecycle_mutex);
-  rc = wyl_policy_store_begin_mutation (store);
+  rc = authority_owned ? WYRELOG_E_OK : wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
     rc = service_domain_claim_request (store, request_id, "credential_revoke",
         credential_id, fingerprint, now_us);
@@ -6750,15 +6881,41 @@ wyl_policy_store_revoke_service_credential (wyl_policy_store_t *store,
     rc = wyl_policy_store_lookup_service_credential_by_id (store,
         credential_id, out);
   if (rc == WYRELOG_E_OK)
-    rc = service_domain_finish_mutation (store);
-  else
+    rc = authority_owned ? service_domain_validate_mutation (store) :
+        service_domain_finish_mutation (store);
+  else if (!authority_owned)
     wyl_policy_store_rollback_mutation (store);
-  g_mutex_unlock (&store->service_lifecycle_mutex);
-  g_mutex_unlock (&store->service_domain_gate_mutex);
-  service_mutation_scope_leave (store);
+  if (!authority_owned) {
+    g_mutex_unlock (&store->service_lifecycle_mutex);
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    service_mutation_scope_leave (store);
+  }
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_credential_info_clear (out);
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_revoke_service_credential (wyl_policy_store_t *store,
+    const gchar *credential_id, const gchar *actor_subject_id,
+    const gchar *request_id, wyl_policy_service_credential_info_t *out)
+{
+  return service_credential_revoke_impl (store, credential_id,
+      actor_subject_id, request_id, out, FALSE);
+}
+
+wyrelog_error_t
+    wyl_policy_store_revoke_service_credential_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * credential_id, const gchar * actor_subject_id,
+    const gchar * request_id, wyl_policy_service_credential_info_t * out)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+      store);
+  return rc == WYRELOG_E_OK ? service_credential_revoke_impl (store,
+      credential_id, actor_subject_id, request_id, out, TRUE) : rc;
 }
 
 static wyrelog_error_t
@@ -6900,14 +7057,15 @@ service_credential_append_rotation_audit (wyl_policy_store_t *store,
       old_credential_id, NULL, NULL, request_id, WYL_DECISION_ALLOW, &inserted);
 }
 
-wyrelog_error_t
-wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
+static wyrelog_error_t
+service_credential_rotate_impl (wyl_policy_store_t *store,
     const gchar *old_credential_id, const gchar *actor_subject_id,
     const gchar *request_id, gint64 new_expires_at_us,
     gint64 (*now_us_cb) (gpointer data), gpointer now_data,
     const wyl_service_credential_runtime_t *runtime,
+    const guint8 *authority_cvk, gsize authority_cvk_len,
     wyl_policy_service_credential_info_t *out,
-    wyl_service_credential_secret_t **out_secret)
+    wyl_service_credential_secret_t **out_secret, gboolean authority_owned)
 {
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
@@ -6923,6 +7081,10 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
   if (now_us_cb == NULL)
     now_us_cb = service_credential_default_now;
+  if (authority_owned
+      && (authority_cvk == NULL
+          || authority_cvk_len != WYL_SERVICE_CREDENTIAL_CVK_BYTES))
+    return WYRELOG_E_INVALID;
 
   guint8 fingerprint[crypto_generichash_BYTES];
   wyrelog_error_t rc = service_credential_rotate_fingerprint
@@ -6935,12 +7097,14 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
     return rc;
   }
 
-  rc = service_mutation_scope_enter (store);
-  if (rc != WYRELOG_E_OK) {
-    sodium_memzero (fingerprint, sizeof fingerprint);
-    return rc;
+  if (!authority_owned) {
+    rc = service_mutation_scope_enter (store);
+    if (rc != WYRELOG_E_OK) {
+      sodium_memzero (fingerprint, sizeof fingerprint);
+      return rc;
+    }
+    g_mutex_lock (&store->service_domain_gate_mutex);
   }
-  g_mutex_lock (&store->service_domain_gate_mutex);
   gint64 now_us = now_us_cb (now_data);
   if (now_us <= 0) {
     rc = WYRELOG_E_IO;
@@ -6950,10 +7114,11 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
     rc = WYRELOG_E_POLICY;
     goto unlock_gate;
   }
-  const guint8 *cvk = NULL;
-  gsize cvk_len = 0;
-  rc = wyl_policy_store_materialize_service_cvk_existing (store, &cvk,
-      &cvk_len);
+  const guint8 *cvk = authority_cvk;
+  gsize cvk_len = authority_cvk_len;
+  if (!authority_owned)
+    rc = wyl_policy_store_materialize_service_cvk_existing (store, &cvk,
+        &cvk_len);
   if (rc == WYRELOG_E_NOT_FOUND)
     rc = WYRELOG_E_POLICY;
   if (rc != WYRELOG_E_OK)
@@ -6963,8 +7128,9 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
   wyl_service_credential_secret_t *secret = NULL;
   wyl_policy_service_credential_info_t old = { 0 };
   wyl_policy_service_principal_info_t principal = { 0 };
-  g_mutex_lock (&store->service_lifecycle_mutex);
-  rc = wyl_policy_store_begin_mutation (store);
+  if (!authority_owned)
+    g_mutex_lock (&store->service_lifecycle_mutex);
+  rc = authority_owned ? WYRELOG_E_OK : wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
     rc = service_domain_claim_request (store, request_id, "credential_rotate",
         old_credential_id, fingerprint, now_us);
@@ -7070,10 +7236,12 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
           WYL_POLICY_SERVICE_ROTATE_FAIL_VALIDATOR))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
-    rc = service_domain_finish_mutation (store);
-  else
+    rc = authority_owned ? service_domain_validate_mutation (store) :
+        service_domain_finish_mutation (store);
+  else if (!authority_owned)
     wyl_policy_store_rollback_mutation (store);
-  g_mutex_unlock (&store->service_lifecycle_mutex);
+  if (!authority_owned)
+    g_mutex_unlock (&store->service_lifecycle_mutex);
   wyl_policy_service_principal_info_clear (&principal);
   wyl_policy_service_credential_info_clear (&old);
   wyl_service_credential_material_clear (&material);
@@ -7087,9 +7255,46 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
 
 unlock_gate:
   sodium_memzero (fingerprint, sizeof fingerprint);
-  g_mutex_unlock (&store->service_domain_gate_mutex);
-  service_mutation_scope_leave (store);
+  if (!authority_owned) {
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    service_mutation_scope_leave (store);
+  }
   return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
+    const gchar *old_credential_id, const gchar *actor_subject_id,
+    const gchar *request_id, gint64 new_expires_at_us,
+    gint64 (*now_us_cb) (gpointer data), gpointer now_data,
+    const wyl_service_credential_runtime_t *runtime,
+    wyl_policy_service_credential_info_t *out,
+    wyl_service_credential_secret_t **out_secret)
+{
+  return service_credential_rotate_impl (store, old_credential_id,
+      actor_subject_id, request_id, new_expires_at_us, now_us_cb, now_data,
+      runtime, NULL, 0, out, out_secret, FALSE);
+}
+
+wyrelog_error_t
+    wyl_policy_store_rotate_service_credential_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * old_credential_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 new_expires_at_us,
+    gint64 (*now_us_cb) (gpointer data), gpointer now_data,
+    const wyl_service_credential_runtime_t * runtime, const guint8 * cvk,
+    gsize cvk_len, wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (out_secret != NULL)
+    wyl_service_credential_secret_clear (out_secret);
+  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+      store);
+  return rc == WYRELOG_E_OK ? service_credential_rotate_impl (store,
+      old_credential_id, actor_subject_id, request_id, new_expires_at_us,
+      now_us_cb, now_data, runtime, cvk, cvk_len, out, out_secret, TRUE) : rc;
 }
 
 wyrelog_error_t

@@ -479,8 +479,18 @@ wyrelog_error_t wyl_policy_store_create_service_principal
     (wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * display_name, const gchar * actor_subject_id,
     const gchar * request_id, wyl_policy_service_principal_info_t * out);
+wyrelog_error_t wyl_policy_store_create_service_principal_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * display_name, const gchar * actor_subject_id,
+    const gchar * request_id, wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_disable_service_principal
     (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    wyl_policy_service_principal_info_t * out);
+wyrelog_error_t wyl_policy_store_disable_service_principal_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_principal_info_t * out);
 /* Test seam: fail the next service lifecycle operation after validation but
@@ -537,6 +547,14 @@ wyrelog_error_t wyl_policy_store_issue_service_credential_with_runtime
     const wyl_service_credential_runtime_t * runtime,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
+wyrelog_error_t wyl_policy_store_issue_service_credential_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 expires_at_us,
+    const wyl_service_credential_runtime_t * runtime, const guint8 * cvk,
+    gsize cvk_len, wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret);
 /* Verification runtimes and their callback data are borrowed only for this
  * call. before_gate is a deterministic test checkpoint immediately before
  * gate acquisition. The clock and credential callbacks run under the
@@ -551,6 +569,11 @@ wyrelog_error_t wyl_policy_store_verify_service_credential_by_id
     gboolean * out_authenticated);
 wyrelog_error_t wyl_policy_store_revoke_service_credential
     (wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    wyl_policy_service_credential_info_t * out);
+wyrelog_error_t wyl_policy_store_revoke_service_credential_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_credential_info_t * out);
 /* now_us and now_data are borrowed and need remain valid only until this call
@@ -570,6 +593,15 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
     gpointer now_data, const wyl_service_credential_runtime_t * runtime,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret);
+wyrelog_error_t wyl_policy_store_rotate_service_credential_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * old_credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
+    gpointer now_data, const wyl_service_credential_runtime_t * runtime,
+    const guint8 * cvk, gsize cvk_len,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
