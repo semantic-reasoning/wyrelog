@@ -795,6 +795,22 @@ test('service-principal-domain', test_service_principal_domain,
   is_parallel : host_machine.system() != 'windows',
 )
 
+test_service_credential_domain = executable('test-service-credential-domain',
+  'test-service-credential-domain.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+service_credential_domain_timeout = 30
+if host_machine.system() == 'windows'
+  service_credential_domain_timeout = 90
+endif
+
+test('service-credential-domain', test_service_credential_domain,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : service_credential_domain_timeout,
+)
+
 test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
   'test-policy-store-service-cvk.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
