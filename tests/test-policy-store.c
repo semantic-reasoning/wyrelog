@@ -354,9 +354,55 @@ failing_keyprovider_derive (gpointer self, const gchar *label, guint8 *out_key,
   return WYRELOG_E_INTERNAL;
 }
 
+static wyrelog_error_t
+failing_keyprovider_seal (gpointer self, const guint8 *plaintext,
+    gsize plaintext_len, wyl_sealed_blob_t *out_blob)
+{
+  (void) self;
+  (void) plaintext;
+  (void) plaintext_len;
+  if (out_blob != NULL)
+    *out_blob = (wyl_sealed_blob_t) {
+    0};
+  return WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
+failing_keyprovider_unseal (gpointer self, const wyl_sealed_blob_t *blob,
+    guint8 *out, gsize capacity, gsize *written)
+{
+  (void) self;
+  (void) blob;
+  (void) out;
+  (void) capacity;
+  (void) written;
+  return WYRELOG_E_INTERNAL;
+}
+
+static void
+failing_keyprovider_wipe (gpointer self)
+{
+  (void) self;
+}
+
+static void
+failing_keyprovider_clear_blob (gpointer self, wyl_sealed_blob_t *blob)
+{
+  (void) self;
+  if (blob == NULL)
+    return;
+  g_free (blob->bytes);
+  *blob = (wyl_sealed_blob_t) {
+  0};
+}
+
 static const wyl_keyprovider_vtable_t failing_keyprovider_vtable = {
   .probe = failing_keyprovider_probe,
+  .seal = failing_keyprovider_seal,
+  .unseal = failing_keyprovider_unseal,
   .derive = failing_keyprovider_derive,
+  .wipe = failing_keyprovider_wipe,
+  .clear_sealed_blob = failing_keyprovider_clear_blob,
 };
 
 static wyrelog_error_t
@@ -410,6 +456,16 @@ check_encrypted_policy_store_hardening_and_rotation (void)
     if (wyl_policy_store_set_deployment_mode (store, "development")
         != WYRELOG_E_OK)
       return 304;
+    char *sqlite_error = NULL;
+    if (sqlite3_exec (wyl_policy_store_get_db (store),
+            "INSERT INTO service_credential_cvk"
+            " (slot,generation,envelope_format_version,provider_binding,"
+            "sealed_cvk,created_at_us,updated_at_us)"
+            " VALUES(1,1,1,zeroblob(32),x'010203',1,1);", NULL, NULL,
+            &sqlite_error) != SQLITE_OK) {
+      sqlite3_free (sqlite_error);
+      return 333;
+    }
   }
 
   g_autofree gchar *valid_bytes = NULL;
@@ -504,6 +560,15 @@ check_encrypted_policy_store_hardening_and_rotation (void)
       return 327;
     if (g_strcmp0 (mode, "development") != 0)
       return 328;
+    wyl_policy_service_cvk_info_t cvk = { 0 };
+    if (wyl_policy_store_load_service_cvk (store, &cvk) != WYRELOG_E_OK)
+      return 334;
+    if (cvk.sealed_cvk_len != 3
+        || memcmp (cvk.sealed_cvk, "\x01\x02\x03", 3) != 0) {
+      wyl_policy_service_cvk_info_clear (&cvk);
+      return 335;
+    }
+    wyl_policy_service_cvk_info_clear (&cvk);
   }
 
   if (rotate_encrypted_policy_store_to_failing_provider (store_path,
@@ -520,6 +585,15 @@ check_encrypted_policy_store_hardening_and_rotation (void)
       return 331;
     if (g_strcmp0 (mode, "development") != 0)
       return 332;
+    wyl_policy_service_cvk_info_t cvk = { 0 };
+    if (wyl_policy_store_load_service_cvk (store, &cvk) != WYRELOG_E_OK)
+      return 336;
+    if (cvk.sealed_cvk_len != 3
+        || memcmp (cvk.sealed_cvk, "\x01\x02\x03", 3) != 0) {
+      wyl_policy_service_cvk_info_clear (&cvk);
+      return 337;
+    }
+    wyl_policy_service_cvk_info_clear (&cvk);
   }
 
   (void) g_remove (tmp_write_path);

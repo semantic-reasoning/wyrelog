@@ -181,10 +181,9 @@ make_encrypted_opts (const gchar *path, wyl_keyprovider_dev_t *kp)
   opts.require_encrypted = TRUE;
   opts.keyprovider_vtable = wyl_keyprovider_dev_get_vtable ();
   opts.keyprovider_state = kp;
-  /* The dev keyprovider is owned by the test (autoptr); the store
-   * must not free it. wipe is invoked unconditionally on the state
-   * after open returns -- that is acceptable, the next test allocates
-   * a fresh state. */
+  /* The dev keyprovider backing storage is owned by the test (autoptr), so it
+   * must outlive the store. A successful open retains operational ownership
+   * and wipes it at store close; failure wipes it before returning. */
   opts.keyprovider_state_free = NULL;
   return opts;
 }

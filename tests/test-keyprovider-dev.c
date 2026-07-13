@@ -47,7 +47,9 @@ roundtrip_for (const guint8 *plaintext, gsize plaintext_len)
   if (plaintext_len > 0 && memcmp (recovered, plaintext, plaintext_len) != 0)
     return 17;
 
-  g_free (blob.bytes);
+  vt->clear_sealed_blob (self, &blob);
+  if (blob.bytes != NULL || blob.len != 0)
+    return 18;
   return 0;
 }
 
@@ -93,7 +95,11 @@ check_unseal_capacity_too_small (void)
   if (written != 0xDEAD)
     return 63;
 
-  g_free (blob.bytes);
+  vt->clear_sealed_blob (self, &blob);
+  if (blob.bytes != NULL || blob.len != 0)
+    return 64;
+  vt->clear_sealed_blob (self, &blob);
+  vt->clear_sealed_blob (self, NULL);
   return 0;
 }
 
@@ -192,6 +198,7 @@ check_argument_validation (void)
     return 105;
   if (vt->derive (self, "x", NULL, 4) != WYRELOG_E_INVALID)
     return 106;
+  vt->clear_sealed_blob (NULL, NULL);
   return 0;
 }
 

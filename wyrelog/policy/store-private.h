@@ -15,26 +15,37 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
-/* KeyProvider state ownership for wyl_policy_store_open_with_options():
+/* KeyProvider configuration and ownership:
  *
  * When opts and out_store are both non-NULL, a non-NULL keyprovider_state is
- * logically transferred to the call on every return path. The caller MUST NOT
- * invoke provider operations or wipe it afterward. When keyprovider_state_free
- * is non-NULL, the caller also MUST NOT release it: the call invokes the
- * vtable's wipe callback exactly once when present, then invokes
- * keyprovider_state_free exactly once.
+ * transferred immediately on every return path. The caller MUST NOT invoke
+ * provider operations or wipe it afterward. A successful open retains the
+ * state until store close; a failed open releases it before returning. When
+ * keyprovider_state_free is non-NULL, the caller also MUST NOT release it:
+ * Wyrelog invokes wipe exactly once when that callback is available, then
+ * invokes keyprovider_state_free exactly once.
  *
- * A NULL keyprovider_state_free does not prevent logical transfer. The call
- * still invokes wipe exactly once when present, but does not deallocate the
- * backing storage. The caller remains responsible for eventually reclaiming
- * that storage after return; its contents may have been wiped and MUST NOT be
- * reused as KeyProvider state.
+ * A providerless configuration has keyprovider_vtable, keyprovider_state, and
+ * keyprovider_state_free all NULL. Any other configuration requires non-NULL
+ * vtable and state plus probe, seal, unseal, derive, wipe, and
+ * clear_sealed_blob callbacks; keyprovider_state_free remains optional. The
+ * vtable is copied by value at adoption and may be mutated or released by its
+ * caller after entry without affecting the store.
+ *
+ * A NULL keyprovider_state_free does not prevent transfer. Wyrelog still
+ * invokes wipe exactly once when available but does not deallocate the backing
+ * storage. That storage MUST outlive a successful store handle. The caller may
+ * reclaim it only after store close, or after a failed open has returned; it
+ * MUST NOT be reused as KeyProvider state. Invalid partial configurations are
+ * also released using only their available lifecycle callbacks.
  *
  * If opts or out_store is NULL, entry validation fails without transfer or
  * lifecycle callbacks. A WYRELOG_E_BUSY return invokes none of the operational
- * callbacks (probe, seal, unseal, or derive), while still performing the
- * transferred state's lifecycle cleanup above. See "Policy-store provider
- * ownership" in docs/developer-lifecycle.md.
+ * callbacks (probe, seal, unseal, or derive), while still releasing the
+ * transferred state before return using its available lifecycle callbacks.
+ * For file-backed configured opens, lease acquisition precedes provider-shape
+ * validation so BUSY retains precedence.
+ * See "Policy-store provider ownership" in docs/developer-lifecycle.md.
  */
 typedef struct
 {
@@ -305,6 +316,9 @@ wyrelog_error_t wyl_policy_store_open (const gchar * path,
  * wyl_policy_store_open_options_t above. */
 wyrelog_error_t wyl_policy_store_open_with_options (const
     wyl_policy_store_open_options_t * opts, wyl_policy_store_t ** out_store);
+/* Basic invalid rotation arguments (empty path, NULL options, or aliased
+ * non-NULL old/new state) transfer neither state. Otherwise both states are
+ * consumed on every outcome and released exactly once before return. */
 wyrelog_error_t wyl_policy_store_rotate_keyprovider (const gchar * path,
     const wyl_policy_store_open_options_t * old_opts,
     const wyl_policy_store_open_options_t * new_opts);

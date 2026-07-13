@@ -54,7 +54,10 @@ check_file_spec_roundtrip (void)
   if (written != sizeof plaintext || memcmp (recovered, plaintext,
           sizeof plaintext) != 0)
     return 10;
-  g_free (blob.bytes);
+  vt->clear_sealed_blob (self, &blob);
+  if (blob.bytes != NULL || blob.len != 0)
+    return 11;
+  vt->clear_sealed_blob (self, &blob);
 
   g_unlink (path);
   g_rmdir (tmpdir);
@@ -91,7 +94,9 @@ check_wrong_provider_state_fails_unseal (void)
     return 24;
   if (written != 0)
     return 25;
-  g_free (blob.bytes);
+  vt->clear_sealed_blob (a, &blob);
+  if (blob.bytes != NULL || blob.len != 0)
+    return 26;
 
   g_unlink (path_a);
   g_unlink (path_b);
