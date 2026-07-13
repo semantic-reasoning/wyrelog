@@ -41,6 +41,18 @@ typedef struct
   gpointer data;
 } wyl_policy_store_rotation_runtime_t;
 
+typedef enum
+{
+  WYL_POLICY_SERVICE_ROTATE_FAIL_NONE = 0,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_INSERT,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_UPDATE,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_SUCCESSOR_EVENT,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_EVENT,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_AUDIT,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_INTENTION,
+  WYL_POLICY_SERVICE_ROTATE_FAIL_VALIDATOR,
+} wyl_policy_service_rotate_fail_stage_t;
+
 /* rotation_runtime is a private, per-call fault seam. rotate_keyprovider uses
  * only old_opts->rotation_runtime and the CVK runtime snapshotted while opening
  * the old store. new_opts runtime pointers are neither adopted nor invoked. */
@@ -409,6 +421,8 @@ wyrelog_error_t wyl_policy_store_disable_service_principal
  * before savepoint release. The operation must roll all local rows back. */
 void wyl_policy_store_service_lifecycle_fail_commit_once
     (wyl_policy_store_t * store);
+void wyl_policy_store_service_rotate_fail_once (wyl_policy_store_t * store,
+    wyl_policy_service_rotate_fail_stage_t stage);
 wyrelog_error_t wyl_policy_store_lookup_service_principal (wyl_policy_store_t *
     store, const gchar * subject_id, wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_foreach_service_principal (wyl_policy_store_t *
@@ -473,6 +487,25 @@ wyrelog_error_t wyl_policy_store_revoke_service_credential
     (wyl_policy_store_t * store, const gchar * credential_id,
     const gchar * actor_subject_id, const gchar * request_id,
     wyl_policy_service_credential_info_t * out);
+/* now_us and now_data are borrowed and need remain valid only until this call
+ * returns. runtime itself is likewise borrowed only for the call. Its callback
+ * table, including the runtime->data pointer value, is copied into a
+ * successfully returned secret, so that callback code, targets and data MUST
+ * remain valid until wyl_service_credential_secret_clear() releases the
+ * secret. On failure or when no secret is returned, those lifetimes need only
+ * extend through this call. The store-scoped rotate fault seam owns no callback
+ * or data lifetime.
+ *
+ * Clock and credential callbacks execute under the service-domain gate;
+ * credential generation also holds the lifecycle mutex. They MUST be
+ * non-reentrant and MUST NOT call APIs on the same store or service domain. */
+wyrelog_error_t wyl_policy_store_rotate_service_credential
+    (wyl_policy_store_t * store, const gchar * old_credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
+    gpointer now_data, const wyl_service_credential_runtime_t * runtime,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
     (wyl_policy_store_t * store,
     const wyl_policy_service_credential_info_t * credential,

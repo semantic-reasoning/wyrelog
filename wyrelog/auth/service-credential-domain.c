@@ -284,3 +284,43 @@ wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
   wyl_policy_service_credential_info_clear (&stored);
   return rc;
 }
+
+wyrelog_error_t
+wyl_service_credential_rotate_with_runtime (WylHandle *handle,
+    const gchar *old_credential_id, const gchar *actor_subject_id,
+    const gchar *request_id, gint64 new_expires_at_us,
+    const wyl_service_credential_rotate_runtime_t *runtime,
+    wyl_service_credential_issue_result_t *out)
+{
+  if (out != NULL)
+    wyl_service_credential_issue_result_clear (out);
+  if (handle == NULL || out == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_policy_service_credential_info_t stored = { 0 };
+  wyl_service_credential_secret_t *secret = NULL;
+  wyrelog_error_t rc = wyl_policy_store_rotate_service_credential
+      (wyl_handle_get_policy_store (handle), old_credential_id,
+      actor_subject_id, request_id, new_expires_at_us,
+      runtime != NULL ? runtime->now_us : NULL,
+      runtime != NULL ? runtime->data : NULL,
+      runtime != NULL ? runtime->credential_runtime : NULL, &stored, &secret);
+  if (rc == WYRELOG_E_OK) {
+    copy_credential (&stored, &out->credential);
+    out->secret = secret;
+    secret = NULL;
+  }
+  wyl_service_credential_secret_clear (&secret);
+  wyl_policy_service_credential_info_clear (&stored);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_rotate (WylHandle *handle,
+    const gchar *old_credential_id, const gchar *actor_subject_id,
+    const gchar *request_id, gint64 new_expires_at_us,
+    wyl_service_credential_issue_result_t *out)
+{
+  return wyl_service_credential_rotate_with_runtime (handle,
+      old_credential_id, actor_subject_id, request_id, new_expires_at_us, NULL,
+      out);
+}
