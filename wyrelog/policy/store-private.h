@@ -474,6 +474,12 @@ wyrelog_error_t
     wyl_policy_store_t * expected_store, guint64 expected_transaction_serial);
 guint64 wyl_policy_store_service_authority_transaction_get_serial
     (const WylServiceAuthorityTransaction * transaction);
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_record_credential_last_used
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * credential_id,
+    guint64 generation, const gchar * subject_id, const gchar * tenant_id,
+    gint64 used_at_us);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityTransaction,
     wyl_policy_store_service_authority_transaction_free);
@@ -492,6 +498,8 @@ guint
 gboolean
     wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
     (WylServiceAuthorityCommitEvidence * evidence);
+void wyl_policy_store_service_authority_transaction_fail_last_used_sql_once
+    (WylServiceAuthorityTransaction * transaction);
 gboolean
     wyl_policy_store_service_authority_transaction_is_poisoned
     (wyl_policy_store_t * store);
