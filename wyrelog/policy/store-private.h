@@ -15,6 +15,22 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
+typedef struct wyl_policy_store_cvk_runtime_t
+{
+  gpointer (*secure_alloc) (gpointer data, gsize size);
+  int (*secure_lock) (gpointer data, gpointer ptr, gsize size);
+  void (*secure_wipe) (gpointer data, gpointer ptr, gsize size);
+  int (*secure_unlock) (gpointer data, gpointer ptr, gsize size);
+  void (*secure_free) (gpointer data, gpointer ptr);
+  int (*fill_random) (gpointer data, guint8 * out, gsize len);
+    gint64 (*now_us) (gpointer data);
+  gpointer data;
+} wyl_policy_store_cvk_runtime_t;
+
+/* service_cvk_runtime is copied by value during open. Callback functions and
+ * data are borrowed, not owned: their code and data context must remain valid
+ * and callable until wyl_policy_store_close() has returned. */
+
 /* KeyProvider configuration and ownership:
  *
  * When opts and out_store are both non-NULL, a non-NULL keyprovider_state is
@@ -54,6 +70,7 @@ typedef struct
   gpointer keyprovider_state;
   void (*keyprovider_state_free) (gpointer state);
   gboolean require_encrypted;
+  const wyl_policy_store_cvk_runtime_t *service_cvk_runtime;
 } wyl_policy_store_open_options_t;
 
 typedef wyrelog_error_t (*wyl_policy_role_permission_cb) (const gchar * role_id,
@@ -360,6 +377,15 @@ wyrelog_error_t wyl_policy_store_foreach_service_credential (wyl_policy_store_t
     wyl_policy_service_credential_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_load_service_cvk (wyl_policy_store_t * store,
     wyl_policy_service_cvk_info_t * out);
+wyrelog_error_t wyl_policy_store_materialize_service_cvk_existing
+    (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+wyrelog_error_t wyl_policy_store_ensure_service_cvk_for_issuance
+    (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+wyrelog_error_t wyl_policy_store_verify_service_credential_secret
+    (wyl_policy_store_t * store,
+    const wyl_policy_service_credential_info_t * credential,
+    const gchar * presented_secret, gsize presented_secret_len,
+    gboolean * out_match);
 wyrelog_error_t wyl_policy_store_foreach_service_principal_event
     (wyl_policy_store_t * store, const gchar * subject_id,
     wyl_policy_service_principal_event_cb cb, gpointer user_data);

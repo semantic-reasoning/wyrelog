@@ -618,15 +618,25 @@ test_rotation_provider_ownership (void)
   g_autofree gchar *clear_path = g_strdup_printf ("%s%s", path, CLEAR_SUFFIX);
   old_success_provider->probe_path_on_wipe = path;
   old_success_provider->truncate_path_on_wipe = clear_path;
+  g_autofree gchar *canonical_before = NULL;
+  gsize canonical_before_len = 0;
+  g_assert_true (g_file_get_contents (path, &canonical_before,
+          &canonical_before_len, NULL));
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_success_options, &new_success_options), ==, WYRELOG_E_OK);
+          &old_success_options, &new_success_options), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *canonical_after = NULL;
+  gsize canonical_after_len = 0;
+  g_assert_true (g_file_get_contents (path, &canonical_after,
+          &canonical_after_len, NULL));
+  g_assert_cmpmem (canonical_after, canonical_after_len, canonical_before,
+      canonical_before_len);
   g_assert_cmpuint (old_success.probes, ==, 1);
   g_assert_cmpuint (old_success.derives, ==, 1);
   g_assert_cmpuint (old_success.wipes, ==, 1);
   g_assert_cmpuint (old_success.frees, ==, 1);
   g_assert_cmpint (old_success.wipe_probe_status, ==, 73);
-  g_assert_cmpuint (new_success.probes, ==, 1);
-  g_assert_cmpuint (new_success.derives, ==, 1);
+  g_assert_cmpuint (new_success.probes, ==, 0);
+  g_assert_cmpuint (new_success.derives, ==, 0);
   g_assert_cmpuint (new_success.wipes, ==, 1);
   g_assert_cmpuint (new_success.frees, ==, 1);
 
@@ -644,7 +654,30 @@ test_rotation_provider_ownership (void)
   g_assert_cmpuint (cvk.sealed_cvk_len, ==, 3);
   g_assert_cmpmem (cvk.sealed_cvk, cvk.sealed_cvk_len, "\x01\x02\x03", 3);
   wyl_policy_service_cvk_info_clear (&cvk);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (verify),
+          "DELETE FROM service_credential_cvk;", NULL, NULL, NULL), ==,
+      SQLITE_OK);
   wyl_policy_store_close (verify);
+
+  old_success = (OwnedProviderCounters) {
+  0};
+  new_success = (OwnedProviderCounters) {
+  0};
+  old_success_provider = NULL;
+  new_success_provider = NULL;
+  old_success_options = owned_options (&old_success, &old_success_provider);
+  new_success_options = owned_options (&new_success, &new_success_provider);
+  old_success_provider->truncate_path_on_wipe = clear_path;
+  g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
+          &old_success_options, &new_success_options), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (old_success.probes, ==, 1);
+  g_assert_cmpuint (old_success.derives, ==, 1);
+  g_assert_cmpuint (old_success.wipes, ==, 1);
+  g_assert_cmpuint (old_success.frees, ==, 1);
+  g_assert_cmpuint (new_success.probes, ==, 1);
+  g_assert_cmpuint (new_success.derives, ==, 1);
+  g_assert_cmpuint (new_success.wipes, ==, 1);
+  g_assert_cmpuint (new_success.frees, ==, 1);
 
   OwnedProviderCounters old_failure = { 0 };
   OwnedProviderCounters new_failure = { 0 };
