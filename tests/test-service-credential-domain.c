@@ -421,6 +421,7 @@ typedef struct
   guint wipes;
   guint unlocks;
   gboolean always_collision;
+  gboolean random_fail;
 } CollisionRuntime;
 
 static gpointer
@@ -479,7 +480,9 @@ test_new_id (gpointer data, gchar out[WYL_SERVICE_CREDENTIAL_ID_BUF])
 static int
 test_random (gpointer data, guint8 *out, gsize len)
 {
-  (void) data;
+  CollisionRuntime *runtime = data;
+  if (runtime->random_fail)
+    return -1;
   memset (out, 0x5a, len);
   return 0;
 }
@@ -1116,6 +1119,426 @@ test_revoke_concurrency_overflow_faults (void)
   wyl_service_credential_issue_result_clear (&validator_target);
 }
 
+static void
+test_rotate_happy_linkage_no_grace (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:rotate:worker");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:rotate:worker",
+          "tenant-a", "admin", "rotate-old", 0, &old), ==, WYRELOG_E_OK);
+  g_autofree gchar *old_id = g_strdup (old.credential.credential_id);
+  gsize old_secret_len = 0;
+  const gchar *old_secret = wyl_service_credential_secret_peek_encoded
+      (old.secret, &old_secret_len);
+  gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
+  wyl_service_credential_issue_result_t rotated = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate (handle, old_id, "admin",
+          "rotate-old", expiry, &rotated), ==, WYRELOG_E_POLICY);
+  g_assert_null (rotated.secret);
+  g_assert_cmpint (wyl_service_credential_rotate (handle, old_id, "admin",
+          "rotate-happy", expiry, &rotated), ==, WYRELOG_E_OK);
+  g_assert_nonnull (rotated.secret);
+  g_assert_cmpstr (rotated.credential.subject_id, ==, "svc:rotate:worker");
+  g_assert_cmpstr (rotated.credential.tenant_id, ==, "tenant-a");
+  g_assert_cmpstr (rotated.credential.state, ==, "active");
+  g_assert_cmpuint (rotated.credential.generation, ==, 1);
+  g_assert_cmpstr (rotated.credential.rotated_from_id, ==, old_id);
+  g_assert_cmpint (rotated.credential.expires_at_us, ==, expiry);
+  g_autofree gchar *new_id = g_strdup (rotated.credential.credential_id);
+  gsize new_secret_len = 0;
+  const gchar *new_secret = wyl_service_credential_secret_peek_encoded
+      (rotated.secret, &new_secret_len);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events e "
+          "WHERE (e.credential_id=(SELECT credential_id FROM "
+          "service_credentials WHERE rotated_from_id IS NOT NULL) "
+          "AND e.event='rotated' AND e.generation=1 "
+          "AND e.related_credential_id=(SELECT rotated_from_id FROM "
+          "service_credentials WHERE credential_id=e.credential_id)) "
+          "OR (e.credential_id=(SELECT rotated_from_id FROM "
+          "service_credentials WHERE rotated_from_id IS NOT NULL) "
+          "AND e.event='revoked' AND e.generation=2 "
+          "AND e.related_credential_id=(SELECT credential_id FROM "
+          "service_credentials WHERE rotated_from_id=e.credential_id));"),
+      ==, 2);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events a JOIN audit_intentions i "
+          "ON a.id=i.audit_id WHERE a.action='service.credential.rotate' "
+          "AND a.resource_id IN (SELECT rotated_from_id FROM "
+          "service_credentials WHERE rotated_from_id IS NOT NULL) "
+          "AND i.state='pending';"), ==, 1);
+
+  gboolean authenticated = TRUE;
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          old_id, old_secret, old_secret_len, &authenticated), ==,
+      WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          new_id, new_secret, new_secret_len, &authenticated), ==,
+      WYRELOG_E_OK);
+  g_assert_true (authenticated);
+  sqlite3_stmt *sanitation = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db_of (handle),
+          "SELECT count(*) FROM audit_events WHERE "
+          "coalesce(subject_id,'')||coalesce(action,'')||"
+          "coalesce(resource_id,'')||coalesce(request_id,'') LIKE ?;", -1,
+          &sanitation, NULL), ==, SQLITE_OK);
+  g_autofree gchar *secret_pattern = g_strdup_printf ("%%%s%%", new_secret);
+  g_assert_cmpint (sqlite3_bind_text (sanitation, 1, secret_pattern, -1,
+          SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (sanitation), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int64 (sanitation, 0), ==, 0);
+  sqlite3_finalize (sanitation);
+
+  g_assert_cmpint (wyl_service_credential_rotate (handle, old_id, "admin",
+          "rotate-happy", expiry, &rotated), ==, WYRELOG_E_POLICY);
+  g_assert_null (rotated.secret);
+  g_assert_null (rotated.credential.credential_id);
+
+  g_clear_object (&fixture.handle);
+  WylHandleOpenOptions reopen_options = {
+    .policy_store_path = fixture.db_path,
+    .policy_keyprovider_path = fixture.key_spec,
+    .audit_store_path = fixture.audit_path,
+    .production_mode = TRUE,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&reopen_options,
+          &fixture.handle), ==, WYRELOG_E_OK);
+  handle = fixture.handle;
+  g_assert_cmpint (wyl_service_credential_rotate (handle, old_id, "admin",
+          "rotate-happy", expiry, &rotated), ==, WYRELOG_E_POLICY);
+  g_assert_null (rotated.secret);
+  wyl_service_credential_t revoked = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke (handle, new_id, "admin",
+          "rotate-new-revoke", &revoked), ==, WYRELOG_E_OK);
+  wyl_service_credential_clear (&revoked);
+  g_assert_cmpint (wyl_service_credential_revoke (handle, old_id, "admin",
+          "rotate-old-noop-revoke", &revoked), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (revoked.generation, ==, 2);
+  wyl_service_credential_clear (&revoked);
+  wyl_service_credential_issue_result_clear (&old);
+}
+
+static void
+assert_rotate_policy_clear (WylHandle *handle, const gchar *id,
+    const gchar *request_id, gint64 expiry,
+    const wyl_service_credential_rotate_runtime_t *runtime)
+{
+  wyl_service_credential_issue_result_t out = { 0 };
+  out.credential.credential_id = g_strdup ("populated");
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle, id,
+          "admin", request_id, expiry, runtime, &out), ==, WYRELOG_E_POLICY);
+  g_assert_null (out.secret);
+  g_assert_null (out.credential.credential_id);
+}
+
+static void
+test_rotate_policy_rejections (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:rotate-policy:worker");
+  gint64 old_expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
+  wyl_service_credential_issue_result_t expiring = { 0 }, active = { 0 };
+  wyl_service_credential_issue_result_t sealed = { 0 }, revoked = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-policy:worker", "tenant-a", "admin", "rp-expiring",
+          old_expiry, &expiring), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-policy:worker", "tenant-a", "admin", "rp-active", 0,
+          &active), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-policy:worker", "tenant-b", "admin", "rp-sealed", 0,
+          &sealed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-policy:worker", "tenant-a", "admin", "rp-revoked", 0,
+          &revoked), ==, WYRELOG_E_OK);
+  wyl_service_credential_t revoked_dto = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke (handle,
+          revoked.credential.credential_id, "admin", "rp-revoke",
+          &revoked_dto), ==, WYRELOG_E_OK);
+  wyl_service_credential_clear (&revoked_dto);
+
+  wyl_service_credential_rotate_runtime_t clock = {
+    .now_us = fixed_now,.data = &old_expiry,
+  };
+  assert_rotate_policy_clear (handle, expiring.credential.credential_id,
+      "rp-old-expired", 0, &clock);
+  assert_rotate_policy_clear (handle, active.credential.credential_id,
+      "rp-new-expired", old_expiry, &clock);
+  assert_rotate_policy_clear (handle, revoked.credential.credential_id,
+      "rp-already-revoked", 0, NULL);
+  assert_rotate_policy_clear (handle, SECOND_ID, "rp-unknown", 0, NULL);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store_of (handle),
+          "tenant-b", TRUE), ==, WYRELOG_E_OK);
+  assert_rotate_policy_clear (handle, sealed.credential.credential_id,
+      "rp-sealed-tenant", 0, NULL);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store_of (handle),
+          "tenant-b", FALSE), ==, WYRELOG_E_OK);
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_disable (handle,
+          "svc:rotate-policy:worker", "admin", "rp-disable", &principal), ==,
+      WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+  assert_rotate_policy_clear (handle, active.credential.credential_id,
+      "rp-disabled-principal", 0, NULL);
+  wyl_service_credential_issue_result_clear (&expiring);
+  wyl_service_credential_issue_result_clear (&active);
+  wyl_service_credential_issue_result_clear (&sealed);
+  wyl_service_credential_issue_result_clear (&revoked);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *old_id;
+  const gchar *request_id;
+  wyrelog_error_t rc;
+  wyl_service_credential_issue_result_t out;
+} RotateThread;
+
+static gpointer
+rotate_thread (gpointer data)
+{
+  RotateThread *thread = data;
+  thread->rc = wyl_service_credential_rotate (thread->handle, thread->old_id,
+      "admin", thread->request_id, 0, &thread->out);
+  return NULL;
+}
+
+static void
+test_rotate_concurrency (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:rotate-race:worker");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-race:worker", "tenant-a", "admin", "race-old", 0,
+          &old), ==, WYRELOG_E_OK);
+  RotateThread a = {
+    .handle = handle,.old_id = old.credential.credential_id,
+    .request_id = "race-a",.rc = -1,
+  };
+  RotateThread b = {
+    .handle = handle,.old_id = old.credential.credential_id,
+    .request_id = "race-b",.rc = -1,
+  };
+  GThread *ta = g_thread_new ("rotate-a", rotate_thread, &a);
+  GThread *tb = g_thread_new ("rotate-b", rotate_thread, &b);
+  g_thread_join (ta);
+  g_thread_join (tb);
+  g_assert_true ((a.rc == WYRELOG_E_OK && b.rc == WYRELOG_E_POLICY)
+      || (a.rc == WYRELOG_E_POLICY && b.rc == WYRELOG_E_OK));
+  g_assert_true ((a.out.secret != NULL) != (b.out.secret != NULL));
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials "
+          "WHERE rotated_from_id IS NOT NULL;"), ==, 1);
+  wyl_service_credential_issue_result_clear (&a.out);
+  wyl_service_credential_issue_result_clear (&b.out);
+  wyl_service_credential_issue_result_clear (&old);
+}
+
+static void
+test_rotate_collision_retry_and_wipe (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:rotate-collision:worker");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-collision:worker", "tenant-a", "admin", "rc-old", 0,
+          &old), ==, WYRELOG_E_OK);
+  exec_ok (db_of (handle),
+      "INSERT INTO service_credentials(credential_id,"
+      "credential_format_version,subject_id,tenant_id,generation,state,"
+      "verifier_version,salt,verifier,created_by,created_at_us,updated_at_us) "
+      "VALUES('" COLLISION_ID "',1,'svc:rotate-collision:worker',"
+      "'tenant-a',1,'active',1,zeroblob(16),zeroblob(32),'admin',1,1);");
+  CollisionRuntime state = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &state,
+  };
+  wyl_service_credential_rotate_runtime_t runtime = {
+    .credential_runtime = &credential_runtime,
+  };
+  wyl_service_credential_issue_result_t out = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          old.credential.credential_id, "admin", "rc-rotate", 0, &runtime,
+          &out), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (state.ids, ==, 2);
+  g_assert_cmpstr (out.credential.credential_id, ==, SECOND_ID);
+  wyl_service_credential_issue_result_clear (&out);
+  g_assert_cmpuint (state.allocs, ==, state.frees);
+  g_assert_cmpuint (state.unlocks, ==, state.frees);
+  g_assert_cmpuint (state.wipes, >=, state.frees);
+  wyl_service_credential_issue_result_clear (&old);
+
+  wyl_service_credential_issue_result_t exhausted = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-collision:worker", "tenant-a", "admin", "rc-old-2", 0,
+          &exhausted), ==, WYRELOG_E_OK);
+  memset (&state, 0, sizeof state);
+  state.always_collision = TRUE;
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          exhausted.credential.credential_id, "admin", "rc-exhausted", 0,
+          &runtime, &out), ==, WYRELOG_E_POLICY);
+  g_assert_null (out.secret);
+  g_assert_cmpuint (state.ids, ==, 4);
+  g_assert_cmpuint (state.allocs, ==, state.frees);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='rc-exhausted';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&exhausted);
+
+  wyl_service_credential_issue_result_t generation_fault = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-collision:worker", "tenant-a", "admin", "rc-old-3", 0,
+          &generation_fault), ==, WYRELOG_E_OK);
+  memset (&state, 0, sizeof state);
+  state.random_fail = TRUE;
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          generation_fault.credential.credential_id, "admin",
+          "rc-generation-fault", 0, &runtime, &out), ==, WYRELOG_E_CRYPTO);
+  g_assert_null (out.secret);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='rc-generation-fault';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&generation_fault);
+}
+
+static void
+assert_failed_rotate_rolled_back (WylHandle *handle,
+    const wyl_service_credential_issue_result_t *old, const gchar *request_id)
+{
+  wyl_service_credential_issue_result_t out = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate (handle,
+          old->credential.credential_id, "admin", request_id, 0, &out), !=,
+      WYRELOG_E_OK);
+  g_assert_null (out.secret);
+  g_assert_null (out.credential.credential_id);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials "
+          "WHERE rotated_from_id IS NOT NULL;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests WHERE request_id="
+          "'rotate-fault';"), ==, 0);
+}
+
+static void
+assert_credential_verifies (WylHandle *handle,
+    const wyl_service_credential_issue_result_t *credential)
+{
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (credential->secret, &secret_len);
+  gboolean authenticated = FALSE;
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          credential->credential.credential_id, secret, secret_len,
+          &authenticated), ==, WYRELOG_E_OK);
+  g_assert_true (authenticated);
+}
+
+static void
+test_rotate_faults_and_overflow (void)
+{
+  static const wyl_policy_service_rotate_fail_stage_t stages[] = {
+    WYL_POLICY_SERVICE_ROTATE_FAIL_INSERT,
+    WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_UPDATE,
+    WYL_POLICY_SERVICE_ROTATE_FAIL_SUCCESSOR_EVENT,
+    WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_EVENT,
+    WYL_POLICY_SERVICE_ROTATE_FAIL_AUDIT,
+    WYL_POLICY_SERVICE_ROTATE_FAIL_INTENTION,
+    WYL_POLICY_SERVICE_ROTATE_FAIL_VALIDATOR,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (stages); i++) {
+    g_auto (Fixture) fixture = { 0 };
+    fixture_init (&fixture);
+    WylHandle *handle = fixture.handle;
+    prepare_authority (handle, "svc:rotate-fault:worker");
+    wyl_service_credential_issue_result_t old = { 0 };
+    g_assert_cmpint (wyl_service_credential_issue (handle,
+            "svc:rotate-fault:worker", "tenant-a", "admin", "rf-old", 0,
+            &old), ==, WYRELOG_E_OK);
+    wyl_policy_store_service_rotate_fail_once (store_of (handle), stages[i]);
+    assert_failed_rotate_rolled_back (handle, &old, "rotate-fault");
+    assert_credential_verifies (handle, &old);
+    wyl_service_credential_issue_result_clear (&old);
+  }
+
+  g_auto (Fixture) commit_fixture = { 0 };
+  fixture_init (&commit_fixture);
+  WylHandle *commit = commit_fixture.handle;
+  prepare_authority (commit, "svc:rotate-commit:worker");
+  wyl_service_credential_issue_result_t commit_old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (commit,
+          "svc:rotate-commit:worker", "tenant-a", "admin", "rf-commit-old",
+          0, &commit_old), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_lifecycle_fail_commit_once (store_of (commit));
+  assert_failed_rotate_rolled_back (commit, &commit_old, "rotate-fault");
+  assert_credential_verifies (commit, &commit_old);
+  wyl_service_credential_issue_result_clear (&commit_old);
+
+  g_auto (Fixture) overflow_fixture = { 0 };
+  fixture_init (&overflow_fixture);
+  WylHandle *overflow = overflow_fixture.handle;
+  prepare_authority (overflow, "svc:rotate-overflow:worker");
+  wyl_service_credential_issue_result_t overflow_old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (overflow,
+          "svc:rotate-overflow:worker", "tenant-a", "admin", "rf-o-old", 0,
+          &overflow_old), ==, WYRELOG_E_OK);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db_of (overflow),
+          "UPDATE service_credentials SET generation=9223372036854775807 "
+          "WHERE credential_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
+  sqlite3_bind_text (stmt, 1, overflow_old.credential.credential_id, -1,
+      SQLITE_TRANSIENT);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  assert_failed_rotate_rolled_back (overflow, &overflow_old, "rotate-fault");
+  assert_credential_verifies (overflow, &overflow_old);
+  wyl_service_credential_issue_result_clear (&overflow_old);
+}
+
+static void
+test_rotate_missing_cvk_does_not_recreate (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  prepare_authority (fixture.handle, "svc:rotate-cvk:worker");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (fixture.handle,
+          "svc:rotate-cvk:worker", "tenant-a", "admin", "cvk-old", 0, &old),
+      ==, WYRELOG_E_OK);
+  g_autofree gchar *old_id = g_strdup (old.credential.credential_id);
+  exec_ok (db_of (fixture.handle), "DELETE FROM service_credential_cvk;");
+  g_clear_object (&fixture.handle);
+  WylHandleOpenOptions options = {
+    .policy_store_path = fixture.db_path,
+    .policy_keyprovider_path = fixture.key_spec,
+    .audit_store_path = fixture.audit_path,
+    .production_mode = TRUE,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture.handle),
+      ==, WYRELOG_E_OK);
+  wyl_service_credential_issue_result_t out = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate (fixture.handle, old_id,
+          "admin", "cvk-rotate", 0, &out), ==, WYRELOG_E_POLICY);
+  g_assert_null (out.secret);
+  g_assert_cmpint (scalar (db_of (fixture.handle),
+          "SELECT count(*) FROM service_credential_cvk;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (fixture.handle),
+          "SELECT count(*) FROM service_credentials;"), ==, 1);
+  wyl_service_credential_issue_result_clear (&old);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1139,5 +1562,17 @@ main (int argc, char **argv)
   g_test_add_func
       ("/auth/service-credential/revoke-concurrency-overflow-faults",
       test_revoke_concurrency_overflow_faults);
+  g_test_add_func ("/auth/service-credential/rotate-happy-linkage-no-grace",
+      test_rotate_happy_linkage_no_grace);
+  g_test_add_func ("/auth/service-credential/rotate-policy-rejections",
+      test_rotate_policy_rejections);
+  g_test_add_func ("/auth/service-credential/rotate-concurrency",
+      test_rotate_concurrency);
+  g_test_add_func ("/auth/service-credential/rotate-collision-wipe",
+      test_rotate_collision_retry_and_wipe);
+  g_test_add_func ("/auth/service-credential/rotate-faults-overflow",
+      test_rotate_faults_and_overflow);
+  g_test_add_func ("/auth/service-credential/rotate-missing-cvk",
+      test_rotate_missing_cvk_does_not_recreate);
   return g_test_run ();
 }
