@@ -67,6 +67,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_audit_conn_t, wyl_audit_conn_close);
  */
 duckdb_connection wyl_audit_conn_get_connection (wyl_audit_conn_t * conn);
 
+/* Test-only, thread-safe one-shot sink fault. The next event insert returns
+ * WYRELOG_E_IO before touching DuckDB. Production defaults to disabled. */
+void wyl_audit_conn_fail_insert_once (wyl_audit_conn_t * conn);
+
 /*
  * Ensures the audit_events table exists on the open connection.
  * Idempotent: subsequent calls on the same connection are no-ops.

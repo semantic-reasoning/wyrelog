@@ -1,15 +1,511 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <duckdb.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/audit/conn-private.h"
+#include "wyrelog/auth/service-credential-domain-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
 #endif
+
+static gboolean policy_get_audit_intention_state (WylHandle * handle,
+    const gchar * id, gchar ** out_state, gint64 * out_attempt_count);
+static gboolean runtime_count_audit_rows (WylHandle * handle,
+    const gchar * id, gint64 * out_count);
+static wyrelog_error_t contains_audit_event_fact (WylHandle * handle,
+    const gchar * id, gint64 created_at_us, const gchar * decision,
+    gboolean * out_contains);
+static wyrelog_error_t contains_audit_event_attr_fact (WylHandle * handle,
+    const gchar * relation, const gchar * id, const gchar * value,
+    gboolean * out_contains);
+static wyrelog_error_t count_audit_attr_facts (WylHandle * handle,
+    const gchar * relation, const gchar * id, guint * out_count);
+static wyrelog_error_t intern_symbol (WylHandle * handle,
+    const gchar * symbol, gint64 * out_id);
+static wyrelog_error_t insert_symbol_row2 (WylHandle * handle,
+    const gchar * relation, const gchar * a, const gchar * b);
+
+static wyrelog_error_t
+insert_audit_base_fact (WylHandle *handle, const gchar *id,
+    gint64 created_at_us)
+{
+  gint64 row[3] = { 0, created_at_us, 0 };
+  wyrelog_error_t rc = intern_symbol (handle, id, &row[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = intern_symbol (handle, "allow", &row[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_engine_insert (handle, "audit_event_input", row, 3);
+}
+
+static gboolean
+policy_get_audit_event_for_request (WylHandle *handle, const gchar *request_id,
+    gchar **out_id, gint64 *out_created_at_us)
+{
+  sqlite3_stmt *stmt = NULL;
+  sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
+
+  if (sqlite3_prepare_v2 (db, "SELECT id, created_at_us FROM audit_events "
+          "WHERE request_id = ?;", -1, &stmt, NULL) != SQLITE_OK
+      || sqlite3_bind_text (stmt, 1, request_id, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return FALSE;
+  }
+  gboolean ok = FALSE;
+  if (sqlite3_step (stmt) == SQLITE_ROW) {
+    *out_id = g_strdup ((const gchar *) sqlite3_column_text (stmt, 0));
+    *out_created_at_us = sqlite3_column_int64 (stmt, 1);
+    ok = sqlite3_step (stmt) == SQLITE_DONE;
+  }
+  sqlite3_finalize (stmt);
+  return ok;
+}
+
+static gboolean
+runtime_event_matches (WylHandle *handle, const gchar *id,
+    const gchar *subject, const gchar *action, const gchar *resource,
+    const gchar *request_id)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  static const gchar *sql = "SELECT count(*) FROM audit_events WHERE id = ? "
+      "AND subject_id = ? AND action = ? AND resource_id = ? "
+      "AND request_id = ? AND decision = 1;";
+
+  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 1, id) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 2, subject) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 3, action) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 4, resource) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 5, request_id) != DuckDBSuccess
+      || duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    duckdb_destroy_prepare (&stmt);
+    return FALSE;
+  }
+  gboolean ok = duckdb_row_count (&result) == 1
+      && duckdb_value_int64 (&result, 0, 0) == 1;
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  return ok;
+}
+
+static gboolean
+runtime_does_not_contain (WylHandle *handle, const gchar *needle)
+{
+  duckdb_prepared_statement stmt = NULL;
+  duckdb_result result = { 0 };
+  duckdb_connection conn =
+      wyl_audit_conn_get_connection (wyl_handle_get_audit_conn (handle));
+  static const gchar *sql = "SELECT count(*) FROM audit_events WHERE "
+      "concat_ws('', id, subject_id, action, resource_id, deny_reason, "
+      "deny_origin, request_id) LIKE ?;";
+  g_autofree gchar *pattern = g_strdup_printf ("%%%s%%", needle);
+
+  if (duckdb_prepare (conn, sql, &stmt) != DuckDBSuccess
+      || duckdb_bind_varchar (stmt, 1, pattern) != DuckDBSuccess
+      || duckdb_execute_prepared (stmt, &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    duckdb_destroy_prepare (&stmt);
+    return FALSE;
+  }
+  gboolean ok = duckdb_row_count (&result) == 1
+      && duckdb_value_int64 (&result, 0, 0) == 0;
+  duckdb_destroy_result (&result);
+  duckdb_destroy_prepare (&stmt);
+  return ok;
+}
+
+static gboolean
+wirelog_event_fact_count (WylHandle *handle, const gchar *id, guint *out_count)
+{
+  static const gchar *relations[] = {
+    "audit_event",
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+    "audit_event_request_id",
+  };
+
+  *out_count = 0;
+  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
+    guint count = 0;
+    if (count_audit_attr_facts (handle, relations[i], id, &count)
+        != WYRELOG_E_OK)
+      return FALSE;
+    *out_count += count;
+  }
+  return TRUE;
+}
+
+static gboolean
+check_projected_lifecycle_event (WylHandle *handle, const gchar *request_id,
+    const gchar *action, const gchar *resource, gchar **out_id)
+{
+  gint64 created_at_us = 0;
+  gboolean contains = FALSE;
+  g_autofree gchar *id = NULL;
+  if (!policy_get_audit_event_for_request (handle, request_id, &id,
+          &created_at_us)
+      || !runtime_event_matches (handle, id, "admin", action, resource,
+          request_id)
+      || contains_audit_event_fact (handle, id, created_at_us, "allow",
+          &contains) != WYRELOG_E_OK || !contains
+      || contains_audit_event_attr_fact (handle, "audit_event_subject", id,
+          "admin", &contains) != WYRELOG_E_OK || !contains
+      || contains_audit_event_attr_fact (handle, "audit_event_action", id,
+          action, &contains) != WYRELOG_E_OK || !contains
+      || contains_audit_event_attr_fact (handle, "audit_event_resource", id,
+          resource, &contains) != WYRELOG_E_OK || !contains
+      || contains_audit_event_attr_fact (handle, "audit_event_request_id", id,
+          request_id, &contains) != WYRELOG_E_OK || !contains)
+    return FALSE;
+  *out_id = g_steal_pointer (&id);
+  return TRUE;
+}
+
+static gint
+check_service_lifecycle_audit_reconciliation (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-lifecycle-audit-XXXXXX", NULL);
+  g_autofree gchar *policy = g_build_filename (dir, "policy.db", NULL);
+  g_autofree gchar *audit = g_build_filename (dir, "audit.db", NULL);
+  g_autofree gchar *key = g_build_filename (dir, "policy.key", NULL);
+  guint8 key_bytes[32] = { 0 };
+  memset (key_bytes, 0x42, sizeof key_bytes);
+  if (!g_file_set_contents (key, (const gchar *) key_bytes, sizeof key_bytes,
+          NULL))
+    return 700;
+  g_autofree gchar *key_spec = g_strdup_printf ("file:%s", key);
+  WylHandleOpenOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = policy,
+    .policy_keyprovider_path = key_spec,
+    .audit_store_path = audit,
+    .production_mode = TRUE,
+  };
+  WylHandle *handle = NULL;
+  if (wyl_handle_open_with_options (&options, &handle) != WYRELOG_E_OK)
+    return 701;
+  wyl_service_principal_t principal = { 0 };
+  if (wyl_service_principal_create (handle, "svc:audit:worker", "worker",
+          "admin", "sla-principal", &principal) != WYRELOG_E_OK)
+    return 702;
+  wyl_service_principal_clear (&principal);
+  gboolean created = FALSE;
+  if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
+          "sla-tenant", &created) != WYRELOG_E_OK)
+    return 703;
+  wyl_service_credential_issue_result_t issued = { 0 }, rotated = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
+          "admin", "sla-issue", 0, &issued) != WYRELOG_E_OK)
+    return 704;
+  gsize issue_len = 0;
+  const gchar *issue_secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &issue_len);
+  g_autofree gchar *issue_copy = g_strndup (issue_secret, issue_len);
+  if (wyl_service_credential_rotate (handle, issued.credential.credential_id,
+          "admin", "sla-rotate", 0, &rotated) != WYRELOG_E_OK)
+    return 705;
+  gsize rotate_len = 0;
+  const gchar *rotate_secret = wyl_service_credential_secret_peek_encoded
+      (rotated.secret, &rotate_len);
+  g_autofree gchar *rotate_copy = g_strndup (rotate_secret, rotate_len);
+  wyl_service_credential_t revoked = { 0 };
+  if (wyl_service_credential_revoke (handle,
+          rotated.credential.credential_id, "admin", "sla-revoke", &revoked)
+      != WYRELOG_E_OK)
+    return 706;
+  wyl_service_credential_clear (&revoked);
+  sqlite3 *db = wyl_policy_store_get_db (wyl_handle_get_policy_store (handle));
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, "SELECT count(*) FROM audit_intentions WHERE "
+          "state='pending' AND request_id LIKE 'sla-%';", -1, &stmt, NULL)
+      != SQLITE_OK || sqlite3_step (stmt) != SQLITE_ROW
+      || sqlite3_column_int64 (stmt, 0) != 4)
+    return 707;
+  sqlite3_finalize (stmt);
+  g_autofree gchar *pattern = g_strdup_printf ("%%%s%%", rotate_copy);
+  if (sqlite3_prepare_v2 (db, "SELECT count(*) FROM audit_events WHERE "
+          "coalesce(subject_id,'')||coalesce(action,'')||"
+          "coalesce(resource_id,'')||coalesce(request_id,'') LIKE ?;", -1,
+          &stmt, NULL) != SQLITE_OK)
+    return 708;
+  sqlite3_bind_text (stmt, 1, pattern, -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) != SQLITE_ROW || sqlite3_column_int64 (stmt, 0) != 0)
+    return 709;
+  g_autofree gchar *issue_pattern = g_strdup_printf ("%%%s%%", issue_copy);
+  sqlite3_reset (stmt);
+  sqlite3_clear_bindings (stmt);
+  sqlite3_bind_text (stmt, 1, issue_pattern, -1, SQLITE_TRANSIENT);
+  if (sqlite3_step (stmt) != SQLITE_ROW || sqlite3_column_int64 (stmt, 0) != 0)
+    return 710;
+  sqlite3_finalize (stmt);
+  stmt = NULL;
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK)
+    return 711;
+  g_autofree gchar *principal_id = NULL;
+  g_autofree gchar *issue_id = NULL;
+  g_autofree gchar *rotate_id = NULL;
+  g_autofree gchar *revoke_id = NULL;
+  if (!check_projected_lifecycle_event (handle, "sla-principal",
+          "service.principal.create", "svc:audit:worker", &principal_id)
+      || !check_projected_lifecycle_event (handle, "sla-issue",
+          "service.credential.issue", issued.credential.credential_id,
+          &issue_id)
+      || !check_projected_lifecycle_event (handle, "sla-rotate",
+          "service.credential.rotate", issued.credential.credential_id,
+          &rotate_id)
+      || !check_projected_lifecycle_event (handle, "sla-revoke",
+          "service.credential.revoke", rotated.credential.credential_id,
+          &revoke_id))
+    return 712;
+  guint principal_facts = 0, issue_facts = 0, rotate_facts = 0,
+      revoke_facts = 0;
+  if (!wirelog_event_fact_count (handle, principal_id, &principal_facts)
+      || !wirelog_event_fact_count (handle, issue_id, &issue_facts)
+      || !wirelog_event_fact_count (handle, rotate_id, &rotate_facts)
+      || !wirelog_event_fact_count (handle, revoke_id, &revoke_facts)
+      || principal_facts == 0 || issue_facts == 0 || rotate_facts == 0
+      || revoke_facts == 0)
+    return 713;
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK)
+    return 713;
+  gint64 count = 0;
+  guint projected_facts = 0;
+  if (!runtime_count_audit_rows (handle, principal_id, &count) || count != 1
+      || !runtime_count_audit_rows (handle, issue_id, &count) || count != 1
+      || !runtime_count_audit_rows (handle, rotate_id, &count) || count != 1
+      || !runtime_count_audit_rows (handle, revoke_id, &count) || count != 1
+      || !wirelog_event_fact_count (handle, principal_id, &projected_facts)
+      || projected_facts != principal_facts
+      || !wirelog_event_fact_count (handle, issue_id, &projected_facts)
+      || projected_facts != issue_facts
+      || !wirelog_event_fact_count (handle, rotate_id, &projected_facts)
+      || projected_facts != rotate_facts
+      || !wirelog_event_fact_count (handle, revoke_id, &projected_facts)
+      || projected_facts != revoke_facts
+      || !runtime_does_not_contain (handle, issue_copy)
+      || !runtime_does_not_contain (handle, rotate_copy))
+    return 714;
+
+  wyl_service_credential_issue_result_t fault = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
+          "admin", "sla-fault", 0, &fault) != WYRELOG_E_OK)
+    return 715;
+  g_autofree gchar *fault_id = NULL;
+  gint64 fault_created_at_us = 0;
+  if (fault.secret == NULL || !policy_get_audit_event_for_request (handle,
+          "sla-fault", &fault_id, &fault_created_at_us))
+    return 716;
+  wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
+      WYRELOG_E_INTERNAL);
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_INTERNAL)
+    return 717;
+  g_autofree gchar *state = NULL;
+  gint64 attempts = 0;
+  wyl_service_credential_t persisted = { 0 };
+  if (!policy_get_audit_intention_state (handle, fault_id, &state, &attempts)
+      || g_strcmp0 (state, "failed") != 0 || attempts != 1
+      || !runtime_count_audit_rows (handle, fault_id, &count) || count != 0
+      || wyl_service_credential_get (handle, fault.credential.credential_id,
+          &persisted) != WYRELOG_E_OK
+      || g_strcmp0 (persisted.state, "active") != 0)
+    return 718;
+  wyl_service_credential_clear (&persisted);
+  g_clear_pointer (&state, g_free);
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK
+      || !policy_get_audit_intention_state (handle, fault_id, &state,
+          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
+      || !runtime_count_audit_rows (handle, fault_id, &count) || count != 1)
+    return 719;
+  g_autofree gchar *projected_id = NULL;
+  if (!check_projected_lifecycle_event (handle, "sla-fault",
+          "service.credential.issue", fault.credential.credential_id,
+          &projected_id) || g_strcmp0 (projected_id, fault_id) != 0)
+    return 734;
+
+  wyl_service_credential_issue_result_t sink = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
+          "admin", "sla-sink", 0, &sink) != WYRELOG_E_OK)
+    return 720;
+  g_autofree gchar *sink_id = NULL;
+  gint64 sink_created_at_us = 0;
+  if (sink.secret == NULL || !policy_get_audit_event_for_request (handle,
+          "sla-sink", &sink_id, &sink_created_at_us))
+    return 721;
+  wyl_audit_conn_fail_insert_once (wyl_handle_get_audit_conn (handle));
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_IO)
+    return 722;
+  guint sink_facts = 0;
+  g_clear_pointer (&state, g_free);
+  if (!policy_get_audit_intention_state (handle, sink_id, &state, &attempts)
+      || g_strcmp0 (state, "failed") != 0 || attempts != 1
+      || !runtime_count_audit_rows (handle, sink_id, &count) || count != 0
+      || !wirelog_event_fact_count (handle, sink_id, &sink_facts)
+      || sink_facts == 0)
+    return 723;
+  g_clear_pointer (&state, g_free);
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_OK
+      || !policy_get_audit_intention_state (handle, sink_id, &state,
+          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
+      || !runtime_count_audit_rows (handle, sink_id, &count) || count != 1)
+    return 724;
+  g_clear_pointer (&projected_id, g_free);
+  if (!check_projected_lifecycle_event (handle, "sla-sink",
+          "service.credential.issue", sink.credential.credential_id,
+          &projected_id) || g_strcmp0 (projected_id, sink_id) != 0
+      || !wirelog_event_fact_count (handle, sink_id, &projected_facts)
+      || projected_facts != sink_facts)
+    return 735;
+
+  wyl_service_credential_issue_result_t restart_failed = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
+          "admin", "sla-restart-failed", 0, &restart_failed) != WYRELOG_E_OK)
+    return 725;
+  g_autofree gchar *restart_failed_id = NULL;
+  gint64 ignored_created_at_us = 0;
+  if (!policy_get_audit_event_for_request (handle, "sla-restart-failed",
+          &restart_failed_id, &ignored_created_at_us))
+    return 726;
+  wyl_handle_set_engine_insert_fault_once (handle, "audit_event_input",
+      WYRELOG_E_INTERNAL);
+  if (wyl_handle_load_policy_store_audit_events (handle) != WYRELOG_E_INTERNAL)
+    return 727;
+  g_clear_pointer (&state, g_free);
+  if (!policy_get_audit_intention_state (handle, restart_failed_id, &state,
+          &attempts) || g_strcmp0 (state, "failed") != 0 || attempts != 1)
+    return 728;
+  wyl_service_credential_issue_result_t restart_pending = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:audit:worker", "sla-tenant",
+          "admin", "sla-restart-pending", 0, &restart_pending)
+      != WYRELOG_E_OK)
+    return 729;
+  g_autofree gchar *restart_pending_id = NULL;
+  if (!policy_get_audit_event_for_request (handle, "sla-restart-pending",
+          &restart_pending_id, &ignored_created_at_us))
+    return 730;
+  wyl_service_credential_issue_result_clear (&issued);
+  wyl_service_credential_issue_result_clear (&rotated);
+  wyl_service_credential_issue_result_clear (&fault);
+  wyl_service_credential_issue_result_clear (&sink);
+  wyl_service_credential_issue_result_clear (&restart_failed);
+  wyl_service_credential_issue_result_clear (&restart_pending);
+  g_object_unref (handle);
+  handle = NULL;
+  if (wyl_handle_open_with_options (&options, &handle) != WYRELOG_E_OK)
+    return 731;
+  g_clear_pointer (&state, g_free);
+  if (!policy_get_audit_intention_state (handle, restart_failed_id, &state,
+          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 1
+      || !runtime_count_audit_rows (handle, restart_failed_id, &count)
+      || count != 1)
+    return 732;
+  g_clear_pointer (&state, g_free);
+  if (!policy_get_audit_intention_state (handle, restart_pending_id, &state,
+          &attempts) || g_strcmp0 (state, "committed") != 0 || attempts != 0
+      || !runtime_count_audit_rows (handle, restart_pending_id, &count)
+      || count != 1)
+    return 733;
+  guint restart_failed_facts = 0, restart_pending_facts = 0;
+  if (!wirelog_event_fact_count (handle, restart_failed_id,
+          &restart_failed_facts) || restart_failed_facts == 0
+      || !wirelog_event_fact_count (handle, restart_pending_id,
+          &restart_pending_facts) || restart_pending_facts == 0)
+    return 736;
+  g_object_unref (handle);
+  handle = NULL;
+  if (wyl_handle_open_with_options (&options, &handle) != WYRELOG_E_OK
+      || !wirelog_event_fact_count (handle, restart_failed_id,
+          &projected_facts) || projected_facts != restart_failed_facts
+      || !wirelog_event_fact_count (handle, restart_pending_id,
+          &projected_facts) || projected_facts != restart_pending_facts)
+    return 737;
+
+  for (guint corruption = 0; corruption < 4; corruption++) {
+    g_autofree gchar *request_id = g_strdup_printf ("sla-corrupt-%u",
+        corruption);
+    wyl_service_credential_issue_result_t corrupt = { 0 };
+    if (wyl_service_credential_issue (handle, "svc:audit:worker",
+            "sla-tenant", "admin", request_id, 0, &corrupt)
+        != WYRELOG_E_OK || corrupt.secret == NULL)
+      return 738 + (gint) corruption *10;
+    g_autofree gchar *corrupt_id = NULL;
+    gint64 corrupt_created_at_us = 0;
+    if (!policy_get_audit_event_for_request (handle, request_id, &corrupt_id,
+            &corrupt_created_at_us))
+      return 739 + (gint) corruption *10;
+
+    wyrelog_error_t corrupt_rc = WYRELOG_E_OK;
+    if (corruption == 0) {
+      /* Expected NULL deny_reason with a stale fact. */
+      corrupt_rc = insert_symbol_row2 (handle,
+          "audit_event_deny_reason_input", corrupt_id, "stale-reason");
+    } else if (corruption == 2) {
+      /* A base without the six sanctioned attribute projections. */
+      corrupt_rc = insert_audit_base_fact (handle, corrupt_id,
+          corrupt_created_at_us);
+    } else {
+      corrupt_rc = wyl_handle_insert_audit_fact (handle, corrupt_id,
+          corrupt_created_at_us, "admin", "service.credential.issue",
+          corrupt.credential.credential_id, NULL, NULL, request_id,
+          WYL_DECISION_ALLOW);
+      if (corrupt_rc == WYRELOG_E_OK) {
+        corrupt_rc = insert_symbol_row2 (handle,
+            "audit_event_action_input", corrupt_id,
+            corruption == 1 ? "service.credential.mismatch"
+            : "service.credential.issue");
+      }
+    }
+    if (corrupt_rc != WYRELOG_E_OK)
+      return 740 + (gint) corruption *10;
+
+    guint corrupt_facts = 0, facts_after = 0;
+    gboolean counted_before = wirelog_event_fact_count (handle, corrupt_id,
+        &corrupt_facts);
+    wyrelog_error_t reconcile_rc =
+        wyl_handle_load_policy_store_audit_events (handle);
+    gboolean counted_after = wirelog_event_fact_count (handle, corrupt_id,
+        &facts_after);
+    if (!counted_before || corrupt_facts == 0
+        || reconcile_rc != WYRELOG_E_POLICY || !counted_after
+        || facts_after != corrupt_facts)
+      return 741 + (gint) corruption *10;
+    g_clear_pointer (&state, g_free);
+    wyl_service_credential_t authority = { 0 };
+    if (!policy_get_audit_intention_state (handle, corrupt_id, &state,
+            &attempts) || g_strcmp0 (state, "failed") != 0 || attempts != 1
+        || !runtime_count_audit_rows (handle, corrupt_id, &count) || count != 0
+        || corrupt.secret == NULL
+        || wyl_service_credential_get (handle,
+            corrupt.credential.credential_id, &authority) != WYRELOG_E_OK
+        || g_strcmp0 (authority.state, "active") != 0)
+      return 742 + (gint) corruption *10;
+    wyl_service_credential_clear (&authority);
+    wyl_service_credential_issue_result_clear (&corrupt);
+  }
+  g_object_unref (handle);
+  g_autofree gchar *clear = g_strdup_printf ("%s.wyrelog-clear", policy);
+  g_autofree gchar *lock = g_strdup_printf ("%s.wyrelog-lock", policy);
+  (void) g_remove (clear);
+  (void) g_remove (lock);
+  (void) g_remove (policy);
+  (void) g_remove (audit);
+  (void) g_remove (key);
+  (void) g_rmdir (dir);
+  return 0;
+}
 
 /*
  * End-to-end audit-emit test. wyl_init opens the audit log and
@@ -218,6 +714,7 @@ contains_audit_event_attr_fact (WylHandle *handle, const gchar *relation,
 
 typedef struct
 {
+  const gchar *relation;
   gint64 audit_id;
   guint matches;
 } AuditFactCount;
@@ -226,10 +723,10 @@ static void
 count_audit_fact_cb (const gchar *relation, const gint64 *row, guint ncols,
     gpointer user_data)
 {
-  (void) relation;
   AuditFactCount *count = user_data;
 
-  if (ncols >= 1 && row[0] == count->audit_id)
+  if (g_strcmp0 (relation, count->relation) == 0 && ncols >= 1
+      && row[0] == count->audit_id)
     count->matches++;
 }
 
@@ -242,7 +739,7 @@ count_audit_attr_facts (WylHandle *handle, const gchar *relation,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  AuditFactCount count = { audit_id, 0 };
+  AuditFactCount count = { relation, audit_id, 0 };
   rc = wyl_engine_snapshot (wyl_handle_get_read_engine (handle), relation,
       count_audit_fact_cb, &count);
   if (rc != WYRELOG_E_OK)
@@ -2973,6 +3470,8 @@ int
 main (void)
 {
   gint rc;
+  if ((rc = check_service_lifecycle_audit_reconciliation ()) != 0)
+    return rc;
   if ((rc = check_emit_inserts_a_row ()) != 0)
     return rc;
   if ((rc = check_emit_persists_event_fields ()) != 0)
