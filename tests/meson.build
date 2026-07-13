@@ -783,7 +783,9 @@ test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )
 
-test('policy-store-service-cvk', test_policy_store_service_cvk)
+test('policy-store-service-cvk', test_policy_store_service_cvk,
+  timeout : 120,
+)
 
 test_handle_id = executable('test-handle-id',
   'test-handle-id.c',

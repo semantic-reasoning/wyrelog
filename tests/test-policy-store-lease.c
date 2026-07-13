@@ -616,14 +616,13 @@ test_rotation_provider_ownership (void)
   wyl_policy_store_open_options_t new_success_options =
       owned_options (&new_success, &new_success_provider);
   g_autofree gchar *clear_path = g_strdup_printf ("%s%s", path, CLEAR_SUFFIX);
-  old_success_provider->probe_path_on_wipe = path;
   old_success_provider->truncate_path_on_wipe = clear_path;
   g_autofree gchar *canonical_before = NULL;
   gsize canonical_before_len = 0;
   g_assert_true (g_file_get_contents (path, &canonical_before,
           &canonical_before_len, NULL));
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_success_options, &new_success_options), ==, WYRELOG_E_POLICY);
+          &old_success_options, &new_success_options), ==, WYRELOG_E_CRYPTO);
   g_autofree gchar *canonical_after = NULL;
   gsize canonical_after_len = 0;
   g_assert_true (g_file_get_contents (path, &canonical_after,
@@ -631,10 +630,10 @@ test_rotation_provider_ownership (void)
   g_assert_cmpmem (canonical_after, canonical_after_len, canonical_before,
       canonical_before_len);
   g_assert_cmpuint (old_success.probes, ==, 1);
-  g_assert_cmpuint (old_success.derives, ==, 1);
+  g_assert_cmpuint (old_success.derives, ==, 2);
+  g_assert_cmpuint (old_success.unseals, ==, 0);
   g_assert_cmpuint (old_success.wipes, ==, 1);
   g_assert_cmpuint (old_success.frees, ==, 1);
-  g_assert_cmpint (old_success.wipe_probe_status, ==, 73);
   g_assert_cmpuint (new_success.probes, ==, 0);
   g_assert_cmpuint (new_success.derives, ==, 0);
   g_assert_cmpuint (new_success.wipes, ==, 1);
@@ -667,6 +666,7 @@ test_rotation_provider_ownership (void)
   new_success_provider = NULL;
   old_success_options = owned_options (&old_success, &old_success_provider);
   new_success_options = owned_options (&new_success, &new_success_provider);
+  old_success_provider->probe_path_on_wipe = path;
   old_success_provider->truncate_path_on_wipe = clear_path;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
           &old_success_options, &new_success_options), ==, WYRELOG_E_OK);
@@ -674,6 +674,7 @@ test_rotation_provider_ownership (void)
   g_assert_cmpuint (old_success.derives, ==, 1);
   g_assert_cmpuint (old_success.wipes, ==, 1);
   g_assert_cmpuint (old_success.frees, ==, 1);
+  g_assert_cmpint (old_success.wipe_probe_status, ==, 73);
   g_assert_cmpuint (new_success.probes, ==, 1);
   g_assert_cmpuint (new_success.derives, ==, 1);
   g_assert_cmpuint (new_success.wipes, ==, 1);
@@ -691,7 +692,7 @@ test_rotation_provider_ownership (void)
   new_failure_provider->probe_path_on_wipe = path;
   new_failure_provider->truncate_path_on_wipe = clear_path;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
-          &old_failure_options, &new_failure_options), ==, WYRELOG_E_INTERNAL);
+          &old_failure_options, &new_failure_options), ==, WYRELOG_E_CRYPTO);
   g_assert_cmpuint (old_failure.wipes, ==, 1);
   g_assert_cmpuint (old_failure.frees, ==, 1);
   g_assert_cmpuint (new_failure.probes, ==, 1);

@@ -27,6 +27,23 @@ typedef struct wyl_policy_store_cvk_runtime_t
   gpointer data;
 } wyl_policy_store_cvk_runtime_t;
 
+typedef enum
+{
+  WYL_POLICY_ROTATION_BEFORE_CVK_CAS = 1,
+  WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME = 2,
+  WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME = 3,
+} wyl_policy_store_rotation_stage_t;
+
+typedef struct
+{
+  int (*checkpoint) (gpointer data, wyl_policy_store_rotation_stage_t stage);
+  gpointer data;
+} wyl_policy_store_rotation_runtime_t;
+
+/* rotation_runtime is a private, per-call fault seam. rotate_keyprovider uses
+ * only old_opts->rotation_runtime and the CVK runtime snapshotted while opening
+ * the old store. new_opts runtime pointers are neither adopted nor invoked. */
+
 /* service_cvk_runtime is copied by value during open. Callback functions and
  * data are borrowed, not owned: their code and data context must remain valid
  * and callable until wyl_policy_store_close() has returned. */
@@ -71,6 +88,7 @@ typedef struct
   void (*keyprovider_state_free) (gpointer state);
   gboolean require_encrypted;
   const wyl_policy_store_cvk_runtime_t *service_cvk_runtime;
+  const wyl_policy_store_rotation_runtime_t *rotation_runtime;
 } wyl_policy_store_open_options_t;
 
 typedef wyrelog_error_t (*wyl_policy_role_permission_cb) (const gchar * role_id,

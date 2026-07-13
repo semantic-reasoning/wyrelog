@@ -135,6 +135,11 @@ struct wyl_policy_store_t
   guint8 *service_cvk_envelope;
 };
 
+static wyrelog_error_t prepare_keyprovider_rotation_work
+    (wyl_policy_store_t * store, WylOwnedKeyProvider * new_provider,
+    const wyl_policy_store_rotation_runtime_t * rotation_runtime,
+    guint8 ** out_new_key_material);
+
 static gpointer
 cvk_default_alloc (gpointer data, gsize size)
 {
@@ -1030,8 +1035,11 @@ read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
 
 static wyrelog_error_t
 write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
-    gsize len)
+    gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
+    gboolean *out_replaced)
 {
+  if (out_replaced != NULL)
+    *out_replaced = FALSE;
   if (path == NULL || path[0] == '\0' || (bytes == NULL && len > 0))
     return WYRELOG_E_INVALID;
 
@@ -1101,7 +1109,14 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
         "policy store FlushFileBuffers of tmp failed");
     return WYRELOG_E_IO;
   }
-  CloseHandle (h);
+  if (!CloseHandle (h)) {
+    (void) DeleteFileW (wtmp);
+    g_free (wtmp);
+    g_free (wdst);
+    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
+        "policy store CloseHandle of tmp failed");
+    return WYRELOG_E_IO;
+  }
 
   DWORD dst_attrs = GetFileAttributesW (wdst);
   if (dst_attrs != INVALID_FILE_ATTRIBUTES
@@ -1112,6 +1127,15 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store refused reparse point at canonical before rename");
     return WYRELOG_E_POLICY;
+  }
+
+  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME) != 0) {
+    (void) DeleteFileW (wtmp);
+    g_free (wtmp);
+    g_free (wdst);
+    return WYRELOG_E_IO;
   }
 
   BOOL moved = MoveFileExW (wtmp, wdst,
@@ -1125,6 +1149,14 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     return WYRELOG_E_IO;
   }
 
+  if (out_replaced != NULL)
+    *out_replaced = TRUE;
+  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME) != 0)
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "policy store canonical replacement completed with a durability warning");
+
   (void) g_chmod (path, 0600);
   return WYRELOG_E_OK;
 }
@@ -1132,7 +1164,7 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 static wyrelog_error_t
 write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 {
-  return write_whole_file_atomic_private (path, bytes, len);
+  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL);
 }
 #endif /* G_OS_WIN32 */
 
@@ -1277,8 +1309,11 @@ read_work_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
 
 static wyrelog_error_t
 write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
-    gsize len)
+    gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
+    gboolean *out_replaced)
 {
+  if (out_replaced != NULL)
+    *out_replaced = FALSE;
   g_autofree gchar *tmp_basename = g_strdup_printf ("%s%s", basename,
       WYL_POLICY_STORE_TMP_SUFFIX);
 
@@ -1324,22 +1359,37 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     return WYRELOG_E_IO;
   }
 
+  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME) != 0) {
+    (void) unlinkat (dirfd, tmp_basename, 0);
+    return WYRELOG_E_IO;
+  }
+
   if (renameat (dirfd, tmp_basename, dirfd, basename) != 0) {
     (void) unlinkat (dirfd, tmp_basename, 0);
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store renameat onto canonical name failed");
     return WYRELOG_E_IO;
   }
+  if (out_replaced != NULL)
+    *out_replaced = TRUE;
+
+  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME) != 0) {
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "policy store canonical replacement completed with a durability warning");
+    return WYRELOG_E_OK;
+  }
 
   /* Fsync the parent directory so the rename is durable across crash.
    * Without this, the kernel may have flushed the new file inode but
    * not the directory entry rewrite, leaving recovery to either lose
    * the canonical name entirely or retain the tmp name. */
-  if (fsync (dirfd) != 0) {
-    WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
-        "policy store fsync of canonical directory failed");
-    return WYRELOG_E_IO;
-  }
+  if (fsync (dirfd) != 0)
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "policy store canonical replacement completed but directory fsync failed");
 
   return WYRELOG_E_OK;
 }
@@ -1686,14 +1736,18 @@ seed_builtin_catalog (sqlite3 *db)
 }
 
 static wyrelog_error_t
-persist_policy_store_encrypted (wyl_policy_store_t *store)
+prepare_policy_store_encrypted (wyl_policy_store_t *store,
+    const guint8 key[WYL_POLICY_STORE_KEY_LEN],
+    const guint8 key_id[WYL_POLICY_STORE_KEY_ID_LEN], guint8 **out_encrypted,
+    gsize *out_encrypted_len)
 {
-  if (store == NULL)
+  if (store == NULL || key == NULL || key_id == NULL || out_encrypted == NULL
+      || out_encrypted_len == NULL)
     return WYRELOG_E_INVALID;
+  *out_encrypted = NULL;
+  *out_encrypted_len = 0;
   if (!store->encrypted)
-    return WYRELOG_E_OK;
-  if (!store->key_materialized)
-    return WYRELOG_E_INTERNAL;
+    return WYRELOG_E_INVALID;
   if (store->work_path == NULL || store->canonical_path == NULL
       || store->canonical_path[0] == '\0')
     return WYRELOG_E_INVALID;
@@ -1721,14 +1775,13 @@ persist_policy_store_encrypted (wyl_policy_store_t *store)
 
   const gsize encrypted_len = sizeof (WylPolicyStoreFileHeader)
       + crypto_aead_xchacha20poly1305_ietf_ABYTES + plaintext_len;
-  g_autofree guint8 *encrypted = g_malloc0 (encrypted_len);
+  guint8 *encrypted = g_malloc0 (encrypted_len);
   WylPolicyStoreFileHeader *header = (WylPolicyStoreFileHeader *) encrypted;
   memcpy (header->magic, WYL_POLICY_STORE_MAGIC, WYL_POLICY_STORE_MAGIC_LEN);
   header->version = WYL_POLICY_STORE_FORMAT_VERSION;
   header->flags = 0;
   header->reserved = 0;
-  memcpy (header->provider_id, store->encryption_key_id,
-      WYL_POLICY_STORE_KEY_ID_LEN);
+  memcpy (header->provider_id, key_id, WYL_POLICY_STORE_KEY_ID_LEN);
   randombytes_buf (header->nonce, sizeof (header->nonce));
   header->ciphertext_len_le = GUINT64_TO_LE ((guint64) (plaintext_len
           + crypto_aead_xchacha20poly1305_ietf_ABYTES));
@@ -1738,11 +1791,31 @@ persist_policy_store_encrypted (wyl_policy_store_t *store)
   if (crypto_aead_xchacha20poly1305_ietf_encrypt (ciphertext, &ciphertext_len,
           plaintext, plaintext_len,
           (const guint8 *) header, sizeof (WylPolicyStoreFileHeader), NULL,
-          header->nonce, store->encryption_key) != 0)
+          header->nonce, key) != 0) {
+    sodium_memzero (encrypted, encrypted_len);
+    g_free (encrypted);
     return WYRELOG_E_CRYPTO;
+  }
   if (ciphertext_len != (unsigned long long) (encrypted_len
-          - sizeof (WylPolicyStoreFileHeader)))
+          - sizeof (WylPolicyStoreFileHeader))) {
+    sodium_memzero (encrypted, encrypted_len);
+    g_free (encrypted);
     return WYRELOG_E_CRYPTO;
+  }
+
+  *out_encrypted = encrypted;
+  *out_encrypted_len = encrypted_len;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+publish_policy_store_encrypted (wyl_policy_store_t *store,
+    const guint8 *encrypted, gsize encrypted_len,
+    const wyl_policy_store_rotation_runtime_t *rotation_runtime,
+    gboolean *out_replaced)
+{
+  if (store == NULL || encrypted == NULL || encrypted_len == 0)
+    return WYRELOG_E_INVALID;
 
 #ifndef G_OS_WIN32
   /* POSIX builds always have canonical_dirfd; the open path enforces
@@ -1750,11 +1823,33 @@ persist_policy_store_encrypted (wyl_policy_store_t *store)
   if (store->canonical_dirfd < 0 || store->canonical_basename == NULL)
     return WYRELOG_E_INTERNAL;
   return write_through_dirfd (store->canonical_dirfd,
-      store->canonical_basename, encrypted, encrypted_len);
+      store->canonical_basename, encrypted, encrypted_len, rotation_runtime,
+      out_replaced);
 #else
   return write_whole_file_atomic_private (store->canonical_path, encrypted,
-      encrypted_len);
+      encrypted_len, rotation_runtime, out_replaced);
 #endif
+}
+
+static wyrelog_error_t
+persist_policy_store_encrypted (wyl_policy_store_t *store)
+{
+  if (store == NULL)
+    return WYRELOG_E_INVALID;
+  if (!store->encrypted)
+    return WYRELOG_E_OK;
+  if (!store->key_materialized)
+    return WYRELOG_E_INTERNAL;
+
+  g_autofree guint8 *encrypted = NULL;
+  gsize encrypted_len = 0;
+  wyrelog_error_t rc = prepare_policy_store_encrypted (store,
+      store->encryption_key, store->encryption_key_id, &encrypted,
+      &encrypted_len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return publish_policy_store_encrypted (store, encrypted, encrypted_len, NULL,
+      NULL);
 }
 
 wyrelog_error_t
@@ -1807,57 +1902,51 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
     return rc;
   }
 
-  guint8 old_key[WYL_POLICY_STORE_KEY_LEN];
-  guint8 old_key_id[WYL_POLICY_STORE_KEY_ID_LEN];
-  memcpy (old_key, store->encryption_key, sizeof old_key);
-  memcpy (old_key_id, store->encryption_key_id, sizeof old_key_id);
+  /* The clear work database is disposable staging for rotation. The encrypted
+   * canonical file is the sole authority until its atomic replacement. */
+  store->suppress_close_persist = TRUE;
 
   rc = wyl_policy_store_create_schema (store);
+  guint8 *new_key_material = NULL;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_validate_snapshot (store);
-  gboolean service_cvk_present = FALSE;
+    rc = prepare_keyprovider_rotation_work (store, &new_provider,
+        old_opts->rotation_runtime, &new_key_material);
+
+  g_autofree guint8 *encrypted = NULL;
+  gsize encrypted_len = 0;
   if (rc == WYRELOG_E_OK)
-    rc = query_has_rows (store->db,
-        "SELECT 1 FROM service_credential_cvk WHERE slot=1;",
-        &service_cvk_present);
-  if (rc == WYRELOG_E_OK && service_cvk_present) {
-    /* The validated old-provider work database is unchanged. The row gate is
-     * an intentional no-op, so close must not rewrite the encrypted canonical
-     * file with a fresh nonce and violate byte-for-byte failure atomicity. */
-    store->suppress_close_persist = TRUE;
-    rc = WYRELOG_E_POLICY;
+    rc = prepare_policy_store_encrypted (store, new_key_material,
+        new_key_material + WYL_POLICY_STORE_KEY_LEN, &encrypted,
+        &encrypted_len);
+
+  gboolean replaced = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = publish_policy_store_encrypted (store, encrypted, encrypted_len,
+        old_opts->rotation_runtime, &replaced);
+  if (rc == WYRELOG_E_OK && !replaced)
+    rc = WYRELOG_E_INTERNAL;
+
+  if (replaced) {
+    /* Rename/MoveFileEx is the linearization point. No later fallible cleanup
+     * may reverse or report failure for the committed rotation. */
+    rc = WYRELOG_E_OK;
   }
-  if (rc == WYRELOG_E_OK)
-    rc = owned_keyprovider_validate (&new_provider);
-  if (rc == WYRELOG_E_OK && !new_provider.owned)
-    rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK
-      && owned_keyprovider_probe (&new_provider) != WYRELOG_E_OK)
-    rc = WYRELOG_E_CRYPTO;
-  if (rc == WYRELOG_E_OK)
-    rc = materialize_store_key (store, &new_provider, TRUE);
+  /* suppress_close_persist makes the new key unnecessary after publish. Keep
+   * it exclusively in locked scratch and destroy it before either provider is
+   * released; the store continues to hold only its old key until close wipes
+   * that ordinary buffer. */
+  cvk_locked_free (store, new_key_material,
+      WYL_POLICY_STORE_KEY_LEN + WYL_POLICY_STORE_KEY_ID_LEN);
 
-  if (rc == WYRELOG_E_OK)
-    rc = persist_policy_store_encrypted (store);
-
-  if (rc != WYRELOG_E_OK) {
-    memcpy (store->encryption_key, old_key, sizeof old_key);
-    memcpy (store->encryption_key_id, old_key_id, sizeof old_key_id);
-    store->key_materialized = TRUE;
-    owned_keyprovider_move (&store->rotation_cleanup_keyprovider,
-        &new_provider);
-  } else {
-    /* The explicit successful persist above is the authoritative rotation
-     * write. Close must not perform a second, unchecked persist. Provider
-     * callbacks are deferred until close has finished with the work DB. */
-    store->suppress_close_persist = TRUE;
+  if (replaced) {
     owned_keyprovider_move (&store->rotation_cleanup_keyprovider,
         &store->keyprovider);
     owned_keyprovider_move (&store->keyprovider, &new_provider);
+  } else {
+    owned_keyprovider_move (&store->rotation_cleanup_keyprovider,
+        &new_provider);
   }
 
-  sodium_memzero (old_key, sizeof old_key);
-  sodium_memzero (old_key_id, sizeof old_key_id);
   wyl_policy_store_close (store);
   return rc;
 }
@@ -4933,6 +5022,182 @@ fail_cvk:
 fail:
   sodium_memzero (binding, sizeof binding);
   cvk_locked_free (store, envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  return rc;
+}
+
+static wyrelog_error_t
+rotation_derive_store_key (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *provider, guint8 **out_key_material)
+{
+  *out_key_material = NULL;
+  guint8 *key_material = cvk_locked_alloc (store,
+      WYL_POLICY_STORE_KEY_LEN + WYL_POLICY_STORE_KEY_ID_LEN);
+  if (key_material == NULL)
+    return WYRELOG_E_NOMEM;
+  wyrelog_error_t rc = provider->vtable.derive (provider->state,
+      WYL_POLICY_STORE_ENCRYPTION_LABEL, key_material,
+      WYL_POLICY_STORE_KEY_LEN);
+  if (rc != WYRELOG_E_OK
+      || crypto_generichash (key_material + WYL_POLICY_STORE_KEY_LEN,
+          WYL_POLICY_STORE_KEY_ID_LEN, key_material,
+          WYL_POLICY_STORE_KEY_LEN, NULL, 0) != 0) {
+    cvk_locked_free (store, key_material,
+        WYL_POLICY_STORE_KEY_LEN + WYL_POLICY_STORE_KEY_ID_LEN);
+    return WYRELOG_E_CRYPTO;
+  }
+  *out_key_material = key_material;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+rotation_update_cvk_row (wyl_policy_store_t *store,
+    const wyl_policy_service_cvk_info_t *info,
+    const guint8 binding[WYL_SERVICE_CVK_BINDING_BYTES],
+    const wyl_sealed_blob_t *sealed)
+{
+  gint64 now_us =
+      store->service_cvk_runtime.now_us (store->service_cvk_runtime.data);
+  if (now_us <= 0)
+    return WYRELOG_E_IO;
+  gint64 updated_at_us = MAX (info->updated_at_us, now_us);
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "UPDATE service_credential_cvk SET generation=?,provider_binding=?,"
+      "sealed_cvk=?,updated_at_us=? WHERE slot=1 AND generation=? AND "
+      "envelope_format_version=? AND provider_binding=? AND sealed_cvk=?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) (info->generation + 1))
+          != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 2, binding,
+              WYL_SERVICE_CVK_BINDING_BYTES, SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 3, sealed->bytes, (int) sealed->len,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 4, updated_at_us) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 5, (sqlite3_int64) info->generation)
+          != SQLITE_OK
+          || sqlite3_bind_int (stmt, 6, info->envelope_format_version)
+          != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 7, info->provider_binding,
+              sizeof info->provider_binding, SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 8, info->sealed_cvk,
+              (int) info->sealed_cvk_len, SQLITE_TRANSIENT) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+static wyrelog_error_t
+prepare_keyprovider_rotation_work (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *new_provider,
+    const wyl_policy_store_rotation_runtime_t *rotation_runtime,
+    guint8 **out_new_key_material)
+{
+  *out_new_key_material = NULL;
+  g_mutex_lock (&store->service_cvk_mutex);
+  wyrelog_error_t rc = service_cvk_begin (store);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  gboolean transaction = TRUE;
+  wyl_policy_service_cvk_info_t info = { 0 };
+  guint8 *old_envelope = NULL;
+  guint8 *new_envelope = NULL;
+  guint8 new_binding[WYL_SERVICE_CVK_BINDING_BYTES] = { 0 };
+  wyl_sealed_blob_t sealed = { 0 };
+  gboolean seal_called = FALSE;
+
+  rc = wyl_policy_store_validate_snapshot (store);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = wyl_policy_store_load_service_cvk (store, &info);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    gboolean credentials = FALSE;
+    rc = query_has_rows (store->db,
+        "SELECT 1 FROM service_credentials LIMIT 1;", &credentials);
+    if (rc == WYRELOG_E_OK && credentials)
+      rc = WYRELOG_E_POLICY;
+    else if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_OK;
+  } else if (rc == WYRELOG_E_OK) {
+    if (info.generation < 1 || info.generation >= G_MAXINT64) {
+      rc = WYRELOG_E_POLICY;
+      goto finish;
+    }
+    rc = service_cvk_unseal_validate (store, &store->keyprovider, &info,
+        &old_envelope);
+  }
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+
+  rc = owned_keyprovider_validate (new_provider);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  if (!new_provider->owned) {
+    rc = WYRELOG_E_POLICY;
+    goto finish;
+  }
+  if (owned_keyprovider_probe (new_provider) != WYRELOG_E_OK) {
+    rc = WYRELOG_E_CRYPTO;
+    goto finish;
+  }
+
+  if (old_envelope != NULL) {
+    rc = service_cvk_provider_binding (store, new_provider, new_binding);
+    if (rc != WYRELOG_E_OK)
+      goto finish;
+    if (sodium_memcmp (new_binding, info.provider_binding,
+            sizeof new_binding) == 0) {
+      rc = WYRELOG_E_POLICY;
+      goto finish;
+    }
+    new_envelope = cvk_locked_alloc (store, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+    if (new_envelope == NULL) {
+      rc = WYRELOG_E_NOMEM;
+      goto finish;
+    }
+    service_cvk_build_envelope (new_envelope, info.generation + 1,
+        new_binding, old_envelope + WYL_SERVICE_CVK_CVK_OFFSET);
+    seal_called = TRUE;
+    rc = service_cvk_seal_envelope (new_provider, new_envelope, &sealed);
+    if (rc != WYRELOG_E_OK)
+      goto finish;
+  }
+
+  rc = rotation_derive_store_key (store, new_provider, out_new_key_material);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  if (old_envelope != NULL && rotation_runtime != NULL
+      && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_BEFORE_CVK_CAS) != 0)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && old_envelope != NULL)
+    rc = rotation_update_cvk_row (store, &info, new_binding, &sealed);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (store->db, "COMMIT;");
+  if (rc == WYRELOG_E_OK)
+    transaction = FALSE;
+
+finish:
+  if (transaction)
+    (void) exec_sql (store->db, "ROLLBACK;");
+  if (rc != WYRELOG_E_OK) {
+    cvk_locked_free (store, *out_new_key_material,
+        WYL_POLICY_STORE_KEY_LEN + WYL_POLICY_STORE_KEY_ID_LEN);
+    *out_new_key_material = NULL;
+  }
+  if (seal_called)
+    new_provider->vtable.clear_sealed_blob (new_provider->state, &sealed);
+  sodium_memzero (new_binding, sizeof new_binding);
+  cvk_locked_free (store, new_envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  cvk_locked_free (store, old_envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  wyl_policy_service_cvk_info_clear (&info);
+out:
+  g_mutex_unlock (&store->service_cvk_mutex);
   return rc;
 }
 
