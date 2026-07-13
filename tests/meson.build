@@ -777,6 +777,16 @@ test_service_credential = executable('test-service-credential',
 
 test('service-credential', test_service_credential)
 
+test_daemon_auth_registry = executable('test-daemon-auth-registry',
+  'test-daemon-auth-registry.c',
+  '../wyrelog/daemon/auth-registry-private.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  c_args : ['-DWYL_AUTH_REGISTRY_TESTING'],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep, libchronoid_dep],
+)
+
+test('daemon-auth-registry', test_daemon_auth_registry)
+
 test_policy_service_namespace = executable('test-policy-service-namespace',
   'test-policy-service-namespace.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
