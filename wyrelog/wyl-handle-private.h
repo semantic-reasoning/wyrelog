@@ -78,6 +78,12 @@ wyrelog_error_t wyl_handle_policy_store_pin_current (WylHandle * self,
     wyl_policy_store_t ** out_store);
 void wyl_handle_policy_store_unpin (WylHandle * self,
     wyl_policy_store_t * expected_store);
+wyrelog_error_t wyl_handle_policy_store_capture_generation (WylHandle * self,
+    wyl_policy_store_t * expected_store, guint64 * out_generation);
+wyrelog_error_t wyl_handle_policy_store_validate_generation (WylHandle * self,
+    wyl_policy_store_t * expected_store, guint64 generation);
+void wyl_handle_policy_store_test_advance_generation (WylHandle * self);
+void wyl_handle_policy_store_test_set_generation_max (WylHandle * self);
 /* Test-only, one-shot checkpoint invoked under the lifecycle lock. */
 void wyl_handle_policy_store_set_pin_checkpoint (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);

@@ -457,6 +457,21 @@ wyl_service_auth_write_lease_get_policy_store (WylServiceAuthWriteLease *lease,
 }
 
 wyrelog_error_t
+wyl_service_auth_write_lease_get_serial (WylServiceAuthWriteLease *lease,
+    WylHandle *handle, guint64 *out_serial)
+{
+  if (out_serial != NULL)
+    *out_serial = 0;
+  if (out_serial == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation (lease,
+      handle);
+  if (rc == WYRELOG_E_OK)
+    *out_serial = lease->serial;
+  return rc;
+}
+
+wyrelog_error_t
     wyl_service_auth_write_lease_mark_unavailable
     (WylServiceAuthWriteLease * lease, WylHandle * handle,
     WylServiceAuthUnavailableReason reason) {
