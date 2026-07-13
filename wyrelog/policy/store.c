@@ -190,6 +190,7 @@ struct _WylServiceAuthorityTransaction
   gboolean durable_operation_started;
   gboolean fail_evidence_allocation_once;
   guint evidence_allocation_count;
+  gboolean fail_last_used_sql_once;
 };
 
 typedef struct
@@ -881,6 +882,21 @@ column_nullable_text_equal (sqlite3_stmt *stmt, int col, const gchar *expected)
     return expected == NULL;
   return g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, col),
       expected) == 0;
+}
+
+static gboolean
+column_text_exact (sqlite3_stmt *stmt, int col, const gchar *expected)
+{
+  if (expected == NULL || sqlite3_column_type (stmt, col) != SQLITE_TEXT)
+    return FALSE;
+  const guint8 *stored = sqlite3_column_text (stmt, col);
+  int stored_len = sqlite3_column_bytes (stmt, col);
+  gsize expected_len = strlen (expected);
+  return stored != NULL && stored_len >= 0
+      && (gsize) stored_len == expected_len
+      && memchr (stored, '\0', (gsize) stored_len) == NULL
+      && g_utf8_validate ((const gchar *) stored, stored_len, NULL)
+      && memcmp (stored, expected, expected_len) == 0;
 }
 
 static gboolean
@@ -5573,6 +5589,93 @@ guint64
       && txn->owns_store_locks ? txn->serial : 0;
 }
 
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_record_credential_last_used
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * credential_id, guint64 generation,
+    const gchar * subject_id, const gchar * tenant_id, gint64 used_at_us)
+{
+  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+      store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (credential_id == NULL
+      || !wyl_service_credential_id_is_canonical (credential_id,
+          strlen (credential_id)) || generation == 0
+      || generation > G_MAXINT64 || subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id,
+          strlen (subject_id)) || !wyl_policy_store_tenant_id_is_valid
+      (tenant_id) || used_at_us <= 0)
+    return WYRELOG_E_INVALID;
+
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT generation,subject_id,tenant_id,state,created_at_us,last_used_at_us"
+      " FROM service_credentials WHERE credential_id=?;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = bind_text (stmt, 1, credential_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_DONE)
+    rc = WYRELOG_E_NOT_FOUND;
+  else if (rc == WYRELOG_E_OK && step_rc != SQLITE_ROW)
+    rc = WYRELOG_E_IO;
+
+  gint64 stored_generation = 0;
+  gint64 created_at_us = 0;
+  gint64 last_used_at_us = 0;
+  gboolean last_used_is_null = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    if (sqlite3_column_type (stmt, 0) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 3) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER
+        || (sqlite3_column_type (stmt, 5) != SQLITE_NULL
+            && sqlite3_column_type (stmt, 5) != SQLITE_INTEGER))
+      rc = WYRELOG_E_POLICY;
+    else {
+      stored_generation = sqlite3_column_int64 (stmt, 0);
+      created_at_us = sqlite3_column_int64 (stmt, 4);
+      last_used_is_null = sqlite3_column_type (stmt, 5) == SQLITE_NULL;
+      last_used_at_us = last_used_is_null ? 0 : sqlite3_column_int64 (stmt, 5);
+      if (stored_generation <= 0 || created_at_us <= 0
+          || (!last_used_is_null && last_used_at_us < created_at_us)
+          || (guint64) stored_generation != generation
+          || !column_text_exact (stmt, 1, subject_id)
+          || !column_text_exact (stmt, 2, tenant_id)
+          || !column_text_exact (stmt, 3, "active"))
+        rc = WYRELOG_E_POLICY;
+      else if (used_at_us < created_at_us)
+        rc = WYRELOG_E_INVALID;
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || (!last_used_is_null
+          && used_at_us <= last_used_at_us))
+    return rc;
+  if (txn->fail_last_used_sql_once) {
+    txn->fail_last_used_sql_once = FALSE;
+    return WYRELOG_E_IO;
+  }
+
+  stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "UPDATE service_credentials SET last_used_at_us=?"
+      " WHERE credential_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_int64 (stmt, 1, used_at_us) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, credential_id);
+  if (rc == WYRELOG_E_OK)
+    rc = sqlite3_step (stmt) == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
 gboolean
     wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected
     (WylServiceAuthorityCommitEvidence * evidence) {
@@ -5583,6 +5686,13 @@ gboolean
       wyl_policy_store_service_authority_commit_evidence_ref (evidence) == NULL;
   g_atomic_int_set (&evidence->refs, 1);
   return rejected;
+}
+
+void wyl_policy_store_service_authority_transaction_fail_last_used_sql_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_last_used_sql_once = TRUE;
 }
 
 void wyl_policy_store_service_lifecycle_fail_commit_once

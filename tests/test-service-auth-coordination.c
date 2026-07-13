@@ -8,6 +8,9 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
+#define LAST_USED_CREDENTIAL_ID "wlc_000000000000000000000000000"
+#define LAST_USED_ABSENT_ID "wlc_000000000000000000000000001"
+
 typedef struct
 {
   GMutex mutex;
@@ -1451,6 +1454,282 @@ test_authority_commit_evidence_does_not_block_shutdown (void)
   wyl_policy_store_service_authority_commit_evidence_unref (evidence);
 }
 
+typedef struct
+{
+  WylServiceAuthorityTransaction *txn;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} LastUsedThread;
+
+static gpointer
+last_used_wrong_thread (gpointer data)
+{
+  LastUsedThread *attempt = data;
+  attempt->rc =
+      wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (attempt->txn, attempt->store, LAST_USED_CREDENTIAL_ID, 7,
+      "svc:last:used", "tenant-last", 150);
+  return NULL;
+}
+
+static void
+setup_last_used_credential (sqlite3 *db)
+{
+  sqlite_exec_ok (db,
+      "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at)"
+      " VALUES('tenant-last',0,1,1);"
+      "INSERT INTO service_principals(subject_id,display_name,state,generation,"
+      "created_by,created_at_us,updated_at_us) VALUES"
+      "('svc:last:used','last used','active',1,'admin',1,1);"
+      "INSERT INTO service_credentials(credential_id,credential_format_version,"
+      "subject_id,tenant_id,generation,state,verifier_version,salt,verifier,"
+      "created_by,created_at_us,updated_at_us) VALUES('"
+      LAST_USED_CREDENTIAL_ID
+      "',1,'svc:last:used','tenant-last',7,'active',1,zeroblob(16),"
+      "zeroblob(32),'admin',100,100);");
+}
+
+static gint64
+read_last_used (sqlite3 *db)
+{
+  return sqlite_scalar (db,
+      "SELECT coalesce(last_used_at_us,-1) FROM service_credentials"
+      " WHERE credential_id='" LAST_USED_CREDENTIAL_ID "';");
+}
+
+static void
+test_authority_transaction_credential_last_used (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (WylHandle) other = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  setup_last_used_credential (db);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  LastUsedThread attempt = { txn, store, WYRELOG_E_OK };
+  g_autoptr (GThread) thread = g_thread_new ("last-used-owner",
+      last_used_wrong_thread, &attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, wyl_handle_get_policy_store (other), LAST_USED_CREDENTIAL_ID, 7,
+          "svc:last:used", "tenant-last", 150), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_ABSENT_ID, 7, "svc:last:used", "tenant-last",
+          150), ==, WYRELOG_E_NOT_FOUND);
+  WylServiceAuthorityCommitEvidence *late_evidence = NULL;
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &late_evidence), ==, WYRELOG_E_BUSY);
+  g_assert_null (late_evidence);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 8, "svc:last:used", "tenant-last",
+          150), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:other", "tenant-last",
+          150), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-other",
+          150), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          99), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, G_MAXUINT64, "svc:last:used",
+          "tenant-last", 150), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          0), ==, WYRELOG_E_INVALID);
+  sqlite_exec_ok (db,
+      "UPDATE service_credentials SET state='revoked',revoked_by='admin',"
+      "revoked_at_us=100,updated_at_us=100 WHERE credential_id='"
+      LAST_USED_CREDENTIAL_ID "';");
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          150), ==, WYRELOG_E_POLICY);
+  sqlite_exec_ok (db,
+      "UPDATE service_credentials SET state='active',revoked_by=NULL,"
+      "revoked_at_us=NULL WHERE credential_id='" LAST_USED_CREDENTIAL_ID "';");
+  g_assert_cmpint (read_last_used (db), ==, -1);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          150), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (read_last_used (db), ==, -1);
+
+  txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          200), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_t created = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_service_principal_core (txn, store,
+          "svc:last:peer", "peer", "admin", "last-used-peer", &created), ==,
+      WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&created);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          225), ==, WYRELOG_E_INVALID);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (read_last_used (db), ==, 200);
+
+  txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          200), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          150), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_fail_last_used_sql_once (txn);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          250), ==, WYRELOG_E_IO);
+  g_assert_cmpint (read_last_used (db), ==, 200);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+
+  wyl_policy_store_service_authority_transaction_fail_once (store,
+      WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+  txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          300), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_IO);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (read_last_used (db), ==, 300);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_authority_transaction_credential_last_used_unavailable (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  setup_last_used_credential (db);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (lease,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_record_credential_last_used
+      (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
+          150), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (read_last_used (db), ==, -1);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_authority_transaction_credential_last_used_corrupt_text (void)
+{
+  static const gchar *subject_values[] = {
+    "CAST(x'7376633a6c6173743a757365640078' AS TEXT)",
+    "'svc:last:used'",
+    "'svc:last:used'",
+    "'svc:last:used'",
+  };
+  static const gchar *tenant_values[] = {
+    "'tenant-last'",
+    "CAST(x'74656e616e742d6c6173740078' AS TEXT)",
+    "'tenant-last'",
+    "'tenant-last'",
+  };
+  static const gchar *state_values[] = {
+    "'active'",
+    "'active'",
+    "CAST(x'6163746976650078' AS TEXT)",
+    "CAST(x'61ff' AS TEXT)",
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (subject_values); i++) {
+    g_autoptr (WylHandle) handle = new_store_handle ();
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    sqlite_exec_ok (db,
+        "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at)"
+        " VALUES('tenant-last',0,1,1);"
+        "INSERT INTO service_principals(subject_id,display_name,state,"
+        "generation,created_by,created_at_us,updated_at_us) VALUES"
+        "('svc:last:used','last used','active',1,'admin',1,1);"
+        "PRAGMA foreign_keys=OFF;PRAGMA ignore_check_constraints=ON;");
+    g_autofree gchar *insert =
+        g_strdup_printf ("INSERT INTO service_credentials(credential_id,"
+        "credential_format_version,subject_id,tenant_id,generation,state,"
+        "verifier_version,salt,verifier,created_by,created_at_us,updated_at_us)"
+        " VALUES('%s',1,%s,%s,7,%s,1,zeroblob(16),zeroblob(32),'admin',100,100);"
+        "PRAGMA ignore_check_constraints=OFF;PRAGMA foreign_keys=ON;",
+        LAST_USED_CREDENTIAL_ID, subject_values[i], tenant_values[i],
+        state_values[i]);
+    sqlite_exec_ok (db, insert);
+
+    WylServiceAuthWriteLease *lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+            &lease), ==, WYRELOG_E_OK);
+    WylServiceAuthorityTransaction *txn = NULL;
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+        (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_record_credential_last_used
+        (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used",
+            "tenant-last", 150), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (read_last_used (db), ==, -1);
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+        (txn), ==, WYRELOG_E_OK);
+    wyl_policy_store_service_authority_transaction_free (txn);
+    g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+        WYRELOG_E_OK);
+    wyl_service_auth_write_lease_free (lease);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1499,5 +1778,12 @@ main (int argc, char **argv)
       test_authority_commit_evidence_invalid_paths);
   g_test_add_func ("/service-auth/evidence/shutdown",
       test_authority_commit_evidence_does_not_block_shutdown);
+  g_test_add_func ("/service-auth/transaction/credential-last-used",
+      test_authority_transaction_credential_last_used);
+  g_test_add_func ("/service-auth/transaction/credential-last-used-unavailable",
+      test_authority_transaction_credential_last_used_unavailable);
+  g_test_add_func
+      ("/service-auth/transaction/credential-last-used-corrupt-text",
+      test_authority_transaction_credential_last_used_corrupt_text);
   return g_test_run ();
 }
