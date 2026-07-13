@@ -457,6 +457,22 @@ wyrelog_error_t wyl_policy_store_issue_service_credential_with_runtime
     const wyl_service_credential_runtime_t * runtime,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
+/* Verification runtimes and their callback data are borrowed only for this
+ * call. before_gate is a deterministic test checkpoint immediately before
+ * gate acquisition. The clock and credential callbacks run under the
+ * service-domain gate. All callbacks MUST be non-reentrant: calling the same
+ * store or service-domain APIs from a callback can deadlock. */
+wyrelog_error_t wyl_policy_store_verify_service_credential_by_id
+    (wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * presented_secret, gsize presented_secret_len,
+    void (*before_gate) (gpointer data),
+    gint64 (*now_us) (gpointer data), gpointer now_data,
+    const wyl_service_credential_runtime_t * runtime,
+    gboolean * out_authenticated);
+wyrelog_error_t wyl_policy_store_revoke_service_credential
+    (wyl_policy_store_t * store, const gchar * credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
     (wyl_policy_store_t * store,
     const wyl_policy_service_credential_info_t * credential,

@@ -539,6 +539,583 @@ test_id_collision_retry_and_wipe (void)
           "WHERE request_id='collision-exhausted';"), ==, 0);
 }
 
+static gint64
+fixed_now (gpointer data)
+{
+  return *(gint64 *) data;
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond cond;
+  gboolean entered;
+  gboolean release;
+} GateHolder;
+
+static gpointer
+gate_alloc (gpointer data, gsize size)
+{
+  (void) data;
+  return g_malloc (size);
+}
+
+static int
+gate_lock (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  (void) ptr;
+  (void) size;
+  return 0;
+}
+
+static void
+gate_wipe (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  memset (ptr, 0, size);
+}
+
+static int
+gate_unlock (gpointer data, gpointer ptr, gsize size)
+{
+  (void) data;
+  (void) ptr;
+  (void) size;
+  return 0;
+}
+
+static void
+gate_free (gpointer data, gpointer ptr)
+{
+  (void) data;
+  g_free (ptr);
+}
+
+static wyrelog_error_t
+gate_new_id (gpointer data, gchar out[WYL_SERVICE_CREDENTIAL_ID_BUF])
+{
+  (void) data;
+  return wyl_service_credential_id_new (out, WYL_SERVICE_CREDENTIAL_ID_BUF);
+}
+
+static int
+gate_random (gpointer data, guint8 *out, gsize len)
+{
+  GateHolder *holder = data;
+  g_mutex_lock (&holder->mutex);
+  holder->entered = TRUE;
+  g_cond_broadcast (&holder->cond);
+  while (!holder->release)
+    g_cond_wait (&holder->cond, &holder->mutex);
+  g_mutex_unlock (&holder->mutex);
+  memset (out, 0x6b, len);
+  return 0;
+}
+
+typedef struct
+{
+  wyl_policy_store_t *store;
+  const wyl_service_credential_runtime_t *runtime;
+  wyrelog_error_t rc;
+  wyl_policy_service_credential_info_t info;
+  wyl_service_credential_secret_t *secret;
+} GateIssueThread;
+
+static gpointer
+gate_issue_thread (gpointer data)
+{
+  GateIssueThread *thread = data;
+  thread->rc = wyl_policy_store_issue_service_credential_with_runtime
+      (thread->store, "svc:verify-gate:worker", "tenant-a", "admin",
+      "verify-gate-holder", 0, thread->runtime, &thread->info, &thread->secret);
+  return NULL;
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond cond;
+  gboolean before_gate;
+  gint64 now;
+} VerifyGateClock;
+
+static void
+verify_before_gate (gpointer data)
+{
+  VerifyGateClock *clock = data;
+  g_mutex_lock (&clock->mutex);
+  clock->before_gate = TRUE;
+  g_cond_broadcast (&clock->cond);
+  g_mutex_unlock (&clock->mutex);
+}
+
+static gint64
+verify_gate_now (gpointer data)
+{
+  VerifyGateClock *clock = data;
+  g_mutex_lock (&clock->mutex);
+  gint64 now = clock->now;
+  g_mutex_unlock (&clock->mutex);
+  return now;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *credential_id;
+  const gchar *secret;
+  gsize secret_len;
+  wyl_service_credential_verify_runtime_t runtime;
+  wyrelog_error_t rc;
+  gboolean authenticated;
+} GateVerifyThread;
+
+static gpointer
+gate_verify_thread (gpointer data)
+{
+  GateVerifyThread *thread = data;
+  thread->rc = wyl_service_credential_verify_authoritative_with_runtime
+      (thread->handle, thread->credential_id, thread->secret,
+      thread->secret_len, &thread->runtime, &thread->authenticated);
+  return NULL;
+}
+
+static void
+test_verify_expiry_clock_inside_gate (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:verify-gate:worker");
+  gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
+  wyl_service_credential_issue_result_t target = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:verify-gate:worker", "tenant-a", "admin", "verify-gate-target",
+          expiry, &target), ==, WYRELOG_E_OK);
+  g_autofree gchar *target_id = g_strdup (target.credential.credential_id);
+  gsize target_secret_len = 0;
+  const gchar *target_secret_borrowed =
+      wyl_service_credential_secret_peek_encoded (target.secret,
+      &target_secret_len);
+  g_autofree gchar *target_secret = g_strndup (target_secret_borrowed,
+      target_secret_len);
+
+  GateHolder holder;
+  g_mutex_init (&holder.mutex);
+  g_cond_init (&holder.cond);
+  holder.entered = FALSE;
+  holder.release = FALSE;
+  wyl_service_credential_runtime_t issue_runtime = {
+    gate_alloc, gate_lock, gate_wipe, gate_unlock, gate_free, gate_new_id,
+    gate_random, &holder,
+  };
+  GateIssueThread issue = { store_of (handle), &issue_runtime, -1, {0}, NULL };
+  GThread *issuer = g_thread_new ("verify-gate-holder", gate_issue_thread,
+      &issue);
+  g_mutex_lock (&holder.mutex);
+  while (!holder.entered)
+    g_cond_wait (&holder.cond, &holder.mutex);
+  g_mutex_unlock (&holder.mutex);
+
+  VerifyGateClock clock;
+  g_mutex_init (&clock.mutex);
+  g_cond_init (&clock.cond);
+  clock.before_gate = FALSE;
+  clock.now = expiry - 1;
+  GateVerifyThread verify = {
+    .handle = handle,
+    .credential_id = target_id,
+    .secret = target_secret,
+    .secret_len = target_secret_len,
+    .runtime = {
+          .before_gate = verify_before_gate,
+          .now_us = verify_gate_now,
+          .data = &clock,
+        },
+    .rc = -1,
+  };
+  GThread *verifier = g_thread_new ("verify-gate-waiter", gate_verify_thread,
+      &verify);
+  g_mutex_lock (&clock.mutex);
+  while (!clock.before_gate)
+    g_cond_wait (&clock.cond, &clock.mutex);
+  clock.now = expiry;
+  g_mutex_unlock (&clock.mutex);
+
+  g_mutex_lock (&holder.mutex);
+  holder.release = TRUE;
+  g_cond_broadcast (&holder.cond);
+  g_mutex_unlock (&holder.mutex);
+  g_thread_join (issuer);
+  g_thread_join (verifier);
+  g_assert_cmpint (issue.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (verify.rc, ==, WYRELOG_E_AUTH);
+  g_assert_false (verify.authenticated);
+
+  wyl_policy_service_credential_info_clear (&issue.info);
+  wyl_service_credential_secret_clear (&issue.secret);
+  wyl_service_credential_issue_result_clear (&target);
+  g_cond_clear (&clock.cond);
+  g_mutex_clear (&clock.mutex);
+  g_cond_clear (&holder.cond);
+  g_mutex_clear (&holder.mutex);
+}
+
+static void
+test_verify_fail_closed_read_only (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:verify:worker");
+  gint64 expiry = g_get_real_time () + 10 * G_USEC_PER_SEC;
+  wyl_service_credential_issue_result_t first = { 0 };
+  wyl_service_credential_issue_result_t second = { 0 };
+  wyl_service_credential_issue_result_t expiring = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:verify:worker",
+          "tenant-a", "admin", "verify-first", 0, &first), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:verify:worker",
+          "tenant-b", "admin", "verify-second", 0, &second), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:verify:worker",
+          "tenant-a", "admin", "verify-expiring", expiry, &expiring), ==,
+      WYRELOG_E_OK);
+  gsize first_len = 0;
+  gsize second_len = 0;
+  const gchar *first_secret = wyl_service_credential_secret_peek_encoded
+      (first.secret, &first_len);
+  const gchar *second_secret = wyl_service_credential_secret_peek_encoded
+      (second.secret, &second_len);
+  gboolean authenticated = TRUE;
+  gint64 events_before = scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_events;");
+  gint64 audits_before = scalar (db_of (handle),
+      "SELECT count(*) FROM audit_events;");
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, first_secret, first_len,
+          &authenticated), ==, WYRELOG_E_OK);
+  g_assert_true (authenticated);
+
+  static const gchar wrong[] = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  G_STATIC_ASSERT (sizeof wrong - 1 == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, wrong, sizeof wrong - 1,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          SECOND_ID, wrong, sizeof wrong - 1, &authenticated), ==,
+      WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, second_secret, second_len,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_autofree gchar *invalid_alphabet = g_strndup (first_secret, first_len);
+  invalid_alphabet[0] = '+';
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, invalid_alphabet, first_len,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          SECOND_ID, invalid_alphabet, first_len, &authenticated), ==,
+      WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_autofree gchar *noncanonical = g_strndup (first_secret, first_len);
+  noncanonical[first_len - 1] = 'B';
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, noncanonical, first_len,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          SECOND_ID, noncanonical, first_len, &authenticated), ==,
+      WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+
+  wyl_service_credential_verify_runtime_t clock = {
+    .now_us = fixed_now,.data = &expiry,
+  };
+  gsize expiry_len = 0;
+  const gchar *expiry_secret = wyl_service_credential_secret_peek_encoded
+      (expiring.secret, &expiry_len);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative_with_runtime
+      (handle, expiring.credential.credential_id, expiry_secret, expiry_len,
+          &clock, &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials "
+          "WHERE last_used_at_us IS NOT NULL;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events;"), ==,
+      events_before);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events;"), ==, audits_before);
+
+  exec_ok (db_of (handle),
+      "INSERT INTO principal_states(subject_id,state,updated_at) "
+      "VALUES('svc:verify:worker','idle',1);");
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          second.credential.credential_id, second_secret, second_len,
+          &authenticated), ==, WYRELOG_E_POLICY);
+  g_assert_false (authenticated);
+  exec_ok (db_of (handle),
+      "DELETE FROM principal_states WHERE subject_id='svc:verify:worker';");
+
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, first_secret, first_len - 1,
+          &authenticated), ==, WYRELOG_E_INVALID);
+  g_assert_false (authenticated);
+  wyl_service_credential_t revoked = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke (handle,
+          first.credential.credential_id, "admin", "verify-revoke",
+          &revoked), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          first.credential.credential_id, first_secret, first_len,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  wyl_service_credential_clear (&revoked);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store_of (handle),
+          "tenant-b", TRUE), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          second.credential.credential_id, second_secret, second_len,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store_of (handle),
+          "tenant-b", FALSE), ==, WYRELOG_E_OK);
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_disable (handle,
+          "svc:verify:worker", "admin", "verify-disable", &principal), ==,
+      WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+  g_assert_cmpint (wyl_service_credential_verify_authoritative (handle,
+          second.credential.credential_id, second_secret, second_len,
+          &authenticated), ==, WYRELOG_E_AUTH);
+  g_assert_false (authenticated);
+  wyl_service_credential_issue_result_clear (&first);
+  wyl_service_credential_issue_result_clear (&second);
+  wyl_service_credential_issue_result_clear (&expiring);
+}
+
+static void
+test_revoke_lifecycle_and_remediation (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:revoke:worker");
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:revoke:worker",
+          "tenant-a", "admin", "revoke-issue", 0, &issued), ==, WYRELOG_E_OK);
+  g_autofree gchar *id = g_strdup (issued.credential.credential_id);
+  wyl_service_credential_issue_result_clear (&issued);
+  wyl_service_credential_t credential = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
+          "revoke-issue", &credential), ==, WYRELOG_E_POLICY);
+  g_assert_null (credential.credential_id);
+  g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
+          "revoke-active", &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (credential.state, ==, "revoked");
+  g_assert_cmpuint (credential.generation, ==, 2);
+  g_assert_cmpstr (credential.revoked_by, ==, "admin");
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked' AND generation=2 "
+          "AND related_credential_id IS NULL;"), ==, 1);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events a JOIN audit_intentions i "
+          "ON a.id=i.audit_id WHERE a.action='service.credential.revoke' "
+          "AND i.state='pending';"), ==, 1);
+
+  g_clear_object (&fixture.handle);
+  WylHandleOpenOptions reopen_options = {
+    .policy_store_path = fixture.db_path,
+    .policy_keyprovider_path = fixture.key_spec,
+    .audit_store_path = fixture.audit_path,
+    .production_mode = TRUE,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&reopen_options,
+          &fixture.handle), ==, WYRELOG_E_OK);
+  handle = fixture.handle;
+  g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
+          "revoke-active", &credential), ==, WYRELOG_E_POLICY);
+  g_assert_null (credential.credential_id);
+
+  g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
+          "revoke-noop", &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (credential.generation, ==, 2);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked';"), ==, 1);
+  g_assert_cmpint (wyl_service_credential_revoke (handle, id, "admin",
+          "revoke-noop", &credential), ==, WYRELOG_E_POLICY);
+  g_assert_null (credential.credential_id);
+  g_assert_cmpint (wyl_service_credential_revoke (handle, SECOND_ID, "admin",
+          "revoke-unknown", &credential), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (credential.credential_id);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='revoke-unknown';"), ==, 0);
+
+  wyl_service_credential_issue_result_t remediation = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:revoke:worker",
+          "tenant-b", "admin", "remediation-issue", 0, &remediation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_set_tenant_sealed (store_of (handle),
+          "tenant-b", TRUE), ==, WYRELOG_E_OK);
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_disable (handle,
+          "svc:revoke:worker", "admin", "remediation-disable", &principal),
+      ==, WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+  g_assert_cmpint (wyl_service_credential_revoke (handle,
+          remediation.credential.credential_id, "admin", "remediation-revoke",
+          &credential), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (credential.state, ==, "revoked");
+  wyl_service_credential_clear (&credential);
+  wyl_service_credential_issue_result_clear (&remediation);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *credential_id;
+  wyrelog_error_t rc;
+  wyl_service_credential_t out;
+} RevokeThread;
+
+static gpointer
+revoke_thread (gpointer data)
+{
+  RevokeThread *thread = data;
+  thread->rc = wyl_service_credential_revoke (thread->handle,
+      thread->credential_id, "admin", "concurrent-revoke", &thread->out);
+  return NULL;
+}
+
+static void
+test_revoke_concurrency_overflow_faults (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:revoke-concurrent:worker");
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:revoke-concurrent:worker", "tenant-a", "admin",
+          "concurrent-revoke-issue", 0, &issued), ==, WYRELOG_E_OK);
+  RevokeThread a = { handle, issued.credential.credential_id, -1, {0} };
+  RevokeThread b = { handle, issued.credential.credential_id, -1, {0} };
+  GThread *ta = g_thread_new ("revoke-a", revoke_thread, &a);
+  GThread *tb = g_thread_new ("revoke-b", revoke_thread, &b);
+  g_thread_join (ta);
+  g_thread_join (tb);
+  g_assert_true ((a.rc == WYRELOG_E_OK && b.rc == WYRELOG_E_POLICY)
+      || (a.rc == WYRELOG_E_POLICY && b.rc == WYRELOG_E_OK));
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE event='revoked';"), ==, 1);
+  wyl_service_credential_clear (&a.out);
+  wyl_service_credential_clear (&b.out);
+  wyl_service_credential_issue_result_clear (&issued);
+
+  wyl_service_credential_issue_result_t overflow = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:revoke-concurrent:worker", "tenant-a", "admin",
+          "overflow-issue", 0, &overflow), ==, WYRELOG_E_OK);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db_of (handle),
+          "UPDATE service_credentials SET generation=9223372036854775807 "
+          "WHERE credential_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1,
+          overflow.credential.credential_id, -1, SQLITE_TRANSIENT), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  wyl_service_credential_t out = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke (handle,
+          overflow.credential.credential_id, "admin", "overflow-revoke",
+          &out), ==, WYRELOG_E_POLICY);
+  g_assert_null (out.credential_id);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='overflow-revoke';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&overflow);
+
+  static const gchar *const targets[] = {
+    "service_credential_events", "audit_events", "audit_intentions",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (targets); i++) {
+    g_auto (Fixture) fault_fixture = { 0 };
+    fixture_init (&fault_fixture);
+    WylHandle *fault = fault_fixture.handle;
+    prepare_authority (fault, "svc:revoke-fault:worker");
+    wyl_service_credential_issue_result_t target = { 0 };
+    g_assert_cmpint (wyl_service_credential_issue (fault,
+            "svc:revoke-fault:worker", "tenant-a", "admin", "fault-issue", 0,
+            &target), ==, WYRELOG_E_OK);
+    g_autofree gchar *sql = g_strdup_printf
+        ("CREATE TRIGGER revoke_fault BEFORE INSERT ON %s "
+        "BEGIN SELECT RAISE(ABORT,'fault'); END;", targets[i]);
+    exec_ok (db_of (fault), sql);
+    g_assert_cmpint (wyl_service_credential_revoke (fault,
+            target.credential.credential_id, "admin", "fault-revoke", &out),
+        !=, WYRELOG_E_OK);
+    g_assert_null (out.credential_id);
+    exec_ok (db_of (fault), "DROP TRIGGER revoke_fault;");
+    g_assert_cmpint (scalar (db_of (fault),
+            "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
+        ==, 0);
+    g_assert_cmpint (scalar (db_of (fault),
+            "SELECT count(*) FROM service_domain_requests "
+            "WHERE request_id='fault-revoke';"), ==, 0);
+    wyl_service_credential_issue_result_clear (&target);
+  }
+
+  g_auto (Fixture) commit_fixture = { 0 };
+  fixture_init (&commit_fixture);
+  WylHandle *commit = commit_fixture.handle;
+  prepare_authority (commit, "svc:revoke-commit:worker");
+  wyl_service_credential_issue_result_t commit_target = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (commit,
+          "svc:revoke-commit:worker", "tenant-a", "admin", "commit-issue",
+          0, &commit_target), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_lifecycle_fail_commit_once (store_of (commit));
+  g_assert_cmpint (wyl_service_credential_revoke (commit,
+          commit_target.credential.credential_id, "admin", "commit-revoke",
+          &out), ==, WYRELOG_E_IO);
+  g_assert_null (out.credential_id);
+  g_assert_cmpint (scalar (db_of (commit),
+          "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
+      ==, 0);
+  g_assert_cmpint (scalar (db_of (commit),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='commit-revoke';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&commit_target);
+
+  g_auto (Fixture) validator_fixture = { 0 };
+  fixture_init (&validator_fixture);
+  WylHandle *validator = validator_fixture.handle;
+  prepare_authority (validator, "svc:revoke-validator:worker");
+  wyl_service_credential_issue_result_t validator_target = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (validator,
+          "svc:revoke-validator:worker", "tenant-a", "admin",
+          "validator-issue", 0, &validator_target), ==, WYRELOG_E_OK);
+  exec_ok (db_of (validator),
+      "CREATE TRIGGER unknown_revoke_trigger AFTER INSERT ON "
+      "service_domain_requests BEGIN SELECT 1; END;");
+  g_assert_cmpint (wyl_service_credential_revoke (validator,
+          validator_target.credential.credential_id, "admin",
+          "validator-revoke", &out), ==, WYRELOG_E_POLICY);
+  g_assert_null (out.credential_id);
+  exec_ok (db_of (validator), "DROP TRIGGER unknown_revoke_trigger;");
+  g_assert_cmpint (scalar (db_of (validator),
+          "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
+      ==, 0);
+  g_assert_cmpint (scalar (db_of (validator),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='validator-revoke';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&validator_target);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -553,5 +1130,14 @@ main (int argc, char **argv)
       test_fault_rollback);
   g_test_add_func ("/auth/service-credential/id-collision-wipe",
       test_id_collision_retry_and_wipe);
+  g_test_add_func ("/auth/service-credential/verify-expiry-clock-inside-gate",
+      test_verify_expiry_clock_inside_gate);
+  g_test_add_func ("/auth/service-credential/verify-fail-closed-read-only",
+      test_verify_fail_closed_read_only);
+  g_test_add_func ("/auth/service-credential/revoke-lifecycle-remediation",
+      test_revoke_lifecycle_and_remediation);
+  g_test_add_func
+      ("/auth/service-credential/revoke-concurrency-overflow-faults",
+      test_revoke_concurrency_overflow_faults);
   return g_test_run ();
 }

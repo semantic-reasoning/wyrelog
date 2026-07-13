@@ -42,6 +42,14 @@ typedef struct
   wyl_service_credential_secret_t *secret;
 } wyl_service_credential_issue_result_t;
 
+typedef struct
+{
+  void (*before_gate) (gpointer data);
+    gint64 (*now_us) (gpointer data);
+  const wyl_service_credential_runtime_t *credential_runtime;
+  gpointer data;
+} wyl_service_credential_verify_runtime_t;
+
 typedef wyrelog_error_t (*wyl_service_principal_cb) (const
     wyl_service_principal_t * principal, gpointer user_data);
 typedef wyrelog_error_t (*wyl_service_credential_cb) (const
@@ -90,5 +98,27 @@ wyrelog_error_t wyl_service_credential_get (WylHandle * handle,
 wyrelog_error_t wyl_service_credential_foreach (WylHandle * handle,
     const gchar * subject_id, const gchar * tenant_id,
     wyl_service_credential_cb cb, gpointer user_data);
+/* Named authoritative to avoid colliding with the lower-level codec symbol.
+ * This API derives subject and tenant solely from the canonical credential ID.
+ * It is read-only: no last-used, audit, session or token state is mutated.
+ *
+ * The optional runtime, its credential callback table and data are borrowed
+ * only until the call returns. before_gate is a deterministic private test
+ * checkpoint immediately before gate acquisition. Clock and credential
+ * callbacks execute while the service-domain gate is held. All callbacks MUST
+ * be non-reentrant and MUST NOT call APIs on the same handle, policy store or
+ * service domain. */
+wyrelog_error_t wyl_service_credential_verify_authoritative
+    (WylHandle * handle, const gchar * credential_id,
+    const gchar * presented_secret, gsize presented_secret_len,
+    gboolean * out_authenticated);
+wyrelog_error_t wyl_service_credential_verify_authoritative_with_runtime
+    (WylHandle * handle, const gchar * credential_id,
+    const gchar * presented_secret, gsize presented_secret_len,
+    const wyl_service_credential_verify_runtime_t * runtime,
+    gboolean * out_authenticated);
+wyrelog_error_t wyl_service_credential_revoke (WylHandle * handle,
+    const gchar * credential_id, const gchar * actor_subject_id,
+    const gchar * request_id, wyl_service_credential_t * out);
 
 G_END_DECLS
