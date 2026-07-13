@@ -79,6 +79,7 @@
   "wyrelog.service-credential.cvk.provider-binding.v1"
 #define WYL_SERVICE_CVK_BINDING_DOMAIN \
   "wyrelog.service-credential.cvk.provider-binding"
+#define WYL_SERVICE_CREDENTIAL_ID_ATTEMPTS 4u
 
 G_STATIC_ASSERT (sizeof (WYL_SERVICE_CVK_MAGIC) - 1
     == WYL_SERVICE_CVK_MAGIC_BYTES);
@@ -131,6 +132,7 @@ struct wyl_policy_store_t
   gboolean key_materialized;
   gboolean suppress_close_persist;
   GMutex service_cvk_mutex;
+  GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
   gboolean service_lifecycle_fail_commit_once;
   wyl_policy_store_cvk_runtime_t service_cvk_runtime;
@@ -2005,6 +2007,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 
   wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
   g_mutex_init (&self->service_cvk_mutex);
+  g_mutex_init (&self->service_domain_gate_mutex);
   g_mutex_init (&self->service_lifecycle_mutex);
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
@@ -2213,6 +2216,7 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
   g_mutex_clear (&store->service_cvk_mutex);
+  g_mutex_clear (&store->service_domain_gate_mutex);
   g_mutex_clear (&store->service_lifecycle_mutex);
   g_free (store);
 }
@@ -4863,6 +4867,7 @@ wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
+  g_mutex_lock (&store->service_domain_gate_mutex);
   g_mutex_lock (&store->service_lifecycle_mutex);
   rc = wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
@@ -4909,6 +4914,7 @@ wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
   else
     wyl_policy_store_rollback_mutation (store);
   g_mutex_unlock (&store->service_lifecycle_mutex);
+  g_mutex_unlock (&store->service_domain_gate_mutex);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
@@ -4939,6 +4945,7 @@ wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
   }
 
   gint64 now_us = g_get_real_time ();
+  g_mutex_lock (&store->service_domain_gate_mutex);
   g_mutex_lock (&store->service_lifecycle_mutex);
   rc = wyl_policy_store_begin_mutation (store);
   if (rc == WYRELOG_E_OK)
@@ -4992,6 +4999,7 @@ wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
   else
     wyl_policy_store_rollback_mutation (store);
   g_mutex_unlock (&store->service_lifecycle_mutex);
+  g_mutex_unlock (&store->service_domain_gate_mutex);
   if (rc != WYRELOG_E_OK)
     wyl_policy_service_principal_info_clear (out);
   return rc;
@@ -5082,6 +5090,36 @@ wyl_policy_store_lookup_service_credential (wyl_policy_store_t *store,
     return rc;
   if ((rc = bind_service_filter (stmt, credential_id, subject_id, tenant_id))
       != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    rc = parse_service_credential_row (stmt, out);
+  else
+    rc = step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_lookup_service_credential_by_id (wyl_policy_store_t *store,
+    const gchar *credential_id, wyl_policy_service_credential_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL
+      || credential_id == NULL
+      || !wyl_service_credential_id_is_canonical (credential_id,
+          strlen (credential_id)))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *sql = g_strdup_printf ("SELECT %s FROM service_credentials"
+      " WHERE credential_id=?;", service_credential_columns);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, credential_id)) != WYRELOG_E_OK) {
     sqlite3_finalize (stmt);
     return rc;
   }
@@ -5703,6 +5741,259 @@ wyl_policy_store_ensure_service_cvk_for_issuance (wyl_policy_store_t *store,
   if (out_cvk == NULL || out_len == NULL)
     return WYRELOG_E_INVALID;
   return service_cvk_materialize (store, TRUE, out_cvk, out_len);
+}
+
+static wyrelog_error_t
+service_credential_issue_fingerprint (const gchar *subject_id,
+    const gchar *tenant_id, const gchar *actor_subject_id,
+    gint64 expires_at_us, guint8 out[crypto_generichash_BYTES])
+{
+  g_autofree gchar *expiry = g_strdup_printf ("%" G_GINT64_FORMAT,
+      expires_at_us);
+  crypto_generichash_state state;
+  static const guint8 domain[] = "wyrelog.service-credential-issue-request.v1";
+  if (crypto_generichash_init (&state, NULL, 0, crypto_generichash_BYTES) != 0
+      || crypto_generichash_update (&state, domain, sizeof domain - 1) != 0)
+    return WYRELOG_E_CRYPTO;
+  const gchar *fields[] = {
+    subject_id, tenant_id, actor_subject_id, expiry,
+  };
+  static const guint8 separator = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++) {
+    if (crypto_generichash_update (&state, (const guint8 *) fields[i],
+            strlen (fields[i])) != 0
+        || crypto_generichash_update (&state, &separator, 1) != 0) {
+      sodium_memzero (&state, sizeof state);
+      return WYRELOG_E_CRYPTO;
+    }
+  }
+  int failed = crypto_generichash_final (&state, out,
+      crypto_generichash_BYTES);
+  sodium_memzero (&state, sizeof state);
+  return failed == 0 ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+}
+
+static wyrelog_error_t
+service_credential_id_exists (wyl_policy_store_t *store,
+    const gchar *credential_id, gboolean *out_exists)
+{
+  sqlite3_stmt *stmt = NULL;
+  *out_exists = FALSE;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT 1 FROM service_credentials WHERE credential_id=? LIMIT 1;",
+      &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, credential_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_exists = TRUE;
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_ROW || step_rc == SQLITE_DONE ? WYRELOG_E_OK :
+      WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_credential_insert (wyl_policy_store_t *store,
+    const wyl_service_credential_material_t *material, const gchar *subject_id,
+    const gchar *tenant_id, const gchar *actor_subject_id, gint64 now_us,
+    gint64 expires_at_us)
+{
+  static const gchar *sql =
+      "INSERT INTO service_credentials(credential_id,"
+      "credential_format_version,subject_id,tenant_id,generation,state,"
+      "verifier_version,salt,verifier,created_by,created_at_us,updated_at_us,"
+      "expires_at_us) VALUES(?,?,?,?,1,'active',?,?,?,?,?,?,?);";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, material->credential_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 2,
+          material->credential_format_version) != SQLITE_OK
+      || (rc = bind_text (stmt, 3, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, tenant_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, material->verifier_version) != SQLITE_OK
+      || sqlite3_bind_blob (stmt, 6, material->salt, sizeof material->salt,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_blob (stmt, 7, material->verifier,
+          sizeof material->verifier, SQLITE_TRANSIENT) != SQLITE_OK
+      || (rc = bind_text (stmt, 8, actor_subject_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 9, now_us) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 10, now_us) != SQLITE_OK
+      || (expires_at_us == 0 ? sqlite3_bind_null (stmt, 11) :
+          sqlite3_bind_int64 (stmt, 11, expires_at_us)) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc == SQLITE_DONE)
+    return WYRELOG_E_OK;
+  return (step_rc & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_POLICY :
+      WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_credential_append_issued_event (wyl_policy_store_t *store,
+    const gchar *credential_id, const gchar *subject_id,
+    const gchar *tenant_id, const gchar *actor_subject_id,
+    const gchar *request_id, gint64 now_us)
+{
+  static const gchar *sql =
+      "INSERT INTO service_credential_events(credential_id,subject_id,"
+      "tenant_id,event,from_state,to_state,generation,actor_subject_id,"
+      "request_id,created_at_us) VALUES(?,?,?,'issued',NULL,'active',1,?,?,?);";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, credential_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, tenant_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, actor_subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 5, request_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 6, now_us) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_policy_store_issue_service_credential_with_runtime
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 expires_at_us,
+    const wyl_service_credential_runtime_t * runtime,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (out_secret != NULL)
+    wyl_service_credential_secret_clear (out_secret);
+  gint64 now_us = g_get_real_time ();
+  if (store == NULL || store->db == NULL || out == NULL || out_secret == NULL
+      || subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !service_domain_text_is_valid (request_id, 256)
+      || expires_at_us < 0 || (expires_at_us != 0 && expires_at_us <= now_us))
+    return WYRELOG_E_INVALID;
+
+  /* Serialize the CVK pre-initialization-to-savepoint handoff so a concurrent
+   * issuer cannot start a second SQLite transaction in that narrow window.
+   * The required inner order remains CVK ensure/unlock, lifecycle mutex,
+   * savepoint. */
+  g_mutex_lock (&store->service_domain_gate_mutex);
+  guint8 fingerprint[crypto_generichash_BYTES];
+  wyrelog_error_t rc = service_credential_issue_fingerprint (subject_id,
+      tenant_id, actor_subject_id, expires_at_us, fingerprint);
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_ensure_service_cvk_for_issuance (store, &cvk,
+        &cvk_len);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    g_mutex_unlock (&store->service_domain_gate_mutex);
+    return rc;
+  }
+
+  gchar audit_id[WYL_ID_STRING_BUF];
+  rc = service_domain_new_audit_id (audit_id);
+  wyl_service_credential_material_t material = { 0 };
+  wyl_service_credential_secret_t *secret = NULL;
+  g_mutex_lock (&store->service_lifecycle_mutex);
+  now_us = g_get_real_time ();
+  if (rc == WYRELOG_E_OK && expires_at_us != 0 && expires_at_us <= now_us)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_begin_mutation (store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_claim_request (store, request_id, "credential_issue",
+        subject_id, fingerprint, now_us);
+  sodium_memzero (fingerprint, sizeof fingerprint);
+
+  wyl_policy_service_principal_info_t principal = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_lookup_service_principal (store, subject_id,
+        &principal);
+  if (rc == WYRELOG_E_OK && !g_str_equal (principal.state, "active"))
+    rc = WYRELOG_E_POLICY;
+  gboolean tenant_active = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_tenant_is_active (store, tenant_id, &tenant_active);
+  if (rc == WYRELOG_E_OK && !tenant_active)
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_service_principal_info_clear (&principal);
+
+  for (guint attempt = 0;
+      rc == WYRELOG_E_OK && attempt < WYL_SERVICE_CREDENTIAL_ID_ATTEMPTS;
+      attempt++) {
+    rc = wyl_service_credential_generate_with_runtime (cvk, cvk_len,
+        tenant_id, strlen (tenant_id), subject_id, strlen (subject_id),
+        runtime, &material, &secret);
+    gboolean collision = FALSE;
+    if (rc == WYRELOG_E_OK)
+      rc = service_credential_id_exists (store, material.credential_id,
+          &collision);
+    if (rc != WYRELOG_E_OK || !collision)
+      break;
+    wyl_service_credential_secret_clear (&secret);
+    wyl_service_credential_material_clear (&material);
+    if (attempt + 1 == WYL_SERVICE_CREDENTIAL_ID_ATTEMPTS)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_credential_insert (store, &material, subject_id, tenant_id,
+        actor_subject_id, now_us, expires_at_us);
+  if (rc == WYRELOG_E_OK)
+    rc = service_credential_append_issued_event (store,
+        material.credential_id, subject_id, tenant_id, actor_subject_id,
+        request_id, now_us);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_append_audit (store, audit_id, now_us,
+        actor_subject_id, "service.credential.issue", material.credential_id,
+        request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_lookup_service_credential (store,
+        material.credential_id, subject_id, tenant_id, out);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_finish_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  g_mutex_unlock (&store->service_lifecycle_mutex);
+
+  wyl_service_credential_material_clear (&material);
+  if (rc == WYRELOG_E_OK) {
+    *out_secret = secret;
+    secret = NULL;
+  } else {
+    wyl_policy_service_credential_info_clear (out);
+  }
+  wyl_service_credential_secret_clear (&secret);
+  g_mutex_unlock (&store->service_domain_gate_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_issue_service_credential (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *tenant_id,
+    const gchar *actor_subject_id, const gchar *request_id,
+    gint64 expires_at_us, wyl_policy_service_credential_info_t *out,
+    wyl_service_credential_secret_t **out_secret)
+{
+  return wyl_policy_store_issue_service_credential_with_runtime (store,
+      subject_id, tenant_id, actor_subject_id, request_id, expires_at_us, NULL,
+      out, out_secret);
 }
 
 wyrelog_error_t

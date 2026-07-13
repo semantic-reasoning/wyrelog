@@ -6,6 +6,7 @@
 
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
+#include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/wyl-traits-private.h"
 
 G_BEGIN_DECLS;
@@ -387,8 +388,10 @@ wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
  */
 wyrelog_error_t wyl_policy_store_get_principal_kind (wyl_policy_store_t * store,
     const gchar * subject_id, wyl_policy_principal_kind_t * out_kind);
-/* Service lifecycle mutations are serialized with service_lifecycle_mutex only
- * against other service-domain calls. Concurrent entry by another policy
+/* Service lifecycle mutations are serialized against other service-domain
+ * calls. Issuance additionally holds the domain gate across CVK initialization
+ * and lifecycle-mutex acquisition so there is no cross-operation DB handoff
+ * race. Concurrent entry by another policy
  * writer or reconciler on the same store violates the daemon single-writer /
  * caller-serialization contract. External mirrors must run only after the
  * domain mutation has returned successfully; they are not part of its local
@@ -413,6 +416,9 @@ wyrelog_error_t wyl_policy_store_foreach_service_principal (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_store_lookup_service_credential (wyl_policy_store_t *
     store, const gchar * credential_id, const gchar * subject_id,
     const gchar * tenant_id, wyl_policy_service_credential_info_t * out);
+wyrelog_error_t wyl_policy_store_lookup_service_credential_by_id
+    (wyl_policy_store_t * store, const gchar * credential_id,
+    wyl_policy_service_credential_info_t * out);
 wyrelog_error_t wyl_policy_store_foreach_service_credential (wyl_policy_store_t
     * store, const gchar * subject_id, const gchar * tenant_id,
     wyl_policy_service_credential_cb cb, gpointer user_data);
@@ -422,6 +428,35 @@ wyrelog_error_t wyl_policy_store_materialize_service_cvk_existing
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
 wyrelog_error_t wyl_policy_store_ensure_service_cvk_for_issuance
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+/* Issuance initializes/materializes the CVK before its lifecycle savepoint.
+ * A later domain failure may therefore leave only the idempotent CVK row;
+ * credential, event, ledger and audit rows still roll back together. */
+wyrelog_error_t wyl_policy_store_issue_service_credential
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 expires_at_us,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret);
+/* Deterministic private seam for collision/wipe and fault tests.
+ *
+ * runtime itself is borrowed only for this call; its callback table is copied
+ * by value before use. The callback code and targets, plus runtime->data, MUST
+ * remain valid until any successfully returned opaque secret has been fully
+ * released with wyl_service_credential_secret_clear(). On failure, or when no
+ * secret is returned, all generated secrets are synchronously cleared, so
+ * these lifetimes need not extend past this function's return.
+ *
+ * Runtime callbacks may execute while the service-domain gate and lifecycle
+ * mutex are held. They MUST be non-reentrant and MUST NOT call APIs on the same
+ * store or service domain; doing so can deadlock.
+ */
+wyrelog_error_t wyl_policy_store_issue_service_credential_with_runtime
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 expires_at_us,
+    const wyl_service_credential_runtime_t * runtime,
+    wyl_policy_service_credential_info_t * out,
+    wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
     (wyl_policy_store_t * store,
     const wyl_policy_service_credential_info_t * credential,
