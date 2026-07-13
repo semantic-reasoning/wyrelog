@@ -181,6 +181,296 @@ static const gchar *const required_tables[] = {
   "fact_relation_query_allowlist",
   "policy_signatures",
   "totp_enrollments",
+  "service_principals",
+  "service_credentials",
+  "service_credential_cvk",
+  "service_principal_events",
+  "service_credential_events",
+};
+
+/* Kept separate from the baseline DDL so upgrading a pre-#353 store can
+ * create the complete inert service authority in one savepoint. */
+static const gchar service_schema_ddl[] =
+    "CREATE TABLE IF NOT EXISTS service_principals ("
+    " subject_id TEXT NOT NULL PRIMARY KEY CHECK ("
+    "   length(subject_id) BETWEEN 5 AND 128 AND"
+    "   instr(subject_id, char(0)) = 0 AND"
+    "   substr(subject_id, 1, 4) = 'svc:' AND"
+    "   substr(subject_id, 5, 1) GLOB '[A-Za-z0-9]' AND"
+    "   substr(subject_id, -1, 1) GLOB '[A-Za-z0-9]' AND"
+    "   subject_id NOT GLOB '*[^-A-Za-z0-9._:]*' AND"
+    "   subject_id NOT GLOB '*:[^A-Za-z0-9]*' AND"
+    "   subject_id NOT GLOB '*[^A-Za-z0-9]:*'"
+    " ),"
+    " display_name TEXT NOT NULL CHECK (length(display_name) BETWEEN 1 AND 256),"
+    " state TEXT NOT NULL CHECK (state IN ('active', 'disabled')),"
+    " generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),"
+    " created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 1 AND 128),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),"
+    " updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),"
+    " disabled_by TEXT,"
+    " disabled_at_us INTEGER,"
+    " CHECK (disabled_by IS NULL OR length(disabled_by) BETWEEN 1 AND 128),"
+    " CHECK ((state = 'active' AND disabled_by IS NULL AND disabled_at_us IS NULL)"
+    "   OR (state = 'disabled' AND disabled_by IS NOT NULL"
+    "     AND disabled_at_us IS NOT NULL AND disabled_at_us >= created_at_us))"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_principals_state_subject"
+    " ON service_principals (state, subject_id);"
+    "CREATE TABLE IF NOT EXISTS service_credential_cvk ("
+    " slot INTEGER PRIMARY KEY CHECK (slot = 1),"
+    " generation INTEGER NOT NULL UNIQUE CHECK (generation >= 1),"
+    " envelope_format_version INTEGER NOT NULL CHECK (envelope_format_version >= 1),"
+    " provider_binding BLOB NOT NULL CHECK (typeof(provider_binding) = 'blob'"
+    "   AND length(provider_binding) = 32),"
+    " sealed_cvk BLOB NOT NULL CHECK (typeof(sealed_cvk) = 'blob'"
+    "   AND length(sealed_cvk) BETWEEN 1 AND 65536),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),"
+    " updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us)"
+    ");"
+    "CREATE TABLE IF NOT EXISTS service_credentials ("
+    " credential_id TEXT NOT NULL PRIMARY KEY CHECK ("
+    "   length(credential_id) BETWEEN 1 AND 128 AND"
+    "   instr(credential_id, char(0)) = 0),"
+    " credential_format_version INTEGER NOT NULL CHECK (credential_format_version >= 1),"
+    " subject_id TEXT NOT NULL,"
+    " tenant_id TEXT NOT NULL,"
+    " generation INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),"
+    " state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),"
+    " verifier_version INTEGER NOT NULL CHECK (verifier_version >= 1),"
+    " salt BLOB NOT NULL CHECK (typeof(salt) = 'blob' AND length(salt) = 16),"
+    " verifier BLOB NOT NULL CHECK (typeof(verifier) = 'blob'"
+    "   AND length(verifier) = 32),"
+    " created_by TEXT NOT NULL CHECK (length(created_by) BETWEEN 1 AND 128),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),"
+    " updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),"
+    " expires_at_us INTEGER CHECK (expires_at_us IS NULL OR expires_at_us > created_at_us),"
+    " last_used_at_us INTEGER CHECK (last_used_at_us IS NULL OR last_used_at_us >= created_at_us),"
+    " revoked_by TEXT,"
+    " revoked_at_us INTEGER,"
+    " rotated_from_id TEXT,"
+    " CHECK (revoked_by IS NULL OR length(revoked_by) BETWEEN 1 AND 128),"
+    " UNIQUE (credential_id, subject_id, tenant_id),"
+    " UNIQUE (rotated_from_id),"
+    " FOREIGN KEY (subject_id) REFERENCES service_principals (subject_id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT,"
+    " FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT,"
+    " FOREIGN KEY (rotated_from_id, subject_id, tenant_id)"
+    "   REFERENCES service_credentials (credential_id, subject_id, tenant_id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT,"
+    " CHECK (rotated_from_id IS NULL OR rotated_from_id <> credential_id),"
+    " CHECK ((state = 'active' AND revoked_by IS NULL AND revoked_at_us IS NULL)"
+    "   OR (state = 'revoked' AND revoked_by IS NOT NULL"
+    "     AND revoked_at_us IS NOT NULL AND revoked_at_us >= created_at_us))"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_credentials_subject_tenant_state"
+    " ON service_credentials (subject_id, tenant_id, state);"
+    "CREATE INDEX IF NOT EXISTS idx_service_credentials_tenant_state_expiry"
+    " ON service_credentials (tenant_id, state, expires_at_us);"
+    "CREATE TABLE IF NOT EXISTS service_principal_events ("
+    " event_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " subject_id TEXT NOT NULL,"
+    " event TEXT NOT NULL CHECK (event IN ('created', 'disabled')),"
+    " from_state TEXT CHECK (from_state IS NULL OR from_state IN ('active', 'disabled')),"
+    " to_state TEXT NOT NULL CHECK (to_state IN ('active', 'disabled')),"
+    " generation INTEGER NOT NULL CHECK (generation >= 1),"
+    " actor_subject_id TEXT NOT NULL"
+    "   CHECK (length(actor_subject_id) BETWEEN 1 AND 128),"
+    " request_id TEXT,"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),"
+    " FOREIGN KEY (subject_id) REFERENCES service_principals (subject_id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT,"
+    " CHECK ((event = 'created' AND from_state IS NULL AND to_state = 'active')"
+    "   OR (event = 'disabled' AND from_state = 'active' AND to_state = 'disabled'))"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_principal_events_subject_time"
+    " ON service_principal_events (subject_id, created_at_us, event_id);"
+    "CREATE INDEX IF NOT EXISTS idx_service_principal_events_request"
+    " ON service_principal_events (request_id);"
+    "CREATE TABLE IF NOT EXISTS service_credential_events ("
+    " event_id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " credential_id TEXT NOT NULL,"
+    " subject_id TEXT NOT NULL,"
+    " tenant_id TEXT NOT NULL,"
+    " event TEXT NOT NULL CHECK (event IN ('issued', 'rotated', 'revoked')),"
+    " from_state TEXT CHECK (from_state IS NULL OR from_state IN ('active', 'revoked')),"
+    " to_state TEXT NOT NULL CHECK (to_state IN ('active', 'revoked')),"
+    " generation INTEGER NOT NULL CHECK (generation >= 1),"
+    " actor_subject_id TEXT NOT NULL"
+    "   CHECK (length(actor_subject_id) BETWEEN 1 AND 128),"
+    " request_id TEXT,"
+    " related_credential_id TEXT,"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),"
+    " FOREIGN KEY (credential_id, subject_id, tenant_id)"
+    "   REFERENCES service_credentials (credential_id, subject_id, tenant_id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT,"
+    " FOREIGN KEY (related_credential_id, subject_id, tenant_id)"
+    "   REFERENCES service_credentials (credential_id, subject_id, tenant_id)"
+    "   ON UPDATE RESTRICT ON DELETE RESTRICT,"
+    " CHECK ((event IN ('issued', 'rotated') AND from_state IS NULL AND to_state = 'active')"
+    "   OR (event = 'revoked' AND from_state = 'active' AND to_state = 'revoked'))"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_credential_events_credential_time"
+    " ON service_credential_events (credential_id, created_at_us, event_id);"
+    "CREATE INDEX IF NOT EXISTS idx_service_credential_events_owner_time"
+    " ON service_credential_events (subject_id, tenant_id, created_at_us, event_id);"
+    "CREATE INDEX IF NOT EXISTS idx_service_credential_events_request"
+    " ON service_credential_events (request_id);"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable"
+    " BEFORE UPDATE ON service_principals WHEN"
+    " OLD.subject_id IS NOT NEW.subject_id OR"
+    " OLD.created_by IS NOT NEW.created_by OR"
+    " OLD.created_at_us IS NOT NEW.created_at_us"
+    " BEGIN SELECT RAISE(ABORT, 'service principal identity is immutable'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_credentials_identity_immutable"
+    " BEFORE UPDATE ON service_credentials WHEN"
+    " OLD.credential_id IS NOT NEW.credential_id OR"
+    " OLD.credential_format_version IS NOT NEW.credential_format_version OR"
+    " OLD.subject_id IS NOT NEW.subject_id OR OLD.tenant_id IS NOT NEW.tenant_id OR"
+    " OLD.verifier_version IS NOT NEW.verifier_version OR"
+    " OLD.salt IS NOT NEW.salt OR OLD.verifier IS NOT NEW.verifier OR"
+    " OLD.created_by IS NOT NEW.created_by OR"
+    " OLD.created_at_us IS NOT NEW.created_at_us OR"
+    " OLD.expires_at_us IS NOT NEW.expires_at_us OR"
+    " OLD.rotated_from_id IS NOT NEW.rotated_from_id"
+    " BEGIN SELECT RAISE(ABORT, 'service credential identity is immutable'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_principal_events_no_update"
+    " BEFORE UPDATE ON service_principal_events"
+    " BEGIN SELECT RAISE(ABORT, 'service principal events are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_principal_events_no_delete"
+    " BEFORE DELETE ON service_principal_events"
+    " BEGIN SELECT RAISE(ABORT, 'service principal events are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_credential_events_no_update"
+    " BEFORE UPDATE ON service_credential_events"
+    " BEGIN SELECT RAISE(ABORT, 'service credential events are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_credential_events_no_delete"
+    " BEFORE DELETE ON service_credential_events"
+    " BEGIN SELECT RAISE(ABORT, 'service credential events are append-only'); END;";
+
+typedef struct
+{
+  const gchar *name;
+  const gchar *column_signature;
+  const gchar *const *sql_needles;
+  guint check_count;
+  const gchar *foreign_key_signature;
+  const gchar *index_signature;
+} ServiceTableDescriptor;
+
+typedef struct
+{
+  const gchar *name;
+  const gchar *table;
+  const gchar *sql_fingerprint;
+} ServiceTriggerDescriptor;
+
+static const gchar *const service_principal_needles[] = {
+  "check(length(subject_id)between5and128andinstr(subject_id,char(0))=0andsubstr(subject_id,1,4)='svc:'andsubstr(subject_id,5,1)glob'[a-za-z0-9]'andsubstr(subject_id,-1,1)glob'[a-za-z0-9]'andsubject_idnotglob'*[^-a-za-z0-9._:]*'andsubject_idnotglob'*:[^a-za-z0-9]*'andsubject_idnotglob'*[^a-za-z0-9]:*')",
+  "check(length(display_name)between1and256)",
+  "check(statein('active','disabled'))",
+  "check(generation>=1)",
+  "check(length(created_by)between1and128)",
+  "check(created_at_us>0)",
+  "check(updated_at_us>=created_at_us)",
+  "check(disabled_byisnullorlength(disabled_by)between1and128)",
+  "check((state='active'anddisabled_byisnullanddisabled_at_usisnull)or(state='disabled'anddisabled_byisnotnullanddisabled_at_usisnotnullanddisabled_at_us>=created_at_us))",
+  NULL,
+};
+
+static const gchar *const service_cvk_needles[] = {
+  "check(slot=1)",
+  "check(generation>=1)",
+  "check(envelope_format_version>=1)",
+  "check(typeof(provider_binding)='blob'andlength(provider_binding)=32)",
+  "check(typeof(sealed_cvk)='blob'andlength(sealed_cvk)between1and65536)",
+  "check(created_at_us>0)",
+  "check(updated_at_us>=created_at_us)",
+  NULL,
+};
+
+static const gchar *const service_credential_needles[] = {
+  "check(length(credential_id)between1and128andinstr(credential_id,char(0))=0)",
+  "check(credential_format_version>=1)",
+  "check(generation>=1)",
+  "check(statein('active','revoked'))",
+  "check(verifier_version>=1)",
+  "check(typeof(salt)='blob'andlength(salt)=16)",
+  "check(typeof(verifier)='blob'andlength(verifier)=32)",
+  "check(length(created_by)between1and128)",
+  "check(created_at_us>0)",
+  "check(updated_at_us>=created_at_us)",
+  "check(expires_at_usisnullorexpires_at_us>created_at_us)",
+  "check(last_used_at_usisnullorlast_used_at_us>=created_at_us)",
+  "check(revoked_byisnullorlength(revoked_by)between1and128)",
+  "unique(credential_id,subject_id,tenant_id)",
+  "unique(rotated_from_id)",
+  "check(rotated_from_idisnullorrotated_from_id<>credential_id)",
+  "check((state='active'andrevoked_byisnullandrevoked_at_usisnull)or(state='revoked'andrevoked_byisnotnullandrevoked_at_usisnotnullandrevoked_at_us>=created_at_us))",
+  NULL,
+};
+
+static const gchar *const service_principal_event_needles[] = {
+  "check(eventin('created','disabled'))",
+  "check(from_stateisnullorfrom_statein('active','disabled'))",
+  "check(to_statein('active','disabled'))",
+  "check(generation>=1)",
+  "check(length(actor_subject_id)between1and128)",
+  "check(created_at_us>0)",
+  "check((event='created'andfrom_stateisnullandto_state='active')or(event='disabled'andfrom_state='active'andto_state='disabled'))",
+  NULL,
+};
+
+static const gchar *const service_credential_event_needles[] = {
+  "check(eventin('issued','rotated','revoked'))",
+  "check(from_stateisnullorfrom_statein('active','revoked'))",
+  "check(to_statein('active','revoked'))",
+  "check(generation>=1)",
+  "check(length(actor_subject_id)between1and128)",
+  "check(created_at_us>0)",
+  "check((eventin('issued','rotated')andfrom_stateisnullandto_state='active')or(event='revoked'andfrom_state='active'andto_state='revoked'))",
+  NULL,
+};
+
+static const ServiceTableDescriptor service_table_descriptors[] = {
+  {"service_principals",
+        "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
+        service_principal_needles, 9, "",
+      "idx_service_principals_state_subject:0:c:0:0:2:state:0:BINARY:1,1:0:subject_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_principals_1:1:pk:0:0:0:subject_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_credentials",
+        "credential_id:TEXT:1::1,credential_format_version:INTEGER:1::0,subject_id:TEXT:1::0,tenant_id:TEXT:1::0,generation:INTEGER:1:1:0,state:TEXT:1::0,verifier_version:INTEGER:1::0,salt:BLOB:1::0,verifier:BLOB:1::0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,expires_at_us:INTEGER:0::0,last_used_at_us:INTEGER:0::0,revoked_by:TEXT:0::0,revoked_at_us:INTEGER:0::0,rotated_from_id:TEXT:0::0",
+        service_credential_needles, 15,
+        "0:0:service_credentials:rotated_from_id:credential_id:RESTRICT:RESTRICT:NONE;0:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;0:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE;1:0:tenants:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE;2:0:service_principals:subject_id:subject_id:RESTRICT:RESTRICT:NONE",
+      "idx_service_credentials_subject_tenant_state:0:c:0:0:2:subject_id:0:BINARY:1,1:3:tenant_id:0:BINARY:1,2:5:state:0:BINARY:1,3:-1::0:BINARY:0;idx_service_credentials_tenant_state_expiry:0:c:0:0:3:tenant_id:0:BINARY:1,1:5:state:0:BINARY:1,2:12:expires_at_us:0:BINARY:1,3:-1::0:BINARY:0;sqlite_autoindex_service_credentials_1:1:pk:0:0:0:credential_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credentials_2:1:u:0:0:0:credential_id:0:BINARY:1,1:2:subject_id:0:BINARY:1,2:3:tenant_id:0:BINARY:1,3:-1::0:BINARY:0;sqlite_autoindex_service_credentials_3:1:u:0:0:16:rotated_from_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_credential_cvk",
+        "slot:INTEGER:0::1,generation:INTEGER:1::0,envelope_format_version:INTEGER:1::0,provider_binding:BLOB:1::0,sealed_cvk:BLOB:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0",
+        service_cvk_needles, 7, "",
+      "sqlite_autoindex_service_credential_cvk_1:1:u:0:0:1:generation:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_principal_events",
+        "event_id:INTEGER:0::1,subject_id:TEXT:1::0,event:TEXT:1::0,from_state:TEXT:0::0,to_state:TEXT:1::0,generation:INTEGER:1::0,actor_subject_id:TEXT:1::0,request_id:TEXT:0::0,created_at_us:INTEGER:1::0",
+        service_principal_event_needles, 7,
+        "0:0:service_principals:subject_id:subject_id:RESTRICT:RESTRICT:NONE",
+      "idx_service_principal_events_request:0:c:0:0:7:request_id:0:BINARY:1,1:-1::0:BINARY:0;idx_service_principal_events_subject_time:0:c:0:0:1:subject_id:0:BINARY:1,1:8:created_at_us:0:BINARY:1,2:0:event_id:0:BINARY:1,3:-1::0:BINARY:0"},
+  {"service_credential_events",
+        "event_id:INTEGER:0::1,credential_id:TEXT:1::0,subject_id:TEXT:1::0,tenant_id:TEXT:1::0,event:TEXT:1::0,from_state:TEXT:0::0,to_state:TEXT:1::0,generation:INTEGER:1::0,actor_subject_id:TEXT:1::0,request_id:TEXT:0::0,related_credential_id:TEXT:0::0,created_at_us:INTEGER:1::0",
+        service_credential_event_needles, 7,
+        "0:0:service_credentials:related_credential_id:credential_id:RESTRICT:RESTRICT:NONE;0:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;0:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE;1:0:service_credentials:credential_id:credential_id:RESTRICT:RESTRICT:NONE;1:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;1:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE",
+      "idx_service_credential_events_credential_time:0:c:0:0:1:credential_id:0:BINARY:1,1:11:created_at_us:0:BINARY:1,2:0:event_id:0:BINARY:1,3:-1::0:BINARY:0;idx_service_credential_events_owner_time:0:c:0:0:2:subject_id:0:BINARY:1,1:3:tenant_id:0:BINARY:1,2:11:created_at_us:0:BINARY:1,3:0:event_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_credential_events_request:0:c:0:0:9:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+};
+
+static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
+  {"trg_service_principals_identity_immutable", "service_principals",
+      "createtriggertrg_service_principals_identity_immutablebeforeupdateonservice_principalswhenold.subject_idisnotnew.subject_idorold.created_byisnotnew.created_byorold.created_at_usisnotnew.created_at_usbeginselectraise(abort,'serviceprincipalidentityisimmutable');end"},
+  {"trg_service_credentials_identity_immutable", "service_credentials",
+      "createtriggertrg_service_credentials_identity_immutablebeforeupdateonservice_credentialswhenold.credential_idisnotnew.credential_idorold.credential_format_versionisnotnew.credential_format_versionorold.subject_idisnotnew.subject_idorold.tenant_idisnotnew.tenant_idorold.verifier_versionisnotnew.verifier_versionorold.saltisnotnew.saltorold.verifierisnotnew.verifierorold.created_byisnotnew.created_byorold.created_at_usisnotnew.created_at_usorold.expires_at_usisnotnew.expires_at_usorold.rotated_from_idisnotnew.rotated_from_idbeginselectraise(abort,'servicecredentialidentityisimmutable');end"},
+  {"trg_service_principal_events_no_update", "service_principal_events",
+      "createtriggertrg_service_principal_events_no_updatebeforeupdateonservice_principal_eventsbeginselectraise(abort,'serviceprincipaleventsareappend-only');end"},
+  {"trg_service_principal_events_no_delete", "service_principal_events",
+      "createtriggertrg_service_principal_events_no_deletebeforedeleteonservice_principal_eventsbeginselectraise(abort,'serviceprincipaleventsareappend-only');end"},
+  {"trg_service_credential_events_no_update", "service_credential_events",
+      "createtriggertrg_service_credential_events_no_updatebeforeupdateonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
+  {"trg_service_credential_events_no_delete", "service_credential_events",
+      "createtriggertrg_service_credential_events_no_deletebeforedeleteonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
 };
 
 static const BuiltinRole *
@@ -2095,7 +2385,25 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "    WHERE config_key = 'bootstrap_admin_sealed_at_us');");
   if (rc != WYRELOG_E_OK)
     return rc;
-  return WYRELOG_E_OK;
+
+  /* Apply all five inert service-authority tables, their indexes and their
+   * six immutability/append-only triggers atomically. CREATE TABLE IF NOT
+   * EXISTS cannot repair a malformed same-name legacy object, so validate
+   * before release and roll the entire service migration back on mismatch. */
+  rc = exec_sql (store->db, "SAVEPOINT wyrelog_service_schema;");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = exec_sql (store->db, service_schema_ddl);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_schema (store);
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t release_rc =
+        exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
+    return release_rc;
+  }
+  (void) exec_sql (store->db, "ROLLBACK TO SAVEPOINT wyrelog_service_schema;");
+  (void) exec_sql (store->db, "RELEASE SAVEPOINT wyrelog_service_schema;");
+  return rc;
 }
 
 gsize
@@ -3336,11 +3644,298 @@ wyl_policy_store_table_exists (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
+static gchar *
+compact_sql (const gchar *sql)
+{
+  if (sql == NULL)
+    return NULL;
+  GString *out = g_string_sized_new (strlen (sql));
+  for (const gchar * p = sql; *p != '\0'; p++) {
+    if (!g_ascii_isspace (*p) && *p != '`' && *p != '"')
+      g_string_append_c (out, g_ascii_tolower (*p));
+  }
+  return g_string_free (out, FALSE);
+}
+
+static wyrelog_error_t
+load_schema_object_sql (sqlite3 *db, const gchar *type, const gchar *name,
+    const gchar *table, gchar **out_sql)
+{
+  sqlite3_stmt *stmt = NULL;
+  *out_sql = NULL;
+  static const gchar *sql =
+      "SELECT sql FROM sqlite_schema WHERE type = ? AND name = ? "
+      "AND (? IS NULL OR tbl_name = ?);";
+  wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (bind_text (stmt, 1, type) != WYRELOG_E_OK
+      || bind_text (stmt, 2, name) != WYRELOG_E_OK
+      || (table == NULL ? sqlite3_bind_null (stmt, 3) :
+          sqlite3_bind_text (stmt, 3, table, -1, SQLITE_TRANSIENT)) != SQLITE_OK
+      || (table == NULL ? sqlite3_bind_null (stmt, 4) :
+          sqlite3_bind_text (stmt, 4, table, -1,
+              SQLITE_TRANSIENT)) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *value = (const gchar *) sqlite3_column_text (stmt, 0);
+    *out_sql = g_strdup (value);
+    sqlite3_finalize (stmt);
+    return *out_sql == NULL ? WYRELOG_E_IO : WYRELOG_E_OK;
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+validate_table_descriptor (sqlite3 *db, const ServiceTableDescriptor *desc)
+{
+  g_autofree gchar *pragma =
+      g_strdup_printf ("PRAGMA table_info(\"%s\");", desc->name);
+  sqlite3_stmt *stmt = NULL;
+  if (sqlite3_prepare_v2 (db, pragma, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  g_autoptr (GString) columns = g_string_new (NULL);
+  int step_rc;
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (stmt, 1);
+    if (name == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    const gchar *type = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *default_value = (const gchar *) sqlite3_column_text (stmt, 4);
+    if (type == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    if (columns->len > 0)
+      g_string_append_c (columns, ',');
+    g_string_append_printf (columns, "%s:%s:%d:%s:%d", name, type,
+        sqlite3_column_int (stmt, 3),
+        default_value != NULL ? default_value : "",
+        sqlite3_column_int (stmt, 5));
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (g_strcmp0 (columns->str, desc->column_signature) != 0)
+    return WYRELOG_E_POLICY;
+
+  g_autofree gchar *object_sql = NULL;
+  wyrelog_error_t rc = load_schema_object_sql (db, "table", desc->name,
+      desc->name, &object_sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autofree gchar *compacted = compact_sql (object_sql);
+  guint check_count = 0;
+  for (const gchar * p = compacted; (p = strstr (p, "check(")) != NULL;
+      p += strlen ("check("))
+    check_count++;
+  if (check_count != desc->check_count)
+    return WYRELOG_E_POLICY;
+  for (gsize i = 0; desc->sql_needles[i] != NULL; i++) {
+    if (strstr (compacted, desc->sql_needles[i]) == NULL)
+      return WYRELOG_E_POLICY;
+  }
+
+  g_autofree gchar *fk_pragma =
+      g_strdup_printf ("PRAGMA foreign_key_list(\"%s\");", desc->name);
+  stmt = NULL;
+  if (sqlite3_prepare_v2 (db, fk_pragma, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  g_autoptr (GString) signature = g_string_new (NULL);
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *table = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *from = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *to = (const gchar *) sqlite3_column_text (stmt, 4);
+    const gchar *on_update = (const gchar *) sqlite3_column_text (stmt, 5);
+    const gchar *on_delete = (const gchar *) sqlite3_column_text (stmt, 6);
+    const gchar *match = (const gchar *) sqlite3_column_text (stmt, 7);
+    if (table == NULL || from == NULL || to == NULL || on_update == NULL
+        || on_delete == NULL || match == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    if (signature->len > 0)
+      g_string_append_c (signature, ';');
+    g_string_append_printf (signature, "%d:%d:%s:%s:%s:%s:%s:%s",
+        sqlite3_column_int (stmt, 0), sqlite3_column_int (stmt, 1), table,
+        from, to, on_update, on_delete, match);
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (g_strcmp0 (signature->str, desc->foreign_key_signature) != 0)
+    return WYRELOG_E_POLICY;
+
+  static const gchar *index_list_sql =
+      "SELECT name, \"unique\", origin, partial FROM pragma_index_list(?) "
+      "ORDER BY name;";
+  if (sqlite3_prepare_v2 (db, index_list_sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  if (sqlite3_bind_text (stmt, 1, desc->name, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  g_string_set_size (signature, 0);
+  while ((step_rc = sqlite3_step (stmt)) == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *origin = (const gchar *) sqlite3_column_text (stmt, 2);
+    if (name == NULL || origin == NULL) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_POLICY;
+    }
+    g_autofree gchar *index_pragma =
+        g_strdup_printf ("PRAGMA index_xinfo(\"%s\");", name);
+    sqlite3_stmt *index_stmt = NULL;
+    if (sqlite3_prepare_v2 (db, index_pragma, -1, &index_stmt, NULL)
+        != SQLITE_OK) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+    g_autoptr (GString) columns = g_string_new (NULL);
+    int index_rc;
+    while ((index_rc = sqlite3_step (index_stmt)) == SQLITE_ROW) {
+      const gchar *column = (const gchar *) sqlite3_column_text (index_stmt, 2);
+      const gchar *collation =
+          (const gchar *) sqlite3_column_text (index_stmt, 4);
+      if (collation == NULL) {
+        sqlite3_finalize (index_stmt);
+        sqlite3_finalize (stmt);
+        return WYRELOG_E_POLICY;
+      }
+      if (columns->len > 0)
+        g_string_append_c (columns, ',');
+      g_string_append_printf (columns, "%d:%d:%s:%d:%s:%d",
+          sqlite3_column_int (index_stmt, 0),
+          sqlite3_column_int (index_stmt, 1), column != NULL ? column : "",
+          sqlite3_column_int (index_stmt, 3), collation,
+          sqlite3_column_int (index_stmt, 5));
+    }
+    sqlite3_finalize (index_stmt);
+    if (index_rc != SQLITE_DONE) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+    if (signature->len > 0)
+      g_string_append_c (signature, ';');
+    g_string_append_printf (signature, "%s:%d:%s:%d:%s", name,
+        sqlite3_column_int (stmt, 1), origin, sqlite3_column_int (stmt, 3),
+        columns->str);
+  }
+  sqlite3_finalize (stmt);
+  if (step_rc != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (g_strcmp0 (signature->str, desc->index_signature) != 0)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_trigger_descriptor (sqlite3 *db, const ServiceTriggerDescriptor *desc)
+{
+  g_autofree gchar *object_sql = NULL;
+  wyrelog_error_t rc = load_schema_object_sql (db, "trigger", desc->name,
+      desc->table, &object_sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *compacted = compact_sql (object_sql);
+  return g_strcmp0 (compacted, desc->sql_fingerprint) == 0 ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
+{
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < G_N_ELEMENTS (service_table_descriptors); i++) {
+    wyrelog_error_t rc = validate_table_descriptor (store->db,
+        &service_table_descriptors[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  for (gsize i = 0; i < G_N_ELEMENTS (service_trigger_descriptors); i++) {
+    wyrelog_error_t rc = validate_trigger_descriptor (store->db,
+        &service_trigger_descriptors[i]);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+
+  gboolean found = FALSE;
+  wyrelog_error_t rc = query_has_rows (store->db,
+      "SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
+      "'service_principals','service_credentials','service_credential_cvk',"
+      "'service_principal_events','service_credential_events') "
+      "AND name NOT IN ("
+      "'trg_service_principals_identity_immutable',"
+      "'trg_service_credentials_identity_immutable',"
+      "'trg_service_principal_events_no_update',"
+      "'trg_service_principal_events_no_delete',"
+      "'trg_service_credential_events_no_update',"
+      "'trg_service_credential_events_no_delete') LIMIT 1;", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  rc = query_has_rows (store->db,
+      "SELECT 1 FROM service_credential_cvk WHERE slot <> 1 "
+      "UNION ALL SELECT 1 FROM service_credential_cvk "
+      "GROUP BY slot HAVING count(*) > 1 LIMIT 1;", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  rc = query_has_rows (store->db,
+      "SELECT 1 FROM pragma_foreign_key_check "
+      "WHERE \"table\" IN ('service_principals','service_credentials',"
+      "'service_credential_cvk','service_principal_events',"
+      "'service_credential_events') LIMIT 1;", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  /* Legacy stores may already contain unregistered `svc:` subjects in the
+   * shared policy/authentication tables.  The inert migration must preserve
+   * those rows without silently registering a service.  Once a service is
+   * registered, however, human authentication state, TOTP, bootstrap identity
+   * and login skip-MFA are conflicting authorities and fail closed. */
+  rc = query_has_rows (store->db,
+      "SELECT 1 FROM service_principals s JOIN principal_states p "
+      "  ON p.subject_id = s.subject_id "
+      "UNION ALL SELECT 1 FROM service_principals s JOIN totp_enrollments t "
+      "  ON t.subject_id = s.subject_id "
+      "UNION ALL SELECT 1 FROM service_principals s "
+      "  JOIN direct_permissions d ON d.subject_id = s.subject_id "
+      "  WHERE d.perm_id = 'wr.login.skip_mfa' "
+      "UNION ALL SELECT 1 FROM service_principals s "
+      "  JOIN wyrelog_config c ON c.config_value = s.subject_id "
+      "  WHERE c.config_key = 'bootstrap_admin_subject' "
+      "    AND c.config_value <> 'legacy-skip' LIMIT 1;", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return found ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
 {
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc = wyl_policy_store_validate_service_schema (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   gboolean found = FALSE;
   static const gchar *cycle_sql =
@@ -3361,7 +3956,7 @@ wyl_policy_store_validate_snapshot (wyl_policy_store_t *store)
       "SELECT 1 FROM walk "
       "JOIN role_inheritances ri ON ri.child_role_id = walk.node "
       "WHERE ri.parent_role_id = walk.root " "LIMIT 1;";
-  wyrelog_error_t rc = query_has_rows (store->db, cycle_sql, &found);
+  rc = query_has_rows (store->db, cycle_sql, &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)

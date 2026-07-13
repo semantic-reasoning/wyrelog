@@ -450,6 +450,19 @@ test('policy-store', test_policy_store,
   timeout : 90,
 )
 
+test_policy_store_service_schema = executable('test-policy-store-service-schema',
+  'test-policy-store-service-schema.c',
+  c_args : [
+    '-DWYL_TEST_SQLITE_SCHEMA_PATH="' + meson.project_source_root() / 'templates' / 'access' / 'sqlite-schema.sql' + '"',
+  ],
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('policy-store-service-schema', test_policy_store_service_schema,
+  timeout : 90,
+)
+
 test_fact_schema = executable('test-fact-schema',
   'test-fact-schema.c',
   include_directories : include_directories('../wyrelog'),
