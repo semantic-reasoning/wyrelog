@@ -1,3 +1,5 @@
+fs = import('fs')
+
 test_smoke = executable('test-smoke',
   'test-smoke.c',
   dependencies : [wyrelog_dep],
@@ -509,6 +511,31 @@ test_policy_store_toctou = executable('test-policy-store-toctou',
 )
 
 test('policy-store-toctou', test_policy_store_toctou)
+
+test_policy_store_lease = executable('test-policy-store-lease',
+  'test-policy-store-lease.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep],
+)
+
+test_policy_store_lease_env = environment()
+if host_machine.system() == 'windows'
+  glib_genmarshal = glib_dep.get_variable(
+    pkgconfig : 'glib_genmarshal',
+    default_value : '',
+  )
+  if glib_genmarshal != '' and fs.is_absolute(glib_genmarshal)
+    test_policy_store_lease_env.prepend('PATH',
+      fs.parent(glib_genmarshal),
+      separator : ';',
+    )
+  endif
+endif
+
+test('policy-store-lease', test_policy_store_lease,
+  env : test_policy_store_lease_env,
+  timeout : 60,
+)
 
 test_policy_store_totp = executable('test-policy-store-totp',
   'test-policy-store-totp.c',

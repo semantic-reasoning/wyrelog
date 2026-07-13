@@ -24,6 +24,7 @@ wyrelog_sources = files(
   'audit/event.c',
   'fact/schema.c',
   'policy/store.c',
+  'policy/store-lease.c',
   'wyl-boot.c',
   'wyl-decide.c',
   'wyl-dl-static.c',
