@@ -63,6 +63,11 @@ wyrelog_error_t wyl_handle_load_policy_store_audit_events (WylHandle * self);
  * valid until wyl_shutdown or g_object_unref.
  */
 wyl_policy_store_t *wyl_handle_get_policy_store (WylHandle * self);
+/* Accessed only while the handle's service-auth authority monitor is held. */
+WylServiceAuthUnavailableReason
+wyl_handle_service_auth_unavailable_reason_locked (WylHandle * self);
+void wyl_handle_service_auth_set_unavailable_reason_locked (WylHandle * self,
+    WylServiceAuthUnavailableReason reason);
 /*
  * Ordered private shutdown used by the public void wrapper and finalization.
  * Returns BUSY without changing lifecycle state when called by a thread that

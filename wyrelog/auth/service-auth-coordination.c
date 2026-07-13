@@ -114,6 +114,7 @@ struct _WylServiceAuthWriteLease
   guint64 serial;
   WylServiceAuthLeaseState state;
   gboolean transaction_claimed;
+  gboolean cleanup_only;
   wyl_policy_store_t *pinned_store;
 };
 
@@ -194,6 +195,13 @@ acquisition_cancelled (GCancellable *cancellable)
   return cancellable != NULL && g_cancellable_is_cancelled (cancellable);
 }
 
+static gboolean
+authority_unavailable_locked (WylServiceAuthAuthority *authority)
+{
+  return wyl_handle_service_auth_unavailable_reason_locked
+      (authority->handle) != WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+}
+
 static wyrelog_error_t
 next_serial_locked (WylServiceAuthAuthority *authority, guint64 *out_serial)
 {
@@ -235,11 +243,13 @@ wyl_service_auth_authority_acquire_read (WylServiceAuthAuthority *authority,
     rc = WYRELOG_E_BUSY;
   } else {
     authority->waiting_readers++;
-    while (!authority->closing && !acquisition_cancelled (cancellable)
+    while (!authority->closing && !authority_unavailable_locked (authority)
+        && !acquisition_cancelled (cancellable)
         && (authority->writer_active || authority->waiting_writers > 0))
       g_cond_wait (&authority->changed, &authority->mutex);
     authority->waiting_readers--;
-    if (authority->closing || acquisition_cancelled (cancellable))
+    if (authority->closing || authority_unavailable_locked (authority)
+        || acquisition_cancelled (cancellable))
       rc = WYRELOG_E_BUSY;
     if (rc != WYRELOG_E_OK)
       g_cond_broadcast (&authority->changed);
@@ -307,11 +317,13 @@ wyl_service_auth_authority_acquire_write (WylServiceAuthAuthority *authority,
     rc = WYRELOG_E_BUSY;
   } else {
     authority->waiting_writers++;
-    while (!authority->closing && !acquisition_cancelled (cancellable)
+    while (!authority->closing && !authority_unavailable_locked (authority)
+        && !acquisition_cancelled (cancellable)
         && (authority->writer_active || authority->active_readers > 0))
       g_cond_wait (&authority->changed, &authority->mutex);
     authority->waiting_writers--;
-    if (authority->closing || acquisition_cancelled (cancellable))
+    if (authority->closing || authority_unavailable_locked (authority)
+        || acquisition_cancelled (cancellable))
       rc = WYRELOG_E_BUSY;
     if (rc != WYRELOG_E_OK)
       g_cond_broadcast (&authority->changed);
@@ -381,6 +393,16 @@ validate_write_locked (WylServiceAuthWriteLease *lease, WylHandle *handle)
       : WYL_SERVICE_AUTH_RANK_COORDINATION);
 }
 
+static wyrelog_error_t
+validate_write_operation_locked (WylServiceAuthWriteLease *lease,
+    WylHandle *handle)
+{
+  wyrelog_error_t rc = validate_write_locked (lease, handle);
+  if (rc == WYRELOG_E_OK && lease->cleanup_only)
+    rc = WYRELOG_E_BUSY;
+  return rc;
+}
+
 wyrelog_error_t
 wyl_service_auth_read_lease_validate (WylServiceAuthReadLease *lease,
     WylHandle *handle)
@@ -406,6 +428,17 @@ wyl_service_auth_write_lease_validate (WylServiceAuthWriteLease *lease,
 }
 
 wyrelog_error_t
+    wyl_service_auth_write_lease_validate_operation
+    (WylServiceAuthWriteLease * lease, WylHandle * handle) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_operation_locked (lease, handle);
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_service_auth_write_lease_get_policy_store (WylServiceAuthWriteLease *lease,
     WylHandle *handle, wyl_policy_store_t **out_store)
 {
@@ -414,7 +447,7 @@ wyl_service_auth_write_lease_get_policy_store (WylServiceAuthWriteLease *lease,
   if (lease == NULL || !WYL_IS_HANDLE (handle) || out_store == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&lease->authority->mutex);
-  wyrelog_error_t rc = validate_write_locked (lease, handle);
+  wyrelog_error_t rc = validate_write_operation_locked (lease, handle);
   if (rc == WYRELOG_E_OK && lease->pinned_store == NULL)
     rc = WYRELOG_E_INVALID;
   if (rc == WYRELOG_E_OK)
@@ -424,12 +457,56 @@ wyl_service_auth_write_lease_get_policy_store (WylServiceAuthWriteLease *lease,
 }
 
 wyrelog_error_t
+    wyl_service_auth_write_lease_mark_unavailable
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    WylServiceAuthUnavailableReason reason) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle)
+      || reason < WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT
+      || reason > WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT)
+    return WYRELOG_E_INVALID;
+
+  WylServiceAuthAuthority *authority = lease->authority;
+  g_mutex_lock (&authority->mutex);
+  wyrelog_error_t rc = validate_write_locked (lease, handle);
+  if (rc == WYRELOG_E_OK && lease->cleanup_only)
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK && authority->closing)
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK) {
+    wyl_handle_service_auth_set_unavailable_reason_locked (handle, reason);
+    lease->cleanup_only = TRUE;
+    g_cond_broadcast (&authority->changed);
+  }
+  g_mutex_unlock (&authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_authority_validate_available
+    (WylServiceAuthAuthority * authority, WylHandle * handle,
+    WylServiceAuthUnavailableReason * out_reason) {
+  if (out_reason != NULL)
+    *out_reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (authority == NULL || !WYL_IS_HANDLE (handle) || out_reason == NULL
+      || authority->handle != handle)
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&authority->mutex);
+  *out_reason = wyl_handle_service_auth_unavailable_reason_locked (handle);
+  wyrelog_error_t rc = !authority->closing
+      && *out_reason == WYL_SERVICE_AUTH_UNAVAILABLE_NONE
+      ? WYRELOG_E_OK : WYRELOG_E_BUSY;
+  g_mutex_unlock (&authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_service_auth_write_lease_claim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle) {
   if (lease == NULL || !WYL_IS_HANDLE (handle))
     return WYRELOG_E_INVALID;
   g_mutex_lock (&lease->authority->mutex);
-  wyrelog_error_t rc = validate_write_locked (lease, handle);
+  wyrelog_error_t rc = validate_write_operation_locked (lease, handle);
   if (rc == WYRELOG_E_OK && lease->transaction_claimed)
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK)

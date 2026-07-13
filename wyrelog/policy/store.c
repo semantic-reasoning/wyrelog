@@ -2231,7 +2231,7 @@ wyrelog_error_t
       || txn->owner != g_thread_self () || !txn->owns_store_locks)
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc = wyl_service_auth_write_lease_validate
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
       (txn->write_lease, txn->handle);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (txn->store);
@@ -5320,7 +5320,8 @@ static wyrelog_error_t
       || !txn->owns_store_locks || !txn->owns_handle_pin
       || !g_atomic_int_get (&store->service_authority_transaction_active))
     return WYRELOG_E_INVALID;
-  return WYRELOG_E_OK;
+  return wyl_service_auth_write_lease_validate_operation (txn->write_lease,
+      txn->handle);
 }
 
 void wyl_policy_store_service_lifecycle_fail_commit_once

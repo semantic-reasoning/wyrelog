@@ -11,6 +11,14 @@ typedef struct _WylServiceAuthReadLease WylServiceAuthReadLease;
 typedef struct _WylServiceAuthWriteLease WylServiceAuthWriteLease;
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
+/* Stable process-lifetime diagnosis for the monotonic handle latch. */
+typedef enum
+{
+  WYL_SERVICE_AUTH_UNAVAILABLE_NONE = 0,
+  WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT = 1,
+  WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT = 2,
+} WylServiceAuthUnavailableReason;
+
 typedef enum
 {
   WYL_SERVICE_AUTH_RANK_COORDINATION = 1,
@@ -58,10 +66,24 @@ wyrelog_error_t wyl_service_auth_read_lease_validate
     (WylServiceAuthReadLease * lease, WylHandle * handle);
 wyrelog_error_t wyl_service_auth_write_lease_validate
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
+/* Rejects a live WRITE lease after it has entered cleanup-only mode. */
+wyrelog_error_t wyl_service_auth_write_lease_validate_operation
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
 /* Borrowed for the lifetime of a valid lease; the lease owns the store pin. */
 wyrelog_error_t wyl_service_auth_write_lease_get_policy_store
     (WylServiceAuthWriteLease * lease, WylHandle * handle,
     wyl_policy_store_t ** out_store);
+/*
+ * Monotonically fails closed the service branch. Only the current owner of an
+ * ACTIVE same-handle WRITE lease may set it; the first valid reason wins.
+ */
+wyrelog_error_t wyl_service_auth_write_lease_mark_unavailable
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    WylServiceAuthUnavailableReason reason);
+/* Typed successor seam for resolver, activation and exchange entry checks. */
+wyrelog_error_t wyl_service_auth_authority_validate_available
+    (WylServiceAuthAuthority * authority, WylHandle * handle,
+    WylServiceAuthUnavailableReason * out_reason);
 /*
  * A store authority transaction claims a live WRITE lease for its complete
  * lifetime. These helpers are private to that transaction implementation.

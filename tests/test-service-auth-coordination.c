@@ -1,4 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#include <string.h>
+
 #include <glib.h>
 #include <sqlite3.h>
 
@@ -476,6 +478,279 @@ test_handle_shutdown_wakes_queued_leases_and_drains_pins (void)
   lease_thread_clear (&reader);
 }
 
+typedef struct
+{
+  WylServiceAuthWriteLease *lease;
+  WylHandle *handle;
+  WylServiceAuthUnavailableReason reason;
+  wyrelog_error_t rc;
+} UnavailableSetterThread;
+
+static gpointer
+unavailable_setter_thread (gpointer data)
+{
+  UnavailableSetterThread *setter = data;
+  setter->rc = wyl_service_auth_write_lease_mark_unavailable (setter->lease,
+      setter->handle, setter->reason);
+  return NULL;
+}
+
+static void
+test_unavailable_latch_validation_wakes_waiters_and_first_reason_wins (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (WylHandle) other = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthWriteLease *owner = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
+          handle, NULL, &owner), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (NULL,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (owner,
+          other, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (owner,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_NONE), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (owner,
+          handle, 99), ==, WYRELOG_E_INVALID);
+  WylServiceAuthUnavailableReason invalid_reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          other, &invalid_reason), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (invalid_reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, NULL), ==, WYRELOG_E_INVALID);
+
+  UnavailableSetterThread wrong_thread = {
+    owner,
+    handle,
+    WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT,
+    WYRELOG_E_OK,
+  };
+  g_autoptr (GThread) wrong = g_thread_new ("wrong-unavailable-owner",
+      unavailable_setter_thread, &wrong_thread);
+  g_thread_join (g_steal_pointer (&wrong));
+  g_assert_cmpint (wrong_thread.rc, ==, WYRELOG_E_INVALID);
+
+  LeaseThread reader = { 0 };
+  LeaseThread writer = { 0 };
+  lease_thread_init (&reader, authority, handle);
+  lease_thread_init (&writer, authority, handle);
+  g_autoptr (GThread) queued_reader = g_thread_new ("unavailable-reader",
+      reader_thread, &reader);
+  g_autoptr (GThread) queued_writer = g_thread_new ("unavailable-writer",
+      writer_thread, &writer);
+  wait_for_snapshot (authority, reader_is_waiting_behind_writer);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (owner,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (owner,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT), ==,
+      WYRELOG_E_BUSY);
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+  g_thread_join (g_steal_pointer (&queued_reader));
+  g_thread_join (g_steal_pointer (&queued_writer));
+  g_assert_cmpint (reader.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_BUSY);
+
+  /* The owner remains valid solely to finish cleanup and release. */
+  g_assert_cmpint (wyl_service_auth_write_lease_validate (owner, handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_validate_operation (owner,
+          handle), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (owner), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (owner);
+
+  WylServiceAuthReadLease *new_reader = NULL;
+  WylServiceAuthWriteLease *new_writer = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &new_reader), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
+          handle, NULL, &new_writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (new_reader);
+  g_assert_null (new_writer);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+  lease_thread_clear (&writer);
+  lease_thread_clear (&reader);
+}
+
+typedef struct
+{
+  WylServiceAuthAuthority *authority;
+  WylHandle *handle;
+  wyrelog_error_t acquire_rc;
+  wyrelog_error_t mark_rc;
+} MarkAfterRead;
+
+static gpointer
+mark_after_read_thread (gpointer data)
+{
+  MarkAfterRead *mark = data;
+  WylServiceAuthWriteLease *lease = NULL;
+  mark->acquire_rc = wyl_service_auth_authority_acquire_write
+      (mark->authority, mark->handle, NULL, &lease);
+  if (mark->acquire_rc == WYRELOG_E_OK) {
+    mark->mark_rc = wyl_service_auth_write_lease_mark_unavailable (lease,
+        mark->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT);
+    g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+        WYRELOG_E_OK);
+    wyl_service_auth_write_lease_free (lease);
+  }
+  return NULL;
+}
+
+static void
+test_unavailable_latch_serializes_after_acquired_read (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthReadLease *reader = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &reader), ==, WYRELOG_E_OK);
+
+  MarkAfterRead mark = {
+    authority,
+    handle,
+    WYRELOG_E_INTERNAL,
+    WYRELOG_E_INTERNAL,
+  };
+  g_autoptr (GThread) marker = g_thread_new ("mark-after-read",
+      mark_after_read_thread, &mark);
+  wait_for_snapshot (authority, writer_is_waiting);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_read_lease_release (reader), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_read_lease_free (reader);
+  g_thread_join (g_steal_pointer (&marker));
+  g_assert_cmpint (mark.acquire_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (mark.mark_rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT);
+}
+
+typedef struct
+{
+  guint fill_random_calls;
+} UnavailableCoreRuntime;
+
+static int
+unavailable_core_fill_random (gpointer data, guint8 *out, gsize len)
+{
+  UnavailableCoreRuntime *runtime = data;
+  runtime->fill_random_calls++;
+  memset (out, 0x5a, len);
+  return 0;
+}
+
+static void
+    test_unavailable_latch_rejects_active_transaction_core_before_side_effects
+    (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+
+  const gchar *tables[] = {
+    "service_principals",
+    "service_credentials",
+    "service_principal_events",
+    "service_credential_events",
+    "service_domain_requests",
+    "audit_events",
+  };
+  gint64 before[G_N_ELEMENTS (tables)];
+  for (guint i = 0; i < G_N_ELEMENTS (tables); i++) {
+    g_autofree gchar *sql = g_strdup_printf ("SELECT count(*) FROM %s;",
+        tables[i]);
+    before[i] = sqlite_scalar (db, sql);
+  }
+
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (lease,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+      WYRELOG_E_OK);
+  UnavailableCoreRuntime runtime_state = { 0 };
+  wyl_service_credential_runtime_t runtime = {
+    .fill_random = unavailable_core_fill_random,
+    .data = &runtime_state,
+  };
+  guint8 cvk[WYL_SERVICE_CREDENTIAL_CVK_BYTES] = { 0 };
+  wyl_policy_service_credential_info_t credential = { 0 };
+  wyl_service_credential_secret_t *secret = NULL;
+  g_assert_cmpint (wyl_policy_store_issue_service_credential_core (txn,
+          store, "svc:unavailable:core", "__wr_default", "admin",
+          "unavailable-core", 0, &runtime, cvk, sizeof cvk, &credential,
+          &secret), ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (runtime_state.fill_random_calls, ==, 0);
+  g_assert_null (credential.credential_id);
+  g_assert_null (secret);
+  for (guint i = 0; i < G_N_ELEMENTS (tables); i++) {
+    g_autofree gchar *sql = g_strdup_printf ("SELECT count(*) FROM %s;",
+        tables[i]);
+    g_assert_cmpint (sqlite_scalar (db, sql), ==, before[i]);
+  }
+
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_unavailable_latch_fresh_handle_and_close_interaction (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthUnavailableReason reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_OK);
+  g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+
+  WylServiceAuthWriteLease *owner = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
+          handle, NULL, &owner), ==, WYRELOG_E_OK);
+  HandleShutdownThread shutdown = { handle, WYRELOG_E_INTERNAL };
+  g_autoptr (GThread) closer = g_thread_new ("close-before-unavailable",
+      handle_shutdown_thread, &shutdown);
+  wait_for_snapshot (authority, authority_is_closing);
+  g_assert_cmpint (wyl_service_auth_write_lease_mark_unavailable (owner,
+          handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
+      WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (owner), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (owner);
+  g_thread_join (g_steal_pointer (&closer));
+  g_assert_cmpint (shutdown.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+}
+
 static void
 test_authority_transaction_commit_and_claim (void)
 {
@@ -910,6 +1185,14 @@ main (int argc, char **argv)
       test_close_wakes_and_drains);
   g_test_add_func ("/service-auth/authority/handle-shutdown-drains-pins",
       test_handle_shutdown_wakes_queued_leases_and_drains_pins);
+  g_test_add_func ("/service-auth/unavailable/validation-waiters-first-reason",
+      test_unavailable_latch_validation_wakes_waiters_and_first_reason_wins);
+  g_test_add_func ("/service-auth/unavailable/acquired-read-race",
+      test_unavailable_latch_serializes_after_acquired_read);
+  g_test_add_func ("/service-auth/unavailable/active-txn-core-no-side-effects",
+      test_unavailable_latch_rejects_active_transaction_core_before_side_effects);
+  g_test_add_func ("/service-auth/unavailable/fresh-handle-close",
+      test_unavailable_latch_fresh_handle_and_close_interaction);
   g_test_add_func ("/service-auth/transaction/commit-claim",
       test_authority_transaction_commit_and_claim);
   g_test_add_func ("/service-auth/transaction/rollback-cleanup",

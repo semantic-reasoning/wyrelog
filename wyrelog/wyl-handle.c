@@ -85,6 +85,7 @@ struct _WylHandle
   void (*policy_store_pin_checkpoint) (gpointer data);
   gpointer policy_store_pin_checkpoint_data;
   WylServiceAuthAuthority *service_auth_authority;
+  WylServiceAuthUnavailableReason service_auth_unavailable_reason;
 #ifdef WYL_HAS_FACT_STORE
   GHashTable *fact_graph_engines;
   GHashTable *fact_graph_statuses;
@@ -142,6 +143,25 @@ wyl_handle_get_service_auth_authority (WylHandle *self)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
   return self->service_auth_authority;
+}
+
+WylServiceAuthUnavailableReason
+wyl_handle_service_auth_unavailable_reason_locked (WylHandle *self)
+{
+  g_return_val_if_fail (WYL_IS_HANDLE (self),
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+  return self->service_auth_unavailable_reason;
+}
+
+void
+wyl_handle_service_auth_set_unavailable_reason_locked (WylHandle *self,
+    WylServiceAuthUnavailableReason reason)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_return_if_fail (reason > WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+  if (self->service_auth_unavailable_reason ==
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    self->service_auth_unavailable_reason = reason;
 }
 
 static void
