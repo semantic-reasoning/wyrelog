@@ -536,6 +536,208 @@ CREATE TABLE IF NOT EXISTS fact_relation_query_allowlist (
 );
 
 -- ---------------------------------------------------------------------------
+-- Inert service identity and credential authority (#353).
+-- No row in these tables is seeded by the schema.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS service_principals (
+    subject_id TEXT NOT NULL PRIMARY KEY CHECK (
+        length(subject_id) BETWEEN 5 AND 128
+        AND instr(subject_id, char(0)) = 0
+        AND substr(subject_id, 1, 4) = 'svc:'
+        AND substr(subject_id, 5, 1) GLOB '[A-Za-z0-9]'
+        AND substr(subject_id, -1, 1) GLOB '[A-Za-z0-9]'
+        AND subject_id NOT GLOB '*[^-A-Za-z0-9._:]*'
+        AND subject_id NOT GLOB '*:[^A-Za-z0-9]*'
+        AND subject_id NOT GLOB '*[^A-Za-z0-9]:*'
+    ),
+    display_name   TEXT    NOT NULL CHECK (length(display_name) BETWEEN 1 AND 256),
+    state          TEXT    NOT NULL CHECK (state IN ('active', 'disabled')),
+    generation     INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+    created_by     TEXT    NOT NULL CHECK (length(created_by) BETWEEN 1 AND 128),
+    created_at_us  INTEGER NOT NULL CHECK (created_at_us > 0),
+    updated_at_us  INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),
+    disabled_by    TEXT,
+    disabled_at_us INTEGER,
+    CHECK (disabled_by IS NULL OR length(disabled_by) BETWEEN 1 AND 128),
+    CHECK (
+        (state = 'active' AND disabled_by IS NULL AND disabled_at_us IS NULL)
+        OR (state = 'disabled' AND disabled_by IS NOT NULL
+            AND disabled_at_us IS NOT NULL
+            AND disabled_at_us >= created_at_us)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_principals_state_subject
+    ON service_principals (state, subject_id);
+
+CREATE TABLE IF NOT EXISTS service_credential_cvk (
+    slot                    INTEGER PRIMARY KEY CHECK (slot = 1),
+    generation              INTEGER NOT NULL UNIQUE CHECK (generation >= 1),
+    envelope_format_version INTEGER NOT NULL CHECK (envelope_format_version >= 1),
+    provider_binding        BLOB    NOT NULL CHECK (
+        typeof(provider_binding) = 'blob' AND length(provider_binding) = 32),
+    sealed_cvk              BLOB    NOT NULL CHECK (
+        typeof(sealed_cvk) = 'blob' AND length(sealed_cvk) BETWEEN 1 AND 65536),
+    created_at_us           INTEGER NOT NULL CHECK (created_at_us > 0),
+    updated_at_us           INTEGER NOT NULL CHECK (updated_at_us >= created_at_us)
+);
+
+CREATE TABLE IF NOT EXISTS service_credentials (
+    credential_id             TEXT    NOT NULL PRIMARY KEY CHECK (
+        length(credential_id) BETWEEN 1 AND 128
+        AND instr(credential_id, char(0)) = 0),
+    credential_format_version INTEGER NOT NULL CHECK (credential_format_version >= 1),
+    subject_id                TEXT    NOT NULL,
+    tenant_id                 TEXT    NOT NULL,
+    generation                INTEGER NOT NULL DEFAULT 1 CHECK (generation >= 1),
+    state                     TEXT    NOT NULL CHECK (state IN ('active', 'revoked')),
+    verifier_version          INTEGER NOT NULL CHECK (verifier_version >= 1),
+    salt                      BLOB    NOT NULL CHECK (
+        typeof(salt) = 'blob' AND length(salt) = 16),
+    verifier                  BLOB    NOT NULL CHECK (
+        typeof(verifier) = 'blob' AND length(verifier) = 32),
+    created_by                TEXT    NOT NULL CHECK (length(created_by) BETWEEN 1 AND 128),
+    created_at_us             INTEGER NOT NULL CHECK (created_at_us > 0),
+    updated_at_us             INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),
+    expires_at_us             INTEGER CHECK (expires_at_us IS NULL OR expires_at_us > created_at_us),
+    last_used_at_us           INTEGER CHECK (last_used_at_us IS NULL OR last_used_at_us >= created_at_us),
+    revoked_by                TEXT,
+    revoked_at_us             INTEGER,
+    rotated_from_id           TEXT,
+    CHECK (revoked_by IS NULL OR length(revoked_by) BETWEEN 1 AND 128),
+    UNIQUE (credential_id, subject_id, tenant_id),
+    UNIQUE (rotated_from_id),
+    FOREIGN KEY (subject_id) REFERENCES service_principals (subject_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (tenant_id) REFERENCES tenants (tenant_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (rotated_from_id, subject_id, tenant_id)
+        REFERENCES service_credentials (credential_id, subject_id, tenant_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (rotated_from_id IS NULL OR rotated_from_id <> credential_id),
+    CHECK (
+        (state = 'active' AND revoked_by IS NULL AND revoked_at_us IS NULL)
+        OR (state = 'revoked' AND revoked_by IS NOT NULL
+            AND revoked_at_us IS NOT NULL AND revoked_at_us >= created_at_us)
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_credentials_subject_tenant_state
+    ON service_credentials (subject_id, tenant_id, state);
+CREATE INDEX IF NOT EXISTS idx_service_credentials_tenant_state_expiry
+    ON service_credentials (tenant_id, state, expires_at_us);
+
+CREATE TABLE IF NOT EXISTS service_principal_events (
+    event_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    subject_id       TEXT    NOT NULL,
+    event            TEXT    NOT NULL CHECK (event IN ('created', 'disabled')),
+    from_state       TEXT    CHECK (from_state IS NULL OR from_state IN ('active', 'disabled')),
+    to_state         TEXT    NOT NULL CHECK (to_state IN ('active', 'disabled')),
+    generation       INTEGER NOT NULL CHECK (generation >= 1),
+    actor_subject_id TEXT    NOT NULL CHECK (
+        length(actor_subject_id) BETWEEN 1 AND 128),
+    request_id       TEXT,
+    created_at_us    INTEGER NOT NULL CHECK (created_at_us > 0),
+    FOREIGN KEY (subject_id) REFERENCES service_principals (subject_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (
+        (event = 'created' AND from_state IS NULL AND to_state = 'active')
+        OR (event = 'disabled' AND from_state = 'active'
+            AND to_state = 'disabled')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_principal_events_subject_time
+    ON service_principal_events (subject_id, created_at_us, event_id);
+CREATE INDEX IF NOT EXISTS idx_service_principal_events_request
+    ON service_principal_events (request_id);
+
+CREATE TABLE IF NOT EXISTS service_credential_events (
+    event_id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id         TEXT    NOT NULL,
+    subject_id            TEXT    NOT NULL,
+    tenant_id             TEXT    NOT NULL,
+    event                 TEXT    NOT NULL CHECK (event IN ('issued', 'rotated', 'revoked')),
+    from_state            TEXT    CHECK (from_state IS NULL OR from_state IN ('active', 'revoked')),
+    to_state              TEXT    NOT NULL CHECK (to_state IN ('active', 'revoked')),
+    generation            INTEGER NOT NULL CHECK (generation >= 1),
+    actor_subject_id      TEXT    NOT NULL CHECK (
+        length(actor_subject_id) BETWEEN 1 AND 128),
+    request_id            TEXT,
+    related_credential_id TEXT,
+    created_at_us         INTEGER NOT NULL CHECK (created_at_us > 0),
+    FOREIGN KEY (credential_id, subject_id, tenant_id)
+        REFERENCES service_credentials (credential_id, subject_id, tenant_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    FOREIGN KEY (related_credential_id, subject_id, tenant_id)
+        REFERENCES service_credentials (credential_id, subject_id, tenant_id)
+        ON UPDATE RESTRICT ON DELETE RESTRICT,
+    CHECK (
+        (event IN ('issued', 'rotated') AND from_state IS NULL
+            AND to_state = 'active')
+        OR (event = 'revoked' AND from_state = 'active'
+            AND to_state = 'revoked')
+    )
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_credential_events_credential_time
+    ON service_credential_events (credential_id, created_at_us, event_id);
+CREATE INDEX IF NOT EXISTS idx_service_credential_events_owner_time
+    ON service_credential_events (subject_id, tenant_id, created_at_us, event_id);
+CREATE INDEX IF NOT EXISTS idx_service_credential_events_request
+    ON service_credential_events (request_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable
+BEFORE UPDATE ON service_principals
+WHEN OLD.subject_id IS NOT NEW.subject_id
+    OR OLD.created_by IS NOT NEW.created_by
+    OR OLD.created_at_us IS NOT NEW.created_at_us
+BEGIN
+    SELECT RAISE(ABORT, 'service principal identity is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credentials_identity_immutable
+BEFORE UPDATE ON service_credentials
+WHEN OLD.credential_id IS NOT NEW.credential_id
+    OR OLD.credential_format_version IS NOT NEW.credential_format_version
+    OR OLD.subject_id IS NOT NEW.subject_id
+    OR OLD.tenant_id IS NOT NEW.tenant_id
+    OR OLD.verifier_version IS NOT NEW.verifier_version
+    OR OLD.salt IS NOT NEW.salt
+    OR OLD.verifier IS NOT NEW.verifier
+    OR OLD.created_by IS NOT NEW.created_by
+    OR OLD.created_at_us IS NOT NEW.created_at_us
+    OR OLD.expires_at_us IS NOT NEW.expires_at_us
+    OR OLD.rotated_from_id IS NOT NEW.rotated_from_id
+BEGIN
+    SELECT RAISE(ABORT, 'service credential identity is immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_principal_events_no_update
+BEFORE UPDATE ON service_principal_events
+BEGIN
+    SELECT RAISE(ABORT, 'service principal events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_principal_events_no_delete
+BEFORE DELETE ON service_principal_events
+BEGIN
+    SELECT RAISE(ABORT, 'service principal events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_events_no_update
+BEFORE UPDATE ON service_credential_events
+BEGIN
+    SELECT RAISE(ABORT, 'service credential events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_events_no_delete
+BEFORE DELETE ON service_credential_events
+BEGIN
+    SELECT RAISE(ABORT, 'service credential events are append-only');
+END;
+
+-- ---------------------------------------------------------------------------
 -- Table: policy_signatures
 -- Ed25519 signatures over policy snapshots, authored by security_officer.
 -- Each policy version is immutably signed; versions are monotonically
