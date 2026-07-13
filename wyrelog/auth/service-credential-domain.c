@@ -236,3 +236,51 @@ wyl_service_credential_foreach (WylHandle *handle, const gchar *subject_id,
       (wyl_handle_get_policy_store (handle), subject_id, tenant_id,
       foreach_credential_adapter, &foreach);
 }
+
+wyrelog_error_t
+wyl_service_credential_verify_authoritative_with_runtime (WylHandle *handle,
+    const gchar *credential_id, const gchar *presented_secret,
+    gsize presented_secret_len,
+    const wyl_service_credential_verify_runtime_t *runtime,
+    gboolean *out_authenticated)
+{
+  if (out_authenticated != NULL)
+    *out_authenticated = FALSE;
+  if (handle == NULL || out_authenticated == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_policy_store_verify_service_credential_by_id
+      (wyl_handle_get_policy_store (handle), credential_id, presented_secret,
+      presented_secret_len, runtime != NULL ? runtime->before_gate : NULL,
+      runtime != NULL ? runtime->now_us : NULL,
+      runtime != NULL ? runtime->data : NULL,
+      runtime != NULL ? runtime->credential_runtime : NULL, out_authenticated);
+}
+
+wyrelog_error_t
+wyl_service_credential_verify_authoritative (WylHandle *handle,
+    const gchar *credential_id, const gchar *presented_secret,
+    gsize presented_secret_len, gboolean *out_authenticated)
+{
+  return wyl_service_credential_verify_authoritative_with_runtime (handle,
+      credential_id, presented_secret, presented_secret_len, NULL,
+      out_authenticated);
+}
+
+wyrelog_error_t
+wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
+    const gchar *actor_subject_id, const gchar *request_id,
+    wyl_service_credential_t *out)
+{
+  if (out != NULL)
+    wyl_service_credential_clear (out);
+  if (handle == NULL || out == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_policy_service_credential_info_t stored = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_revoke_service_credential
+      (wyl_handle_get_policy_store (handle), credential_id, actor_subject_id,
+      request_id, &stored);
+  if (rc == WYRELOG_E_OK)
+    copy_credential (&stored, out);
+  wyl_policy_service_credential_info_clear (&stored);
+  return rc;
+}
