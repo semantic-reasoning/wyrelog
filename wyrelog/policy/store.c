@@ -70,6 +70,14 @@ typedef struct
 
 G_STATIC_ASSERT (WYL_POLICY_STORE_MAGIC_LEN == 5);
 
+typedef struct
+{
+  wyl_keyprovider_vtable_t vtable;
+  gpointer state;
+  void (*state_free) (gpointer state);
+  gboolean owned;
+} WylOwnedKeyProvider;
+
 struct wyl_policy_store_t
 {
   sqlite3 *db;
@@ -86,8 +94,12 @@ struct wyl_policy_store_t
   gchar *work_basename;
   guint8 encryption_key[WYL_POLICY_STORE_KEY_LEN];
   guint8 encryption_key_id[WYL_POLICY_STORE_KEY_ID_LEN];
+  WylOwnedKeyProvider keyprovider;
+  /* Provider retired by rotation and released during ordered store close. */
+  WylOwnedKeyProvider rotation_cleanup_keyprovider;
   gboolean encrypted;
   gboolean key_materialized;
+  gboolean suppress_close_persist;
 };
 
 typedef struct
@@ -625,30 +637,82 @@ policy_store_zero_key_material (wyl_policy_store_t *store)
   store->key_materialized = FALSE;
 }
 
-static wyrelog_error_t
-cleanup_keyprovider_state (const wyl_policy_store_open_options_t *opts)
+static void
+owned_keyprovider_release (WylOwnedKeyProvider *provider)
 {
-  if (opts == NULL)
+  if (provider == NULL || !provider->owned)
+    return;
+  gpointer state = provider->state;
+  void (*wipe) (gpointer state) = provider->vtable.wipe;
+  void (*state_free) (gpointer state) = provider->state_free;
+  memset (provider, 0, sizeof *provider);
+  if (state != NULL && wipe != NULL)
+    wipe (state);
+  if (state != NULL && state_free != NULL)
+    state_free (state);
+}
+
+static void
+owned_keyprovider_adopt (WylOwnedKeyProvider *provider,
+    const wyl_policy_store_open_options_t *opts)
+{
+  g_return_if_fail (provider != NULL);
+  g_return_if_fail (opts != NULL);
+  owned_keyprovider_release (provider);
+  if (opts->keyprovider_vtable == NULL && opts->keyprovider_state == NULL
+      && opts->keyprovider_state_free == NULL)
+    return;
+  if (opts->keyprovider_vtable != NULL)
+    provider->vtable = *opts->keyprovider_vtable;
+  provider->state = opts->keyprovider_state;
+  provider->state_free = opts->keyprovider_state_free;
+  provider->owned = TRUE;
+}
+
+static void
+owned_keyprovider_move (WylOwnedKeyProvider *destination,
+    WylOwnedKeyProvider *source)
+{
+  g_return_if_fail (destination != NULL);
+  g_return_if_fail (source != NULL);
+  if (destination == source)
+    return;
+  owned_keyprovider_release (destination);
+  *destination = *source;
+  memset (source, 0, sizeof *source);
+}
+
+static wyrelog_error_t
+owned_keyprovider_validate (const WylOwnedKeyProvider *provider)
+{
+  if (provider == NULL)
     return WYRELOG_E_INVALID;
-
-  if (opts->keyprovider_vtable != NULL && opts->keyprovider_vtable->wipe != NULL
-      && opts->keyprovider_state != NULL) {
-    opts->keyprovider_vtable->wipe (opts->keyprovider_state);
-  }
-  if (opts->keyprovider_state_free != NULL && opts->keyprovider_state != NULL)
-    opts->keyprovider_state_free (opts->keyprovider_state);
-
+  if (!provider->owned)
+    return WYRELOG_E_OK;
+  if (provider->state == NULL || provider->vtable.probe == NULL
+      || provider->vtable.seal == NULL || provider->vtable.unseal == NULL
+      || provider->vtable.derive == NULL || provider->vtable.wipe == NULL
+      || provider->vtable.clear_sealed_blob == NULL)
+    return WYRELOG_E_INVALID;
   return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
-materialize_store_key (wyl_policy_store_t *store,
-    const wyl_policy_store_open_options_t *opts)
+owned_keyprovider_probe (WylOwnedKeyProvider *provider)
 {
-  if (store == NULL || opts == NULL)
+  if (provider == NULL || !provider->owned)
+    return WYRELOG_E_OK;
+  return provider->vtable.probe (provider->state);
+}
+
+static wyrelog_error_t
+materialize_store_key (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *provider, gboolean require_encrypted)
+{
+  if (store == NULL || provider == NULL)
     return WYRELOG_E_INVALID;
 
-  if (!opts->require_encrypted) {
+  if (!require_encrypted) {
     store->encrypted = FALSE;
     store->key_materialized = FALSE;
     return WYRELOG_E_OK;
@@ -657,19 +721,9 @@ materialize_store_key (wyl_policy_store_t *store,
   if (sodium_init () < 0)
     return WYRELOG_E_CRYPTO;
 
-  if (opts->keyprovider_vtable == NULL || opts->keyprovider_state == NULL)
+  if (!provider->owned)
     return WYRELOG_E_POLICY;
-
-  if (opts->keyprovider_vtable->probe == NULL
-      || opts->keyprovider_vtable->derive == NULL)
-    return WYRELOG_E_INTERNAL;
-
-  if (opts->keyprovider_vtable->probe (opts->keyprovider_state)
-      != WYRELOG_E_OK)
-    return WYRELOG_E_CRYPTO;
-
-  wyrelog_error_t rc =
-      opts->keyprovider_vtable->derive (opts->keyprovider_state,
+  wyrelog_error_t rc = provider->vtable.derive (provider->state,
       WYL_POLICY_STORE_ENCRYPTION_LABEL, store->encryption_key,
       WYL_POLICY_STORE_KEY_LEN);
   if (rc != WYRELOG_E_OK)
@@ -1602,6 +1656,12 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
 {
   if (path == NULL || path[0] == '\0' || old_opts == NULL || new_opts == NULL)
     return WYRELOG_E_INVALID;
+  if (old_opts->keyprovider_state != NULL
+      && old_opts->keyprovider_state == new_opts->keyprovider_state)
+    return WYRELOG_E_INVALID;
+
+  WylOwnedKeyProvider new_provider = { 0 };
+  owned_keyprovider_adopt (&new_provider, new_opts);
 
   wyl_policy_store_open_options_t open_opts = *old_opts;
   open_opts.path = path;
@@ -1609,24 +1669,28 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
 
   wyl_policy_store_t *store = NULL;
   wyrelog_error_t rc = wyl_policy_store_open_with_options (&open_opts, &store);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    owned_keyprovider_release (&new_provider);
     return rc;
+  }
 
   guint8 old_key[WYL_POLICY_STORE_KEY_LEN];
   guint8 old_key_id[WYL_POLICY_STORE_KEY_ID_LEN];
   memcpy (old_key, store->encryption_key, sizeof old_key);
   memcpy (old_key_id, store->encryption_key_id, sizeof old_key_id);
 
-  wyl_policy_store_open_options_t rotate_opts = *new_opts;
-  rotate_opts.path = path;
-  rotate_opts.require_encrypted = TRUE;
-
   rc = wyl_policy_store_create_schema (store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (store);
   if (rc == WYRELOG_E_OK)
-    rc = materialize_store_key (store, &rotate_opts);
-  (void) cleanup_keyprovider_state (&rotate_opts);
+    rc = owned_keyprovider_validate (&new_provider);
+  if (rc == WYRELOG_E_OK && !new_provider.owned)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && owned_keyprovider_probe (&new_provider) != WYRELOG_E_OK)
+    rc = WYRELOG_E_CRYPTO;
+  if (rc == WYRELOG_E_OK)
+    rc = materialize_store_key (store, &new_provider, TRUE);
 
   if (rc == WYRELOG_E_OK)
     rc = persist_policy_store_encrypted (store);
@@ -1635,6 +1699,16 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
     memcpy (store->encryption_key, old_key, sizeof old_key);
     memcpy (store->encryption_key_id, old_key_id, sizeof old_key_id);
     store->key_materialized = TRUE;
+    owned_keyprovider_move (&store->rotation_cleanup_keyprovider,
+        &new_provider);
+  } else {
+    /* The explicit successful persist above is the authoritative rotation
+     * write. Close must not perform a second, unchecked persist. Provider
+     * callbacks are deferred until close has finished with the work DB. */
+    store->suppress_close_persist = TRUE;
+    owned_keyprovider_move (&store->rotation_cleanup_keyprovider,
+        &store->keyprovider);
+    owned_keyprovider_move (&store->keyprovider, &new_provider);
   }
 
   sodium_memzero (old_key, sizeof old_key);
@@ -1656,20 +1730,17 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     effective_path = ":memory:";
 
   wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
+  owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
   self->canonical_path = g_strdup (effective_path);
   self->canonical_dirfd = -1;
+  wyrelog_error_t rc = WYRELOG_E_OK;
 
-  gboolean provider_backed = opts->require_encrypted
-      || (opts->keyprovider_vtable != NULL && opts->keyprovider_state != NULL);
+  gboolean provider_backed = opts->require_encrypted || self->keyprovider.owned;
   if (!path_is_memory_db (effective_path) && provider_backed) {
-    wyrelog_error_t lease_rc = wyl_policy_store_lease_acquire (effective_path,
-        &self->lease);
-    if (lease_rc != WYRELOG_E_OK) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return lease_rc;
-    }
+    rc = wyl_policy_store_lease_acquire (effective_path, &self->lease);
+    if (rc != WYRELOG_E_OK)
+      goto fail;
     g_free (self->canonical_path);
     self->canonical_path =
         g_strdup (wyl_policy_store_lease_resolved_path (self->lease));
@@ -1680,18 +1751,24 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 #endif
   }
 
-  const gchar *open_path = effective_path;
+  rc = owned_keyprovider_validate (&self->keyprovider);
+  if (rc != WYRELOG_E_OK)
+    goto fail;
+  if (opts->require_encrypted && !self->keyprovider.owned) {
+    rc = WYRELOG_E_POLICY;
+    goto fail;
+  }
+
+  const gchar *open_path = self->lease != NULL ? self->canonical_path :
+      effective_path;
   if (self->encrypted) {
     if (path_is_memory_db (effective_path)) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return WYRELOG_E_POLICY;
+      rc = WYRELOG_E_POLICY;
+      goto fail;
     }
 
     self->work_path = g_strdup_printf ("%s%s",
         self->canonical_path, WYL_POLICY_STORE_CLEAR_SUFFIX);
-
-    wyrelog_error_t rc;
 
 #ifndef G_OS_WIN32
     /* The lease owns the retained parent dirfd used by Wyrelog's encrypted
@@ -1709,20 +1786,18 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
      * not an error here; the subsequent read_whole_file call will see
      * the same ENOENT and route through the create-new path. */
     rc = reject_reparse_point_win32 (self->canonical_path);
-    if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return rc;
-    }
+    if (rc != WYRELOG_E_OK && rc != WYRELOG_E_NOT_FOUND)
+      goto fail;
     (void) g_remove (self->work_path);
 #endif
 
-    rc = materialize_store_key (self, opts);
-    if (rc != WYRELOG_E_OK) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return rc;
+    if (owned_keyprovider_probe (&self->keyprovider) != WYRELOG_E_OK) {
+      rc = WYRELOG_E_CRYPTO;
+      goto fail;
     }
+    rc = materialize_store_key (self, &self->keyprovider, TRUE);
+    if (rc != WYRELOG_E_OK)
+      goto fail;
 
 #ifndef G_OS_WIN32
     {
@@ -1733,17 +1808,12 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
       if (rc == WYRELOG_E_OK) {
         rc = decrypt_policy_store_from_bytes (self, canonical_bytes,
             canonical_len);
-        if (rc != WYRELOG_E_OK) {
-          cleanup_keyprovider_state (opts);
-          wyl_policy_store_close (self);
-          return rc;
-        }
+        if (rc != WYRELOG_E_OK)
+          goto fail;
       } else if (rc == WYRELOG_E_NOT_FOUND) {
         /* Fresh store: fall through and let sqlite3 create the work db. */
       } else {
-        cleanup_keyprovider_state (opts);
-        wyl_policy_store_close (self);
-        return rc;
+        goto fail;
       }
     }
 #else
@@ -1755,37 +1825,31 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
       if (rc == WYRELOG_E_OK) {
         rc = decrypt_policy_store_from_bytes (self, canonical_bytes,
             canonical_len);
-        if (rc != WYRELOG_E_OK) {
-          cleanup_keyprovider_state (opts);
-          wyl_policy_store_close (self);
-          return rc;
-        }
+        if (rc != WYRELOG_E_OK)
+          goto fail;
       } else if (rc == WYRELOG_E_NOT_FOUND) {
         /* Fresh store: fall through and let sqlite3 create the work db. */
       } else {
-        cleanup_keyprovider_state (opts);
-        wyl_policy_store_close (self);
-        return rc;
+        goto fail;
       }
     }
 #endif
     open_path = self->work_path;
   } else {
-    wyrelog_error_t rc = materialize_store_key (self, opts);
-    if (rc != WYRELOG_E_OK) {
-      cleanup_keyprovider_state (opts);
-      wyl_policy_store_close (self);
-      return rc;
+    if (self->keyprovider.owned
+        && owned_keyprovider_probe (&self->keyprovider) != WYRELOG_E_OK) {
+      rc = WYRELOG_E_CRYPTO;
+      goto fail;
     }
-    if (self->lease != NULL)
-      open_path = self->canonical_path;
+    rc = materialize_store_key (self, &self->keyprovider, FALSE);
+    if (rc != WYRELOG_E_OK)
+      goto fail;
   }
 
   if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)
       != WYRELOG_E_OK) {
-    cleanup_keyprovider_state (opts);
-    wyl_policy_store_close (self);
-    return WYRELOG_E_POLICY;
+    rc = WYRELOG_E_POLICY;
+    goto fail;
   }
 
   if (sqlite3_open_v2 (open_path, &self->db,
@@ -1794,32 +1858,32 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     if (self->db != NULL)
       sqlite3_close (self->db);
     self->db = NULL;
-    cleanup_keyprovider_state (opts);
-    wyl_policy_store_close (self);
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto fail;
   }
 
   if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)
       != WYRELOG_E_OK) {
     sqlite3_close (self->db);
     self->db = NULL;
-    cleanup_keyprovider_state (opts);
-    wyl_policy_store_close (self);
-    return WYRELOG_E_POLICY;
+    rc = WYRELOG_E_POLICY;
+    goto fail;
   }
 
   const gchar *open_pragmas = self->encrypted ?
       "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = MEMORY;" :
       "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;";
   if (exec_sql (self->db, open_pragmas) != WYRELOG_E_OK) {
-    cleanup_keyprovider_state (opts);
-    wyl_policy_store_close (self);
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto fail;
   }
 
-  cleanup_keyprovider_state (opts);
   *out_store = self;
   return WYRELOG_E_OK;
+
+fail:
+  wyl_policy_store_close (self);
+  return rc;
 }
 
 wyrelog_error_t
@@ -1835,7 +1899,7 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   if (store == NULL)
     return;
   if (store->db != NULL) {
-    if (store->encrypted)
+    if (store->encrypted && !store->suppress_close_persist)
       (void) persist_policy_store_encrypted (store);
     sqlite3_close (store->db);
     store->db = NULL;
@@ -1855,13 +1919,15 @@ wyl_policy_store_close (wyl_policy_store_t *store)
     store->canonical_dirfd = -1;
   }
 #endif
+  policy_store_zero_key_material (store);
+  owned_keyprovider_release (&store->rotation_cleanup_keyprovider);
+  owned_keyprovider_release (&store->keyprovider);
+  wyl_policy_store_lease_release (store->lease);
+  store->lease = NULL;
   g_clear_pointer (&store->canonical_basename, g_free);
   g_clear_pointer (&store->work_basename, g_free);
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
-  policy_store_zero_key_material (store);
-  wyl_policy_store_lease_release (store->lease);
-  store->lease = NULL;
   g_free (store);
 }
 

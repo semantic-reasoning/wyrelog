@@ -44,9 +44,9 @@ G_BEGIN_DECLS;
 /*
  * Opaque buffer for a sealed blob.
  *
- * Allocated by the implementation, freed via the trait's wipe op.
- * The engine sees only the bytes pointer + length and never inspects
- * the format.
+ * Allocated by the implementation and released via that implementation's
+ * clear_sealed_blob op. The engine sees only the bytes pointer + length and
+ * never inspects the format.
  */
 typedef struct wyl_sealed_blob_t
 {
@@ -55,8 +55,9 @@ typedef struct wyl_sealed_blob_t
 } wyl_sealed_blob_t;
 
 /* KeyProvider operations are split into operational callbacks
- * (probe/seal/unseal/derive) and the lifecycle callback (wipe). Policy-store
- * ownership and exact callback counts are specified by
+ * (probe/seal/unseal/derive), the state lifecycle callback (wipe), and the
+ * sealed-output lifecycle callback (clear_sealed_blob). Policy-store ownership
+ * and exact callback counts are specified by
  * wyl_policy_store_open_options_t in policy/store-private.h and by
  * docs/developer-lifecycle.md. In particular, a policy-store WYRELOG_E_BUSY
  * return invokes zero operational callbacks but still invokes lifecycle
@@ -67,8 +68,9 @@ typedef struct wyl_keyprovider_vtable_t
    * implementation is healthy enough to satisfy unseal calls. */
   wyrelog_error_t (*probe) (gpointer self);
 
-  /* Seal a plaintext key into an opaque blob suitable for at-rest
-   * storage. Output blob ownership transfers to the caller. */
+  /* Seal a plaintext key into an opaque blob suitable for at-rest storage.
+   * The caller MUST pass out_blob initialized to { 0 }. Success transfers the
+   * output to the caller; every failure leaves it as { NULL, 0 }. */
   wyrelog_error_t (*seal) (gpointer self,
       const guint8 * plaintext,
       gsize plaintext_len, wyl_sealed_blob_t * out_blob);
@@ -89,6 +91,12 @@ typedef struct wyl_keyprovider_vtable_t
   /* Lifecycle callback: zero out any in-memory copies the implementation
    * holds. Policy-store calls obey the ownership contract referenced above. */
   void (*wipe) (gpointer self);
+
+  /* Release a blob returned by seal using the matching provider allocator.
+   * The callback is NULL-safe and idempotent. It securely wipes blob->len
+   * bytes when blob->bytes is non-NULL, frees them, and resets the blob to
+   * { NULL, 0 }. New vtable fields MUST remain appended at the tail. */
+  void (*clear_sealed_blob) (gpointer self, wyl_sealed_blob_t * blob);
 } wyl_keyprovider_vtable_t;
 
 

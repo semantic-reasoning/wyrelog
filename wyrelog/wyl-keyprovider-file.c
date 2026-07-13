@@ -142,6 +142,10 @@ static wyrelog_error_t
 file_seal (gpointer self_p, const guint8 *plaintext, gsize plaintext_len,
     wyl_sealed_blob_t *out_blob)
 {
+  if (out_blob != NULL) {
+    out_blob->bytes = NULL;
+    out_blob->len = 0;
+  }
   wyl_keyprovider_file_t *self = self_p;
   if (self == NULL || out_blob == NULL)
     return WYRELOG_E_INVALID;
@@ -239,12 +243,27 @@ file_wipe (gpointer self_p)
   self->wiped = TRUE;
 }
 
+static void
+file_clear_sealed_blob (gpointer self_p, wyl_sealed_blob_t *blob)
+{
+  (void) self_p;
+  if (blob == NULL)
+    return;
+  if (blob->bytes != NULL) {
+    sodium_memzero (blob->bytes, blob->len);
+    g_free (blob->bytes);
+  }
+  blob->bytes = NULL;
+  blob->len = 0;
+}
+
 static const wyl_keyprovider_vtable_t file_vtable = {
   .probe = file_probe,
   .seal = file_seal,
   .unseal = file_unseal,
   .derive = file_derive,
   .wipe = file_wipe,
+  .clear_sealed_blob = file_clear_sealed_blob,
 };
 
 const wyl_keyprovider_vtable_t *

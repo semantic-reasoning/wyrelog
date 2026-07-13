@@ -21,6 +21,7 @@ main (void)
   /* Zero-initialize one of each vtable to confirm the struct types
    * are complete (not just forward-declared). */
   wyl_keyprovider_vtable_t kp = { 0 };
+  kp.clear_sealed_blob = NULL;
   wyl_auditsink_vtable_t as = { 0 };
   wyl_ingress_vtable_t is = { 0 };
   wyl_ctxprovider_vtable_t cp = { 0 };
