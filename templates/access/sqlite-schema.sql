@@ -687,6 +687,22 @@ CREATE INDEX IF NOT EXISTS idx_service_credential_events_owner_time
 CREATE INDEX IF NOT EXISTS idx_service_credential_events_request
     ON service_credential_events (request_id);
 
+CREATE TABLE IF NOT EXISTS service_domain_requests (
+    request_id        TEXT NOT NULL PRIMARY KEY CHECK (
+        length(request_id) BETWEEN 1 AND 256
+        AND instr(request_id, char(0)) = 0),
+    operation         TEXT NOT NULL CHECK (operation IN (
+        'principal_create', 'principal_disable', 'credential_issue',
+        'credential_revoke', 'credential_rotate')),
+    resource_id       TEXT NOT NULL CHECK (
+        length(resource_id) BETWEEN 1 AND 128
+        AND instr(resource_id, char(0)) = 0),
+    input_fingerprint BLOB NOT NULL CHECK (
+        typeof(input_fingerprint) = 'blob'
+        AND length(input_fingerprint) = 32),
+    created_at_us     INTEGER NOT NULL CHECK (created_at_us > 0)
+);
+
 CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable
 BEFORE UPDATE ON service_principals
 WHEN OLD.subject_id IS NOT NEW.subject_id
@@ -735,6 +751,18 @@ CREATE TRIGGER IF NOT EXISTS trg_service_credential_events_no_delete
 BEFORE DELETE ON service_credential_events
 BEGIN
     SELECT RAISE(ABORT, 'service credential events are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_update
+BEFORE UPDATE ON service_domain_requests
+BEGIN
+    SELECT RAISE(ABORT, 'service domain requests are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_delete
+BEFORE DELETE ON service_domain_requests
+BEGIN
+    SELECT RAISE(ABORT, 'service domain requests are append-only');
 END;
 
 -- ---------------------------------------------------------------------------

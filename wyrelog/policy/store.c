@@ -131,6 +131,8 @@ struct wyl_policy_store_t
   gboolean key_materialized;
   gboolean suppress_close_persist;
   GMutex service_cvk_mutex;
+  GMutex service_lifecycle_mutex;
+  gboolean service_lifecycle_fail_commit_once;
   wyl_policy_store_cvk_runtime_t service_cvk_runtime;
   guint8 *service_cvk_envelope;
 };
@@ -338,6 +340,7 @@ static const gchar *const required_tables[] = {
   "service_credential_cvk",
   "service_principal_events",
   "service_credential_events",
+  "service_domain_requests",
 };
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
@@ -469,6 +472,20 @@ static const gchar service_schema_ddl[] =
     " ON service_credential_events (subject_id, tenant_id, created_at_us, event_id);"
     "CREATE INDEX IF NOT EXISTS idx_service_credential_events_request"
     " ON service_credential_events (request_id);"
+    "CREATE TABLE IF NOT EXISTS service_domain_requests ("
+    " request_id TEXT NOT NULL PRIMARY KEY CHECK ("
+    "   length(request_id) BETWEEN 1 AND 256 AND"
+    "   instr(request_id, char(0)) = 0),"
+    " operation TEXT NOT NULL CHECK (operation IN ("
+    "   'principal_create','principal_disable','credential_issue',"
+    "   'credential_revoke','credential_rotate')) ,"
+    " resource_id TEXT NOT NULL CHECK ("
+    "   length(resource_id) BETWEEN 1 AND 128 AND"
+    "   instr(resource_id, char(0)) = 0),"
+    " input_fingerprint BLOB NOT NULL CHECK ("
+    "   typeof(input_fingerprint) = 'blob' AND length(input_fingerprint) = 32),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0)"
+    ");"
     "CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable"
     " BEFORE UPDATE ON service_principals WHEN"
     " OLD.subject_id IS NOT NEW.subject_id OR"
@@ -498,7 +515,13 @@ static const gchar service_schema_ddl[] =
     " BEGIN SELECT RAISE(ABORT, 'service credential events are append-only'); END;"
     "CREATE TRIGGER IF NOT EXISTS trg_service_credential_events_no_delete"
     " BEFORE DELETE ON service_credential_events"
-    " BEGIN SELECT RAISE(ABORT, 'service credential events are append-only'); END;";
+    " BEGIN SELECT RAISE(ABORT, 'service credential events are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_update"
+    " BEFORE UPDATE ON service_domain_requests"
+    " BEGIN SELECT RAISE(ABORT, 'service domain requests are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_delete"
+    " BEFORE DELETE ON service_domain_requests"
+    " BEGIN SELECT RAISE(ABORT, 'service domain requests are append-only'); END;";
 
 typedef struct
 {
@@ -584,6 +607,15 @@ static const gchar *const service_credential_event_needles[] = {
   NULL,
 };
 
+static const gchar *const service_domain_request_needles[] = {
+  "check(length(request_id)between1and256andinstr(request_id,char(0))=0)",
+  "check(operationin('principal_create','principal_disable','credential_issue','credential_revoke','credential_rotate'))",
+  "check(length(resource_id)between1and128andinstr(resource_id,char(0))=0)",
+  "check(typeof(input_fingerprint)='blob'andlength(input_fingerprint)=32)",
+  "check(created_at_us>0)",
+  NULL,
+};
+
 static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_principals",
         "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
@@ -608,6 +640,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         service_credential_event_needles, 7,
         "0:0:service_credentials:related_credential_id:credential_id:RESTRICT:RESTRICT:NONE;0:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;0:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE;1:0:service_credentials:credential_id:credential_id:RESTRICT:RESTRICT:NONE;1:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;1:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE",
       "idx_service_credential_events_credential_time:0:c:0:0:1:credential_id:0:BINARY:1,1:11:created_at_us:0:BINARY:1,2:0:event_id:0:BINARY:1,3:-1::0:BINARY:0;idx_service_credential_events_owner_time:0:c:0:0:2:subject_id:0:BINARY:1,1:3:tenant_id:0:BINARY:1,2:11:created_at_us:0:BINARY:1,3:0:event_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_credential_events_request:0:c:0:0:9:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_domain_requests",
+        "request_id:TEXT:1::1,operation:TEXT:1::0,resource_id:TEXT:1::0,input_fingerprint:BLOB:1::0,created_at_us:INTEGER:1::0",
+        service_domain_request_needles, 5, "",
+      "sqlite_autoindex_service_domain_requests_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
 };
 
 static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
@@ -623,6 +659,10 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
       "createtriggertrg_service_credential_events_no_updatebeforeupdateonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
   {"trg_service_credential_events_no_delete", "service_credential_events",
       "createtriggertrg_service_credential_events_no_deletebeforedeleteonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
+  {"trg_service_domain_requests_no_update", "service_domain_requests",
+      "createtriggertrg_service_domain_requests_no_updatebeforeupdateonservice_domain_requestsbeginselectraise(abort,'servicedomainrequestsareappend-only');end"},
+  {"trg_service_domain_requests_no_delete", "service_domain_requests",
+      "createtriggertrg_service_domain_requests_no_deletebeforedeleteonservice_domain_requestsbeginselectraise(abort,'servicedomainrequestsareappend-only');end"},
 };
 
 static const BuiltinRole *
@@ -1965,6 +2005,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 
   wyl_policy_store_t *self = g_new0 (wyl_policy_store_t, 1);
   g_mutex_init (&self->service_cvk_mutex);
+  g_mutex_init (&self->service_lifecycle_mutex);
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
   self->canonical_path = g_strdup (effective_path);
@@ -2172,6 +2213,7 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
   g_mutex_clear (&store->service_cvk_mutex);
+  g_mutex_clear (&store->service_lifecycle_mutex);
   g_free (store);
 }
 
@@ -2672,8 +2714,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  /* Apply all five inert service-authority tables, their indexes and their
-   * six immutability/append-only triggers atomically. CREATE TABLE IF NOT
+  /* Apply all six inert service-authority tables, their indexes and their
+   * eight immutability/append-only triggers atomically. CREATE TABLE IF NOT
    * EXISTS cannot repair a malformed same-name legacy object, so validate
    * before release and roll the entire service migration back on mismatch. */
   rc = exec_sql (store->db, "SAVEPOINT wyrelog_service_schema;");
@@ -4159,14 +4201,17 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
   wyrelog_error_t rc = query_has_rows (store->db,
       "SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
-      "'service_principal_events','service_credential_events') "
+      "'service_principal_events','service_credential_events',"
+      "'service_domain_requests') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
       "'trg_service_credentials_identity_immutable',"
       "'trg_service_principal_events_no_update',"
       "'trg_service_principal_events_no_delete',"
       "'trg_service_credential_events_no_update',"
-      "'trg_service_credential_events_no_delete') LIMIT 1;", &found);
+      "'trg_service_credential_events_no_delete',"
+      "'trg_service_domain_requests_no_update',"
+      "'trg_service_domain_requests_no_delete') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -4185,7 +4230,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "SELECT 1 FROM pragma_foreign_key_check "
       "WHERE \"table\" IN ('service_principals','service_credentials',"
       "'service_credential_cvk','service_principal_events',"
-      "'service_credential_events') LIMIT 1;", &found);
+      "'service_credential_events','service_domain_requests') LIMIT 1;",
+      &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -4600,6 +4646,355 @@ wyl_policy_store_get_principal_kind (wyl_policy_store_t *store,
       (step_rc == SQLITE_ROW ? WYL_POLICY_PRINCIPAL_KIND_HUMAN :
       WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
   return WYRELOG_E_OK;
+}
+
+static gboolean
+service_domain_text_is_valid (const gchar *value, gsize max_len)
+{
+  if (value == NULL)
+    return FALSE;
+  gsize len = strlen (value);
+  return len >= 1 && len <= max_len;
+}
+
+static wyrelog_error_t
+service_domain_fingerprint (const gchar *operation, const gchar *subject_id,
+    const gchar *display_name, const gchar *actor_subject_id,
+    guint8 out[crypto_generichash_BYTES])
+{
+  crypto_generichash_state state;
+  static const guint8 domain[] = "wyrelog.service-principal-domain-request.v1";
+  if (crypto_generichash_init (&state, NULL, 0, crypto_generichash_BYTES) != 0
+      || crypto_generichash_update (&state, domain, sizeof domain - 1) != 0)
+    return WYRELOG_E_CRYPTO;
+  const gchar *fields[] = {
+    operation, subject_id, display_name != NULL ? display_name : "",
+    actor_subject_id,
+  };
+  static const guint8 separator = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++) {
+    if (crypto_generichash_update (&state, (const guint8 *) fields[i],
+            strlen (fields[i])) != 0
+        || crypto_generichash_update (&state, &separator, 1) != 0) {
+      sodium_memzero (&state, sizeof state);
+      return WYRELOG_E_CRYPTO;
+    }
+  }
+  int failed = crypto_generichash_final (&state, out,
+      crypto_generichash_BYTES);
+  sodium_memzero (&state, sizeof state);
+  return failed == 0 ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+}
+
+static wyrelog_error_t
+service_domain_claim_request (wyl_policy_store_t *store,
+    const gchar *request_id, const gchar *operation, const gchar *resource_id,
+    const guint8 fingerprint[crypto_generichash_BYTES], gint64 now_us)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO service_domain_requests "
+      "(request_id,operation,resource_id,input_fingerprint,created_at_us) "
+      "VALUES(?,?,?,?,?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, request_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, operation)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 3, resource_id)) != WYRELOG_E_OK
+      || sqlite3_bind_blob (stmt, 4, fingerprint, crypto_generichash_BYTES,
+          SQLITE_TRANSIENT) != SQLITE_OK
+      || sqlite3_bind_int64 (stmt, 5, now_us) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (step_rc == SQLITE_DONE)
+    return WYRELOG_E_OK;
+  return (step_rc & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_POLICY :
+      WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_domain_has_legacy_collision (wyl_policy_store_t *store,
+    const gchar *subject_id, gboolean *out_found)
+{
+  static const gchar *sql =
+      "SELECT 1 FROM principal_states WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM principal_events WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM totp_enrollments WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM wyrelog_config "
+      " WHERE config_key='bootstrap_admin_subject' AND config_value=? "
+      "UNION ALL SELECT 1 FROM session_states WHERE session_id=? "
+      "UNION ALL SELECT 1 FROM session_events WHERE session_id=? "
+      "UNION ALL SELECT 1 FROM permission_states WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM permission_state_events WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM role_memberships WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM role_membership_events WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM direct_permissions WHERE subject_id=? "
+      "UNION ALL SELECT 1 FROM direct_permission_events WHERE subject_id=? "
+      "LIMIT 1;";
+  sqlite3_stmt *stmt = NULL;
+  *out_found = FALSE;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  for (int i = 1; i <= 12; i++) {
+    if ((rc = bind_text (stmt, i, subject_id)) != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_found = TRUE;
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_ROW || step_rc == SQLITE_DONE ? WYRELOG_E_OK :
+      WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_domain_new_audit_id (gchar out[WYL_ID_STRING_BUF])
+{
+  wyl_id_t id = WYL_ID_NIL;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  return rc == WYRELOG_E_OK ? wyl_id_format (&id, out, WYL_ID_STRING_BUF) : rc;
+}
+
+static wyrelog_error_t
+service_domain_append_audit (wyl_policy_store_t *store, const gchar *audit_id,
+    gint64 now_us, const gchar *actor_subject_id, const gchar *action,
+    const gchar *subject_id, const gchar *request_id)
+{
+  gboolean inserted = FALSE;
+  wyrelog_error_t rc = wyl_policy_store_append_audit_event_full (store,
+      audit_id, now_us, actor_subject_id, action, subject_id, NULL, NULL,
+      request_id, WYL_DECISION_ALLOW, &inserted);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  inserted = FALSE;
+  return wyl_policy_store_record_audit_intention_full (store, audit_id,
+      now_us, actor_subject_id, action, subject_id, NULL, NULL, request_id,
+      WYL_DECISION_ALLOW, &inserted);
+}
+
+static wyrelog_error_t
+service_domain_append_principal_event (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *event, const gchar *from_state,
+    const gchar *to_state, guint64 generation, const gchar *actor_subject_id,
+    const gchar *request_id, gint64 now_us)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO service_principal_events "
+      "(subject_id,event,from_state,to_state,generation,actor_subject_id,"
+      "request_id,created_at_us) VALUES(?,?,?,?,?,?,?,?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, event)) != WYRELOG_E_OK
+      || (rc = bind_nullable_text (stmt, 3, from_state)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 4, to_state)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 5, (sqlite3_int64) generation) != SQLITE_OK
+      || (rc = bind_text (stmt, 6, actor_subject_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 7, request_id)) != WYRELOG_E_OK
+      || sqlite3_bind_int64 (stmt, 8, now_us) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step_rc = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_domain_finish_mutation (wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = wyl_policy_store_validate_snapshot (store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_schema (store);
+  if (rc == WYRELOG_E_OK && store->service_lifecycle_fail_commit_once) {
+    store->service_lifecycle_fail_commit_once = FALSE;
+    rc = WYRELOG_E_IO;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_commit_mutation (store);
+  }
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_store_rollback_mutation (store);
+  return rc;
+}
+
+void wyl_policy_store_service_lifecycle_fail_commit_once
+    (wyl_policy_store_t * store)
+{
+  if (store == NULL)
+    return;
+  g_mutex_lock (&store->service_lifecycle_mutex);
+  store->service_lifecycle_fail_commit_once = TRUE;
+  g_mutex_unlock (&store->service_lifecycle_mutex);
+}
+
+wyrelog_error_t
+wyl_policy_store_create_service_principal (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *display_name,
+    const gchar *actor_subject_id, const gchar *request_id,
+    wyl_policy_service_principal_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_principal_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL || subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
+      || !service_domain_text_is_valid (display_name, 256)
+      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !service_domain_text_is_valid (request_id, 256))
+    return WYRELOG_E_INVALID;
+
+  guint8 fingerprint[crypto_generichash_BYTES];
+  wyrelog_error_t rc = service_domain_fingerprint ("principal_create",
+      subject_id, display_name, actor_subject_id, fingerprint);
+  gchar audit_id[WYL_ID_STRING_BUF];
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_new_audit_id (audit_id);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
+
+  gint64 now_us = g_get_real_time ();
+  g_mutex_lock (&store->service_lifecycle_mutex);
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_claim_request (store, request_id, "principal_create",
+        subject_id, fingerprint, now_us);
+  sodium_memzero (fingerprint, sizeof fingerprint);
+
+  gboolean collision = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_has_legacy_collision (store, subject_id, &collision);
+  if (rc == WYRELOG_E_OK && collision)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+        "INSERT INTO service_principals "
+        "(subject_id,display_name,state,generation,created_by,created_at_us,"
+        "updated_at_us) VALUES(?,?,'active',1,?,?,?);", &stmt);
+    if (rc == WYRELOG_E_OK
+        && ((rc = bind_text (stmt, 1, subject_id)) != WYRELOG_E_OK
+            || (rc = bind_text (stmt, 2, display_name)) != WYRELOG_E_OK
+            || (rc = bind_text (stmt, 3, actor_subject_id)) != WYRELOG_E_OK
+            || sqlite3_bind_int64 (stmt, 4, now_us) != SQLITE_OK
+            || sqlite3_bind_int64 (stmt, 5, now_us) != SQLITE_OK))
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK) {
+      int step_rc = sqlite3_step (stmt);
+      if (step_rc != SQLITE_DONE)
+        rc = (step_rc & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_POLICY :
+            WYRELOG_E_IO;
+    }
+    sqlite3_finalize (stmt);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_append_principal_event (store, subject_id, "created",
+        NULL, "active", 1, actor_subject_id, request_id, now_us);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_append_audit (store, audit_id, now_us,
+        actor_subject_id, "service.principal.create", subject_id, request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_lookup_service_principal (store, subject_id, out);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_finish_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  g_mutex_unlock (&store->service_lifecycle_mutex);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_principal_info_clear (out);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_disable_service_principal (wyl_policy_store_t *store,
+    const gchar *subject_id, const gchar *actor_subject_id,
+    const gchar *request_id, wyl_policy_service_principal_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_principal_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL || subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
+      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !service_domain_text_is_valid (request_id, 256))
+    return WYRELOG_E_INVALID;
+
+  guint8 fingerprint[crypto_generichash_BYTES];
+  wyrelog_error_t rc = service_domain_fingerprint ("principal_disable",
+      subject_id, NULL, actor_subject_id, fingerprint);
+  gchar audit_id[WYL_ID_STRING_BUF];
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_new_audit_id (audit_id);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
+
+  gint64 now_us = g_get_real_time ();
+  g_mutex_lock (&store->service_lifecycle_mutex);
+  rc = wyl_policy_store_begin_mutation (store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_claim_request (store, request_id, "principal_disable",
+        subject_id, fingerprint, now_us);
+  sodium_memzero (fingerprint, sizeof fingerprint);
+
+  wyl_policy_service_principal_info_t current = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_lookup_service_principal (store, subject_id,
+        &current);
+  if (rc == WYRELOG_E_OK && g_str_equal (current.state, "active")) {
+    if (current.generation >= G_MAXINT64) {
+      rc = WYRELOG_E_POLICY;
+    } else {
+      sqlite3_stmt *stmt = NULL;
+      rc = prepare_stmt (store->db,
+          "UPDATE service_principals SET state='disabled',generation=?,"
+          "updated_at_us=?,disabled_by=?,disabled_at_us=? "
+          "WHERE subject_id=? AND state='active';", &stmt);
+      if (rc == WYRELOG_E_OK
+          && (sqlite3_bind_int64 (stmt, 1,
+                  (sqlite3_int64) current.generation + 1) != SQLITE_OK
+              || sqlite3_bind_int64 (stmt, 2, now_us) != SQLITE_OK
+              || (rc = bind_text (stmt, 3, actor_subject_id)) != WYRELOG_E_OK
+              || sqlite3_bind_int64 (stmt, 4, now_us) != SQLITE_OK
+              || (rc = bind_text (stmt, 5, subject_id)) != WYRELOG_E_OK))
+        rc = WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+        rc = WYRELOG_E_IO;
+      if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+        rc = WYRELOG_E_POLICY;
+      sqlite3_finalize (stmt);
+      if (rc == WYRELOG_E_OK)
+        rc = service_domain_append_principal_event (store, subject_id,
+            "disabled", "active", "disabled", current.generation + 1,
+            actor_subject_id, request_id, now_us);
+    }
+  } else if (rc == WYRELOG_E_OK && !g_str_equal (current.state, "disabled")) {
+    rc = WYRELOG_E_POLICY;
+  }
+  wyl_policy_service_principal_info_clear (&current);
+
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_append_audit (store, audit_id, now_us,
+        actor_subject_id, "service.principal.disable", subject_id, request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_lookup_service_principal (store, subject_id, out);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_finish_mutation (store);
+  else
+    wyl_policy_store_rollback_mutation (store);
+  g_mutex_unlock (&store->service_lifecycle_mutex);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_principal_info_clear (out);
+  return rc;
 }
 
 wyrelog_error_t
