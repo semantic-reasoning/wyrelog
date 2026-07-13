@@ -543,9 +543,28 @@ check_encrypted_policy_store_hardening_and_rotation (void)
       return 323;
   }
 
-  if (rotate_encrypted_policy_store (store_path, old_key_path, new_key_path)
-      != WYRELOG_E_POLICY)
+  g_autofree gchar *before_malformed_rotation = NULL;
+  gsize before_malformed_rotation_len = 0;
+  if (!g_file_get_contents (store_path, &before_malformed_rotation,
+          &before_malformed_rotation_len, &error))
     return 324;
+  if (rotate_encrypted_policy_store (store_path, old_key_path, new_key_path)
+      != WYRELOG_E_CRYPTO)
+    return 324;
+  g_autofree gchar *after_malformed_rotation = NULL;
+  gsize after_malformed_rotation_len = 0;
+  if (!g_file_get_contents (store_path, &after_malformed_rotation,
+          &after_malformed_rotation_len, &error)
+      || after_malformed_rotation_len != before_malformed_rotation_len
+      || memcmp (after_malformed_rotation, before_malformed_rotation,
+          before_malformed_rotation_len) != 0)
+    return 337;
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    if (open_encrypted_policy_store (store_path, new_key_path, &store)
+        == WYRELOG_E_OK)
+      return 335;
+  }
   {
     g_autoptr (wyl_policy_store_t) store = NULL;
     if (open_encrypted_policy_store (store_path, old_key_path, &store)

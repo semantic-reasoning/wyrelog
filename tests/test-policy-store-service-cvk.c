@@ -21,6 +21,7 @@ typedef struct
 
 typedef struct
 {
+  guint8 seed;
   guint probes;
   guint derives;
   guint seals;
@@ -30,6 +31,8 @@ typedef struct
   guint binding_derives;
   guint store_derives;
   gboolean fail_binding_derive;
+  gboolean fail_store_derive;
+  gboolean fail_probe;
   gboolean fail_seal;
   gboolean fail_unseal;
   gssize unseal_written_override;
@@ -50,7 +53,7 @@ provider_probe (gpointer data)
 {
   TestProvider *p = data;
   p->probes++;
-  return WYRELOG_E_OK;
+  return p->fail_probe ? WYRELOG_E_CRYPTO : WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -64,12 +67,14 @@ provider_derive (gpointer data, const gchar *label, guint8 *out, gsize len)
     if (p->fail_binding_derive)
       return WYRELOG_E_CRYPTO;
     for (gsize i = 0; i < len; i++)
-      out[i] = (guint8) i;
+      out[i] = (guint8) (p->seed + i);
   } else {
     p->store_derives++;
     g_assert_cmpstr (label, ==, "policy_store_v1");
+    if (p->fail_store_derive)
+      return WYRELOG_E_CRYPTO;
     for (gsize i = 0; i < len; i++)
-      out[i] = (guint8) (0x40 + i);
+      out[i] = (guint8) (0x40 + p->seed + i);
   }
   return WYRELOG_E_OK;
 }
@@ -941,6 +946,494 @@ test_binding_and_unseal_boundaries (void)
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
 
+typedef struct
+{
+  wyl_policy_store_rotation_stage_t fail_stage;
+  guint calls[4];
+} RotationFault;
+
+static int
+rotation_checkpoint (gpointer data, wyl_policy_store_rotation_stage_t stage)
+{
+  RotationFault *fault = data;
+  fault->calls[stage]++;
+  return fault->fail_stage == stage ? -1 : 0;
+}
+
+static wyrelog_error_t
+rotate_store (const gchar *path, TestProvider *old_provider,
+    TestProvider *new_provider, TestRuntime *runtime, RotationFault *fault)
+{
+  wyl_policy_store_cvk_runtime_t cvk_runtime = make_runtime (runtime);
+  wyl_policy_store_rotation_runtime_t rotation_runtime = {
+    .checkpoint = rotation_checkpoint,
+    .data = fault,
+  };
+  wyl_policy_store_open_options_t old_opts = {
+    .keyprovider_vtable = &provider_vtable,
+    .keyprovider_state = old_provider,
+    .require_encrypted = TRUE,
+    .service_cvk_runtime = &cvk_runtime,
+    .rotation_runtime = fault != NULL ? &rotation_runtime : NULL,
+  };
+  wyl_policy_store_open_options_t new_opts = {
+    .keyprovider_vtable = &provider_vtable,
+    .keyprovider_state = new_provider,
+    .require_encrypted = TRUE,
+  };
+  return wyl_policy_store_rotate_keyprovider (path, &old_opts, &new_opts);
+}
+
+static void
+insert_golden_credential (wyl_policy_store_t *store, const guint8 *cvk,
+    gsize cvk_len, guint8 out_salt[16], guint8 out_verifier[32])
+{
+  for (guint i = 0; i < 16; i++)
+    out_salt[i] = (guint8) (0x10 + i);
+  wyl_service_credential_secret_t *parsed = NULL;
+  g_assert_cmpint (wyl_service_credential_secret_parse (1, FIXTURE_SECRET,
+          strlen (FIXTURE_SECRET), &parsed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_verifier_compute (1, cvk, cvk_len,
+          FIXTURE_ID, strlen (FIXTURE_ID), "tenant-a", 8,
+          "svc:tenant-a:worker", 19, out_salt, 16, parsed, out_verifier, 32),
+      ==, WYRELOG_E_OK);
+  wyl_service_credential_secret_clear (&parsed);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_exec (db,
+          "INSERT INTO tenants VALUES('tenant-a',0,1,1);"
+          "INSERT INTO service_principals(subject_id,display_name,state,"
+          "generation,created_by,created_at_us,updated_at_us) VALUES("
+          "'svc:tenant-a:worker','worker','active',1,'admin',1,1);",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+          "INSERT INTO service_credentials(credential_id,"
+          "credential_format_version,subject_id,tenant_id,generation,state,"
+          "verifier_version,salt,verifier,created_by,created_at_us,"
+          "updated_at_us) VALUES(?,1,'svc:tenant-a:worker','tenant-a',1,"
+          "'active',1,?,?,'admin',1,1);", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, FIXTURE_ID, -1,
+          SQLITE_STATIC), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob (stmt, 2, out_salt, 16,
+          SQLITE_STATIC), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_blob (stmt, 3, out_verifier, 32,
+          SQLITE_STATIC), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+}
+
+static void
+assert_golden_verifies (wyl_policy_store_t *store, const guint8 salt[16],
+    const guint8 verifier[32])
+{
+  wyl_policy_service_credential_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_lookup_service_credential (store,
+          FIXTURE_ID, "svc:tenant-a:worker", "tenant-a", &info), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpmem (info.salt, sizeof info.salt, salt, 16);
+  g_assert_cmpmem (info.verifier, sizeof info.verifier, verifier, 32);
+  gboolean match = FALSE;
+  g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
+          &info, FIXTURE_SECRET, strlen (FIXTURE_SECRET), &match), ==,
+      WYRELOG_E_OK);
+  g_assert_true (match);
+  match = TRUE;
+  g_assert_cmpint (wyl_policy_store_verify_service_credential_secret (store,
+          &info, "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA", 43, &match),
+      ==, WYRELOG_E_OK);
+  g_assert_false (match);
+  wyl_policy_service_credential_info_clear (&info);
+}
+
+static void
+create_golden_store (const gchar *path, guint8 salt[16], guint8 verifier[32],
+    guint8 cvk[32])
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *materialized = NULL;
+  gsize len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &materialized, &len), ==, WYRELOG_E_OK);
+  memcpy (cvk, materialized, 32);
+  insert_golden_credential (store, materialized, len, salt, verifier);
+  assert_golden_verifies (store, salt, verifier);
+  wyl_policy_store_close (store);
+}
+
+static void
+test_rotation_preserves_golden_credential (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  guint8 salt[16], verifier[32], original_cvk[32];
+  create_golden_store (path, salt, verifier, original_cvk);
+  guint8 old_binding[32];
+  g_autofree guint8 *old_sealed = NULL;
+  gsize old_sealed_len = 0;
+  {
+    TestProvider inspect_provider = { 0 };
+    TestRuntime inspect_runtime = { 0 };
+    wyl_policy_store_t *inspect_store = NULL;
+    g_assert_cmpint (open_store (path, &inspect_provider, &inspect_runtime,
+            &inspect_store), ==, WYRELOG_E_OK);
+    wyl_policy_service_cvk_info_t inspect_info = { 0 };
+    g_assert_cmpint (wyl_policy_store_load_service_cvk (inspect_store,
+            &inspect_info), ==, WYRELOG_E_OK);
+    memcpy (old_binding, inspect_info.provider_binding, sizeof old_binding);
+    old_sealed = g_memdup2 (inspect_info.sealed_cvk,
+        inspect_info.sealed_cvk_len);
+    old_sealed_len = inspect_info.sealed_cvk_len;
+    wyl_policy_service_cvk_info_clear (&inspect_info);
+    wyl_policy_store_close (inspect_store);
+  }
+  g_autofree gchar *old_canonical = NULL;
+  gsize old_canonical_len = 0;
+  g_assert_true (g_file_get_contents (path, &old_canonical,
+          &old_canonical_len, NULL));
+
+  TestProvider old_provider = { 0 };
+  TestProvider new_provider = {.seed = 0x20 };
+  TestRuntime runtime = { 0 };
+  SharedTrace rotation_trace = { 0 };
+  old_provider.trace = &rotation_trace;
+  new_provider.trace = &rotation_trace;
+  runtime.trace = &rotation_trace;
+  RotationFault fault = { 0 };
+  g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
+          &fault), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (old_provider.unseals, ==, 1);
+  g_assert_cmpuint (new_provider.seals, ==, 1);
+  g_assert_cmpuint (new_provider.clears, ==, 1);
+  g_assert_cmpuint (old_provider.wipes, ==, 1);
+  g_assert_cmpuint (new_provider.wipes, ==, 1);
+  g_assert_cmpuint (runtime.rng_calls, ==, 0);
+  g_assert_cmpuint (rotation_trace.n_events, >=, 5);
+  g_assert_cmpmem (rotation_trace.events + rotation_trace.n_events - 5, 5,
+      "WUFPP", 5);
+  g_assert_cmpuint (fault.calls[WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME],
+      ==, 1);
+
+  TestProvider wrong_old = { 0 };
+  TestRuntime wrong_runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &wrong_old, &wrong_runtime, &store), !=,
+      WYRELOG_E_OK);
+  g_assert_null (store);
+
+  TestProvider reopened = {.seed = 0x20 };
+  TestRuntime reopened_runtime = { 0 };
+  g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
+      WYRELOG_E_OK);
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &cvk, &cvk_len), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (cvk, cvk_len, original_cvk, sizeof original_cvk);
+  assert_golden_verifies (store, salt, verifier);
+  wyl_policy_service_cvk_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &info), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (info.generation, ==, 2);
+  g_assert_cmpint (sodium_memcmp (info.provider_binding, old_binding,
+          sizeof old_binding), !=, 0);
+  g_assert_false (info.sealed_cvk_len == old_sealed_len
+      && memcmp (info.sealed_cvk, old_sealed, old_sealed_len) == 0);
+  g_assert_false (contains_bytes (info.sealed_cvk, info.sealed_cvk_len,
+          original_cvk, sizeof original_cvk));
+  g_assert_false (contains_bytes ((const guint8 *) old_canonical,
+          old_canonical_len, original_cvk, sizeof original_cvk));
+  wyl_policy_service_cvk_info_clear (&info);
+  wyl_policy_store_close (store);
+
+  TestProvider second = {.seed = 0x20 };
+  TestProvider third = {.seed = 0x40 };
+  runtime = (TestRuntime) {
+  0};
+  fault = (RotationFault) {
+  0};
+  g_assert_cmpint (rotate_store (path, &second, &third, &runtime, &fault), ==,
+      WYRELOG_E_OK);
+  TestProvider third_reopen = {.seed = 0x40 };
+  reopened_runtime = (TestRuntime) {
+  0};
+  store = NULL;
+  g_assert_cmpint (open_store (path, &third_reopen, &reopened_runtime, &store),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_load_service_cvk (store, &info), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (info.generation, ==, 3);
+  wyl_policy_service_cvk_info_clear (&info);
+  assert_golden_verifies (store, salt, verifier);
+  wyl_policy_store_close (store);
+  assert_file_omits (path, original_cvk, sizeof original_cvk);
+
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_rotation_publish_failpoints (void)
+{
+  for (guint iteration = 0; iteration < 2; iteration++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-fail-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    g_autofree gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = 0x20 };
+    TestRuntime runtime = { 0 };
+    RotationFault fault = {
+      .fail_stage = iteration == 0 ? WYL_POLICY_ROTATION_BEFORE_CVK_CAS :
+          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
+    };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &runtime, &fault), ==,
+        iteration == 0 ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+    TestProvider reopened = { 0 };
+    TestRuntime reopened_runtime = { 0 };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store),
+        ==, WYRELOG_E_OK);
+    assert_golden_verifies (store, salt, verifier);
+    wyl_policy_store_close (store);
+    TestProvider wrong_new = {.seed = 0x20 };
+    reopened_runtime = (TestRuntime) {
+    0};
+    store = NULL;
+    g_assert_cmpint (open_store (path, &wrong_new, &reopened_runtime, &store),
+        !=, WYRELOG_E_OK);
+    g_assert_null (store);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+}
+
+static void
+test_rotation_post_rename_warning_commits (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  guint8 salt[16], verifier[32], cvk[32];
+  create_golden_store (path, salt, verifier, cvk);
+  TestProvider old_provider = { 0 };
+  TestProvider new_provider = {.seed = 0x20 };
+  TestRuntime runtime = { 0 };
+  RotationFault fault = {
+    .fail_stage = WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME,
+  };
+  g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
+          &fault), ==, WYRELOG_E_OK);
+  TestProvider reopened = {.seed = 0x20 };
+  TestRuntime reopened_runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
+      WYRELOG_E_OK);
+  assert_golden_verifies (store, salt, verifier);
+  wyl_policy_store_close (store);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_rotation_provider_failures_preserve_old (void)
+{
+  for (guint scenario = 0; scenario < 6; scenario++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-provider-fail-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    g_autofree gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = 0x20 };
+    if (scenario == 0)
+      old_provider.fail_binding_derive = TRUE;
+    else if (scenario == 1)
+      old_provider.fail_unseal = TRUE;
+    else if (scenario == 2)
+      new_provider.fail_probe = TRUE;
+    else if (scenario == 3)
+      new_provider.fail_binding_derive = TRUE;
+    else if (scenario == 4)
+      new_provider.fail_seal = TRUE;
+    else
+      new_provider.fail_store_derive = TRUE;
+    TestRuntime runtime = { 0 };
+    RotationFault fault = { 0 };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &runtime, &fault), ==, WYRELOG_E_CRYPTO);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+    g_assert_cmpuint (runtime.rng_calls, ==, 0);
+    g_assert_cmpuint (new_provider.clears, ==, scenario >= 4 ? 1 : 0);
+    TestProvider reopened = { 0 };
+    TestRuntime reopened_runtime = { 0 };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store),
+        ==, WYRELOG_E_OK);
+    assert_golden_verifies (store, salt, verifier);
+    wyl_policy_store_close (store);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+}
+
+static void
+test_rotation_secure_memory_failures_preserve_old (void)
+{
+  for (guint scenario = 0; scenario < 10; scenario++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-memory-fail-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    g_autofree gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = 0x20 };
+    TestRuntime runtime = { 0 };
+    if (scenario < 5)
+      runtime.fail_alloc_at = scenario + 1;
+    else
+      runtime.fail_lock_at = scenario - 4;
+    RotationFault fault = { 0 };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &runtime, &fault), ==, WYRELOG_E_NOMEM);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+    g_assert_cmpuint (runtime.rng_calls, ==, 0);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+}
+
+static void
+test_rotation_policy_edges (void)
+{
+  for (guint scenario = 0; scenario < 4; scenario++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-policy-edge-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    if (scenario != 0) {
+      TestProvider provider = { 0 };
+      TestRuntime runtime = { 0 };
+      wyl_policy_store_t *store = NULL;
+      g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+          WYRELOG_E_OK);
+      const gchar *sql = scenario == 1 ?
+          "UPDATE service_credential_cvk SET generation=9223372036854775807;" :
+          scenario == 2 ? "DELETE FROM service_credential_cvk;" :
+          "DROP TRIGGER trg_service_credential_events_no_delete;"
+          "CREATE TRIGGER trg_service_credential_events_no_delete BEFORE "
+          "DELETE ON service_credential_events BEGIN SELECT 1; END;";
+      g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store), sql,
+              NULL, NULL, NULL), ==, SQLITE_OK);
+      wyl_policy_store_close (store);
+    }
+    g_autofree gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = scenario == 0 ? 0 : 0x20 };
+    TestRuntime runtime = { 0 };
+    RotationFault fault = { 0 };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &runtime, &fault), ==, WYRELOG_E_POLICY);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+    if (scenario == 0) {
+      g_assert_cmpuint (new_provider.unseals, ==, 0);
+      g_assert_cmpuint (new_provider.seals, ==, 0);
+    }
+    if (scenario >= 2)
+      g_assert_cmpuint (new_provider.probes, ==, 0);
+    if (scenario == 3) {
+      g_assert_cmpuint (old_provider.binding_derives, ==, 0);
+      g_assert_cmpuint (old_provider.unseals, ==, 0);
+    }
+    g_assert_cmpint (g_remove (path), ==, 0);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-legacy-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider initial = { 0 };
+  TestRuntime initial_runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &initial, &initial_runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (store);
+  TestProvider old_provider = { 0 };
+  TestProvider new_provider = {.seed = 0x20 };
+  TestRuntime runtime = { 0 };
+  RotationFault fault = { 0 };
+  g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
+          &fault), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (old_provider.binding_derives, ==, 0);
+  g_assert_cmpuint (old_provider.unseals, ==, 0);
+  g_assert_cmpuint (new_provider.binding_derives, ==, 0);
+  g_assert_cmpuint (new_provider.seals, ==, 0);
+  g_assert_cmpuint (runtime.rng_calls, ==, 0);
+  TestProvider reopened = {.seed = 0x20 };
+  TestRuntime reopened_runtime = { 0 };
+  store = NULL;
+  g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
+      WYRELOG_E_OK);
+  const guint8 *missing = NULL;
+  gsize missing_len = 0;
+  g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
+          &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
+  wyl_policy_store_close (store);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -964,5 +1457,17 @@ main (int argc, char **argv)
       test_schema_gate_precedes_crypto);
   g_test_add_func ("/policy-store-service-cvk/crypto-boundaries",
       test_binding_and_unseal_boundaries);
+  g_test_add_func ("/policy-store-service-cvk/rotation-golden",
+      test_rotation_preserves_golden_credential);
+  g_test_add_func ("/policy-store-service-cvk/rotation-failpoints",
+      test_rotation_publish_failpoints);
+  g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",
+      test_rotation_post_rename_warning_commits);
+  g_test_add_func ("/policy-store-service-cvk/rotation-provider-failures",
+      test_rotation_provider_failures_preserve_old);
+  g_test_add_func ("/policy-store-service-cvk/rotation-memory-failures",
+      test_rotation_secure_memory_failures_preserve_old);
+  g_test_add_func ("/policy-store-service-cvk/rotation-policy-edges",
+      test_rotation_policy_edges);
   return g_test_run ();
 }

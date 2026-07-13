@@ -89,10 +89,34 @@ Key rotation performs no transfer for an empty path, null option, or aliased
 non-null old/new state. After basic validation it consumes both states on every
 outcome. The old provider is retained by the internal store while the new
 provider is validated and used. An old-provider failure, including
-`WYRELOG_E_BUSY`, also releases the new provider. Success persists with the new
-key, moves new-provider ownership into the store, releases the old provider
-while the lease is held, and closes the store; failures restore the old key and
-release both providers exactly once.
+`WYRELOG_E_BUSY`, also releases the new provider. Rotation uses the old store's
+snapshotted CVK secure runtime for locked scratch. The runtime supplied through
+`new_opts`, if any, is not adopted or invoked by this transient operation.
+
+The clear SQLite work database is disposable rotation staging. After schema
+and snapshot validation in `BEGIN IMMEDIATE`, an existing CVK is unsealed with
+the old provider and re-sealed under a distinct new-provider binding with its
+generation incremented; the 32-byte CVK and every credential verifier remain
+unchanged. The staged transaction commits before an encrypted candidate is
+prepared with the new database key. A fully written, file-synced and closed
+temporary file is then renamed over the canonical file. That rename is the
+sole rotation linearization point: a failure before it leaves the old canonical
+file byte-for-byte unchanged, while a failure of directory durability after it
+is logged as a warning and the already-committed rotation returns success.
+Provider handoff and secret-buffer cleanup occur while the exclusive lease is
+still held, and close never performs a second persist.
+
+The post-rename warning contains no key, CVK, credential or path material. It
+means atomic visibility has committed successfully but power-loss durability of
+the directory entry could not be confirmed; it must never be translated into a
+failure that invites an unsafe retry with the old root.
+
+Crash recovery follows the same boundary: a crash before rename leaves the old
+root authoritative; a crash after rename leaves the new root authoritative.
+The operation is deliberately not crash-resumable or idempotently retryable in
+#354 because a caller cannot infer which root won after losing the response.
+Operators must retain both roots and follow the explicit recovery procedure
+tracked by #364.
 
 ## Service credential verification key
 
@@ -117,8 +141,8 @@ and `data` pointer are borrowed; no ownership is transferred. The callback
 code and data context must outlive the store and remain valid through the end
 of `wyl_policy_store_close()`.
 
-Until credential-preserving CVK resealing is implemented, root-provider
-rotation fails with `WYRELOG_E_POLICY` when the singleton CVK row is present.
-This gate runs before any operational callback on the new provider, preserving
-the old canonical store. Rotation without a CVK row continues to use the
-existing store-key rotation path.
+Root-provider rotation never creates a missing CVK. A missing row with existing
+credentials is policy corruption; a missing row with no credentials follows
+the legacy database-key-only rotation path without CVK derive, unseal, seal or
+random-number callbacks. Existing rows require a non-overflowing generation
+and a new provider binding distinct from the old binding.
