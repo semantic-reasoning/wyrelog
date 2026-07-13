@@ -790,6 +790,144 @@ typedef struct
   GPtrArray *committed_ids;
 } WylAuditReconcileCtx;
 
+static const gchar *decision_symbol (wyl_decision_t decision);
+static gboolean engine_pair_unavailable (WylHandle * self);
+
+typedef enum
+{
+  WYL_AUDIT_PROJECTION_ABSENT,
+  WYL_AUDIT_PROJECTION_EXACT,
+  WYL_AUDIT_PROJECTION_INCONSISTENT,
+} WylAuditProjectionState;
+
+typedef struct
+{
+  const gchar *relation;
+  gint64 audit_id;
+  const gint64 *expected;
+  guint expected_ncols;
+  guint count;
+  guint exact_count;
+} WylAuditProjectionProbe;
+
+static void
+audit_projection_probe_cb (const gchar *relation, const gint64 *row,
+    guint ncols, gpointer user_data)
+{
+  WylAuditProjectionProbe *probe = user_data;
+  if (g_strcmp0 (relation, probe->relation) != 0 || ncols == 0
+      || row[0] != probe->audit_id)
+    return;
+
+  probe->count++;
+  if (ncols != probe->expected_ncols)
+    return;
+  for (guint i = 0; i < ncols; i++) {
+    if (row[i] != probe->expected[i])
+      return;
+  }
+  probe->exact_count++;
+}
+
+static wyrelog_error_t
+probe_audit_projection_relation (WylHandle *self, const gchar *relation,
+    gint64 audit_id, const gint64 *expected, guint expected_ncols,
+    guint *out_count, guint *out_exact_count)
+{
+  WylAuditProjectionProbe probe = {
+    .relation = relation,
+    .audit_id = audit_id,
+    .expected = expected,
+    .expected_ncols = expected_ncols,
+  };
+  wyrelog_error_t rc = wyl_engine_snapshot (self->read_engine, relation,
+      audit_projection_probe_cb, &probe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_count = probe.count;
+  *out_exact_count = probe.exact_count;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+classify_audit_projection (WylHandle *self, const gchar *id,
+    gint64 created_at_us, const gchar *subject_id, const gchar *action,
+    const gchar *resource_id, const gchar *deny_reason,
+    const gchar *deny_origin, const gchar *request_id, wyl_decision_t decision,
+    WylAuditProjectionState *out_state)
+{
+  *out_state = WYL_AUDIT_PROJECTION_ABSENT;
+  if (engine_pair_unavailable (self)) {
+    *out_state = WYL_AUDIT_PROJECTION_EXACT;
+    return WYRELOG_E_OK;
+  }
+
+  const gchar *decision_name = decision_symbol (decision);
+  if (decision_name == NULL)
+    return WYRELOG_E_POLICY;
+  gint64 event[3] = { 0 };
+  wyrelog_error_t rc = wyl_handle_intern_engine_symbol (self, id, &event[0]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  event[1] = created_at_us;
+  rc = wyl_handle_intern_engine_symbol (self, decision_name, &event[2]);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint base_count = 0, base_exact_count = 0;
+  /* Engine snapshots expose the derived audit relations that mirror the
+   * corresponding *_input relations. Filter the callback by relation and
+   * audit ID so unrelated derived rows cannot affect cardinality. */
+  rc = probe_audit_projection_relation (self, "audit_event", event[0], event,
+      G_N_ELEMENTS (event), &base_count, &base_exact_count);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  static const gchar *relations[] = {
+    "audit_event_subject",
+    "audit_event_action",
+    "audit_event_resource",
+    "audit_event_deny_reason",
+    "audit_event_deny_origin",
+    "audit_event_request_id",
+  };
+  const gchar *values[] = {
+    subject_id,
+    action,
+    resource_id,
+    deny_reason,
+    deny_origin,
+    request_id,
+  };
+  guint total_count = base_count;
+  gboolean exact = base_count == 1 && base_exact_count == 1;
+  for (guint i = 0; i < G_N_ELEMENTS (relations); i++) {
+    gint64 attr[2] = { event[0], 0 };
+    if (values[i] != NULL) {
+      rc = wyl_handle_intern_engine_symbol (self, values[i], &attr[1]);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+    }
+    guint count = 0, exact_count = 0;
+    rc = probe_audit_projection_relation (self, relations[i], event[0], attr,
+        G_N_ELEMENTS (attr), &count, &exact_count);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    total_count += count;
+    if (values[i] == NULL)
+      exact = exact && count == 0;
+    else
+      exact = exact && count == 1 && exact_count == 1;
+  }
+
+  if (total_count == 0)
+    *out_state = WYL_AUDIT_PROJECTION_ABSENT;
+  else if (exact)
+    *out_state = WYL_AUDIT_PROJECTION_EXACT;
+  else
+    *out_state = WYL_AUDIT_PROJECTION_INCONSISTENT;
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
     const gchar *subject_id, const gchar *action, const gchar *resource_id,
@@ -815,8 +953,18 @@ reconcile_policy_store_audit_intention (const gchar *id, gint64 created_at_us,
     return rc;
   }
 
-  rc = wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
-      action, resource_id, deny_reason, deny_origin, request_id, decision);
+  WylAuditProjectionState projection = WYL_AUDIT_PROJECTION_ABSENT;
+  /* wyl_handle_insert_audit_fact() rolls back every input it inserted when
+   * any later input fails. A non-empty partial or contradictory projection
+   * therefore represents corruption, not a normal retry checkpoint. */
+  rc = classify_audit_projection (self, id, created_at_us, subject_id,
+      action, resource_id, deny_reason, deny_origin, request_id, decision,
+      &projection);
+  if (rc == WYRELOG_E_OK && projection == WYL_AUDIT_PROJECTION_INCONSISTENT)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && projection == WYL_AUDIT_PROJECTION_ABSENT)
+    rc = wyl_handle_insert_audit_fact (self, id, created_at_us, subject_id,
+        action, resource_id, deny_reason, deny_origin, request_id, decision);
   if (rc != WYRELOG_E_OK) {
     if (inserted) {
       wyrelog_error_t cleanup_rc =

@@ -146,3 +146,27 @@ credentials is policy corruption; a missing row with no credentials follows
 the legacy database-key-only rotation path without CVK derive, unseal, seal or
 random-number callbacks. Existing rows require a non-overflowing generation
 and a new provider binding distinct from the old binding.
+
+## Service lifecycle audit reconciliation
+
+Service-principal and service-credential operations succeed when their local
+SQLite savepoint commits the authority state, lifecycle event, sanitized audit
+row, and pending audit intention together. The external Wirelog projection and
+DuckDB audit mirror are eventual, post-commit work; mirror failure must never be
+translated into lifecycle failure, secret loss, or secret re-issuance.
+
+Audit-enabled handles reconcile pending and failed intentions explicitly and
+again while opening a persistent handle. A failed projection records a retry
+attempt and remains eligible for idempotent reconciliation. There is no
+automatic lifecycle adapter: callers that require a live mirror invoke the
+private reconciler only after the lifecycle call returns. The daemon
+single-writer contract applies while lifecycle mutations and reconciliation
+share a policy store.
+
+Reconciliation classifies the complete Wirelog projection for an audit ID as
+absent, exact, or inconsistent. Only an absent projection may be inserted and
+only an exact projection may be skipped. A partial, duplicate, mismatched, or
+unexpected optional fact is policy corruption: reconciliation fails the
+intention without writing DuckDB or marking it committed. Normal projection
+errors roll back every input inserted by that attempt, so a partial projection
+is never a valid retry checkpoint.

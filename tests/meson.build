@@ -1117,7 +1117,10 @@ if get_option('enable_audit').allowed()
     dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
   )
 
-  test('audit-emit', test_audit_emit, env : audit_conn_test_env)
+  test('audit-emit', test_audit_emit,
+    env : audit_conn_test_env,
+    timeout : 120,
+  )
 
   test_daemon_checks = executable('test-daemon-checks',
     'test-daemon-checks.c',

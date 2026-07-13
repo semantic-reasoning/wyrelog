@@ -22,6 +22,7 @@ struct wyl_audit_conn_t
   duckdb_connection conn;
   GMutex lock;
   GHashTable *chain_tail_cache;
+  gboolean fail_insert_once;
 };
 
 static WylAuditChainTail *
@@ -150,6 +151,16 @@ wyl_audit_conn_get_connection (wyl_audit_conn_t *conn)
     return zero;
   }
   return conn->conn;
+}
+
+void
+wyl_audit_conn_fail_insert_once (wyl_audit_conn_t *conn)
+{
+  if (conn == NULL)
+    return;
+  g_mutex_lock (&conn->lock);
+  conn->fail_insert_once = TRUE;
+  g_mutex_unlock (&conn->lock);
 }
 
 static wyrelog_error_t
@@ -526,6 +537,10 @@ insert_event_full_unlocked (wyl_audit_conn_t *conn, const gchar *id,
 
   if (conn == NULL || id == NULL || created_at_us < 0 || out_inserted == NULL)
     return WYRELOG_E_INVALID;
+  if (conn->fail_insert_once) {
+    conn->fail_insert_once = FALSE;
+    return WYRELOG_E_IO;
+  }
   *out_inserted = FALSE;
   if (wyl_id_parse (id, &parsed_id) != WYRELOG_E_OK)
     return WYRELOG_E_INVALID;
