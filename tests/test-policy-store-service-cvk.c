@@ -1020,12 +1020,28 @@ insert_golden_credential (wyl_policy_store_t *store, const guint8 *cvk,
           SQLITE_STATIC), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
   sqlite3_finalize (stmt);
+  g_assert_cmpint (sqlite3_exec (db,
+          "INSERT INTO service_domain_requests "
+          "(request_id,operation,resource_id,input_fingerprint,created_at_us) "
+          "VALUES('rotation-request','credential_issue',"
+          "'svc:tenant-a:worker',zeroblob(32),1);", NULL, NULL, NULL), ==,
+      SQLITE_OK);
 }
 
 static void
 assert_golden_verifies (wyl_policy_store_t *store, const guint8 salt[16],
     const guint8 verifier[32])
 {
+  sqlite3_stmt *request_stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='rotation-request' "
+          "AND operation='credential_issue';", -1, &request_stmt, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (request_stmt), ==, SQLITE_ROW);
+  g_assert_cmpint (sqlite3_column_int64 (request_stmt, 0), ==, 1);
+  sqlite3_finalize (request_stmt);
+
   wyl_policy_service_credential_info_t info = { 0 };
   g_assert_cmpint (wyl_policy_store_lookup_service_credential (store,
           FIXTURE_ID, "svc:tenant-a:worker", "tenant-a", &info), ==,

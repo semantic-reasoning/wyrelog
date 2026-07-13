@@ -785,6 +785,16 @@ test_policy_service_namespace = executable('test-policy-service-namespace',
 
 test('policy-service-namespace', test_policy_service_namespace)
 
+test_service_principal_domain = executable('test-service-principal-domain',
+  'test-service-principal-domain.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+test('service-principal-domain', test_service_principal_domain,
+  is_parallel : host_machine.system() != 'windows',
+)
+
 test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
   'test-policy-store-service-cvk.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],

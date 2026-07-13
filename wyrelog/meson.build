@@ -21,6 +21,7 @@ wyrelog_sources = files(
   'auth/mfa-enrollment.c',
   'auth/mfa-validator.c',
   'auth/service-credential.c',
+  'auth/service-credential-domain.c',
   'auth/totp.c',
   'audit/event.c',
   'fact/schema.c',

@@ -387,6 +387,25 @@ wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
  */
 wyrelog_error_t wyl_policy_store_get_principal_kind (wyl_policy_store_t * store,
     const gchar * subject_id, wyl_policy_principal_kind_t * out_kind);
+/* Service lifecycle mutations are serialized with service_lifecycle_mutex only
+ * against other service-domain calls. Concurrent entry by another policy
+ * writer or reconciler on the same store violates the daemon single-writer /
+ * caller-serialization contract. External mirrors must run only after the
+ * domain mutation has returned successfully; they are not part of its local
+ * SQLite savepoint.
+ */
+wyrelog_error_t wyl_policy_store_create_service_principal
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * display_name, const gchar * actor_subject_id,
+    const gchar * request_id, wyl_policy_service_principal_info_t * out);
+wyrelog_error_t wyl_policy_store_disable_service_principal
+    (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    wyl_policy_service_principal_info_t * out);
+/* Test seam: fail the next service lifecycle operation after validation but
+ * before savepoint release. The operation must roll all local rows back. */
+void wyl_policy_store_service_lifecycle_fail_commit_once
+    (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_lookup_service_principal (wyl_policy_store_t *
     store, const gchar * subject_id, wyl_policy_service_principal_info_t * out);
 wyrelog_error_t wyl_policy_store_foreach_service_principal (wyl_policy_store_t *
