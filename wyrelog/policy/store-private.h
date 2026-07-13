@@ -323,6 +323,10 @@ typedef wyrelog_error_t (*wyl_policy_service_credential_event_cb) (const
 
 gboolean wyl_policy_service_subject_is_valid (const gchar * subject_id,
     gsize subject_id_len);
+/* Lexical namespace reservation used by human-auth ingress.  This deliberately
+ * recognizes malformed identifiers too: every lowercase `svc:` prefix belongs
+ * to the service namespace and must never fall back to a human identity path. */
+gboolean wyl_policy_subject_has_service_prefix (const gchar * subject_id);
 void wyl_policy_service_principal_info_clear
     (wyl_policy_service_principal_info_t * info);
 void wyl_policy_service_credential_info_clear

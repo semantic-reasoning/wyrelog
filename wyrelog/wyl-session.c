@@ -592,6 +592,11 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   if (!login_tenant_is_valid (tenant))
     return WYRELOG_E_INVALID;
 
+  const gchar *requested_username =
+      req != NULL ? wyl_login_req_get_username (req) : NULL;
+  if (wyl_policy_subject_has_service_prefix (requested_username))
+    return WYRELOG_E_POLICY;
+
   if (req != NULL && wyl_login_req_get_skip_mfa (req)) {
     gboolean skip_mfa_allowed = FALSE;
     wyrelog_error_t rc = login_skip_mfa_allowed (handle, req,
