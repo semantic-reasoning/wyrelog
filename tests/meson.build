@@ -792,6 +792,17 @@ test_daemon_auth_registry = executable('test-daemon-auth-registry',
 
 test('daemon-auth-registry', test_daemon_auth_registry)
 
+test_service_auth_coordination = executable('test-service-auth-coordination',
+  'test-service-auth-coordination.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep],
+)
+
+test('service-auth-coordination', test_service_auth_coordination,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : 30,
+)
+
 test_policy_service_namespace = executable('test-policy-service-namespace',
   'test-policy-service-namespace.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
