@@ -289,6 +289,134 @@ test_populated_clear_and_reuse (void)
   wyl_service_auth_registry_unref (registry);
 }
 
+static void
+assert_revoke_result (const WylServiceAuthRevokeResult *result,
+    gsize matched, gsize transitioned)
+{
+  g_assert_cmpuint (result->matched, ==, matched);
+  g_assert_cmpuint (result->transitioned, ==, transitioned);
+}
+
+static void
+test_indexed_authority_sets (void)
+{
+  WylServiceAuthRegistry *registry = new_registry ();
+  WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
+  WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
+  WylServiceAuthReservation third = fixture
+      ("01890c10-2e3f-7000-8000-000000000105",
+      "01890c10-2e3f-7000-8000-000000000106");
+  WylServiceAuthReservation fourth = fixture
+      ("01890c10-2e3f-7000-8000-000000000107",
+      "01890c10-2e3f-7000-8000-000000000108");
+  WylServiceAuthRevokeResult result = { 0 };
+  gboolean changed = FALSE;
+
+  second.tenant = (gchar *) "tenant-b";
+  third.generation = 2;
+  third.principal = (gchar *) "svc:tenant-a:other";
+  fourth.credential_id = (gchar *) CREDENTIAL_B;
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &third), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &fourth), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
+          &changed), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 2, 2);
+  assert_lookup (registry, &first, WYL_SERVICE_AUTH_REVOKED);
+  assert_lookup (registry, &second, WYL_SERVICE_AUTH_REVOKED);
+  assert_lookup (registry, &third, WYL_SERVICE_AUTH_PENDING);
+  assert_lookup (registry, &fourth, WYL_SERVICE_AUTH_PENDING);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 2, 0);
+
+  g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
+          third.principal, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 1, 1);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
+          third.principal, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 1, 0);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
+          "tenant-a", &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 3, 1);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
+          "tenant-a", &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 3, 0);
+  assert_lookup (registry, &fourth, WYL_SERVICE_AUTH_REVOKED);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
+          first.principal, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 3, 0);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, CREDENTIAL_A, 99, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 0, 0);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
+          "svc:tenant-a:absent", &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 0, 0);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
+          "tenant-absent", &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 0, 0);
+
+  result.matched = result.transitioned = 9;
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, CREDENTIAL_A, 0, &result), ==, WYRELOG_E_INVALID);
+  assert_revoke_result (&result, 0, 0);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, "wlc_invalid", 1, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
+          "human:a", &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
+          "tenant/a", &result), ==, WYRELOG_E_INVALID);
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
+test_indexed_remove_ordering (void)
+{
+  WylServiceAuthRegistry *registry = new_registry ();
+  WylServiceAuthReservation value = fixture (SESSION_A, JTI_A);
+  WylServiceAuthRevokeResult result = { 0 };
+  gboolean removed = FALSE;
+
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &value,
+          &removed), ==, WYRELOG_E_OK);
+  g_assert_true (removed);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, value.credential_id, value.generation, &result), ==,
+      WYRELOG_E_OK);
+  assert_revoke_result (&result, 0, 0);
+
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, value.credential_id, value.generation, &result), ==,
+      WYRELOG_E_OK);
+  assert_revoke_result (&result, 1, 1);
+  g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &value,
+          &removed), ==, WYRELOG_E_OK);
+  g_assert_true (removed);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_principal (registry,
+          value.principal, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 0, 0);
+  g_assert_cmpint (wyl_service_auth_registry_revoke_tenant (registry,
+          value.tenant, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 0, 0);
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  wyl_service_auth_registry_unref (registry);
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -364,11 +492,36 @@ counter_clear (CountingAllocator *counter)
 }
 
 static void
+test_counted_clear_reuse (void)
+{
+  CountingAllocator counter = { 0 };
+  WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
+  WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
+
+  g_mutex_init (&counter.mutex);
+  g_cond_init (&counter.cond);
+  WylServiceAuthRegistry *registry = new_counting_registry (&counter);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_registry_clear (registry);
+  g_assert_cmpuint (counter.allocations, ==, counter.frees);
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_registry_unref (registry);
+  g_assert_cmpuint (counter.allocations, ==, counter.frees);
+  counter_clear (&counter);
+}
+
+static void
 test_allocation_failures_and_cleanup (void)
 {
   WylServiceAuthReservation value = fixture (SESSION_A, JTI_A);
 
-  for (guint fail_at = 1; fail_at <= 6; fail_at++) {
+  for (guint fail_at = 1; fail_at <= 12; fail_at++) {
     CountingAllocator counter = { 0 };
     WylServiceAuthRegistry *registry;
     g_mutex_init (&counter.mutex);
@@ -379,6 +532,8 @@ test_allocation_failures_and_cleanup (void)
         WYRELOG_E_NOMEM);
     g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
         0);
+    g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+        (registry));
     g_assert_cmpuint (counter.frees, ==, fail_at - 1);
     wyl_service_auth_registry_unref (registry);
     counter_clear (&counter);
@@ -468,18 +623,24 @@ typedef struct
   StartGate *gate;
 } ThreadCall;
 
+static void
+start_gate_wait (StartGate *gate)
+{
+  if (gate == NULL)
+    return;
+  g_mutex_lock (&gate->mutex);
+  gate->ready++;
+  g_cond_broadcast (&gate->cond);
+  while (!gate->go)
+    g_cond_wait (&gate->cond, &gate->mutex);
+  g_mutex_unlock (&gate->mutex);
+}
+
 static gpointer
 thread_call (gpointer data)
 {
   ThreadCall *call = data;
-  if (call->gate != NULL) {
-    g_mutex_lock (&call->gate->mutex);
-    call->gate->ready++;
-    g_cond_broadcast (&call->gate->cond);
-    while (!call->gate->go)
-      g_cond_wait (&call->gate->cond, &call->gate->mutex);
-    g_mutex_unlock (&call->gate->mutex);
-  }
+  start_gate_wait (call->gate);
   if (call->operation == 0)
     call->rc = wyl_service_auth_registry_reserve (call->registry, &call->value);
   else if (call->operation == 1)
@@ -513,12 +674,180 @@ start_gate_clear (StartGate *gate)
 }
 
 static void
+test_concurrent_shared_bucket_reserve (void)
+{
+  CountingAllocator counter = { 0 };
+  ThreadCall calls[8] = { 0 };
+  GThread *threads[8];
+  gchar session_ids[8][37];
+  gchar jtis[8][37];
+  StartGate gate = { 0 };
+  WylServiceAuthRevokeResult result = { 0 };
+
+  g_mutex_init (&counter.mutex);
+  g_cond_init (&counter.cond);
+  WylServiceAuthRegistry *registry = new_counting_registry (&counter);
+  g_mutex_init (&gate.mutex);
+  g_cond_init (&gate.cond);
+  for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
+    g_snprintf (session_ids[i], sizeof session_ids[i],
+        "01890c10-2e3f-7000-8000-%012x", 0x200 + i);
+    g_snprintf (jtis[i], sizeof jtis[i],
+        "01890c10-2e3f-7000-8000-%012x", 0x300 + i);
+    calls[i].registry = registry;
+    calls[i].value = fixture (session_ids[i], jtis[i]);
+    calls[i].gate = &gate;
+    threads[i] = g_thread_new ("shared-bucket", thread_call, &calls[i]);
+  }
+  start_gate_release (&gate, G_N_ELEMENTS (calls));
+  for (guint i = 0; i < G_N_ELEMENTS (calls); i++) {
+    g_thread_join (threads[i]);
+    g_assert_cmpint (calls[i].rc, ==, WYRELOG_E_OK);
+  }
+  start_gate_clear (&gate);
+  g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
+      G_N_ELEMENTS (calls));
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  g_assert_cmpint (wyl_service_auth_registry_revoke_credential_generation
+      (registry, CREDENTIAL_A, 1, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, G_N_ELEMENTS (calls), G_N_ELEMENTS (calls));
+  wyl_service_auth_registry_unref (registry);
+  g_assert_cmpuint (counter.allocations, ==, counter.frees);
+  counter_clear (&counter);
+}
+
+typedef struct
+{
+  WylServiceAuthRegistry *registry;
+  WylServiceAuthReservation value;
+  StartGate *gate;
+  gboolean remove;
+  gboolean removed;
+  WylServiceAuthRevokeResult result;
+  wyrelog_error_t rc;
+} IndexedRaceCall;
+
+static gpointer
+indexed_race_call (gpointer data)
+{
+  IndexedRaceCall *call = data;
+
+  start_gate_wait (call->gate);
+  if (call->remove)
+    call->rc = wyl_service_auth_registry_remove_exact (call->registry,
+        &call->value, &call->removed);
+  else
+    call->rc = wyl_service_auth_registry_revoke_credential_generation
+        (call->registry, call->value.credential_id, call->value.generation,
+        &call->result);
+  return NULL;
+}
+
+static void
+test_indexed_revoke_remove_race (void)
+{
+  for (guint iteration = 0; iteration < 50; iteration++) {
+    WylServiceAuthRegistry *registry = new_registry ();
+    WylServiceAuthReservation value = fixture (SESSION_A, JTI_A);
+    StartGate gate = { 0 };
+    IndexedRaceCall revoke = { registry, value, &gate, FALSE, FALSE,
+      {0}, WYRELOG_E_INTERNAL
+    };
+    IndexedRaceCall remove = { registry, value, &gate, TRUE, FALSE,
+      {0}, WYRELOG_E_INTERNAL
+    };
+
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
+        WYRELOG_E_OK);
+    g_mutex_init (&gate.mutex);
+    g_cond_init (&gate.cond);
+    GThread *revoke_thread = g_thread_new ("indexed-revoke",
+        indexed_race_call, &revoke);
+    GThread *remove_thread = g_thread_new ("indexed-remove",
+        indexed_race_call, &remove);
+    start_gate_release (&gate, 2);
+    g_thread_join (revoke_thread);
+    g_thread_join (remove_thread);
+    start_gate_clear (&gate);
+
+    g_assert_cmpint (revoke.rc, ==, WYRELOG_E_OK);
+    g_assert_cmpint (remove.rc, ==, WYRELOG_E_OK);
+    g_assert_true (remove.removed);
+    g_assert_true ((revoke.result.matched == 0
+            && revoke.result.transitioned == 0)
+        || (revoke.result.matched == 1 && revoke.result.transitioned == 1));
+    g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
+        0);
+    g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+        (registry));
+    wyl_service_auth_registry_unref (registry);
+  }
+}
+
+static void
+test_concurrent_indexed_revokes (void)
+{
+  for (guint iteration = 0; iteration < 50; iteration++) {
+    WylServiceAuthRegistry *registry = new_registry ();
+    WylServiceAuthReservation values[4] = {
+      fixture (SESSION_A, JTI_A),
+      fixture (SESSION_B, JTI_B),
+      fixture ("01890c10-2e3f-7000-8000-000000000105",
+          "01890c10-2e3f-7000-8000-000000000106"),
+      fixture ("01890c10-2e3f-7000-8000-000000000107",
+          "01890c10-2e3f-7000-8000-000000000108"),
+    };
+    StartGate gate = { 0 };
+    IndexedRaceCall first = { registry, values[0], &gate, FALSE, FALSE,
+      {0}, WYRELOG_E_INTERNAL
+    };
+    IndexedRaceCall second = { registry, values[0], &gate, FALSE, FALSE,
+      {0}, WYRELOG_E_INTERNAL
+    };
+    gboolean changed = FALSE;
+
+    for (guint i = 0; i < G_N_ELEMENTS (values); i++)
+      g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
+              &values[i]), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_auth_registry_activate (registry, &values[1],
+            &changed), ==, WYRELOG_E_OK);
+    g_mutex_init (&gate.mutex);
+    g_cond_init (&gate.cond);
+    GThread *first_thread = g_thread_new ("indexed-revoke-a",
+        indexed_race_call, &first);
+    GThread *second_thread = g_thread_new ("indexed-revoke-b",
+        indexed_race_call, &second);
+    start_gate_release (&gate, 2);
+    g_thread_join (first_thread);
+    g_thread_join (second_thread);
+    start_gate_clear (&gate);
+
+    g_assert_cmpint (first.rc, ==, WYRELOG_E_OK);
+    g_assert_cmpint (second.rc, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (first.result.matched, ==, G_N_ELEMENTS (values));
+    g_assert_cmpuint (second.result.matched, ==, G_N_ELEMENTS (values));
+    g_assert_cmpuint (first.result.transitioned + second.result.transitioned,
+        ==, G_N_ELEMENTS (values));
+    g_assert_true ((first.result.transitioned == G_N_ELEMENTS (values)
+            && second.result.transitioned == 0)
+        || (first.result.transitioned == 0
+            && second.result.transitioned == G_N_ELEMENTS (values)));
+    for (guint i = 0; i < G_N_ELEMENTS (values); i++)
+      assert_lookup (registry, &values[i], WYL_SERVICE_AUTH_REVOKED);
+    g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+        (registry));
+    wyl_service_auth_registry_unref (registry);
+  }
+}
+
+static void
 test_duplicate_after_preflight (void)
 {
   CountingAllocator counter = { 0 };
   g_mutex_init (&counter.mutex);
   g_cond_init (&counter.cond);
-  counter.block_at = 6;
+  counter.block_at = 12;
   WylServiceAuthRegistry *registry = new_counting_registry (&counter);
   ThreadCall delayed = {
     .registry = registry,
@@ -670,10 +999,22 @@ main (int argc, char **argv)
       test_duplicates_crossed_and_remove);
   g_test_add_func ("/daemon/auth-registry/clear-reuse",
       test_populated_clear_and_reuse);
+  g_test_add_func ("/daemon/auth-registry/indexed-authority-sets",
+      test_indexed_authority_sets);
+  g_test_add_func ("/daemon/auth-registry/indexed-remove-ordering",
+      test_indexed_remove_ordering);
   g_test_add_func ("/daemon/auth-registry/allocation-cleanup",
       test_allocation_failures_and_cleanup);
+  g_test_add_func ("/daemon/auth-registry/counted-clear-reuse",
+      test_counted_clear_reuse);
   g_test_add_func ("/daemon/auth-registry/preflight-race",
       test_duplicate_after_preflight);
+  g_test_add_func ("/daemon/auth-registry/shared-bucket-concurrency",
+      test_concurrent_shared_bucket_reserve);
+  g_test_add_func ("/daemon/auth-registry/indexed-revoke-remove-race",
+      test_indexed_revoke_remove_race);
+  g_test_add_func ("/daemon/auth-registry/concurrent-indexed-revokes",
+      test_concurrent_indexed_revokes);
   g_test_add_func ("/daemon/auth-registry/concurrency",
       test_concurrent_duplicate_and_transitions);
   g_test_add_func ("/daemon/auth-registry/transition-remove-races",

@@ -14,6 +14,12 @@ typedef enum
   WYL_SERVICE_AUTH_REVOKED,
 } WylServiceAuthState;
 
+typedef struct
+{
+  gsize matched;
+  gsize transitioned;
+} WylServiceAuthRevokeResult;
+
 typedef gpointer (*WylServiceAuthTryAllocFunc) (gsize size, gpointer user_data);
 typedef void (*WylServiceAuthFreeFunc) (gpointer memory, gpointer user_data);
 
@@ -46,7 +52,10 @@ typedef struct
 
 typedef struct
 {
-  /* Callback state must outlive the registry and snapshots it allocated. */
+  /*
+   * Callback state must outlive the registry and snapshots it allocated.
+   * Callbacks must be thread-safe when registry operations are concurrent.
+   */
   WylServiceAuthTryAllocFunc try_alloc;
   WylServiceAuthFreeFunc free;
   gpointer user_data;
@@ -57,19 +66,20 @@ typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
 /*
  * Concurrency and ownership contract
  * ----------------------------------
- * One internal mutex protects both indexes and every state transition.
- * by_session is the sole container owner of entries and by_jti is a borrowed,
- * unique reverse index.  Allocator callbacks are never invoked while the
- * mutex is held.  A caller must hold a registry reference for the full
+ * One internal mutex protects all five indexes and every state transition.
+ * by_session is the sole container owner of entries; by_jti and the three
+ * selector buckets borrow entries.  Allocator callbacks are never invoked
+ * while the mutex is held.  A caller must hold a registry reference for the full
  * duration of every operation; final unref requires all operations to have
  * quiesced and is not itself a concurrency barrier.
  *
- * clear linearises by swapping both indexes under the mutex, then releases the
- * old borrowed index before the old owning index.  Operations therefore
+ * clear linearises by swapping all five indexes under the mutex, then releases
+ * every borrowed index before the old owning index.  Operations therefore
  * observe either side of that swap, but clear is not a caller/thread lifetime
  * barrier and does not replace the final-unref quiescence requirement.
  *
- * reserve validates and allocates an entire immutable entry before mutation.
+ * reserve validates and allocates an entire immutable entry plus candidate
+ * credential-generation, principal, and tenant buckets before mutation.
  * A duplicate session or jti returns WYRELOG_E_POLICY.  activate accepts only
  * an exact PENDING pair.  revoke_exact accepts exact PENDING or ACTIVE pairs
  * and is idempotent for REVOKED.  Exact transitions return
@@ -81,6 +91,9 @@ typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
  * Entry preflight and lookup snapshots use the registry allocator and report
  * WYRELOG_E_NOMEM without partial mutation/output.  GLib hash-table internal
  * allocation is process-fatal on OOM and is outside this recoverable contract.
+ * Indexed revocation retains entries in their buckets until physical remove,
+ * returns OK with matched/transitioned counts, and is idempotent for already
+ * revoked members.  An absent valid selector returns OK with both counts zero.
  */
 
 wyrelog_error_t wyl_service_auth_registry_new
@@ -104,6 +117,15 @@ wyrelog_error_t wyl_service_auth_registry_activate
 wyrelog_error_t wyl_service_auth_registry_revoke_exact
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation, gboolean * out_changed);
+wyrelog_error_t wyl_service_auth_registry_revoke_credential_generation
+    (WylServiceAuthRegistry * registry, const gchar * credential_id,
+    guint64 generation, WylServiceAuthRevokeResult * out_result);
+wyrelog_error_t wyl_service_auth_registry_revoke_principal
+    (WylServiceAuthRegistry * registry, const gchar * principal,
+    WylServiceAuthRevokeResult * out_result);
+wyrelog_error_t wyl_service_auth_registry_revoke_tenant
+    (WylServiceAuthRegistry * registry, const gchar * tenant,
+    WylServiceAuthRevokeResult * out_result);
 wyrelog_error_t wyl_service_auth_registry_remove_exact
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation, gboolean * out_removed);
