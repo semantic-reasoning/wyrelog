@@ -15,6 +15,7 @@
 #include "daemon/delta.h"
 #include "daemon/http.h"
 #include "daemon/signals.h"
+#include "daemon/startup-recovery-private.h"
 #include "policy/store-private.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -325,6 +326,17 @@ open_runtime_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
   wyrelog_error_t rc = wyl_handle_open_with_options (&open_opts, out_handle);
   if (rc != WYRELOG_E_OK)
     return rc;
+
+#ifdef WYL_HAS_AUDIT
+  if (opts->audit_store_path != NULL && opts->audit_store_path[0] != '\0') {
+    rc = wyl_daemon_recover_service_exchange_on_startup (*out_handle);
+    if (rc != WYRELOG_E_OK) {
+      g_printerr ("wyrelogd: service_exchange_recovery: failed\n");
+      g_clear_object (out_handle);
+      return rc;
+    }
+  }
+#endif
 
   /* Install the daemon-default TOTP MFA validator (issue #331 commit 3).
    * The commit-4 HTTP /auth/mfa/verify route resolves this through

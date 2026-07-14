@@ -131,6 +131,42 @@ service_session_private_dep = declare_dependency(
   dependencies : [wyrelog_dep],
 )
 
+if get_option('enable_audit').allowed()
+  # Non-installed host companion for the daemon and focused private tests.
+  # libwyrelog retains its canonical copies; every external private consumer
+  # shares this single additional compilation context.
+  service_exchange_private_lib = static_library(
+    'wyrelog-service-exchange-private',
+    'auth/service-exchange-audit-private.c',
+    'auth/service-exchange-projector-private.c',
+    include_directories : wyrelog_inc,
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep, sodium_dep,
+      libchronoid_dep],
+    c_args : ['-DWYL_HAS_AUDIT'],
+    install : false,
+    build_by_default : false,
+  )
+  service_exchange_private_dep = declare_dependency(
+    link_with : service_exchange_private_lib,
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep, sodium_dep,
+      libchronoid_dep],
+  )
+
+  service_exchange_startup_private_lib = static_library(
+    'wyrelog-service-exchange-startup-private',
+    'daemon/startup-recovery-private.c',
+    include_directories : wyrelog_inc,
+    dependencies : [service_exchange_private_dep],
+    c_args : ['-DWYL_HAS_AUDIT'],
+    install : false,
+    build_by_default : false,
+  )
+  service_exchange_startup_private_dep = declare_dependency(
+    link_with : service_exchange_startup_private_lib,
+    dependencies : [service_exchange_private_dep],
+  )
+endif
+
 build_client = libsoup_dep.found()
 
 if build_client
@@ -189,7 +225,7 @@ if libsoup_dep.found()
   wyrelogd_c_args += '-DWYL_HAS_DAEMON_HTTP'
 endif
 if get_option('enable_audit').allowed()
-  wyrelogd_deps += duckdb_dep
+  wyrelogd_deps += service_exchange_startup_private_dep
   wyrelogd_c_args += '-DWYL_HAS_AUDIT'
 elif get_option('enable_fact_store').allowed()
   wyrelogd_deps += duckdb_dep
@@ -201,8 +237,7 @@ if get_option('enable_break_glass')
   wyrelogd_c_args += '-DWYL_HAS_BREAK_GLASS'
 endif
 
-wyrelogd_exe = executable('wyrelogd',
-  files(
+wyrelogd_sources = files(
     'daemon/checks.c',
     'daemon/auth-registry-private.c',
     'daemon/delta.c',
@@ -212,7 +247,9 @@ wyrelogd_exe = executable('wyrelogd',
     'daemon/runtime.c',
     'daemon/signals.c',
     'daemon/wyrelogd.c',
-  ),
+)
+wyrelogd_exe = executable('wyrelogd',
+  wyrelogd_sources,
   include_directories : wyrelog_inc,
   dependencies : wyrelogd_deps,
   c_args : wyrelogd_c_args,

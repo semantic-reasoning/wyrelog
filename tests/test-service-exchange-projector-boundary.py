@@ -147,7 +147,10 @@ for path in root.rglob("*"):
         continue
     text = path.read_text(errors="ignore")
     if PROJECTOR in text or VALIDATOR in text:
-        if path.name != "test-service-exchange-projector.c":
+        if path.name not in {
+            "test-service-exchange-projector.c",
+            "test-daemon-startup-recovery.c",
+        }:
             repo_consumers.append(str(path.relative_to(root)))
 if repo_consumers:
     raise SystemExit("projector leaked to route/non-test consumers: "
