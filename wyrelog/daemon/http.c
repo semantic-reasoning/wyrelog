@@ -1978,15 +1978,14 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
   gboolean changed = FALSE;
   if (g_strcmp0 (action, "create") == 0) {
-    rc = wyl_policy_store_create_tenant (store, tenant, &changed);
+    rc = wyl_policy_store_create_tenant (write.store, tenant, &changed);
   } else if (g_strcmp0 (action, "seal") == 0) {
-    rc = wyl_policy_store_set_tenant_sealed (store, tenant, TRUE);
+    rc = wyl_policy_store_set_tenant_sealed (write.store, tenant, TRUE);
     changed = rc == WYRELOG_E_OK;
   } else if (g_strcmp0 (action, "unseal") == 0) {
-    rc = wyl_policy_store_set_tenant_sealed (store, tenant, FALSE);
+    rc = wyl_policy_store_set_tenant_sealed (write.store, tenant, FALSE);
     changed = rc == WYRELOG_E_OK;
   }
 
@@ -2249,8 +2248,7 @@ graph_create_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_create_fact_graph
-        (wyl_handle_get_policy_store (ctx->handle), &opts, NULL);
+    rc = wyl_policy_store_create_fact_graph (write.store, &opts, NULL);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -2306,8 +2304,7 @@ graph_seal_handler (SoupServer *server, SoupServerMessage *msg,
   g_auto (WylDaemonPolicyWrite) write = { 0 };
   wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_seal_fact_graph
-        (wyl_handle_get_policy_store (ctx->handle), tenant, graph);
+    rc = wyl_policy_store_seal_fact_graph (write.store, tenant, graph);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, "invalid_graph_request");
     return;
@@ -2707,8 +2704,7 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   GraphLookupCtx lookup = { 0 };
-  rc = lookup_fact_graph (wyl_handle_get_policy_store
-      (ctx->handle), tenant, graph, &lookup);
+  rc = lookup_fact_graph (write.store, tenant, graph, &lookup);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "schema_register_failed");
     return;
@@ -2754,8 +2750,7 @@ schema_register_handler (SoupServer *server, SoupServerMessage *msg,
     .queries = max_rows > 0 ? &schema_query : NULL,
     .n_queries = max_rows > 0 ? 1 : 0,
   };
-  rc = wyl_policy_store_register_fact_relation_schema
-      (wyl_handle_get_policy_store (ctx->handle), &opts);
+  rc = wyl_policy_store_register_fact_relation_schema (write.store, &opts);
   schema_columns_clear (columns, n_columns);
   if (rc == WYRELOG_E_INVALID || rc == WYRELOG_E_POLICY) {
     set_json_error (msg, 400, "invalid_schema_request");
@@ -3203,8 +3198,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     }
 
     GraphLookupCtx lookup = { 0 };
-    rc = lookup_fact_graph (wyl_handle_get_policy_store
-        (ctx->handle), tenant, graph, &lookup);
+    rc = lookup_fact_graph (write.store, tenant, graph, &lookup);
     if (rc != WYRELOG_E_OK) {
       set_json_error (msg, 500, "fact_forget_failed");
       return;
@@ -3219,7 +3213,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;
     gsize n_loaded = 0;
     rc = wyl_policy_store_load_fact_relation_schema_columns
-        (wyl_handle_get_policy_store (ctx->handle), tenant, graph, namespace_id,
+        (write.store, tenant, graph, namespace_id,
         relation, schema_version, &relation_visible, &loaded, &n_loaded);
     if (rc != WYRELOG_E_OK) {
       graph_lookup_clear (&lookup);
@@ -3323,8 +3317,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   GraphLookupCtx lookup = { 0 };
-  rc = lookup_fact_graph (wyl_handle_get_policy_store
-      (ctx->handle), tenant, graph, &lookup);
+  rc = lookup_fact_graph (write.store, tenant, graph, &lookup);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, fail_code);
     return;
@@ -3344,7 +3337,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_policy_fact_relation_schema_column_info_t *loaded = NULL;
   gsize n_loaded = 0;
   rc = wyl_policy_store_load_fact_relation_schema_columns
-      (wyl_handle_get_policy_store (ctx->handle), tenant, graph, namespace_id,
+      (write.store, tenant, graph, namespace_id,
       relation, schema_version, &relation_visible, &loaded, &n_loaded);
   if (rc != WYRELOG_E_OK) {
     graph_lookup_clear (&lookup);
@@ -3390,8 +3383,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     .rows = rows,
     .n_rows = n_rows,
   };
-  rc = wyl_fact_schema_validate_batch (wyl_handle_get_policy_store
-      (ctx->handle), &validation_batch, NULL);
+  rc = wyl_fact_schema_validate_batch (write.store, &validation_batch, NULL);
   if (rc != WYRELOG_E_OK) {
     graph_lookup_clear (&lookup);
     wyl_policy_fact_relation_schema_columns_free (loaded, n_loaded);
@@ -3494,10 +3486,9 @@ datalog_query_handler (SoupServer *server, SoupServerMessage *msg,
 
 static gboolean
 ensure_policy_permission_exists (SoupServerMessage *msg,
-    WylDaemonHttpContext *ctx, const gchar *perm)
+    wyl_policy_store_t *store, const gchar *perm)
 {
   gboolean exists = FALSE;
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
   wyrelog_error_t rc =
       wyl_policy_store_permission_exists (store, perm, &exists);
   if (rc != WYRELOG_E_OK) {
@@ -3522,11 +3513,10 @@ ensure_permission_transition_event (SoupServerMessage *msg, const gchar *event)
 }
 
 static gboolean
-ensure_policy_role_exists (SoupServerMessage *msg, WylDaemonHttpContext *ctx,
+ensure_policy_role_exists (SoupServerMessage *msg, wyl_policy_store_t *store,
     const gchar *role)
 {
   gboolean exists = FALSE;
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
   wyrelog_error_t rc = wyl_policy_store_role_exists (store, role, &exists);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "policy_mutation_failed");
@@ -3576,7 +3566,7 @@ direct_permission_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  if (!ensure_policy_permission_exists (msg, ctx, perm))
+  if (!ensure_policy_permission_exists (msg, write.store, perm))
     return;
 
   if (grant) {
@@ -3661,7 +3651,7 @@ policy_permission_transition_handler (SoupServer *server,
     return;
   }
 
-  if (!ensure_policy_permission_exists (msg, ctx, perm))
+  if (!ensure_policy_permission_exists (msg, write.store, perm))
     return;
 
   g_autoptr (WylAuditEvent) audit_event = NULL;
@@ -3724,7 +3714,7 @@ role_membership_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  if (!ensure_policy_role_exists (msg, ctx, role))
+  if (!ensure_policy_role_exists (msg, write.store, role))
     return;
 
   if (grant) {
@@ -3821,13 +3811,12 @@ mfa_enroll_authorize (SoupServer *server, SoupServerMessage *msg,
 }
 
 static gboolean
-mfa_enroll_subject_exists (WylDaemonHttpContext *ctx, const gchar *subject)
+mfa_enroll_subject_exists (wyl_policy_store_t *store, const gchar *subject)
 {
   gboolean found = FALSE;
   g_autofree gchar *state = NULL;
   if (subject == NULL || subject[0] == '\0' || strlen (subject) > 256)
     return FALSE;
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (ctx->handle);
   if (wyl_policy_store_get_principal_state (store, subject, &state,
           &found) != WYRELOG_E_OK)
     return FALSE;
@@ -3958,7 +3947,8 @@ mfa_enroll_start_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 400, "invalid_mfa_enroll_request");
     return;
   }
-  if (!mfa_enroll_subject_exists (ctx, subject)) {
+  if (!mfa_enroll_subject_exists (wyl_handle_get_policy_store (ctx->handle),
+          subject)) {
     set_json_error (msg, 404, "mfa_enroll_subject_not_found");
     return;
   }
@@ -4082,7 +4072,7 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 500, "mfa_enroll_failed");
     return;
   }
-  if (!mfa_enroll_subject_exists (ctx, challenge->subject)) {
+  if (!mfa_enroll_subject_exists (write.store, challenge->subject)) {
     wyl_mfa_enroll_challenge_free (challenge);
     set_json_error (msg, 404, "mfa_enroll_subject_not_found");
     return;
@@ -4090,8 +4080,7 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
   WylTotpEnrollment existing = { 0 };
   gboolean already_enrolled = FALSE;
   rc = wyl_policy_store_totp_enrollment_lookup
-      (wyl_handle_get_policy_store (ctx->handle), challenge->subject,
-      &existing, &already_enrolled);
+      (write.store, challenge->subject, &existing, &already_enrolled);
   wyl_totp_enrollment_clear (&existing);
   if (rc != WYRELOG_E_OK || already_enrolled) {
     wyl_mfa_enroll_challenge_free (challenge);
@@ -4105,7 +4094,7 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
   enrollment.last_verified_step = (gint64) matched_step;
   enrollment.enrolled_at = now;
   rc = wyl_mfa_enrollment_commit
-      (wyl_handle_get_policy_store (ctx->handle), &enrollment, auth.actor,
+      (write.store, &enrollment, auth.actor,
       ensure_request_id_header (msg), "wyrelogd", FALSE);
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_reload_engine_pair (ctx->handle);
