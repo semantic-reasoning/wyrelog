@@ -225,6 +225,9 @@ struct _WylServiceAuthorityTransaction
   int participant_failure_sqlite_extended_error;
   gboolean fail_service_exchange_preallocation_once;
   gboolean fail_service_exchange_readback_once;
+  gboolean fail_service_exchange_typed_read_prepare_once;
+  gboolean fail_service_exchange_typed_read_step_once;
+  gboolean fail_service_exchange_typed_read_allocation_once;
   WylServiceExchangeReceipt *service_exchange_pending;
   guint service_exchange_receipt_fail_allocation_at;
   guint service_exchange_receipt_allocation_count;
@@ -6321,8 +6324,8 @@ service_exchange_generation_to_be (guint64 value, guint8 bytes[8])
 }
 
 static wyrelog_error_t
-service_exchange_record_from_row (sqlite3_stmt *stmt,
-    WylServiceExchangeIntentionRecord **out_record)
+service_exchange_record_from_row (WylServiceAuthorityTransaction *txn,
+    sqlite3_stmt *stmt, WylServiceExchangeIntentionRecord **out_record)
 {
   *out_record = NULL;
   const int text_columns[] = { 0, 1, 3, 4, 6, 7, 9, 10, 12, 13 };
@@ -6343,8 +6346,11 @@ service_exchange_record_from_row (sqlite3_stmt *stmt,
       || sqlite3_column_bytes (stmt, 14) > 4096)
     return WYRELOG_E_POLICY;
 
-  WylServiceExchangeIntentionRecord *r = g_try_new0
-      (WylServiceExchangeIntentionRecord, 1);
+  WylServiceExchangeIntentionRecord *r = txn != NULL
+      && txn->fail_service_exchange_typed_read_allocation_once ? NULL :
+      g_try_new0 (WylServiceExchangeIntentionRecord, 1);
+  if (txn != NULL)
+    txn->fail_service_exchange_typed_read_allocation_once = FALSE;
   if (r == NULL)
     return WYRELOG_E_NOMEM;
 #define TEXT_AT(column) ((const gchar *) sqlite3_column_text (stmt, (column)))
@@ -6430,6 +6436,17 @@ service_exchange_require_participant (WylServiceAuthorityTransaction *txn,
   if (txn->write_intent_state !=
       WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ACQUIRED)
     return WYRELOG_E_POLICY;
+  return wyl_policy_store_service_authority_transaction_enter_participant
+      (txn, store);
+}
+
+/* Typed recovery reads run inside the same authority transaction and WRITE
+ * lease, but deliberately do not manufacture commit evidence or a SQLite
+ * write intent.  The decoder remains the sole row-validation boundary. */
+static wyrelog_error_t
+service_exchange_require_read_participant (WylServiceAuthorityTransaction *txn,
+    wyl_policy_store_t *store)
+{
   return wyl_policy_store_service_authority_transaction_enter_participant
       (txn, store);
 }
@@ -6812,21 +6829,30 @@ service_exchange_decode_created_row (sqlite3_stmt *stmt,
 }
 
 static wyrelog_error_t
-service_exchange_select_one (wyl_policy_store_t *store, const gchar *sql,
+service_exchange_select_one (WylServiceAuthorityTransaction *txn,
+    wyl_policy_store_t *store, const gchar *sql,
     const gchar *first, const gchar *second,
     WylServiceExchangeIntentionRecord **out_record, gboolean *out_found)
 {
   *out_record = NULL;
   *out_found = FALSE;
   sqlite3_stmt *stmt = NULL;
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  wyrelog_error_t rc = txn != NULL
+      && txn->fail_service_exchange_typed_read_prepare_once ? WYRELOG_E_IO :
+      prepare_stmt (store->db, sql, &stmt);
+  if (txn != NULL)
+    txn->fail_service_exchange_typed_read_prepare_once = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = bind_text (stmt, 1, first);
   if (rc == WYRELOG_E_OK && second != NULL)
     rc = bind_text (stmt, 2, second);
-  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  int step = rc == WYRELOG_E_OK && txn != NULL
+      && txn->fail_service_exchange_typed_read_step_once ? SQLITE_IOERR :
+      rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (txn != NULL)
+    txn->fail_service_exchange_typed_read_step_once = FALSE;
   if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
-    rc = service_exchange_record_from_row (stmt, out_record);
+    rc = service_exchange_record_from_row (txn, stmt, out_record);
     *out_found = rc == WYRELOG_E_OK;
     if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
       rc = WYRELOG_E_POLICY;
@@ -6881,7 +6907,7 @@ wyrelog_error_t
 
   WylServiceExchangeIntentionRecord *existing = NULL;
   gboolean found = FALSE;
-  rc = service_exchange_select_one (store,
+  rc = service_exchange_select_one (txn, store,
       "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
       " FROM main.service_exchange_audit_intentions"
       " WHERE intention_id=? OR payload_digest=?;",
@@ -7032,6 +7058,39 @@ void wyl_policy_store_service_exchange_intention_fail_readback_once
     txn->fail_service_exchange_readback_once = TRUE;
 }
 
+void wyl_policy_store_service_exchange_intention_fail_typed_read_prepare_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_service_exchange_typed_read_prepare_once = TRUE;
+}
+
+void wyl_policy_store_service_exchange_intention_fail_typed_read_step_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_service_exchange_typed_read_step_once = TRUE;
+}
+
+void wyl_policy_store_service_exchange_intention_fail_typed_read_allocation_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_service_exchange_typed_read_allocation_once = TRUE;
+}
+
+void wyl_policy_store_service_exchange_intention_typed_read_state_for_test
+    (const WylServiceAuthorityTransaction * txn, gboolean * out_has_evidence,
+    gboolean * out_has_write_intent)
+{
+  if (out_has_evidence != NULL)
+    *out_has_evidence = txn != NULL && txn->commit_evidence != NULL;
+  if (out_has_write_intent != NULL)
+    *out_has_write_intent = txn != NULL
+        && txn->write_intent_state ==
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ACQUIRED;
+}
+
 wyrelog_error_t
     wyl_policy_store_service_exchange_intention_load
     (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
@@ -7051,11 +7110,11 @@ wyrelog_error_t
       || wyl_id_parse (encoded, &parsed) != WYRELOG_E_OK
       || !wyl_id_equal (intention_id, &parsed))
     return WYRELOG_E_INVALID;
-  wyrelog_error_t rc = service_exchange_require_participant (txn, store);
+  wyrelog_error_t rc = service_exchange_require_read_participant (txn, store);
   if (rc != WYRELOG_E_OK)
     return rc;
   gboolean found = FALSE;
-  rc = service_exchange_select_one (store,
+  rc = service_exchange_select_one (txn, store,
       "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
       " FROM main.service_exchange_audit_intentions"
       " WHERE intention_id=? OR payload_digest=?;", encoded, payload_digest,
@@ -7082,17 +7141,24 @@ wyrelog_error_t
       ((GDestroyNotify) wyl_service_exchange_intention_record_free);
   if (records == NULL)
     return WYRELOG_E_NOMEM;
-  wyrelog_error_t rc = service_exchange_require_participant (txn, store);
+  wyrelog_error_t rc = service_exchange_require_read_participant (txn, store);
   sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK && txn->fail_service_exchange_typed_read_prepare_once) {
+    txn->fail_service_exchange_typed_read_prepare_once = FALSE;
+    rc = WYRELOG_E_IO;
+  }
   if (rc == WYRELOG_E_OK)
     rc = prepare_stmt (store->db,
         "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
         " FROM main.service_exchange_audit_intentions"
         " ORDER BY created_at_us,intention_id;", &stmt);
-  int step;
-  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK
+      && (step = txn->fail_service_exchange_typed_read_step_once
+          ? (txn->fail_service_exchange_typed_read_step_once = FALSE,
+              SQLITE_IOERR) : sqlite3_step (stmt)) == SQLITE_ROW) {
     WylServiceExchangeIntentionRecord *record = NULL;
-    rc = service_exchange_record_from_row (stmt, &record);
+    rc = service_exchange_record_from_row (txn, stmt, &record);
     if (rc == WYRELOG_E_OK)
       g_ptr_array_add (records, record);
   }

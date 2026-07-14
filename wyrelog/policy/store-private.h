@@ -581,6 +581,17 @@ void wyl_policy_store_service_exchange_intention_fail_preallocation_once
     (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_exchange_intention_fail_readback_once
     (WylServiceAuthorityTransaction * transaction);
+/* Typed recovery read fault seams. Array creation uses GLib's fatal allocator;
+ * the recoverable allocation seam targets decoded owned records. */
+void wyl_policy_store_service_exchange_intention_fail_typed_read_prepare_once
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_exchange_intention_fail_typed_read_step_once
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_exchange_intention_fail_typed_read_allocation_once
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_exchange_intention_typed_read_state_for_test
+    (const WylServiceAuthorityTransaction * transaction,
+    gboolean * out_has_evidence, gboolean * out_has_write_intent);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityTransaction,
     wyl_policy_store_service_authority_transaction_free);
