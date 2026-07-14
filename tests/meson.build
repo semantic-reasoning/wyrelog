@@ -1335,6 +1335,23 @@ if get_option('enable_audit').allowed()
 
   test('audit-conn', test_audit_conn, env : audit_conn_test_env)
 
+  test_service_exchange_projector = executable(
+    'test-service-exchange-projector',
+    'test-service-exchange-projector.c',
+    '../wyrelog/auth/service-exchange-projector-private.c',
+    '../wyrelog/auth/service-exchange-audit-private.c',
+    c_args : ['-DWYL_HAS_AUDIT'],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep, sodium_dep,
+      libchronoid_dep],
+  )
+  test('service-exchange-projector', test_service_exchange_projector,
+    env : audit_conn_test_env, timeout : 180)
+
+  test('service-exchange-projector-boundary', python3,
+    args : [files('test-service-exchange-projector-boundary.py'),
+      meson.project_source_root()])
+
   test_audit_emit = executable('test-audit-emit',
     'test-audit-emit.c',
     c_args : [

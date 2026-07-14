@@ -449,6 +449,8 @@ wyrelog_error_t wyl_policy_store_service_authority_transaction_begin
     (wyl_policy_store_t * store, WylHandle * handle,
     WylServiceAuthWriteLease * write_lease,
     WylServiceAuthorityTransaction ** out_transaction);
+gboolean wyl_policy_store_service_authority_transaction_is_active
+    (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_service_authority_transaction_commit
     (WylServiceAuthorityTransaction * transaction);
 wyrelog_error_t wyl_policy_store_service_authority_transaction_rollback
@@ -541,6 +543,14 @@ typedef enum
   WYL_SERVICE_EXCHANGE_INTENTION_REPLAY,
 } WylServiceExchangeIntentionClassification;
 
+typedef struct
+{
+  WylServiceExchangeIntentionClassification classification;
+  guint64 transaction_serial;
+  guint64 store_generation;
+  guint64 write_lease_serial;
+} WylServiceExchangeReceiptIdentity;
+
 typedef struct WylServiceExchangeIntentionRecord
 {
   wyl_service_exchange_audit_material_t material;
@@ -594,6 +604,14 @@ wyl_service_exchange_receipt_get_classification (const
 wyrelog_error_t wyl_service_exchange_receipt_validate_handle
     (const WylServiceExchangeReceipt * receipt, WylHandle * handle,
     wyl_policy_store_t * store);
+wyrelog_error_t wyl_service_exchange_receipt_validate_for_active_write
+    (const WylServiceExchangeReceipt * receipt,
+    WylServiceAuthWriteLease * write_lease, WylHandle * handle,
+    wyl_policy_store_t * store);
+wyrelog_error_t wyl_service_exchange_receipt_snapshot_for_active_write
+    (const WylServiceExchangeReceipt * receipt,
+    WylServiceAuthWriteLease * write_lease, WylHandle * handle,
+    wyl_policy_store_t * store, WylServiceExchangeReceiptIdentity * out);
 wyrelog_error_t wyl_policy_store_service_exchange_receipt_take
     (WylServiceAuthorityTransaction * transaction,
     WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,

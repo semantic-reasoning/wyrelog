@@ -2615,6 +2615,13 @@ wyrelog_error_t
   return txn->primary_result;
 }
 
+gboolean
+    wyl_policy_store_service_authority_transaction_is_active
+    (wyl_policy_store_t * store) {
+  return store != NULL
+      && g_atomic_int_get (&store->service_authority_transaction_active);
+}
+
 wyrelog_error_t
     wyl_policy_store_service_authority_transaction_rollback
     (WylServiceAuthorityTransaction * txn) {
@@ -6661,6 +6668,52 @@ wyl_service_exchange_receipt_validate_handle (const WylServiceExchangeReceipt
     return WYRELOG_E_INVALID;
   return wyl_handle_policy_store_validate_generation (handle, store,
       receipt->store_generation);
+}
+
+wyrelog_error_t
+    wyl_service_exchange_receipt_validate_for_active_write
+    (const WylServiceExchangeReceipt * receipt,
+    WylServiceAuthWriteLease * write_lease, WylHandle * handle,
+    wyl_policy_store_t * store)
+{
+  if (receipt == NULL || write_lease == NULL || !WYL_IS_HANDLE (handle)
+      || store == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_policy_store_service_authority_transaction_is_active (store))
+    return WYRELOG_E_BUSY;
+  wyrelog_error_t rc = wyl_service_exchange_receipt_validate_handle (receipt,
+      handle, store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return
+      wyl_policy_store_service_authority_commit_evidence_validate_for_active_write
+      (receipt->evidence, write_lease, handle, store,
+      receipt->transaction_serial);
+}
+
+wyrelog_error_t
+    wyl_service_exchange_receipt_snapshot_for_active_write
+    (const WylServiceExchangeReceipt * receipt,
+    WylServiceAuthWriteLease * write_lease, WylHandle * handle,
+    wyl_policy_store_t * store, WylServiceExchangeReceiptIdentity * out)
+{
+  if (out != NULL)
+    memset (out, 0, sizeof *out);
+  if (out == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_exchange_receipt_validate_for_active_write
+      (receipt, write_lease, handle, store);
+  guint64 lease_serial = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_write_lease_get_serial (write_lease, handle,
+        &lease_serial);
+  if (rc == WYRELOG_E_OK) {
+    out->classification = receipt->classification;
+    out->transaction_serial = receipt->transaction_serial;
+    out->store_generation = receipt->store_generation;
+    out->write_lease_serial = lease_serial;
+  }
+  return rc;
 }
 
 wyrelog_error_t
