@@ -17,6 +17,7 @@ typedef enum
   WYL_SERVICE_AUTH_UNAVAILABLE_NONE = 0,
   WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT = 1,
   WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT = 2,
+  WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT = 3,
 } WylServiceAuthUnavailableReason;
 
 typedef enum
@@ -96,6 +97,15 @@ wyrelog_error_t wyl_service_auth_write_lease_claim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
 wyrelog_error_t wyl_service_auth_write_lease_unclaim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
+/* Fail-stop cleanup path: the exact transaction owner may latch the handle
+ * even after its claim was consumed or the authority entered CLOSING. */
+wyrelog_error_t wyl_service_auth_write_lease_terminalize_cleanup
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
+wyrelog_error_t wyl_service_auth_write_lease_terminalize_store_fallback
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    guint64 originating_writer_serial);
+wyrelog_error_t wyl_service_auth_rank_leave_expected
+    (WylHandle * handle, WylServiceAuthRank rank);
 wyrelog_error_t wyl_service_auth_read_lease_release
     (WylServiceAuthReadLease * lease);
 wyrelog_error_t wyl_service_auth_write_lease_release
