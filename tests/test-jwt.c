@@ -44,6 +44,7 @@ check_base64url_round_trip (void)
       != 0)
     return 13;
 
+  g_clear_pointer (&decoded, g_bytes_unref);
   if (wyl_jwt_base64url_decode ("abc=", &decoded) != WYRELOG_E_INVALID)
     return 14;
   if (wyl_jwt_base64url_decode ("a", &decoded) != WYRELOG_E_INVALID)
@@ -492,6 +493,167 @@ check_hs256_access_token_rejects_ambiguous_claims (void)
   return 0;
 }
 
+static const wyl_jwt_service_issue_input_t valid_service_input = {
+  .key_id = "wyrelogd-test-key",
+  .jti = "01890c10-2e3f-7000-8000-000000000201",
+  .subject = "svc:jwt:worker",
+  .issuer = "wyrelogd",
+  .audience = "wyrelog-client",
+  .tenant = "tenant-a",
+  .session_id = "01890c10-2e3f-7000-8000-000000000202",
+  .credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+  .credential_generation = G_MAXUINT64,
+  .issued_at = 2000,
+};
+
+static gint
+check_service_claim_round_trip (void)
+{
+  static const guint8 secret[] = "service-test-secret";
+  g_autofree gchar *token = NULL;
+  if (wyl_jwt_sign_hs256_service (&valid_service_input, secret,
+          sizeof secret - 1, &token) != WYRELOG_E_OK)
+    return 150;
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret - 1,
+          valid_service_input.key_id, valid_service_input.issuer,
+          valid_service_input.audience, 2000, &payload) != WYRELOG_E_OK)
+    return 151;
+  wyl_jwt_access_claims_t claims = { 0 };
+  if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
+    return 152;
+  gboolean exact = g_strcmp0 (claims.jti, valid_service_input.jti) == 0
+      && g_strcmp0 (claims.subject, valid_service_input.subject) == 0
+      && g_strcmp0 (claims.tenant, valid_service_input.tenant) == 0
+      && g_strcmp0 (claims.session_id, valid_service_input.session_id) == 0
+      && g_strcmp0 (claims.auth_method, "service_credential") == 0
+      && g_strcmp0 (claims.credential_id,
+      valid_service_input.credential_id) == 0
+      && claims.credential_generation == G_MAXUINT64
+      && claims.issued_at == 2000 && claims.not_before == 2000
+      && claims.expires_at == 2300;
+  wyl_jwt_access_claims_clear (&claims);
+  if (!exact)
+    return 153;
+
+  wyl_jwt_service_issue_input_t invalid = valid_service_input;
+  invalid.credential_generation = 0;
+  g_clear_pointer (&token, g_free);
+  if (wyl_jwt_sign_hs256_service (&invalid, secret, sizeof secret - 1,
+          &token) != WYRELOG_E_INVALID)
+    return 154;
+  invalid = valid_service_input;
+  invalid.issued_at = G_MAXINT64 - 299;
+  if (wyl_jwt_sign_hs256_service (&invalid, secret, sizeof secret - 1,
+          &token) != WYRELOG_E_INVALID)
+    return 155;
+  return 0;
+}
+
+static wyrelog_error_t
+parse_claim_text (const gchar *text)
+{
+  g_autoptr (GBytes) bytes = g_bytes_new_static (text, strlen (text));
+  wyl_jwt_access_claims_t claims = { 0 };
+  wyrelog_error_t rc = wyl_jwt_parse_access_claims_json (bytes, &claims);
+  wyl_jwt_access_claims_clear (&claims);
+  return rc;
+}
+
+static gchar *
+replace_claim_fragment (const gchar *text, const gchar *from, const gchar *to)
+{
+  const gchar *match = strstr (text, from);
+  if (match == NULL)
+    return NULL;
+  return g_strdup_printf ("%.*s%s%s", (gint) (match - text), text, to,
+      match + strlen (from));
+}
+
+#define SERVICE_BASE \
+  "\"jti\":\"01890c10-2e3f-7000-8000-000000000201\"," \
+  "\"sub\":\"svc:jwt:worker\",\"iss\":\"wyrelogd\"," \
+  "\"aud\":\"wyrelog-client\",\"iat\":2000,\"nbf\":2000," \
+  "\"exp\":2300,\"tenant\":\"tenant-a\"," \
+  "\"principal_state_at_issue\":\"authenticated\"," \
+  "\"session_id\":\"01890c10-2e3f-7000-8000-000000000202\""
+#define SERVICE_ONLY \
+  "\"auth_method\":\"service_credential\"," \
+  "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"," \
+  "\"credential_generation\":1"
+
+static gint
+check_service_claims_fail_closed (void)
+{
+  const gchar *invalid[] = {
+    "{" SERVICE_BASE ",\"auth_method\":\"service_credential\"}",
+    "{" SERVICE_BASE ",\"credential_id\":"
+        "\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"}",
+    "{" SERVICE_BASE ",\"credential_generation\":1}",
+    "{" SERVICE_BASE "," SERVICE_ONLY ",\"sid\":\"alias\"}",
+    "{" SERVICE_BASE "," SERVICE_ONLY ",\"auth_method\":"
+        "\"service_credential\"}",
+    "{" SERVICE_BASE ",\"auth_method\":1,\"credential_id\":"
+        "\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"," "\"credential_generation\":1}",
+    "{" SERVICE_BASE ",\"auth_method\":\"service_credential\","
+        "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"credential_generation\":\"1\"}",
+    "{" SERVICE_BASE ",\"auth_method\":\"unknown\","
+        "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"credential_generation\":1}",
+    "{" SERVICE_BASE ",\"auth_method\":\"service_credential\","
+        "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"credential_generation\":0}",
+    "{" SERVICE_BASE ",\"auth_method\":\"service_credential\","
+        "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"credential_generation\":18446744073709551616}",
+    "{" SERVICE_BASE ",\"auth_method\":\"service_credential\","
+        "\"credential_id\":\"wlc_bad\",\"credential_generation\":1}",
+    "{" SERVICE_BASE "," SERVICE_ONLY "} trailing",
+    "{" SERVICE_BASE ",\"auth_method\":\"service_credential\","
+        "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"credential_generation\":01}",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid); i++)
+    if (parse_claim_text (invalid[i]) == WYRELOG_E_OK)
+      return 160 + (gint) i;
+
+  const gchar *bad_time =
+      "{\"jti\":\"01890c10-2e3f-7000-8000-000000000201\","
+      "\"sub\":\"svc:jwt:worker\",\"iss\":\"wyrelogd\","
+      "\"aud\":\"wyrelog-client\",\"iat\":2000,\"nbf\":2001,"
+      "\"exp\":2300,\"tenant\":\"tenant-a\","
+      "\"principal_state_at_issue\":\"authenticated\","
+      "\"session_id\":\"01890c10-2e3f-7000-8000-000000000202\","
+      SERVICE_ONLY "}";
+  if (parse_claim_text (bad_time) != WYRELOG_E_POLICY)
+    return 180;
+  g_autofree gchar *bad_expiry = g_strdup ("{" SERVICE_BASE ","
+      SERVICE_ONLY "}");
+  gchar *expiry = strstr (bad_expiry, "\"exp\":2300");
+  if (expiry == NULL)
+    return 181;
+  expiry[strlen ("\"exp\":230")] = '1';
+  if (parse_claim_text (bad_expiry) != WYRELOG_E_POLICY)
+    return 182;
+
+  const gchar *valid_payload = "{" SERVICE_BASE "," SERVICE_ONLY "}";
+  const gchar *invalid_identity[][2] = {
+    {"01890c10-2e3f-7000-8000-000000000201", "not-a-jti"},
+    {"01890c10-2e3f-7000-8000-000000000202", "not-a-session"},
+    {"svc:jwt:worker", "alice"},
+    {"tenant-a", "bad tenant"},
+    {"authenticated", "active"},
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid_identity); i++) {
+    g_autofree gchar *mutated = replace_claim_fragment (valid_payload,
+        invalid_identity[i][0], invalid_identity[i][1]);
+    if (mutated == NULL || parse_claim_text (mutated) == WYRELOG_E_OK)
+      return 183 + (gint) i;
+  }
+  return 0;
+}
+
 int
 main (void)
 {
@@ -518,6 +680,10 @@ main (void)
   if ((rc = check_hs256_signature_rejects_ambiguous_headers ()) != 0)
     return rc;
   if ((rc = check_hs256_access_token_rejects_ambiguous_claims ()) != 0)
+    return rc;
+  if ((rc = check_service_claim_round_trip ()) != 0)
+    return rc;
+  if ((rc = check_service_claims_fail_closed ()) != 0)
     return rc;
   return 0;
 }

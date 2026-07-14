@@ -39,6 +39,7 @@ PROTECTED = (
     "wyl_session_get_service_credential_generation_private",
     "wyl_session_get_service_issued_at_seconds_private",
     "wyl_session_get_service_expires_at_seconds_private",
+    "wyl_jwt_sign_hs256_service",
 )
 
 # #358 may add references only at this exact orchestrator owner. Its counts
@@ -59,6 +60,11 @@ MANIFEST = {
             5 if symbol == "wyl_session_new_service_detached" else 1),
     }
     for symbol in PROTECTED
+}
+MANIFEST["wyl_jwt_sign_hs256_service"] = {
+    "wyrelog/auth/jwt-private.h": 1,
+    "wyrelog/auth/service-jwt-private.c": 1,
+    "tests/test-jwt.c": 3,
 }
 
 
@@ -984,11 +990,18 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
                             + "\nactual=" + json.dumps(actual, sort_keys=True))
 
     if manifest is MANIFEST:
-        header = (root / "wyrelog/wyl-session-private.h").read_text(
-            encoding="utf-8")
-        implementation = (root / "wyrelog/auth/service-session-private.c").read_text(
-            encoding="utf-8")
         for symbol in protected:
+            owners = manifest[symbol]
+            headers = [path for path in owners if path.endswith(".h")]
+            implementations = [path for path in owners
+                               if path.startswith("wyrelog/auth/")
+                               and path.endswith(".c")]
+            if len(headers) != 1 or len(implementations) != 1:
+                raise BoundaryError(
+                    f"private owner cardinality changed: {symbol}")
+            header = (root / headers[0]).read_text(encoding="utf-8")
+            implementation = (root / implementations[0]).read_text(
+                encoding="utf-8")
             declaration = re.compile(
                 rf"G_GNUC_INTERNAL\b[^;{{}}]*\b{re.escape(symbol)}\s*\(")
             definition = re.compile(rf"^[^;{{}}]*\b{re.escape(symbol)}\s*\(",

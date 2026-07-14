@@ -25,6 +25,7 @@ PROTECTED = (
     "wyl_session_get_service_credential_generation_private",
     "wyl_session_get_service_issued_at_seconds_private",
     "wyl_session_get_service_expires_at_seconds_private",
+    "wyl_jwt_sign_hs256_service",
 )
 
 
