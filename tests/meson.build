@@ -807,6 +807,25 @@ test('service-auth-coordination', test_service_auth_coordination,
   timeout : 30,
 )
 
+test_service_exchange_intention_store = executable(
+  'test-service-exchange-intention-store',
+  'test-service-exchange-intention-store.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('service-exchange-intention-store', test_service_exchange_intention_store,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : 120,
+)
+
+test('service-exchange-shadow-boundary', python3,
+  args : [
+    meson.current_source_dir() / 'test-service-exchange-shadow-boundary.py',
+    meson.project_source_root() / 'wyrelog' / 'policy' / 'store.c',
+  ],
+)
+
 test_policy_service_namespace = executable('test-policy-service-namespace',
   'test-policy-service-namespace.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
