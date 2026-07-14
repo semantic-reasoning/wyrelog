@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include <sodium.h>
+#include <chronoid/ksuid.h>
 #include <glib/gstdio.h>
 
 #ifdef G_OS_WIN32
@@ -219,6 +220,11 @@ struct _WylServiceAuthorityTransaction
   gboolean write_intent_barrier_reached;
   gboolean write_intent_barrier_released;
   int write_intent_fail_sql_once;
+  gboolean participant_rollback_only;
+  wyrelog_error_t participant_failure_rc;
+  int participant_failure_sqlite_extended_error;
+  gboolean fail_service_exchange_preallocation_once;
+  gboolean fail_service_exchange_readback_once;
 };
 
 typedef struct
@@ -523,6 +529,7 @@ static const gchar *const required_tables[] = {
   "service_principal_events",
   "service_credential_events",
   "service_domain_requests",
+  "service_exchange_audit_intentions",
   "service_authority_writer_gate",
 };
 
@@ -675,6 +682,54 @@ static const gchar service_schema_ddl[] =
     ") WITHOUT ROWID;"
     "INSERT OR IGNORE INTO service_authority_writer_gate(singleton,lock_word)"
     " VALUES(1,0);"
+    "CREATE TABLE IF NOT EXISTS service_exchange_audit_intentions ("
+    " intention_id TEXT NOT NULL PRIMARY KEY CHECK (typeof(intention_id) = 'text'"
+    "   AND length(intention_id) = 36 AND instr(intention_id,char(0)) = 0),"
+    " payload_digest TEXT NOT NULL UNIQUE CHECK (typeof(payload_digest) = 'text'"
+    "   AND length(payload_digest) = 64 AND payload_digest = lower(payload_digest)"
+    "   AND payload_digest NOT GLOB '*[^0-9a-f]*'),"
+    " payload_schema_version INTEGER NOT NULL CHECK ("
+    "   typeof(payload_schema_version) = 'integer' AND payload_schema_version = 1),"
+    " event_type TEXT NOT NULL CHECK (typeof(event_type) = 'text'"
+    "   AND event_type = 'service.credential.exchange'),"
+    " outcome TEXT NOT NULL CHECK (typeof(outcome) = 'text' AND outcome = 'allowed'),"
+    " created_at_us INTEGER NOT NULL CHECK (typeof(created_at_us) = 'integer'"
+    "   AND created_at_us > 0),"
+    " request_id TEXT NOT NULL CHECK (typeof(request_id) = 'text'"
+    "   AND length(request_id) = 27 AND instr(request_id,char(0)) = 0),"
+    " credential_id TEXT NOT NULL CHECK (typeof(credential_id) = 'text'"
+    "   AND length(credential_id) = 31 AND substr(credential_id,1,4) = 'wlc_'"
+    "   AND instr(credential_id,char(0)) = 0),"
+    " credential_generation BLOB NOT NULL CHECK ("
+    "   typeof(credential_generation) = 'blob' AND length(credential_generation) = 8),"
+    " service_principal TEXT NOT NULL CHECK (typeof(service_principal) = 'text'"
+    "   AND length(CAST(service_principal AS BLOB)) BETWEEN 5 AND 128"
+    "   AND instr(service_principal,char(0)) = 0),"
+    " tenant_id TEXT NOT NULL CHECK (typeof(tenant_id) = 'text'"
+    "   AND length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 128"
+    "   AND instr(tenant_id,char(0)) = 0),"
+    " fingerprint_schema_version INTEGER NOT NULL CHECK ("
+    "   typeof(fingerprint_schema_version) = 'integer'"
+    "   AND fingerprint_schema_version = 1),"
+    " session_fingerprint TEXT NOT NULL CHECK (typeof(session_fingerprint) = 'text'"
+    "   AND length(session_fingerprint) = 64"
+    "   AND session_fingerprint = lower(session_fingerprint)"
+    "   AND session_fingerprint NOT GLOB '*[^0-9a-f]*'),"
+    " jti_fingerprint TEXT NOT NULL CHECK (typeof(jti_fingerprint) = 'text'"
+    "   AND length(jti_fingerprint) = 64"
+    "   AND jti_fingerprint = lower(jti_fingerprint)"
+    "   AND jti_fingerprint NOT GLOB '*[^0-9a-f]*'),"
+    " canonical_payload BLOB NOT NULL CHECK (typeof(canonical_payload) = 'blob'"
+    "   AND length(canonical_payload) BETWEEN 1 AND 4096)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_exchange_audit_created"
+    " ON service_exchange_audit_intentions(created_at_us,intention_id);"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_update"
+    " BEFORE UPDATE ON service_exchange_audit_intentions"
+    " BEGIN SELECT RAISE(ABORT, 'service exchange audit intentions are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_delete"
+    " BEFORE DELETE ON service_exchange_audit_intentions"
+    " BEGIN SELECT RAISE(ABORT, 'service exchange audit intentions are append-only'); END;"
     "CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable"
     " BEFORE UPDATE ON service_principals WHEN"
     " OLD.subject_id IS NOT NEW.subject_id OR"
@@ -812,6 +867,25 @@ static const gchar *const service_writer_gate_needles[] = {
   NULL,
 };
 
+static const gchar *const service_exchange_audit_needles[] = {
+  "check(typeof(intention_id)='text'andlength(intention_id)=36andinstr(intention_id,char(0))=0)",
+  "check(typeof(payload_digest)='text'andlength(payload_digest)=64andpayload_digest=lower(payload_digest)andpayload_digestnotglob'*[^0-9a-f]*')",
+  "check(typeof(payload_schema_version)='integer'andpayload_schema_version=1)",
+  "check(typeof(event_type)='text'andevent_type='service.credential.exchange')",
+  "check(typeof(outcome)='text'andoutcome='allowed')",
+  "check(typeof(created_at_us)='integer'andcreated_at_us>0)",
+  "check(typeof(request_id)='text'andlength(request_id)=27andinstr(request_id,char(0))=0)",
+  "check(typeof(credential_id)='text'andlength(credential_id)=31andsubstr(credential_id,1,4)='wlc_'andinstr(credential_id,char(0))=0)",
+  "check(typeof(credential_generation)='blob'andlength(credential_generation)=8)",
+  "check(typeof(service_principal)='text'andlength(cast(service_principalasblob))between5and128andinstr(service_principal,char(0))=0)",
+  "check(typeof(tenant_id)='text'andlength(cast(tenant_idasblob))between1and128andinstr(tenant_id,char(0))=0)",
+  "check(typeof(fingerprint_schema_version)='integer'andfingerprint_schema_version=1)",
+  "check(typeof(session_fingerprint)='text'andlength(session_fingerprint)=64andsession_fingerprint=lower(session_fingerprint)andsession_fingerprintnotglob'*[^0-9a-f]*')",
+  "check(typeof(jti_fingerprint)='text'andlength(jti_fingerprint)=64andjti_fingerprint=lower(jti_fingerprint)andjti_fingerprintnotglob'*[^0-9a-f]*')",
+  "check(typeof(canonical_payload)='blob'andlength(canonical_payload)between1and4096)",
+  NULL,
+};
+
 static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_principals",
         "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
@@ -844,6 +918,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         "singleton:INTEGER:1::1,lock_word:INTEGER:1::0",
         service_writer_gate_needles, 2, "",
       "sqlite_autoindex_service_authority_writer_gate_1:1:pk:0:0:0:singleton:0:BINARY:1,1:1:lock_word:0:BINARY:0"},
+  {"service_exchange_audit_intentions",
+        "intention_id:TEXT:1::1,payload_digest:TEXT:1::0,payload_schema_version:INTEGER:1::0,event_type:TEXT:1::0,outcome:TEXT:1::0,created_at_us:INTEGER:1::0,request_id:TEXT:1::0,credential_id:TEXT:1::0,credential_generation:BLOB:1::0,service_principal:TEXT:1::0,tenant_id:TEXT:1::0,fingerprint_schema_version:INTEGER:1::0,session_fingerprint:TEXT:1::0,jti_fingerprint:TEXT:1::0,canonical_payload:BLOB:1::0",
+        service_exchange_audit_needles, 15, "",
+      "idx_service_exchange_audit_created:0:c:0:0:5:created_at_us:0:BINARY:1,1:0:intention_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_exchange_audit_intentions_1:1:pk:0:0:0:intention_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_exchange_audit_intentions_2:1:u:0:0:1:payload_digest:0:BINARY:1,1:-1::0:BINARY:0"},
 };
 
 static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
@@ -863,6 +941,12 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
       "createtriggertrg_service_domain_requests_no_updatebeforeupdateonservice_domain_requestsbeginselectraise(abort,'servicedomainrequestsareappend-only');end"},
   {"trg_service_domain_requests_no_delete", "service_domain_requests",
       "createtriggertrg_service_domain_requests_no_deletebeforedeleteonservice_domain_requestsbeginselectraise(abort,'servicedomainrequestsareappend-only');end"},
+  {"trg_service_exchange_audit_no_update",
+        "service_exchange_audit_intentions",
+      "createtriggertrg_service_exchange_audit_no_updatebeforeupdateonservice_exchange_audit_intentionsbeginselectraise(abort,'serviceexchangeauditintentionsareappend-only');end"},
+  {"trg_service_exchange_audit_no_delete",
+        "service_exchange_audit_intentions",
+      "createtriggertrg_service_exchange_audit_no_deletebeforedeleteonservice_exchange_audit_intentionsbeginselectraise(abort,'serviceexchangeauditintentionsareappend-only');end"},
 };
 
 static const BuiltinRole *
@@ -2457,7 +2541,8 @@ wyrelog_error_t
       || txn->owner != g_thread_self () || !txn->owns_store_locks)
     return WYRELOG_E_INVALID;
   if (txn->write_intent_state ==
-      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED)
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED
+      || txn->participant_rollback_only)
     return WYRELOG_E_BUSY;
 
   gboolean release_succeeded = FALSE;
@@ -3573,8 +3658,8 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  /* Apply all six inert service-authority tables, their indexes and their
-   * eight immutability/append-only triggers atomically. CREATE TABLE IF NOT
+  /* Apply all seven inert service-authority tables, their indexes and their
+   * ten immutability/append-only triggers atomically. CREATE TABLE IF NOT
    * EXISTS cannot repair a malformed same-name legacy object, so validate
    * before release and roll the entire service migration back on mismatch. */
   rc = exec_sql (store->db, "SAVEPOINT wyrelog_service_schema;");
@@ -4851,7 +4936,7 @@ load_schema_object_sql (sqlite3 *db, const gchar *type, const gchar *name,
   sqlite3_stmt *stmt = NULL;
   *out_sql = NULL;
   static const gchar *sql =
-      "SELECT sql FROM sqlite_schema WHERE type = ? AND name = ? "
+      "SELECT sql FROM main.sqlite_schema WHERE type = ? AND name = ? "
       "AND (? IS NULL OR tbl_name = ?);";
   wyrelog_error_t rc = prepare_stmt (db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -4881,7 +4966,7 @@ static wyrelog_error_t
 validate_table_descriptor (sqlite3 *db, const ServiceTableDescriptor *desc)
 {
   g_autofree gchar *pragma =
-      g_strdup_printf ("PRAGMA table_info(\"%s\");", desc->name);
+      g_strdup_printf ("PRAGMA main.table_info(\"%s\");", desc->name);
   sqlite3_stmt *stmt = NULL;
   if (sqlite3_prepare_v2 (db, pragma, -1, &stmt, NULL) != SQLITE_OK)
     return WYRELOG_E_IO;
@@ -4930,7 +5015,7 @@ validate_table_descriptor (sqlite3 *db, const ServiceTableDescriptor *desc)
   }
 
   g_autofree gchar *fk_pragma =
-      g_strdup_printf ("PRAGMA foreign_key_list(\"%s\");", desc->name);
+      g_strdup_printf ("PRAGMA main.foreign_key_list(\"%s\");", desc->name);
   stmt = NULL;
   if (sqlite3_prepare_v2 (db, fk_pragma, -1, &stmt, NULL) != SQLITE_OK)
     return WYRELOG_E_IO;
@@ -4960,8 +5045,8 @@ validate_table_descriptor (sqlite3 *db, const ServiceTableDescriptor *desc)
     return WYRELOG_E_POLICY;
 
   static const gchar *index_list_sql =
-      "SELECT name, \"unique\", origin, partial FROM pragma_index_list(?) "
-      "ORDER BY name;";
+      "SELECT name, \"unique\", origin, partial"
+      " FROM pragma_index_list(?, 'main') " "ORDER BY name;";
   if (sqlite3_prepare_v2 (db, index_list_sql, -1, &stmt, NULL) != SQLITE_OK)
     return WYRELOG_E_IO;
   if (sqlite3_bind_text (stmt, 1, desc->name, -1, SQLITE_TRANSIENT)
@@ -4978,7 +5063,7 @@ validate_table_descriptor (sqlite3 *db, const ServiceTableDescriptor *desc)
       return WYRELOG_E_POLICY;
     }
     g_autofree gchar *index_pragma =
-        g_strdup_printf ("PRAGMA index_xinfo(\"%s\");", name);
+        g_strdup_printf ("PRAGMA main.index_xinfo(\"%s\");", name);
     sqlite3_stmt *index_stmt = NULL;
     if (sqlite3_prepare_v2 (db, index_pragma, -1, &index_stmt, NULL)
         != SQLITE_OK) {
@@ -5058,10 +5143,10 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
 
   gboolean found = FALSE;
   wyrelog_error_t rc = query_has_rows (store->db,
-      "SELECT 1 FROM sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
+      "SELECT 1 FROM main.sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests') "
+      "'service_domain_requests','service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
       "'trg_service_credentials_identity_immutable',"
@@ -5070,15 +5155,34 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_credential_events_no_update',"
       "'trg_service_credential_events_no_delete',"
       "'trg_service_domain_requests_no_update',"
-      "'trg_service_domain_requests_no_delete') LIMIT 1;", &found);
+      "'trg_service_domain_requests_no_delete',"
+      "'trg_service_exchange_audit_no_update',"
+      "'trg_service_exchange_audit_no_delete') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
     return WYRELOG_E_POLICY;
 
   rc = query_has_rows (store->db,
-      "SELECT 1 WHERE (SELECT count(*) FROM service_authority_writer_gate)<>1"
-      " OR NOT EXISTS(SELECT 1 FROM service_authority_writer_gate"
+      "SELECT 1 FROM sqlite_temp_schema AS temp_object WHERE"
+      " temp_object.tbl_name IN ("
+      "'service_principals','service_credentials','service_credential_cvk',"
+      "'service_principal_events','service_credential_events',"
+      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_authority_writer_gate') OR temp_object.name IN ("
+      " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
+      "'service_principals','service_credentials','service_credential_cvk',"
+      "'service_principal_events','service_credential_events',"
+      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_authority_writer_gate')) LIMIT 1;", &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  rc = query_has_rows (store->db,
+      "SELECT 1 WHERE (SELECT count(*) FROM main.service_authority_writer_gate)<>1"
+      " OR NOT EXISTS(SELECT 1 FROM main.service_authority_writer_gate"
       " WHERE singleton=1 AND lock_word=0"
       " AND typeof(singleton)='integer' AND typeof(lock_word)='integer');",
       &found);
@@ -5726,7 +5830,21 @@ static wyrelog_error_t
   if (rc == WYRELOG_E_OK && txn->write_intent_state ==
       WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED)
     rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK && txn->participant_rollback_only)
+    rc = WYRELOG_E_BUSY;
   return rc;
+}
+
+static void
+service_authority_transaction_fail_participant (WylServiceAuthorityTransaction
+    *txn, wyrelog_error_t rc)
+{
+  if (!txn->participant_rollback_only) {
+    txn->participant_rollback_only = TRUE;
+    txn->participant_failure_rc = rc;
+    txn->participant_failure_sqlite_extended_error =
+        sqlite3_extended_errcode (txn->store->db);
+  }
 }
 
 wyrelog_error_t
@@ -5796,7 +5914,7 @@ wyrelog_error_t
         WYRELOG_E_POLICY);
   sqlite3_stmt *stmt = NULL;
   int sql_rc = sqlite3_prepare_v2 (expected_store->db,
-      "UPDATE service_authority_writer_gate SET lock_word=lock_word"
+      "UPDATE main.service_authority_writer_gate SET lock_word=lock_word"
       " WHERE singleton=1 AND lock_word=0;", -1, &stmt, NULL);
   if (sql_rc == SQLITE_OK) {
     g_mutex_lock (&txn->write_intent_barrier_mutex);
@@ -6082,6 +6200,696 @@ wyrelog_error_t
   sqlite3_finalize (stmt);
   return rc;
 }
+
+#define SERVICE_EXCHANGE_SELECT_COLUMNS \
+  "intention_id,payload_digest,payload_schema_version,event_type,outcome," \
+  "created_at_us,request_id,credential_id,credential_generation," \
+  "service_principal,tenant_id,fingerprint_schema_version," \
+  "session_fingerprint,jti_fingerprint,canonical_payload"
+
+typedef struct
+{
+  const guint8 *data;
+  gsize len;
+  gsize offset;
+} ServiceExchangePayloadCursor;
+
+static gboolean
+service_exchange_take (ServiceExchangePayloadCursor *cursor, gsize len,
+    const guint8 **out)
+{
+  if (len > cursor->len - cursor->offset)
+    return FALSE;
+  *out = cursor->data + cursor->offset;
+  cursor->offset += len;
+  return TRUE;
+}
+
+static gboolean
+service_exchange_take_u32 (ServiceExchangePayloadCursor *cursor, guint32 *out)
+{
+  const guint8 *bytes = NULL;
+  if (!service_exchange_take (cursor, 4, &bytes))
+    return FALSE;
+  *out = ((guint32) bytes[0] << 24) | ((guint32) bytes[1] << 16)
+      | ((guint32) bytes[2] << 8) | bytes[3];
+  return TRUE;
+}
+
+static gboolean
+service_exchange_take_u64 (ServiceExchangePayloadCursor *cursor, guint64 *out)
+{
+  const guint8 *bytes = NULL;
+  if (!service_exchange_take (cursor, 8, &bytes))
+    return FALSE;
+  guint64 value = 0;
+  for (guint i = 0; i < 8; i++)
+    value = (value << 8) | bytes[i];
+  *out = value;
+  return TRUE;
+}
+
+static gboolean
+service_exchange_take_exact (ServiceExchangePayloadCursor *cursor,
+    const guint8 *expected, gsize expected_len)
+{
+  const guint8 *actual = NULL;
+  return service_exchange_take (cursor, expected_len, &actual)
+      && memcmp (actual, expected, expected_len) == 0;
+}
+
+static gboolean
+service_exchange_take_framed_exact (ServiceExchangePayloadCursor *cursor,
+    const guint8 *expected, gsize expected_len)
+{
+  guint32 len = 0;
+  return expected_len <= G_MAXUINT32
+      && service_exchange_take_u32 (cursor, &len) && len == expected_len
+      && service_exchange_take_exact (cursor, expected, expected_len);
+}
+
+static gboolean
+service_exchange_hex_is_canonical (const gchar *value, gsize len)
+{
+  if (value == NULL || len != 64 || memchr (value, '\0', len) != NULL)
+    return FALSE;
+  for (gsize i = 0; i < len; i++)
+    if (!g_ascii_isdigit (value[i])
+        && (value[i] < 'a' || value[i] > 'f'))
+      return FALSE;
+  return TRUE;
+}
+
+static gboolean
+service_exchange_request_id_is_canonical (const gchar *value, gsize len)
+{
+  chronoid_ksuid_t parsed;
+  gchar canonical[CHRONOID_KSUID_STRING_LEN + 1];
+
+  if (value == NULL || len != CHRONOID_KSUID_STRING_LEN
+      || memchr (value, '\0', len) != NULL
+      || chronoid_ksuid_parse (&parsed, value, len) != CHRONOID_KSUID_OK)
+    return FALSE;
+  chronoid_ksuid_format (&parsed, canonical);
+  return memcmp (value, canonical, len) == 0;
+}
+
+static gboolean
+service_exchange_payload_matches (const WylServiceExchangeIntentionRecord *r)
+{
+  gsize payload_len = 0;
+  const guint8 *payload = g_bytes_get_data (r->material.canonical_payload,
+      &payload_len);
+  guint8 digest[crypto_hash_sha256_BYTES];
+  if (payload == NULL || crypto_hash_sha256 (digest, payload, payload_len) != 0)
+    return FALSE;
+  gchar digest_hex[65];
+  sodium_bin2hex (digest_hex, sizeof digest_hex, digest, sizeof digest);
+  sodium_memzero (digest, sizeof digest);
+  if (strcmp (digest_hex, r->material.payload_digest) != 0)
+    return FALSE;
+
+  guint8 session[32], jti[32];
+  if (sodium_hex2bin (session, sizeof session,
+          r->material.session_fingerprint, 64, NULL, NULL, NULL) != 0
+      || sodium_hex2bin (jti, sizeof jti, r->material.jti_fingerprint, 64,
+          NULL, NULL, NULL) != 0)
+    return FALSE;
+  static const guint8 domain[] = "wyrelog.service-exchange.intention-payload";
+  static const guint8 event[] = "service.credential.exchange";
+  static const guint8 outcome[] = "allowed";
+  ServiceExchangePayloadCursor cursor = { payload, payload_len, 0 };
+  guint32 value32 = 0;
+  guint64 value64 = 0;
+  gboolean valid = service_exchange_take_exact (&cursor, domain,
+      sizeof domain)
+      && service_exchange_take_u32 (&cursor, &value32) && value32 == 1
+      && service_exchange_take_framed_exact (&cursor,
+      (const guint8 *) r->material.intention_id, 36)
+      && service_exchange_take_framed_exact (&cursor, event, sizeof event - 1)
+      && service_exchange_take_framed_exact (&cursor, outcome,
+      sizeof outcome - 1)
+      && service_exchange_take_u64 (&cursor, &value64)
+      && value64 == (guint64) r->created_at_us
+      && service_exchange_take_framed_exact (&cursor,
+      (const guint8 *) r->material.request_id, 27)
+      && service_exchange_take_framed_exact (&cursor,
+      (const guint8 *) r->credential_id, 31)
+      && service_exchange_take_u64 (&cursor, &value64)
+      && value64 == r->credential_generation
+      && service_exchange_take_framed_exact (&cursor,
+      (const guint8 *) r->service_principal, strlen (r->service_principal))
+      && service_exchange_take_framed_exact (&cursor,
+      (const guint8 *) r->tenant_id, strlen (r->tenant_id))
+      && service_exchange_take_u32 (&cursor, &value32) && value32 == 1
+      && service_exchange_take_u32 (&cursor, &value32) && value32 == 32
+      && service_exchange_take_exact (&cursor, session, sizeof session)
+      && service_exchange_take_u32 (&cursor, &value32) && value32 == 32
+      && service_exchange_take_exact (&cursor, jti, sizeof jti)
+      && cursor.offset == cursor.len;
+  sodium_memzero (session, sizeof session);
+  sodium_memzero (jti, sizeof jti);
+  return valid;
+}
+
+void wyl_service_exchange_intention_record_free
+    (WylServiceExchangeIntentionRecord * record)
+{
+  if (record == NULL)
+    return;
+  wyl_service_exchange_audit_material_clear (&record->material);
+  g_clear_pointer (&record->service_principal, g_free);
+  g_clear_pointer (&record->tenant_id, g_free);
+  sodium_memzero (record, sizeof *record);
+  g_free (record);
+}
+
+static guint64
+service_exchange_generation_from_be (const guint8 bytes[8])
+{
+  guint64 value = 0;
+  for (guint i = 0; i < 8; i++)
+    value = (value << 8) | bytes[i];
+  return value;
+}
+
+static void
+service_exchange_generation_to_be (guint64 value, guint8 bytes[8])
+{
+  for (guint i = 0; i < 8; i++)
+    bytes[i] = (guint8) (value >> (56 - i * 8));
+}
+
+static wyrelog_error_t
+service_exchange_record_from_row (sqlite3_stmt *stmt,
+    WylServiceExchangeIntentionRecord **out_record)
+{
+  *out_record = NULL;
+  const int text_columns[] = { 0, 1, 3, 4, 6, 7, 9, 10, 12, 13 };
+  for (guint i = 0; i < G_N_ELEMENTS (text_columns); i++)
+    if (sqlite3_column_type (stmt, text_columns[i]) != SQLITE_TEXT)
+      return WYRELOG_E_POLICY;
+  if (sqlite3_column_type (stmt, 2) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 5) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 8) != SQLITE_BLOB
+      || sqlite3_column_type (stmt, 11) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 14) != SQLITE_BLOB)
+    return WYRELOG_E_POLICY;
+  if (sqlite3_column_int64 (stmt, 2) != 1
+      || sqlite3_column_int64 (stmt, 11) != 1
+      || sqlite3_column_int64 (stmt, 5) <= 0
+      || sqlite3_column_bytes (stmt, 8) != 8
+      || sqlite3_column_bytes (stmt, 14) <= 0
+      || sqlite3_column_bytes (stmt, 14) > 4096)
+    return WYRELOG_E_POLICY;
+
+  WylServiceExchangeIntentionRecord *r = g_try_new0
+      (WylServiceExchangeIntentionRecord, 1);
+  if (r == NULL)
+    return WYRELOG_E_NOMEM;
+#define TEXT_AT(column) ((const gchar *) sqlite3_column_text (stmt, (column)))
+#define LEN_AT(column) ((gsize) sqlite3_column_bytes (stmt, (column)))
+  const gchar *intention = TEXT_AT (0);
+  const gchar *digest = TEXT_AT (1);
+  const gchar *request = TEXT_AT (6);
+  const gchar *credential = TEXT_AT (7);
+  const gchar *principal = TEXT_AT (9);
+  const gchar *tenant = TEXT_AT (10);
+  const gchar *session_fp = TEXT_AT (12);
+  const gchar *jti_fp = TEXT_AT (13);
+  wyl_id_t parsed;
+  gchar canonical[37];
+  gboolean valid = LEN_AT (0) == 36 && memchr (intention, '\0', 36) == NULL
+      && intention[14] == '7'
+      && strchr ("89ab", intention[19]) != NULL
+      && wyl_id_parse (intention, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+      && memcmp (intention, canonical, 36) == 0
+      && service_exchange_hex_is_canonical (digest, LEN_AT (1))
+      && column_text_exact (stmt, 3, "service.credential.exchange")
+      && column_text_exact (stmt, 4, "allowed")
+      && service_exchange_request_id_is_canonical (request, LEN_AT (6))
+      && LEN_AT (7) == 31
+      && wyl_service_credential_id_is_canonical (credential, LEN_AT (7))
+      && LEN_AT (9) >= 5 && LEN_AT (9) <= 128
+      && g_utf8_validate (principal, LEN_AT (9), NULL)
+      && wyl_policy_service_subject_is_valid (principal, LEN_AT (9))
+      && LEN_AT (10) >= 1 && LEN_AT (10) <= 128
+      && memchr (tenant, '\0', LEN_AT (10)) == NULL
+      && g_utf8_validate (tenant, LEN_AT (10), NULL)
+      && service_exchange_hex_is_canonical (session_fp, LEN_AT (12))
+      && service_exchange_hex_is_canonical (jti_fp, LEN_AT (13));
+  guint64 generation = service_exchange_generation_from_be
+      (sqlite3_column_blob (stmt, 8));
+  if (!valid || generation == 0 || generation > G_MAXINT64) {
+    wyl_service_exchange_intention_record_free (r);
+    return WYRELOG_E_POLICY;
+  }
+  gchar tenant_copy[129];
+  memcpy (tenant_copy, tenant, LEN_AT (10));
+  tenant_copy[LEN_AT (10)] = '\0';
+  if (!wyl_policy_store_tenant_id_is_valid (tenant_copy)) {
+    wyl_service_exchange_intention_record_free (r);
+    return WYRELOG_E_POLICY;
+  }
+  memcpy (r->material.intention_id, intention, 36);
+  memcpy (r->material.request_id, request, 27);
+  memcpy (r->credential_id, credential, 31);
+  memcpy (r->material.payload_digest, digest, 64);
+  memcpy (r->material.session_fingerprint, session_fp, 64);
+  memcpy (r->material.jti_fingerprint, jti_fp, 64);
+  r->credential_generation = generation;
+  r->created_at_us = sqlite3_column_int64 (stmt, 5);
+  r->service_principal = g_strndup (principal, LEN_AT (9));
+  r->tenant_id = g_strndup (tenant, LEN_AT (10));
+  r->material.canonical_payload = g_bytes_new (sqlite3_column_blob (stmt, 14),
+      LEN_AT (14));
+#undef TEXT_AT
+#undef LEN_AT
+  if (r->service_principal == NULL || r->tenant_id == NULL
+      || r->material.canonical_payload == NULL) {
+    wyl_service_exchange_intention_record_free (r);
+    return WYRELOG_E_NOMEM;
+  }
+  if (!service_exchange_payload_matches (r)) {
+    wyl_service_exchange_intention_record_free (r);
+    return WYRELOG_E_POLICY;
+  }
+  *out_record = r;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_exchange_require_participant (WylServiceAuthorityTransaction *txn,
+    wyl_policy_store_t *store)
+{
+  wyrelog_error_t rc = service_authority_transaction_validate_active (txn,
+      store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (txn->write_intent_state !=
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ACQUIRED)
+    return WYRELOG_E_POLICY;
+  return wyl_policy_store_service_authority_transaction_enter_participant
+      (txn, store);
+}
+
+static gboolean
+service_exchange_record_matches_input (const
+    WylServiceExchangeIntentionRecord *record,
+    const wyl_service_exchange_audit_input_t *input,
+    const wyl_service_exchange_audit_material_t *material)
+{
+  gsize stored_len = 0, input_len = 0;
+  const guint8 *stored = g_bytes_get_data (record->material.canonical_payload,
+      &stored_len);
+  const guint8 *encoded = g_bytes_get_data (material->canonical_payload,
+      &input_len);
+  return strcmp (record->material.intention_id, material->intention_id) == 0
+      && strcmp (record->material.payload_digest, material->payload_digest) == 0
+      && strcmp (record->material.request_id, material->request_id) == 0
+      && strlen (record->credential_id) == input->credential_id.len
+      && memcmp (record->credential_id, input->credential_id.data,
+      input->credential_id.len) == 0
+      && record->credential_generation == input->credential_generation
+      && record->created_at_us == input->created_at_us
+      && strlen (record->service_principal) == input->service_principal.len
+      && memcmp (record->service_principal, input->service_principal.data,
+      input->service_principal.len) == 0
+      && strlen (record->tenant_id) == input->tenant_id.len
+      && memcmp (record->tenant_id, input->tenant_id.data,
+      input->tenant_id.len) == 0
+      && strcmp (record->material.session_fingerprint,
+      material->session_fingerprint) == 0
+      && strcmp (record->material.jti_fingerprint,
+      material->jti_fingerprint) == 0
+      && stored_len == input_len && memcmp (stored, encoded, stored_len) == 0;
+}
+
+static WylServiceExchangeIntentionRecord *
+service_exchange_record_new_from_input (const wyl_service_exchange_audit_input_t
+    *input, const wyl_service_exchange_audit_material_t *material)
+{
+  WylServiceExchangeIntentionRecord *record = g_try_new0
+      (WylServiceExchangeIntentionRecord, 1);
+  if (record == NULL)
+    return NULL;
+
+  record->service_principal = g_try_malloc (input->service_principal.len + 1);
+  record->tenant_id = g_try_malloc (input->tenant_id.len + 1);
+  if (record->service_principal == NULL || record->tenant_id == NULL) {
+    wyl_service_exchange_intention_record_free (record);
+    return NULL;
+  }
+  memcpy (record->service_principal, input->service_principal.data,
+      input->service_principal.len);
+  record->service_principal[input->service_principal.len] = '\0';
+  memcpy (record->tenant_id, input->tenant_id.data, input->tenant_id.len);
+  record->tenant_id[input->tenant_id.len] = '\0';
+  memcpy (record->material.intention_id, material->intention_id,
+      sizeof record->material.intention_id);
+  memcpy (record->material.request_id, material->request_id,
+      sizeof record->material.request_id);
+  memcpy (record->material.payload_digest, material->payload_digest,
+      sizeof record->material.payload_digest);
+  memcpy (record->material.session_fingerprint,
+      material->session_fingerprint,
+      sizeof record->material.session_fingerprint);
+  memcpy (record->material.jti_fingerprint, material->jti_fingerprint,
+      sizeof record->material.jti_fingerprint);
+  memcpy (record->credential_id, input->credential_id.data,
+      input->credential_id.len);
+  record->material.canonical_payload = g_bytes_ref
+      (material->canonical_payload);
+  record->credential_generation = input->credential_generation;
+  record->created_at_us = input->created_at_us;
+  return record;
+}
+
+/* Validate the authoritative row into storage allocated before INSERT.  Every
+ * value is consumed from SQLite; equality permits retaining the preallocated
+ * GBytes only after the row bytes themselves have been verified exactly. */
+static wyrelog_error_t
+service_exchange_decode_created_row (sqlite3_stmt *stmt,
+    WylServiceExchangeIntentionRecord *record)
+{
+  gsize payload_len = 0;
+  const guint8 *payload = g_bytes_get_data (record->material.canonical_payload,
+      &payload_len);
+  guint8 generation[8];
+  service_exchange_generation_to_be (record->credential_generation, generation);
+#define ROW_TEXT_EQ(c,v,n) (sqlite3_column_type (stmt, (c)) == SQLITE_TEXT \
+    && sqlite3_column_bytes (stmt, (c)) == (int) (n) \
+    && memcmp (sqlite3_column_text (stmt, (c)), (v), (n)) == 0)
+  gboolean valid = ROW_TEXT_EQ (0, record->material.intention_id, 36)
+      && ROW_TEXT_EQ (1, record->material.payload_digest, 64)
+      && sqlite3_column_type (stmt, 2) == SQLITE_INTEGER
+      && sqlite3_column_int64 (stmt, 2) == 1
+      && ROW_TEXT_EQ (3, "service.credential.exchange", 27)
+      && ROW_TEXT_EQ (4, "allowed", 7)
+      && sqlite3_column_type (stmt, 5) == SQLITE_INTEGER
+      && sqlite3_column_int64 (stmt, 5) == record->created_at_us
+      && ROW_TEXT_EQ (6, record->material.request_id, 27)
+      && ROW_TEXT_EQ (7, record->credential_id, 31)
+      && sqlite3_column_type (stmt, 8) == SQLITE_BLOB
+      && sqlite3_column_bytes (stmt, 8) == 8
+      && memcmp (sqlite3_column_blob (stmt, 8), generation, 8) == 0
+      && ROW_TEXT_EQ (9, record->service_principal,
+      strlen (record->service_principal))
+      && ROW_TEXT_EQ (10, record->tenant_id, strlen (record->tenant_id))
+      && sqlite3_column_type (stmt, 11) == SQLITE_INTEGER
+      && sqlite3_column_int64 (stmt, 11) == 1
+      && ROW_TEXT_EQ (12, record->material.session_fingerprint, 64)
+      && ROW_TEXT_EQ (13, record->material.jti_fingerprint, 64)
+      && sqlite3_column_type (stmt, 14) == SQLITE_BLOB
+      && sqlite3_column_bytes (stmt, 14) == (int) payload_len
+      && memcmp (sqlite3_column_blob (stmt, 14), payload, payload_len) == 0
+      && service_exchange_payload_matches (record);
+#undef ROW_TEXT_EQ
+  return valid ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+service_exchange_select_one (wyl_policy_store_t *store, const gchar *sql,
+    const gchar *first, const gchar *second,
+    WylServiceExchangeIntentionRecord **out_record, gboolean *out_found)
+{
+  *out_record = NULL;
+  *out_found = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, first);
+  if (rc == WYRELOG_E_OK && second != NULL)
+    rc = bind_text (stmt, 2, second);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    rc = service_exchange_record_from_row (stmt, out_record);
+    *out_found = rc == WYRELOG_E_OK;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_POLICY;
+  } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
+    rc = WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_record, wyl_service_exchange_intention_record_free);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_exchange_intention_append
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const wyl_service_exchange_audit_input_t * input,
+    WylServiceExchangeIntentionClassification * out_classification,
+    WylServiceExchangeIntentionRecord ** out_record)
+{
+  if (out_classification != NULL)
+    *out_classification = WYL_SERVICE_EXCHANGE_INTENTION_NONE;
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (out_classification == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_service_exchange_audit_material_t material =
+      WYL_SERVICE_EXCHANGE_AUDIT_MATERIAL_INIT;
+  wyrelog_error_t rc = wyl_service_exchange_audit_encode (input, &material);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylServiceExchangeIntentionRecord *prepared =
+      txn != NULL && txn->fail_service_exchange_preallocation_once ? NULL :
+      service_exchange_record_new_from_input (input, &material);
+  if (txn != NULL)
+    txn->fail_service_exchange_preallocation_once = FALSE;
+  if (prepared == NULL) {
+    wyl_service_exchange_audit_material_clear (&material);
+    return WYRELOG_E_NOMEM;
+  }
+  rc = service_exchange_require_participant (txn, store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    return rc;
+  }
+  rc = wyl_policy_store_validate_service_schema (store);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    return rc;
+  }
+
+  WylServiceExchangeIntentionRecord *existing = NULL;
+  gboolean found = FALSE;
+  rc = service_exchange_select_one (store,
+      "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
+      " FROM main.service_exchange_audit_intentions"
+      " WHERE intention_id=? OR payload_digest=?;",
+      material.intention_id, material.payload_digest, &existing, &found);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    return rc;
+  }
+  if (found) {
+    gboolean matches = service_exchange_record_matches_input (existing, input,
+        &material);
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    if (!matches) {
+      wyl_service_exchange_intention_record_free (existing);
+      return WYRELOG_E_POLICY;
+    }
+    *out_classification = WYL_SERVICE_EXCHANGE_INTENTION_REPLAY;
+    *out_record = existing;
+    return WYRELOG_E_OK;
+  }
+
+  guint8 generation[8];
+  service_exchange_generation_to_be (input->credential_generation, generation);
+  gsize payload_len = 0;
+  const guint8 *payload = g_bytes_get_data (material.canonical_payload,
+      &payload_len);
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "INSERT INTO main.service_exchange_audit_intentions("
+      "intention_id,payload_digest,payload_schema_version,event_type,outcome,"
+      "created_at_us,request_id,credential_id,credential_generation,"
+      "service_principal,tenant_id,fingerprint_schema_version,"
+      "session_fingerprint,jti_fingerprint,canonical_payload) VALUES"
+      "(?,?,1,'service.credential.exchange','allowed',?,?,?,?,?,?,1,?,?,?);",
+      &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, material.intention_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, material.payload_digest);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_int64 (stmt, 3,
+          input->created_at_us) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 4, material.request_id);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 5,
+          input->credential_id.data, input->credential_id.len,
+          SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_bind_blob (stmt, 6, generation, 8,
+          SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 7,
+          input->service_principal.data, input->service_principal.len,
+          SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_bind_text (stmt, 8,
+          input->tenant_id.data, input->tenant_id.len,
+          SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 9, material.session_fingerprint);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 10, material.jti_fingerprint);
+  if (rc == WYRELOG_E_OK && sqlite3_bind_blob (stmt, 11, payload, payload_len,
+          SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  sqlite3_stmt *readback = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+        "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
+        " FROM main.service_exchange_audit_intentions"
+        " WHERE intention_id=? AND payload_digest=?;", &readback);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (readback, 1, material.intention_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (readback, 2, material.payload_digest);
+  gboolean insert_attempted = rc == WYRELOG_E_OK;
+  if (insert_attempted)
+    rc = sqlite3_step (stmt) == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    sqlite3_finalize (readback);
+    if (insert_attempted)
+      service_authority_transaction_fail_participant (txn, rc);
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    return rc;
+  }
+  if (txn->fail_service_exchange_readback_once) {
+    txn->fail_service_exchange_readback_once = FALSE;
+    sqlite3_finalize (readback);
+    service_authority_transaction_fail_participant (txn, WYRELOG_E_IO);
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    return WYRELOG_E_IO;
+  }
+  int read_step = sqlite3_step (readback);
+  if (read_step != SQLITE_ROW)
+    rc = read_step == SQLITE_DONE ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = service_exchange_decode_created_row (readback, prepared);
+  if (rc == WYRELOG_E_OK && sqlite3_step (readback) != SQLITE_DONE)
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (readback);
+  if (rc == WYRELOG_E_OK) {
+    *out_classification = WYL_SERVICE_EXCHANGE_INTENTION_CREATED;
+    *out_record = prepared;
+    prepared = NULL;
+  } else {
+    service_authority_transaction_fail_participant (txn, rc);
+  }
+  wyl_service_exchange_audit_material_clear (&material);
+  wyl_service_exchange_intention_record_free (prepared);
+  if (rc != WYRELOG_E_OK)
+    g_clear_pointer (out_record, wyl_service_exchange_intention_record_free);
+  return rc;
+}
+
+void wyl_policy_store_service_exchange_intention_fail_preallocation_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_service_exchange_preallocation_once = TRUE;
+}
+
+void wyl_policy_store_service_exchange_intention_fail_readback_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_service_exchange_readback_once = TRUE;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_exchange_intention_load
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const wyl_id_t * intention_id, const gchar * payload_digest,
+    WylServiceExchangeIntentionRecord ** out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (out_record == NULL || intention_id == NULL || payload_digest == NULL
+      || !service_exchange_hex_is_canonical (payload_digest,
+          strlen (payload_digest)))
+    return WYRELOG_E_INVALID;
+  gchar encoded[37];
+  wyl_id_t parsed;
+  if (wyl_id_equal (intention_id, &WYL_ID_NIL)
+      || wyl_id_format (intention_id, encoded, sizeof encoded) != WYRELOG_E_OK
+      || wyl_id_parse (encoded, &parsed) != WYRELOG_E_OK
+      || !wyl_id_equal (intention_id, &parsed))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = service_exchange_require_participant (txn, store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean found = FALSE;
+  rc = service_exchange_select_one (store,
+      "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
+      " FROM main.service_exchange_audit_intentions"
+      " WHERE intention_id=? OR payload_digest=?;", encoded, payload_digest,
+      out_record, &found);
+  if (rc == WYRELOG_E_OK && found
+      && (strcmp ((*out_record)->material.intention_id, encoded) != 0
+          || strcmp ((*out_record)->material.payload_digest,
+              payload_digest) != 0)) {
+    g_clear_pointer (out_record, wyl_service_exchange_intention_record_free);
+    return WYRELOG_E_POLICY;
+  }
+  return rc != WYRELOG_E_OK ? rc : found ? WYRELOG_E_OK : WYRELOG_E_NOT_FOUND;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_exchange_intention_enumerate
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    GPtrArray ** out_records) {
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (out_records == NULL)
+    return WYRELOG_E_INVALID;
+  GPtrArray *records = g_ptr_array_new_with_free_func
+      ((GDestroyNotify) wyl_service_exchange_intention_record_free);
+  if (records == NULL)
+    return WYRELOG_E_NOMEM;
+  wyrelog_error_t rc = service_exchange_require_participant (txn, store);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+        "SELECT " SERVICE_EXCHANGE_SELECT_COLUMNS
+        " FROM main.service_exchange_audit_intentions"
+        " ORDER BY created_at_us,intention_id;", &stmt);
+  int step;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylServiceExchangeIntentionRecord *record = NULL;
+    rc = service_exchange_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (records, record);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (records);
+    return rc;
+  }
+  *out_records = records;
+  return WYRELOG_E_OK;
+}
+
+#undef SERVICE_EXCHANGE_SELECT_COLUMNS
 
 gboolean
     wyl_policy_store_service_authority_commit_evidence_test_ref_overflow_rejected

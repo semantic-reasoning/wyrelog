@@ -7,6 +7,7 @@
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
 #include "wyrelog/auth/service-credential-private.h"
+#include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/wyl-traits-private.h"
 
@@ -532,10 +533,50 @@ wyrelog_error_t
     guint64 generation, const gchar * subject_id, const gchar * tenant_id,
     gint64 used_at_us);
 
+typedef enum
+{
+  WYL_SERVICE_EXCHANGE_INTENTION_NONE,
+  WYL_SERVICE_EXCHANGE_INTENTION_CREATED,
+  WYL_SERVICE_EXCHANGE_INTENTION_REPLAY,
+} WylServiceExchangeIntentionClassification;
+
+typedef struct WylServiceExchangeIntentionRecord
+{
+  wyl_service_exchange_audit_material_t material;
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  guint64 credential_generation;
+  gchar *service_principal;
+  gchar *tenant_id;
+  gint64 created_at_us;
+} WylServiceExchangeIntentionRecord;
+
+void wyl_service_exchange_intention_record_free
+    (WylServiceExchangeIntentionRecord * record);
+wyrelog_error_t wyl_policy_store_service_exchange_intention_append
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const wyl_service_exchange_audit_input_t * input,
+    WylServiceExchangeIntentionClassification * out_classification,
+    WylServiceExchangeIntentionRecord ** out_record);
+wyrelog_error_t wyl_policy_store_service_exchange_intention_load
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const wyl_id_t * intention_id,
+    const gchar * payload_digest,
+    WylServiceExchangeIntentionRecord ** out_record);
+wyrelog_error_t wyl_policy_store_service_exchange_intention_enumerate
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, GPtrArray ** out_records);
+void wyl_policy_store_service_exchange_intention_fail_preallocation_once
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_exchange_intention_fail_readback_once
+    (WylServiceAuthorityTransaction * transaction);
+
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityTransaction,
     wyl_policy_store_service_authority_transaction_free);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityCommitEvidence,
     wyl_policy_store_service_authority_commit_evidence_unref);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceExchangeIntentionRecord,
+    wyl_service_exchange_intention_record_free);
 
 /* Deterministic private fault and observation seams for transaction tests. */
 void wyl_policy_store_service_authority_transaction_fail_once

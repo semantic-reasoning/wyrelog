@@ -2179,6 +2179,66 @@ test_authority_transaction_write_intent (void)
   wyl_service_auth_write_lease_free (lease);
 }
 
+static void
+test_service_exchange_intention_created_replay_rollback (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  begin_with_evidence (handle, &lease, &txn, &evidence);
+  WylServiceAuthorityWriteIntentOutcome outcome = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
+
+  wyl_service_exchange_audit_input_t input = {
+    .request_id = {"000000000000000000000000000", 27},
+    .credential_id = {"wlc_000000000000000000000000000", 31},
+    .credential_generation = 7,
+    .service_principal = {"svc:test", 8},
+    .tenant_id = {"tenant-a", 8},
+    .session_id = {"01890f47-3c4b-7cc2-98c4-dc0c0c07398f", 36},
+    .jti = {"01890f47-3c4b-7cc2-a8c4-dc0c0c073990", 36},
+    .created_at_us = 42,
+  };
+  g_assert_cmpint (wyl_id_parse ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+          &input.intention_id), ==, WYRELOG_E_OK);
+  WylServiceExchangeIntentionClassification classification;
+  g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (txn,
+          store, &input, &classification, &created), ==, WYRELOG_E_OK);
+  g_assert_cmpint (classification, ==, WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  g_assert_cmpstr (created->tenant_id, ==, "tenant-a");
+  g_autoptr (WylServiceExchangeIntentionRecord) replay = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (txn,
+          store, &input, &classification, &replay), ==, WYRELOG_E_OK);
+  g_assert_cmpint (classification, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
+  g_autoptr (WylServiceExchangeIntentionRecord) loaded = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load (txn,
+          store, &input.intention_id, created->material.payload_digest,
+          &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (loaded->credential_generation, ==, 7);
+  g_autoptr (GPtrArray) records = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate (txn,
+          store, &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  input.created_at_us++;
+  WylServiceExchangeIntentionRecord *conflict = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (txn,
+          store, &input, &classification, &conflict), ==, WYRELOG_E_POLICY);
+  g_assert_null (conflict);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM audit_intentions;"), ==, 0);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE service_exchange_audit_intentions SET created_at_us=43;",
+          NULL, NULL, NULL), !=, SQLITE_OK);
+  finish_rolled_back (lease, txn, evidence);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_exchange_audit_intentions;"), ==, 0);
+}
+
 typedef struct
 {
   WylHandle *handle;
@@ -2493,6 +2553,8 @@ main (int argc, char **argv)
       test_authority_transaction_participant_contract);
   g_test_add_func ("/service-auth/transaction/write-intent",
       test_authority_transaction_write_intent);
+  g_test_add_func ("/service-auth/transaction/service-exchange-intention",
+      test_service_exchange_intention_created_replay_rollback);
   g_test_add_func ("/service-auth/transaction/write-intent-connections",
       test_authority_transaction_write_intent_connections);
   g_test_add_func ("/service-auth/transaction/write-intent-cancel-barrier",

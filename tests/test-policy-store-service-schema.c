@@ -17,6 +17,7 @@ static const gchar *const service_tables[] = {
   "service_principal_events",
   "service_credential_events",
   "service_domain_requests",
+  "service_exchange_audit_intentions",
 };
 
 static void
@@ -94,7 +95,7 @@ service_object_count (sqlite3 *db)
       "SELECT count(*) FROM sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests');");
+      "'service_domain_requests','service_exchange_audit_intentions');");
 }
 
 static gchar *
@@ -117,7 +118,8 @@ service_schema_fingerprint (sqlite3 *db)
       "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests') " "ORDER BY type,name;";
+      "'service_domain_requests','service_exchange_audit_intentions') "
+      "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
@@ -553,6 +555,26 @@ test_corruption_matrix (void)
         "DROP INDEX idx_service_credentials_tenant_state_expiry;"
         "CREATE INDEX idx_service_credentials_tenant_state_expiry"
         " ON service_credentials(state,tenant_id,expires_at_us);");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "CREATE TRIGGER trg_service_exchange_extra BEFORE INSERT ON"
+        " service_exchange_audit_intentions BEGIN SELECT 1; END;");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "CREATE TEMP TRIGGER trg_temp_service_exchange_extra BEFORE INSERT ON"
+        " main.service_exchange_audit_intentions BEGIN SELECT 1; END;");
     g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
         WYRELOG_E_POLICY);
   }

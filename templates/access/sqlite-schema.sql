@@ -711,6 +711,74 @@ CREATE TABLE IF NOT EXISTS service_authority_writer_gate (
 INSERT OR IGNORE INTO service_authority_writer_gate (singleton, lock_word)
 VALUES (1, 0);
 
+CREATE TABLE IF NOT EXISTS service_exchange_audit_intentions (
+    intention_id TEXT NOT NULL PRIMARY KEY CHECK (
+        typeof(intention_id) = 'text' AND length(intention_id) = 36
+        AND instr(intention_id, char(0)) = 0),
+    payload_digest TEXT NOT NULL UNIQUE CHECK (
+        typeof(payload_digest) = 'text' AND length(payload_digest) = 64
+        AND payload_digest = lower(payload_digest)
+        AND payload_digest NOT GLOB '*[^0-9a-f]*'),
+    payload_schema_version INTEGER NOT NULL CHECK (
+        typeof(payload_schema_version) = 'integer'
+        AND payload_schema_version = 1),
+    event_type TEXT NOT NULL CHECK (
+        typeof(event_type) = 'text'
+        AND event_type = 'service.credential.exchange'),
+    outcome TEXT NOT NULL CHECK (typeof(outcome) = 'text'
+        AND outcome = 'allowed'),
+    created_at_us INTEGER NOT NULL CHECK (
+        typeof(created_at_us) = 'integer' AND created_at_us > 0),
+    request_id TEXT NOT NULL CHECK (
+        typeof(request_id) = 'text' AND length(request_id) = 27
+        AND instr(request_id, char(0)) = 0),
+    credential_id TEXT NOT NULL CHECK (
+        typeof(credential_id) = 'text' AND length(credential_id) = 31
+        AND substr(credential_id, 1, 4) = 'wlc_'
+        AND instr(credential_id, char(0)) = 0),
+    credential_generation BLOB NOT NULL CHECK (
+        typeof(credential_generation) = 'blob'
+        AND length(credential_generation) = 8),
+    service_principal TEXT NOT NULL CHECK (
+        typeof(service_principal) = 'text'
+    AND length(CAST(service_principal AS BLOB)) BETWEEN 5 AND 128
+        AND instr(service_principal, char(0)) = 0),
+    tenant_id TEXT NOT NULL CHECK (
+        typeof(tenant_id) = 'text'
+        AND length(CAST(tenant_id AS BLOB)) BETWEEN 1 AND 128
+        AND instr(tenant_id, char(0)) = 0),
+    fingerprint_schema_version INTEGER NOT NULL CHECK (
+        typeof(fingerprint_schema_version) = 'integer'
+        AND fingerprint_schema_version = 1),
+    session_fingerprint TEXT NOT NULL CHECK (
+        typeof(session_fingerprint) = 'text'
+        AND length(session_fingerprint) = 64
+        AND session_fingerprint = lower(session_fingerprint)
+        AND session_fingerprint NOT GLOB '*[^0-9a-f]*'),
+    jti_fingerprint TEXT NOT NULL CHECK (
+        typeof(jti_fingerprint) = 'text' AND length(jti_fingerprint) = 64
+        AND jti_fingerprint = lower(jti_fingerprint)
+        AND jti_fingerprint NOT GLOB '*[^0-9a-f]*'),
+    canonical_payload BLOB NOT NULL CHECK (
+        typeof(canonical_payload) = 'blob'
+        AND length(canonical_payload) BETWEEN 1 AND 4096)
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_exchange_audit_created
+    ON service_exchange_audit_intentions (created_at_us, intention_id);
+
+CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_update
+BEFORE UPDATE ON service_exchange_audit_intentions
+BEGIN
+    SELECT RAISE(ABORT, 'service exchange audit intentions are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_delete
+BEFORE DELETE ON service_exchange_audit_intentions
+BEGIN
+    SELECT RAISE(ABORT, 'service exchange audit intentions are append-only');
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable
 BEFORE UPDATE ON service_principals
 WHEN OLD.subject_id IS NOT NEW.subject_id
