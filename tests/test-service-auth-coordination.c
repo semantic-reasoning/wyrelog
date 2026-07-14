@@ -204,6 +204,106 @@ test_basic_validation_and_reentry (void)
 typedef struct
 {
   WylServiceAuthReadLease *lease;
+  WylHandle *handle;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} ReadStoreAttempt;
+
+static gpointer
+read_store_wrong_thread (gpointer data)
+{
+  ReadStoreAttempt *attempt = data;
+  attempt->store = (wyl_policy_store_t *) attempt;
+  attempt->rc = wyl_service_auth_read_lease_get_policy_store (attempt->lease,
+      attempt->handle, &attempt->store);
+  return NULL;
+}
+
+static void
+pin_checkpoint_count (gpointer data)
+{
+  guint *count = data;
+  (*count)++;
+}
+
+static void
+test_read_lease_pinned_policy_store (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (WylHandle) other = new_store_handle ();
+  WylServiceAuthReadLease *lease = NULL;
+  wyl_policy_store_t *store = (wyl_policy_store_t *) handle;
+
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (NULL, handle,
+          &store), ==, WYRELOG_E_INVALID);
+  g_assert_null (store);
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+
+  guint pin_checkpoints = 0;
+  wyl_handle_policy_store_set_pin_checkpoint (handle, pin_checkpoint_count,
+      &pin_checkpoints);
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (lease, handle,
+          &store), ==, WYRELOG_E_OK);
+  g_assert_nonnull (store);
+  g_assert_true (store == wyl_handle_get_policy_store (handle));
+  wyl_policy_store_t *same_store = NULL;
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (lease, handle,
+          &same_store), ==, WYRELOG_E_OK);
+  g_assert_true (same_store == store);
+  g_assert_cmpuint (pin_checkpoints, ==, 0);
+
+  same_store = store;
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (lease, other,
+          &same_store), ==, WYRELOG_E_INVALID);
+  g_assert_null (same_store);
+
+  wyl_policy_store_t *saved =
+      wyl_service_auth_read_lease_test_swap_pinned_store (lease, NULL);
+  g_assert_true (saved == store);
+  same_store = store;
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (lease, handle,
+          &same_store), ==, WYRELOG_E_INVALID);
+  g_assert_null (same_store);
+  g_assert_null (wyl_service_auth_read_lease_test_swap_pinned_store (lease,
+          saved));
+
+  wyl_service_auth_read_lease_test_corrupt_serial (lease);
+  same_store = store;
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (lease, handle,
+          &same_store), ==, WYRELOG_E_INVALID);
+  g_assert_null (same_store);
+  wyl_service_auth_read_lease_test_corrupt_serial (lease);
+
+  ReadStoreAttempt attempt = { lease, handle, NULL, WYRELOG_E_OK };
+  g_autoptr (GThread) thread = g_thread_new ("wrong-read-store",
+      read_store_wrong_thread, &attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
+  g_assert_null (attempt.store);
+
+  wyl_policy_store_t *extra_pin = NULL;
+  g_assert_cmpint (wyl_handle_policy_store_pin_current (handle, &extra_pin), ==,
+      WYRELOG_E_OK);
+  g_assert_true (extra_pin == store);
+  g_assert_cmpuint (pin_checkpoints, ==, 1);
+  wyl_handle_policy_store_unpin (handle, extra_pin);
+
+  g_assert_cmpint (wyl_service_auth_read_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  same_store = store;
+  g_assert_cmpint (wyl_service_auth_read_lease_get_policy_store (lease, handle,
+          &same_store), ==, WYRELOG_E_INVALID);
+  g_assert_null (same_store);
+  wyl_service_auth_read_lease_free (lease);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (other), ==, WYRELOG_E_OK);
+}
+
+typedef struct
+{
+  WylServiceAuthReadLease *lease;
   gboolean free_instead;
   wyrelog_error_t rc;
 } WrongThreadRelease;
@@ -2498,6 +2598,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/service-auth/lease/basic-validation-reentry",
       test_basic_validation_and_reentry);
+  g_test_add_func ("/service-auth/lease/read-pinned-policy-store",
+      test_read_lease_pinned_policy_store);
   g_test_add_func ("/service-auth/lease/wrong-thread-release",
       test_wrong_thread_release);
   g_test_add_func ("/service-auth/lease/rank-inversion-write-serial",

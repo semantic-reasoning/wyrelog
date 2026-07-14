@@ -423,6 +423,24 @@ wyl_service_auth_read_lease_validate (WylServiceAuthReadLease *lease,
 }
 
 wyrelog_error_t
+wyl_service_auth_read_lease_get_policy_store (WylServiceAuthReadLease *lease,
+    WylHandle *handle, wyl_policy_store_t **out_store)
+{
+  if (out_store != NULL)
+    *out_store = NULL;
+  if (lease == NULL || !WYL_IS_HANDLE (handle) || out_store == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_read_locked (lease, handle);
+  if (rc == WYRELOG_E_OK && lease->pinned_store == NULL)
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    *out_store = lease->pinned_store;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_service_auth_write_lease_validate (WylServiceAuthWriteLease *lease,
     WylHandle *handle)
 {
@@ -742,6 +760,16 @@ wyl_service_auth_read_lease_test_corrupt_serial (WylServiceAuthReadLease *lease)
 {
   if (lease != NULL)
     lease->serial ^= G_GUINT64_CONSTANT (1) << 63;
+}
+
+wyl_policy_store_t *wyl_service_auth_read_lease_test_swap_pinned_store
+    (WylServiceAuthReadLease * lease, wyl_policy_store_t * replacement)
+{
+  if (lease == NULL)
+    return NULL;
+  wyl_policy_store_t *previous = lease->pinned_store;
+  lease->pinned_store = replacement;
+  return previous;
 }
 
 void wyl_service_auth_write_lease_test_corrupt_serial
