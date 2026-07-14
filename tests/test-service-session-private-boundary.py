@@ -406,6 +406,7 @@ def main() -> int:
         original_validate = guard_module.IncludeSnapshot.validate
         def integration_run(factory):
             trace = []
+            routing = {"probe": 0, "batch": 0}
             validation_trace = []
             def counters(snapshot):
                 return (
@@ -423,17 +424,22 @@ def main() -> int:
                 result = original_validate(snapshot)
                 validation_trace.append(("after", counters(snapshot)))
                 return result
-            def collect(rel, probe, _protected, _compiler, _kind, semantics):
+            def record(rel, probe, semantics):
                 flattened = guard_module.flatten_expansion(probe)
                 trace.append((
                     rel, hashlib.sha256(flattened.encode()).hexdigest(),
                     hashlib.sha256(json.dumps(semantics).encode()).hexdigest()))
+            def collect(rel, probe, _protected, _compiler, _kind, semantics):
+                routing["probe"] += 1
+                record(rel, probe, semantics)
             # msvc/clang-cl group probes into inspect_probe_batch instead of
             # calling inspect_probe per task; stub both so the trace records
-            # one entry per probe on every compiler.
+            # one entry per probe on every compiler, and count the dispatches
+            # so the routing itself stays pinned.
             def collect_batch(items, _compiler, _kind, semantics):
-                for rel, probe, protected in items:
-                    collect(rel, probe, protected, None, None, semantics)
+                routing["batch"] += 1
+                for rel, probe, _protected in items:
+                    record(rel, probe, semantics)
             guard_module.inspect_probe = collect
             guard_module.inspect_probe_batch = collect_batch
             guard_module.IncludeSnapshot.validate = validating
@@ -453,7 +459,7 @@ def main() -> int:
                 guard_module.inspect_probe_batch = original_inspect_probe_batch
                 guard_module.IncludeSnapshot.validate = original_validate
             return (verdict, stdout.getvalue(), stderr.getvalue(), tuple(trace),
-                    tuple(validation_trace))
+                    tuple(validation_trace), dict(routing))
         heartbeat_reports = []
         heartbeat_instances = []
         class BarrierReporter(guard_module.HeartbeatReporter):
@@ -487,6 +493,12 @@ def main() -> int:
         assert accepted_null[3] == accepted_heartbeat[3] == accepted_failing[3]
         assert accepted_null[4] == accepted_heartbeat[4] == accepted_failing[4]
         assert len(accepted_null[4]) == 4
+        # Pin the dispatch itself: a trace alone cannot tell the batched path
+        # from the per-task one, so batching could silently stop happening.
+        batched = compiler_id in {"msvc", "clang-cl"}
+        for accepted in (accepted_null, accepted_heartbeat, accepted_failing):
+            assert (accepted[5]["batch"] > 0) is batched
+            assert (accepted[5]["probe"] > 0) is not batched
         assert heartbeat_reports
         accepted_reporter = heartbeat_instances[0]
         emitted_snapshot = heartbeat_reports[0][:-2]
