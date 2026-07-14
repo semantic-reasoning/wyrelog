@@ -31,6 +31,9 @@ struct wyl_audit_conn_t
   WylAuditServiceExchangeFailStage service_exchange_fail_stage;
   guint service_exchange_rollback_count;
   gint service_exchange_entry_count;
+  GMutex service_exchange_checkpoint_lock;
+  void (*service_exchange_entry_checkpoint) (gpointer data);
+  gpointer service_exchange_entry_checkpoint_data;
   gboolean sink_metadata_initialization_pending;
 };
 
@@ -48,6 +51,17 @@ wyl_audit_conn_service_exchange_reset_entry_count_for_test (wyl_audit_conn_t
 {
   if (conn != NULL)
     g_atomic_int_set (&conn->service_exchange_entry_count, 0);
+}
+
+void wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
+    (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data), gpointer data)
+{
+  if (conn == NULL)
+    return;
+  g_mutex_lock (&conn->service_exchange_checkpoint_lock);
+  conn->service_exchange_entry_checkpoint = checkpoint;
+  conn->service_exchange_entry_checkpoint_data = data;
+  g_mutex_unlock (&conn->service_exchange_checkpoint_lock);
 }
 
 static gboolean
@@ -176,6 +190,7 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
     return WYRELOG_E_INTERNAL;
   }
   g_mutex_init (&self->lock);
+  g_mutex_init (&self->service_exchange_checkpoint_lock);
   self->chain_tail_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, (GDestroyNotify) audit_chain_tail_free);
   self->persistent = effective_path != NULL && effective_path[0] != '\0';
@@ -196,6 +211,7 @@ wyl_audit_conn_close (wyl_audit_conn_t *conn)
   duckdb_disconnect (&conn->conn);
   duckdb_close (&conn->db);
   g_mutex_clear (&conn->lock);
+  g_mutex_clear (&conn->service_exchange_checkpoint_lock);
   g_clear_pointer (&conn->chain_tail_cache, g_hash_table_destroy);
   g_free (conn);
 }
@@ -1527,6 +1543,16 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
   if (!conn->persistent)
     return WYRELOG_E_POLICY;
   g_atomic_int_inc (&conn->service_exchange_entry_count);
+
+  g_mutex_lock (&conn->service_exchange_checkpoint_lock);
+  void (*entry_checkpoint) (gpointer data) =
+      conn->service_exchange_entry_checkpoint;
+  gpointer checkpoint_data = conn->service_exchange_entry_checkpoint_data;
+  conn->service_exchange_entry_checkpoint = NULL;
+  conn->service_exchange_entry_checkpoint_data = NULL;
+  g_mutex_unlock (&conn->service_exchange_checkpoint_lock);
+  if (entry_checkpoint != NULL)
+    entry_checkpoint (checkpoint_data);
 
   g_mutex_lock (&conn->lock);
   wyrelog_error_t rc = ensure_service_exchange_schema (conn, FALSE);

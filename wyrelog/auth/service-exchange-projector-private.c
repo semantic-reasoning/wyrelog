@@ -21,6 +21,22 @@ struct _WylServiceExchangeProjectionAck
 
 static gint fail_allocation_at;
 static gint allocation_count;
+static gint recovery_fail_allocation_at;
+static gint recovery_allocation_count;
+G_LOCK_DEFINE_STATIC (recovery_checkpoint);
+static void (*recovery_gap_checkpoint) (gpointer data);
+static gpointer recovery_gap_checkpoint_data;
+static gint recovery_enumerate_fail;
+
+static gboolean expected_identity_valid (const gchar * name,
+    const gchar * uuid);
+
+typedef struct
+{
+  WylHandle *handle;
+  guint64 store_generation;
+  WylServiceExchangeIntentionRecord *record;
+} WylServiceExchangeRecoveryWorkItem;
 
 void
 wyl_service_exchange_projector_fail_allocation_for_test (guint index)
@@ -39,6 +55,64 @@ allocation_allowed (void)
     return FALSE;
   }
   return TRUE;
+}
+
+void
+wyl_service_exchange_recovery_fail_allocation_for_test (guint index)
+{
+  g_atomic_int_set (&recovery_allocation_count, 0);
+  g_atomic_int_set (&recovery_fail_allocation_at, (gint) index);
+}
+
+void wyl_service_exchange_recovery_set_gap_checkpoint_for_test
+    (void (*checkpoint) (gpointer data), gpointer data)
+{
+  G_LOCK (recovery_checkpoint);
+  recovery_gap_checkpoint = checkpoint;
+  recovery_gap_checkpoint_data = data;
+  G_UNLOCK (recovery_checkpoint);
+}
+
+static void
+recovery_run_gap_checkpoint (void)
+{
+  G_LOCK (recovery_checkpoint);
+  void (*checkpoint) (gpointer data) = recovery_gap_checkpoint;
+  gpointer data = recovery_gap_checkpoint_data;
+  recovery_gap_checkpoint = NULL;
+  recovery_gap_checkpoint_data = NULL;
+  G_UNLOCK (recovery_checkpoint);
+  if (checkpoint != NULL)
+    checkpoint (data);
+}
+
+void wyl_service_exchange_recovery_fail_enumerate_for_test
+    (WylServiceExchangeRecoveryEnumerateFail stage)
+{
+  g_atomic_int_set (&recovery_enumerate_fail, (gint) stage);
+}
+
+static gboolean
+recovery_allocation_allowed (void)
+{
+  gint count = g_atomic_int_add (&recovery_allocation_count, 1) + 1;
+  gint fail = g_atomic_int_get (&recovery_fail_allocation_at);
+  if (fail > 0 && count == fail) {
+    g_atomic_int_set (&recovery_fail_allocation_at, 0);
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static void
+recovery_work_item_free (WylServiceExchangeRecoveryWorkItem *item)
+{
+  if (item == NULL)
+    return;
+  g_clear_pointer (&item->record, wyl_service_exchange_intention_record_free);
+  g_clear_object (&item->handle);
+  sodium_memzero (item, sizeof *item);
+  g_free (item);
 }
 
 static WylServiceExchangeIntentionRecord *
@@ -116,6 +190,169 @@ projection_from_record (const WylServiceExchangeIntentionRecord *record)
         record->material.session_fingerprint,.jti_fingerprint =
         record->material.jti_fingerprint,.canonical_payload =
         record->material.canonical_payload,};
+}
+
+static wyrelog_error_t
+recovery_project_item (WylServiceExchangeRecoveryWorkItem *item,
+    const gchar *expected_name, const gchar *expected_uuid,
+    GCancellable *cancellable)
+{
+  if (cancellable != NULL && g_cancellable_is_cancelled (cancellable))
+    return WYRELOG_E_BUSY;
+
+  wyl_policy_store_t *store = NULL;
+  WylServiceAuthUnavailableReason unavailable =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  wyrelog_error_t rc = wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (item->handle), item->handle,
+      &unavailable);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_policy_store_pin_current (item->handle, &store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_policy_store_validate_generation (item->handle, store,
+        item->store_generation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (item->handle), item->handle,
+        &unavailable);
+
+  wyl_audit_conn_t *conn = NULL;
+  gchar actual_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM] = { 0 };
+  gchar actual_uuid[WYL_SERVICE_EXCHANGE_UUID_BUF] = { 0 };
+  if (rc == WYRELOG_E_OK) {
+    conn = wyl_handle_get_audit_conn (item->handle);
+    if (conn == NULL)
+      rc = WYRELOG_E_INVALID;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_audit_conn_service_exchange_get_sink_identity (conn,
+        actual_name, actual_uuid);
+  if (rc == WYRELOG_E_OK && (strcmp (actual_name, expected_name) != 0
+          || strcmp (actual_uuid, expected_uuid) != 0))
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK && cancellable != NULL
+      && g_cancellable_is_cancelled (cancellable))
+    rc = WYRELOG_E_BUSY;
+
+  WylAuditServiceExchangeProjectionReadback readback = { 0 };
+  if (rc == WYRELOG_E_OK) {
+    WylAuditServiceExchangeProjection projection =
+        projection_from_record (item->record);
+    rc = wyl_service_exchange_audit_projection_validate (&projection);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_audit_conn_service_exchange_project (conn, &projection,
+          &readback);
+  }
+  if (rc == WYRELOG_E_OK
+      && (strcmp (readback.sink_uuid, expected_uuid) != 0
+          || strcmp (readback.intention_id,
+              item->record->material.intention_id) != 0
+          || strcmp (readback.payload_digest,
+              item->record->material.payload_digest) != 0
+          || readback.sequence_no <= 0 || readback.record_hash[0] == '\0'
+          || strcmp (readback.record_hash, readback.checkpoint_root) != 0))
+    rc = WYRELOG_E_POLICY;
+
+  sodium_memzero (&readback, sizeof readback);
+  sodium_memzero (actual_uuid, sizeof actual_uuid);
+  if (store != NULL)
+    wyl_handle_policy_store_unpin (item->handle, store);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_exchange_recover_committed (WylHandle *handle,
+    const gchar *expected_name, const gchar *expected_uuid,
+    GCancellable *cancellable, WylServiceExchangeRecoverySummary *out_summary)
+{
+  if (out_summary != NULL)
+    memset (out_summary, 0, sizeof *out_summary);
+  if (!WYL_IS_HANDLE (handle) || out_summary == NULL
+      || !expected_identity_valid (expected_name, expected_uuid))
+    return WYRELOG_E_INVALID;
+  if (cancellable != NULL && g_cancellable_is_cancelled (cancellable))
+    return WYRELOG_E_BUSY;
+
+  wyl_policy_store_t *enumeration_store = NULL;
+  WylServiceAuthWriteLease *write_lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  GPtrArray *records = NULL;
+  GPtrArray *items = g_ptr_array_new_with_free_func
+      ((GDestroyNotify) recovery_work_item_free);
+  guint64 generation = 0;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, cancellable,
+      &write_lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_write_lease_get_policy_store (write_lease, handle,
+        &enumeration_store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_policy_store_capture_generation (handle,
+        enumeration_store, &generation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_begin
+        (enumeration_store, handle, write_lease, &txn);
+  WylServiceExchangeRecoveryEnumerateFail enumerate_fail =
+      (WylServiceExchangeRecoveryEnumerateFail) g_atomic_int_exchange
+      (&recovery_enumerate_fail,
+      WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_NONE);
+  if (rc == WYRELOG_E_OK) {
+    if (enumerate_fail == WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_PREPARE)
+      wyl_policy_store_service_exchange_intention_fail_typed_read_prepare_once
+          (txn);
+    else if (enumerate_fail ==
+        WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_STEP)
+      wyl_policy_store_service_exchange_intention_fail_typed_read_step_once
+          (txn);
+    else if (enumerate_fail ==
+        WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_ALLOCATION)
+      wyl_policy_store_service_exchange_intention_fail_typed_read_allocation_once
+          (txn);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_exchange_intention_enumerate (txn,
+        enumeration_store, &records);
+
+  while (rc == WYRELOG_E_OK && records->len > 0) {
+    WylServiceExchangeRecoveryWorkItem *item =
+        recovery_allocation_allowed ()?
+        g_try_new0 (WylServiceExchangeRecoveryWorkItem, 1) : NULL;
+    if (item == NULL) {
+      rc = WYRELOG_E_NOMEM;
+      break;
+    }
+    item->handle = g_object_ref (handle);
+    item->store_generation = generation;
+    item->record = g_ptr_array_steal_index (records, 0);
+    g_ptr_array_add (items, item);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_commit (txn);
+  else if (txn != NULL)
+    (void) wyl_policy_store_service_authority_transaction_rollback (txn);
+  g_clear_pointer (&records, g_ptr_array_unref);
+  g_clear_pointer (&txn, wyl_policy_store_service_authority_transaction_free);
+  if (write_lease != NULL) {
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release (write_lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    g_clear_pointer (&write_lease, wyl_service_auth_write_lease_free);
+  }
+  if (rc == WYRELOG_E_OK)
+    recovery_run_gap_checkpoint ();
+  if (rc == WYRELOG_E_OK)
+    out_summary->enumerated = items->len;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < items->len; i++) {
+    rc = recovery_project_item (g_ptr_array_index (items, i), expected_name,
+        expected_uuid, cancellable);
+    if (rc == WYRELOG_E_OK)
+      out_summary->projected++;
+  }
+  g_ptr_array_unref (items);
+  if (rc != WYRELOG_E_OK)
+    memset (out_summary, 0, sizeof *out_summary);
+  return rc;
 }
 
 WylServiceExchangeProjectionAck *

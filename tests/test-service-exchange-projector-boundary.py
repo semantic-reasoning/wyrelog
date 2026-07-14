@@ -17,10 +17,13 @@ PROJECTOR = "wyl_service_exchange_project_committed"
 VALIDATOR = "wyl_service_exchange_projection_ack_validate_receipt"
 ATOM_A = "wyl_audit_conn_service_exchange_project"
 RECEIPT = "wyl_service_exchange_receipt_dup_record"
+RECOVERY = "wyl_service_exchange_recover_committed"
+RECOVERY_ITEM = "recovery_project_item"
 
 
 def function_body(text, name):
-    matches = list(re.finditer(r"\n(?:G_GNUC_INTERNAL\s+)?wyrelog_error_t\s*\n?"
+    matches = list(re.finditer(r"\n(?:static\s+)?(?:G_GNUC_INTERNAL\s+)?"
+                               r"wyrelog_error_t\s*\n?"
                                + re.escape(name) + r"\s*\(", text))
     if len(matches) != 1:
         raise ValueError(f"{name} definition count={len(matches)}")
@@ -43,10 +46,13 @@ def violations(text):
     try:
         projector = function_body(text, PROJECTOR)
         validator = function_body(text, VALIDATOR)
+        recovery = function_body(text, RECOVERY)
+        recovery_item = function_body(text, RECOVERY_ITEM)
     except ValueError as error:
         return [str(error)]
     boundaries = projector + validator
-    outside = text.replace(projector, "").replace(validator, "")
+    outside = (text.replace(projector, "").replace(validator, "")
+               .replace(recovery_item, ""))
     if ATOM_A in outside or RECEIPT in outside:
         errors.append("receipt/Atom A consumed outside sole boundaries")
     for body, label in ((projector, "projector"), (validator, "validator")):
@@ -73,6 +79,40 @@ def violations(text):
                       "wyl_service_auth_authority_acquire_write"):
         if forbidden in boundaries:
             errors.append("borrowed WRITE is released/free/acquired/upgraded")
+    recovery_forbidden = (
+        "wyl_handle_policy_store_pin_current", "receipt", "commit_evidence",
+        "intention_append", "intention_load", "sqlite3_", "audit_intentions",
+        ATOM_A,
+    )
+    for token in recovery_forbidden:
+        if token in recovery:
+            errors.append("recovery scheduler contains forbidden " + token)
+    recovery_order = [recovery.find(token) for token in (
+        "wyl_service_auth_authority_acquire_write",
+        "wyl_service_auth_write_lease_get_policy_store",
+        "wyl_handle_policy_store_capture_generation",
+        "wyl_policy_store_service_authority_transaction_begin",
+        "wyl_policy_store_service_exchange_intention_enumerate",
+        "wyl_policy_store_service_authority_transaction_commit",
+        "wyl_service_auth_write_lease_release",
+        RECOVERY_ITEM,
+    )]
+    if recovery_order != sorted(recovery_order) or -1 in recovery_order:
+        errors.append("recovery WRITE/enumerate/release order changed")
+    for token in ("receipt", "commit_evidence", "intention_append",
+                  "intention_load", "sqlite3_", "audit_intentions"):
+        if token in recovery_item:
+            errors.append("recovery item contains forbidden " + token)
+    item_order = [recovery_item.find(token) for token in (
+        "wyl_handle_policy_store_pin_current",
+        "wyl_handle_policy_store_validate_generation", ATOM_A,
+        "wyl_handle_policy_store_unpin")]
+    if item_order != sorted(item_order) or -1 in item_order:
+        errors.append("recovery item pin/Atom A/unpin order changed")
+    if recovery_item.count("wyl_handle_policy_store_pin_current") != 1:
+        errors.append("recovery item must acquire exactly one lifecycle pin")
+    if recovery_item.count("wyl_handle_policy_store_unpin") != 1:
+        errors.append("recovery item must release exactly one lifecycle pin")
     return errors
 
 
@@ -86,6 +126,7 @@ for forbidden in ("secret", "raw_session", "raw_jti", "audit_store_path"):
         raise SystemExit("projector boundary contains forbidden token: "
                          + forbidden)
 for symbol in (PROJECTOR, VALIDATOR,
+               RECOVERY,
                "wyl_service_exchange_projection_ack_ref",
                "wyl_service_exchange_projection_ack_unref",
                "wyl_service_exchange_projection_ack_dup_record"):
@@ -118,12 +159,20 @@ mutants = [
     source.replace("rc = wyl_handle_policy_store_pin_current (handle, &fresh_store);",
                    "rc = wyl_audit_conn_service_exchange_project (conn, "
                    "&projection, &readback);", 1),
-    source.replace("return rc;\n}",
-                   "wyl_service_auth_write_lease_release (write_lease);\n"
-                   "  return rc;\n}", 1),
+    source.replace("if (out_ack != NULL)\n    *out_ack = NULL;",
+                   "wyl_service_auth_write_lease_release (write_lease);\n  "
+                   "if (out_ack != NULL)\n    *out_ack = NULL;", 1),
     source + "\nwyrelog_error_t\n" + PROJECTOR + " (void) { return 0; }\n",
     source.replace("#endif", "static void decoy(void) { " + ATOM_A
                    + "(); }\n#endif", 1),
+    source.replace("wyrelog_error_t rc = wyl_service_auth_authority_acquire_write",
+                   "wyl_handle_policy_store_pin_current (handle, NULL);\n  "
+                   "wyrelog_error_t rc = "
+                   "wyl_service_auth_authority_acquire_write", 1),
+    source.replace("rc = wyl_audit_conn_service_exchange_project (conn,",
+                   "wyl_handle_policy_store_unpin (item->handle, store);\n"
+                   "      rc = wyl_audit_conn_service_exchange_project (conn,",
+                   1),
 ]
 for index, mutant in enumerate(mutants):
     if not violations(mutant):

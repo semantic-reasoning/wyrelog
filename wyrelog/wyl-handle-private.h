@@ -87,6 +87,10 @@ void wyl_handle_policy_store_test_set_generation_max (WylHandle * self);
 /* Test-only, one-shot checkpoint invoked under the lifecycle lock. */
 void wyl_handle_policy_store_set_pin_checkpoint (WylHandle * self,
     void (*checkpoint) (gpointer data), gpointer data);
+void wyl_handle_policy_store_set_shutdown_wait_checkpoint_for_test
+    (WylHandle * self, void (*checkpoint) (gpointer data), gpointer data);
+void wyl_handle_policy_store_pin_snapshot_for_test (WylHandle * self,
+    guint * out_total_pins, guint * out_current_thread_pins);
 
 /* Borrowed handle-owned service-auth coordination authority. */
 WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
