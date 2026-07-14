@@ -357,6 +357,7 @@ def main() -> int:
         allowed.write_text(
             f"void {integration_symbol}(void) {{}}\n", encoding="utf-8")
         original_inspect_probe = guard_module.inspect_probe
+        original_inspect_probe_batch = guard_module.inspect_probe_batch
         original_validate = guard_module.IncludeSnapshot.validate
         def integration_run(factory):
             trace = []
@@ -382,7 +383,14 @@ def main() -> int:
                 trace.append((
                     rel, hashlib.sha256(flattened.encode()).hexdigest(),
                     hashlib.sha256(json.dumps(semantics).encode()).hexdigest()))
+            # msvc/clang-cl group probes into inspect_probe_batch instead of
+            # calling inspect_probe per task; stub both so the trace records
+            # one entry per probe on every compiler.
+            def collect_batch(items, _compiler, _kind, semantics):
+                for rel, probe, protected in items:
+                    collect(rel, probe, protected, None, None, semantics)
             guard_module.inspect_probe = collect
+            guard_module.inspect_probe_batch = collect_batch
             guard_module.IncludeSnapshot.validate = validating
             stdout = io.StringIO()
             stderr = io.StringIO()
@@ -397,6 +405,7 @@ def main() -> int:
                 verdict = (type(error), str(error))
             finally:
                 guard_module.inspect_probe = original_inspect_probe
+                guard_module.inspect_probe_batch = original_inspect_probe_batch
                 guard_module.IncludeSnapshot.validate = original_validate
             return (verdict, stdout.getvalue(), stderr.getvalue(), tuple(trace),
                     tuple(validation_trace))
