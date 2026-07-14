@@ -45,6 +45,21 @@ begin_txn (WylHandle *handle, gboolean intent)
   return t;
 }
 
+static Txn
+begin_read_txn_without_evidence (WylHandle *handle)
+{
+  Txn t = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &t.lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_get_policy_store (t.lease,
+          handle, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
+  return t;
+}
+
 static void
 finish_txn (Txn *t, gboolean commit)
 {
@@ -69,6 +84,19 @@ sql_ok (sqlite3 *db, const gchar *sql)
     g_test_message ("sqlite: %s", message != NULL ? message : "unknown");
   sqlite3_free (message);
   g_assert_cmpint (rc, ==, SQLITE_OK);
+}
+
+static gint64
+sql_scalar (sqlite3 *db, const gchar *sql)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
+      SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gint64 value = sqlite3_column_int64 (stmt, 0);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  return value;
 }
 
 static void
@@ -171,6 +199,342 @@ test_fault_atomicity (void)
   finish_txn (&t, FALSE);
   g_assert_cmpint (sqlite3_total_changes (wyl_policy_store_get_db (store)), >,
       0);
+}
+
+typedef struct
+{
+  WylServiceAuthorityTransaction *txn;
+  wyl_policy_store_t *store;
+  wyl_id_t intention_id;
+  gchar digest[65];
+  wyrelog_error_t rc;
+} ThreadRead;
+
+typedef struct
+{
+  WylServiceAuthorityTransaction *txn;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} ThreadEnumerate;
+
+typedef struct
+{
+  sqlite3 *db;
+  WylServiceAuthorityTransaction *txn;
+  int total_changes;
+  gint64 data_version;
+} ReadInvariant;
+
+static ReadInvariant
+read_invariant_capture (sqlite3 *db, WylServiceAuthorityTransaction *txn)
+{
+  gboolean evidence = TRUE, intent = TRUE;
+  wyl_policy_store_service_exchange_intention_typed_read_state_for_test (txn,
+      &evidence, &intent);
+  g_assert_false (evidence);
+  g_assert_false (intent);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_get_state (txn), ==,
+      WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
+  return (ReadInvariant) {
+    db, txn, sqlite3_total_changes (db),
+        sql_scalar (db, "PRAGMA main.data_version;")
+  };
+}
+
+static void
+assert_read_invariant (const ReadInvariant *invariant)
+{
+  gboolean evidence = TRUE, intent = TRUE;
+  wyl_policy_store_service_exchange_intention_typed_read_state_for_test
+      (invariant->txn, &evidence, &intent);
+  g_assert_false (evidence);
+  g_assert_false (intent);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_get_state
+      (invariant->txn), ==, WYL_SERVICE_AUTHORITY_TXN_ACTIVE);
+  g_assert_cmpint (sqlite3_total_changes (invariant->db), ==,
+      invariant->total_changes);
+  g_assert_cmpint (sql_scalar (invariant->db, "PRAGMA main.data_version;"), ==,
+      invariant->data_version);
+}
+
+static gpointer
+load_wrong_thread (gpointer data)
+{
+  ThreadRead *attempt = data;
+  WylServiceExchangeIntentionRecord *row = (gpointer) 1;
+  attempt->rc = wyl_policy_store_service_exchange_intention_load
+      (attempt->txn, attempt->store, &attempt->intention_id, attempt->digest,
+      &row);
+  g_assert_null (row);
+  return NULL;
+}
+
+static gpointer
+enumerate_wrong_thread (gpointer data)
+{
+  ThreadEnumerate *attempt = data;
+  GPtrArray *rows = (gpointer) 1;
+  attempt->rc = wyl_policy_store_service_exchange_intention_enumerate
+      (attempt->txn, attempt->store, &rows);
+  g_assert_null (rows);
+  return NULL;
+}
+
+static void
+test_typed_recovery_reads_without_evidence (void)
+{
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  g_autoptr (WylHandle) other = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+
+  gchar digest[65];
+  Txn create = begin_txn (handle, TRUE);
+  WylServiceExchangeIntentionClassification kind;
+  g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
+  g_strlcpy (digest, created->material.payload_digest, sizeof digest);
+  finish_txn (&create, TRUE);
+
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  int changes_before = sqlite3_total_changes (db);
+  gint64 data_version_before = sql_scalar (db, "PRAGMA main.data_version;");
+  Txn read = begin_read_txn_without_evidence (handle);
+  ReadInvariant invariant = read_invariant_capture (db, read.txn);
+  g_autoptr (WylServiceExchangeIntentionRecord) loaded = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &input.intention_id, digest, &loaded), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GPtrArray) rows = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (read.txn, store, &rows), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (rows->len, ==, 1);
+  g_assert_true (loaded != rows->pdata[0]);
+  g_assert_cmpstr (loaded->tenant_id, ==, "tenant-a");
+  g_assert_cmpint (sqlite3_total_changes (db), ==, changes_before);
+  g_assert_cmpint (sql_scalar (db, "PRAGMA main.data_version;"), ==,
+      data_version_before);
+  assert_read_invariant (&invariant);
+
+  WylServiceExchangeIntentionRecord *denied = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &input.intention_id, digest, NULL), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &WYL_ID_NIL, digest, &denied), ==, WYRELOG_E_INVALID);
+  g_assert_null (denied);
+  denied = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &input.intention_id, "bad", &denied), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (denied);
+  assert_read_invariant (&invariant);
+  denied = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, NULL, &input.intention_id, digest, &denied), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (denied);
+  assert_read_invariant (&invariant);
+  denied = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (NULL, store, &input.intention_id, digest, &denied), !=, WYRELOG_E_OK);
+  g_assert_null (denied);
+  assert_read_invariant (&invariant);
+  denied = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, wyl_handle_get_policy_store (other), &input.intention_id,
+          digest, &denied), ==, WYRELOG_E_INVALID);
+  g_assert_null (denied);
+  assert_read_invariant (&invariant);
+
+  GPtrArray *denied_rows = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (read.txn, store, NULL), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (read.txn, NULL, &denied_rows), ==, WYRELOG_E_INVALID);
+  g_assert_null (denied_rows);
+  assert_read_invariant (&invariant);
+  denied_rows = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (NULL, store, &denied_rows), !=, WYRELOG_E_OK);
+  g_assert_null (denied_rows);
+  assert_read_invariant (&invariant);
+  denied_rows = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (read.txn, wyl_handle_get_policy_store (other), &denied_rows), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (denied_rows);
+  assert_read_invariant (&invariant);
+
+  ThreadRead attempt = { read.txn, store, input.intention_id, "", 0 };
+  g_strlcpy (attempt.digest, digest, sizeof attempt.digest);
+  g_autoptr (GThread) thread = g_thread_new ("typed-read-wrong-thread",
+      load_wrong_thread, &attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
+  assert_read_invariant (&invariant);
+  ThreadEnumerate enumerate_attempt = { read.txn, store, WYRELOG_E_OK };
+  thread = g_thread_new ("typed-enumerate-wrong-thread",
+      enumerate_wrong_thread, &enumerate_attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (enumerate_attempt.rc, ==, WYRELOG_E_INVALID);
+  assert_read_invariant (&invariant);
+
+  WylServiceExchangeIntentionRecord *append_row = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (read.txn, store, &input, &kind, &append_row), ==, WYRELOG_E_POLICY);
+  g_assert_null (append_row);
+  assert_read_invariant (&invariant);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (read.txn), ==, WYRELOG_E_OK);
+  WylServiceExchangeIntentionRecord *terminal = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &input.intention_id, digest, &terminal), !=,
+      WYRELOG_E_OK);
+  g_assert_null (terminal);
+  GPtrArray *terminal_rows = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (read.txn, store, &terminal_rows), !=, WYRELOG_E_OK);
+  g_assert_null (terminal_rows);
+  wyl_policy_store_service_authority_transaction_free (read.txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (read.lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (read.lease);
+  memset (&read, 0, sizeof read);
+
+  /* Both outputs are independently owned beyond transaction teardown. */
+  loaded->tenant_id[0] = 'X';
+  g_assert_cmpstr (((WylServiceExchangeIntentionRecord *) rows->pdata[0])->
+      tenant_id, ==, "tenant-a");
+  g_assert_cmpint (sqlite3_total_changes (db), ==, changes_before);
+  g_assert_cmpint (sql_scalar (db, "PRAGMA main.data_version;"), ==,
+      data_version_before);
+}
+
+typedef void (*TypedReadFaultArm) (WylServiceAuthorityTransaction * txn);
+
+static void
+test_typed_recovery_read_fault_cleanup (void)
+{
+  static const TypedReadFaultArm faults[] = {
+    wyl_policy_store_service_exchange_intention_fail_typed_read_prepare_once,
+    wyl_policy_store_service_exchange_intention_fail_typed_read_step_once,
+    wyl_policy_store_service_exchange_intention_fail_typed_read_allocation_once,
+  };
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  gchar digest[65];
+  Txn create = begin_txn (handle, TRUE);
+  WylServiceExchangeIntentionClassification kind;
+  g_autoptr (WylServiceExchangeIntentionRecord) created = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (create.txn, store, &input, &kind, &created), ==, WYRELOG_E_OK);
+  g_strlcpy (digest, created->material.payload_digest, sizeof digest);
+  finish_txn (&create, TRUE);
+
+  Txn read = begin_read_txn_without_evidence (handle);
+  ReadInvariant invariant = read_invariant_capture (db, read.txn);
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    faults[i] (read.txn);
+    WylServiceExchangeIntentionRecord *row = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+        (read.txn, store, &input.intention_id, digest, &row), ==,
+        i == 2 ? WYRELOG_E_NOMEM : WYRELOG_E_IO);
+    g_assert_null (row);
+    assert_read_invariant (&invariant);
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+        (read.txn, store, &input.intention_id, digest, &row), ==, WYRELOG_E_OK);
+    g_clear_pointer (&row, wyl_service_exchange_intention_record_free);
+    assert_read_invariant (&invariant);
+
+    faults[i] (read.txn);
+    GPtrArray *rows = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+        (read.txn, store, &rows), ==, i == 2 ? WYRELOG_E_NOMEM : WYRELOG_E_IO);
+    g_assert_null (rows);
+    assert_read_invariant (&invariant);
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+        (read.txn, store, &rows), ==, WYRELOG_E_OK);
+    g_clear_pointer (&rows, g_ptr_array_unref);
+    assert_read_invariant (&invariant);
+  }
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (read.txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (read.txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (read.lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (read.lease);
+}
+
+static void
+test_typed_recovery_read_malformed_row (void)
+{
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  wyl_service_exchange_audit_input_t bad_input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  wyl_service_exchange_audit_input_t good_input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
+      "000000000000000000000000001", 11);
+  gchar bad_digest[65], good_digest[65];
+  for (guint i = 0; i < 2; i++) {
+    wyl_service_exchange_audit_input_t *input = i == 0 ? &bad_input :
+        &good_input;
+    Txn create = begin_txn (handle, TRUE);
+    WylServiceExchangeIntentionClassification kind;
+    g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+        (create.txn, store, input, &kind, &row), ==, WYRELOG_E_OK);
+    g_strlcpy (i == 0 ? bad_digest : good_digest,
+        row->material.payload_digest, 65);
+    finish_txn (&create, TRUE);
+  }
+  remove_exchange_triggers (db);
+  sql_ok (db, "UPDATE service_exchange_audit_intentions SET outcome='deny'"
+      " WHERE intention_id='01890f47-3c4b-7cc2-b8c4-dc0c0c073991';");
+  sql_ok (db, "PRAGMA ignore_check_constraints=OFF;");
+  restore_exchange_triggers (db);
+
+  Txn read = begin_read_txn_without_evidence (handle);
+  ReadInvariant invariant = read_invariant_capture (db, read.txn);
+  WylServiceExchangeIntentionRecord *bad = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &bad_input.intention_id, bad_digest, &bad), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (bad);
+  assert_read_invariant (&invariant);
+  g_autoptr (WylServiceExchangeIntentionRecord) good = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &good_input.intention_id, good_digest, &good), ==,
+      WYRELOG_E_OK);
+  assert_read_invariant (&invariant);
+  GPtrArray *rows = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
+      (read.txn, store, &rows), ==, WYRELOG_E_POLICY);
+  g_assert_null (rows);
+  assert_read_invariant (&invariant);
+  g_clear_pointer (&good, wyl_service_exchange_intention_record_free);
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_load
+      (read.txn, store, &good_input.intention_id, good_digest, &good), ==,
+      WYRELOG_E_OK);
+  assert_read_invariant (&invariant);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (read.txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (read.txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (read.lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (read.lease);
 }
 
 static void
@@ -1009,6 +1373,12 @@ main (int argc, char **argv)
       test_commit_reopen_replay);
   g_test_add_func ("/service-exchange/store/fault-atomicity",
       test_fault_atomicity);
+  g_test_add_func ("/service-exchange/store/typed-recovery-read",
+      test_typed_recovery_reads_without_evidence);
+  g_test_add_func ("/service-exchange/store/typed-recovery-read-faults",
+      test_typed_recovery_read_fault_cleanup);
+  g_test_add_func ("/service-exchange/store/typed-recovery-read-malformed",
+      test_typed_recovery_read_malformed_row);
   g_test_add_func ("/service-exchange/store/guards-order-corruption",
       test_guards_order_and_corruption);
   g_test_add_func ("/service-exchange/store/persisted-corruption-matrix",
