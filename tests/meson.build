@@ -914,12 +914,26 @@ test_service_session_metadata = executable('test-service-session-metadata',
 
 test('service-session-metadata', test_service_session_metadata)
 
+test_service_exchange_audit_codec_sources = files(
+  'test-service-exchange-audit-codec.c',
+)
+test_service_exchange_audit_codec_deps = [
+  wyrelog_dep,
+  sodium_dep,
+  libchronoid_dep,
+]
+if get_option('enable_audit').allowed()
+  test_service_exchange_audit_codec_deps += service_exchange_private_dep
+else
+  test_service_exchange_audit_codec_sources += files(
+    '../wyrelog/auth/service-exchange-audit-private.c',
+  )
+endif
 test_service_exchange_audit_codec = executable(
   'test-service-exchange-audit-codec',
-  'test-service-exchange-audit-codec.c',
-  '../wyrelog/auth/service-exchange-audit-private.c',
+  test_service_exchange_audit_codec_sources,
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep, sodium_dep, libchronoid_dep],
+  dependencies : test_service_exchange_audit_codec_deps,
 )
 
 test('service-exchange-audit-codec', test_service_exchange_audit_codec)
@@ -978,7 +992,7 @@ test('check-service-session-private-boundary',
   # Full semantic preprocessing follows every configured TU and can vary
   # substantially with compiler/system-header performance on shared runners.
   is_parallel : false,
-  timeout : 720,
+  timeout : 900,
 )
 
 check_service_session_private_boundary_self_test = find_program(
@@ -1325,12 +1339,11 @@ if get_option('enable_audit').allowed()
 
   test_audit_conn = executable('test-audit-conn',
     'test-audit-conn.c',
-    '../wyrelog/auth/service-exchange-audit-private.c',
     include_directories : include_directories('../wyrelog'),
     c_args : [
       '-DWYL_TEST_DUCKDB_SCHEMA_PATH="' + meson.project_source_root() / 'templates' / 'access' / 'duckdb-schema.sql' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep, sodium_dep, libchronoid_dep],
+    dependencies : [service_exchange_private_dep],
   )
 
   test('audit-conn', test_audit_conn, env : audit_conn_test_env)
@@ -1338,18 +1351,28 @@ if get_option('enable_audit').allowed()
   test_service_exchange_projector = executable(
     'test-service-exchange-projector',
     'test-service-exchange-projector.c',
-    '../wyrelog/auth/service-exchange-projector-private.c',
-    '../wyrelog/auth/service-exchange-audit-private.c',
     c_args : ['-DWYL_HAS_AUDIT'],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep, sodium_dep,
-      libchronoid_dep],
+    dependencies : [service_exchange_private_dep],
   )
   test('service-exchange-projector', test_service_exchange_projector,
     env : audit_conn_test_env, timeout : 180)
 
   test('service-exchange-projector-boundary', python3,
     args : [files('test-service-exchange-projector-boundary.py'),
+      meson.project_source_root()])
+
+  test_daemon_startup_recovery = executable(
+    'test-daemon-startup-recovery',
+    'test-daemon-startup-recovery.c',
+    c_args : ['-DWYL_HAS_AUDIT'],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [service_exchange_startup_private_dep],
+  )
+  test('daemon-startup-recovery', test_daemon_startup_recovery,
+    env : audit_conn_test_env, timeout : 60)
+  test('daemon-startup-recovery-boundary', python3,
+    args : [files('test-daemon-startup-recovery-boundary.py'),
       meson.project_source_root()])
 
   test_audit_emit = executable('test-audit-emit',
