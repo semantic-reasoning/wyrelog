@@ -1,4 +1,5 @@
 fs = import('fs')
+python3 = find_program('python3')
 
 test_smoke = executable('test-smoke',
   'test-smoke.c',
@@ -23,7 +24,6 @@ test('wyrelogd-check', wyrelogd_exe,
 )
 
 if host_machine.system() != 'windows'
-  python3 = find_program('python3')
   sh = find_program('sh')
   test('wyrelogd-production-gates', sh,
     args : [
@@ -894,6 +894,56 @@ test_service_session_metadata = executable('test-service-session-metadata',
 )
 
 test('service-session-metadata', test_service_session_metadata)
+
+test_service_exchange_audit_codec = executable(
+  'test-service-exchange-audit-codec',
+  'test-service-exchange-audit-codec.c',
+  '../wyrelog/auth/service-exchange-audit-private.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sodium_dep, libchronoid_dep],
+)
+
+test('service-exchange-audit-codec', test_service_exchange_audit_codec)
+
+test('service-exchange-audit-vectors', python3,
+  args : files('test-service-exchange-audit-vectors.py'),
+)
+
+check_service_exchange_audit_exports = find_program(
+  '../tools/check-service-exchange-audit-exports.py',
+)
+
+test('check-service-exchange-audit-exports',
+  check_service_exchange_audit_exports,
+  args : libwyrelog.full_path(),
+  depends : libwyrelog,
+)
+
+test('check-service-exchange-audit-private-header', python3,
+  args : [
+    files('test-private-header-not-installed.py'),
+    meson.project_build_root(),
+    'service-exchange-audit-private.h',
+  ],
+)
+
+test_service_exchange_private_root_include = executable(
+  'test-service-exchange-private-root-include',
+  'test-service-exchange-private-root-include.c',
+  dependencies : [wyrelog_dep],
+)
+
+test('service-exchange-private-root-include',
+  test_service_exchange_private_root_include)
+
+test('service-exchange-private-root-boundary', python3,
+  args : [
+    meson.current_source_dir() / 'test-service-exchange-private-root-boundary.py',
+    meson.project_source_root() / 'wyrelog' / 'auth' /
+      'service-exchange-audit-private.h',
+    meson.current_source_dir() / 'meson.build',
+  ],
+)
 
 check_service_session_private_boundary = find_program(
   '../tools/check-service-session-private-boundary.py',
