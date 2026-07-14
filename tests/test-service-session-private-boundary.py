@@ -132,6 +132,51 @@ def main() -> int:
     assert expansion_watchdog.snapshot[1:3] == ("distill", "expand")
     assert expansion_watchdog.snapshot[
         guard_module.HeartbeatReporter.FIELDS["expansion_calls"]] == 256
+    with tempfile.TemporaryDirectory() as vendored_directory:
+        # Windows CI installs vcpkg inside the checkout. Its headers live under
+        # the project root but are dependencies, not tracked source: distilling
+        # them exhausts the expansion budget and diverges from POSIX runners,
+        # where the same headers resolve outside the tree.
+        vendored_root = Path(vendored_directory).resolve()
+        vcpkg_root = vendored_root / "vcpkg"
+        vcpkg_include = vcpkg_root / "installed" / "x64-windows" / "include"
+        vcpkg_include.mkdir(parents=True)
+        (vcpkg_root / ".vcpkg-root").write_text("", encoding="utf-8")
+        (vcpkg_include / "dependency.h").write_text(
+            "#define VENDORED_DEPENDENCY 1\n", encoding="utf-8")
+        owned = vendored_root / "owned.h"
+        owned.write_text("#define OWNED_HEADER 1\n", encoding="utf-8")
+        vendored_source = vendored_root / "vendored.c"
+        vendored_source.write_text(
+            '#include <dependency.h>\n#include "owned.h"\n', encoding="utf-8")
+        (vcpkg_include / "sibling.h").write_text(
+            "#define VENDORED_SIBLING 1\n", encoding="utf-8")
+        neighbour = vendored_root / "neighbour.h"
+        neighbour.write_text("#define OWNED_NEIGHBOUR 1\n", encoding="utf-8")
+        vendored_snapshot = guard_module.IncludeSnapshot((vendored_root,))
+        assert not vendored_snapshot.is_local(vcpkg_include / "dependency.h")
+        assert vendored_snapshot.is_local(owned)
+        # Repeat both verdicts to cover the memoised directory lookups.
+        assert not vendored_snapshot.is_local(vcpkg_include / "sibling.h")
+        assert vendored_snapshot.is_local(neighbour)
+        assert not vendored_snapshot.is_local(vcpkg_include / "dependency.h")
+        assert vendored_snapshot.is_local(owned)
+        # A sentinel at or above the checkout must not turn the project into a
+        # dependency and silently disable distillation.
+        (vendored_root / ".vcpkg-root").write_text("", encoding="utf-8")
+        assert guard_module.IncludeSnapshot((vendored_root,)).is_local(owned)
+        (vendored_root / ".vcpkg-root").unlink()
+        vendored_expansion = guard_module.flatten_expansion(
+            guard_module.distilled_expansion(
+                "vendored.c", vendored_source.read_text(encoding="utf-8"),
+                vendored_source.resolve(), [vendored_root],
+                [vendored_root, vcpkg_include], (vendored_root,),
+                vendored_snapshot))
+        # The dependency stays an include for the real preprocessor; the
+        # project's own header is still expanded in place.
+        assert "#include <dependency.h>" in vendored_expansion
+        assert "VENDORED_DEPENDENCY" not in vendored_expansion
+        assert "OWNED_HEADER" in vendored_expansion
     with tempfile.TemporaryDirectory() as cache_directory:
         cache_root = Path(cache_directory)
         canonical_root = cache_root.resolve()

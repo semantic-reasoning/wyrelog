@@ -482,11 +482,37 @@ def flatten_expansion(expansion: Expansion) -> str:
     return "".join(output)
 
 
+def dependency_prefix(path: Path, bases: tuple[Path, ...]) -> Path | None:
+    """Return the vendored dependency tree containing @path, if any.
+
+    A dependency installed inside the checkout is still a dependency.  Windows
+    CI clones vcpkg into the workspace, so its installed headers sit under the
+    project root and would otherwise be distilled as project source: glib and
+    libsoup alone exhaust the expansion budget, while POSIX runners resolve the
+    same headers outside the tree and leave them to the real preprocessor.
+    Honour the vcpkg sentinel rather than a directory name so the layout, not
+    the platform, decides.
+
+    Only vendored trees strictly inside a local base qualify.  The search stops
+    at the base so a sentinel at or above the checkout cannot classify the
+    project itself as a dependency and silently disable distillation.  This
+    recognises the classic vcpkg clone that CI installs; a manifest-mode
+    `vcpkg_installed/` carries no sentinel and is not detected here.
+    """
+    for parent in path.parents:
+        if parent in bases:
+            break
+        if (parent / ".vcpkg-root").exists():
+            return parent
+    return None
+
+
 class IncludeSnapshot:
     def __init__(self, local_bases: tuple[Path, ...],
                  expansion_cap: int = 64 * 1024 * 1024,
                  reporter=None):
         self.local_bases = local_bases
+        self.dependency_prefixes = {}
         self.resolutions = {}
         self.resolution_errors = {}
         self.text = {}
@@ -632,8 +658,16 @@ class IncludeSnapshot:
         return selected
 
     def is_local(self, path: Path) -> bool:
-        return any(path == base or base in path.parents
-                   for base in self.local_bases)
+        if not any(path == base or base in path.parents
+                   for base in self.local_bases):
+            return False
+        # Keyed by the parent because dependency_prefix() reads only the
+        # ancestors: every file in a directory shares the same verdict.
+        directory = path.parent
+        if directory not in self.dependency_prefixes:
+            self.dependency_prefixes[directory] = dependency_prefix(
+                path, self.local_bases)
+        return self.dependency_prefixes[directory] is None
 
     def read_local(self, path: Path) -> str:
         identity = str(path)
