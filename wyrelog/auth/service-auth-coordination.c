@@ -111,6 +111,9 @@ struct _WylServiceAuthReadLease
   guint64 serial;
   WylServiceAuthLeaseState state;
   wyl_policy_store_t *pinned_store;
+  gboolean test_fail_terminal_prevalidation;
+  void (*test_terminal_checkpoint) (gpointer data);
+  gpointer test_terminal_checkpoint_data;
 };
 
 struct _WylServiceAuthWriteLease
@@ -644,6 +647,68 @@ wyl_service_auth_read_lease_release (WylServiceAuthReadLease *lease)
     wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
     lease->pinned_store = NULL;
   }
+  return rc;
+}
+
+void wyl_service_auth_read_lease_test_fail_terminal_prevalidation
+    (WylServiceAuthReadLease * lease)
+{
+  if (lease != NULL)
+    lease->test_fail_terminal_prevalidation = TRUE;
+}
+
+void wyl_service_auth_read_lease_test_set_terminal_checkpoint
+    (WylServiceAuthReadLease * lease, void (*checkpoint) (gpointer data),
+    gpointer data)
+{
+  if (lease != NULL) {
+    lease->test_terminal_checkpoint = checkpoint;
+    lease->test_terminal_checkpoint_data = data;
+  }
+}
+
+wyrelog_error_t
+wyl_service_auth_read_lease_release_terminal (WylServiceAuthReadLease
+    **inout_lease)
+{
+  if (inout_lease == NULL || *inout_lease == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthReadLease *lease = *inout_lease;
+  if (lease->test_terminal_checkpoint != NULL)
+    lease->test_terminal_checkpoint (lease->test_terminal_checkpoint_data);
+  WylServiceAuthAuthority *authority = lease->authority;
+  gboolean consumed = FALSE;
+  g_mutex_lock (&authority->mutex);
+  wyrelog_error_t rc = lease->test_fail_terminal_prevalidation
+      ? WYRELOG_E_INTERNAL : validate_read_locked (lease, lease->handle);
+  guint64 canonical_serial = reader_serial_locked (authority, lease->owner);
+  gboolean cleanup_identity = authority->handle == lease->handle
+      && lease->owner == g_thread_self ()
+      && lease->state == WYL_SERVICE_AUTH_LEASE_ACTIVE
+      && canonical_serial != 0 && authority->active_readers > 0;
+  if (cleanup_identity) {
+    lease->state = WYL_SERVICE_AUTH_LEASE_RELEASED;
+    g_hash_table_remove (authority->reader_owners, lease->owner);
+    authority->active_readers--;
+    if (rc != WYRELOG_E_OK)
+      wyl_handle_service_auth_set_unavailable_reason_locked (lease->handle,
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    g_cond_broadcast (&authority->changed);
+    consumed = TRUE;
+  }
+  g_mutex_unlock (&authority->mutex);
+  if (!consumed)
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_INVALID;
+  wyrelog_error_t rank_rc = wyl_service_auth_rank_leave_expected
+      (lease->handle, WYL_SERVICE_AUTH_RANK_COORDINATION);
+  if (rc == WYRELOG_E_OK && rank_rc != WYRELOG_E_OK)
+    rc = rank_rc;
+  wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
+  lease->pinned_store = NULL;
+  g_clear_object (&lease->handle);
+  wyl_service_auth_authority_unref (lease->authority);
+  g_free (lease);
+  *inout_lease = NULL;
   return rc;
 }
 

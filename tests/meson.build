@@ -1238,6 +1238,19 @@ test('check-no-daemon-policy-mutation-lock',
   args : daemon_guard_args,
 )
 
+bearer_resolver_structure_guard = find_program(
+  '../tools/check-daemon-bearer-resolver-structure.py')
+test('check-daemon-bearer-resolver-structure',
+  bearer_resolver_structure_guard,
+  args : [meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c'],
+)
+test('check-daemon-bearer-resolver-structure-self-test', python3,
+  args : [
+    meson.current_source_dir() / 'test-daemon-bearer-resolver-structure.py',
+    bearer_resolver_structure_guard.full_path(),
+  ],
+)
+
 check_no_daemon_policy_mutation_lock_self_test = find_program(
   'test-daemon-policy-write-authority-guard.py',
 )

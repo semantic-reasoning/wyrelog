@@ -118,6 +118,141 @@ writer_is_waiting (const WylServiceAuthAuthoritySnapshot *snapshot)
   return snapshot->waiting_writers == 1;
 }
 
+static WylHandle *new_handle (void);
+
+static void
+terminal_entry_checkpoint (gpointer data)
+{
+  guint *entries = data;
+  (*entries)++;
+}
+
+typedef struct
+{
+  WylServiceAuthReadLease **lease;
+  wyrelog_error_t rc;
+} WrongThreadTerminal;
+
+static gpointer
+wrong_thread_terminal (gpointer data)
+{
+  WrongThreadTerminal *attempt = data;
+  attempt->rc = wyl_service_auth_read_lease_release_terminal (attempt->lease);
+  return NULL;
+}
+
+static void
+finish_writer (LeaseThread *writer, GThread **thread)
+{
+  g_mutex_lock (&writer->mutex);
+  writer->may_release = TRUE;
+  g_cond_broadcast (&writer->changed);
+  g_mutex_unlock (&writer->mutex);
+  g_thread_join (g_steal_pointer (thread));
+}
+
+static void
+test_read_terminal_release_contract (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthReadLease *lease = NULL;
+  guint entries = 0;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  wyl_service_auth_read_lease_test_set_terminal_checkpoint (lease,
+      terminal_entry_checkpoint, &entries);
+  LeaseThread writer = { 0 };
+  lease_thread_init (&writer, authority, handle);
+  GThread *writer_handle = g_thread_new ("terminal-normal-writer",
+      writer_thread, &writer);
+  wait_for_snapshot (authority, writer_is_waiting);
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&lease), ==,
+      WYRELOG_E_OK);
+  g_assert_null (lease);
+  g_assert_cmpuint (entries, ==, 1);
+  wait_for_flag (&writer, &writer.acquired);
+  finish_writer (&writer, &writer_handle);
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&lease), ==,
+      WYRELOG_E_INVALID);
+  lease_thread_clear (&writer);
+}
+
+static void
+assert_terminal_fault_consumes (gboolean corrupt_serial)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthReadLease *lease = NULL;
+  guint entries = 0;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  wyl_service_auth_read_lease_test_set_terminal_checkpoint (lease,
+      terminal_entry_checkpoint, &entries);
+  if (corrupt_serial)
+    wyl_service_auth_read_lease_test_corrupt_serial (lease);
+  else
+    wyl_service_auth_read_lease_test_fail_terminal_prevalidation (lease);
+  LeaseThread writer = { 0 };
+  lease_thread_init (&writer, authority, handle);
+  GThread *writer_handle = g_thread_new ("terminal-fault-writer",
+      writer_thread, &writer);
+  wait_for_snapshot (authority, writer_is_waiting);
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&lease), ==,
+      corrupt_serial ? WYRELOG_E_INVALID : WYRELOG_E_INTERNAL);
+  g_assert_null (lease);
+  g_assert_cmpuint (entries, ==, 1);
+  g_thread_join (writer_handle);
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_BUSY);
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_cmpuint (snapshot.active_readers, ==, 0);
+  g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
+  g_assert_false (snapshot.writer_active);
+  g_assert_cmpint (wyl_service_auth_rank_enter (handle,
+          WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_rank_leave (handle,
+          WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+  lease_thread_clear (&writer);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+}
+
+static void
+test_read_terminal_release_faults (void)
+{
+  assert_terminal_fault_consumes (FALSE);
+  assert_terminal_fault_consumes (TRUE);
+}
+
+static void
+test_read_terminal_release_wrong_thread (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthReadLease *lease = NULL;
+  guint entries = 0;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &lease), ==, WYRELOG_E_OK);
+  wyl_service_auth_read_lease_test_set_terminal_checkpoint (lease,
+      terminal_entry_checkpoint, &entries);
+  WrongThreadTerminal attempt = {
+    .lease = &lease,.rc = WYRELOG_E_OK,
+  };
+  g_autoptr (GThread) thread = g_thread_new ("wrong-terminal-owner",
+      wrong_thread_terminal, &attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
+  g_assert_nonnull (lease);
+  g_assert_cmpuint (entries, ==, 1);
+  g_assert_cmpint (wyl_service_auth_read_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_read_lease_free (lease);
+}
+
 static gboolean
     reader_is_waiting_behind_writer
     (const WylServiceAuthAuthoritySnapshot * snapshot)
@@ -2602,6 +2737,12 @@ main (int argc, char **argv)
       test_read_lease_pinned_policy_store);
   g_test_add_func ("/service-auth/lease/wrong-thread-release",
       test_wrong_thread_release);
+  g_test_add_func ("/service-auth/lease/terminal-release",
+      test_read_terminal_release_contract);
+  g_test_add_func ("/service-auth/lease/terminal-release-faults",
+      test_read_terminal_release_faults);
+  g_test_add_func ("/service-auth/lease/terminal-release-wrong-thread",
+      test_read_terminal_release_wrong_thread);
   g_test_add_func ("/service-auth/lease/rank-inversion-write-serial",
       test_rank_inversion_and_write_serial);
   g_test_add_func ("/service-auth/authority/writer-preference",
