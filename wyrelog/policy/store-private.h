@@ -474,6 +474,17 @@ wyrelog_error_t
     wyl_policy_store_t * expected_store, guint64 expected_transaction_serial);
 guint64 wyl_policy_store_service_authority_transaction_get_serial
     (const WylServiceAuthorityTransaction * transaction);
+/* Enter a store-owned participant in the existing authority transaction.
+ * This validates the ACTIVE owner-thread transaction, exact current store,
+ * locks/pin/claim and operational WRITE lease, then latches that durable work
+ * has begun. It returns no database handle, token, reference or commit result;
+ * participants must execute directly in this transaction's existing savepoint
+ * and must not open a nested transaction or expose raw database access.
+ */
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_enter_participant
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * expected_store);
 wyrelog_error_t
     wyl_policy_store_service_authority_transaction_record_credential_last_used
     (WylServiceAuthorityTransaction * transaction,

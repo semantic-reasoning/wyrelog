@@ -1461,6 +1461,23 @@ typedef struct
   wyrelog_error_t rc;
 } LastUsedThread;
 
+typedef struct
+{
+  WylServiceAuthorityTransaction *txn;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} ParticipantThread;
+
+static gpointer
+participant_wrong_thread (gpointer data)
+{
+  ParticipantThread *attempt = data;
+  attempt->rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (attempt->txn, attempt->store);
+  return NULL;
+}
+
 static gpointer
 last_used_wrong_thread (gpointer data)
 {
@@ -1654,12 +1671,78 @@ test_authority_transaction_credential_last_used_unavailable (void)
           handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT), ==,
       WYRELOG_E_OK);
   g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint
       (wyl_policy_store_service_authority_transaction_record_credential_last_used
       (txn, store, LAST_USED_CREDENTIAL_ID, 7, "svc:last:used", "tenant-last",
           150), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (read_last_used (db), ==, -1);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
       (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_authority_transaction_participant_contract (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (WylHandle) other = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+      ==, WYRELOG_E_OK);
+
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  gint changes_before = sqlite3_total_changes (db);
+  guint allocations_before =
+      wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+      (txn);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          wyl_handle_get_policy_store (other)), ==, WYRELOG_E_INVALID);
+  ParticipantThread attempt = { txn, store, WYRELOG_E_OK };
+  g_autoptr (GThread) thread = g_thread_new ("participant-owner",
+      participant_wrong_thread, &attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_total_changes (db), ==, changes_before);
+  g_assert_cmpuint
+      (wyl_policy_store_service_authority_transaction_get_evidence_allocation_count
+      (txn), ==, allocations_before);
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (txn, store,
+          &evidence), ==, WYRELOG_E_BUSY);
+  g_assert_null (evidence);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_INVALID);
+  wyl_policy_store_service_authority_transaction_free (txn);
+
+  txn = NULL;
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_INVALID);
   wyl_policy_store_service_authority_transaction_free (txn);
   g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
       WYRELOG_E_OK);
@@ -1782,6 +1865,8 @@ main (int argc, char **argv)
       test_authority_transaction_credential_last_used);
   g_test_add_func ("/service-auth/transaction/credential-last-used-unavailable",
       test_authority_transaction_credential_last_used_unavailable);
+  g_test_add_func ("/service-auth/transaction/participant-contract",
+      test_authority_transaction_participant_contract);
   g_test_add_func
       ("/service-auth/transaction/credential-last-used-corrupt-text",
       test_authority_transaction_credential_last_used_corrupt_text);

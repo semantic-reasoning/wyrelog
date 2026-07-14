@@ -5431,12 +5431,12 @@ static wyrelog_error_t
       txn->handle);
 }
 
-static wyrelog_error_t
-    service_authority_transaction_validate_core
-    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store)
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_enter_participant
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * expected_store)
 {
   wyrelog_error_t rc = service_authority_transaction_validate_active (txn,
-      store);
+      expected_store);
   if (rc == WYRELOG_E_OK)
     txn->durable_operation_started = TRUE;
   return rc;
@@ -5595,7 +5595,8 @@ wyrelog_error_t
     const gchar * credential_id, guint64 generation,
     const gchar * subject_id, const gchar * tenant_id, gint64 used_at_us)
 {
-  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant (txn,
       store);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -5826,7 +5827,8 @@ wyrelog_error_t
 {
   if (out != NULL)
     wyl_policy_service_principal_info_clear (out);
-  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant (txn,
       store);
   return rc == WYRELOG_E_OK ? service_principal_create_impl (store,
       subject_id, display_name, actor_subject_id, request_id, out, TRUE) : rc;
@@ -5946,7 +5948,8 @@ wyrelog_error_t
 {
   if (out != NULL)
     wyl_policy_service_principal_info_clear (out);
-  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant (txn,
       store);
   return rc == WYRELOG_E_OK ? service_principal_disable_impl (store,
       subject_id, actor_subject_id, request_id, out, TRUE) : rc;
@@ -6978,7 +6981,8 @@ wyrelog_error_t
     wyl_policy_service_credential_info_clear (out);
   if (out_secret != NULL)
     wyl_service_credential_secret_clear (out_secret);
-  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant (txn,
       store);
   return rc == WYRELOG_E_OK ? service_credential_issue_impl (store,
       subject_id, tenant_id, actor_subject_id, request_id, expires_at_us,
@@ -7284,7 +7288,8 @@ wyrelog_error_t
 {
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
-  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant (txn,
       store);
   return rc == WYRELOG_E_OK ? service_credential_revoke_impl (store,
       credential_id, actor_subject_id, request_id, out, TRUE) : rc;
@@ -7662,7 +7667,8 @@ wyrelog_error_t
     wyl_policy_service_credential_info_clear (out);
   if (out_secret != NULL)
     wyl_service_credential_secret_clear (out_secret);
-  wyrelog_error_t rc = service_authority_transaction_validate_core (txn,
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant (txn,
       store);
   return rc == WYRELOG_E_OK ? service_credential_rotate_impl (store,
       old_credential_id, actor_subject_id, request_id, new_expires_at_us,
