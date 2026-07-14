@@ -14,6 +14,13 @@ meson-logs/
 meson-private/
 compile_commands.json
 
+# Vendored dependency trees. CI installs these outside the checkout; ignore a
+# local in-tree installation so it is never committed as project source. The
+# binary cache is deliberately absent: nothing should create one here, and CI
+# asserts against it, so ignoring it would only hide that.
+/vcpkg/
+vcpkg_installed/
+
 # IDE and editor files
 .vscode/
 .idea/
