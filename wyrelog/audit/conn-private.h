@@ -48,6 +48,7 @@ typedef struct WylAuditServiceExchangeProjectionReadback
   gchar payload_digest[WYL_SERVICE_EXCHANGE_PAYLOAD_DIGEST_HEX_BUF];
   gint64 sequence_no;
   gchar record_hash[WYL_SERVICE_EXCHANGE_PAYLOAD_DIGEST_HEX_BUF];
+  gchar checkpoint_root[WYL_SERVICE_EXCHANGE_PAYLOAD_DIGEST_HEX_BUF];
 } WylAuditServiceExchangeProjectionReadback;
 
 typedef enum
@@ -69,6 +70,17 @@ void wyl_audit_conn_service_exchange_fail_once
     (wyl_audit_conn_t * conn, WylAuditServiceExchangeFailStage stage);
 guint wyl_audit_conn_service_exchange_get_rollback_count_for_test
     (wyl_audit_conn_t * conn);
+/* WYL_TEST-only observation: number of entries into Atom A projection. */
+guint64 wyl_audit_conn_service_exchange_get_entry_count_for_test
+    (wyl_audit_conn_t * conn);
+void wyl_audit_conn_service_exchange_reset_entry_count_for_test
+    (wyl_audit_conn_t * conn);
+
+/* Exact identity of the durable service-exchange sink. */
+wyrelog_error_t wyl_audit_conn_service_exchange_get_sink_identity
+    (wyl_audit_conn_t * conn,
+    gchar out_logical_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM],
+    gchar out_sink_uuid[WYL_SERVICE_EXCHANGE_UUID_BUF]);
 
 /* Private durable projection primitive. It deliberately consumes sanitized
  * material rather than a receipt; receipt validation and acknowledgement are

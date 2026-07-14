@@ -843,3 +843,13 @@ void wyl_service_auth_write_lease_test_corrupt_serial
   if (lease != NULL)
     lease->serial ^= G_GUINT64_CONSTANT (1) << 63;
 }
+
+wyl_policy_store_t *wyl_service_auth_write_lease_test_swap_pinned_store
+    (WylServiceAuthWriteLease * lease, wyl_policy_store_t * replacement)
+{
+  if (lease == NULL)
+    return NULL;
+  wyl_policy_store_t *previous = lease->pinned_store;
+  lease->pinned_store = replacement;
+  return previous;
+}

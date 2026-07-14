@@ -794,7 +794,7 @@ checkpoint_corruption_is_denied (duckdb_connection raw,
   if (wyl_audit_conn_service_exchange_project (conn, p, &out)
       != WYRELOG_E_POLICY
       || out.sink_uuid[0] != '\0' || out.sequence_no != 0
-      || out.record_hash[0] != '\0')
+      || out.record_hash[0] != '\0' || out.checkpoint_root[0] != '\0')
     return FALSE;
   if (duckdb_query (raw, restore, &result) != DuckDBSuccess) {
     duckdb_destroy_result (&result);
@@ -826,11 +826,12 @@ check_service_exchange_projection_durable_exact (void)
       || strcmp (first.intention_id, p.intention_id) != 0
       || strcmp (first.record_hash,
           "060e74f0177ea5d3ac5962f31665162ae24f9142bd296e73ba023835f5bc0cfc")
-      != 0)
+      != 0 || strcmp (first.checkpoint_root, first.record_hash) != 0)
     return 162;
   if (wyl_audit_conn_service_exchange_project (conn, &p, &replay)
       != WYRELOG_E_OK || replay.sequence_no != first.sequence_no
-      || strcmp (replay.sink_uuid, first.sink_uuid) != 0)
+      || strcmp (replay.sink_uuid, first.sink_uuid) != 0
+      || strcmp (replay.checkpoint_root, first.checkpoint_root) != 0)
     return 163;
   duckdb_result result = { 0 };
   if (duckdb_query (wyl_audit_conn_get_connection (conn),

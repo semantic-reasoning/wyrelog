@@ -11,6 +11,12 @@ import sys
 PROTECTED = {
     "wyl_service_exchange_audit_encode",
     "wyl_service_exchange_audit_material_clear",
+    "wyl_service_exchange_project_committed",
+    "wyl_service_exchange_projection_ack_ref",
+    "wyl_service_exchange_projection_ack_unref",
+    "wyl_service_exchange_projection_ack_validate_receipt",
+    "wyl_service_exchange_projection_ack_dup_record",
+    "wyl_service_exchange_projector_fail_allocation_for_test",
 }
 
 

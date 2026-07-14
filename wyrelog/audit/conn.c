@@ -30,8 +30,25 @@ struct wyl_audit_conn_t
   gboolean persistent;
   WylAuditServiceExchangeFailStage service_exchange_fail_stage;
   guint service_exchange_rollback_count;
+  gint service_exchange_entry_count;
   gboolean sink_metadata_initialization_pending;
 };
+
+guint64
+wyl_audit_conn_service_exchange_get_entry_count_for_test (wyl_audit_conn_t
+    *conn)
+{
+  return conn != NULL ? (guint64) g_atomic_int_get
+      (&conn->service_exchange_entry_count) : 0;
+}
+
+void
+wyl_audit_conn_service_exchange_reset_entry_count_for_test (wyl_audit_conn_t
+    *conn)
+{
+  if (conn != NULL)
+    g_atomic_int_set (&conn->service_exchange_entry_count, 0);
+}
 
 static gboolean
 service_exchange_fail (wyl_audit_conn_t *conn,
@@ -1228,6 +1245,28 @@ load_sink_uuid_unlocked (wyl_audit_conn_t *conn, gchar out[WYL_ID_STRING_BUF])
   return valid ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_audit_conn_service_exchange_get_sink_identity (wyl_audit_conn_t *conn,
+    gchar out_logical_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM],
+    gchar out_sink_uuid[WYL_SERVICE_EXCHANGE_UUID_BUF])
+{
+  if (out_logical_name != NULL)
+    memset (out_logical_name, 0, sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
+  if (out_sink_uuid != NULL)
+    memset (out_sink_uuid, 0, WYL_SERVICE_EXCHANGE_UUID_BUF);
+  if (conn == NULL || out_logical_name == NULL || out_sink_uuid == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&conn->lock);
+  wyrelog_error_t rc = ensure_service_exchange_schema (conn, FALSE);
+  if (rc == WYRELOG_E_OK)
+    rc = load_sink_uuid_unlocked (conn, out_sink_uuid);
+  if (rc == WYRELOG_E_OK)
+    memcpy (out_logical_name, WYL_AUDIT_SERVICE_EXCHANGE_STREAM,
+        sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM);
+  g_mutex_unlock (&conn->lock);
+  return rc;
+}
+
 static wyrelog_error_t
 load_projection_candidates (wyl_audit_conn_t *conn, const gchar *sink_uuid,
     const WylAuditServiceExchangeProjection *p, duckdb_result *out)
@@ -1487,6 +1526,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     return WYRELOG_E_INVALID;
   if (!conn->persistent)
     return WYRELOG_E_POLICY;
+  g_atomic_int_inc (&conn->service_exchange_entry_count);
 
   g_mutex_lock (&conn->lock);
   wyrelog_error_t rc = ensure_service_exchange_schema (conn, FALSE);
@@ -1651,6 +1691,7 @@ wyl_audit_conn_service_exchange_project (wyl_audit_conn_t *conn,
     out->sequence_no = duckdb_value_int64 (&anchor, 8, 0);
     gchar *fresh_hash = duckdb_value_varchar (&anchor, 10, 0);
     memcpy (out->record_hash, fresh_hash, sizeof out->record_hash);
+    memcpy (out->checkpoint_root, fresh_hash, sizeof out->checkpoint_root);
     duckdb_free (fresh_hash);
     if (!replay)
       update_chain_tail_cache (conn, WYL_AUDIT_SERVICE_EXCHANGE_STREAM,

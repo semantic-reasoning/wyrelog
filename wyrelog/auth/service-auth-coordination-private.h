@@ -141,6 +141,8 @@ wyl_policy_store_t *wyl_service_auth_read_lease_test_swap_pinned_store
     (WylServiceAuthReadLease * lease, wyl_policy_store_t * replacement);
 void wyl_service_auth_write_lease_test_corrupt_serial
     (WylServiceAuthWriteLease * lease);
+wyl_policy_store_t *wyl_service_auth_write_lease_test_swap_pinned_store
+    (WylServiceAuthWriteLease * lease, wyl_policy_store_t * replacement);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthAuthority,
     wyl_service_auth_authority_unref)
