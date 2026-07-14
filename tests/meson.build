@@ -883,6 +883,64 @@ test_session_id = executable('test-session-id',
 
 test('session-id', test_session_id)
 
+test_service_session_metadata = executable('test-service-session-metadata',
+  'test-service-session-metadata.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [service_session_private_dep],
+)
+
+test('service-session-metadata', test_service_session_metadata)
+
+check_service_session_private_boundary = find_program(
+  '../tools/check-service-session-private-boundary.py',
+)
+service_session_boundary_cc = meson.get_compiler('c').cmd_array()
+service_session_boundary_cc_id = meson.get_compiler('c').get_id()
+
+test('check-service-session-private-boundary',
+  check_service_session_private_boundary,
+  args : [meson.project_source_root(), '--compiler-id',
+    service_session_boundary_cc_id, '--build-root', meson.project_build_root(),
+    '--'] + service_session_boundary_cc,
+  # Full semantic preprocessing follows every configured TU and can vary
+  # substantially with compiler/system-header performance on shared runners.
+  is_parallel : false,
+  timeout : 720,
+)
+
+check_service_session_private_boundary_self_test = find_program(
+  'test-service-session-private-boundary.py',
+)
+
+test('check-service-session-private-boundary-self-test',
+  check_service_session_private_boundary_self_test,
+  args : [check_service_session_private_boundary.full_path(), '--',
+    service_session_boundary_cc_id] + service_session_boundary_cc,
+  is_parallel : false,
+  timeout : 120,
+)
+
+check_service_session_private_exports = find_program(
+  '../tools/check-service-session-private-exports.py',
+)
+
+test('check-service-session-private-exports',
+  check_service_session_private_exports,
+  args : ['--must-not-contain-family', libwyrelog.full_path()],
+  depends : libwyrelog,
+)
+
+test('check-service-session-private-companion-symbols',
+  check_service_session_private_exports,
+  args : ['--must-contain', service_session_private_lib.full_path()],
+  depends : service_session_private_lib,
+)
+
+test('check-service-session-private-exports-self-test',
+  check_service_session_private_exports,
+  args : ['--self-test'],
+)
+
 test_login_req = executable('test-login-req',
   'test-login-req.c',
   dependencies : [wyrelog_dep],

@@ -113,6 +113,21 @@ wyrelog_dep = declare_dependency(
   dependencies : [glib_dep, gio_dep],
 )
 
+# Host-only private companion: never installed and never linked into
+# libwyrelog. Focused tests and the exact future #358 daemon owner opt in.
+service_session_private_lib = static_library('wyrelog-service-session-private',
+  'auth/service-session-private.c',
+  include_directories : wyrelog_inc,
+  dependencies : [wyrelog_dep],
+  install : false,
+  build_by_default : false,
+)
+
+service_session_private_dep = declare_dependency(
+  link_with : service_session_private_lib,
+  dependencies : [wyrelog_dep],
+)
+
 build_client = libsoup_dep.found()
 
 if build_client
