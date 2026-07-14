@@ -19,6 +19,43 @@ SoupServer *wyl_daemon_start_http_server_with_runtime
 WylSession *wyl_daemon_http_ref_session (SoupServer * server,
     const gchar * session_token);
 #ifdef WYL_TEST_DAEMON_HTTP
+gboolean wyl_daemon_http_store_human_access_token_for_test
+    (SoupServer * server, const gchar * jti, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, const gchar * key_id,
+    gint64 expires_at);
+gboolean wyl_daemon_http_access_token_is_active_for_test
+    (SoupServer * server, const gchar * jti, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, gint64 expires_at,
+    const gchar * auth_method, const gchar * credential_id,
+    guint64 credential_generation, gint64 now);
+typedef struct wyl_daemon_access_token_snapshot_t
+{
+  gchar *jti;
+  gchar *session_id;
+  gchar *subject;
+  gchar *tenant;
+  gchar *key_id;
+  gint auth_method;
+  gchar *credential_id;
+  guint64 credential_generation;
+  gint64 expires_at;
+  gboolean revoked;
+} wyl_daemon_access_token_snapshot_t;
+void wyl_daemon_access_token_snapshot_clear
+    (wyl_daemon_access_token_snapshot_t * snapshot);
+gboolean wyl_daemon_http_store_service_access_token_for_test
+    (SoupServer * server, const gchar * jti, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, const gchar * key_id,
+    gint64 expires_at, gint auth_method, const gchar * credential_id,
+    guint64 credential_generation, gboolean revoked);
+gboolean wyl_daemon_http_snapshot_access_token_for_test
+    (SoupServer * server, const gchar * jti,
+    wyl_daemon_access_token_snapshot_t * out_snapshot);
+gboolean wyl_daemon_http_service_access_token_is_exact_for_test
+    (SoupServer * server, const gchar * jti, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, const gchar * key_id,
+    gint64 expires_at, gint auth_method, const gchar * credential_id,
+    guint64 credential_generation, gint64 now);
 wyrelog_error_t wyl_daemon_http_copy_access_token_secret (SoupServer * server,
     guint8 * out_secret, gsize out_len);
 gchar *wyl_daemon_http_dup_access_token_key_id (SoupServer * server);

@@ -1096,6 +1096,188 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
   return 0;
 }
 
+static gint
+check_service_access_token_state_contract (SoupServer *server,
+    wyl_daemon_access_token_snapshot_t *owned_after_teardown)
+{
+  wyl_id_t sid_id = WYL_ID_NIL, jti_id = WYL_ID_NIL, other_id = WYL_ID_NIL;
+  gchar sid[WYL_ID_STRING_BUF], jti[WYL_ID_STRING_BUF];
+  gchar other[WYL_ID_STRING_BUF];
+  gchar credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  wyl_id_t human_sid_id = WYL_ID_NIL, human_jti_id = WYL_ID_NIL;
+  gchar human_sid[WYL_ID_STRING_BUF], human_jti[WYL_ID_STRING_BUF];
+  if (wyl_id_new (&sid_id) != WYRELOG_E_OK
+      || wyl_id_new (&jti_id) != WYRELOG_E_OK
+      || wyl_id_new (&other_id) != WYRELOG_E_OK
+      || wyl_id_new (&human_sid_id) != WYRELOG_E_OK
+      || wyl_id_new (&human_jti_id) != WYRELOG_E_OK
+      || wyl_id_format (&sid_id, sid, sizeof sid) != WYRELOG_E_OK
+      || wyl_id_format (&jti_id, jti, sizeof jti) != WYRELOG_E_OK
+      || wyl_id_format (&other_id, other, sizeof other) != WYRELOG_E_OK
+      || wyl_id_format (&human_sid_id, human_sid, sizeof human_sid)
+      != WYRELOG_E_OK
+      || wyl_id_format (&human_jti_id, human_jti, sizeof human_jti)
+      != WYRELOG_E_OK
+      || wyl_service_credential_id_new (credential, sizeof credential)
+      != WYRELOG_E_OK)
+    return 1940;
+
+  g_autofree gchar *active_key =
+      wyl_daemon_http_dup_access_token_key_id (server);
+  if (active_key == NULL
+      || !wyl_daemon_http_store_human_access_token_for_test (server,
+          human_jti, human_sid, "human-state", "tenant-state", active_key, 500)
+      || !wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
+          human_sid, "human-state", "tenant-state", 500, NULL, NULL, 0, 499))
+    return 1958;
+  wyl_daemon_access_token_snapshot_t human_snapshot = { 0 };
+  if (!wyl_daemon_http_snapshot_access_token_for_test (server, human_jti,
+          &human_snapshot)
+      || human_snapshot.auth_method != WYL_SESSION_AUTH_METHOD_HUMAN
+      || human_snapshot.credential_id != NULL
+      || human_snapshot.credential_generation != 0) {
+    wyl_daemon_access_token_snapshot_clear (&human_snapshot);
+    return 1959;
+  }
+  wyl_daemon_access_token_snapshot_clear (&human_snapshot);
+  if (wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
+          human_sid, "human-state", "tenant-state", 500,
+          "service_credential", credential, 7, 499))
+    return 1960;
+
+  gchar mutable_subject[] = "svc:state:test";
+  gchar mutable_tenant[] = "tenant-state";
+  gchar mutable_key[] = "key-state";
+  gchar mutable_credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  memcpy (mutable_credential, credential, sizeof credential);
+  if (!wyl_daemon_http_store_service_access_token_for_test (server, jti, sid,
+          mutable_subject, mutable_tenant, mutable_key, 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, mutable_credential, 7,
+          FALSE))
+    return 1941;
+  mutable_subject[4] = 'X';
+  mutable_tenant[0] = 'X';
+  mutable_key[0] = 'X';
+  mutable_credential[4] = mutable_credential[4] == '0' ? '1' : '0';
+
+  wyl_daemon_access_token_snapshot_t snapshot = { 0 };
+  if (!wyl_daemon_http_snapshot_access_token_for_test (server, jti, &snapshot)
+      || g_strcmp0 (snapshot.jti, jti) != 0
+      || g_strcmp0 (snapshot.session_id, sid) != 0
+      || g_strcmp0 (snapshot.subject, "svc:state:test") != 0
+      || g_strcmp0 (snapshot.tenant, "tenant-state") != 0
+      || g_strcmp0 (snapshot.key_id, "key-state") != 0
+      || snapshot.auth_method != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      || g_strcmp0 (snapshot.credential_id, credential) != 0
+      || snapshot.credential_generation != 7 || snapshot.expires_at != 500
+      || snapshot.revoked)
+    return 1942;
+  if (!wyl_daemon_http_service_access_token_is_exact_for_test (server, jti,
+          sid, "svc:state:test", "tenant-state", "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499))
+    return 1943;
+
+#define EXPECT_NOT_EXACT(j, s, sub, ten, key, exp, method, cred, gen, now, code) \
+  G_STMT_START { \
+    if (wyl_daemon_http_service_access_token_is_exact_for_test (server, (j), \
+            (s), (sub), (ten), (key), (exp), (method), (cred), (gen), (now))) \
+      return (code); \
+  } G_STMT_END
+  EXPECT_NOT_EXACT (other, sid, "svc:state:test", "tenant-state",
+      "key-state", 500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
+      credential, 7, 499, 1944);
+  EXPECT_NOT_EXACT (jti, other, "svc:state:test", "tenant-state",
+      "key-state", 500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
+      credential, 7, 499, 1945);
+  EXPECT_NOT_EXACT (jti, sid, "svc:other", "tenant-state", "key-state", 500,
+      WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499, 1946);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-other", "key-state",
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499,
+      1947);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-state", "key-other",
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499,
+      1948);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-state", "key-state",
+      501, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499,
+      1949);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-state", "key-state",
+      500, WYL_SESSION_AUTH_METHOD_HUMAN, credential, 7, 499, 1950);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-state", "key-state",
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, "missing", 7, 499, 1951);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-state", "key-state",
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 8, 499,
+      1952);
+  EXPECT_NOT_EXACT (jti, sid, "svc:state:test", "tenant-state", "key-state",
+      500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 500,
+      1953);
+#undef EXPECT_NOT_EXACT
+
+  const gchar *missing[] = { NULL, "", "bad" };
+  for (gsize i = 0; i < G_N_ELEMENTS (missing); i++) {
+    if (wyl_daemon_http_store_service_access_token_for_test (server,
+            missing[i], sid, "svc:state:test", "tenant-state", "key-state",
+            500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7,
+            FALSE)
+        || wyl_daemon_http_store_service_access_token_for_test (server, jti,
+            missing[i], "svc:state:test", "tenant-state", "key-state", 500,
+            WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE))
+      return 1954;
+  }
+  if (wyl_daemon_http_store_service_access_token_for_test (server, other, sid,
+          NULL, "tenant-state", "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server, other,
+          sid, "svc:state:test", NULL, "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server, other,
+          sid, "svc:state:test", "tenant-state", NULL, 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server, other,
+          sid, "svc:state:test", "tenant-state", "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, NULL, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server, other,
+          sid, "svc:state:test", "tenant-state", "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 0, FALSE))
+    return 1955;
+
+  if (!wyl_daemon_http_store_service_access_token_for_test (server, other,
+          sid, "svc:revoked", "tenant-state", "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, TRUE)
+      || wyl_daemon_http_service_access_token_is_exact_for_test (server,
+          other, sid, "svc:revoked", "tenant-state", "key-state", 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, 499))
+    return 1956;
+
+  static const gchar noncanonical_id[] = "01900000-0000-7000-8000-00000000000A";
+  wyl_id_t parsed_noncanonical = WYL_ID_NIL;
+  if (wyl_id_parse (noncanonical_id, &parsed_noncanonical) != WYRELOG_E_OK
+      || wyl_daemon_http_store_service_access_token_for_test (server,
+          noncanonical_id, sid, "svc:state:test", "tenant-state", active_key,
+          500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server, jti,
+          noncanonical_id, "svc:state:test", "tenant-state", active_key, 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server,
+          human_jti, human_sid, "svc:bad/subject", "tenant-state", active_key,
+          500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_store_service_access_token_for_test (server,
+          human_jti, human_sid, "svc:state:test", "bad/tenant", active_key,
+          500, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7,
+          FALSE))
+    return 1961;
+
+  if (!wyl_daemon_http_store_service_access_token_for_test (server, human_jti,
+          human_sid, "svc:state:test", "tenant-state", active_key, 500,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
+      || wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
+          human_sid, "svc:state:test", "tenant-state", 500, NULL, NULL, 0, 499))
+    return 1962;
+
+  *owned_after_teardown = snapshot;
+  memset (&snapshot, 0, sizeof snapshot);
+  return 0;
+}
+
 static gchar *
 extract_json_string (const gchar *body, const gchar *name)
 {
@@ -3562,6 +3744,11 @@ main (void)
       &runtime, &error);
   if (http.server == NULL)
     return 3;
+  wyl_daemon_access_token_snapshot_t service_token_snapshot = { 0 };
+  gint service_state_rc = check_service_access_token_state_contract
+      (http.server, &service_token_snapshot);
+  if (service_state_rc != 0)
+    return service_state_rc;
   GThread *thread = g_thread_new ("daemon-http-decide",
       test_http_server_thread, &http);
 
@@ -3632,6 +3819,12 @@ main (void)
   g_thread_join (thread);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
+  if (g_strcmp0 (service_token_snapshot.subject, "svc:state:test") != 0
+      || g_strcmp0 (service_token_snapshot.credential_id, NULL) == 0) {
+    wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
+    return 1957;
+  }
+  wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
   g_clear_pointer (&http.loop, g_main_loop_unref);
   return 0;
 }
