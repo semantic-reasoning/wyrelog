@@ -29,3 +29,15 @@ forbidden = (
 present = [token for token in forbidden if token in runtime]
 if present:
     raise SystemExit("unqualified exchange CRUD: " + ", ".join(present))
+
+receipt = source[source.index("struct _WylServiceExchangeReceipt"):]
+receipt = receipt[:receipt.index("};")]
+for token in ("wyl_policy_store_t", "WylServiceAuthorityTransaction *",
+              "WylServiceAuthWriteLease", "session_id", "jti;"):
+    if token in receipt:
+        raise SystemExit("receipt leaks authority/raw identity: " + token)
+for token in ("projection", "acknowledgement", "receipt_ack"):
+    if token in receipt.lower():
+        raise SystemExit("receipt boundary grew projection/ACK: " + token)
+if "receipt_get_record" in source:
+    raise SystemExit("receipt exposes mutable internal record alias")

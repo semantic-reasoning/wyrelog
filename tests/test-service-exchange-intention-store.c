@@ -198,13 +198,14 @@ test_guards_order_and_corruption (void)
       "000000000000000000000000001", 10);
   g_autoptr (WylServiceExchangeIntentionRecord) second = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
-          store, &b, &kind, &second), ==, WYRELOG_E_OK);
+          store, &b, &kind, &second), ==, WYRELOG_E_POLICY);
+  g_assert_null (second);
   g_autoptr (GPtrArray) rows = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_enumerate
       (t.txn, store, &rows), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (rows->len, ==, 2);
+  g_assert_cmpuint (rows->len, ==, 1);
   g_assert_cmpint (((WylServiceExchangeIntentionRecord *) rows->pdata[0])->
-      created_at_us, ==, 10);
+      created_at_us, ==, 20);
   a.created_at_us++;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
           store, &a, &kind, &row), ==, WYRELOG_E_POLICY);
@@ -639,6 +640,367 @@ test_exact_temp_clone (void)
   g_rmdir (dir);
 }
 
+static void
+release_committed_txn (Txn *t)
+{
+  wyl_policy_store_service_authority_transaction_free (t->txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (t->evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (t->lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (t->lease);
+  memset (t, 0, sizeof *t);
+}
+
+static gpointer
+receipt_unref_thread (gpointer data)
+{
+  WylServiceExchangeReceipt *receipt = data;
+  g_autoptr (WylServiceExchangeIntentionRecord) copy = NULL;
+  g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt, &copy),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull (copy);
+  copy->tenant_id[0] = 'X';
+  wyl_service_exchange_receipt_unref (receipt);
+  return NULL;
+}
+
+static void
+test_receipt_created_take_once (void)
+{
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Txn t = begin_txn (handle, TRUE);
+  WylServiceExchangeIntentionClassification kind;
+  g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
+          store, &input, &kind, &row), ==, WYRELOG_E_OK);
+  WylServiceExchangeReceipt *receipt = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+  g_assert_null (receipt);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (t.txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          t.evidence, handle, store, &receipt), ==, WYRELOG_E_OK);
+  g_assert_nonnull (receipt);
+  g_assert_cmpint (wyl_service_exchange_receipt_get_classification (receipt),
+      ==, WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  g_autoptr (WylServiceExchangeIntentionRecord) receipt_copy = NULL;
+  g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
+          &receipt_copy), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (receipt_copy->tenant_id, ==, "tenant-a");
+  receipt_copy->tenant_id[0] = 'X';
+  g_autoptr (WylServiceExchangeIntentionRecord) independent = NULL;
+  g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
+          &independent), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (independent->tenant_id, ==, "tenant-a");
+  WylServiceExchangeReceipt *again = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          t.evidence, handle, store, &again), ==, WYRELOG_E_INVALID);
+  g_assert_null (again);
+  release_committed_txn (&t);
+  g_clear_pointer (&receipt_copy, wyl_service_exchange_intention_record_free);
+  g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
+          &receipt_copy), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (receipt_copy->tenant_id, ==, "tenant-a");
+  wyl_service_exchange_receipt_unref (receipt);
+
+  Txn replay_txn = begin_txn (handle, TRUE);
+  g_autoptr (WylServiceExchangeIntentionRecord) replay_row = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (replay_txn.txn, store, &input, &kind, &replay_row), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (replay_txn.txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take
+      (replay_txn.txn, replay_txn.evidence, handle, store, &receipt), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_exchange_receipt_get_classification (receipt),
+      ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
+  g_autoptr (WylServiceExchangeIntentionRecord) replay_copy = NULL;
+  g_assert_cmpint (wyl_service_exchange_receipt_dup_record (receipt,
+          &replay_copy), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (replay_copy->material.intention_id, ==,
+      replay_row->material.intention_id);
+  release_committed_txn (&replay_txn);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      1);
+  g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_exchange_receipt_validate_handle (receipt,
+          handle, NULL), ==, WYRELOG_E_INVALID);
+  GThread *copy_threads[3];
+  for (guint i = 0; i < G_N_ELEMENTS (copy_threads); i++) {
+    WylServiceExchangeReceipt *thread_ref =
+        wyl_service_exchange_receipt_ref (receipt);
+    g_assert_nonnull (thread_ref);
+    copy_threads[i] = g_thread_new ("receipt-copy-unref",
+        receipt_unref_thread, thread_ref);
+  }
+  for (guint i = 0; i < G_N_ELEMENTS (copy_threads); i++)
+    g_thread_join (copy_threads[i]);
+  g_autoptr (GThread) unref_thread = g_thread_new ("receipt-last-unref",
+      receipt_unref_thread, receipt);
+  g_thread_join (g_steal_pointer (&unref_thread));
+}
+
+static void
+test_receipt_allocation_faults (void)
+{
+  for (guint fail_at = 1; fail_at <= 4; fail_at++) {
+    g_autoptr (WylHandle) handle = open_handle (NULL);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    Txn t = begin_txn (handle, TRUE);
+    wyl_policy_store_service_exchange_receipt_fail_allocation (t.txn, fail_at);
+    wyl_service_exchange_audit_input_t input = input_at
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+        "000000000000000000000000000", 10);
+    WylServiceExchangeIntentionClassification kind =
+        WYL_SERVICE_EXCHANGE_INTENTION_CREATED;
+    WylServiceExchangeIntentionRecord *row = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+        (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_NOMEM);
+    g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_NONE);
+    g_assert_null (row);
+    g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+            "SELECT count(*) FROM main.service_exchange_audit_intentions;"),
+        ==, 0);
+    finish_txn (&t, FALSE);
+  }
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Txn created_fail = begin_txn (handle, TRUE);
+  wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
+      (created_fail.txn);
+  WylServiceExchangeIntentionClassification kind =
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED;
+  WylServiceExchangeIntentionRecord *row = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (created_fail.txn, store, &input, &kind, &row), ==, WYRELOG_E_INTERNAL);
+  g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_NONE);
+  g_assert_null (row);
+  finish_txn (&created_fail, FALSE);
+  Txn seed = begin_txn (handle, TRUE);
+  g_autoptr (WylServiceExchangeIntentionRecord) seeded = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (seed.txn, store, &input, &kind, &seeded), ==, WYRELOG_E_OK);
+  finish_txn (&seed, TRUE);
+  Txn replay_fail = begin_txn (handle, TRUE);
+  wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
+      (replay_fail.txn);
+  row = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (replay_fail.txn, store, &input, &kind, &row), ==, WYRELOG_E_INTERNAL);
+  g_assert_null (row);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM main.service_exchange_audit_intentions;"), ==,
+      1);
+  finish_txn (&replay_fail, FALSE);
+}
+
+static void
+test_receipt_generation_guard (void)
+{
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  Txn t = begin_txn (handle, TRUE);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  WylServiceExchangeIntentionClassification kind;
+  g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
+          store, &input, &kind, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (t.txn), ==, WYRELOG_E_OK);
+  wyl_handle_policy_store_test_advance_generation (handle);
+  WylServiceExchangeReceipt *receipt = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+  g_assert_null (receipt);
+  release_committed_txn (&t);
+}
+
+typedef struct
+{
+  WylServiceAuthorityTransaction *txn;
+  WylServiceAuthorityCommitEvidence *evidence;
+  WylHandle *handle;
+  wyl_policy_store_t *store;
+  wyrelog_error_t rc;
+} ReceiptTakeThread;
+
+static gpointer
+receipt_take_wrong_thread (gpointer data)
+{
+  ReceiptTakeThread *attempt = data;
+  WylServiceExchangeReceipt *receipt = (gpointer) 1;
+  attempt->rc = wyl_policy_store_service_exchange_receipt_take (attempt->txn,
+      attempt->evidence, attempt->handle, attempt->store, &receipt);
+  g_assert_null (receipt);
+  return NULL;
+}
+
+static void
+test_receipt_identity_guards_no_detach (void)
+{
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  g_autoptr (WylHandle) other = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  Txn t = begin_txn (handle, TRUE);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  WylServiceExchangeIntentionClassification kind;
+  g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (t.txn,
+          store, &input, &kind, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (t.txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (t.lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (t.lease);
+  t.lease = NULL;
+  Txn alien = begin_txn (other, TRUE);
+  WylServiceExchangeReceipt *receipt = (gpointer) 1;
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          alien.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+  g_assert_null (receipt);
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (alien.txn,
+          t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+  g_assert_null (receipt);
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          t.evidence, other, wyl_handle_get_policy_store (other), &receipt),
+      ==, WYRELOG_E_INVALID);
+  g_assert_null (receipt);
+  ReceiptTakeThread attempt = { t.txn, t.evidence, handle, store,
+    WYRELOG_E_OK
+  };
+  g_autoptr (GThread) thread = g_thread_new ("receipt-wrong-owner",
+      receipt_take_wrong_thread, &attempt);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+          t.evidence, handle, store, &receipt), ==, WYRELOG_E_OK);
+  g_assert_nonnull (receipt);
+  finish_txn (&alien, FALSE);
+  wyl_policy_store_service_authority_transaction_free (t.txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (t.evidence);
+  wyl_service_exchange_receipt_test_set_refcount_max (receipt);
+  g_assert_null (wyl_service_exchange_receipt_ref (receipt));
+  wyl_service_exchange_receipt_test_restore_refcount_one (receipt);
+  wyl_service_exchange_receipt_unref (receipt);
+}
+
+static void
+test_receipt_failure_withheld (void)
+{
+  const WylPolicyAuthorityTransactionFailStage faults[] = {
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = open_handle (NULL);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    wyl_policy_store_service_authority_transaction_fail_once (store, faults[i]);
+    Txn t = begin_txn (handle, TRUE);
+    wyl_service_exchange_audit_input_t input = input_at
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+        "000000000000000000000000000", 10);
+    WylServiceExchangeIntentionClassification kind;
+    g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+        (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+        (t.txn), !=, WYRELOG_E_OK);
+    WylServiceExchangeReceipt *receipt = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+            t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+    g_assert_null (receipt);
+    release_committed_txn (&t);
+  }
+
+  g_autoptr (WylHandle) handle = open_handle (NULL);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  for (guint attempt = 0; attempt < 2; attempt++) {
+    wyl_policy_store_service_authority_transaction_fail_once (store,
+        WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+    Txn failed = begin_txn (handle, TRUE);
+    WylServiceExchangeIntentionClassification kind;
+    g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+        (failed.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+        (failed.txn), !=, WYRELOG_E_OK);
+    WylServiceExchangeReceipt *withheld = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take
+        (failed.txn, failed.evidence, handle, store, &withheld), ==,
+        WYRELOG_E_INVALID);
+    g_assert_null (withheld);
+    release_committed_txn (&failed);
+  }
+  Txn converge = begin_txn (handle, TRUE);
+  WylServiceExchangeIntentionClassification kind;
+  g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+      (converge.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+  g_assert_cmpint (kind, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (converge.txn), ==, WYRELOG_E_OK);
+  WylServiceExchangeReceipt *receipt = NULL;
+  g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take
+      (converge.txn, converge.evidence, handle, store, &receipt), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (receipt);
+  release_committed_txn (&converge);
+  wyl_service_exchange_receipt_unref (receipt);
+}
+
+static void
+test_receipt_cleanup_faults (void)
+{
+  const WylPolicyAuthorityTransactionFailStage faults[] = {
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AND_CLAIM_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_LEASE_SERIAL_AT_FINISH,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_autoptr (WylHandle) handle = open_handle (NULL);
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    wyl_policy_store_service_authority_transaction_fail_once (store, faults[i]);
+    Txn t = begin_txn (handle, TRUE);
+    wyl_service_exchange_audit_input_t input = input_at
+        ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+        "000000000000000000000000000", 10);
+    WylServiceExchangeIntentionClassification kind;
+    g_autoptr (WylServiceExchangeIntentionRecord) row = NULL;
+    g_assert_cmpint (wyl_policy_store_service_exchange_intention_append
+        (t.txn, store, &input, &kind, &row), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+        (t.txn), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_get_cleanup_result
+        (t.txn), !=, WYRELOG_E_OK);
+    WylServiceExchangeReceipt *receipt = (gpointer) 1;
+    g_assert_cmpint (wyl_policy_store_service_exchange_receipt_take (t.txn,
+            t.evidence, handle, store, &receipt), ==, WYRELOG_E_INVALID);
+    g_assert_null (receipt);
+    release_committed_txn (&t);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -659,5 +1021,17 @@ main (int argc, char **argv)
       test_temp_shadow_objects);
   g_test_add_func ("/service-exchange/store/exact-temp-clone",
       test_exact_temp_clone);
+  g_test_add_func ("/service-exchange/receipt/created-take-once",
+      test_receipt_created_take_once);
+  g_test_add_func ("/service-exchange/receipt/failure-withheld",
+      test_receipt_failure_withheld);
+  g_test_add_func ("/service-exchange/receipt/cleanup-faults",
+      test_receipt_cleanup_faults);
+  g_test_add_func ("/service-exchange/receipt/allocation-faults",
+      test_receipt_allocation_faults);
+  g_test_add_func ("/service-exchange/receipt/generation-guard",
+      test_receipt_generation_guard);
+  g_test_add_func ("/service-exchange/receipt/identity-guards-no-detach",
+      test_receipt_identity_guards_no_detach);
   return g_test_run ();
 }

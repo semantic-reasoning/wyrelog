@@ -18,6 +18,7 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 typedef struct _WylServiceAuthorityTransaction WylServiceAuthorityTransaction;
+typedef struct _WylServiceExchangeReceipt WylServiceExchangeReceipt;
 typedef struct _WylServiceAuthorityCommitEvidence
     WylServiceAuthorityCommitEvidence;
 
@@ -577,6 +578,34 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthorityCommitEvidence,
     wyl_policy_store_service_authority_commit_evidence_unref);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceExchangeIntentionRecord,
     wyl_service_exchange_intention_record_free);
+WylServiceExchangeReceipt *wyl_service_exchange_receipt_ref
+    (WylServiceExchangeReceipt * receipt);
+void wyl_service_exchange_receipt_unref (WylServiceExchangeReceipt * receipt);
+void wyl_service_exchange_receipt_test_set_refcount_max
+    (WylServiceExchangeReceipt * receipt);
+void wyl_service_exchange_receipt_test_restore_refcount_one
+    (WylServiceExchangeReceipt * receipt);
+wyrelog_error_t wyl_service_exchange_receipt_dup_record
+    (const WylServiceExchangeReceipt * receipt,
+    WylServiceExchangeIntentionRecord ** out_record);
+WylServiceExchangeIntentionClassification
+wyl_service_exchange_receipt_get_classification (const
+    WylServiceExchangeReceipt * receipt);
+wyrelog_error_t wyl_service_exchange_receipt_validate_handle
+    (const WylServiceExchangeReceipt * receipt, WylHandle * handle,
+    wyl_policy_store_t * store);
+wyrelog_error_t wyl_policy_store_service_exchange_receipt_take
+    (WylServiceAuthorityTransaction * transaction,
+    WylServiceAuthorityCommitEvidence * evidence, WylHandle * handle,
+    wyl_policy_store_t * store, WylServiceExchangeReceipt ** out_receipt);
+void wyl_policy_store_service_exchange_receipt_fail_allocation
+    (WylServiceAuthorityTransaction * transaction, guint allocation_index);
+guint wyl_policy_store_service_exchange_receipt_get_allocation_count
+    (const WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
+    (WylServiceAuthorityTransaction * transaction);
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceExchangeReceipt,
+    wyl_service_exchange_receipt_unref);
 
 /* Deterministic private fault and observation seams for transaction tests. */
 void wyl_policy_store_service_authority_transaction_fail_once
