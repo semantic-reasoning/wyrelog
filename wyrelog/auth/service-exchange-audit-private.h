@@ -48,6 +48,23 @@ typedef struct wyl_service_exchange_audit_material_t
   GBytes *canonical_payload;
 } wyl_service_exchange_audit_material_t;
 
+typedef struct wyl_service_exchange_audit_projection_t
+{
+  const gchar *intention_id;
+  const gchar *payload_digest;
+  const gchar *request_id;
+  const gchar *credential_id;
+  guint64 credential_generation;
+  const gchar *service_principal;
+  const gchar *tenant_id;
+  gint64 created_at_us;
+  guint32 payload_schema_version;
+  guint32 fingerprint_schema_version;
+  const gchar *session_fingerprint;
+  const gchar *jti_fingerprint;
+  GBytes *canonical_payload;
+} wyl_service_exchange_audit_projection_t;
+
 #define WYL_SERVICE_EXCHANGE_AUDIT_MATERIAL_INIT { 0 }
 
 /*
@@ -84,5 +101,11 @@ G_GNUC_INTERNAL wyrelog_error_t wyl_service_exchange_audit_encode (const
 
 G_GNUC_INTERNAL void wyl_service_exchange_audit_material_clear
     (wyl_service_exchange_audit_material_t * material);
+
+/* Validates a sanitized projection against the one frozen v1 transcript.
+ * Every separately supplied field must be canonical and byte-for-byte equal
+ * to its framed value in canonical_payload. */
+G_GNUC_INTERNAL wyrelog_error_t wyl_service_exchange_audit_projection_validate
+    (const wyl_service_exchange_audit_projection_t * projection);
 
 G_END_DECLS;

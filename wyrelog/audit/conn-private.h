@@ -6,6 +6,7 @@
 
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
+#include "wyrelog/auth/service-exchange-audit-private.h"
 
 G_BEGIN_DECLS;
 
@@ -34,6 +35,48 @@ G_BEGIN_DECLS;
  */
 
 typedef struct wyl_audit_conn_t wyl_audit_conn_t;
+
+#define WYL_AUDIT_SERVICE_EXCHANGE_STREAM "__wyrelog.service-exchange"
+
+typedef wyl_service_exchange_audit_projection_t
+    WylAuditServiceExchangeProjection;
+
+typedef struct WylAuditServiceExchangeProjectionReadback
+{
+  gchar sink_uuid[WYL_SERVICE_EXCHANGE_UUID_BUF];
+  gchar intention_id[WYL_SERVICE_EXCHANGE_UUID_BUF];
+  gchar payload_digest[WYL_SERVICE_EXCHANGE_PAYLOAD_DIGEST_HEX_BUF];
+  gint64 sequence_no;
+  gchar record_hash[WYL_SERVICE_EXCHANGE_PAYLOAD_DIGEST_HEX_BUF];
+} WylAuditServiceExchangeProjectionReadback;
+
+typedef enum
+{
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_NONE,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_METADATA_IN_TXN_READBACK,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_BEGIN,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_PREFLIGHT,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_SIDECAR,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_ANCHOR,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_IN_TXN_READBACK,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_QUERY,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_RESPONSE_LOST,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_CHECKPOINT,
+  WYL_AUDIT_SERVICE_EXCHANGE_FAIL_POST_COMMIT_READBACK,
+} WylAuditServiceExchangeFailStage;
+
+void wyl_audit_conn_service_exchange_fail_once
+    (wyl_audit_conn_t * conn, WylAuditServiceExchangeFailStage stage);
+guint wyl_audit_conn_service_exchange_get_rollback_count_for_test
+    (wyl_audit_conn_t * conn);
+
+/* Private durable projection primitive. It deliberately consumes sanitized
+ * material rather than a receipt; receipt validation and acknowledgement are
+ * owned by the later projector layer. */
+wyrelog_error_t wyl_audit_conn_service_exchange_project
+    (wyl_audit_conn_t * conn,
+    const WylAuditServiceExchangeProjection * projection,
+    WylAuditServiceExchangeProjectionReadback * out_readback);
 
 /*
  * Opens an audit log at `path`. On WYRELOG_E_OK *out_conn owns

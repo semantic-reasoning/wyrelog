@@ -295,3 +295,172 @@ wyl_service_exchange_audit_encode (const
   *out_material = material;
   return WYRELOG_E_OK;
 }
+
+typedef struct
+{
+  const guint8 *data;
+  gsize len;
+  gsize offset;
+} PayloadCursor;
+
+static gboolean
+payload_take (PayloadCursor *cursor, gsize len, const guint8 **out)
+{
+  if (cursor == NULL || out == NULL || cursor->offset > cursor->len
+      || len > cursor->len - cursor->offset)
+    return FALSE;
+  *out = cursor->data + cursor->offset;
+  cursor->offset += len;
+  return TRUE;
+}
+
+static gboolean
+payload_take_u32 (PayloadCursor *cursor, guint32 *out)
+{
+  const guint8 *bytes = NULL;
+  if (out == NULL || !payload_take (cursor, 4, &bytes))
+    return FALSE;
+  *out = ((guint32) bytes[0] << 24) | ((guint32) bytes[1] << 16)
+      | ((guint32) bytes[2] << 8) | bytes[3];
+  return TRUE;
+}
+
+static gboolean
+payload_take_u64 (PayloadCursor *cursor, guint64 *out)
+{
+  const guint8 *bytes = NULL;
+  if (out == NULL || !payload_take (cursor, 8, &bytes))
+    return FALSE;
+  guint64 value = 0;
+  for (guint i = 0; i < 8; i++)
+    value = (value << 8) | bytes[i];
+  *out = value;
+  return TRUE;
+}
+
+static gboolean
+payload_take_exact (PayloadCursor *cursor, const guint8 *expected,
+    gsize expected_len)
+{
+  const guint8 *actual = NULL;
+  return expected != NULL && payload_take (cursor, expected_len, &actual)
+      && memcmp (actual, expected, expected_len) == 0;
+}
+
+static gboolean
+payload_take_framed_exact (PayloadCursor *cursor, const guint8 *expected,
+    gsize expected_len)
+{
+  guint32 len = 0;
+  return expected_len <= G_MAXUINT32 && payload_take_u32 (cursor, &len)
+      && len == expected_len
+      && payload_take_exact (cursor, expected, expected_len);
+}
+
+static gboolean
+canonical_hex (const gchar *value)
+{
+  if (value == NULL || strlen (value) != 64)
+    return FALSE;
+  for (guint i = 0; i < 64; i++)
+    if (!g_ascii_isdigit (value[i])
+        && (value[i] < 'a' || value[i] > 'f'))
+      return FALSE;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_service_exchange_audit_projection_validate (const
+    wyl_service_exchange_audit_projection_t *p)
+{
+  if (p == NULL || p->intention_id == NULL || p->request_id == NULL
+      || p->credential_id == NULL || p->service_principal == NULL
+      || p->tenant_id == NULL || p->canonical_payload == NULL
+      || !uuid_is_canonical ((wyl_service_exchange_text_t) {
+          p->intention_id, strlen (p->intention_id)}
+      )
+      || !wyl_service_exchange_request_id_is_canonical (p->request_id,
+          strlen (p->request_id))
+      || !wyl_service_credential_id_is_canonical (p->credential_id,
+          strlen (p->credential_id))
+      || p->credential_generation == 0
+      || p->credential_generation > G_MAXINT64 || p->created_at_us <= 0
+      || p->payload_schema_version !=
+      WYL_SERVICE_EXCHANGE_PAYLOAD_SCHEMA_VERSION
+      || p->fingerprint_schema_version !=
+      WYL_SERVICE_EXCHANGE_FINGERPRINT_SCHEMA_VERSION
+      || !canonical_hex (p->payload_digest)
+      || !canonical_hex (p->session_fingerprint)
+      || !canonical_hex (p->jti_fingerprint)
+      || !text_is_utf8_without_nul ((wyl_service_exchange_text_t) {
+          p->service_principal, strlen (p->service_principal)}
+          , 5, MAX_BINDING_BYTES)
+      || !wyl_policy_service_subject_is_valid (p->service_principal,
+          strlen (p->service_principal))
+      || !text_is_utf8_without_nul ((wyl_service_exchange_text_t) {
+          p->tenant_id, strlen (p->tenant_id)}
+          , 1, MAX_BINDING_BYTES)
+      || !wyl_policy_store_tenant_id_is_valid (p->tenant_id))
+    return WYRELOG_E_INVALID;
+
+  gsize payload_len = 0;
+  const guint8 *payload = g_bytes_get_data (p->canonical_payload,
+      &payload_len);
+  if (payload == NULL || payload_len == 0 || payload_len > 4096)
+    return WYRELOG_E_INVALID;
+  guint8 digest[crypto_hash_sha256_BYTES];
+  if (crypto_hash_sha256 (digest, payload, payload_len) != 0)
+    return WYRELOG_E_CRYPTO;
+  gchar digest_hex[WYL_SERVICE_EXCHANGE_PAYLOAD_DIGEST_HEX_BUF];
+  sodium_bin2hex (digest_hex, sizeof digest_hex, digest, sizeof digest);
+  sodium_memzero (digest, sizeof digest);
+  if (strcmp (digest_hex, p->payload_digest) != 0)
+    return WYRELOG_E_INVALID;
+
+  guint8 session[crypto_hash_sha256_BYTES];
+  guint8 jti[crypto_hash_sha256_BYTES];
+  if (sodium_hex2bin (session, sizeof session, p->session_fingerprint, 64,
+          NULL, NULL, NULL) != 0
+      || sodium_hex2bin (jti, sizeof jti, p->jti_fingerprint, 64, NULL, NULL,
+          NULL) != 0) {
+    sodium_memzero (session, sizeof session);
+    sodium_memzero (jti, sizeof jti);
+    return WYRELOG_E_INVALID;
+  }
+  static const guint8 domain[] = PAYLOAD_DOMAIN;
+  static const guint8 event[] = EVENT_TYPE;
+  static const guint8 outcome[] = OUTCOME;
+  PayloadCursor cursor = { payload, payload_len, 0 };
+  guint32 value32 = 0;
+  guint64 value64 = 0;
+  gboolean valid = payload_take_exact (&cursor, domain, sizeof domain)
+      && payload_take_u32 (&cursor, &value32)
+      && value32 == p->payload_schema_version
+      && payload_take_framed_exact (&cursor,
+      (const guint8 *) p->intention_id, strlen (p->intention_id))
+      && payload_take_framed_exact (&cursor, event, sizeof event - 1)
+      && payload_take_framed_exact (&cursor, outcome, sizeof outcome - 1)
+      && payload_take_u64 (&cursor, &value64)
+      && value64 == (guint64) p->created_at_us
+      && payload_take_framed_exact (&cursor,
+      (const guint8 *) p->request_id, strlen (p->request_id))
+      && payload_take_framed_exact (&cursor,
+      (const guint8 *) p->credential_id, strlen (p->credential_id))
+      && payload_take_u64 (&cursor, &value64)
+      && value64 == p->credential_generation
+      && payload_take_framed_exact (&cursor,
+      (const guint8 *) p->service_principal, strlen (p->service_principal))
+      && payload_take_framed_exact (&cursor,
+      (const guint8 *) p->tenant_id, strlen (p->tenant_id))
+      && payload_take_u32 (&cursor, &value32)
+      && value32 == p->fingerprint_schema_version
+      && payload_take_u32 (&cursor, &value32)
+      && value32 == sizeof session
+      && payload_take_exact (&cursor, session, sizeof session)
+      && payload_take_u32 (&cursor, &value32) && value32 == sizeof jti
+      && payload_take_exact (&cursor, jti, sizeof jti)
+      && cursor.offset == cursor.len;
+  sodium_memzero (session, sizeof session);
+  sodium_memzero (jti, sizeof jti);
+  return valid ? WYRELOG_E_OK : WYRELOG_E_INVALID;
+}
