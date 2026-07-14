@@ -547,6 +547,42 @@ check_service_claim_round_trip (void)
   if (wyl_jwt_sign_hs256_service (&invalid, secret, sizeof secret - 1,
           &token) != WYRELOG_E_INVALID)
     return 155;
+
+  invalid.issued_at = G_MAXINT64 - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS;
+  if (wyl_jwt_sign_hs256_service (&invalid, secret, sizeof secret - 1,
+          &token) != WYRELOG_E_OK)
+    return 156;
+  g_clear_pointer (&payload, g_bytes_unref);
+  if (wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret - 1,
+          invalid.key_id, invalid.issuer, invalid.audience, invalid.issued_at,
+          &payload) != WYRELOG_E_OK)
+    return 157;
+  memset (&claims, 0, sizeof claims);
+  if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK
+      || claims.issued_at != invalid.issued_at
+      || claims.not_before != invalid.issued_at
+      || claims.expires_at != G_MAXINT64) {
+    wyl_jwt_access_claims_clear (&claims);
+    return 158;
+  }
+  wyl_jwt_access_claims_clear (&claims);
+
+  g_clear_pointer (&token, g_free);
+  if (wyl_jwt_sign_hs256_service (&valid_service_input, secret,
+          sizeof secret - 1, &token) != WYRELOG_E_OK)
+    return 159;
+  g_clear_pointer (&payload, g_bytes_unref);
+  if (wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret - 1,
+          valid_service_input.key_id, valid_service_input.issuer,
+          valid_service_input.audience, valid_service_input.issued_at - 1,
+          &payload) != WYRELOG_E_POLICY || payload != NULL)
+    return 160;
+  if (wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret - 1,
+          valid_service_input.key_id, valid_service_input.issuer,
+          valid_service_input.audience,
+          valid_service_input.issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS,
+          &payload) != WYRELOG_E_POLICY || payload != NULL)
+    return 161;
   return 0;
 }
 
@@ -616,7 +652,7 @@ check_service_claims_fail_closed (void)
   };
   for (guint i = 0; i < G_N_ELEMENTS (invalid); i++)
     if (parse_claim_text (invalid[i]) == WYRELOG_E_OK)
-      return 160 + (gint) i;
+      return 170 + (gint) i;
 
   const gchar *bad_time =
       "{\"jti\":\"01890c10-2e3f-7000-8000-000000000201\","

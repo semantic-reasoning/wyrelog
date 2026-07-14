@@ -9,11 +9,14 @@
 #include "daemon/delta.h"
 #include "daemon/http.h"
 #include "wyrelog/auth/jwt-private.h"
+#include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
+#include "wyrelog/wyl-session-private.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -990,6 +993,109 @@ send_raw_refresh (SoupSession *session, const gchar *method,
   return 0;
 }
 
+static gint
+check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
+    const gchar *human_session_id)
+{
+  wyl_id_t session_id = WYL_ID_NIL, jti_id = WYL_ID_NIL;
+  gchar session_text[WYL_ID_STRING_BUF], jti[WYL_ID_STRING_BUF];
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  if (wyl_id_new (&session_id) != WYRELOG_E_OK
+      || wyl_id_new (&jti_id) != WYRELOG_E_OK
+      || wyl_id_format (&session_id, session_text, sizeof session_text)
+      != WYRELOG_E_OK
+      || wyl_id_format (&jti_id, jti, sizeof jti) != WYRELOG_E_OK
+      || wyl_service_credential_id_new (credential_id, sizeof credential_id)
+      != WYRELOG_E_OK)
+    return 1900;
+  wyl_service_session_descriptor_t descriptor = {
+    .session_id = session_id,
+    .jti = jti,
+    .subject_id = "svc:refresh:isolation",
+    .tenant_id = "default",
+    .credential_id = credential_id,
+    .credential_generation = 1,
+    .issued_at_seconds = 100,
+    .expires_at_seconds = 400,
+  };
+  g_autoptr (WylSession) service = NULL;
+  if (wyl_session_new_service_detached (&descriptor, &service)
+      != WYRELOG_E_OK)
+    return 1901;
+
+  guint refresh_before = 0, access_before = 0;
+  g_autofree gchar *missing = wyl_daemon_http_dup_refresh_state_for_test
+      (server, "missing-service-refresh", &refresh_before, &access_before);
+  g_autofree gchar *access = (gchar *) 0x1;
+  g_autofree gchar *refresh = (gchar *) 0x1;
+  if (missing != NULL || wyl_daemon_http_issue_human_tokens_for_test (server,
+          service, session_text, descriptor.subject_id, descriptor.tenant_id,
+          &access, &refresh) != WYRELOG_E_POLICY || access != NULL
+      || refresh != NULL)
+    return 1902;
+  guint refresh_after = 0, access_after = 0;
+  missing = wyl_daemon_http_dup_refresh_state_for_test (server,
+      "missing-service-refresh", &refresh_after, &access_after);
+  if (missing != NULL || refresh_after != refresh_before
+      || access_after != access_before)
+    return 1903;
+
+  g_autoptr (WylSession) human = wyl_daemon_http_ref_session (server,
+      human_session_id);
+  if (human == NULL)
+    return 1904;
+  typedef struct
+  {
+    const gchar *token;
+    WylSession *session;
+    const gchar *session_id;
+    const gchar *subject;
+    gint auth_method;
+    gboolean consumed;
+  } InvalidRefresh;
+  const InvalidRefresh invalid[] = {
+    {"seed-service", service, session_text, "svc:refresh:isolation",
+        WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, FALSE},
+    {"seed-human-cache", service, session_text, "human.cached",
+        WYL_SESSION_AUTH_METHOD_HUMAN, FALSE},
+    {"seed-svc-cache", human, human_session_id, "svc:cached",
+        WYL_SESSION_AUTH_METHOD_HUMAN, FALSE},
+    {"seed-service-consumed", service, session_text,
+          "svc:refresh:isolation", WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL,
+        TRUE},
+  };
+  g_autoptr (SoupSession) client = soup_session_new ();
+  for (guint i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    const gchar *successor_access =
+        invalid[i].consumed ? "cached-access" : NULL;
+    const gchar *successor_refresh =
+        invalid[i].consumed ? "cached-refresh" : NULL;
+    if (!wyl_daemon_http_seed_refresh_for_test (server, invalid[i].session,
+            invalid[i].token, invalid[i].session_id, invalid[i].subject,
+            "default", invalid[i].auth_method, invalid[i].consumed,
+            successor_access, successor_refresh))
+      return 1910 + (gint) i;
+    guint before_refresh = 0, before_access = 0;
+    g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
+        (server, invalid[i].token, &before_refresh, &before_access);
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (before == NULL || send_raw_refresh (client, "POST", base_url,
+            invalid[i].token, &status, &body) != 0 || status != 401
+        || strstr (body, "\"refresh_auth_required\"") == NULL
+        || strstr (body, "access_token") != NULL
+        || strstr (body, "refresh_token") != NULL)
+      return 1920 + (gint) i;
+    guint after_refresh = 0, after_access = 0;
+    g_autofree gchar *after = wyl_daemon_http_dup_refresh_state_for_test
+        (server, invalid[i].token, &after_refresh, &after_access);
+    if (g_strcmp0 (after, before) != 0 || after_refresh != before_refresh
+        || after_access != before_access)
+      return 1930 + (gint) i;
+  }
+  return 0;
+}
+
 static gchar *
 extract_json_string (const gchar *body, const gchar *name)
 {
@@ -1426,6 +1532,11 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   if (login_access_token == NULL || login_refresh_token == NULL)
     return 535;
   g_clear_pointer (&body, g_free);
+
+  rc = check_service_refresh_isolation (server, base_url,
+      authenticated_session_token);
+  if (rc != 0)
+    return rc;
 
   rc = send_raw_refresh (session, "GET", base_url, login_refresh_token,
       &status, &body);

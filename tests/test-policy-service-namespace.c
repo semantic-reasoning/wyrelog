@@ -3,6 +3,7 @@
 #include <sqlite3.h>
 #include <string.h>
 
+#include "auth/mfa-enrollment-private.h"
 #include "policy/store-private.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -52,6 +53,19 @@ count_subject_rows (wyl_policy_store_t *store, const gchar *sql,
           -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, subject_id, -1,
           SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gint64 count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return count;
+}
+
+static gint64
+count_all_rows (wyl_policy_store_t *store, const gchar *table)
+{
+  g_autofree gchar *sql = g_strdup_printf ("SELECT count(*) FROM %s;", table);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql,
+          -1, &stmt, NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
   gint64 count = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
@@ -175,6 +189,55 @@ test_totp_rejects_service_namespace (void)
   wyl_totp_enrollment_clear (&human);
   g_assert_cmpint (wyl_policy_store_totp_enrollment_delete (store,
           "human.totp"), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (store);
+}
+
+static void
+test_mfa_enrollment_rejects_service_namespace (void)
+{
+  wyl_policy_store_t *store = open_store ();
+  register_service (store, "svc:registered");
+
+  const gchar *subjects[] = {
+    "svc:registered", "svc:unregistered", "svc:bad/name", "svc:"
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (subjects); i++) {
+    gint64 totp_before = count_all_rows (store, "totp_enrollments");
+    gint64 audit_before = count_all_rows (store, "audit_events");
+    WylTotpEnrollment enrollment = {
+      .subject_id = g_strdup (subjects[i]),
+      .last_verified_step = 1,
+      .enrolled_at = 1,
+    };
+    memset (enrollment.secret, 0x5a, sizeof enrollment.secret);
+    g_assert_cmpint (wyl_mfa_enrollment_commit (store, &enrollment,
+            "human.admin", "service-mfa-rejected", "test", FALSE), ==,
+        WYRELOG_E_POLICY);
+    g_assert_cmpint (count_all_rows (store, "totp_enrollments"), ==,
+        totp_before);
+    g_assert_cmpint (count_all_rows (store, "audit_events"), ==, audit_before);
+    wyl_totp_enrollment_clear (&enrollment);
+  }
+
+  gint64 totp_before = count_all_rows (store, "totp_enrollments");
+  gint64 audit_before = count_all_rows (store, "audit_events");
+  WylTotpEnrollment human = {
+    .subject_id = g_strdup ("human.enrollment"),
+    .last_verified_step = 1,
+    .enrolled_at = 1,
+  };
+  memset (human.secret, 0x33, sizeof human.secret);
+  g_assert_cmpint (wyl_mfa_enrollment_commit (store, &human, "human.admin",
+          "human-mfa-enrolled", "test", FALSE), ==, WYRELOG_E_OK);
+  g_assert_nonnull (human.id_uuidv7);
+  g_assert_cmpint (count_all_rows (store, "totp_enrollments"), ==,
+      totp_before + 1);
+  g_assert_cmpint (count_all_rows (store, "audit_events"), ==,
+      audit_before + 1);
+  g_assert_cmpint (count_subject_rows (store,
+          "SELECT count(*) FROM audit_events WHERE resource_id = ? "
+          "AND action = 'mfa_enrolled';", human.id_uuidv7), ==, 1);
+  wyl_totp_enrollment_clear (&human);
   wyl_policy_store_close (store);
 }
 
@@ -335,6 +398,8 @@ main (int argc, char **argv)
       test_bootstrap_rejects_service_namespace);
   g_test_add_func ("/policy/service-namespace/totp",
       test_totp_rejects_service_namespace);
+  g_test_add_func ("/policy/service-namespace/mfa-enrollment",
+      test_mfa_enrollment_rejects_service_namespace);
   g_test_add_func ("/policy/service-namespace/authorization",
       test_authorization_is_kind_aware);
   g_test_add_func ("/policy/service-namespace/destructive-remediation",

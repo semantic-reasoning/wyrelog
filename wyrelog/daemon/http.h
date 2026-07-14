@@ -30,6 +30,17 @@ gboolean wyl_daemon_http_expire_refresh_grace_for_test (SoupServer * server,
     const gchar * refresh_token);
 gboolean wyl_daemon_http_session_is_revoked (SoupServer * server,
     const gchar * session_token);
+wyrelog_error_t wyl_daemon_http_issue_human_tokens_for_test
+    (SoupServer * server, WylSession * session, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, gchar ** out_access,
+    gchar ** out_refresh);
+gboolean wyl_daemon_http_seed_refresh_for_test (SoupServer * server,
+    WylSession * session, const gchar * token, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, gint auth_method,
+    gboolean consumed, const gchar * successor_access,
+    const gchar * successor_refresh);
+gchar *wyl_daemon_http_dup_refresh_state_for_test (SoupServer * server,
+    const gchar * token, guint * out_refresh_count, guint * out_access_count);
 typedef void (*WylDaemonPolicyWriteCheckpoint) (gpointer data);
 /* Runs a representative daemon policy mutation while holding its WRITE lease. */
 wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
