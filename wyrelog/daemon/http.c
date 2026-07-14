@@ -12,7 +12,9 @@
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/auth/mfa-enrollment-private.h"
+#include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/totp.h"
+#include "wyrelog/policy/store-private.h"
 #ifdef WYL_HAS_FACT_STORE
 #include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
@@ -84,6 +86,9 @@ typedef struct
   gchar *subject;
   gchar *tenant;
   gchar *key_id;
+  wyl_session_auth_method_t auth_method;
+  gchar *credential_id;
+  guint64 credential_generation;
   gboolean revoked;
   gint64 expires_at;
 } WylAccessTokenState;
@@ -265,6 +270,7 @@ wyl_access_token_state_free (gpointer data)
   g_free (state->subject);
   g_free (state->tenant);
   g_free (state->key_id);
+  g_free (state->credential_id);
   g_free (state);
 }
 
@@ -540,6 +546,81 @@ human_refresh_state_matches (WylDaemonHttpContext *ctx,
 }
 
 static gboolean
+access_token_identity_is_valid (const gchar *jti, const gchar *session_id)
+{
+  wyl_id_t jti_id;
+  wyl_id_t sid_id;
+  gchar canonical_jti[WYL_ID_STRING_BUF];
+  gchar canonical_sid[WYL_ID_STRING_BUF];
+  return jti != NULL && session_id != NULL && g_strcmp0 (jti, session_id) != 0
+      && wyl_id_parse (jti, &jti_id) == WYRELOG_E_OK
+      && wyl_id_parse (session_id, &sid_id) == WYRELOG_E_OK
+      && wyl_id_format (&jti_id, canonical_jti, sizeof canonical_jti)
+      == WYRELOG_E_OK
+      && wyl_id_format (&sid_id, canonical_sid, sizeof canonical_sid)
+      == WYRELOG_E_OK && g_strcmp0 (jti, canonical_jti) == 0
+      && g_strcmp0 (session_id, canonical_sid) == 0;
+}
+
+static gboolean
+service_access_token_tuple_is_valid (const gchar *jti,
+    const gchar *session_id, const gchar *subject, const gchar *tenant,
+    const gchar *key_id, gint64 expires_at, const gchar *credential_id,
+    guint64 credential_generation)
+{
+  return access_token_identity_is_valid (jti, session_id)
+      && subject != NULL
+      && wyl_policy_service_subject_is_valid (subject, strlen (subject))
+      && wyl_policy_store_tenant_id_is_valid (tenant)
+      && key_id != NULL && key_id[0] != '\0' && expires_at > 0
+      && wyl_service_credential_id_is_canonical (credential_id,
+      credential_id != NULL ? strlen (credential_id) : 0)
+      && credential_generation > 0;
+}
+
+static gboolean
+wyl_daemon_http_context_store_access_token_state (WylDaemonHttpContext *ctx,
+    const gchar *jti, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, const gchar *key_id, gint64 expires_at,
+    wyl_session_auth_method_t auth_method, const gchar *credential_id,
+    guint64 credential_generation, gboolean revoked)
+{
+  if (ctx == NULL || jti == NULL || jti[0] == '\0' || session_id == NULL
+      || session_id[0] == '\0' || subject == NULL || subject[0] == '\0'
+      || tenant == NULL || tenant[0] == '\0' || key_id == NULL
+      || key_id[0] == '\0' || expires_at < 0
+      || (auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
+          ? credential_id != NULL || credential_generation != 0
+          : auth_method != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+          || !service_access_token_tuple_is_valid (jti, session_id, subject,
+              tenant, key_id, expires_at, credential_id,
+              credential_generation)))
+    return FALSE;
+
+  WylAccessTokenState *state = g_new0 (WylAccessTokenState, 1);
+  state->jti = g_strdup (jti);
+  state->session_id = g_strdup (session_id);
+  state->subject = g_strdup (subject);
+  state->tenant = g_strdup (tenant);
+  state->key_id = g_strdup (key_id);
+  state->expires_at = expires_at;
+  state->auth_method = auth_method;
+  state->credential_id = g_strdup (credential_id);
+  state->credential_generation = credential_generation;
+  state->revoked = revoked;
+
+  g_mutex_lock (&ctx->lock);
+  if (g_hash_table_contains (ctx->revoked_session_tokens, session_id)) {
+    g_mutex_unlock (&ctx->lock);
+    wyl_access_token_state_free (state);
+    return FALSE;
+  }
+  g_hash_table_replace (ctx->access_tokens_by_jti, g_strdup (jti), state);
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+}
+
+static gboolean
 wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
     WylSession *session, const gchar *jti, const gchar *session_id,
     const gchar *subject,
@@ -552,31 +633,9 @@ wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
       || !human_session_matches (ctx, session, session_id, subject, tenant))
     return FALSE;
 
-  WylAccessTokenState *state = g_new0 (WylAccessTokenState, 1);
-  state->jti = g_strdup (jti);
-  state->session_id = g_strdup (session_id);
-  state->subject = g_strdup (subject);
-  state->tenant = g_strdup (tenant);
-  state->key_id = g_strdup (key_id);
-  state->expires_at = expires_at;
-
-  g_mutex_lock (&ctx->lock);
-  /*
-   * Refuse to register tokens for a session that has already entered
-   * the logout teardown path. This closes the window in which a
-   * concurrent /auth/refresh that snapshotted state->revoked == FALSE
-   * before the teardown's revoke pass landed could otherwise insert
-   * a freshly-minted access token whose jti the teardown's snapshot
-   * never saw.
-   */
-  if (g_hash_table_contains (ctx->revoked_session_tokens, session_id)) {
-    g_mutex_unlock (&ctx->lock);
-    wyl_access_token_state_free (state);
-    return FALSE;
-  }
-  g_hash_table_replace (ctx->access_tokens_by_jti, g_strdup (jti), state);
-  g_mutex_unlock (&ctx->lock);
-  return TRUE;
+  return wyl_daemon_http_context_store_access_token_state (ctx, jti,
+      session_id, subject, tenant, key_id, expires_at,
+      WYL_SESSION_AUTH_METHOD_HUMAN, NULL, 0, FALSE);
 }
 
 static wyrelog_error_t
@@ -650,6 +709,10 @@ wyl_daemon_http_context_access_token_is_active (WylDaemonHttpContext *ctx,
   WylAccessTokenState *state = g_hash_table_lookup (ctx->access_tokens_by_jti,
       claims->jti);
   gboolean active = state != NULL && !state->revoked && now < state->expires_at
+      && state->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
+      && state->credential_id == NULL && state->credential_generation == 0
+      && claims->auth_method == NULL && claims->credential_id == NULL
+      && claims->credential_generation == 0
       && g_strcmp0 (state->session_id, claims->session_id) == 0
       && g_strcmp0 (state->subject, claims->subject) == 0
       && g_strcmp0 (state->tenant, claims->tenant) == 0
@@ -657,6 +720,35 @@ wyl_daemon_http_context_access_token_is_active (WylDaemonHttpContext *ctx,
       && state->expires_at == claims->expires_at;
   g_mutex_unlock (&ctx->lock);
   return active;
+}
+
+static gboolean
+    wyl_daemon_http_context_service_access_token_is_exact
+    (WylDaemonHttpContext * ctx, const gchar * jti, const gchar * session_id,
+    const gchar * subject, const gchar * tenant, const gchar * key_id,
+    gint64 expires_at, wyl_session_auth_method_t auth_method,
+    const gchar * credential_id, guint64 credential_generation, gint64 now)
+{
+  if (ctx == NULL || auth_method != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      || !service_access_token_tuple_is_valid (jti, session_id, subject,
+          tenant, key_id, expires_at, credential_id, credential_generation))
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylAccessTokenState *state = g_hash_table_lookup (ctx->access_tokens_by_jti,
+      jti);
+  gboolean exact = state != NULL && !state->revoked && now >= 0
+      && now < state->expires_at
+      && state->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      && g_strcmp0 (state->jti, jti) == 0
+      && g_strcmp0 (state->session_id, session_id) == 0
+      && g_strcmp0 (state->subject, subject) == 0
+      && g_strcmp0 (state->tenant, tenant) == 0
+      && g_strcmp0 (state->key_id, key_id) == 0
+      && state->expires_at == expires_at
+      && g_strcmp0 (state->credential_id, credential_id) == 0
+      && state->credential_generation == credential_generation;
+  g_mutex_unlock (&ctx->lock);
+  return exact;
 }
 
 static void
@@ -736,6 +828,108 @@ wyl_daemon_http_context_revoke_session_refresh_tokens (WylDaemonHttpContext
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP
+gboolean
+wyl_daemon_http_store_human_access_token_for_test (SoupServer *server,
+    const gchar *jti, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, const gchar *key_id, gint64 expires_at)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return wyl_daemon_http_context_store_access_token_state (ctx, jti,
+      session_id, subject, tenant, key_id, expires_at,
+      WYL_SESSION_AUTH_METHOD_HUMAN, NULL, 0, FALSE);
+}
+
+gboolean
+wyl_daemon_http_access_token_is_active_for_test (SoupServer *server,
+    const gchar *jti, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, gint64 expires_at, const gchar *auth_method,
+    const gchar *credential_id, guint64 credential_generation, gint64 now)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  wyl_jwt_access_claims_t claims = {
+    .jti = (gchar *) jti,
+    .session_id = (gchar *) session_id,
+    .subject = (gchar *) subject,
+    .tenant = (gchar *) tenant,
+    .expires_at = expires_at,
+    .auth_method = (gchar *) auth_method,
+    .credential_id = (gchar *) credential_id,
+    .credential_generation = credential_generation,
+  };
+  return wyl_daemon_http_context_access_token_is_active (ctx, &claims, now);
+}
+
+void wyl_daemon_access_token_snapshot_clear
+    (wyl_daemon_access_token_snapshot_t * snapshot)
+{
+  if (snapshot == NULL)
+    return;
+  g_free (snapshot->jti);
+  g_free (snapshot->session_id);
+  g_free (snapshot->subject);
+  g_free (snapshot->tenant);
+  g_free (snapshot->key_id);
+  g_free (snapshot->credential_id);
+  memset (snapshot, 0, sizeof *snapshot);
+}
+
+gboolean
+wyl_daemon_http_store_service_access_token_for_test (SoupServer *server,
+    const gchar *jti, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, const gchar *key_id, gint64 expires_at,
+    gint auth_method, const gchar *credential_id,
+    guint64 credential_generation, gboolean revoked)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return wyl_daemon_http_context_store_access_token_state (ctx, jti,
+      session_id, subject, tenant, key_id, expires_at,
+      (wyl_session_auth_method_t) auth_method, credential_id,
+      credential_generation, revoked);
+}
+
+gboolean
+wyl_daemon_http_snapshot_access_token_for_test (SoupServer *server,
+    const gchar *jti, wyl_daemon_access_token_snapshot_t *out_snapshot)
+{
+  if (out_snapshot == NULL)
+    return FALSE;
+  wyl_daemon_access_token_snapshot_clear (out_snapshot);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || jti == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylAccessTokenState *state = g_hash_table_lookup (ctx->access_tokens_by_jti,
+      jti);
+  if (state != NULL) {
+    out_snapshot->jti = g_strdup (state->jti);
+    out_snapshot->session_id = g_strdup (state->session_id);
+    out_snapshot->subject = g_strdup (state->subject);
+    out_snapshot->tenant = g_strdup (state->tenant);
+    out_snapshot->key_id = g_strdup (state->key_id);
+    out_snapshot->auth_method = state->auth_method;
+    out_snapshot->credential_id = g_strdup (state->credential_id);
+    out_snapshot->credential_generation = state->credential_generation;
+    out_snapshot->expires_at = state->expires_at;
+    out_snapshot->revoked = state->revoked;
+  }
+  g_mutex_unlock (&ctx->lock);
+  return state != NULL;
+}
+
+gboolean
+wyl_daemon_http_service_access_token_is_exact_for_test (SoupServer *server,
+    const gchar *jti, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, const gchar *key_id, gint64 expires_at,
+    gint auth_method, const gchar *credential_id,
+    guint64 credential_generation, gint64 now)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return wyl_daemon_http_context_service_access_token_is_exact (ctx, jti,
+      session_id, subject, tenant, key_id, expires_at,
+      (wyl_session_auth_method_t) auth_method, credential_id,
+      credential_generation, now);
+}
+
 wyrelog_error_t
 wyl_daemon_http_copy_access_token_secret (SoupServer *server,
     guint8 *out_secret, gsize out_len)
