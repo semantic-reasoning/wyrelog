@@ -2,6 +2,7 @@
 #include <string.h>
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <sqlite3.h>
 
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -666,6 +667,8 @@ static void
 {
   g_autoptr (WylHandle) handle = new_store_handle ();
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
+          "PRAGMA busy_timeout;"), ==, 0);
   sqlite3 *db = wyl_policy_store_get_db (store);
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
@@ -1749,6 +1752,381 @@ test_authority_transaction_participant_contract (void)
   wyl_service_auth_write_lease_free (lease);
 }
 
+static WylHandle *
+new_file_store_handle (const gchar *path)
+{
+  WylHandleOpenOptions options = {
+    .policy_store_path = path,
+  };
+  WylHandle *handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  return handle;
+}
+
+static void
+begin_with_evidence (WylHandle *handle, WylServiceAuthWriteLease **out_lease,
+    WylServiceAuthorityTransaction **out_txn,
+    WylServiceAuthorityCommitEvidence **out_evidence)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          out_lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, *out_lease, out_txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_prepare_commit_evidence (*out_txn,
+          store, out_evidence), ==, WYRELOG_E_OK);
+}
+
+static void
+finish_rolled_back (WylServiceAuthWriteLease *lease,
+    WylServiceAuthorityTransaction *txn,
+    WylServiceAuthorityCommitEvidence *evidence)
+{
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+static void
+test_authority_transaction_write_intent (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  begin_with_evidence (handle, &lease, &txn, &evidence);
+  WylServiceAuthorityWriteIntentOutcome outcome = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_ACQUIRED);
+  g_assert_cmpint (outcome.sqlite_extended_code, ==, SQLITE_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_OK);
+  gint changes = sqlite3_total_changes (wyl_policy_store_get_db (store));
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_total_changes (wyl_policy_store_get_db (store)), ==,
+      changes);
+  finish_rolled_back (lease, txn, evidence);
+
+  lease = NULL;
+  txn = NULL;
+  evidence = NULL;
+  begin_with_evidence (handle, &lease, &txn, &evidence);
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  g_cancellable_cancel (cancellable);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, cancellable, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_CANCELLED);
+  g_assert_cmpint (outcome.sqlite_extended_code, ==, SQLITE_INTERRUPT);
+  WylServiceAuthorityWriteIntentOutcome repeated = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &repeated), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (repeated.result, ==, outcome.result);
+  g_assert_cmpint (repeated.sqlite_extended_code, ==,
+      outcome.sqlite_extended_code);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_BUSY);
+  finish_rolled_back (lease, txn, evidence);
+
+  lease = NULL;
+  txn = NULL;
+  evidence = NULL;
+  begin_with_evidence (handle, &lease, &txn, &evidence);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_enter_participant (txn,
+          store), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &outcome), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &repeated), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (repeated.result, ==, outcome.result);
+  g_assert_cmpint (repeated.sqlite_extended_code, ==,
+      outcome.sqlite_extended_code);
+  finish_rolled_back (lease, txn, evidence);
+
+  const int forced_codes[] = { SQLITE_LOCKED, SQLITE_IOERR };
+  const wyrelog_error_t forced_rcs[] = { WYRELOG_E_BUSY, WYRELOG_E_IO };
+  const WylServiceAuthorityWriteIntentResult forced_results[] = {
+    WYL_SERVICE_AUTHORITY_WRITE_INTENT_LOCKED,
+    WYL_SERVICE_AUTHORITY_WRITE_INTENT_IO,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (forced_codes); i++) {
+    lease = NULL;
+    txn = NULL;
+    evidence = NULL;
+    begin_with_evidence (handle, &lease, &txn, &evidence);
+    wyl_policy_store_service_authority_transaction_test_fail_intent_once (txn,
+        forced_codes[i]);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_acquire_write_intent
+        (txn, store, NULL, &outcome), ==, forced_rcs[i]);
+    g_assert_cmpint (outcome.result, ==, forced_results[i]);
+    g_assert_cmpint (outcome.sqlite_extended_code, ==, forced_codes[i]);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_acquire_write_intent
+        (txn, store, NULL, &repeated), ==, forced_rcs[i]);
+    g_assert_cmpint (repeated.result, ==, outcome.result);
+    g_assert_cmpint (repeated.sqlite_extended_code, ==,
+        outcome.sqlite_extended_code);
+    finish_rolled_back (lease, txn, evidence);
+  }
+
+  sqlite_exec_ok (wyl_policy_store_get_db (store),
+      "DELETE FROM service_authority_writer_gate;");
+  lease = NULL;
+  txn = NULL;
+  evidence = NULL;
+  begin_with_evidence (handle, &lease, &txn, &evidence);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &outcome), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &repeated), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (repeated.result, ==, outcome.result);
+  g_assert_cmpint (repeated.sqlite_extended_code, ==,
+      outcome.sqlite_extended_code);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_BUSY);
+  finish_rolled_back (lease, txn, evidence);
+  sqlite_exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO service_authority_writer_gate(singleton,lock_word)"
+      " VALUES(1,0);");
+
+  wyl_policy_store_service_authority_transaction_fail_once (store,
+      WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+  lease = NULL;
+  txn = NULL;
+  evidence = NULL;
+  begin_with_evidence (handle, &lease, &txn, &evidence);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, store, NULL, &outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_IO);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  gboolean commit;
+  wyrelog_error_t rc;
+  WylServiceAuthorityWriteIntentOutcome outcome;
+} WriteIntentConnectionAttempt;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  GCancellable *cancellable;
+  WylServiceAuthorityTransaction *txn;
+  gboolean ready;
+  wyrelog_error_t rc;
+  WylServiceAuthorityWriteIntentOutcome outcome;
+} WriteIntentCancelBarrier;
+
+static gpointer
+write_intent_cancel_barrier_thread (gpointer data)
+{
+  WriteIntentCancelBarrier *barrier = data;
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  begin_with_evidence (barrier->handle, &lease, &txn, &evidence);
+  wyl_policy_store_service_authority_transaction_test_arm_intent_barrier (txn);
+  g_mutex_lock (&barrier->mutex);
+  barrier->txn = txn;
+  barrier->ready = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  g_mutex_unlock (&barrier->mutex);
+  barrier->rc =
+      wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, wyl_handle_get_policy_store (barrier->handle),
+      barrier->cancellable, &barrier->outcome);
+  finish_rolled_back (lease, txn, evidence);
+  return NULL;
+}
+
+static void
+test_authority_transaction_write_intent_cancel_barrier (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  WriteIntentCancelBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  barrier.handle = handle;
+  barrier.cancellable = cancellable;
+  barrier.rc = WYRELOG_E_INTERNAL;
+  g_autoptr (GThread) thread = g_thread_new ("intent-cancel-barrier",
+      write_intent_cancel_barrier_thread, &barrier);
+  g_mutex_lock (&barrier.mutex);
+  while (!barrier.ready)
+    g_cond_wait (&barrier.changed, &barrier.mutex);
+  WylServiceAuthorityTransaction *txn = barrier.txn;
+  g_mutex_unlock (&barrier.mutex);
+  wyl_policy_store_service_authority_transaction_test_wait_intent_barrier (txn);
+  g_cancellable_cancel (cancellable);
+  wyl_policy_store_service_authority_transaction_test_release_intent_barrier
+      (txn);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (barrier.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (barrier.outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_CANCELLED);
+  g_assert_cmpint (barrier.outcome.sqlite_extended_code, ==, SQLITE_INTERRUPT);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+}
+
+static gpointer
+write_intent_connection_thread (gpointer data)
+{
+  WriteIntentConnectionAttempt *attempt = data;
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  begin_with_evidence (attempt->handle, &lease, &txn, &evidence);
+  attempt->rc =
+      wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (txn, wyl_handle_get_policy_store (attempt->handle), NULL,
+      &attempt->outcome);
+  if (attempt->rc != WYRELOG_E_OK) {
+    wyrelog_error_t first_rc = attempt->rc;
+    WylServiceAuthorityWriteIntentOutcome first = attempt->outcome;
+    WylServiceAuthorityWriteIntentOutcome repeated = { 0 };
+    attempt->rc =
+        wyl_policy_store_service_authority_transaction_acquire_write_intent
+        (txn, wyl_handle_get_policy_store (attempt->handle), NULL, &repeated);
+    g_assert_cmpint (attempt->rc, ==, first_rc);
+    g_assert_cmpint (repeated.result, ==, first.result);
+    g_assert_cmpint (repeated.sqlite_extended_code, ==,
+        first.sqlite_extended_code);
+  }
+  if (attempt->rc == WYRELOG_E_OK && attempt->commit) {
+    sqlite_exec_ok (wyl_policy_store_get_db
+        (wyl_handle_get_policy_store (attempt->handle)),
+        "PRAGMA user_version=371;");
+    attempt->rc = wyl_policy_store_service_authority_transaction_commit (txn);
+    wyl_policy_store_service_authority_transaction_free (txn);
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+    g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+        WYRELOG_E_OK);
+    wyl_service_auth_write_lease_free (lease);
+  } else {
+    finish_rolled_back (lease, txn, evidence);
+  }
+  return NULL;
+}
+
+static void
+test_authority_transaction_write_intent_connections (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-write-intent-XXXXXX", NULL);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  g_autoptr (WylHandle) first = new_file_store_handle (path);
+  g_autoptr (WylHandle) second = new_file_store_handle (path);
+  wyl_policy_store_t *first_store = wyl_handle_get_policy_store (first);
+  wyl_policy_store_t *second_store = wyl_handle_get_policy_store (second);
+
+  WylServiceAuthWriteLease *first_lease = NULL;
+  WylServiceAuthorityTransaction *first_txn = NULL;
+  WylServiceAuthorityCommitEvidence *first_evidence = NULL;
+  begin_with_evidence (first, &first_lease, &first_txn, &first_evidence);
+  WylServiceAuthorityWriteIntentOutcome outcome = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (first_txn, first_store, NULL, &outcome), ==, WYRELOG_E_OK);
+
+  WriteIntentConnectionAttempt attempt = { second, FALSE, WYRELOG_E_OK, {0} };
+  g_autoptr (GThread) contender = g_thread_new ("write-intent-contender",
+      write_intent_connection_thread, &attempt);
+  g_thread_join (g_steal_pointer (&contender));
+  g_assert_cmpint (attempt.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (attempt.outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_BUSY);
+  finish_rolled_back (first_lease, first_txn, first_evidence);
+
+  WylServiceAuthWriteLease *second_lease = NULL;
+  WylServiceAuthorityTransaction *second_txn = NULL;
+  WylServiceAuthorityCommitEvidence *second_evidence = NULL;
+  begin_with_evidence (second, &second_lease, &second_txn, &second_evidence);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (second_txn, second_store, NULL, &outcome), ==, WYRELOG_E_OK);
+  finish_rolled_back (second_lease, second_txn, second_evidence);
+
+  second_lease = NULL;
+  second_txn = NULL;
+  second_evidence = NULL;
+  begin_with_evidence (second, &second_lease, &second_txn, &second_evidence);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (second_store),
+          "SELECT lock_word FROM service_authority_writer_gate;"), ==, 0);
+  WriteIntentConnectionAttempt writer = { first, TRUE, WYRELOG_E_INTERNAL,
+    {0}
+  };
+  g_autoptr (GThread) writer_thread = g_thread_new ("write-intent-writer",
+      write_intent_connection_thread, &writer);
+  g_thread_join (g_steal_pointer (&writer_thread));
+  g_assert_cmpint (writer.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (second_txn, second_store, NULL, &outcome), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (outcome.result, ==,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_BUSY_SNAPSHOT);
+  g_assert_cmpint (outcome.sqlite_extended_code, ==, SQLITE_BUSY_SNAPSHOT);
+  WylServiceAuthorityWriteIntentOutcome snapshot_repeated = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_transaction_acquire_write_intent
+      (second_txn, second_store, NULL, &snapshot_repeated), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (snapshot_repeated.result, ==, outcome.result);
+  g_assert_cmpint (snapshot_repeated.sqlite_extended_code, ==,
+      outcome.sqlite_extended_code);
+  finish_rolled_back (second_lease, second_txn, second_evidence);
+
+  g_clear_object (&second);
+  g_clear_object (&first);
+  (void) g_remove (path);
+  g_autofree gchar *wal = g_strdup_printf ("%s-wal", path);
+  g_autofree gchar *shm = g_strdup_printf ("%s-shm", path);
+  (void) g_remove (wal);
+  (void) g_remove (shm);
+  (void) g_rmdir (dir);
+}
+
 static void
 test_authority_transaction_credential_last_used_corrupt_text (void)
 {
@@ -1867,6 +2245,12 @@ main (int argc, char **argv)
       test_authority_transaction_credential_last_used_unavailable);
   g_test_add_func ("/service-auth/transaction/participant-contract",
       test_authority_transaction_participant_contract);
+  g_test_add_func ("/service-auth/transaction/write-intent",
+      test_authority_transaction_write_intent);
+  g_test_add_func ("/service-auth/transaction/write-intent-connections",
+      test_authority_transaction_write_intent_connections);
+  g_test_add_func ("/service-auth/transaction/write-intent-cancel-barrier",
+      test_authority_transaction_write_intent_cancel_barrier);
   g_test_add_func
       ("/service-auth/transaction/credential-last-used-corrupt-text",
       test_authority_transaction_credential_last_used_corrupt_text);
