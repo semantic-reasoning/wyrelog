@@ -20,6 +20,7 @@
 #endif
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-session-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-request-id-private.h"
@@ -114,6 +115,7 @@ typedef struct
   gint64 issued_at;
   gint64 expires_at;
   gint64 consumed_at;
+  wyl_session_auth_method_t auth_method;
 } WylRefreshTokenState;
 
 typedef struct
@@ -495,14 +497,59 @@ wyl_daemon_http_context_mark_session_revoked (WylDaemonHttpContext *ctx,
 }
 
 static gboolean
+human_session_matches (WylDaemonHttpContext *ctx, WylSession *session,
+    const gchar *session_id, const gchar *subject, const gchar *tenant)
+{
+  if (ctx == NULL || session == NULL || !WYL_IS_SESSION (session)
+      || session_id == NULL
+      || session_id[0] == '\0' || subject == NULL || subject[0] == '\0'
+      || tenant == NULL || tenant[0] == '\0'
+      || wyl_policy_subject_has_service_prefix (subject)
+      || wyl_session_get_auth_method_private (session)
+      != WYL_SESSION_AUTH_METHOD_HUMAN
+      || !wyl_session_is_active_private (session))
+    return FALSE;
+
+  g_autofree gchar *live_id = wyl_session_dup_id_string (session);
+  g_autofree gchar *live_subject = wyl_session_dup_username (session);
+  g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
+  if (g_strcmp0 (live_id, session_id) != 0
+      || g_strcmp0 (live_subject, subject) != 0
+      || g_strcmp0 (live_tenant, tenant) != 0)
+    return FALSE;
+  g_autofree gchar *principal_state = NULL;
+  gboolean found = FALSE;
+  return wyl_policy_store_get_principal_state
+      (wyl_handle_get_policy_store (ctx->handle), subject, &principal_state,
+      &found) == WYRELOG_E_OK && found
+      && g_strcmp0 (principal_state, "authenticated") == 0;
+}
+
+static gboolean
+human_refresh_state_matches (WylDaemonHttpContext *ctx,
+    const WylRefreshTokenState *state, WylSession *session,
+    const gchar *session_id, const gchar *subject, const gchar *tenant,
+    gint64 now)
+{
+  return state != NULL && !state->revoked && now < state->expires_at
+      && state->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
+      && g_strcmp0 (state->session_id, session_id) == 0
+      && g_strcmp0 (state->subject, subject) == 0
+      && g_strcmp0 (state->tenant, tenant) == 0
+      && human_session_matches (ctx, session, session_id, subject, tenant);
+}
+
+static gboolean
 wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
-    const gchar *jti, const gchar *session_id, const gchar *subject,
+    WylSession *session, const gchar *jti, const gchar *session_id,
+    const gchar *subject,
     const gchar *tenant, const gchar *key_id, gint64 expires_at)
 {
   if (ctx == NULL || jti == NULL || jti[0] == '\0' || session_id == NULL ||
       session_id[0] == '\0' || subject == NULL || subject[0] == '\0' ||
       tenant == NULL || tenant[0] == '\0' || key_id == NULL ||
-      key_id[0] == '\0' || expires_at < 0)
+      key_id[0] == '\0' || expires_at < 0
+      || !human_session_matches (ctx, session, session_id, subject, tenant))
     return FALSE;
 
   WylAccessTokenState *state = g_new0 (WylAccessTokenState, 1);
@@ -555,13 +602,15 @@ new_token_id_string (gchar **out_token)
 
 static gboolean
 wyl_daemon_http_context_store_refresh_token (WylDaemonHttpContext *ctx,
-    const gchar *token, const gchar *session_id, const gchar *subject,
+    WylSession *session, const gchar *token, const gchar *session_id,
+    const gchar *subject,
     const gchar *tenant, gint64 issued_at, gint64 expires_at)
 {
   if (ctx == NULL || token == NULL || token[0] == '\0' ||
       session_id == NULL || session_id[0] == '\0' || subject == NULL ||
       subject[0] == '\0' || tenant == NULL || tenant[0] == '\0' ||
-      issued_at < 0 || expires_at <= issued_at)
+      issued_at < 0 || expires_at <= issued_at
+      || !human_session_matches (ctx, session, session_id, subject, tenant))
     return FALSE;
 
   WylRefreshTokenState *state = g_new0 (WylRefreshTokenState, 1);
@@ -571,6 +620,7 @@ wyl_daemon_http_context_store_refresh_token (WylDaemonHttpContext *ctx,
   state->tenant = g_strdup (tenant);
   state->issued_at = issued_at;
   state->expires_at = expires_at;
+  state->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
 
   g_mutex_lock (&ctx->lock);
   /*
@@ -959,16 +1009,18 @@ copy_access_token_secret (WylDaemonHttpContext *ctx,
 }
 
 static wyrelog_error_t
-issue_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
-    const gchar *username, const gchar *tenant, const gchar *principal_state,
-    gint64 issued_at, gchar **out_token)
+issue_access_token (WylDaemonHttpContext *ctx, WylSession *session,
+    const gchar *session_token, const gchar *username, const gchar *tenant,
+    const gchar *principal_state, gint64 issued_at, gchar **out_token)
 {
   if (out_token == NULL)
     return WYRELOG_E_INVALID;
   *out_token = NULL;
-  if (session_token == NULL || username == NULL || tenant == NULL ||
-      principal_state == NULL || issued_at < 0)
+  if (session_token == NULL || username == NULL || tenant == NULL
+      || principal_state == NULL || issued_at < 0)
     return WYRELOG_E_INVALID;
+  if (!human_session_matches (ctx, session, session_token, username, tenant))
+    return WYRELOG_E_POLICY;
 
   guint8 secret[WYL_DAEMON_JWT_KEY_LEN];
   wyrelog_error_t rc = copy_access_token_secret (ctx, secret);
@@ -1003,7 +1055,7 @@ issue_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
   sodium_memzero (secret, sizeof secret);
   if (rc != WYRELOG_E_OK)
     return rc;
-  if (!wyl_daemon_http_context_store_access_token (ctx, token_id,
+  if (!wyl_daemon_http_context_store_access_token (ctx, session, token_id,
           session_token, username, tenant, ctx->access_token_key_id,
           issued_at + ttl)) {
     g_clear_pointer (out_token, g_free);
@@ -1014,23 +1066,26 @@ issue_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
 
 static wyrelog_error_t
 issue_login_access_token (WylDaemonHttpContext *ctx, const gchar *session_token,
-    const gchar *username, const gchar *tenant, const gchar *principal_state,
-    gchar **out_token)
+    WylSession *session, const gchar *username, const gchar *tenant,
+    const gchar *principal_state, gchar **out_token)
 {
-  return issue_access_token (ctx, session_token, username, tenant,
+  return issue_access_token (ctx, session, session_token, username, tenant,
       principal_state, g_get_real_time () / G_USEC_PER_SEC, out_token);
 }
 
 static wyrelog_error_t
-issue_refresh_token (WylDaemonHttpContext *ctx, const gchar *session_token,
-    const gchar *username, const gchar *tenant, gchar **out_token)
+issue_refresh_token (WylDaemonHttpContext *ctx, WylSession *session,
+    const gchar *session_token, const gchar *username, const gchar *tenant,
+    gchar **out_token)
 {
   if (out_token == NULL)
     return WYRELOG_E_INVALID;
   *out_token = NULL;
-  if (ctx == NULL || session_token == NULL || username == NULL ||
-      tenant == NULL)
+  if (ctx == NULL || session_token == NULL || username == NULL
+      || tenant == NULL)
     return WYRELOG_E_INVALID;
+  if (!human_session_matches (ctx, session, session_token, username, tenant))
+    return WYRELOG_E_POLICY;
 
   g_autofree gchar *token = NULL;
   wyrelog_error_t rc = new_token_id_string (&token);
@@ -1041,13 +1096,96 @@ issue_refresh_token (WylDaemonHttpContext *ctx, const gchar *session_token,
   if (now > G_MAXINT64 - WYL_DAEMON_REFRESH_TTL_SECONDS)
     return WYRELOG_E_INVALID;
 
-  if (!wyl_daemon_http_context_store_refresh_token (ctx, token, session_token,
-          username, tenant, now, now + WYL_DAEMON_REFRESH_TTL_SECONDS))
+  if (!wyl_daemon_http_context_store_refresh_token (ctx, session, token,
+          session_token, username, tenant, now,
+          now + WYL_DAEMON_REFRESH_TTL_SECONDS))
     return WYRELOG_E_INTERNAL;
 
   *out_token = g_steal_pointer (&token);
   return WYRELOG_E_OK;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_issue_human_tokens_for_test (SoupServer *server,
+    WylSession *session, const gchar *session_id, const gchar *subject,
+    const gchar *tenant, gchar **out_access, gchar **out_refresh)
+{
+  if (out_access == NULL || out_refresh == NULL)
+    return WYRELOG_E_INVALID;
+  *out_access = NULL;
+  *out_refresh = NULL;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  wyrelog_error_t rc = issue_login_access_token (ctx, session_id, session,
+      subject, tenant, "authenticated", out_access);
+  if (rc == WYRELOG_E_OK)
+    rc = issue_refresh_token (ctx, session, session_id, subject, tenant,
+        out_refresh);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_pointer (out_access, g_free);
+    g_clear_pointer (out_refresh, g_free);
+  }
+  return rc;
+}
+
+gboolean
+wyl_daemon_http_seed_refresh_for_test (SoupServer *server,
+    WylSession *session, const gchar *token, const gchar *session_id,
+    const gchar *subject, const gchar *tenant, gint auth_method,
+    gboolean consumed, const gchar *successor_access,
+    const gchar *successor_refresh)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session == NULL || token == NULL || session_id == NULL
+      || subject == NULL || tenant == NULL)
+    return FALSE;
+  WylRefreshTokenState *state = g_new0 (WylRefreshTokenState, 1);
+  state->token = g_strdup (token);
+  state->session_id = g_strdup (session_id);
+  state->subject = g_strdup (subject);
+  state->tenant = g_strdup (tenant);
+  state->auth_method = (wyl_session_auth_method_t) auth_method;
+  state->issued_at = g_get_real_time () / G_USEC_PER_SEC;
+  state->expires_at = state->issued_at + WYL_DAEMON_REFRESH_TTL_SECONDS;
+  state->consumed = consumed;
+  state->consumed_at = state->issued_at;
+  state->successor_access_token = g_strdup (successor_access);
+  state->successor_token = g_strdup (successor_refresh);
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_replace (ctx->sessions_by_token, g_strdup (session_id),
+      g_object_ref (session));
+  g_hash_table_replace (ctx->refresh_tokens_by_token, g_strdup (token), state);
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+}
+
+gchar *
+wyl_daemon_http_dup_refresh_state_for_test (SoupServer *server,
+    const gchar *token, guint *out_refresh_count, guint *out_access_count)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || token == NULL || out_refresh_count == NULL
+      || out_access_count == NULL)
+    return NULL;
+  g_mutex_lock (&ctx->lock);
+  *out_refresh_count = g_hash_table_size (ctx->refresh_tokens_by_token);
+  *out_access_count = g_hash_table_size (ctx->access_tokens_by_jti);
+  WylRefreshTokenState *state =
+      g_hash_table_lookup (ctx->refresh_tokens_by_token, token);
+  gchar *snapshot =
+      state ==
+      NULL ? NULL : g_strdup_printf ("%s|%s|%s|%s|%d|%d|%d|%" G_GINT64_FORMAT
+      "|%" G_GINT64_FORMAT "|%" G_GINT64_FORMAT "|%s|%s", state->token,
+      state->session_id,
+      state->subject, state->tenant, (gint) state->auth_method,
+      state->consumed, state->revoked, state->issued_at, state->expires_at,
+      state->consumed_at, state->successor_access_token != NULL
+      ? state->successor_access_token : "", state->successor_token != NULL
+      ? state->successor_token : "");
+  g_mutex_unlock (&ctx->lock);
+  return snapshot;
+}
+#endif
 
 static const gchar *
 lookup_bearer_token (SoupServerMessage *msg)
@@ -4197,11 +4335,11 @@ login_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_autofree gchar *access_token = NULL;
   g_autofree gchar *refresh_token = NULL;
   if (skip_mfa_requested) {
-    rc = issue_login_access_token (ctx, session_token, username,
+    rc = issue_login_access_token (ctx, session_token, session, username,
         session_tenant, principal_state, &access_token);
     if (rc == WYRELOG_E_OK)
-      rc = issue_refresh_token (ctx, session_token, username, session_tenant,
-          &refresh_token);
+      rc = issue_refresh_token (ctx, session, session_token, username,
+          session_tenant, &refresh_token);
     if (rc != WYRELOG_E_OK) {
       set_json_error (msg, 500, "login_failed");
       return;
@@ -4437,11 +4575,11 @@ mfa_verify_handler (SoupServer *server, SoupServerMessage *msg,
    */
   g_autofree gchar *access_token = NULL;
   g_autofree gchar *refresh_token = NULL;
-  rc = issue_login_access_token (ctx, session_token, username,
+  rc = issue_login_access_token (ctx, session_token, session, username,
       session_tenant, "authenticated", &access_token);
   if (rc == WYRELOG_E_OK)
-    rc = issue_refresh_token (ctx, session_token, username, session_tenant,
-        &refresh_token);
+    rc = issue_refresh_token (ctx, session, session_token, username,
+        session_tenant, &refresh_token);
   if (rc != WYRELOG_E_OK) {
     set_json_error (msg, 500, "mfa_verify_failed");
     return;
@@ -4485,12 +4623,12 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   g_autofree gchar *tenant = NULL;
   g_autofree gchar *cached_access_token = NULL;
   g_autofree gchar *cached_refresh_token = NULL;
-  gboolean reuse_detected = FALSE;
-
   g_mutex_lock (&ctx->lock);
   WylRefreshTokenState *state =
       g_hash_table_lookup (ctx->refresh_tokens_by_token, refresh_token);
-  if (state == NULL || state->revoked || now >= state->expires_at) {
+  if (state == NULL || state->revoked || now >= state->expires_at
+      || state->auth_method != WYL_SESSION_AUTH_METHOD_HUMAN
+      || wyl_policy_subject_has_service_prefix (state->subject)) {
     g_mutex_unlock (&ctx->lock);
     set_json_error (msg, 401, "refresh_auth_required");
     return;
@@ -4498,9 +4636,27 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   session_id = g_strdup (state->session_id);
   subject = g_strdup (state->subject);
   tenant = g_strdup (state->tenant);
+  g_mutex_unlock (&ctx->lock);
+
+  g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
+      session_id);
+  if (!human_session_matches (ctx, session, session_id, subject, tenant)) {
+    set_json_error (msg, 401, "refresh_auth_required");
+    return;
+  }
+
+  gboolean reuse_detected = FALSE;
+  g_mutex_lock (&ctx->lock);
+  state = g_hash_table_lookup (ctx->refresh_tokens_by_token, refresh_token);
+  if (!human_refresh_state_matches (ctx, state, session, session_id, subject,
+          tenant, now)) {
+    g_mutex_unlock (&ctx->lock);
+    set_json_error (msg, 401, "refresh_auth_required");
+    return;
+  }
   if (state->consumed) {
-    if (now <= state->consumed_at + WYL_DAEMON_REFRESH_GRACE_SECONDS &&
-        state->successor_token != NULL
+    if (now <= state->consumed_at + WYL_DAEMON_REFRESH_GRACE_SECONDS
+        && state->successor_token != NULL
         && state->successor_access_token != NULL) {
       cached_refresh_token = g_strdup (state->successor_token);
       cached_access_token = g_strdup (state->successor_access_token);
@@ -4518,29 +4674,15 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     return;
   }
 
-  g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
-      session_id);
-  if (session == NULL) {
-    set_json_error (msg, 401, "refresh_auth_required");
-    return;
-  }
-  g_autofree gchar *live_username = wyl_session_dup_username (session);
-  g_autofree gchar *live_tenant = wyl_session_dup_tenant (session);
-  if (g_strcmp0 (live_username, subject) != 0 ||
-      g_strcmp0 (live_tenant, tenant) != 0) {
-    set_json_error (msg, 401, "refresh_auth_required");
-    return;
-  }
-
   g_autofree gchar *access_token = g_steal_pointer (&cached_access_token);
   g_autofree gchar *next_refresh_token =
       g_steal_pointer (&cached_refresh_token);
   wyrelog_error_t rc = WYRELOG_E_OK;
   if (access_token == NULL || next_refresh_token == NULL) {
-    rc = issue_access_token (ctx, session_id, subject, tenant, "authenticated",
-        now, &access_token);
+    rc = issue_access_token (ctx, session, session_id, subject, tenant,
+        "authenticated", now, &access_token);
     if (rc == WYRELOG_E_OK)
-      rc = issue_refresh_token (ctx, session_id, subject, tenant,
+      rc = issue_refresh_token (ctx, session, session_id, subject, tenant,
           &next_refresh_token);
     if (rc != WYRELOG_E_OK) {
       set_json_error (msg, 500, "refresh_failed");
@@ -4549,7 +4691,8 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
 
     g_mutex_lock (&ctx->lock);
     state = g_hash_table_lookup (ctx->refresh_tokens_by_token, refresh_token);
-    if (state != NULL && !state->consumed && !state->revoked) {
+    if (human_refresh_state_matches (ctx, state, session, session_id, subject,
+            tenant, now) && !state->consumed) {
       state->consumed = TRUE;
       state->consumed_at = now;
       state->successor_token = g_strdup (next_refresh_token);

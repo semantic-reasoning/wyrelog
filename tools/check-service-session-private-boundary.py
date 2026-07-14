@@ -64,8 +64,12 @@ MANIFEST = {
 MANIFEST["wyl_jwt_sign_hs256_service"] = {
     "wyrelog/auth/jwt-private.h": 1,
     "wyrelog/auth/service-jwt-private.c": 1,
-    "tests/test-jwt.c": 3,
+    "tests/test-jwt.c": 5,
 }
+MANIFEST["wyl_session_get_auth_method_private"]["wyrelog/daemon/http.c"] = 1
+MANIFEST["wyl_session_is_active_private"]["wyrelog/daemon/http.c"] = 1
+MANIFEST["wyl_session_new_service_detached"][
+    "tests/test-daemon-http-decide.c"] = 1
 
 
 class BoundaryError(RuntimeError):

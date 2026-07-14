@@ -140,6 +140,7 @@ if build_client
     wyrelog_client_dep,
     libsoup_dep,
     sodium_dep,
+    service_session_private_dep,
   ]
   if get_option('enable_fact_store').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_FACT_STORE'
@@ -190,6 +191,7 @@ if build_client
     libsoup_dep,
     sodium_dep,
     sqlite_dep,
+    service_session_private_dep,
   ]
   if get_option('enable_fact_store').allowed()
     test_daemon_http_mfa_c_args += '-DWYL_HAS_FACT_STORE'
@@ -225,6 +227,7 @@ if build_client
       sodium_dep,
       duckdb_dep,
       sqlite_dep,
+      service_session_private_dep,
     ]
     if get_option('enable_audit').allowed()
       test_daemon_http_facts_c_args += '-DWYL_HAS_AUDIT'
@@ -359,6 +362,7 @@ if build_client and host_machine.system() != 'windows'
     wyrelog_client_dep,
     libsoup_dep,
     sodium_dep,
+    service_session_private_dep,
   ]
   if get_option('enable_fact_store').allowed()
     test_wyctl_policy_daemon_c_args += '-DWYL_HAS_FACT_STORE'
