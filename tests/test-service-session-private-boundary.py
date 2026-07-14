@@ -133,10 +133,10 @@ def main() -> int:
     assert expansion_watchdog.snapshot[
         guard_module.HeartbeatReporter.FIELDS["expansion_calls"]] == 256
     with tempfile.TemporaryDirectory() as vendored_directory:
-        # Windows CI installs vcpkg inside the checkout. Its headers live under
-        # the project root but are dependencies, not tracked source: distilling
-        # them exhausts the expansion budget and diverges from POSIX runners,
-        # where the same headers resolve outside the tree.
+        # A vcpkg tree vendored inside the checkout lives under the project
+        # root but is a dependency, not tracked source: distilling it exhausts
+        # the expansion budget, whereas the same headers installed outside the
+        # tree are left to the real preprocessor.
         vendored_root = Path(vendored_directory).resolve()
         vcpkg_root = vendored_root / "vcpkg"
         vcpkg_include = vcpkg_root / "installed" / "x64-windows" / "include"
