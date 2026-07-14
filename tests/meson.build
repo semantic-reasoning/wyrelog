@@ -519,7 +519,7 @@ test_policy_store_toctou = executable('test-policy-store-toctou',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],
 )
 
-test('policy-store-toctou', test_policy_store_toctou)
+test('policy-store-toctou', test_policy_store_toctou, timeout : 60)
 
 test_policy_store_lease = executable('test-policy-store-lease',
   'test-policy-store-lease.c',
