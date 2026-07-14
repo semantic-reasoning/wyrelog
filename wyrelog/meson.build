@@ -117,8 +117,9 @@ wyrelog_dep = declare_dependency(
 # libwyrelog. Focused tests and the exact future #358 daemon owner opt in.
 service_session_private_lib = static_library('wyrelog-service-session-private',
   'auth/service-session-private.c',
+  'auth/service-jwt-private.c',
   include_directories : wyrelog_inc,
-  dependencies : [wyrelog_dep],
+  dependencies : [wyrelog_dep, sodium_dep],
   install : false,
   build_by_default : false,
 )

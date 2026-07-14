@@ -1,5 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "auth/jwt-private.h"
+#include "auth/service-credential-private.h"
+#include "policy/store-private.h"
+#include "wyl-id-private.h"
 
 #include <sodium.h>
 #include <string.h>
@@ -21,6 +24,16 @@ validate_issue_input (const wyl_jwt_issue_input_t *input)
       || input->ttl_seconds < 0)
     return WYRELOG_E_INVALID;
   return WYRELOG_E_OK;
+}
+
+static gboolean
+canonical_id_text (const gchar *value)
+{
+  wyl_id_t parsed;
+  gchar encoded[WYL_ID_STRING_BUF];
+  return non_empty (value) && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, encoded, sizeof encoded) == WYRELOG_E_OK
+      && strcmp (value, encoded) == 0;
 }
 
 static void
@@ -434,6 +447,28 @@ parse_json_uint64 (const gchar **cursor, gint64 *out_value)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+parse_json_full_uint64 (const gchar **cursor, guint64 *out_value)
+{
+  if (cursor == NULL || *cursor == NULL || out_value == NULL
+      || !g_ascii_isdigit (**cursor))
+    return WYRELOG_E_INVALID;
+  const gchar *p = *cursor;
+  if (*p == '0' && g_ascii_isdigit (p[1]))
+    return WYRELOG_E_POLICY;
+  guint64 value = 0;
+  while (g_ascii_isdigit (*p)) {
+    guint digit = (guint) (*p - '0');
+    if (value > (G_MAXUINT64 - digit) / 10)
+      return WYRELOG_E_POLICY;
+    value = value * 10 + digit;
+    p++;
+  }
+  *cursor = p;
+  *out_value = value;
+  return WYRELOG_E_OK;
+}
+
 static void
 skip_json_ws (const gchar **cursor)
 {
@@ -591,7 +626,12 @@ enum
   CLAIM_TENANT = 1u << 7,
   CLAIM_PRINCIPAL_STATE = 1u << 8,
   CLAIM_SESSION_ID = 1u << 9,
+  CLAIM_AUTH_METHOD = 1u << 10,
+  CLAIM_CREDENTIAL_ID = 1u << 11,
+  CLAIM_CREDENTIAL_GENERATION = 1u << 12,
   CLAIM_REQUIRED_MASK = (1u << 10) - 1,
+  CLAIM_SERVICE_MASK = CLAIM_AUTH_METHOD | CLAIM_CREDENTIAL_ID
+      | CLAIM_CREDENTIAL_GENERATION,
 };
 
 static void
@@ -613,6 +653,8 @@ wyl_jwt_access_claims_clear (wyl_jwt_access_claims_t *claims)
   g_free (claims->tenant);
   g_free (claims->principal_state_at_issue);
   g_free (claims->session_id);
+  g_free (claims->auth_method);
+  g_free (claims->credential_id);
   memset (claims, 0, sizeof *claims);
 }
 
@@ -688,10 +730,10 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
     else if (g_strcmp0 (key, "aud") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_AUD,
           &claims->claims.audience);
-    else if (g_strcmp0 (key, "iat") == 0) {
-      gint64 ignored = 0;
-      rc = parse_int_claim_value (&p, claims, CLAIM_IAT, &ignored);
-    } else if (g_strcmp0 (key, "nbf") == 0)
+    else if (g_strcmp0 (key, "iat") == 0)
+      rc = parse_int_claim_value (&p, claims, CLAIM_IAT,
+          &claims->claims.issued_at);
+    else if (g_strcmp0 (key, "nbf") == 0)
       rc = parse_int_claim_value (&p, claims, CLAIM_NBF,
           &claims->claims.not_before);
     else if (g_strcmp0 (key, "exp") == 0)
@@ -706,7 +748,17 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
     else if (g_strcmp0 (key, "session_id") == 0)
       rc = parse_string_claim_value (&p, claims, CLAIM_SESSION_ID,
           &claims->claims.session_id);
-    else
+    else if (g_strcmp0 (key, "auth_method") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_AUTH_METHOD,
+          &claims->claims.auth_method);
+    else if (g_strcmp0 (key, "credential_id") == 0)
+      rc = parse_string_claim_value (&p, claims, CLAIM_CREDENTIAL_ID,
+          &claims->claims.credential_id);
+    else if (g_strcmp0 (key, "credential_generation") == 0) {
+      rc = mark_claim_seen (claims, CLAIM_CREDENTIAL_GENERATION);
+      if (rc == WYRELOG_E_OK)
+        rc = parse_json_full_uint64 (&p, &claims->claims.credential_generation);
+    } else
       return WYRELOG_E_POLICY;
     if (rc != WYRELOG_E_OK)
       return rc;
@@ -726,6 +778,28 @@ parse_jwt_payload_claims (const gchar *payload, ParsedJwtClaims *claims)
   if (*p != '\0')
     return WYRELOG_E_POLICY;
   if ((claims->seen_mask & CLAIM_REQUIRED_MASK) != CLAIM_REQUIRED_MASK)
+    return WYRELOG_E_POLICY;
+  guint service_seen = claims->seen_mask & CLAIM_SERVICE_MASK;
+  if (service_seen != 0 && service_seen != CLAIM_SERVICE_MASK)
+    return WYRELOG_E_POLICY;
+  if (service_seen == CLAIM_SERVICE_MASK
+      && (g_strcmp0 (claims->claims.auth_method,
+              "service_credential") != 0
+          || claims->claims.credential_generation == 0
+          || !canonical_id_text (claims->claims.jti)
+          || !canonical_id_text (claims->claims.session_id)
+          || g_strcmp0 (claims->claims.principal_state_at_issue,
+              "authenticated") != 0
+          || !wyl_policy_service_subject_is_valid (claims->claims.subject,
+              strlen (claims->claims.subject))
+          || !wyl_policy_store_tenant_id_is_valid (claims->claims.tenant)
+          || !wyl_service_credential_id_is_canonical (claims->
+              claims.credential_id, strlen (claims->claims.credential_id))
+          || claims->claims.not_before != claims->claims.issued_at
+          || claims->claims.issued_at >
+          G_MAXINT64 - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS
+          || claims->claims.expires_at !=
+          claims->claims.issued_at + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS))
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }

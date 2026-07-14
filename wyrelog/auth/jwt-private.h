@@ -8,6 +8,7 @@
 G_BEGIN_DECLS;
 
 #define WYL_JWT_ACCESS_TTL_SECONDS 900
+#define WYL_JWT_SERVICE_ACCESS_TTL_SECONDS 300
 
 typedef struct
 {
@@ -25,6 +26,20 @@ typedef struct
 
 typedef struct
 {
+  const gchar *key_id;
+  const gchar *jti;
+  const gchar *subject;
+  const gchar *issuer;
+  const gchar *audience;
+  const gchar *tenant;
+  const gchar *session_id;
+  const gchar *credential_id;
+  guint64 credential_generation;
+  gint64 issued_at;
+} wyl_jwt_service_issue_input_t;
+
+typedef struct
+{
   gchar *jti;
   gchar *subject;
   gchar *issuer;
@@ -32,6 +47,10 @@ typedef struct
   gchar *tenant;
   gchar *principal_state_at_issue;
   gchar *session_id;
+  gchar *auth_method;
+  gchar *credential_id;
+  guint64 credential_generation;
+  gint64 issued_at;
   gint64 not_before;
   gint64 expires_at;
 } wyl_jwt_access_claims_t;
@@ -49,6 +68,9 @@ wyrelog_error_t wyl_jwt_build_unsigned_segments (const wyl_jwt_issue_input_t *
     input, gchar ** out_header_segment, gchar ** out_payload_segment);
 wyrelog_error_t wyl_jwt_sign_hs256 (const wyl_jwt_issue_input_t * input,
     const guint8 * secret, gsize secret_len, gchar ** out_token);
+G_GNUC_INTERNAL wyrelog_error_t wyl_jwt_sign_hs256_service (const
+    wyl_jwt_service_issue_input_t * input, const guint8 * secret,
+    gsize secret_len, gchar ** out_token);
 wyrelog_error_t wyl_jwt_verify_hs256_signature (const gchar * token,
     const guint8 * secret, gsize secret_len, const gchar * expected_key_id,
     GBytes ** out_payload_json);
