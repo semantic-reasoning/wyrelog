@@ -225,7 +225,25 @@ struct _WylServiceAuthorityTransaction
   int participant_failure_sqlite_extended_error;
   gboolean fail_service_exchange_preallocation_once;
   gboolean fail_service_exchange_readback_once;
+  WylServiceExchangeReceipt *service_exchange_pending;
+  guint service_exchange_receipt_fail_allocation_at;
+  guint service_exchange_receipt_allocation_count;
+  gboolean fail_service_exchange_evidence_ref_once;
 };
+
+struct _WylServiceExchangeReceipt
+{
+  gint refs;
+  WylHandle *handle;
+  WylServiceExchangeIntentionRecord *record;
+  WylServiceExchangeIntentionClassification classification;
+  guint64 transaction_serial;
+  guint64 store_generation;
+  WylServiceAuthorityCommitEvidence *evidence;
+};
+
+static void
+service_exchange_pending_clear (WylServiceAuthorityTransaction * txn);
 
 typedef struct
 {
@@ -2585,6 +2603,15 @@ wyrelog_error_t
     txn->state = WYL_SERVICE_AUTHORITY_TXN_FAILED_COMMIT;
   }
   service_authority_transaction_finish (txn);
+  if (txn->primary_result != WYRELOG_E_OK
+      || txn->state != WYL_SERVICE_AUTHORITY_TXN_COMMITTED
+      || txn->cleanup_result != WYRELOG_E_OK || txn->owns_store_locks
+      || txn->service_exchange_pending == NULL
+      || txn->service_exchange_pending->evidence != txn->commit_evidence
+      || txn->service_exchange_pending->transaction_serial != txn->serial
+      || wyl_handle_policy_store_validate_generation (txn->handle, txn->store,
+          txn->service_exchange_pending->store_generation) != WYRELOG_E_OK)
+    service_exchange_pending_clear (txn);
   return txn->primary_result;
 }
 
@@ -2595,6 +2622,7 @@ wyrelog_error_t
       || txn->owner != g_thread_self () || !txn->owns_store_locks)
     return WYRELOG_E_INVALID;
 
+  service_exchange_pending_clear (txn);
   txn->primary_result = service_authority_transaction_restore (txn);
   txn->cleanup_result = txn->primary_result;
   txn->state = txn->primary_result == WYRELOG_E_OK
@@ -2783,6 +2811,7 @@ void wyl_policy_store_service_authority_transaction_free
   }
   if (txn->owns_store_locks)
     return;
+  service_exchange_pending_clear (txn);
   g_clear_pointer (&txn->commit_evidence,
       wyl_policy_store_service_authority_commit_evidence_unref);
   g_clear_object (&txn->handle);
@@ -6566,6 +6595,222 @@ service_exchange_record_new_from_input (const wyl_service_exchange_audit_input_t
   return record;
 }
 
+static gboolean
+service_exchange_receipt_allocation_allowed (WylServiceAuthorityTransaction
+    *txn)
+{
+  if (txn == NULL)
+    return TRUE;
+  txn->service_exchange_receipt_allocation_count++;
+  if (txn->service_exchange_receipt_fail_allocation_at ==
+      txn->service_exchange_receipt_allocation_count) {
+    txn->service_exchange_receipt_fail_allocation_at = 0;
+    return FALSE;
+  }
+  return TRUE;
+}
+
+static WylServiceExchangeIntentionRecord *
+service_exchange_record_clone (WylServiceAuthorityTransaction *txn,
+    const WylServiceExchangeIntentionRecord *source)
+{
+  WylServiceExchangeIntentionRecord *copy =
+      service_exchange_receipt_allocation_allowed (txn) ?
+      g_try_new0 (WylServiceExchangeIntentionRecord, 1) : NULL;
+  if (copy == NULL)
+    return NULL;
+  copy->service_principal = service_exchange_receipt_allocation_allowed (txn) ?
+      g_try_malloc (strlen (source->service_principal) + 1) : NULL;
+  copy->tenant_id = service_exchange_receipt_allocation_allowed (txn) ?
+      g_try_malloc (strlen (source->tenant_id) + 1) : NULL;
+  if (copy->service_principal == NULL || copy->tenant_id == NULL) {
+    wyl_service_exchange_intention_record_free (copy);
+    return NULL;
+  }
+  strcpy (copy->service_principal, source->service_principal);
+  strcpy (copy->tenant_id, source->tenant_id);
+  copy->material = source->material;
+  copy->material.canonical_payload = g_bytes_ref
+      (source->material.canonical_payload);
+  memcpy (copy->credential_id, source->credential_id,
+      sizeof copy->credential_id);
+  copy->credential_generation = source->credential_generation;
+  copy->created_at_us = source->created_at_us;
+  return copy;
+}
+
+WylServiceExchangeReceipt *
+wyl_service_exchange_receipt_ref (WylServiceExchangeReceipt *receipt)
+{
+  if (receipt == NULL)
+    return NULL;
+  gint refs;
+  do {
+    refs = g_atomic_int_get (&receipt->refs);
+    if (refs <= 0 || refs == G_MAXINT)
+      return NULL;
+  } while (!g_atomic_int_compare_and_exchange (&receipt->refs, refs, refs + 1));
+  return receipt;
+}
+
+void
+wyl_service_exchange_receipt_test_set_refcount_max (WylServiceExchangeReceipt
+    *receipt)
+{
+  if (receipt != NULL && g_atomic_int_get (&receipt->refs) == 1)
+    g_atomic_int_set (&receipt->refs, G_MAXINT);
+}
+
+void wyl_service_exchange_receipt_test_restore_refcount_one
+    (WylServiceExchangeReceipt * receipt)
+{
+  if (receipt != NULL && g_atomic_int_get (&receipt->refs) == G_MAXINT)
+    g_atomic_int_set (&receipt->refs, 1);
+}
+
+void
+wyl_service_exchange_receipt_unref (WylServiceExchangeReceipt *receipt)
+{
+  if (receipt == NULL || !g_atomic_int_dec_and_test (&receipt->refs))
+    return;
+  wyl_service_exchange_intention_record_free (receipt->record);
+  wyl_policy_store_service_authority_commit_evidence_unref (receipt->evidence);
+  g_clear_object (&receipt->handle);
+  sodium_memzero (receipt, sizeof *receipt);
+  g_free (receipt);
+}
+
+static void
+service_exchange_pending_clear (WylServiceAuthorityTransaction *txn)
+{
+  g_clear_pointer (&txn->service_exchange_pending,
+      wyl_service_exchange_receipt_unref);
+}
+
+static wyrelog_error_t
+service_exchange_pending_stage (WylServiceAuthorityTransaction *txn,
+    WylServiceExchangeIntentionClassification classification,
+    const WylServiceExchangeIntentionRecord *record)
+{
+  if (txn->service_exchange_pending != NULL)
+    return WYRELOG_E_POLICY;
+  guint64 generation = 0;
+  wyrelog_error_t rc = wyl_handle_policy_store_capture_generation (txn->handle,
+      txn->store, &generation);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  if (!txn->fail_service_exchange_evidence_ref_once)
+    evidence = wyl_policy_store_service_authority_commit_evidence_ref
+        (txn->commit_evidence);
+  txn->fail_service_exchange_evidence_ref_once = FALSE;
+  if (evidence == NULL)
+    return WYRELOG_E_INTERNAL;
+  WylServiceExchangeReceipt *pending =
+      service_exchange_receipt_allocation_allowed (txn) ?
+      g_try_new0 (WylServiceExchangeReceipt, 1) : NULL;
+  if (pending == NULL) {
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+    return WYRELOG_E_NOMEM;
+  }
+  pending->record = service_exchange_record_clone (txn, record);
+  if (pending->record == NULL) {
+    g_free (pending);
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+    return WYRELOG_E_NOMEM;
+  }
+  g_atomic_int_set (&pending->refs, 1);
+  pending->handle = g_object_ref (txn->handle);
+  pending->evidence = evidence;
+  pending->classification = classification;
+  pending->transaction_serial = txn->serial;
+  pending->store_generation = generation;
+  txn->service_exchange_pending = pending;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_service_exchange_receipt_dup_record (const WylServiceExchangeReceipt *r,
+    WylServiceExchangeIntentionRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (r == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  *out_record = service_exchange_record_clone (NULL, r->record);
+  return *out_record != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+WylServiceExchangeIntentionClassification
+wyl_service_exchange_receipt_get_classification (const WylServiceExchangeReceipt
+    *r)
+{
+  return r != NULL ? r->classification : WYL_SERVICE_EXCHANGE_INTENTION_NONE;
+}
+
+wyrelog_error_t
+wyl_service_exchange_receipt_validate_handle (const WylServiceExchangeReceipt
+    *receipt, WylHandle *handle, wyl_policy_store_t *store)
+{
+  if (receipt == NULL || handle == NULL || store == NULL
+      || receipt->handle != handle)
+    return WYRELOG_E_INVALID;
+  return wyl_handle_policy_store_validate_generation (handle, store,
+      receipt->store_generation);
+}
+
+wyrelog_error_t
+wyl_policy_store_service_exchange_receipt_take (WylServiceAuthorityTransaction
+    *txn, WylServiceAuthorityCommitEvidence *evidence, WylHandle *handle,
+    wyl_policy_store_t *store, WylServiceExchangeReceipt **out_receipt)
+{
+  if (out_receipt != NULL)
+    *out_receipt = NULL;
+  if (out_receipt == NULL || txn == NULL || evidence == NULL || handle == NULL
+      || store == NULL || txn->owner != g_thread_self ()
+      || txn->state != WYL_SERVICE_AUTHORITY_TXN_COMMITTED
+      || txn->primary_result != WYRELOG_E_OK
+      || txn->cleanup_result != WYRELOG_E_OK
+      || txn->commit_evidence != evidence || txn->handle != handle
+      || txn->store != store || txn->service_exchange_pending == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceExchangeReceipt *pending = txn->service_exchange_pending;
+  if (pending->evidence != evidence || pending->handle != handle
+      || pending->transaction_serial != txn->serial
+      || wyl_handle_policy_store_validate_generation (handle, store,
+          pending->store_generation) != WYRELOG_E_OK
+      ||
+      wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+      (evidence, handle, store) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  txn->service_exchange_pending = NULL;
+  *out_receipt = pending;
+  return WYRELOG_E_OK;
+}
+
+void wyl_policy_store_service_exchange_receipt_fail_allocation
+    (WylServiceAuthorityTransaction * txn, guint allocation_index)
+{
+  if (txn != NULL) {
+    txn->service_exchange_receipt_allocation_count = 0;
+    txn->service_exchange_receipt_fail_allocation_at = allocation_index;
+  }
+}
+
+guint
+wyl_policy_store_service_exchange_receipt_get_allocation_count (const
+    WylServiceAuthorityTransaction *txn)
+{
+  return txn != NULL ? txn->service_exchange_receipt_allocation_count : 0;
+}
+
+void wyl_policy_store_service_exchange_receipt_fail_evidence_ref_once
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn != NULL)
+    txn->fail_service_exchange_evidence_ref_once = TRUE;
+}
+
 /* Validate the authoritative row into storage allocated before INSERT.  Every
  * value is consumed from SQLite; equality permits retaining the preallocated
  * GBytes only after the row bytes themselves have been verified exactly. */
@@ -6698,6 +6943,12 @@ wyrelog_error_t
       wyl_service_exchange_intention_record_free (existing);
       return WYRELOG_E_POLICY;
     }
+    rc = service_exchange_pending_stage (txn,
+        WYL_SERVICE_EXCHANGE_INTENTION_REPLAY, existing);
+    if (rc != WYRELOG_E_OK) {
+      wyl_service_exchange_intention_record_free (existing);
+      return rc;
+    }
     *out_classification = WYL_SERVICE_EXCHANGE_INTENTION_REPLAY;
     *out_record = existing;
     return WYRELOG_E_OK;
@@ -6708,6 +6959,13 @@ wyrelog_error_t
   gsize payload_len = 0;
   const guint8 *payload = g_bytes_get_data (material.canonical_payload,
       &payload_len);
+  rc = service_exchange_pending_stage (txn,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED, prepared);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_exchange_intention_record_free (prepared);
+    wyl_service_exchange_audit_material_clear (&material);
+    return rc;
+  }
   sqlite3_stmt *stmt = NULL;
   rc = prepare_stmt (store->db,
       "INSERT INTO main.service_exchange_audit_intentions("
@@ -6763,6 +7021,7 @@ wyrelog_error_t
     rc = sqlite3_step (stmt) == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_IO;
   sqlite3_finalize (stmt);
   if (rc != WYRELOG_E_OK) {
+    service_exchange_pending_clear (txn);
     sqlite3_finalize (readback);
     if (insert_attempted)
       service_authority_transaction_fail_participant (txn, rc);
@@ -6774,6 +7033,7 @@ wyrelog_error_t
     txn->fail_service_exchange_readback_once = FALSE;
     sqlite3_finalize (readback);
     service_authority_transaction_fail_participant (txn, WYRELOG_E_IO);
+    service_exchange_pending_clear (txn);
     wyl_service_exchange_intention_record_free (prepared);
     wyl_service_exchange_audit_material_clear (&material);
     return WYRELOG_E_IO;
@@ -6792,6 +7052,7 @@ wyrelog_error_t
     prepared = NULL;
   } else {
     service_authority_transaction_fail_participant (txn, rc);
+    service_exchange_pending_clear (txn);
   }
   wyl_service_exchange_audit_material_clear (&material);
   wyl_service_exchange_intention_record_free (prepared);

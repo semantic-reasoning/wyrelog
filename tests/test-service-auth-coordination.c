@@ -2213,8 +2213,9 @@ test_service_exchange_intention_created_replay_rollback (void)
   g_assert_cmpstr (created->tenant_id, ==, "tenant-a");
   g_autoptr (WylServiceExchangeIntentionRecord) replay = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_append (txn,
-          store, &input, &classification, &replay), ==, WYRELOG_E_OK);
-  g_assert_cmpint (classification, ==, WYL_SERVICE_EXCHANGE_INTENTION_REPLAY);
+          store, &input, &classification, &replay), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (classification, ==, WYL_SERVICE_EXCHANGE_INTENTION_NONE);
+  g_assert_null (replay);
   g_autoptr (WylServiceExchangeIntentionRecord) loaded = NULL;
   g_assert_cmpint (wyl_policy_store_service_exchange_intention_load (txn,
           store, &input.intention_id, created->material.payload_digest,
