@@ -379,6 +379,68 @@ close_thread (gpointer data)
   return NULL;
 }
 
+typedef struct
+{
+  WylServiceAuthWriteLease *lease;
+  WylHandle *handle;
+  wyrelog_error_t rc;
+} TerminalizeThread;
+
+static gpointer
+terminalize_thread (gpointer data)
+{
+  TerminalizeThread *terminal = data;
+  terminal->rc = wyl_service_auth_write_lease_terminalize_cleanup
+      (terminal->lease, terminal->handle);
+  return NULL;
+}
+
+static void
+test_terminalize_cleanup_exact_token (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  g_autoptr (WylHandle) other = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (authority, handle, NULL, &lease), ==, WYRELOG_E_OK);
+
+  wyl_service_auth_write_lease_test_corrupt_serial (lease);
+  g_assert_cmpint (wyl_service_auth_write_lease_terminalize_cleanup
+      (lease, handle), ==, WYRELOG_E_INVALID);
+  wyl_service_auth_write_lease_test_corrupt_serial (lease);
+  g_assert_cmpint (wyl_service_auth_write_lease_terminalize_cleanup
+      (lease, other), ==, WYRELOG_E_INVALID);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (authority, handle, &reason), ==, WYRELOG_E_OK);
+
+  TerminalizeThread terminal = { lease, handle, WYRELOG_E_OK };
+  g_autoptr (GThread) wrong_owner = g_thread_new ("wrong-terminal-owner",
+      terminalize_thread, &terminal);
+  g_thread_join (g_steal_pointer (&wrong_owner));
+  g_assert_cmpint (terminal.rc, ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (authority, handle, &reason), ==, WYRELOG_E_OK);
+
+  CloseThread close = { authority, WYRELOG_E_INTERNAL };
+  g_autoptr (GThread) closer = g_thread_new ("terminal-close", close_thread,
+      &close);
+  wait_for_snapshot (authority, authority_is_closing);
+  g_assert_cmpint (wyl_service_auth_write_lease_terminalize_cleanup
+      (lease, handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (authority, handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+  g_thread_join (g_steal_pointer (&closer));
+  g_assert_cmpint (close.rc, ==, WYRELOG_E_OK);
+}
+
 static gpointer
 handle_shutdown_thread (gpointer data)
 {
@@ -1104,6 +1166,7 @@ typedef struct
 {
   sqlite3 *db;
   int rc;
+  int matrix_rc[5];
 } ConcurrentCommit;
 
 static gpointer
@@ -1114,13 +1177,29 @@ concurrent_commit_thread (gpointer data)
   return NULL;
 }
 
-static void
-concurrent_commit_checkpoint (gpointer data)
+typedef struct
 {
-  ConcurrentCommit *commit = data;
-  g_autoptr (GThread) thread = g_thread_new ("poison-commit",
-      concurrent_commit_thread, commit);
-  g_thread_join (g_steal_pointer (&thread));
+  WylServiceAuthorityTransaction *txn;
+  ConcurrentCommit *commit;
+} AbortBarrierObserver;
+
+static gpointer
+abort_barrier_observer_thread (gpointer data)
+{
+  AbortBarrierObserver *observer = data;
+  wyl_policy_store_service_authority_transaction_abort_barrier_wait
+      (observer->txn);
+  concurrent_commit_thread (observer->commit);
+  const gchar *sql[] = {
+    "SELECT 1;", "CREATE TABLE poison_probe(x);", "SAVEPOINT poison_probe;",
+    "PRAGMA user_version;", "ROLLBACK;",
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (sql); i++)
+    observer->commit->matrix_rc[i] = sqlite3_exec (observer->commit->db,
+        sql[i], NULL, NULL, NULL);
+  wyl_policy_store_service_authority_transaction_abort_barrier_release
+      (observer->txn);
+  return NULL;
 }
 
 static void
@@ -1159,17 +1238,178 @@ test_authority_transaction_preserves_commit_cleanup_failure (void)
   g_assert_cmpint
       (wyl_policy_store_service_authority_transaction_get_recovery_sqlite_extended_error
       (txn), ==, SQLITE_AUTH);
-  ConcurrentCommit concurrent = { db, SQLITE_OK };
-  wyl_policy_store_service_authority_transaction_set_abort_checkpoint (txn,
-      concurrent_commit_checkpoint, &concurrent);
+  ConcurrentCommit concurrent = {.db = db,.rc = SQLITE_OK };
+  wyl_policy_store_service_authority_transaction_abort_barrier_arm (txn);
+  AbortBarrierObserver observer = { txn, &concurrent };
+  g_autoptr (GThread) commit_thread = g_thread_new ("poison-commit",
+      abort_barrier_observer_thread, &observer);
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_abort (txn),
       ==, WYRELOG_E_OK);
+  g_thread_join (g_steal_pointer (&commit_thread));
   g_assert_cmpint (concurrent.rc, ==, SQLITE_AUTH);
+  for (guint i = 0; i < G_N_ELEMENTS (concurrent.matrix_rc); i++)
+    g_assert_cmpint (concurrent.matrix_rc[i], ==, SQLITE_AUTH);
   g_assert_false (wyl_policy_store_service_authority_transaction_is_poisoned
       (store));
   g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
       WYRELOG_E_OK);
   wyl_service_auth_write_lease_free (lease);
+}
+
+typedef struct
+{
+  WylServiceAuthorityTransaction *txn;
+  WylServiceAuthAuthority *authority;
+  WylHandle *handle;
+  WylServiceAuthReadLease *lease;
+  wyrelog_error_t rc;
+} CleanupBarrierObserver;
+
+static gpointer
+cleanup_barrier_observer_thread (gpointer data)
+{
+  CleanupBarrierObserver *observer = data;
+  wyl_policy_store_service_authority_transaction_cleanup_barrier_wait
+      (observer->txn);
+  observer->rc = wyl_service_auth_authority_acquire_read
+      (observer->authority, observer->handle, NULL, &observer->lease);
+  wyl_policy_store_service_authority_transaction_cleanup_barrier_release
+      (observer->txn);
+  return NULL;
+}
+
+static void
+test_authority_transaction_cleanup_after_faults (void)
+{
+  const WylPolicyAuthorityTransactionFailStage stages[] = {
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AND_CLAIM_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_LEASE_SERIAL_AT_FINISH,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (stages); i++) {
+    g_autoptr (WylHandle) handle = new_store_handle ();
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    WylServiceAuthWriteLease *lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        ==, WYRELOG_E_OK);
+    wyl_policy_store_service_authority_transaction_fail_once (store, stages[i]);
+    g_autoptr (WylServiceAuthorityTransaction) txn = NULL;
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+        (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+    WylServiceAuthorityCommitEvidence *evidence = NULL;
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_prepare_commit_evidence (txn,
+            store, &evidence), ==, WYRELOG_E_OK);
+    CleanupBarrierObserver cleanup_observer = { 0 };
+    g_autoptr (GThread) cleanup_thread = NULL;
+    if (stages[i] == WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_BEFORE) {
+      wyl_policy_store_service_authority_transaction_cleanup_barrier_arm (txn);
+      cleanup_observer.txn = txn;
+      cleanup_observer.authority =
+          wyl_handle_get_service_auth_authority (handle);
+      cleanup_observer.handle = handle;
+      cleanup_thread = g_thread_new ("cleanup-observer",
+          cleanup_barrier_observer_thread, &cleanup_observer);
+    }
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+        (txn), ==, WYRELOG_E_OK);
+    if (cleanup_thread != NULL) {
+      g_thread_join (g_steal_pointer (&cleanup_thread));
+      g_assert_cmpint (cleanup_observer.rc, ==, WYRELOG_E_BUSY);
+      g_assert_null (cleanup_observer.lease);
+    }
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_get_cleanup_result
+        (txn), ==, WYRELOG_E_INTERNAL);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+        (evidence, handle, store), ==, WYRELOG_E_OK);
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+        WYRELOG_E_OK);
+    wyl_service_auth_write_lease_free (lease);
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  }
+}
+
+static void
+test_authority_transaction_authorizer_faults (void)
+{
+  const WylPolicyAuthorityTransactionFailStage stages[] = {
+    WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_INSTALL,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_REMOVE,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (stages); i++) {
+    g_autoptr (WylHandle) handle = new_store_handle ();
+    wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+    WylServiceAuthWriteLease *lease = NULL;
+    g_assert_cmpint (wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
+        ==, WYRELOG_E_OK);
+    wyl_policy_store_service_authority_transaction_fail_once (store, stages[i]);
+    g_autoptr (WylServiceAuthorityTransaction) txn = NULL;
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+        (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+        (txn), ==, WYRELOG_E_IO);
+    if (stages[i] == WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_INSTALL) {
+      g_assert_false
+          (wyl_policy_store_service_authority_transaction_is_poisoned (store));
+      g_assert_true
+          (wyl_policy_store_service_authority_transaction_test_poison_identity_is_clear
+          (txn));
+      g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+          WYRELOG_E_OK);
+      wyl_service_auth_write_lease_free (lease);
+      continue;
+    }
+    g_assert_true (wyl_policy_store_service_authority_transaction_is_poisoned
+        (store));
+    wyl_policy_store_service_authority_transaction_test_set_poison_identity
+        (txn, TRUE, FALSE);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_abort (txn), ==,
+        WYRELOG_E_INVALID);
+    g_assert_true (wyl_policy_store_service_authority_transaction_is_poisoned
+        (store));
+    wyl_policy_store_service_authority_transaction_test_set_poison_identity
+        (txn, FALSE, TRUE);
+    g_assert_cmpint
+        (wyl_policy_store_service_authority_transaction_abort (txn), ==,
+        WYRELOG_E_INVALID);
+    g_assert_true (wyl_policy_store_service_authority_transaction_is_poisoned
+        (store));
+    wyl_policy_store_service_authority_transaction_test_set_poison_identity
+        (txn, TRUE, TRUE);
+    wyl_service_auth_write_lease_test_corrupt_serial (lease);
+    wyrelog_error_t abort_rc =
+        wyl_policy_store_service_authority_transaction_abort (txn);
+    g_assert_cmpint (abort_rc, ==,
+        stages[i] == WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_REMOVE
+        ? WYRELOG_E_INTERNAL : WYRELOG_E_OK);
+    g_assert_true
+        (wyl_policy_store_service_authority_transaction_test_poison_identity_is_clear
+        (txn));
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_BUSY);
+    g_assert_cmpint (reason, ==,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+        WYRELOG_E_OK);
+    wyl_service_auth_write_lease_free (lease);
+    g_assert_cmpint (wyl_handle_shutdown_ordered (handle), ==, WYRELOG_E_OK);
+  }
 }
 
 typedef struct
@@ -2207,6 +2447,8 @@ main (int argc, char **argv)
       test_writer_cancellation_restores_progress);
   g_test_add_func ("/service-auth/authority/close-drain",
       test_close_wakes_and_drains);
+  g_test_add_func ("/service-auth/unavailable/terminal-exact-token",
+      test_terminalize_cleanup_exact_token);
   g_test_add_func ("/service-auth/authority/handle-shutdown-drains-pins",
       test_handle_shutdown_wakes_queued_leases_and_drains_pins);
   g_test_add_func ("/service-auth/unavailable/validation-waiters-first-reason",
@@ -2231,6 +2473,10 @@ main (int argc, char **argv)
       test_authority_transaction_poison_on_failed_rollback);
   g_test_add_func ("/service-auth/transaction/commit-cleanup-failure",
       test_authority_transaction_preserves_commit_cleanup_failure);
+  g_test_add_func ("/service-auth/transaction/cleanup-after-faults",
+      test_authority_transaction_cleanup_after_faults);
+  g_test_add_func ("/service-auth/transaction/authorizer-faults",
+      test_authority_transaction_authorizer_faults);
   g_test_add_func ("/service-auth/transaction/pin-precedes-shutdown",
       test_authority_transaction_pin_precedes_shutdown);
   g_test_add_func ("/service-auth/evidence/commit-lifetime",

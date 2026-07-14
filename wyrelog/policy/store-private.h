@@ -54,6 +54,14 @@ typedef enum
   WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER,
   WYL_POLICY_AUTHORITY_TXN_FAIL_ROLLBACK,
   WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AFTER,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_AFTER,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AND_CLAIM_AFTER,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_INSTALL,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_REMOVE,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_BEFORE,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_BEFORE,
+  WYL_POLICY_AUTHORITY_TXN_FAIL_LEASE_SERIAL_AT_FINISH,
 } WylPolicyAuthorityTransactionFailStage;
 
 typedef struct wyl_policy_store_cvk_runtime_t
@@ -460,9 +468,18 @@ wyl_policy_store_service_authority_transaction_get_primary_sqlite_extended_error
 int
 wyl_policy_store_service_authority_transaction_get_recovery_sqlite_extended_error
     (const WylServiceAuthorityTransaction * transaction);
-void wyl_policy_store_service_authority_transaction_set_abort_checkpoint
-    (WylServiceAuthorityTransaction * transaction,
-    void (*checkpoint) (gpointer data), gpointer data);
+void wyl_policy_store_service_authority_transaction_abort_barrier_arm
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_abort_barrier_wait
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_abort_barrier_release
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_cleanup_barrier_arm
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_cleanup_barrier_wait
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_cleanup_barrier_release
+    (WylServiceAuthorityTransaction * transaction);
 void wyl_policy_store_service_authority_transaction_free
     (WylServiceAuthorityTransaction * transaction);
 
@@ -545,6 +562,12 @@ void wyl_policy_store_service_authority_transaction_test_fail_intent_once
 gboolean
     wyl_policy_store_service_authority_transaction_is_poisoned
     (wyl_policy_store_t * store);
+void wyl_policy_store_service_authority_transaction_test_set_poison_identity
+    (WylServiceAuthorityTransaction * transaction, gboolean owner_exact,
+    gboolean serial_exact);
+gboolean
+    wyl_policy_store_service_authority_transaction_test_poison_identity_is_clear
+    (WylServiceAuthorityTransaction * transaction);
 
 /* Owned-output contract for the service lookup/load APIs below:
  * - On first use, the caller MUST pass an output initialized to { 0 }.

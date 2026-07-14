@@ -96,6 +96,13 @@ wyl_service_auth_rank_leave (WylHandle *handle, WylServiceAuthRank rank)
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_service_auth_rank_leave_expected (WylHandle *handle,
+    WylServiceAuthRank rank)
+{
+  return wyl_service_auth_rank_leave (handle, rank);
+}
+
 struct _WylServiceAuthReadLease
 {
   WylServiceAuthAuthority *authority;
@@ -477,7 +484,7 @@ wyrelog_error_t
     WylServiceAuthUnavailableReason reason) {
   if (lease == NULL || !WYL_IS_HANDLE (handle)
       || reason < WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT
-      || reason > WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT)
+      || reason > WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT)
     return WYRELOG_E_INVALID;
 
   WylServiceAuthAuthority *authority = lease->authority;
@@ -490,6 +497,58 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK) {
     wyl_handle_service_auth_set_unavailable_reason_locked (handle, reason);
     lease->cleanup_only = TRUE;
+    g_cond_broadcast (&authority->changed);
+  }
+  g_mutex_unlock (&authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_write_lease_terminalize_cleanup
+    (WylServiceAuthWriteLease * lease, WylHandle * handle) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  WylServiceAuthAuthority *authority = lease->authority;
+  g_mutex_lock (&authority->mutex);
+  wyrelog_error_t rc = lease->handle == handle && authority->handle == handle
+      && lease->owner == g_thread_self ()
+      && lease->state == WYL_SERVICE_AUTH_LEASE_ACTIVE
+      && authority->writer_active
+      && authority->writer_owner == lease->owner
+      && authority->writer_serial == lease->serial
+      ? WYRELOG_E_OK : WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK) {
+    wyl_handle_service_auth_set_unavailable_reason_locked (handle,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    lease->cleanup_only = TRUE;
+    g_cond_broadcast (&authority->changed);
+  }
+  g_mutex_unlock (&authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_write_lease_terminalize_store_fallback
+    (WylServiceAuthWriteLease * lease, WylHandle * handle,
+    guint64 originating_writer_serial) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle)
+      || originating_writer_serial == 0)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthAuthority *authority = lease->authority;
+  g_mutex_lock (&authority->mutex);
+  wyrelog_error_t rc = authority->handle == handle && lease->handle == handle
+      && lease->authority == authority
+      && lease->state == WYL_SERVICE_AUTH_LEASE_ACTIVE
+      && lease->owner == g_thread_self () && authority->writer_active
+      && authority->writer_owner == g_thread_self ()
+      && authority->writer_serial == originating_writer_serial
+      ? WYRELOG_E_OK : WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK) {
+    lease->serial = originating_writer_serial;
+    lease->transaction_claimed = FALSE;
+    lease->cleanup_only = TRUE;
+    wyl_handle_service_auth_set_unavailable_reason_locked (handle,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
     g_cond_broadcast (&authority->changed);
   }
   g_mutex_unlock (&authority->mutex);
