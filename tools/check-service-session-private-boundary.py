@@ -485,19 +485,21 @@ def flatten_expansion(expansion: Expansion) -> str:
 def dependency_prefix(path: Path, bases: tuple[Path, ...]) -> Path | None:
     """Return the vendored dependency tree containing @path, if any.
 
-    A dependency installed inside the checkout is still a dependency.  Windows
-    CI clones vcpkg into the workspace, so its installed headers sit under the
-    project root and would otherwise be distilled as project source: glib and
-    libsoup alone exhaust the expansion budget, while POSIX runners resolve the
-    same headers outside the tree and leave them to the real preprocessor.
-    Honour the vcpkg sentinel rather than a directory name so the layout, not
-    the platform, decides.
+    A dependency installed inside the checkout is still a dependency.  Its
+    headers sit under the project root and would otherwise be distilled as
+    project source, and glib and libsoup alone exhaust the expansion budget;
+    installed outside the tree, the same headers are left to the real
+    preprocessor.  Honour the vcpkg sentinel rather than a directory name so
+    the layout, not the platform, decides.
+
+    CI installs its dependencies outside the checkout, so this guards the
+    developer who vendors one in-tree rather than any configured runner.
 
     Only vendored trees strictly inside a local base qualify.  The search stops
     at the base so a sentinel at or above the checkout cannot classify the
     project itself as a dependency and silently disable distillation.  This
-    recognises the classic vcpkg clone that CI installs; a manifest-mode
-    `vcpkg_installed/` carries no sentinel and is not detected here.
+    recognises a classic vcpkg clone; a manifest-mode `vcpkg_installed/`
+    carries no sentinel and is not detected here.
     """
     for parent in path.parents:
         if parent in bases:
