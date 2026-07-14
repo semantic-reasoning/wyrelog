@@ -13,8 +13,12 @@
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/auth/mfa-enrollment-private.h"
 #include "wyrelog/auth/service-credential-private.h"
+#include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/auth/totp.h"
 #include "wyrelog/policy/store-private.h"
+#ifdef WYL_TEST_DAEMON_HTTP
+#include "wyrelog/wyl-session-layout-private.h"
+#endif
 #ifdef WYL_HAS_FACT_STORE
 #include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
@@ -166,6 +170,12 @@ typedef struct
    */
   GHashTable *revoked_session_tokens;
   GMutex lock;
+#ifdef WYL_TEST_DAEMON_HTTP
+  WylDaemonServiceResolverCheckpoint resolver_checkpoint;
+  gpointer resolver_checkpoint_data;
+  gboolean fail_next_resolver_read_release;
+  guint resolver_terminal_entries;
+#endif
 } WylDaemonHttpContext;
 
 typedef struct
@@ -859,6 +869,336 @@ wyl_daemon_http_access_token_is_active_for_test (SoupServer *server,
   return wyl_daemon_http_context_access_token_is_active (ctx, &claims, now);
 }
 
+wyrelog_error_t
+wyl_daemon_http_seed_service_session_for_test (SoupServer *server,
+    WylSession *session, const gchar *session_id, const gchar *jti,
+    const gchar *credential_id, guint64 generation, const gchar *principal,
+    const gchar *tenant, gint registry_state)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) session_id,
+    .jti = (gchar *) jti,
+    .credential_id = (gchar *) credential_id,
+    .generation = generation,
+    .principal = (gchar *) principal,
+    .tenant = (gchar *) tenant,
+  };
+  wyrelog_error_t rc = wyl_service_auth_registry_reserve
+      (ctx->service_auth_registry, &reservation);
+  gboolean changed = FALSE;
+  if (rc == WYRELOG_E_OK && registry_state >= WYL_SERVICE_AUTH_ACTIVE)
+    rc = wyl_service_auth_registry_activate (ctx->service_auth_registry,
+        &reservation, &changed);
+  if (rc == WYRELOG_E_OK && registry_state == WYL_SERVICE_AUTH_REVOKED)
+    rc = wyl_service_auth_registry_revoke_exact (ctx->service_auth_registry,
+        &reservation, &changed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_replace (ctx->sessions_by_token, g_strdup (session_id),
+      g_object_ref (session));
+  g_mutex_unlock (&ctx->lock);
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_daemon_http_set_service_resolver_checkpoint_for_test (SoupServer *server,
+    WylDaemonServiceResolverCheckpoint checkpoint, gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  ctx->resolver_checkpoint = checkpoint;
+  ctx->resolver_checkpoint_data = data;
+}
+
+void wyl_daemon_http_fail_next_service_resolver_read_release_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx != NULL)
+    ctx->fail_next_resolver_read_release = TRUE;
+}
+
+guint wyl_daemon_http_service_resolver_terminal_entries_for_test
+    (SoupServer * server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return ctx != NULL ? ctx->resolver_terminal_entries : 0;
+}
+
+static void
+service_resolver_terminal_entry_for_test (gpointer data)
+{
+  guint *entries = data;
+  (*entries)++;
+}
+
+wyrelog_error_t
+wyl_daemon_http_service_registry_transition_for_test (SoupServer *server,
+    const gchar *session_id, const gchar *jti, const gchar *credential_id,
+    guint64 generation, const gchar *principal, const gchar *tenant,
+    gint operation, gboolean *out_changed)
+{
+  if (out_changed != NULL)
+    *out_changed = FALSE;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || out_changed == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) session_id,.jti = (gchar *) jti,
+    .credential_id = (gchar *) credential_id,.generation = generation,
+    .principal = (gchar *) principal,.tenant = (gchar *) tenant,
+  };
+  switch (operation) {
+    case WYL_DAEMON_SERVICE_REGISTRY_RESERVE:
+      return wyl_service_auth_registry_reserve (ctx->service_auth_registry,
+          &reservation);
+    case WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE:
+      return wyl_service_auth_registry_activate (ctx->service_auth_registry,
+          &reservation, out_changed);
+    case WYL_DAEMON_SERVICE_REGISTRY_REVOKE:
+      return wyl_service_auth_registry_revoke_exact (ctx->service_auth_registry,
+          &reservation, out_changed);
+    case WYL_DAEMON_SERVICE_REGISTRY_REMOVE:
+      return wyl_service_auth_registry_remove_exact (ctx->service_auth_registry,
+          &reservation, out_changed);
+    default:
+      return WYRELOG_E_INVALID;
+  }
+}
+
+gboolean
+wyl_daemon_http_replace_session_for_test (SoupServer *server,
+    const gchar *session_id, WylSession *session)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session_id == NULL || session == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  g_hash_table_replace (ctx->sessions_by_token, g_strdup (session_id),
+      g_object_ref (session));
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+}
+
+gboolean
+wyl_daemon_http_seed_human_session_for_test (SoupServer *server,
+    const gchar *session_id, const gchar *subject, const gchar *tenant)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  wyl_id_t id = WYL_ID_NIL;
+  if (ctx == NULL || wyl_id_parse (session_id, &id) != WYRELOG_E_OK
+      || subject == NULL || tenant == NULL)
+    return FALSE;
+  g_autoptr (WylSession) session = g_object_new (WYL_TYPE_SESSION, NULL);
+  session->id = id;
+  session->username = g_strdup (subject);
+  session->tenant = g_strdup (tenant);
+  session->state = WYL_SESSION_STATE_ACTIVE;
+  session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+  return wyl_daemon_http_replace_session_for_test (server, session_id, session);
+}
+
+wyrelog_error_t
+wyl_daemon_http_configure_tenant_for_test (SoupServer *server,
+    const gchar *tenant, gboolean create, gboolean sealed)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc == WYRELOG_E_OK && create) {
+    gboolean created = FALSE;
+    rc = wyl_policy_store_create_tenant (write.store, tenant, &created);
+    if (rc == WYRELOG_E_OK && !created)
+      rc = WYRELOG_E_POLICY;
+  }
+  return rc == WYRELOG_E_OK ? wyl_policy_store_set_tenant_sealed (write.store,
+      tenant, sealed) : rc;
+}
+
+gboolean
+wyl_daemon_http_remove_access_token_for_test (SoupServer *server,
+    const gchar *jti)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || jti == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  gboolean removed = g_hash_table_remove (ctx->access_tokens_by_jti, jti);
+  g_mutex_unlock (&ctx->lock);
+  return removed;
+}
+
+gboolean
+wyl_daemon_http_revoke_access_token_for_test (SoupServer *server,
+    const gchar *jti)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || jti == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylAccessTokenState *state = g_hash_table_lookup
+      (ctx->access_tokens_by_jti, jti);
+  if (state != NULL)
+    state->revoked = TRUE;
+  g_mutex_unlock (&ctx->lock);
+  return state != NULL;
+}
+
+gboolean
+wyl_daemon_http_mutate_access_token_for_test (SoupServer *server,
+    const gchar *lookup_jti, gint field, const gchar *text, guint64 number)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || lookup_jti == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylAccessTokenState *state = g_hash_table_lookup
+      (ctx->access_tokens_by_jti, lookup_jti);
+  if (state == NULL)
+    goto invalid;
+  gchar **slot = NULL;
+  switch (field) {
+    case WYL_DAEMON_SERVICE_TOKEN_EXPIRES:
+      state->expires_at = (gint64) number;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_SESSION_ID:
+      slot = &state->session_id;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_JTI:
+      slot = &state->jti;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_SUBJECT:
+      slot = &state->subject;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_TENANT:
+      slot = &state->tenant;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_KEY_ID:
+      slot = &state->key_id;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_AUTH_METHOD:
+      state->auth_method = (wyl_session_auth_method_t) number;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_CREDENTIAL:
+      slot = &state->credential_id;
+      break;
+    case WYL_DAEMON_SERVICE_TOKEN_GENERATION:
+      state->credential_generation = number;
+      break;
+    default:
+      goto invalid;
+  }
+  if (slot != NULL) {
+    g_free (*slot);
+    *slot = g_strdup (text);
+  }
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+invalid:
+  g_mutex_unlock (&ctx->lock);
+  return FALSE;
+}
+
+void
+wyl_daemon_http_service_authority_snapshot_for_test (SoupServer *server,
+    WylServiceAuthAuthoritySnapshot *out_snapshot)
+{
+  memset (out_snapshot, 0, sizeof *out_snapshot);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx != NULL)
+    wyl_service_auth_authority_snapshot
+        (wyl_handle_get_service_auth_authority (ctx->handle), out_snapshot);
+}
+
+wyrelog_error_t
+wyl_daemon_http_latch_service_unavailable_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
+      &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_write_lease_mark_unavailable (lease, ctx->handle,
+        WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
+  }
+  return rc;
+}
+
+gboolean
+wyl_daemon_http_mutate_service_session_for_test (SoupServer *server,
+    const gchar *session_id, gint field, const gchar *text, guint64 number)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session_id == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylSession *session = g_hash_table_lookup (ctx->sessions_by_token,
+      session_id);
+  if (session == NULL) {
+    g_mutex_unlock (&ctx->lock);
+    return FALSE;
+  }
+  switch (field) {
+    case WYL_DAEMON_SERVICE_SESSION_INACTIVE:
+      session->state = WYL_SESSION_STATE_CLOSED;
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_AUTH_METHOD:
+      session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_ID:
+      if (text == NULL || wyl_id_parse (text, &session->id) != WYRELOG_E_OK)
+        goto invalid;
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_JTI:
+      g_free (session->service_jti);
+      session->service_jti = g_strdup (text);
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_SUBJECT:
+      g_free (session->service_subject_id);
+      session->service_subject_id = g_strdup (text);
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_TENANT:
+      g_free (session->tenant);
+      session->tenant = g_strdup (text);
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_CREDENTIAL:
+      g_free (session->service_credential_id);
+      session->service_credential_id = g_strdup (text);
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_GENERATION:
+      session->service_credential_generation = number;
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_ISSUED_AT:
+      session->service_issued_at_seconds = (gint64) number;
+      break;
+    case WYL_DAEMON_SERVICE_SESSION_EXPIRES_AT:
+      session->service_expires_at_seconds = (gint64) number;
+      break;
+    default:
+      goto invalid;
+  }
+  g_mutex_unlock (&ctx->lock);
+  return TRUE;
+invalid:
+  g_mutex_unlock (&ctx->lock);
+  return FALSE;
+}
+
 void wyl_daemon_access_token_snapshot_clear
     (wyl_daemon_access_token_snapshot_t * snapshot)
 {
@@ -1397,18 +1737,7 @@ lookup_bearer_token (SoupServerMessage *msg)
   return token;
 }
 
-/*
- * Bearer-token auth resolver. Defense-in-depth tenant gate: after
- * the signature/issuer/audience/exp verifier passes and the access
- * claims are parsed, we directly require that the JWT's tenant
- * claim is one of the daemon's active tenants. On miss, we surface the
- * stable wire code
- * WYL_DAEMON_ERR_TENANT_INVALID through *out_auth_error_code so the
- * caller can emit it instead of the generic auth_required code.
- * out_auth_error_code may be NULL; callers that don't need the
- * specific reason still get WYRELOG_E_POLICY and can fall back to
- * their handler-family auth_required code.
- */
+/* Sole bearer resolver for human and service credentials. */
 static wyrelog_error_t
 resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     const gchar *token, WylDaemonAuthContext *out_auth,
@@ -1438,6 +1767,147 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   rc = wyl_jwt_parse_access_claims_json (payload, &claims);
   if (rc != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
+  if (g_strcmp0 (claims.auth_method, "service_credential") == 0) {
+    WylServiceAuthReadLease *lease = NULL;
+    WylServiceAuthReservation reservation = { 0 };
+    WylServiceAuthState registry_state = WYL_SERVICE_AUTH_PENDING;
+    gboolean found = FALSE, tenant_exists = FALSE, tenant_active = FALSE;
+    WylServiceAuthUnavailableReason unavailable_reason =
+        WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    wyl_policy_store_t *store = NULL;
+    g_autoptr (WylSession) service_session = NULL;
+    g_autofree gchar *session_id = NULL;
+    g_autofree gchar *actor = NULL;
+    g_autofree gchar *tenant = NULL;
+    g_autofree gchar *live_jti = NULL;
+    g_autofree gchar *live_subject = NULL;
+    g_autofree gchar *live_tenant = NULL;
+    g_autofree gchar *live_credential = NULL;
+    wyl_id_t persistent_id = WYL_ID_NIL;
+    gchar persistent_text[WYL_ID_STRING_BUF];
+#ifdef WYL_TEST_DAEMON_HTTP
+    ctx->resolver_terminal_entries = 0;
+#endif
+
+    rc = wyl_service_auth_authority_acquire_read
+        (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle,
+        NULL, &lease);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_auth_authority_validate_available
+          (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle,
+          &unavailable_reason);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_auth_read_lease_get_policy_store (lease, ctx->handle,
+          &store);
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_policy_store_tenant_exists (store, claims.tenant,
+          &tenant_exists);
+      if (rc != WYRELOG_E_OK || !tenant_exists) {
+        if (out_auth_error_code != NULL)
+          *out_auth_error_code = WYL_DAEMON_ERR_TENANT_INVALID;
+        rc = WYRELOG_E_POLICY;
+      }
+    }
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_policy_store_tenant_is_active (store, claims.tenant,
+          &tenant_active);
+      if (rc != WYRELOG_E_OK || !tenant_active) {
+        if (out_auth_error_code != NULL)
+          *out_auth_error_code = WYL_DAEMON_ERR_TENANT_SEALED;
+        rc = WYRELOG_E_POLICY;
+      }
+    }
+    if (rc == WYRELOG_E_OK
+        && !wyl_daemon_http_context_service_access_token_is_exact (ctx,
+            claims.jti, claims.session_id, claims.subject, claims.tenant,
+            ctx->access_token_key_id, claims.expires_at,
+            WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, claims.credential_id,
+            claims.credential_generation, now))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      service_session = wyl_daemon_http_ref_session (server, claims.session_id);
+      if (service_session == NULL
+          || wyl_session_get_auth_method_private (service_session)
+          != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+          || !wyl_session_is_active_private (service_session))
+        rc = WYRELOG_E_POLICY;
+    }
+    if (rc == WYRELOG_E_OK) {
+      live_jti = wyl_session_dup_service_jti_private (service_session);
+      live_subject = wyl_session_dup_service_subject_private (service_session);
+      live_tenant = wyl_session_dup_service_tenant_private (service_session);
+      live_credential = wyl_session_dup_service_credential_id_private
+          (service_session);
+      if (wyl_session_copy_persistent_id_private (service_session,
+              &persistent_id) != WYRELOG_E_OK
+          || wyl_id_format (&persistent_id, persistent_text,
+              sizeof persistent_text) != WYRELOG_E_OK
+          || g_strcmp0 (persistent_text, claims.session_id) != 0
+          || g_strcmp0 (live_jti, claims.jti) != 0
+          || g_strcmp0 (live_subject, claims.subject) != 0
+          || g_strcmp0 (live_tenant, claims.tenant) != 0
+          || g_strcmp0 (live_credential, claims.credential_id) != 0
+          || wyl_session_get_service_credential_generation_private
+          (service_session) != claims.credential_generation
+          || wyl_session_get_service_issued_at_seconds_private
+          (service_session) != claims.issued_at
+          || wyl_session_get_service_expires_at_seconds_private
+          (service_session) != claims.expires_at)
+        rc = WYRELOG_E_POLICY;
+    }
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_service_auth_registry_lookup (ctx->service_auth_registry,
+          claims.session_id, claims.jti, &reservation, &registry_state, &found);
+      if (rc != WYRELOG_E_OK || !found
+          || registry_state != WYL_SERVICE_AUTH_ACTIVE
+          || g_strcmp0 (reservation.session_id, claims.session_id) != 0
+          || g_strcmp0 (reservation.jti, claims.jti) != 0
+          || g_strcmp0 (reservation.credential_id, claims.credential_id) != 0
+          || reservation.generation != claims.credential_generation
+          || g_strcmp0 (reservation.principal, claims.subject) != 0
+          || g_strcmp0 (reservation.tenant, claims.tenant) != 0)
+        rc = WYRELOG_E_POLICY;
+    }
+    if (rc == WYRELOG_E_OK) {
+      session_id = g_strdup (claims.session_id);
+      actor = g_strdup (claims.subject);
+      tenant = g_strdup (claims.tenant);
+      out_auth->session_id = g_steal_pointer (&session_id);
+      out_auth->actor = g_steal_pointer (&actor);
+      out_auth->tenant = g_steal_pointer (&tenant);
+      out_auth->bearer = TRUE;
+#ifdef WYL_TEST_DAEMON_HTTP
+      if (ctx->resolver_checkpoint != NULL)
+        ctx->resolver_checkpoint (WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED,
+            ctx->resolver_checkpoint_data);
+#endif
+    }
+    if (lease != NULL) {
+#ifdef WYL_TEST_DAEMON_HTTP
+      wyl_service_auth_read_lease_test_set_terminal_checkpoint (lease,
+          service_resolver_terminal_entry_for_test,
+          &ctx->resolver_terminal_entries);
+      if (ctx->fail_next_resolver_read_release) {
+        ctx->fail_next_resolver_read_release = FALSE;
+        wyl_service_auth_read_lease_test_fail_terminal_prevalidation (lease);
+      }
+#endif
+      wyrelog_error_t release_rc =
+          wyl_service_auth_read_lease_release_terminal (&lease);
+      if (release_rc != WYRELOG_E_OK)
+        rc = release_rc;
+#ifdef WYL_TEST_DAEMON_HTTP
+      if (ctx->resolver_checkpoint != NULL)
+        ctx->resolver_checkpoint (WYL_DAEMON_SERVICE_RESOLVER_RELEASED,
+            ctx->resolver_checkpoint_data);
+#endif
+    }
+    wyl_service_auth_reservation_clear (&reservation);
+    if (rc != WYRELOG_E_OK)
+      wyl_daemon_auth_context_clear (out_auth);
+    wyl_jwt_access_claims_clear (&claims);
+    return rc == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  }
   /*
    * Direct JWT-claims tenant gate (defense-in-depth, see function
    * header comment). Runs immediately after signature verify and
@@ -1486,6 +1956,31 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
   wyl_jwt_access_claims_clear (&claims);
   return WYRELOG_E_OK;
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_resolve_bearer_for_test (SoupServer *server,
+    const gchar *token, gchar **out_session_id, gchar **out_actor,
+    gchar **out_tenant)
+{
+  if (out_session_id == NULL || out_actor == NULL || out_tenant == NULL)
+    return WYRELOG_E_INVALID;
+  *out_session_id = NULL;
+  *out_actor = NULL;
+  *out_tenant = NULL;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  WylDaemonAuthContext auth = { 0 };
+  wyrelog_error_t rc = resolve_bearer_session (server, ctx, token, &auth,
+      NULL);
+  if (rc == WYRELOG_E_OK) {
+    *out_session_id = g_steal_pointer (&auth.session_id);
+    *out_actor = g_steal_pointer (&auth.actor);
+    *out_tenant = g_steal_pointer (&auth.tenant);
+  }
+  wyl_daemon_auth_context_clear (&auth);
+  return rc;
+}
+#endif
 
 /*
  * Session-token (cookie-equivalent) auth resolver. Same

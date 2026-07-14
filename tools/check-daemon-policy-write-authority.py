@@ -18,8 +18,11 @@ FUNCTIONS = (
     "tenant_delete_handler",
     "policy_permission_grant_handler", "policy_permission_revoke_handler",
     "policy_role_grant_handler", "policy_role_revoke_handler",
+    "wyl_daemon_http_configure_tenant_for_test",
 )
-ALLOW_ACQUIRE = set(FUNCTIONS[:11])
+ALLOW_ACQUIRE = set(FUNCTIONS[:11]) | {
+    "wyl_daemon_http_configure_tenant_for_test",
+}
 MUTATORS = {
     "wyl_policy_store_create_tenant", "wyl_policy_store_set_tenant_sealed",
     "wyl_policy_store_create_fact_graph", "wyl_policy_store_seal_fact_graph",
@@ -249,6 +252,34 @@ def candidate(defs, raw_tokens):
     aggregate=hashlib.sha256(material.encode()).hexdigest()
     return {"version":VERSION,"profile":PROFILE,"rationale":"Reviewed full raw conditional declarations for WRITE intervals and their store-consuming helper closure.","functions":hashes,"directives":directive_freeze,"aggregate":aggregate}
 
+def validate_test_only_tenant_seam(source, raw_defs, active_defs=None):
+    name="wyl_daemon_http_configure_tenant_for_test"
+    marker=source.find(name+" (")
+    if marker<0: raise GuardError("missing test-only tenant seam")
+    stack=[]
+    for line in source[:marker].splitlines():
+        directive=re.match(r"\s*#\s*(if|ifdef|ifndef|endif)\b(.*)",line)
+        if not directive: continue
+        kind,value=directive.groups()
+        if kind=="endif":
+            if not stack: raise GuardError("unbalanced conditional before tenant seam")
+            stack.pop()
+        else: stack.append((kind,value.strip()))
+    if ("ifdef","WYL_TEST_DAEMON_HTTP") not in stack:
+        raise GuardError("tenant seam is not structurally WYL_TEST-only")
+    items=raw_defs.get(name,[])
+    if len(items)!=1: raise GuardError("tenant seam definition cardinality mismatch")
+    values=[value for _,value in items[0][2]]
+    required=("wyl_daemon_policy_write_acquire",
+        "wyl_policy_store_create_tenant","wyl_policy_store_set_tenant_sealed")
+    for symbol in required:
+        if values.count(symbol)!=1: raise GuardError(f"tenant seam {symbol} cardinality mismatch")
+    forbidden=("wyl_handle_get_policy_store","g_mutex_lock","g_mutex_unlock")
+    if any(symbol in values for symbol in forbidden):
+        raise GuardError("tenant seam bypasses WRITE-owned store authority")
+    if active_defs is not None and name in active_defs:
+        raise GuardError("test-only tenant seam leaked into production preprocessing")
+
 def global_invariants(tokens,defs):
     values=[v for _,v in tokens]
     if "policy_mutation_lock" in values: raise GuardError("legacy mutex present")
@@ -399,6 +430,7 @@ def main(argv=None):
     raw_tokens=lex(source,preserve_pp=True); raw_mate=pairs(raw_tokens); raw_defs=definitions(raw_tokens,raw_mate,allow_duplicates=True,full=True)
     missing=[x for x in FUNCTIONS if x not in raw_defs]
     if missing: raise GuardError("missing function definitions: "+", ".join(missing))
+    validate_test_only_tenant_seam(source,raw_defs)
     raw_global_invariants(raw_tokens,raw_defs)
     if not ns.raw_only:
         if not ns.build_root or not ns.compiler_id: raise GuardError("active check requires build-root and compiler-id")
@@ -409,6 +441,7 @@ def main(argv=None):
         if ambiguous: raise GuardError("ambiguous active function definitions: "+", ".join(sorted(ambiguous)))
         defs={name:items[0] for name,items in grouped.items()
             if name in raw_defs and len(items)==1}
+        validate_test_only_tenant_seam(source,raw_defs,defs)
         global_invariants(tokens,defs)
         raw_global_invariants(tokens,{name:[item] for name,item in defs.items()},False)
     actual=candidate(raw_defs,raw_tokens)

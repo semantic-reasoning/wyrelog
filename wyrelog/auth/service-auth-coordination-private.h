@@ -112,6 +112,9 @@ wyrelog_error_t wyl_service_auth_rank_leave_expected
     (WylHandle * handle, WylServiceAuthRank rank);
 wyrelog_error_t wyl_service_auth_read_lease_release
     (WylServiceAuthReadLease * lease);
+/* Consumes a resolver-owned lease in one independent terminal operation. */
+wyrelog_error_t wyl_service_auth_read_lease_release_terminal
+    (WylServiceAuthReadLease ** lease);
 wyrelog_error_t wyl_service_auth_write_lease_release
     (WylServiceAuthWriteLease * lease);
 void wyl_service_auth_read_lease_free (WylServiceAuthReadLease * lease);
@@ -129,6 +132,11 @@ void wyl_service_auth_authority_set_close_checkpoint
 /* Private deterministic fault seams for serial-validation tests. */
 void wyl_service_auth_read_lease_test_corrupt_serial
     (WylServiceAuthReadLease * lease);
+void wyl_service_auth_read_lease_test_fail_terminal_prevalidation
+    (WylServiceAuthReadLease * lease);
+void wyl_service_auth_read_lease_test_set_terminal_checkpoint
+    (WylServiceAuthReadLease * lease, void (*checkpoint) (gpointer data),
+    gpointer data);
 wyl_policy_store_t *wyl_service_auth_read_lease_test_swap_pinned_store
     (WylServiceAuthReadLease * lease, wyl_policy_store_t * replacement);
 void wyl_service_auth_write_lease_test_corrupt_serial

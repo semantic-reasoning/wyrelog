@@ -257,6 +257,24 @@ def main():
             "(ctx->handle);\n  g_auto (WylDaemonPolicyWrite) write = { 0 };").replace(
             "ensure_policy_permission_exists (msg, write.store, perm)",
             "ensure_policy_permission_exists (msg, store, perm)", 1),
+        "test-tenant-seam-production-visible": source.replace(
+            "#ifdef WYL_TEST_DAEMON_HTTP", "#if 1", 1),
+        "test-tenant-seam-duplicate-acquire": mutate_function(source,
+            "wyl_daemon_http_configure_tenant_for_test",
+            "wyl_daemon_policy_write_acquire (ctx, &write);",
+            "wyl_daemon_policy_write_acquire (ctx, &write);\n"
+            "  wyl_daemon_policy_write_acquire (ctx, &write);"),
+        "test-tenant-seam-missing-create": mutate_function(source,
+            "wyl_daemon_http_configure_tenant_for_test",
+            "wyl_policy_store_create_tenant", "tenant_create_removed"),
+        "test-tenant-seam-raw-store": mutate_function(source,
+            "wyl_daemon_http_configure_tenant_for_test", "write.store",
+            "wyl_handle_get_policy_store (ctx->handle)"),
+        "test-tenant-seam-mutator-alias": mutate_function(source,
+            "wyl_daemon_http_configure_tenant_for_test",
+            "g_auto (WylDaemonPolicyWrite) write = { 0 };",
+            "void *alias = wyl_policy_store_set_tenant_sealed;\n"
+            "  g_auto (WylDaemonPolicyWrite) write = { 0 };"),
         "string-literal-change": mutate_function(source,
             "graph_create_handler", '"created"', '"created_changed"'),
         "malformed-delimiter": source + "\nvoid malformed( {\n",

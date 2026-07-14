@@ -2,11 +2,13 @@
 #include <string.h>
 
 #include <glib.h>
+#include <sodium.h>
 #ifdef WYL_HAS_AUDIT
 #include <duckdb.h>
 #endif
 
 #include "daemon/delta.h"
+#include "daemon/auth-registry-private.h"
 #include "daemon/http.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/auth/service-credential-private.h"
@@ -1275,6 +1277,739 @@ check_service_access_token_state_contract (SoupServer *server,
 
   *owned_after_teardown = snapshot;
   memset (&snapshot, 0, sizeof snapshot);
+  return 0;
+}
+
+typedef struct
+{
+  gchar sid[WYL_ID_STRING_BUF];
+  gchar jti[WYL_ID_STRING_BUF];
+  gchar other_sid[WYL_ID_STRING_BUF];
+  gchar other_jti[WYL_ID_STRING_BUF];
+  gchar credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  gchar other_credential[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  gchar tenant[64];
+  gchar *key_id;
+  gchar *token;
+  gint64 now;
+} ServiceResolverFixture;
+
+static void
+service_resolver_fixture_clear (ServiceResolverFixture *fixture)
+{
+  g_clear_pointer (&fixture->key_id, g_free);
+  g_clear_pointer (&fixture->token, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
+    service_resolver_fixture_clear)
+     static gboolean
+         service_resolver_fixture_init_tenant (SoupServer *server,
+    ServiceResolverFixture *fixture, gint registry_state,
+    guint registry_mismatch, const gchar *tenant_id)
+{
+  memset (fixture, 0, sizeof *fixture);
+  wyl_id_t sid = WYL_ID_NIL, jti = WYL_ID_NIL;
+  wyl_id_t other_sid = WYL_ID_NIL, other_jti = WYL_ID_NIL;
+  guint8 secret[32] = { 0 };
+  fixture->now = g_get_real_time () / G_USEC_PER_SEC;
+  g_strlcpy (fixture->tenant, tenant_id, sizeof fixture->tenant);
+  fixture->key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (fixture->key_id == NULL || wyl_id_new (&sid) != WYRELOG_E_OK
+      || wyl_id_new (&jti) != WYRELOG_E_OK
+      || wyl_id_new (&other_sid) != WYRELOG_E_OK
+      || wyl_id_new (&other_jti) != WYRELOG_E_OK
+      || wyl_id_format (&sid, fixture->sid, sizeof fixture->sid)
+      != WYRELOG_E_OK || wyl_id_format (&jti, fixture->jti, sizeof fixture->jti)
+      != WYRELOG_E_OK
+      || wyl_id_format (&other_sid, fixture->other_sid,
+          sizeof fixture->other_sid) != WYRELOG_E_OK
+      || wyl_id_format (&other_jti, fixture->other_jti,
+          sizeof fixture->other_jti) != WYRELOG_E_OK
+      || wyl_service_credential_id_new (fixture->credential,
+          sizeof fixture->credential) != WYRELOG_E_OK
+      || wyl_service_credential_id_new (fixture->other_credential,
+          sizeof fixture->other_credential) != WYRELOG_E_OK)
+    return FALSE;
+  wyl_service_session_descriptor_t descriptor = {
+    .session_id = sid,.jti = fixture->jti,
+    .subject_id = "svc:resolver:test",.tenant_id = fixture->tenant,
+    .credential_id = fixture->credential,.credential_generation = 9,
+    .issued_at_seconds = fixture->now,
+    .expires_at_seconds = fixture->now + 300,
+  };
+  g_autoptr (WylSession) session = NULL;
+  if (wyl_session_new_service_detached (&descriptor, &session)
+      != WYRELOG_E_OK
+      || !wyl_daemon_http_replace_session_for_test (server, fixture->sid,
+          session)
+      || !wyl_daemon_http_store_service_access_token_for_test (server,
+          fixture->jti, fixture->sid, descriptor.subject_id,
+          descriptor.tenant_id, fixture->key_id, fixture->now + 300,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, fixture->credential, 9,
+          FALSE))
+    return FALSE;
+  const gchar *reg_sid = registry_mismatch == 1 ? fixture->other_sid
+      : fixture->sid;
+  const gchar *reg_jti = registry_mismatch == 2 ? fixture->other_jti
+      : fixture->jti;
+  const gchar *reg_cred = registry_mismatch == 3 ? fixture->other_credential
+      : fixture->credential;
+  guint64 reg_generation = registry_mismatch == 4 ? 10 : 9;
+  const gchar *reg_subject = registry_mismatch == 5 ? "svc:resolver:other"
+      : descriptor.subject_id;
+  const gchar *reg_tenant = registry_mismatch == 6 ? "tenant-other"
+      : descriptor.tenant_id;
+  gboolean changed = FALSE;
+  if (registry_state >= 0
+      && wyl_daemon_http_service_registry_transition_for_test (server,
+          reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
+          WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_OK)
+    return FALSE;
+  if (registry_state >= WYL_SERVICE_AUTH_ACTIVE
+      && wyl_daemon_http_service_registry_transition_for_test (server,
+          reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_OK)
+    return FALSE;
+  if (registry_state == WYL_SERVICE_AUTH_REVOKED
+      && wyl_daemon_http_service_registry_transition_for_test (server,
+          reg_sid, reg_jti, reg_cred, reg_generation, reg_subject, reg_tenant,
+          WYL_DAEMON_SERVICE_REGISTRY_REVOKE, &changed) != WYRELOG_E_OK)
+    return FALSE;
+  if (wyl_daemon_http_copy_access_token_secret (server, secret,
+          sizeof secret) != WYRELOG_E_OK)
+    return FALSE;
+  wyl_jwt_service_issue_input_t input = {
+    .key_id = fixture->key_id,.jti = fixture->jti,
+    .subject = descriptor.subject_id,.issuer = "wyrelogd",
+    .audience = "wyrelog-client",.tenant = descriptor.tenant_id,
+    .session_id = fixture->sid,.credential_id = fixture->credential,
+    .credential_generation = 9,.issued_at = fixture->now,
+  };
+  wyrelog_error_t rc = wyl_jwt_sign_hs256_service (&input, secret,
+      sizeof secret, &fixture->token);
+  sodium_memzero (secret, sizeof secret);
+  return rc == WYRELOG_E_OK;
+}
+
+static gboolean
+service_resolver_fixture_init (SoupServer *server,
+    ServiceResolverFixture *fixture, gint registry_state,
+    guint registry_mismatch)
+{
+  return service_resolver_fixture_init_tenant (server, fixture,
+      registry_state, registry_mismatch, "__wr_default");
+}
+
+static gboolean
+service_resolver_expect (SoupServer *server,
+    const ServiceResolverFixture *fixture, const gchar *token, gboolean success)
+{
+  g_autofree gchar *sid = NULL;
+  g_autofree gchar *actor = NULL;
+  g_autofree gchar *tenant = NULL;
+  wyrelog_error_t rc = wyl_daemon_http_resolve_bearer_for_test (server,
+      token, &sid, &actor, &tenant);
+  if (!success)
+    return rc == WYRELOG_E_POLICY && sid == NULL && actor == NULL
+        && tenant == NULL;
+  return rc == WYRELOG_E_OK && g_strcmp0 (sid, fixture->sid) == 0
+      && g_strcmp0 (actor, "svc:resolver:test") == 0
+      && g_strcmp0 (tenant, fixture->tenant) == 0;
+}
+
+static gchar *
+service_resolver_sign_variant (SoupServer *server,
+    const ServiceResolverFixture *fixture, guint field)
+{
+  guint8 secret[32] = { 0 };
+  if (wyl_daemon_http_copy_access_token_secret (server, secret,
+          sizeof secret) != WYRELOG_E_OK)
+    return NULL;
+  wyl_jwt_service_issue_input_t input = {
+    .key_id = field == 8 ? "wrong-key" : fixture->key_id,
+    .jti = field == 2 ? fixture->other_jti : fixture->jti,
+    .subject = field == 3 ? "svc:resolver:other" : "svc:resolver:test",
+    .issuer = field == 9 ? "wrong-issuer" : "wyrelogd",
+    .audience = field == 10 ? "wrong-audience" : "wyrelog-client",
+    .tenant = field == 4 ? "tenant-unknown" : "__wr_default",
+    .session_id = field == 1 ? fixture->other_sid : fixture->sid,
+    .credential_id = field == 5 ? fixture->other_credential
+        : fixture->credential,
+    .credential_generation = field == 6 ? 10 : 9,
+    .issued_at = field == 7 ? fixture->now - 301 : fixture->now,
+  };
+  gchar *token = NULL;
+  if (wyl_jwt_sign_hs256_service (&input, secret, sizeof secret, &token)
+      != WYRELOG_E_OK)
+    g_clear_pointer (&token, g_free);
+  sodium_memzero (secret, sizeof secret);
+  return token;
+}
+
+static gchar *
+service_resolver_sign_crossed (SoupServer *server,
+    const ServiceResolverFixture *sid_source,
+    const ServiceResolverFixture *jti_source)
+{
+  guint8 secret[32] = { 0 };
+  if (wyl_daemon_http_copy_access_token_secret (server, secret,
+          sizeof secret) != WYRELOG_E_OK)
+    return NULL;
+  wyl_jwt_service_issue_input_t input = {
+    .key_id = sid_source->key_id,.jti = jti_source->jti,
+    .subject = "svc:resolver:test",.issuer = "wyrelogd",
+    .audience = "wyrelog-client",.tenant = "__wr_default",
+    .session_id = sid_source->sid,
+    .credential_id = sid_source->credential,
+    .credential_generation = 9,.issued_at = sid_source->now,
+  };
+  gchar *token = NULL;
+  if (wyl_jwt_sign_hs256_service (&input, secret, sizeof secret, &token)
+      != WYRELOG_E_OK)
+    g_clear_pointer (&token, g_free);
+  sodium_memzero (secret, sizeof secret);
+  return token;
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  SoupServer *server;
+  const ServiceResolverFixture *fixture;
+  gboolean published;
+  gboolean allow_release;
+  gboolean released;
+  gboolean allow_continue;
+  gboolean writer_acquired;
+  gboolean allow_writer_finish;
+  gboolean inverse_mutation;
+  gboolean mutate_requested;
+  gboolean mutation_done;
+  wyrelog_error_t mutation_rc;
+  wyrelog_error_t resolver_rc;
+  wyrelog_error_t writer_rc;
+  gchar *sid;
+  gchar *actor;
+  gchar *tenant;
+} ServiceResolverRace;
+
+static void
+service_resolver_race_checkpoint (WylDaemonServiceResolverPhase phase,
+    gpointer data)
+{
+  ServiceResolverRace *race = data;
+  g_mutex_lock (&race->mutex);
+  if (phase == WYL_DAEMON_SERVICE_RESOLVER_PUBLISHED) {
+    race->published = TRUE;
+    g_cond_broadcast (&race->changed);
+    while (!race->allow_release)
+      g_cond_wait (&race->changed, &race->mutex);
+  } else {
+    race->released = TRUE;
+    g_cond_broadcast (&race->changed);
+    while (!race->allow_continue)
+      g_cond_wait (&race->changed, &race->mutex);
+  }
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+service_resolver_race_thread (gpointer data)
+{
+  ServiceResolverRace *race = data;
+  race->resolver_rc = wyl_daemon_http_resolve_bearer_for_test (race->server,
+      race->fixture->token, &race->sid, &race->actor, &race->tenant);
+  return NULL;
+}
+
+static gpointer service_resolver_writer_thread (gpointer data);
+static gboolean service_resolver_wait_flag (ServiceResolverRace * race,
+    gboolean * flag);
+
+static void
+service_resolver_writer_checkpoint (gpointer data)
+{
+  ServiceResolverRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->writer_acquired = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (race->inverse_mutation && !race->mutate_requested)
+    g_cond_wait (&race->changed, &race->mutex);
+  if (race->inverse_mutation) {
+    g_mutex_unlock (&race->mutex);
+    gboolean changed = FALSE;
+    race->mutation_rc = wyl_daemon_http_service_registry_transition_for_test
+        (race->server, race->fixture->sid, race->fixture->jti,
+        race->fixture->credential, 9, "svc:resolver:test", "__wr_default",
+        WYL_DAEMON_SERVICE_REGISTRY_REVOKE, &changed);
+    if (race->mutation_rc == WYRELOG_E_OK && !changed)
+      race->mutation_rc = WYRELOG_E_INTERNAL;
+    g_mutex_lock (&race->mutex);
+    race->mutation_done = TRUE;
+    g_cond_broadcast (&race->changed);
+  }
+  while (!race->allow_writer_finish)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gboolean
+service_resolver_wait_reader_queued (SoupServer *server)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  do {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.writer_active && snapshot.waiting_readers == 1
+        && snapshot.active_readers == 0)
+      return TRUE;
+    g_thread_yield ();
+  } while (g_get_monotonic_time () < deadline);
+  return FALSE;
+}
+
+static gboolean
+check_service_resolver_inverse_barrier (SoupServer *server,
+    const ServiceResolverFixture *fixture)
+{
+  ServiceResolverRace race = {
+    .server = server,.fixture = fixture,.inverse_mutation = TRUE,
+    .resolver_rc = WYRELOG_E_INTERNAL,.writer_rc = WYRELOG_E_INTERNAL,
+    .mutation_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GThread) writer = g_thread_new ("inverse-write-holder",
+      service_resolver_writer_thread, &race);
+  gboolean ok = service_resolver_wait_flag (&race, &race.writer_acquired);
+  g_autoptr (GThread) resolver = NULL;
+  if (ok) {
+    resolver = g_thread_new ("inverse-service-resolver",
+        service_resolver_race_thread, &race);
+    ok = service_resolver_wait_reader_queued (server);
+  }
+  g_mutex_lock (&race.mutex);
+  race.mutate_requested = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  ok = ok && service_resolver_wait_flag (&race, &race.mutation_done)
+      && race.mutation_rc == WYRELOG_E_OK;
+  g_mutex_lock (&race.mutex);
+  race.allow_writer_finish = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&writer));
+  if (resolver != NULL)
+    g_thread_join (g_steal_pointer (&resolver));
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  ok = ok && race.writer_rc == WYRELOG_E_OK
+      && race.resolver_rc == WYRELOG_E_POLICY && race.sid == NULL
+      && race.actor == NULL && race.tenant == NULL
+      && snapshot.active_readers == 0 && snapshot.waiting_readers == 0
+      && !snapshot.writer_active;
+  g_free (race.sid);
+  g_free (race.actor);
+  g_free (race.tenant);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok;
+}
+
+static gpointer
+service_resolver_writer_thread (gpointer data)
+{
+  ServiceResolverRace *race = data;
+  race->writer_rc = wyl_daemon_http_policy_write_for_test (race->server,
+      service_resolver_writer_checkpoint, race);
+  return NULL;
+}
+
+static gboolean
+service_resolver_wait_flag (ServiceResolverRace *race, gboolean *flag)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!*flag && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean reached = *flag;
+  g_mutex_unlock (&race->mutex);
+  return reached;
+}
+
+static gboolean
+service_resolver_wait_writer_queued (SoupServer *server)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  do {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.waiting_writers == 1 && snapshot.active_readers == 1
+        && !snapshot.writer_active)
+      return TRUE;
+    g_thread_yield ();
+  } while (g_get_monotonic_time () < deadline);
+  return FALSE;
+}
+
+static gboolean
+check_service_resolver_publication_barrier (SoupServer *server,
+    const ServiceResolverFixture *fixture)
+{
+  ServiceResolverRace race = {
+    .server = server,.fixture = fixture,
+    .resolver_rc = WYRELOG_E_INTERNAL,.writer_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  wyl_daemon_http_set_service_resolver_checkpoint_for_test (server,
+      service_resolver_race_checkpoint, &race);
+  g_autoptr (GThread) resolver = g_thread_new ("service-resolver",
+      service_resolver_race_thread, &race);
+  gboolean ok = service_resolver_wait_flag (&race, &race.published);
+  g_autoptr (GThread) writer = NULL;
+  if (ok) {
+    writer = g_thread_new ("service-writer", service_resolver_writer_thread,
+        &race);
+    ok = service_resolver_wait_writer_queued (server);
+  }
+  g_mutex_lock (&race.mutex);
+  ok = ok && !race.writer_acquired;
+  race.allow_release = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  ok = ok && service_resolver_wait_flag (&race, &race.released)
+      && service_resolver_wait_flag (&race, &race.writer_acquired);
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  ok = ok && snapshot.active_readers == 0 && snapshot.writer_active;
+  g_mutex_lock (&race.mutex);
+  race.allow_continue = TRUE;
+  race.allow_writer_finish = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&resolver));
+  if (writer != NULL)
+    g_thread_join (g_steal_pointer (&writer));
+  wyl_daemon_http_set_service_resolver_checkpoint_for_test (server, NULL, NULL);
+  ok = ok && race.resolver_rc == WYRELOG_E_OK
+      && race.writer_rc == WYRELOG_E_OK
+      && g_strcmp0 (race.sid, fixture->sid) == 0
+      && g_strcmp0 (race.actor, "svc:resolver:test") == 0
+      && g_strcmp0 (race.tenant, "__wr_default") == 0;
+  g_free (race.sid);
+  g_free (race.actor);
+  g_free (race.tenant);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok;
+}
+
+static gboolean
+check_human_resolver_while_write_held (SoupServer *server)
+{
+  wyl_id_t sid_id = WYL_ID_NIL, jti_id = WYL_ID_NIL;
+  gchar sid[WYL_ID_STRING_BUF], jti[WYL_ID_STRING_BUF];
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  guint8 secret[32] = { 0 };
+  g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id == NULL || wyl_id_new (&sid_id) != WYRELOG_E_OK
+      || wyl_id_new (&jti_id) != WYRELOG_E_OK
+      || wyl_id_format (&sid_id, sid, sizeof sid) != WYRELOG_E_OK
+      || wyl_id_format (&jti_id, jti, sizeof jti) != WYRELOG_E_OK
+      || !wyl_daemon_http_seed_human_session_for_test (server, sid,
+          "human-resolver", "__wr_default")
+      || !wyl_daemon_http_store_human_access_token_for_test (server, jti, sid,
+          "human-resolver", "__wr_default", key_id, now + 300)
+      || wyl_daemon_http_copy_access_token_secret (server, secret,
+          sizeof secret) != WYRELOG_E_OK)
+    return FALSE;
+  wyl_jwt_issue_input_t input = {
+    .key_id = key_id,.jti = jti,.subject = "human-resolver",
+    .issuer = "wyrelogd",.audience = "wyrelog-client",
+    .tenant = "__wr_default",
+    .principal_state_at_issue = "authenticated",.session_id = sid,
+    .issued_at = now,.ttl_seconds = 300,
+  };
+  g_autofree gchar *token = NULL;
+  wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&input, secret,
+      sizeof secret, &token);
+  sodium_memzero (secret, sizeof secret);
+  if (sign_rc != WYRELOG_E_OK)
+    return FALSE;
+  ServiceResolverRace race = {
+    .server = server,.writer_rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GThread) writer = g_thread_new ("human-write-holder",
+      service_resolver_writer_thread, &race);
+  gboolean ok = service_resolver_wait_flag (&race, &race.writer_acquired);
+  WylServiceAuthAuthoritySnapshot before = { 0 }, after = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &before);
+  g_autofree gchar *resolved_sid = NULL;
+  g_autofree gchar *actor = NULL;
+  g_autofree gchar *tenant = NULL;
+  wyrelog_error_t resolve_rc = wyl_daemon_http_resolve_bearer_for_test (server,
+      token, &resolved_sid, &actor, &tenant);
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &after);
+  ok = ok && resolve_rc == WYRELOG_E_OK && before.writer_active
+      && after.writer_active && before.active_readers == 0
+      && after.active_readers == 0 && before.waiting_readers == 0
+      && after.waiting_readers == 0 && g_strcmp0 (resolved_sid, sid) == 0
+      && g_strcmp0 (actor, "human-resolver") == 0
+      && g_strcmp0 (tenant, "__wr_default") == 0;
+  g_mutex_lock (&race.mutex);
+  race.allow_writer_finish = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&writer));
+  ok = ok && race.writer_rc == WYRELOG_E_OK;
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  return ok;
+}
+
+static gboolean
+check_service_resolver_prelatched_unavailable (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return FALSE;
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,.listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts, handle,
+      &error);
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (server == NULL || !service_resolver_fixture_init (server, &fixture,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE)
+      || wyl_daemon_http_latch_service_unavailable_for_test (server)
+      != WYRELOG_E_OK
+      || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
+    return FALSE;
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  return snapshot.active_readers == 0 && !snapshot.writer_active;
+}
+
+static gboolean
+check_service_resolver_terminal_failure (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return FALSE;
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,.listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts, handle,
+      &error);
+  g_auto (ServiceResolverFixture) fixture = { 0 };
+  if (server == NULL || !service_resolver_fixture_init (server, &fixture,
+          WYL_SERVICE_AUTH_ACTIVE, 0))
+    return FALSE;
+  wyl_daemon_http_fail_next_service_resolver_read_release_for_test (server);
+  if (!service_resolver_expect (server, &fixture, fixture.token, FALSE)
+      || wyl_daemon_http_service_resolver_terminal_entries_for_test
+      (server) != 1)
+    return FALSE;
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  return snapshot.active_readers == 0 && !snapshot.writer_active
+      && service_resolver_expect (server, &fixture, fixture.token, FALSE)
+      && wyl_daemon_http_service_resolver_terminal_entries_for_test
+      (server) == 0;
+}
+
+static gint
+check_service_bearer_resolver_contract (SoupServer *server)
+{
+  g_auto (ServiceResolverFixture) control = { 0 };
+  if (!service_resolver_fixture_init (server, &control,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &control, control.token, TRUE))
+    return 1970;
+  if (!check_service_resolver_publication_barrier (server, &control))
+    return 1971;
+  g_auto (ServiceResolverFixture) inverse = { 0 };
+  if (!service_resolver_fixture_init (server, &inverse,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &inverse, inverse.token, TRUE)
+      || !check_service_resolver_inverse_barrier (server, &inverse))
+    return 1972;
+  if (!check_human_resolver_while_write_held (server))
+    return 1973;
+  if (!check_service_resolver_prelatched_unavailable ())
+    return 1974;
+  if (!check_service_resolver_terminal_failure ())
+    return 1975;
+
+  /* Every signed-claim mutation has the exact ACTIVE fixture as its control. */
+  for (guint field = 1; field <= 10; field++) {
+    g_autofree gchar *variant = service_resolver_sign_variant (server,
+        &control, field);
+    if (variant == NULL || strcmp (variant, control.token) == 0
+        || !service_resolver_expect (server, &control, variant, FALSE)
+        || !service_resolver_expect (server, &control, control.token, TRUE))
+      return 1971 + (gint) field;
+  }
+
+  /* Live access-token absence, revocation, expiry, and every tuple field. */
+  for (guint field = 0; field < 11; field++) {
+    g_auto (ServiceResolverFixture) fixture = { 0 };
+    if (!service_resolver_fixture_init (server, &fixture,
+            WYL_SERVICE_AUTH_ACTIVE, 0)
+        || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+      return 1990 + (gint) field;
+    if (field == 0) {
+      if (!wyl_daemon_http_remove_access_token_for_test (server, fixture.jti))
+        return 2010;
+    } else if (field == 1) {
+      if (!wyl_daemon_http_revoke_access_token_for_test (server, fixture.jti))
+        return 2011;
+    } else {
+      gint token_field = field - 1;
+      const gchar *text = field == 3 ? fixture.other_sid
+          : field == 4 ? fixture.other_jti
+          : field == 5 ? "svc:resolver:other"
+          : field == 6 ? "tenant-other"
+          : field == 7 ? "wrong-key"
+          : field == 9 ? fixture.other_credential : NULL;
+      guint64 number = field == 2 ? (guint64) (fixture.now - 1)
+          : field == 8 ? WYL_SESSION_AUTH_METHOD_HUMAN : 10;
+      if (!wyl_daemon_http_mutate_access_token_for_test (server, fixture.jti,
+              token_field, text, number))
+        return 2020 + (gint) field;
+    }
+    if (!service_resolver_expect (server, &fixture, fixture.token, FALSE))
+      return 2040 + (gint) field;
+  }
+
+  /* Live service-session absence/inactive and all immutable tuple/time fields. */
+  const gint session_fields[] = {
+    WYL_DAEMON_SERVICE_SESSION_INACTIVE,
+    WYL_DAEMON_SERVICE_SESSION_AUTH_METHOD,
+    WYL_DAEMON_SERVICE_SESSION_ID,
+    WYL_DAEMON_SERVICE_SESSION_JTI,
+    WYL_DAEMON_SERVICE_SESSION_SUBJECT,
+    WYL_DAEMON_SERVICE_SESSION_TENANT,
+    WYL_DAEMON_SERVICE_SESSION_CREDENTIAL,
+    WYL_DAEMON_SERVICE_SESSION_GENERATION,
+    WYL_DAEMON_SERVICE_SESSION_ISSUED_AT,
+    WYL_DAEMON_SERVICE_SESSION_EXPIRES_AT,
+  };
+  for (guint i = 0; i <= G_N_ELEMENTS (session_fields); i++) {
+    g_auto (ServiceResolverFixture) fixture = { 0 };
+    if (!service_resolver_fixture_init (server, &fixture,
+            WYL_SERVICE_AUTH_ACTIVE, 0)
+        || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+      return 2060 + (gint) i;
+    if (i == 0) {
+      if (!wyl_daemon_http_remove_session_for_test (server, fixture.sid))
+        return 2080;
+    } else {
+      gint field = session_fields[i - 1];
+      const gchar *text = field == WYL_DAEMON_SERVICE_SESSION_ID
+          ? fixture.other_sid
+          : field == WYL_DAEMON_SERVICE_SESSION_JTI ? fixture.other_jti
+          : field == WYL_DAEMON_SERVICE_SESSION_SUBJECT
+          ? "svc:resolver:other"
+          : field == WYL_DAEMON_SERVICE_SESSION_TENANT ? "tenant-other"
+          : field == WYL_DAEMON_SERVICE_SESSION_CREDENTIAL
+          ? fixture.other_credential : NULL;
+      guint64 number = field == WYL_DAEMON_SERVICE_SESSION_GENERATION ? 10
+          : (guint64) (fixture.now + 1);
+      if (!wyl_daemon_http_mutate_service_session_for_test (server,
+              fixture.sid, field, text, number))
+        return 2080 + (gint) i;
+    }
+    if (!service_resolver_expect (server, &fixture, fixture.token, FALSE))
+      return 2100 + (gint) i;
+  }
+
+  /* Registry lifecycle and each exact reservation tuple component. */
+  for (gint state = -1; state <= WYL_SERVICE_AUTH_REVOKED; state++) {
+    if (state == WYL_SERVICE_AUTH_ACTIVE)
+      continue;
+    g_auto (ServiceResolverFixture) fixture = { 0 };
+    if (!service_resolver_fixture_init (server, &fixture, state, 0)
+        || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
+      return 2120 + state;
+  }
+  for (guint mismatch = 1; mismatch <= 6; mismatch++) {
+    g_auto (ServiceResolverFixture) fixture = { 0 };
+    if (!service_resolver_fixture_init (server, &fixture,
+            WYL_SERVICE_AUTH_ACTIVE, mismatch)
+        || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
+      return 2130 + (gint) mismatch;
+  }
+  g_auto (ServiceResolverFixture) cross_a = { 0 };
+  g_auto (ServiceResolverFixture) cross_b = { 0 };
+  if (!service_resolver_fixture_init (server, &cross_a,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_fixture_init (server, &cross_b,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &cross_a, cross_a.token, TRUE)
+      || !service_resolver_expect (server, &cross_b, cross_b.token, TRUE))
+    return 2137;
+  g_autofree gchar *crossed = service_resolver_sign_crossed (server,
+      &cross_a, &cross_b);
+  if (crossed == NULL
+      || !wyl_daemon_http_store_service_access_token_for_test (server,
+          cross_b.jti, cross_a.sid, "svc:resolver:test", "__wr_default",
+          cross_a.key_id, cross_a.now + 300,
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, cross_a.credential, 9,
+          FALSE)
+      || !wyl_daemon_http_mutate_service_session_for_test (server,
+          cross_a.sid, WYL_DAEMON_SERVICE_SESSION_JTI, cross_b.jti, 0)
+      || !service_resolver_expect (server, &cross_a, crossed, FALSE))
+    return 2138;
+  g_auto (ServiceResolverFixture) removed = { 0 };
+  gboolean changed = FALSE;
+  if (!service_resolver_fixture_init (server, &removed,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &removed, removed.token, TRUE)
+      || wyl_daemon_http_service_registry_transition_for_test (server,
+          removed.sid, removed.jti, removed.credential, 9,
+          "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
+      || !changed
+      || !service_resolver_expect (server, &removed, removed.token, FALSE))
+    return 2140;
+  g_auto (ServiceResolverFixture) duplicate = { 0 };
+  if (!service_resolver_fixture_init (server, &duplicate,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || wyl_daemon_http_service_registry_transition_for_test (server,
+          duplicate.sid, duplicate.jti, duplicate.other_credential, 10,
+          "svc:resolver:other", "tenant-other",
+          WYL_DAEMON_SERVICE_REGISTRY_RESERVE, &changed) != WYRELOG_E_POLICY
+      || !service_resolver_expect (server, &duplicate, duplicate.token, TRUE))
+    return 2141;
+
+  g_auto (ServiceResolverFixture) sealed = { 0 };
+  if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-sealed",
+          TRUE, FALSE) != WYRELOG_E_OK
+      || !service_resolver_fixture_init_tenant (server, &sealed,
+          WYL_SERVICE_AUTH_ACTIVE, 0, "tenant-sealed"))
+    return 2144;
+  if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
+    return 2145;
+  if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-sealed",
+          FALSE, TRUE)
+      != WYRELOG_E_OK)
+    return 2146;
+  if (!service_resolver_expect (server, &sealed, sealed.token, FALSE))
+    return 2147;
+  if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-sealed",
+          FALSE, FALSE)
+      != WYRELOG_E_OK)
+    return 2148;
+  if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
+    return 2149;
   return 0;
 }
 
@@ -3749,6 +4484,10 @@ main (void)
       (http.server, &service_token_snapshot);
   if (service_state_rc != 0)
     return service_state_rc;
+  gint service_resolver_rc = check_service_bearer_resolver_contract
+      (http.server);
+  if (service_resolver_rc != 0)
+    return service_resolver_rc;
   GThread *thread = g_thread_new ("daemon-http-decide",
       test_http_server_thread, &http);
 

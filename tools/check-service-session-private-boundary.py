@@ -65,11 +65,16 @@ MANIFEST["wyl_jwt_sign_hs256_service"] = {
     "wyrelog/auth/jwt-private.h": 1,
     "wyrelog/auth/service-jwt-private.c": 1,
     "tests/test-jwt.c": 5,
+    "tests/test-daemon-http-decide.c": 3,
 }
-MANIFEST["wyl_session_get_auth_method_private"]["wyrelog/daemon/http.c"] = 1
-MANIFEST["wyl_session_is_active_private"]["wyrelog/daemon/http.c"] = 1
+for symbol in PROTECTED:
+    if symbol not in {"wyl_session_new_service_detached",
+                      "wyl_jwt_sign_hs256_service"}:
+        MANIFEST[symbol]["wyrelog/daemon/http.c"] = (
+            2 if symbol in {"wyl_session_get_auth_method_private",
+                            "wyl_session_is_active_private"} else 1)
 MANIFEST["wyl_session_new_service_detached"][
-    "tests/test-daemon-http-decide.c"] = 1
+    "tests/test-daemon-http-decide.c"] = 2
 
 
 class BoundaryError(RuntimeError):
