@@ -7,25 +7,9 @@
 #include "wyl-fsm-session-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-id-private.h"
+#include "wyl-session-layout-private.h"
+#include "wyl-session-private.h"
 #include "policy/store-private.h"
-
-struct _WylSession
-{
-  GObject parent_instance;
-  wyl_id_t id;
-  /*
-   * Handle-scoped integer id assigned at the wyl_session_login success
-   * path through wyl_handle_register_session. Stable across the
-   * lifetime of the owning WylHandle and used by wyl_session_logout
-   * to resolve back to this session through the handle registry.
-   * Zero before registration; non-zero after.
-   */
-  wyl_session_id_t sid;
-  gint64 created_at_us;
-  gchar *username;
-  gchar *tenant;
-  wyl_session_state_t state;
-};
 
 G_DEFINE_FINAL_TYPE (WylSession, wyl_session, G_TYPE_OBJECT);
 
@@ -36,6 +20,9 @@ wyl_session_finalize (GObject *object)
 
   g_free (self->username);
   g_free (self->tenant);
+  g_free (self->service_jti);
+  g_free (self->service_subject_id);
+  g_free (self->service_credential_id);
 
   G_OBJECT_CLASS (wyl_session_parent_class)->finalize (object);
 }
@@ -51,18 +38,15 @@ wyl_session_class_init (WylSessionClass *klass)
 static void
 wyl_session_init (WylSession *self)
 {
-  /* Stamp the session with a fresh id and timestamp at login time so
-   * audit events emitted on its behalf can be correlated back to the
-   * specific session that produced them. The stamps are independent
-   * of wyl_session_id_t (the integer handle exposed for logout
-   * dispatch) -- this id is the long-lived persistence-side
-   * identifier. Failure to mint an id is fatal for the same reason
-   * it is on WylAuditEvent and WylHandle: a zero-id session would
-   * collapse correlation downstream. */
-  if (wyl_id_new (&self->id) != WYRELOG_E_OK)
-    g_error ("wyl_session_init: failed to mint identifier");
-  self->created_at_us = g_get_real_time ();
   self->state = WYL_SESSION_STATE_IDLE;
+  self->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
+}
+
+static gboolean
+session_is_service (const WylSession *session)
+{
+  return WYL_IS_SESSION ((gpointer) session)
+      && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
 }
 
 static wyrelog_error_t
@@ -615,6 +599,9 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
   }
 
   WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
+  if (wyl_id_new (&session->id) != WYRELOG_E_OK)
+    g_error ("wyl_session_login: failed to mint identifier");
+  session->created_at_us = g_get_real_time ();
   const gchar *username = NULL;
   if (req != NULL) {
     username = wyl_login_req_get_username (req);
@@ -738,6 +725,8 @@ wyl_session_login (WylHandle *handle, const wyl_login_req_t *req,
 static wyrelog_error_t
 mark_session_mfa_verified (WylHandle *handle, WylSession *session)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
   if (session->username == NULL)
@@ -763,6 +752,8 @@ wyrelog_error_t
 wyl_session_mfa_verify_with_proof (WylHandle *handle, WylSession *session,
     const gchar *proof, WylMfaValidator validator, gpointer user_data)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session) ||
       session->username == NULL)
     return WYRELOG_E_INVALID;
@@ -780,6 +771,8 @@ wyrelog_error_t
 wyl_session_close_with_request_id (WylHandle *handle, WylSession *session,
     const gchar *request_id)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
@@ -802,6 +795,8 @@ wyl_session_close (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_elevate (WylHandle *handle, WylSession *session)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
@@ -818,6 +813,8 @@ wyl_session_elevate (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_drop_elevation (WylHandle *handle, WylSession *session)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
@@ -834,6 +831,8 @@ wyl_session_drop_elevation (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_idle_timeout (WylHandle *handle, WylSession *session)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
@@ -850,6 +849,8 @@ wyl_session_idle_timeout (WylHandle *handle, WylSession *session)
 wyrelog_error_t
 wyl_session_expire (WylHandle *handle, WylSession *session)
 {
+  if (session_is_service (session))
+    return WYRELOG_E_POLICY;
   if (handle == NULL || session == NULL || !WYL_IS_SESSION (session))
     return WYRELOG_E_INVALID;
 
