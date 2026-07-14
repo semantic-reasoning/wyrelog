@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: Lint workflows
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  actionlint:
+    name: actionlint
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v5
+
+      # Workflow defects otherwise surface only once a job runs, and an invalid
+      # expression takes the whole file with it. Runs on every pull request
+      # rather than filtering on paths, so the check can never be pending.
+      - name: Lint workflow definitions
+        uses: docker://rhysd/actionlint:1.7.12
+        with:
+          args: -color
