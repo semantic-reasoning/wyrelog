@@ -1251,6 +1251,26 @@ test('check-daemon-bearer-resolver-structure-self-test', python3,
   ],
 )
 
+bearer_resolver_export_guard = find_program(
+  '../tools/check-daemon-bearer-resolver-exports.py')
+bearer_resolver_object_format = 'elf'
+if host_machine.system() == 'darwin'
+  bearer_resolver_object_format = 'macho'
+elif host_machine.system() == 'windows'
+  bearer_resolver_object_format = 'pe'
+endif
+test('check-daemon-bearer-resolver-exports',
+  bearer_resolver_export_guard,
+  args : [bearer_resolver_object_format, wyrelogd_exe.full_path()],
+  depends : wyrelogd_exe,
+)
+test('check-daemon-bearer-resolver-exports-self-test', python3,
+  args : [
+    meson.current_source_dir() / 'test-daemon-bearer-resolver-exports.py',
+    bearer_resolver_export_guard.full_path(),
+  ],
+)
+
 check_no_daemon_policy_mutation_lock_self_test = find_program(
   'test-daemon-policy-write-authority-guard.py',
 )
