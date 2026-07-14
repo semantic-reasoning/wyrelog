@@ -703,6 +703,14 @@ CREATE TABLE IF NOT EXISTS service_domain_requests (
     created_at_us     INTEGER NOT NULL CHECK (created_at_us > 0)
 );
 
+CREATE TABLE IF NOT EXISTS service_authority_writer_gate (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    lock_word INTEGER NOT NULL CHECK (lock_word = 0)
+) WITHOUT ROWID;
+
+INSERT OR IGNORE INTO service_authority_writer_gate (singleton, lock_word)
+VALUES (1, 0);
+
 CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable
 BEFORE UPDATE ON service_principals
 WHEN OLD.subject_id IS NOT NEW.subject_id

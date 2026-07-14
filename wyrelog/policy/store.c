@@ -155,6 +155,13 @@ typedef enum
   WYL_SERVICE_AUTHORITY_EVIDENCE_INVALID,
 } WylServiceAuthorityEvidenceState;
 
+typedef enum
+{
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_NONE,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ACQUIRED,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED,
+} WylServiceAuthorityWriteIntentState;
+
 struct _WylServiceAuthorityCommitEvidence
 {
   gint refs;
@@ -191,6 +198,15 @@ struct _WylServiceAuthorityTransaction
   gboolean fail_evidence_allocation_once;
   guint evidence_allocation_count;
   gboolean fail_last_used_sql_once;
+  WylServiceAuthorityWriteIntentState write_intent_state;
+  wyrelog_error_t write_intent_failure_rc;
+  WylServiceAuthorityWriteIntentOutcome write_intent_failure;
+  GMutex write_intent_barrier_mutex;
+  GCond write_intent_barrier_cond;
+  gboolean write_intent_barrier_armed;
+  gboolean write_intent_barrier_reached;
+  gboolean write_intent_barrier_released;
+  int write_intent_fail_sql_once;
 };
 
 typedef struct
@@ -481,6 +497,7 @@ static const gchar *const required_tables[] = {
   "service_principal_events",
   "service_credential_events",
   "service_domain_requests",
+  "service_authority_writer_gate",
 };
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
@@ -626,6 +643,12 @@ static const gchar service_schema_ddl[] =
     "   typeof(input_fingerprint) = 'blob' AND length(input_fingerprint) = 32),"
     " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0)"
     ");"
+    "CREATE TABLE IF NOT EXISTS service_authority_writer_gate ("
+    " singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
+    " lock_word INTEGER NOT NULL CHECK (lock_word = 0)"
+    ") WITHOUT ROWID;"
+    "INSERT OR IGNORE INTO service_authority_writer_gate(singleton,lock_word)"
+    " VALUES(1,0);"
     "CREATE TRIGGER IF NOT EXISTS trg_service_principals_identity_immutable"
     " BEFORE UPDATE ON service_principals WHEN"
     " OLD.subject_id IS NOT NEW.subject_id OR"
@@ -756,6 +779,13 @@ static const gchar *const service_domain_request_needles[] = {
   NULL,
 };
 
+static const gchar *const service_writer_gate_needles[] = {
+  "check(singleton=1)",
+  "check(lock_word=0)",
+  "withoutrowid",
+  NULL,
+};
+
 static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_principals",
         "subject_id:TEXT:1::1,display_name:TEXT:1::0,state:TEXT:1::0,generation:INTEGER:1:1:0,created_by:TEXT:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0,disabled_by:TEXT:0::0,disabled_at_us:INTEGER:0::0",
@@ -784,6 +814,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         "request_id:TEXT:1::1,operation:TEXT:1::0,resource_id:TEXT:1::0,input_fingerprint:BLOB:1::0,created_at_us:INTEGER:1::0",
         service_domain_request_needles, 5, "",
       "sqlite_autoindex_service_domain_requests_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_authority_writer_gate",
+        "singleton:INTEGER:1::1,lock_word:INTEGER:1::0",
+        service_writer_gate_needles, 2, "",
+      "sqlite_autoindex_service_authority_writer_gate_1:1:pk:0:0:0:singleton:0:BINARY:1,1:1:lock_word:0:BINARY:0"},
 };
 
 static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
@@ -2272,6 +2306,8 @@ wyrelog_error_t
 
   WylServiceAuthorityTransaction *txn =
       g_new0 (WylServiceAuthorityTransaction, 1);
+  g_mutex_init (&txn->write_intent_barrier_mutex);
+  g_cond_init (&txn->write_intent_barrier_cond);
   txn->store = store;
   txn->handle = g_object_ref (handle);
   txn->write_lease = write_lease;
@@ -2296,6 +2332,8 @@ wyrelog_error_t
     txn->state = WYL_SERVICE_AUTHORITY_TXN_FAILED_ROLLBACK;
     service_authority_transaction_finish (txn);
     g_clear_object (&txn->handle);
+    g_cond_clear (&txn->write_intent_barrier_cond);
+    g_mutex_clear (&txn->write_intent_barrier_mutex);
     g_free (txn->savepoint);
     g_free (txn);
     return rc;
@@ -2310,6 +2348,9 @@ wyrelog_error_t
   if (txn == NULL || txn->state != WYL_SERVICE_AUTHORITY_TXN_ACTIVE
       || txn->owner != g_thread_self () || !txn->owns_store_locks)
     return WYRELOG_E_INVALID;
+  if (txn->write_intent_state ==
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED)
+    return WYRELOG_E_BUSY;
 
   gboolean release_succeeded = FALSE;
   wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
@@ -2460,6 +2501,8 @@ void wyl_policy_store_service_authority_transaction_free
   g_clear_pointer (&txn->commit_evidence,
       wyl_policy_store_service_authority_commit_evidence_unref);
   g_clear_object (&txn->handle);
+  g_cond_clear (&txn->write_intent_barrier_cond);
+  g_mutex_clear (&txn->write_intent_barrier_mutex);
   g_free (txn->savepoint);
   g_free (txn);
 }
@@ -2738,6 +2781,15 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
       "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = MEMORY;" :
       "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;";
   if (exec_sql (self->db, open_pragmas) != WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+    goto fail;
+  }
+  sqlite3_busy_handler (self->db, NULL, NULL);
+  if (sqlite3_busy_timeout (self->db, 0) != SQLITE_OK) {
+    rc = WYRELOG_E_IO;
+    goto fail;
+  }
+  if (sqlite3_extended_result_codes (self->db, 1) != SQLITE_OK) {
     rc = WYRELOG_E_IO;
     goto fail;
   }
@@ -4802,6 +4854,17 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
     return WYRELOG_E_POLICY;
 
   rc = query_has_rows (store->db,
+      "SELECT 1 WHERE (SELECT count(*) FROM service_authority_writer_gate)<>1"
+      " OR NOT EXISTS(SELECT 1 FROM service_authority_writer_gate"
+      " WHERE singleton=1 AND lock_word=0"
+      " AND typeof(singleton)='integer' AND typeof(lock_word)='integer');",
+      &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (found)
+    return WYRELOG_E_POLICY;
+
+  rc = query_has_rows (store->db,
       "SELECT 1 FROM service_credential_cvk WHERE slot <> 1 "
       "UNION ALL SELECT 1 FROM service_credential_cvk "
       "GROUP BY slot HAVING count(*) > 1 LIMIT 1;", &found);
@@ -5418,7 +5481,7 @@ service_domain_finish_mutation (wyl_policy_store_t *store)
 }
 
 static wyrelog_error_t
-    service_authority_transaction_validate_active
+    service_authority_transaction_validate_preconditions
     (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store)
 {
   if (txn == NULL || store == NULL || txn->store != store
@@ -5431,6 +5494,18 @@ static wyrelog_error_t
       txn->handle);
 }
 
+static wyrelog_error_t
+    service_authority_transaction_validate_active
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store)
+{
+  wyrelog_error_t rc = service_authority_transaction_validate_preconditions
+      (txn, store);
+  if (rc == WYRELOG_E_OK && txn->write_intent_state ==
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED)
+    rc = WYRELOG_E_BUSY;
+  return rc;
+}
+
 wyrelog_error_t
     wyl_policy_store_service_authority_transaction_enter_participant
     (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * expected_store)
@@ -5440,6 +5515,114 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK)
     txn->durable_operation_started = TRUE;
   return rc;
+}
+
+static wyrelog_error_t
+write_intent_fail (WylServiceAuthorityTransaction *txn,
+    WylServiceAuthorityWriteIntentOutcome *outcome,
+    WylServiceAuthorityWriteIntentResult result, int extended_code,
+    wyrelog_error_t rc)
+{
+  txn->write_intent_state =
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED;
+  txn->write_intent_failure_rc = rc;
+  txn->write_intent_failure.result = result;
+  txn->write_intent_failure.sqlite_extended_code = extended_code;
+  *outcome = txn->write_intent_failure;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_acquire_write_intent
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * expected_store,
+    GCancellable * cancellable,
+    WylServiceAuthorityWriteIntentOutcome * out_outcome) {
+  if (out_outcome != NULL)
+    *out_outcome = (WylServiceAuthorityWriteIntentOutcome) {
+    WYL_SERVICE_AUTHORITY_WRITE_INTENT_NONE, SQLITE_OK};
+  if (out_outcome == NULL
+      || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = service_authority_transaction_validate_preconditions
+      (txn, expected_store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (txn->write_intent_state ==
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ACQUIRED) {
+    out_outcome->result = WYL_SERVICE_AUTHORITY_WRITE_INTENT_ACQUIRED;
+    return WYRELOG_E_OK;
+  }
+  if (txn->write_intent_state ==
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ROLLBACK_REQUIRED) {
+    *out_outcome = txn->write_intent_failure;
+    return txn->write_intent_failure_rc;
+  }
+
+  if (txn->durable_operation_started)
+    return write_intent_fail (txn, out_outcome,
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY, SQLITE_MISUSE,
+        WYRELOG_E_POLICY);
+
+  rc = wyl_policy_store_service_authority_transaction_enter_participant (txn,
+      expected_store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (txn->commit_evidence == NULL)
+    return write_intent_fail (txn, out_outcome,
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY, SQLITE_MISUSE,
+        WYRELOG_E_POLICY);
+  sqlite3_stmt *stmt = NULL;
+  int sql_rc = sqlite3_prepare_v2 (expected_store->db,
+      "UPDATE service_authority_writer_gate SET lock_word=lock_word"
+      " WHERE singleton=1 AND lock_word=0;", -1, &stmt, NULL);
+  if (sql_rc == SQLITE_OK) {
+    g_mutex_lock (&txn->write_intent_barrier_mutex);
+    if (txn->write_intent_barrier_armed) {
+      txn->write_intent_barrier_reached = TRUE;
+      g_cond_broadcast (&txn->write_intent_barrier_cond);
+      while (!txn->write_intent_barrier_released)
+        g_cond_wait (&txn->write_intent_barrier_cond,
+            &txn->write_intent_barrier_mutex);
+      txn->write_intent_barrier_armed = FALSE;
+    }
+    g_mutex_unlock (&txn->write_intent_barrier_mutex);
+    if (cancellable != NULL && g_cancellable_is_cancelled (cancellable)) {
+      sqlite3_finalize (stmt);
+      return write_intent_fail (txn, out_outcome,
+          WYL_SERVICE_AUTHORITY_WRITE_INTENT_CANCELLED, SQLITE_INTERRUPT,
+          WYRELOG_E_BUSY);
+    }
+  }
+  int forced = txn->write_intent_fail_sql_once;
+  txn->write_intent_fail_sql_once = SQLITE_OK;
+  if (sql_rc == SQLITE_OK)
+    sql_rc = forced != SQLITE_OK ? forced : sqlite3_step (stmt);
+  int extended = forced != SQLITE_OK ? forced
+      : sqlite3_extended_errcode (expected_store->db);
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (sql_rc == SQLITE_DONE && sqlite3_changes (expected_store->db) == 1
+      && sqlite3_txn_state (expected_store->db, "main") == SQLITE_TXN_WRITE) {
+    txn->write_intent_state = WYL_SERVICE_AUTHORITY_WRITE_INTENT_STATE_ACQUIRED;
+    out_outcome->result = WYL_SERVICE_AUTHORITY_WRITE_INTENT_ACQUIRED;
+    out_outcome->sqlite_extended_code = SQLITE_OK;
+    return WYRELOG_E_OK;
+  }
+  if (sql_rc == SQLITE_BUSY_SNAPSHOT)
+    return write_intent_fail (txn, out_outcome,
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_BUSY_SNAPSHOT, extended,
+        WYRELOG_E_BUSY);
+  if ((sql_rc & 0xff) == SQLITE_BUSY)
+    return write_intent_fail (txn, out_outcome,
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_BUSY, extended, WYRELOG_E_BUSY);
+  if ((sql_rc & 0xff) == SQLITE_LOCKED)
+    return write_intent_fail (txn, out_outcome,
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_LOCKED, extended, WYRELOG_E_BUSY);
+  if (sql_rc == SQLITE_DONE)
+    return write_intent_fail (txn, out_outcome,
+        WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY, extended, WYRELOG_E_POLICY);
+  return write_intent_fail (txn, out_outcome,
+      WYL_SERVICE_AUTHORITY_WRITE_INTENT_IO, extended, WYRELOG_E_IO);
 }
 
 wyrelog_error_t
@@ -5694,6 +5877,51 @@ void wyl_policy_store_service_authority_transaction_fail_last_used_sql_once
 {
   if (txn != NULL)
     txn->fail_last_used_sql_once = TRUE;
+}
+
+void wyl_policy_store_service_authority_transaction_test_arm_intent_barrier
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn == NULL || txn->owner != g_thread_self ()
+      || txn->state != WYL_SERVICE_AUTHORITY_TXN_ACTIVE)
+    return;
+  g_mutex_lock (&txn->write_intent_barrier_mutex);
+  txn->write_intent_barrier_armed = TRUE;
+  txn->write_intent_barrier_reached = FALSE;
+  txn->write_intent_barrier_released = FALSE;
+  g_mutex_unlock (&txn->write_intent_barrier_mutex);
+}
+
+void wyl_policy_store_service_authority_transaction_test_wait_intent_barrier
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn == NULL)
+    return;
+  g_mutex_lock (&txn->write_intent_barrier_mutex);
+  while (txn->write_intent_barrier_armed && !txn->write_intent_barrier_reached)
+    g_cond_wait (&txn->write_intent_barrier_cond,
+        &txn->write_intent_barrier_mutex);
+  g_mutex_unlock (&txn->write_intent_barrier_mutex);
+}
+
+void wyl_policy_store_service_authority_transaction_test_release_intent_barrier
+    (WylServiceAuthorityTransaction * txn)
+{
+  if (txn == NULL)
+    return;
+  g_mutex_lock (&txn->write_intent_barrier_mutex);
+  txn->write_intent_barrier_released = TRUE;
+  g_cond_broadcast (&txn->write_intent_barrier_cond);
+  g_mutex_unlock (&txn->write_intent_barrier_mutex);
+}
+
+void wyl_policy_store_service_authority_transaction_test_fail_intent_once
+    (WylServiceAuthorityTransaction * txn, int sqlite_extended_code)
+{
+  if (txn == NULL || (sqlite_extended_code != SQLITE_LOCKED
+          && sqlite_extended_code != SQLITE_IOERR))
+    return;
+  txn->write_intent_fail_sql_once = sqlite_extended_code;
 }
 
 void wyl_policy_store_service_lifecycle_fail_commit_once

@@ -22,6 +22,24 @@ typedef struct _WylServiceAuthorityCommitEvidence
 
 typedef enum
 {
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_NONE,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_ACQUIRED,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_BUSY,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_LOCKED,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_BUSY_SNAPSHOT,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_CANCELLED,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY,
+  WYL_SERVICE_AUTHORITY_WRITE_INTENT_IO,
+} WylServiceAuthorityWriteIntentResult;
+
+typedef struct
+{
+  WylServiceAuthorityWriteIntentResult result;
+  int sqlite_extended_code;
+} WylServiceAuthorityWriteIntentOutcome;
+
+typedef enum
+{
   WYL_SERVICE_AUTHORITY_TXN_ACTIVE,
   WYL_SERVICE_AUTHORITY_TXN_COMMITTED,
   WYL_SERVICE_AUTHORITY_TXN_ROLLED_BACK,
@@ -486,6 +504,11 @@ wyrelog_error_t
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * expected_store);
 wyrelog_error_t
+    wyl_policy_store_service_authority_transaction_acquire_write_intent
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * expected_store, GCancellable * cancellable,
+    WylServiceAuthorityWriteIntentOutcome * out_outcome);
+wyrelog_error_t
     wyl_policy_store_service_authority_transaction_record_credential_last_used
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * credential_id,
@@ -511,6 +534,14 @@ gboolean
     (WylServiceAuthorityCommitEvidence * evidence);
 void wyl_policy_store_service_authority_transaction_fail_last_used_sql_once
     (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_test_arm_intent_barrier
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_test_wait_intent_barrier
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_test_release_intent_barrier
+    (WylServiceAuthorityTransaction * transaction);
+void wyl_policy_store_service_authority_transaction_test_fail_intent_once
+    (WylServiceAuthorityTransaction * transaction, int sqlite_extended_code);
 gboolean
     wyl_policy_store_service_authority_transaction_is_poisoned
     (wyl_policy_store_t * store);
