@@ -149,6 +149,20 @@ projection_count (WylHandle *handle)
   return count;
 }
 
+static gint64
+projection_distinct_intention_count (WylHandle *handle)
+{
+  duckdb_result result = { 0 };
+  g_assert_cmpint (duckdb_query (wyl_audit_conn_get_connection
+          (wyl_handle_get_audit_conn (handle)),
+          "SELECT count(DISTINCT intention_id) "
+          "FROM service_exchange_receipt_projections;", &result), ==,
+      DuckDBSuccess);
+  gint64 count = duckdb_value_int64 (&result, 0, 0);
+  duckdb_destroy_result (&result);
+  return count;
+}
+
 static guint64 sink_entries (WylHandle * handle);
 static void assert_validator_control (WylServiceExchangeProjectionAck * ack,
     WylHandle * handle, WylServiceAuthWriteLease * lease,
@@ -165,6 +179,18 @@ audit_sql_ok (WylHandle *handle, const gchar *sql)
     g_test_message ("duckdb: %s", duckdb_result_error (&result));
   duckdb_destroy_result (&result);
   g_assert_cmpint (state, ==, DuckDBSuccess);
+}
+
+static void
+policy_sql_ok (WylHandle *handle, const gchar *sql)
+{
+  gchar *message = NULL;
+  int rc = sqlite3_exec (wyl_policy_store_get_db
+      (wyl_handle_get_policy_store (handle)), sql, NULL, NULL, &message);
+  if (rc != SQLITE_OK)
+    g_test_message ("sqlite: %s", message != NULL ? message : "unknown");
+  sqlite3_free (message);
+  g_assert_cmpint (rc, ==, SQLITE_OK);
 }
 
 static void
@@ -846,6 +872,498 @@ test_faults_retry_and_exact_ack (void)
   committed_clear (&c);
 }
 
+static void
+test_recovery_idempotent_and_faults (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+
+  WylServiceExchangeRecoverySummary summary = { 99, 99 };
+  wyl_service_exchange_recovery_fail_allocation_for_test (1);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_NOMEM);
+  g_assert_cmpuint (summary.enumerated, ==, 0);
+  g_assert_cmpuint (summary.projected, ==, 0);
+  g_assert_cmpint (projection_count (f.handle), ==, 0);
+
+  g_autoptr (GCancellable) cancelled = g_cancellable_new ();
+  g_cancellable_cancel (cancelled);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, cancelled, &summary), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (projection_count (f.handle), ==, 0);
+
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (summary.enumerated, ==, 1);
+  g_assert_cmpuint (summary.projected, ==, 1);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (summary.enumerated, ==, 1);
+  g_assert_cmpuint (summary.projected, ==, 1);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+
+  guint64 before = sink_entries (f.handle);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle,
+          "decoy", uuid, NULL, &summary), ==, WYRELOG_E_INVALID);
+  g_assert_cmpuint (sink_entries (f.handle), ==, before);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c073999", NULL, &summary), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpuint (sink_entries (f.handle), ==, before);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  const gchar *name;
+  const gchar *uuid;
+  WylServiceExchangeRecoverySummary summary;
+  wyrelog_error_t rc;
+} RecoveryAttempt;
+
+static gpointer
+run_recovery (gpointer data)
+{
+  RecoveryAttempt *attempt = data;
+  attempt->rc = wyl_service_exchange_recover_committed (attempt->handle,
+      attempt->name, attempt->uuid, NULL, &attempt->summary);
+  return NULL;
+}
+
+static void
+test_recovery_projects_every_enumerated_record (void)
+{
+  static const gchar *intention_ids[] = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073993",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073994",
+  };
+  static const gchar *request_ids[] = {
+    "000000000000000000000000000",
+    "000000000000000000000000001",
+    "000000000000000000000000002",
+    "000000000000000000000000003",
+  };
+  const guint original_count = G_N_ELEMENTS (intention_ids);
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+
+  for (guint i = 0; i < original_count; i++) {
+    wyl_service_exchange_audit_input_t input = input_at (intention_ids[i],
+        request_ids[i], 10 + i);
+    Committed committed = commit_receipt (f.handle, &input,
+        WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+    committed_clear (&committed);
+  }
+
+  RecoveryAttempt a = { f.handle, name, uuid, {0}, 0 };
+  RecoveryAttempt b = { f.handle, name, uuid, {0}, 0 };
+  g_autoptr (GThread) ta = g_thread_new ("recovery-all-a", run_recovery, &a);
+  g_autoptr (GThread) tb = g_thread_new ("recovery-all-b", run_recovery, &b);
+  g_thread_join (g_steal_pointer (&ta));
+  g_thread_join (g_steal_pointer (&tb));
+
+  g_assert_cmpint (a.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (b.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (a.summary.enumerated, ==, original_count);
+  g_assert_cmpuint (a.summary.projected, ==, original_count);
+  g_assert_cmpuint (b.summary.enumerated, ==, original_count);
+  g_assert_cmpuint (b.summary.projected, ==, original_count);
+  g_assert_cmpint (projection_count (f.handle), ==, original_count);
+  g_assert_cmpint (projection_distinct_intention_count (f.handle), ==,
+      original_count);
+}
+
+static void
+test_recovery_response_loss_reopen_and_race (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+
+  wyl_audit_conn_service_exchange_fail_once
+      (wyl_handle_get_audit_conn (f.handle),
+      WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_RESPONSE_LOST);
+  WylServiceExchangeRecoverySummary summary = { 0 };
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_IO);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_OK);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+
+  RecoveryAttempt a = { f.handle, name, uuid, {0}, 0 };
+  RecoveryAttempt b = { f.handle, name, uuid, {0}, 0 };
+  g_autoptr (GThread) ta = g_thread_new ("recovery-a", run_recovery, &a);
+  g_autoptr (GThread) tb = g_thread_new ("recovery-b", run_recovery, &b);
+  g_thread_join (g_steal_pointer (&ta));
+  g_thread_join (g_steal_pointer (&tb));
+  g_assert_cmpint (a.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (b.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+
+  g_clear_object (&f.handle);
+  WylHandleOpenOptions options = {
+    .policy_store_path = f.policy_path,.audit_store_path = f.audit_path,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &f.handle), ==,
+      WYRELOG_E_OK);
+  gchar reopened_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM];
+  gchar reopened_uuid[37];
+  sink_identity (f.handle, reopened_name, reopened_uuid);
+  g_assert_cmpstr (reopened_uuid, ==, uuid);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle,
+          reopened_name, reopened_uuid, NULL, &summary), ==, WYRELOG_E_OK);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+
+  g_autofree gchar *relocated = g_build_filename (f.dir,
+      "relocated-audit.duckdb", NULL);
+  g_clear_object (&f.handle);
+  options.audit_store_path = relocated;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &f.handle), ==,
+      WYRELOG_E_OK);
+  gchar relocated_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM];
+  gchar relocated_uuid[37];
+  sink_identity (f.handle, relocated_name, relocated_uuid);
+  g_assert_cmpstr (relocated_uuid, !=, reopened_uuid);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle,
+          relocated_name, reopened_uuid, NULL, &summary), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (projection_count (f.handle), ==, 0);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle,
+          relocated_name, relocated_uuid, NULL, &summary), ==, WYRELOG_E_OK);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+  g_clear_object (&f.handle);
+  g_remove (relocated);
+  options.audit_store_path = f.audit_path;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &f.handle), ==,
+      WYRELOG_E_OK);
+}
+
+static void
+advance_generation_at_gap (gpointer data)
+{
+  wyl_handle_policy_store_test_advance_generation (data);
+}
+
+static void
+shutdown_at_gap (gpointer data)
+{
+  g_assert_cmpint (wyl_handle_shutdown_ordered (data), ==, WYRELOG_E_OK);
+}
+
+static void
+mark_checkpoint_called (gpointer data)
+{
+  *(gboolean *) data = TRUE;
+}
+
+static void
+test_recovery_gap_stale_and_artifact_corruption (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+  WylServiceExchangeRecoverySummary summary = { 0 };
+  wyl_service_exchange_recovery_set_gap_checkpoint_for_test
+      (advance_generation_at_gap, f.handle);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (projection_count (f.handle), ==, 0);
+
+  /* A new handle represents a new current generation and can recover. */
+  g_clear_object (&f.handle);
+  WylHandleOpenOptions options = {
+    .policy_store_path = f.policy_path,.audit_store_path = f.audit_path,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &f.handle), ==,
+      WYRELOG_E_OK);
+  sink_identity (f.handle, name, uuid);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_OK);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+  audit_sql_ok (f.handle,
+      "UPDATE service_exchange_receipt_projections SET tenant_id='corrupt';");
+  guint64 before = sink_entries (f.handle);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (sink_entries (f.handle), ==, before + 1);
+  g_assert_cmpint (projection_count (f.handle), ==, 1);
+}
+
+static void
+test_recovery_gap_closing_presink (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+  gboolean sink_entered = FALSE;
+  wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
+      (wyl_handle_get_audit_conn (f.handle), mark_checkpoint_called,
+      &sink_entered);
+  wyl_service_exchange_recovery_set_gap_checkpoint_for_test (shutdown_at_gap,
+      f.handle);
+  WylServiceExchangeRecoverySummary summary = { 0 };
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_BUSY);
+  g_assert_false (sink_entered);
+  g_assert_cmpuint (summary.enumerated, ==, 0);
+  g_assert_cmpuint (summary.projected, ==, 0);
+}
+
+static void
+cancel_at_gap (gpointer data)
+{
+  g_cancellable_cancel (data);
+}
+
+static void
+test_recovery_presink_and_fault_matrix (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+  WylServiceExchangeRecoverySummary summary = { 0 };
+
+  for (gint stage = WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_PREPARE;
+      stage <= WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_ALLOCATION;
+      stage++) {
+    wyl_service_exchange_recovery_fail_enumerate_for_test (stage);
+    g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+            uuid, NULL, &summary), ==,
+        stage == WYL_SERVICE_EXCHANGE_RECOVERY_ENUMERATE_FAIL_ALLOCATION
+        ? WYRELOG_E_NOMEM : WYRELOG_E_IO);
+    g_assert_cmpuint (sink_entries (f.handle), ==, 0);
+  }
+
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  wyl_service_exchange_recovery_set_gap_checkpoint_for_test (cancel_at_gap,
+      cancellable);
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, cancellable, &summary), ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (sink_entries (f.handle), ==, 0);
+
+  const WylAuditServiceExchangeFailStage faults[] = {
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_BEGIN,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_PREFLIGHT,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_SIDECAR,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_ANCHOR,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_AFTER_IN_TXN_READBACK,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_COMMIT_QUERY,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_CHECKPOINT,
+    WYL_AUDIT_SERVICE_EXCHANGE_FAIL_POST_COMMIT_READBACK,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    g_auto (Fixture) fault_fixture = { 0 };
+    fixture_init (&fault_fixture);
+    gchar fault_name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM];
+    gchar fault_uuid[37];
+    sink_identity (fault_fixture.handle, fault_name, fault_uuid);
+    Committed fault_committed = commit_receipt (fault_fixture.handle, &input,
+        WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+    committed_clear (&fault_committed);
+    wyl_audit_conn_service_exchange_fail_once
+        (wyl_handle_get_audit_conn (fault_fixture.handle), faults[i]);
+    g_assert_cmpint (wyl_service_exchange_recover_committed
+        (fault_fixture.handle, fault_name, fault_uuid, NULL, &summary), !=,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_exchange_recover_committed
+        (fault_fixture.handle, fault_name, fault_uuid, NULL, &summary), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (projection_count (fault_fixture.handle), ==, 1);
+  }
+}
+
+static void
+test_recovery_malformed_local_presink (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+  policy_sql_ok (f.handle,
+      "DROP TRIGGER trg_service_exchange_audit_no_update;"
+      "PRAGMA ignore_check_constraints=ON;"
+      "UPDATE service_exchange_audit_intentions SET outcome='deny';"
+      "PRAGMA ignore_check_constraints=OFF;"
+      "CREATE TRIGGER trg_service_exchange_audit_no_update BEFORE UPDATE ON"
+      " service_exchange_audit_intentions BEGIN SELECT RAISE(ABORT,"
+      " 'service exchange audit intentions are append-only'); END;");
+  WylServiceExchangeRecoverySummary summary = { 0 };
+  g_assert_cmpint (wyl_service_exchange_recover_committed (f.handle, name,
+          uuid, NULL, &summary), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (sink_entries (f.handle), ==, 0);
+  g_assert_cmpint (projection_count (f.handle), ==, 0);
+}
+
+static void
+test_recovery_requires_persistent_sink (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  WylHandleOpenOptions options = { 0 };
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+  const gchar *name = WYL_AUDIT_SERVICE_EXCHANGE_STREAM;
+  const gchar *uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c073999";
+  WylServiceExchangeRecoverySummary summary = { 0 };
+  g_assert_cmpint (wyl_service_exchange_recover_committed (handle, name, uuid,
+          NULL, &summary), ==, WYRELOG_E_POLICY);
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  WylHandle *handle;
+  gboolean at_entry;
+  gboolean shutdown_waiting;
+  gboolean release_entry;
+  gboolean entry_invariants;
+  wyrelog_error_t shutdown_rc;
+} RecoveryPinBarrier;
+
+static void
+shutdown_wait_checkpoint (gpointer data)
+{
+  RecoveryPinBarrier *barrier = data;
+  g_mutex_lock (&barrier->mutex);
+  barrier->shutdown_waiting = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  g_mutex_unlock (&barrier->mutex);
+}
+
+static gpointer
+shutdown_handle (gpointer data)
+{
+  RecoveryPinBarrier *barrier = data;
+  barrier->shutdown_rc = wyl_handle_shutdown_ordered (barrier->handle);
+  return NULL;
+}
+
+static void
+recovery_entry_checkpoint (gpointer data)
+{
+  RecoveryPinBarrier *barrier = data;
+  WylServiceAuthAuthoritySnapshot authority = { 0 };
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (barrier->handle), &authority);
+  guint total = 0, owner = 0;
+  wyl_handle_policy_store_pin_snapshot_for_test (barrier->handle, &total,
+      &owner);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (barrier->handle);
+  barrier->entry_invariants = !authority.writer_active
+      && authority.active_readers == 0
+      && !wyl_policy_store_service_authority_transaction_is_active (store)
+      && total == 1 && owner == 1;
+  g_mutex_lock (&barrier->mutex);
+  barrier->at_entry = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  while (!barrier->release_entry)
+    g_cond_wait (&barrier->changed, &barrier->mutex);
+  g_mutex_unlock (&barrier->mutex);
+}
+
+static void
+test_recovery_pin_held_through_atom_a (void)
+{
+  g_auto (Fixture) f = { 0 };
+  fixture_init (&f);
+  gchar name[sizeof WYL_AUDIT_SERVICE_EXCHANGE_STREAM], uuid[37];
+  sink_identity (f.handle, name, uuid);
+  wyl_service_exchange_audit_input_t input = input_at
+      ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991",
+      "000000000000000000000000000", 10);
+  Committed c = commit_receipt (f.handle, &input,
+      WYL_SERVICE_EXCHANGE_INTENTION_CREATED);
+  committed_clear (&c);
+
+  RecoveryPinBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  barrier.handle = f.handle;
+  wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
+      (wyl_handle_get_audit_conn (f.handle), recovery_entry_checkpoint,
+      &barrier);
+  wyl_handle_policy_store_set_shutdown_wait_checkpoint_for_test (f.handle,
+      shutdown_wait_checkpoint, &barrier);
+  RecoveryAttempt recovery = { f.handle, name, uuid, {0}, 0 };
+  g_autoptr (GThread) worker = g_thread_new ("recovery-pin", run_recovery,
+      &recovery);
+  g_mutex_lock (&barrier.mutex);
+  while (!barrier.at_entry)
+    g_cond_wait (&barrier.changed, &barrier.mutex);
+  g_mutex_unlock (&barrier.mutex);
+  g_assert_true (barrier.entry_invariants);
+
+  g_autoptr (GThread) closer = g_thread_new ("recovery-close",
+      shutdown_handle, &barrier);
+  g_mutex_lock (&barrier.mutex);
+  while (!barrier.shutdown_waiting)
+    g_cond_wait (&barrier.changed, &barrier.mutex);
+  barrier.release_entry = TRUE;
+  g_cond_broadcast (&barrier.changed);
+  g_mutex_unlock (&barrier.mutex);
+  g_thread_join (g_steal_pointer (&worker));
+  g_thread_join (g_steal_pointer (&closer));
+  g_assert_cmpint (recovery.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (barrier.shutdown_rc, ==, WYRELOG_E_OK);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -868,5 +1386,23 @@ main (int argc, char **argv)
       test_stale_generation_and_unavailable);
   g_test_add_func ("/service-exchange/projector/closing",
       test_closing_denies_before_sink);
+  g_test_add_func ("/service-exchange/recovery/idempotent-faults",
+      test_recovery_idempotent_and_faults);
+  g_test_add_func ("/service-exchange/recovery/all-enumerated-records",
+      test_recovery_projects_every_enumerated_record);
+  g_test_add_func ("/service-exchange/recovery/response-loss-reopen-race",
+      test_recovery_response_loss_reopen_and_race);
+  g_test_add_func ("/service-exchange/recovery/stale-artifact",
+      test_recovery_gap_stale_and_artifact_corruption);
+  g_test_add_func ("/service-exchange/recovery/gap-closing",
+      test_recovery_gap_closing_presink);
+  g_test_add_func ("/service-exchange/recovery/presink-faults",
+      test_recovery_presink_and_fault_matrix);
+  g_test_add_func ("/service-exchange/recovery/malformed-local",
+      test_recovery_malformed_local_presink);
+  g_test_add_func ("/service-exchange/recovery/persistent-sink",
+      test_recovery_requires_persistent_sink);
+  g_test_add_func ("/service-exchange/recovery/pin-through-atom-a",
+      test_recovery_pin_held_through_atom_a);
   return g_test_run ();
 }

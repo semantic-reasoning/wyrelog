@@ -75,6 +75,9 @@ guint64 wyl_audit_conn_service_exchange_get_entry_count_for_test
     (wyl_audit_conn_t * conn);
 void wyl_audit_conn_service_exchange_reset_entry_count_for_test
     (wyl_audit_conn_t * conn);
+void wyl_audit_conn_service_exchange_set_entry_checkpoint_for_test
+    (wyl_audit_conn_t * conn, void (*checkpoint) (gpointer data),
+    gpointer data);
 
 /* Exact identity of the durable service-exchange sink. */
 wyrelog_error_t wyl_audit_conn_service_exchange_get_sink_identity

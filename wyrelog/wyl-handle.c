@@ -86,6 +86,8 @@ struct _WylHandle
   gboolean policy_store_shutdown_completed;
   void (*policy_store_pin_checkpoint) (gpointer data);
   gpointer policy_store_pin_checkpoint_data;
+  void (*policy_store_shutdown_wait_checkpoint) (gpointer data);
+  gpointer policy_store_shutdown_wait_checkpoint_data;
   WylServiceAuthAuthority *service_auth_authority;
   WylServiceAuthUnavailableReason service_auth_unavailable_reason;
 #ifdef WYL_HAS_FACT_STORE
@@ -824,6 +826,15 @@ wyl_handle_shutdown_ordered (WylHandle *handle)
   }
 
   g_mutex_lock (&handle->policy_store_lifecycle_mutex);
+  if (handle->policy_store_active_operations > 0
+      && handle->policy_store_shutdown_wait_checkpoint != NULL) {
+    void (*checkpoint) (gpointer data) =
+        handle->policy_store_shutdown_wait_checkpoint;
+    gpointer data = handle->policy_store_shutdown_wait_checkpoint_data;
+    handle->policy_store_shutdown_wait_checkpoint = NULL;
+    handle->policy_store_shutdown_wait_checkpoint_data = NULL;
+    checkpoint (data);
+  }
   while (handle->policy_store_active_operations > 0)
     g_cond_wait (&handle->policy_store_lifecycle_changed,
         &handle->policy_store_lifecycle_mutex);
@@ -1344,6 +1355,36 @@ wyl_handle_policy_store_set_pin_checkpoint (WylHandle *self,
   g_mutex_lock (&self->policy_store_lifecycle_mutex);
   self->policy_store_pin_checkpoint = checkpoint;
   self->policy_store_pin_checkpoint_data = data;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+}
+
+void
+wyl_handle_policy_store_set_shutdown_wait_checkpoint_for_test (WylHandle *self,
+    void (*checkpoint) (gpointer data), gpointer data)
+{
+  g_return_if_fail (WYL_IS_HANDLE (self));
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  self->policy_store_shutdown_wait_checkpoint = checkpoint;
+  self->policy_store_shutdown_wait_checkpoint_data = data;
+  g_mutex_unlock (&self->policy_store_lifecycle_mutex);
+}
+
+void
+wyl_handle_policy_store_pin_snapshot_for_test (WylHandle *self,
+    guint *out_total_pins, guint *out_current_thread_pins)
+{
+  if (out_total_pins != NULL)
+    *out_total_pins = 0;
+  if (out_current_thread_pins != NULL)
+    *out_current_thread_pins = 0;
+  if (!WYL_IS_HANDLE (self))
+    return;
+  g_mutex_lock (&self->policy_store_lifecycle_mutex);
+  if (out_total_pins != NULL)
+    *out_total_pins = self->policy_store_active_operations;
+  if (out_current_thread_pins != NULL)
+    *out_current_thread_pins = GPOINTER_TO_UINT (g_hash_table_lookup
+        (self->policy_store_pin_owners, g_thread_self ()));
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
 }
 
