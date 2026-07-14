@@ -76,15 +76,30 @@ jobs:
     name: build-windows
     runs-on: windows-latest
     env:
-      VCPKG_ROOT: ${{ github.workspace }}\vcpkg
-      VCPKG_INSTALLED_DIR: ${{ github.workspace }}\vcpkg\installed\x64-windows
-      VCPKG_DEFAULT_BINARY_CACHE: ${{ github.workspace }}\vcpkg-binary-cache
-      VCPKG_BINARY_SOURCES: "clear;files,${{ github.workspace }}\\vcpkg-binary-cache,readwrite"
       SCCACHE_GHA_ENABLED: "true"
+      # Stays the checkout even though vcpkg no longer lives there: this only
+      # relativises paths so hashes survive a moved tree, and both locations
+      # are fixed on hosted runners, so the hit rate does not depend on it.
       SCCACHE_BASEDIRS: ${{ github.workspace }}
     steps:
       - name: Check out source
         uses: actions/checkout@v5
+
+      # A dependency tree inside the checkout is indistinguishable from project
+      # source to anything that walks the tree, which is how the POSIX runners
+      # already see their system prefixes. The runner context is unavailable in
+      # job-level env, so resolve the paths from RUNNER_TEMP here instead.
+      - name: Point vcpkg outside the checkout
+        shell: bash
+        run: |
+          vcpkg="${RUNNER_TEMP}\\vcpkg"
+          binary_cache="${RUNNER_TEMP}\\vcpkg-binary-cache"
+          {
+            printf '%s\n' "VCPKG_ROOT=${vcpkg}"
+            printf '%s\n' "VCPKG_INSTALLED_DIR=${vcpkg}\\installed\\x64-windows"
+            printf '%s\n' "VCPKG_DEFAULT_BINARY_CACHE=${binary_cache}"
+            printf '%s\n' "VCPKG_BINARY_SOURCES=clear;files,${binary_cache},readwrite"
+          } >> "$GITHUB_ENV"
 
       - name: Set up sccache
         uses: mozilla-actions/sccache-action@v0.0.10
@@ -105,10 +120,11 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_DEFAULT_BINARY_CACHE }}
-          key: vcpkg-windows-v4-2026.04.27-x64-windows-glib-sqlite3-libsodium-libsoup
-          restore-keys: |
-            vcpkg-windows-v3-2026.04.27-x64-windows-
-            vcpkg-windows-2026.04.27-glib-sqlite3-libsodium-libsoup
+          # v5, with no fallbacks: actions/cache stores archive members
+          # relative to GITHUB_WORKSPACE and extracts them back under it, so
+          # an entry saved while vcpkg lived in the checkout restores into the
+          # checkout again whatever `path` says. Every older key does that.
+          key: vcpkg-windows-v5-2026.04.27-x64-windows-glib-sqlite3-libsodium-libsoup
 
       - name: Restore vcpkg installed tree
         id: vcpkg-installed-cache
@@ -116,9 +132,9 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ env.VCPKG_ROOT }}\installed
-          key: vcpkg-windows-installed-v2-2026.04.27-x64-windows-glib-sqlite3-libsodium-libsoup
-          restore-keys: |
-            vcpkg-windows-installed-v1-2026.04.27-x64-windows-
+          # v3, with no fallbacks: same workspace-rooted archive contract as
+          # the binary packages above.
+          key: vcpkg-windows-installed-v3-2026.04.27-x64-windows-glib-sqlite3-libsodium-libsoup
 
       - name: Clear failed vcpkg installed restore
         if: steps.vcpkg-installed-cache.outcome == 'failure'
@@ -142,6 +158,22 @@ jobs:
         run: |
           @echo off
           "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows libsoup:x64-windows --x-abi-tools-use-exact-versions
+
+      # Installing outside the checkout is only worth anything if nothing under
+      # it can still be mistaken for project source, and a cache entry rooted at
+      # an older layout would restore one back without failing anything. Assert
+      # the property the layout exists for rather than trusting it holds.
+      - name: Assert no dependency tree in the checkout
+        shell: bash
+        run: |
+          status=0
+          for tree in vcpkg vcpkg_installed vcpkg-binary-cache; do
+            if [ -e "${GITHUB_WORKSPACE}/${tree}" ]; then
+              echo "::error::${tree} resolved under the workspace"
+              status=1
+            fi
+          done
+          exit "$status"
 
       - name: Save vcpkg binary packages
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
