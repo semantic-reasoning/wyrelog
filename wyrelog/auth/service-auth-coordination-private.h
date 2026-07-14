@@ -65,6 +65,10 @@ wyrelog_error_t wyl_service_auth_rank_leave (WylHandle * handle,
 
 wyrelog_error_t wyl_service_auth_read_lease_validate
     (WylServiceAuthReadLease * lease, WylHandle * handle);
+/* Borrowed for the lifetime of a valid lease; the lease owns the store pin. */
+wyrelog_error_t wyl_service_auth_read_lease_get_policy_store
+    (WylServiceAuthReadLease * lease, WylHandle * handle,
+    wyl_policy_store_t ** out_store);
 wyrelog_error_t wyl_service_auth_write_lease_validate
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
 /* Rejects a live WRITE lease after it has entered cleanup-only mode. */
@@ -125,6 +129,8 @@ void wyl_service_auth_authority_set_close_checkpoint
 /* Private deterministic fault seams for serial-validation tests. */
 void wyl_service_auth_read_lease_test_corrupt_serial
     (WylServiceAuthReadLease * lease);
+wyl_policy_store_t *wyl_service_auth_read_lease_test_swap_pinned_store
+    (WylServiceAuthReadLease * lease, wyl_policy_store_t * replacement);
 void wyl_service_auth_write_lease_test_corrupt_serial
     (WylServiceAuthWriteLease * lease);
 
