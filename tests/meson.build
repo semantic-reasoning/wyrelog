@@ -1325,10 +1325,12 @@ if get_option('enable_audit').allowed()
 
   test_audit_conn = executable('test-audit-conn',
     'test-audit-conn.c',
+    '../wyrelog/auth/service-exchange-audit-private.c',
+    include_directories : include_directories('../wyrelog'),
     c_args : [
       '-DWYL_TEST_DUCKDB_SCHEMA_PATH="' + meson.project_source_root() / 'templates' / 'access' / 'duckdb-schema.sql' + '"',
     ],
-    dependencies : [wyrelog_dep, duckdb_dep],
+    dependencies : [wyrelog_dep, duckdb_dep, sodium_dep, libchronoid_dep],
   )
 
   test('audit-conn', test_audit_conn, env : audit_conn_test_env)

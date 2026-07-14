@@ -6236,67 +6236,6 @@ wyrelog_error_t
   "service_principal,tenant_id,fingerprint_schema_version," \
   "session_fingerprint,jti_fingerprint,canonical_payload"
 
-typedef struct
-{
-  const guint8 *data;
-  gsize len;
-  gsize offset;
-} ServiceExchangePayloadCursor;
-
-static gboolean
-service_exchange_take (ServiceExchangePayloadCursor *cursor, gsize len,
-    const guint8 **out)
-{
-  if (len > cursor->len - cursor->offset)
-    return FALSE;
-  *out = cursor->data + cursor->offset;
-  cursor->offset += len;
-  return TRUE;
-}
-
-static gboolean
-service_exchange_take_u32 (ServiceExchangePayloadCursor *cursor, guint32 *out)
-{
-  const guint8 *bytes = NULL;
-  if (!service_exchange_take (cursor, 4, &bytes))
-    return FALSE;
-  *out = ((guint32) bytes[0] << 24) | ((guint32) bytes[1] << 16)
-      | ((guint32) bytes[2] << 8) | bytes[3];
-  return TRUE;
-}
-
-static gboolean
-service_exchange_take_u64 (ServiceExchangePayloadCursor *cursor, guint64 *out)
-{
-  const guint8 *bytes = NULL;
-  if (!service_exchange_take (cursor, 8, &bytes))
-    return FALSE;
-  guint64 value = 0;
-  for (guint i = 0; i < 8; i++)
-    value = (value << 8) | bytes[i];
-  *out = value;
-  return TRUE;
-}
-
-static gboolean
-service_exchange_take_exact (ServiceExchangePayloadCursor *cursor,
-    const guint8 *expected, gsize expected_len)
-{
-  const guint8 *actual = NULL;
-  return service_exchange_take (cursor, expected_len, &actual)
-      && memcmp (actual, expected, expected_len) == 0;
-}
-
-static gboolean
-service_exchange_take_framed_exact (ServiceExchangePayloadCursor *cursor,
-    const guint8 *expected, gsize expected_len)
-{
-  guint32 len = 0;
-  return expected_len <= G_MAXUINT32
-      && service_exchange_take_u32 (cursor, &len) && len == expected_len
-      && service_exchange_take_exact (cursor, expected, expected_len);
-}
-
 static gboolean
 service_exchange_hex_is_canonical (const gchar *value, gsize len)
 {
@@ -6326,59 +6265,24 @@ service_exchange_request_id_is_canonical (const gchar *value, gsize len)
 static gboolean
 service_exchange_payload_matches (const WylServiceExchangeIntentionRecord *r)
 {
-  gsize payload_len = 0;
-  const guint8 *payload = g_bytes_get_data (r->material.canonical_payload,
-      &payload_len);
-  guint8 digest[crypto_hash_sha256_BYTES];
-  if (payload == NULL || crypto_hash_sha256 (digest, payload, payload_len) != 0)
-    return FALSE;
-  gchar digest_hex[65];
-  sodium_bin2hex (digest_hex, sizeof digest_hex, digest, sizeof digest);
-  sodium_memzero (digest, sizeof digest);
-  if (strcmp (digest_hex, r->material.payload_digest) != 0)
-    return FALSE;
-
-  guint8 session[32], jti[32];
-  if (sodium_hex2bin (session, sizeof session,
-          r->material.session_fingerprint, 64, NULL, NULL, NULL) != 0
-      || sodium_hex2bin (jti, sizeof jti, r->material.jti_fingerprint, 64,
-          NULL, NULL, NULL) != 0)
-    return FALSE;
-  static const guint8 domain[] = "wyrelog.service-exchange.intention-payload";
-  static const guint8 event[] = "service.credential.exchange";
-  static const guint8 outcome[] = "allowed";
-  ServiceExchangePayloadCursor cursor = { payload, payload_len, 0 };
-  guint32 value32 = 0;
-  guint64 value64 = 0;
-  gboolean valid = service_exchange_take_exact (&cursor, domain,
-      sizeof domain)
-      && service_exchange_take_u32 (&cursor, &value32) && value32 == 1
-      && service_exchange_take_framed_exact (&cursor,
-      (const guint8 *) r->material.intention_id, 36)
-      && service_exchange_take_framed_exact (&cursor, event, sizeof event - 1)
-      && service_exchange_take_framed_exact (&cursor, outcome,
-      sizeof outcome - 1)
-      && service_exchange_take_u64 (&cursor, &value64)
-      && value64 == (guint64) r->created_at_us
-      && service_exchange_take_framed_exact (&cursor,
-      (const guint8 *) r->material.request_id, 27)
-      && service_exchange_take_framed_exact (&cursor,
-      (const guint8 *) r->credential_id, 31)
-      && service_exchange_take_u64 (&cursor, &value64)
-      && value64 == r->credential_generation
-      && service_exchange_take_framed_exact (&cursor,
-      (const guint8 *) r->service_principal, strlen (r->service_principal))
-      && service_exchange_take_framed_exact (&cursor,
-      (const guint8 *) r->tenant_id, strlen (r->tenant_id))
-      && service_exchange_take_u32 (&cursor, &value32) && value32 == 1
-      && service_exchange_take_u32 (&cursor, &value32) && value32 == 32
-      && service_exchange_take_exact (&cursor, session, sizeof session)
-      && service_exchange_take_u32 (&cursor, &value32) && value32 == 32
-      && service_exchange_take_exact (&cursor, jti, sizeof jti)
-      && cursor.offset == cursor.len;
-  sodium_memzero (session, sizeof session);
-  sodium_memzero (jti, sizeof jti);
-  return valid;
+  wyl_service_exchange_audit_projection_t projection = {
+    .intention_id = r->material.intention_id,
+    .payload_digest = r->material.payload_digest,
+    .request_id = r->material.request_id,
+    .credential_id = r->credential_id,
+    .credential_generation = r->credential_generation,
+    .service_principal = r->service_principal,
+    .tenant_id = r->tenant_id,
+    .created_at_us = r->created_at_us,
+    .payload_schema_version = WYL_SERVICE_EXCHANGE_PAYLOAD_SCHEMA_VERSION,
+    .fingerprint_schema_version =
+        WYL_SERVICE_EXCHANGE_FINGERPRINT_SCHEMA_VERSION,
+    .session_fingerprint = r->material.session_fingerprint,
+    .jti_fingerprint = r->material.jti_fingerprint,
+    .canonical_payload = r->material.canonical_payload,
+  };
+  return wyl_service_exchange_audit_projection_validate (&projection)
+      == WYRELOG_E_OK;
 }
 
 void wyl_service_exchange_intention_record_free
