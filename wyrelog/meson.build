@@ -60,6 +60,12 @@ wyrelog_deps = [
   sqlite_dep,
   wirelog_dep,
 ]
+if host_machine.system() == 'windows'
+  advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
+    required : true)
+else
+  advapi32_dep = disabler()
+endif
 
 wyrelog_log_levels = {
   'none' : 0,
@@ -200,10 +206,11 @@ if build_client
 
   wyctl_exe = executable('wyctl',
     files('wyctl/wyctl.c', 'wyctl/wyctl-config.c',
-        'wyctl/wyctl-token-file.c', 'wyctl/wyctl-publication-private.c'),
+        'wyctl/wyctl-token-file.c', 'wyctl/wyctl-publication-private.c',
+        'wyctl/wyctl-publication-windows-private.c'),
     include_directories : wyrelog_inc,
     dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep,
-        sodium_dep, sqlite_dep],
+        sodium_dep, sqlite_dep, advapi32_dep],
     install : true,
   )
 
