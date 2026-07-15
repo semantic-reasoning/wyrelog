@@ -5334,6 +5334,10 @@ fail:
   return FALSE;
 }
 
+static const gchar *skip_ascii_spaces (const gchar * p);
+static gboolean request_body_dup (SoupServerMessage * msg, gsize max_len,
+    gchar ** out_body);
+
 #ifdef WYL_TEST_DAEMON_HTTP
 typedef struct
 {
