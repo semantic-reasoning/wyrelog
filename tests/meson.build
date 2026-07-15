@@ -978,6 +978,14 @@ test('service-exchange-private-root-boundary', python3,
   ],
 )
 
+test('human-refresh-single-flight-boundary', python3,
+  args : [
+    files('test-human-refresh-single-flight-boundary.py'),
+    meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c',
+    meson.project_source_root() / 'tests' / 'test-daemon-http-decide.c',
+  ],
+)
+
 check_service_session_private_boundary = find_program(
   '../tools/check-service-session-private-boundary.py',
 )
