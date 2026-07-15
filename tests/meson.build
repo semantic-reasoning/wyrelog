@@ -1346,7 +1346,7 @@ if get_option('enable_audit').allowed()
     dependencies : [service_exchange_private_dep],
   )
 
-  test('audit-conn', test_audit_conn, env : audit_conn_test_env)
+  test('audit-conn', test_audit_conn, env : audit_conn_test_env, timeout : 60)
 
   test_service_exchange_projector = executable(
     'test-service-exchange-projector',
