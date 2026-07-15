@@ -489,6 +489,144 @@ test_random (gpointer data, guint8 *out, gsize len)
 
 typedef struct
 {
+  WylServiceAuthWriteLease *lease;
+  WylServiceAuthorityTransaction *txn;
+  WylServiceAuthorityCommitEvidence *evidence;
+} Txn;
+
+static void
+test_terminal_fence_blocks_issue_before_rng (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:fence:issue-block");
+
+  Txn t = { 0 };
+  wyl_policy_store_t *store = store_of (handle);
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &t.lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_prepare_commit_evidence
+      (t.txn, store, &t.evidence), ==, WYRELOG_E_OK);
+  WylServiceCredentialFenceResult fence_result = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_reconcile_service_credential_operation_fence (t.txn,
+          store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          "fence-block-issue", "svc:fence:issue-block", "tenant-a", NULL,
+          &fence_result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fence_result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (t.txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (t.txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (t.evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (t.lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (t.lease);
+  memset (&t, 0, sizeof t);
+
+  WylServiceCredentialFenceResult fence = { 0 };
+  g_assert_cmpint (wyl_policy_store_precheck_service_credential_operation_fence
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          "fence-block-issue", "svc:fence:issue-block", "tenant-a", NULL,
+          &fence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fence.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL);
+
+  wyl_service_credential_issue_result_t issue_result = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:fence:issue-block", "tenant-a", "admin",
+          "fence-block-issue", 0, &issue_result), ==, WYRELOG_E_POLICY);
+  g_assert_null (issue_result.secret);
+  g_assert_null (issue_result.credential.credential_id);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests WHERE request_id="
+          "'fence-block-issue';"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_cvk;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events;"), ==, 0);
+  wyl_service_credential_issue_result_clear (&issue_result);
+}
+
+static void
+test_terminal_fence_blocks_rotate_before_rng (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:fence:rotate-block");
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:fence:rotate-block", "tenant-a", "admin", "fence-rotate-old",
+          0, &issued), ==, WYRELOG_E_OK);
+  g_autofree gchar *old_id = g_strdup (issued.credential.credential_id);
+  wyl_service_credential_issue_result_clear (&issued);
+
+  Txn t = { 0 };
+  wyl_policy_store_t *store = store_of (handle);
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &t.lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, t.lease, &t.txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_prepare_commit_evidence
+      (t.txn, store, &t.evidence), ==, WYRELOG_E_OK);
+  WylServiceCredentialFenceResult result = { 0 };
+  g_assert_cmpint
+      (wyl_policy_store_reconcile_service_credential_operation_fence (t.txn,
+          store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+          "fence-block-rotate", NULL, NULL, old_id, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (t.txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (t.txn);
+  wyl_policy_store_service_authority_commit_evidence_unref (t.evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (t.lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (t.lease);
+  memset (&t, 0, sizeof t);
+
+  WylServiceCredentialFenceResult fence = { 0 };
+  g_assert_cmpint (wyl_policy_store_precheck_service_credential_operation_fence
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+          "fence-block-rotate", NULL, NULL, old_id, &fence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fence.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL);
+
+  CollisionRuntime state = { 0 };
+  wyl_service_credential_runtime_t runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &state,
+  };
+  wyl_service_credential_issue_result_t rotated = { 0 };
+  wyl_service_credential_rotate_runtime_t rotate_runtime = {
+    .credential_runtime = &runtime,
+  };
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          old_id, "admin", "fence-block-rotate", 0, &rotate_runtime,
+          &rotated), ==, WYRELOG_E_POLICY);
+  g_assert_null (rotated.secret);
+  g_assert_null (rotated.credential.credential_id);
+  g_assert_cmpuint (state.ids, ==, 0);
+  g_assert_cmpuint (state.allocs, ==, 0);
+  g_assert_cmpuint (state.frees, ==, 0);
+  g_assert_cmpuint (state.wipes, ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests WHERE request_id="
+          "'fence-block-rotate';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&rotated);
+}
+
+typedef struct
+{
   CollisionRuntime collision;
   wyl_policy_store_t *store;
   wyrelog_error_t reentry_rc;
@@ -1744,6 +1882,10 @@ main (int argc, char **argv)
       test_issue_metadata_and_sanitation);
   g_test_add_func ("/auth/service-credential/rejections-replay-cvk-only",
       test_rejections_replay_and_cvk_only);
+  g_test_add_func ("/auth/service-credential/terminal-fence-issue-block",
+      test_terminal_fence_blocks_issue_before_rng);
+  g_test_add_func ("/auth/service-credential/terminal-fence-rotate-block",
+      test_terminal_fence_blocks_rotate_before_rng);
   g_test_add_func ("/auth/service-credential/concurrent-request",
       test_concurrent_request);
   g_test_add_func ("/auth/service-credential/fault-rollback",

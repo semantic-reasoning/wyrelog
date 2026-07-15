@@ -614,6 +614,21 @@ wyrelog_error_t
     const gchar * tenant_id, const gchar * old_credential_id,
     WylServiceCredentialFenceResult * out_result);
 
+/*
+ * Reads only the durable terminal-fence namespace through a separate
+ * read-only connection and classifies the existing fence state without
+ * inserting anything. Returns WYRELOG_E_NOT_FOUND when no durable fence
+ * exists, WYRELOG_E_OK with NOT_COMMITTED_TERMINAL or CONFLICT when one
+ * does, and a retryable/terminal error for storage failures.
+ */
+wyrelog_error_t
+    wyl_policy_store_precheck_service_credential_operation_fence
+    (wyl_policy_store_t * store, GCancellable * cancellable,
+    WylServiceCredentialFenceOperation operation, const gchar * request_id,
+    const gchar * subject_id, const gchar * tenant_id,
+    const gchar * old_credential_id,
+    WylServiceCredentialFenceResult * out_result);
+
 typedef enum
 {
   WYL_SERVICE_EXCHANGE_INTENTION_NONE,
