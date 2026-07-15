@@ -767,6 +767,19 @@ CREATE TABLE IF NOT EXISTS service_exchange_audit_intentions (
 CREATE INDEX IF NOT EXISTS idx_service_exchange_audit_created
     ON service_exchange_audit_intentions (created_at_us, intention_id);
 
+CREATE TABLE IF NOT EXISTS service_credential_operation_fences (
+    request_id            TEXT NOT NULL PRIMARY KEY CHECK (
+        length(request_id) BETWEEN 1 AND 256
+        AND instr(request_id, char(0)) = 0),
+    operation             TEXT NOT NULL CHECK (operation IN (
+        'credential_issue', 'credential_rotate')),
+    operation_fingerprint BLOB NOT NULL CHECK (
+        typeof(operation_fingerprint) = 'blob'
+        AND length(operation_fingerprint) = 32),
+    terminal_state        TEXT NOT NULL CHECK (terminal_state = 'not_committed'),
+    created_at_us         INTEGER NOT NULL CHECK (created_at_us > 0)
+);
+
 CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_update
 BEFORE UPDATE ON service_exchange_audit_intentions
 BEGIN
@@ -839,6 +852,18 @@ CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_delete
 BEFORE DELETE ON service_domain_requests
 BEGIN
     SELECT RAISE(ABORT, 'service domain requests are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_update
+BEFORE UPDATE ON service_credential_operation_fences
+BEGIN
+    SELECT RAISE(ABORT, 'service credential operation fences are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_delete
+BEFORE DELETE ON service_credential_operation_fences
+BEGIN
+    SELECT RAISE(ABORT, 'service credential operation fences are append-only');
 END;
 
 -- ---------------------------------------------------------------------------

@@ -860,6 +860,22 @@ test('service-credential-domain', test_service_credential_domain,
   timeout : service_credential_domain_timeout,
 )
 
+test_service_credential_operation_fence = executable('test-service-credential-operation-fence',
+  'test-service-credential-operation-fence.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+service_credential_operation_fence_timeout = 30
+if host_machine.system() == 'windows'
+  service_credential_operation_fence_timeout = 90
+endif
+
+test('service-credential-operation-fence', test_service_credential_operation_fence,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : service_credential_operation_fence_timeout,
+)
+
 test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
   'test-policy-store-service-cvk.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],

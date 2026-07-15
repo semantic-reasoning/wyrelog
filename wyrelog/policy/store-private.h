@@ -2,6 +2,7 @@
 #pragma once
 
 #include <glib.h>
+#include <sodium.h>
 #include <sqlite3.h>
 
 #include "wyrelog/decide.h"
@@ -535,6 +536,82 @@ wyrelog_error_t
     wyl_policy_store_t * store, const gchar * credential_id,
     guint64 generation, const gchar * subject_id, const gchar * tenant_id,
     gint64 used_at_us);
+
+/*
+ * Service credential operation fences (issue #384).
+ *
+ * A durable terminal fence lets recovery prove that one canonical
+ * issue/rotate request identity either committed a credential or can never
+ * do so later, even if the original caller was disconnected or delayed.
+ *
+ * Canonical request identity (v1): version 1, an operation
+ * (issue or rotate), and an exact target -- issue: validated service
+ * subject plus exact tenant; rotate: exact old credential_id. request_id is
+ * the separate join key and is never part of the fingerprint: reuse of one
+ * request_id is only idempotent when the stored operation and target
+ * fingerprint also match, otherwise it is a conflict.
+ *
+ * Frozen v1 transcript, hashed with unkeyed BLAKE2b-256
+ * (crypto_generichash, outlen = crypto_generichash_BYTES):
+ *   u32be(45) || ASCII("wyrelog.service-credential-operation-fence.v1") ||
+ *   u8(1) || u8(operation_tag) || target
+ * where operation_tag is 1 for issue, 2 for rotate, and
+ *   target(issue)  = u32be(len(subject)) || subject ||
+ *                     u32be(len(tenant))  || tenant
+ *   target(rotate) = u32be(len(old_credential_id)) || old_credential_id
+ * Every u32be is an unsigned 32-bit big-endian byte length over the raw
+ * validated UTF-8 bytes returned by the field's existing canonical
+ * validator. No Unicode, case, whitespace, locale, or delimiter
+ * normalization is performed, and request_id is never hashed.
+ */
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE = 1,
+  WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE = 2,
+} WylServiceCredentialFenceOperation;
+
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED = 1,
+  WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL = 2,
+  WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT = 3,
+} WylServiceCredentialFenceResultState;
+
+typedef struct
+{
+  WylServiceCredentialFenceResultState state;
+  /* COMMITTED only; NOT_COMMITTED_TERMINAL and CONFLICT leave these zeroed. */
+  gchar successor_credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  guint64 successor_generation;
+} WylServiceCredentialFenceResult;
+
+/* Test/shared-helper seam for the frozen transcript above: every persistence,
+ * lookup, reconciliation, and conflict-detection path calls this exact
+ * function rather than reimplementing the transcript. */
+wyrelog_error_t
+    wyl_policy_store_service_credential_operation_fence_fingerprint
+    (WylServiceCredentialFenceOperation operation, const gchar * field_a,
+    gsize field_a_len, const gchar * field_b, gsize field_b_len,
+    guint8 out[crypto_generichash_BYTES]);
+
+/*
+ * Reconciles one canonical issue/rotate request identity against the
+ * durable committed-request and fence namespaces under the #371 WRITE
+ * lease, appending a new terminal fence when neither already exists.
+ * |txn| must be an ACTIVE authority transaction owned by the calling
+ * thread; this call enters it as a participant and acquires its
+ * cross-process write intent, so SQLITE_BUSY/LOCKED/BUSY_SNAPSHOT during
+ * that acquisition surface as WYRELOG_E_BUSY -- a retryable uncertainty,
+ * never a terminal *out_result. Exactly one of subject_id+tenant_id (issue)
+ * or old_credential_id (rotate) must be supplied, matching |operation|.
+ */
+wyrelog_error_t
+    wyl_policy_store_reconcile_service_credential_operation_fence
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    GCancellable * cancellable, WylServiceCredentialFenceOperation operation,
+    const gchar * request_id, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * old_credential_id,
+    WylServiceCredentialFenceResult * out_result);
 
 typedef enum
 {
