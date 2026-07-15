@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from unittest import mock
 
 PROTECTED = (
     "wyl_session_new_service_detached",
@@ -72,6 +73,121 @@ def main() -> int:
         return 2
     guard_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard_module)
+
+    direct_output = "WYL_BOUNDARY_CALIBRATION_TEST — direct\n"
+    direct_result = subprocess.CompletedProcess(
+        ["cc"], 0, stdout=direct_output.encode("utf-8"), stderr=b"")
+    with mock.patch.object(guard_module.subprocess, "run",
+                           return_value=direct_result) as run:
+        assert guard_module.preprocess(
+            ["cc"], "gcc", "input —\n", "direct-tu.c") == direct_output
+    direct_kwargs = run.call_args.kwargs
+    assert direct_kwargs["input"] == "input —\n".encode("utf-8")
+    assert direct_kwargs["stdout"] is subprocess.PIPE
+    assert direct_kwargs["stderr"] is subprocess.PIPE
+    assert direct_kwargs["check"] is False
+    assert not ({"text", "encoding", "errors", "universal_newlines"}
+                & direct_kwargs.keys())
+
+    for invalid_stdout in (b"invalid-\xff", None, "already decoded"):
+        invalid_result = subprocess.CompletedProcess(
+            ["cc"], 0, stdout=invalid_stdout, stderr=b"")
+        with mock.patch.object(guard_module.subprocess, "run",
+                               return_value=invalid_result):
+            try:
+                guard_module.preprocess(
+                    ["cc"], "gcc", "input\n", "invalid-direct-tu.c")
+                raise AssertionError("invalid preprocessor stdout was accepted")
+            except guard_module.BoundaryError as error:
+                assert "invalid-direct-tu.c" in str(error)
+
+    batch_output = "WYL_BOUNDARY_CALIBRATION_TEST — batch\n"
+    batch_validation = []
+    batch_probe = guard_module.Expansion(
+        ("probe —\n",), frozenset(), False, len("probe —\n".encode("utf-8")))
+
+    def batch_run(argv, **kwargs):
+        assert all(Path(path).read_text(encoding="utf-8").endswith(" —\n")
+                   for path in argv if path.endswith(".c"))
+        assert not ({"text", "encoding", "errors", "universal_newlines"}
+                    & kwargs.keys())
+        assert kwargs["timeout"] == 300
+        return subprocess.CompletedProcess(
+            argv, 0, stdout=batch_output.encode("utf-8"), stderr=b"")
+    with mock.patch.object(guard_module.subprocess, "run", side_effect=batch_run), \
+            mock.patch.object(
+                guard_module.locale, "getpreferredencoding",
+                return_value="cp949") as preferred_encoding, \
+            mock.patch.object(
+                guard_module, "validate_expanded",
+                side_effect=lambda rels, expanded, *_args:
+                    batch_validation.append((rels, expanded))):
+        guard_module.inspect_probe_batch(
+            [("batch-a.c", batch_probe, (PROTECTED[0],)),
+             ("batch-b.c", batch_probe, (PROTECTED[0],))],
+            ["clang-cl"], "clang-cl", [])
+    preferred_encoding.assert_not_called()
+    assert batch_validation
+    assert all(entry == (("batch-a.c", "batch-b.c"), batch_output)
+               for entry in batch_validation)
+
+    for invalid_stdout in (b"invalid-\xff", None, "already decoded"):
+        invalid_result = subprocess.CompletedProcess(
+            ["clang-cl"], 0, stdout=invalid_stdout, stderr=b"")
+        with mock.patch.object(guard_module.subprocess, "run",
+                               return_value=invalid_result), \
+                mock.patch.object(
+                    guard_module, "validate_expanded",
+                    side_effect=AssertionError("validation reached")):
+            try:
+                guard_module.inspect_probe_batch(
+                    [("invalid-a.c", batch_probe, (PROTECTED[0],)),
+                     ("invalid-b.c", batch_probe, (PROTECTED[0],))],
+                    ["clang-cl"], "clang-cl", [])
+                raise AssertionError("invalid batch stdout was accepted")
+            except guard_module.BoundaryError as error:
+                message = str(error)
+                assert "invalid-a.c" in message and "invalid-b.c" in message
+                assert "validation reached" not in message
+
+    diagnostics = (("컴파일 오류".encode("cp949"), "컴파일 오류"),
+                   (b"malformed-\xff", "malformed-\ufffd"))
+    for diagnostic, expected_diagnostic in diagnostics:
+        failed_result = subprocess.CompletedProcess(
+            ["clang-cl"], 9, stdout=None, stderr=diagnostic)
+        with mock.patch.object(guard_module.subprocess, "run",
+                               return_value=failed_result), \
+                mock.patch.object(
+                    guard_module.locale, "getpreferredencoding",
+                    return_value="cp949"), \
+                mock.patch.object(
+                    guard_module, "validate_expanded",
+                    side_effect=AssertionError("validation reached")):
+            try:
+                guard_module.inspect_probe_batch(
+                    [("failed-a.c", batch_probe, (PROTECTED[0],)),
+                     ("failed-b.c", batch_probe, (PROTECTED[0],))],
+                    ["clang-cl"], "clang-cl", [])
+                raise AssertionError("failed preprocessor was accepted")
+            except guard_module.BoundaryError as error:
+                message = str(error)
+                assert "failed-a.c" in message and "failed-b.c" in message
+                assert expected_diagnostic in message
+                assert "validation reached" not in message
+    with mock.patch.object(
+            guard_module.locale, "getpreferredencoding",
+            side_effect=RuntimeError("locale unavailable")):
+        assert "\ufffd" in guard_module.diagnostic_text(b"\xff")
+    with mock.patch.object(
+            guard_module.locale, "getpreferredencoding",
+            return_value="not-a-real-codec"):
+        assert "\ufffd" in guard_module.diagnostic_text(b"\xff")
+
+    class Unprintable:
+        def __str__(self):
+            raise RuntimeError("unprintable")
+    assert (guard_module.diagnostic_text(Unprintable())
+            == "<unavailable compiler diagnostic>")
     assert guard_module.worker_count("gcc") == 1
     assert 1 <= guard_module.worker_count("clang-cl") <= 4
     heartbeats = []

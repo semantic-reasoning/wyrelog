@@ -14,6 +14,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
+import locale
 import os
 from pathlib import Path
 import re
@@ -853,7 +854,39 @@ def distilled_source(rel: str, raw: str, path: Path,
         stack))
 
 
-def preprocess(command: list[str], compiler_id: str, source: str) -> str:
+def diagnostic_text(value: object) -> str:
+    """Render subprocess diagnostics without making them authoritative input."""
+    if isinstance(value, bytes):
+        try:
+            encoding = locale.getpreferredencoding(False)
+        except Exception:
+            encoding = "utf-8"
+        try:
+            return value.decode(encoding, errors="replace")
+        except (LookupError, TypeError, ValueError):
+            return value.decode("utf-8", errors="replace")
+    if value is None:
+        return ""
+    try:
+        return str(value)
+    except Exception:
+        return "<unavailable compiler diagnostic>"
+
+
+def decode_preprocessor_stdout(value: object, rels: tuple[str, ...]) -> str:
+    location = ", ".join(rels)
+    if not isinstance(value, bytes):
+        raise BoundaryError(
+            f"C preprocessor returned non-byte output: {location}")
+    try:
+        return value.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise BoundaryError(
+            f"C preprocessor emitted invalid UTF-8: {location}") from error
+
+
+def preprocess(command: list[str], compiler_id: str, source: str,
+               rel: str) -> str:
     if not command:
         raise BoundaryError("C preprocessor command is unavailable")
     if compiler_id in {"msvc", "clang-cl"}:
@@ -861,15 +894,18 @@ def preprocess(command: list[str], compiler_id: str, source: str) -> str:
     else:
         argv = command + ["-E", "-P", "-x", "c", "-"]
     try:
-        result = subprocess.run(argv, input=source, text=True, check=False,
+        result = subprocess.run(argv,
+                                input=source.encode("utf-8", errors="strict"),
+                                check=False,
                                 stdout=subprocess.PIPE,
                                 stderr=subprocess.PIPE)
     except OSError as error:
         raise BoundaryError(f"C preprocessor execution failed: {error}") from error
     if result.returncode != 0:
         raise BoundaryError("C preprocessor rejected boundary probe: "
-                            + " ".join(argv) + "\n" + result.stderr)
-    return result.stdout
+                            + rel + ": " + " ".join(argv) + "\n"
+                            + diagnostic_text(result.stderr))
+    return decode_preprocessor_stdout(result.stdout, (rel,))
 
 
 def worker_count(compiler_id: str) -> int:
@@ -1065,7 +1101,7 @@ def inspect_probe(rel: str, probe: str, protected: tuple[str, ...],
             masked_probe, calibration, sentinels = prepare_probe(
                 rel, flatten_expansion(probe), protected)
             expanded = preprocess(compiler[:1] + semantics, compiler_id,
-                                  masked_probe)
+                                  masked_probe, rel)
             validate_expanded((rel,), expanded, protected, calibration,
                               sentinels)
 
@@ -1122,6 +1158,7 @@ def inspect_probe_batch(items, compiler: list[str], compiler_id: str,
                         semantics: list[str]) -> None:
     prepared = [(rel, *prepare_probe(rel, flatten_expansion(probe), protected))
                 for rel, probe, protected in items]
+    rels = tuple(item[0] for item in prepared)
     with tempfile.TemporaryDirectory() as directory:
         paths = []
         for index, (_, source, _, _) in enumerate(prepared):
@@ -1130,7 +1167,7 @@ def inspect_probe_batch(items, compiler: list[str], compiler_id: str,
             paths.append(str(path))
         argv = compiler[:1] + semantics + ["/nologo", "/EP", "/TC", *paths]
         try:
-            result = subprocess.run(argv, text=True, check=False, timeout=300,
+            result = subprocess.run(argv, check=False, timeout=300,
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE)
         except subprocess.TimeoutExpired as error:
@@ -1143,10 +1180,11 @@ def inspect_probe_batch(items, compiler: list[str], compiler_id: str,
                 f"C preprocessor batch execution failed: {error}") from error
         if result.returncode != 0:
             raise BoundaryError("C preprocessor rejected boundary batch: "
-                                + " ".join(argv) + "\n" + result.stderr)
-    rels = tuple(item[0] for item in prepared)
+                                + ", ".join(rels) + ": " + " ".join(argv)
+                                + "\n" + diagnostic_text(result.stderr))
+    expanded = decode_preprocessor_stdout(result.stdout, rels)
     for _, _, calibration, sentinels in prepared:
-        validate_expanded(rels, result.stdout, items[0][2], calibration,
+        validate_expanded(rels, expanded, items[0][2], calibration,
                           sentinels)
 
 def main() -> int:
