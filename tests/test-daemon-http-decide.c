@@ -4564,26 +4564,6 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
-#ifdef WYL_HAS_FACT_STORE
-static wyrelog_error_t
-grant_service_credential_manage_authority (WylHandle *handle,
-    const gchar *subject, const gchar *scope)
-{
-  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
-  wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
-      "wr.service_credential.manage", scope);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_set_session_state (store, scope, "active");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_policy_store_set_permission_state (store, subject,
-      "wr.service_credential.manage", scope, "armed");
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return wyl_handle_reload_engine_pair (handle);
-}
-
 static wyrelog_error_t
 grant_policy_role_authority (WylHandle *handle, const gchar *subject,
     const gchar *scope)
@@ -5931,6 +5911,7 @@ check_audit_event_present (WylClient *client, const gchar *filter,
   }
 }
 
+#ifdef WYL_HAS_FACT_STORE
 static wyrelog_error_t
 prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id)
 {
@@ -5969,8 +5950,20 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       "session_token");
   if (session_token == NULL)
     return 1922;
-  if (grant_service_credential_manage_authority (handle, "http-allow-user",
-          session_token) != WYRELOG_E_OK)
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t grant_rc = wyl_policy_store_grant_direct_permission (store,
+      "http-allow-user", "wr.service_credential.manage", session_token);
+  if (grant_rc != WYRELOG_E_OK)
+    return 1923;
+  grant_rc = wyl_policy_store_set_session_state (store, session_token,
+      "active");
+  if (grant_rc != WYRELOG_E_OK)
+    return 1923;
+  grant_rc = wyl_policy_store_set_permission_state (store, "http-allow-user",
+      "wr.service_credential.manage", session_token, "armed");
+  if (grant_rc != WYRELOG_E_OK)
+    return 1923;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 1923;
 
   g_autofree gchar *escaped_session = g_uri_escape_string (session_token,
