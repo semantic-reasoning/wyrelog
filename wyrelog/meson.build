@@ -146,6 +146,7 @@ if get_option('enable_audit').allowed()
   service_exchange_private_lib = static_library(
     'wyrelog-service-exchange-private',
     'auth/service-exchange-private.c',
+    'auth/service-exchange-limiter-private.c',
     'auth/service-exchange-audit-private.c',
     'auth/service-exchange-projector-private.c',
     include_directories : wyrelog_inc,
