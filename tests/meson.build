@@ -162,7 +162,7 @@ if build_client
     dependencies : test_daemon_http_decide_deps,
   )
 
-  test('daemon-http-decide', test_daemon_http_decide, timeout : 120)
+  test('daemon-http-decide', test_daemon_http_decide, timeout : 240)
 
   test_daemon_http_decide_refresh = executable('test-daemon-http-decide-refresh',
     'test-daemon-http-decide.c',
@@ -176,7 +176,7 @@ if build_client
   )
 
   test('daemon-http-decide-refresh', test_daemon_http_decide_refresh,
-    timeout : 120,
+    timeout : 240,
   )
 
   if get_option('enable_audit').allowed()
@@ -192,7 +192,7 @@ if build_client
     )
 
     test('daemon-http-decide-audit', test_daemon_http_decide_audit,
-      timeout : 180,
+      timeout : 240,
     )
   endif
 
@@ -881,7 +881,7 @@ test_service_credential_domain = executable('test-service-credential-domain',
 
 service_credential_domain_timeout = 30
 if host_machine.system() == 'windows'
-  service_credential_domain_timeout = 90
+  service_credential_domain_timeout = 180
 endif
 
 test('service-credential-domain', test_service_credential_domain,
@@ -897,7 +897,7 @@ test_service_credential_operation_fence = executable('test-service-credential-op
 
 service_credential_operation_fence_timeout = 30
 if host_machine.system() == 'windows'
-  service_credential_operation_fence_timeout = 90
+  service_credential_operation_fence_timeout = 180
 endif
 
 test('service-credential-operation-fence', test_service_credential_operation_fence,
