@@ -22,6 +22,7 @@ FUNCTIONS = (
 )
 ALLOW_ACQUIRE = set(FUNCTIONS[:11]) | {
     "wyl_daemon_http_configure_tenant_for_test",
+    "service_credential_operation_reconcile_execute",
 }
 MUTATORS = {
     "wyl_policy_store_create_tenant", "wyl_policy_store_set_tenant_sealed",
