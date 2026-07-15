@@ -17,6 +17,7 @@ typedef struct
   wyl_policy_store_t *store;
   WylServiceAuthWriteLease *lease;
   WylServiceAuthorityTransaction *transaction;
+  WylServiceAuthorityCommitEvidence *evidence;
   gboolean owns_handle_pin;
 } ServiceMutation;
 
@@ -46,6 +47,31 @@ service_mutation_start_transaction (ServiceMutation *mutation)
 }
 
 static wyrelog_error_t
+service_mutation_reconcile_operation_fence (ServiceMutation *mutation,
+    WylServiceCredentialFenceOperation operation, const gchar *request_id,
+    const gchar *subject_id, const gchar *tenant_id,
+    const gchar *old_credential_id)
+{
+  if (mutation->evidence == NULL) {
+    wyrelog_error_t evidence_rc =
+        wyl_policy_store_service_authority_prepare_commit_evidence
+        (mutation->transaction, mutation->store, &mutation->evidence);
+    if (evidence_rc != WYRELOG_E_OK)
+      return evidence_rc;
+  }
+  WylServiceCredentialFenceResult fence = { 0 };
+  wyrelog_error_t rc =
+      wyl_policy_store_reconcile_service_credential_operation_fence
+      (mutation->transaction, mutation->store, NULL, operation, request_id,
+      subject_id, tenant_id, old_credential_id, &fence);
+  if (rc == WYRELOG_E_OK
+      && fence.state !=
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+static wyrelog_error_t
 service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
 {
   wyrelog_error_t result = operation;
@@ -69,6 +95,11 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     }
     wyl_policy_store_service_authority_transaction_free (mutation->transaction);
     mutation->transaction = NULL;
+  }
+  if (mutation->evidence != NULL) {
+    wyl_policy_store_service_authority_commit_evidence_unref
+        (mutation->evidence);
+    mutation->evidence = NULL;
   }
   if (mutation->lease != NULL) {
     wyrelog_error_t release_rc =
@@ -273,11 +304,25 @@ wyl_service_credential_issue (WylHandle *handle, const gchar *subject_id,
   wyl_service_credential_secret_t *secret = NULL;
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
+  if (rc == WYRELOG_E_OK) {
+    WylServiceCredentialFenceResult fence = { 0 };
+    rc = wyl_policy_store_precheck_service_credential_operation_fence
+        (mutation.store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+        request_id, subject_id, tenant_id, NULL, &fence);
+    if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_POLICY;
+    else if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_OK;
+  }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_ensure_service_cvk_for_issuance (mutation.store,
         &cvk, &cvk_len);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_reconcile_operation_fence (&mutation,
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, request_id, subject_id,
+        tenant_id, NULL);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_issue_service_credential_core
         (mutation.transaction, mutation.store, subject_id, tenant_id,
@@ -412,6 +457,16 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
   wyl_service_credential_secret_t *secret = NULL;
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
+  if (rc == WYRELOG_E_OK) {
+    WylServiceCredentialFenceResult fence = { 0 };
+    rc = wyl_policy_store_precheck_service_credential_operation_fence
+        (mutation.store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+        request_id, NULL, NULL, old_credential_id, &fence);
+    if (rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_POLICY;
+    else if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_OK;
+  }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_materialize_service_cvk_existing (mutation.store,
         &cvk, &cvk_len);
@@ -419,6 +474,10 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_reconcile_operation_fence (&mutation,
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,
+        old_credential_id);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_rotate_service_credential_core
         (mutation.transaction, mutation.store, old_credential_id,

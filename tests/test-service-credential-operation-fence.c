@@ -260,6 +260,9 @@ test_fresh_request_creates_fence (void)
 {
   g_autoptr (WylHandle) handle = open_handle (NULL);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credential_operation_fences"
+          " WHERE request_id='req-committed-issue';"), ==, 0);
   Txn t = begin_txn (handle);
   WylServiceCredentialFenceResult result = { 0 };
   g_assert_cmpint
@@ -382,7 +385,7 @@ test_committed_issue_returns_successor (void)
 
   g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
           "SELECT count(*) FROM service_credential_operation_fences"
-          " WHERE request_id='req-committed-issue';"), ==, 0);
+          " WHERE request_id='req-committed-issue';"), ==, 1);
 }
 
 static void
