@@ -162,7 +162,10 @@ if build_client
     dependencies : test_daemon_http_decide_deps,
   )
 
-  test('daemon-http-decide', test_daemon_http_decide)
+  # Same runner budget as the -audit and -mfa siblings: the shared
+  # daemon-http flow costs 8-19s depending on host scheduling and meson's
+  # default MALLOC_PERTURB_, which leaves no headroom in the default 30s.
+  test('daemon-http-decide', test_daemon_http_decide, timeout : 60)
 
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
