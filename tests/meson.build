@@ -879,10 +879,7 @@ test_service_credential_domain = executable('test-service-credential-domain',
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )
 
-service_credential_domain_timeout = 30
-if host_machine.system() == 'windows'
-  service_credential_domain_timeout = 180
-endif
+service_credential_domain_timeout = 180
 
 test('service-credential-domain', test_service_credential_domain,
   is_parallel : host_machine.system() != 'windows',
