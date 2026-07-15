@@ -2,7 +2,6 @@
 #pragma once
 
 #include <glib.h>
-#include <sodium.h>
 #include <sqlite3.h>
 
 #include "wyrelog/decide.h"
@@ -564,6 +563,8 @@ wyrelog_error_t
  * validator. No Unicode, case, whitespace, locale, or delimiter
  * normalization is performed, and request_id is never hashed.
  */
+#define WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES 32u
+
 typedef enum
 {
   WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE = 1,
@@ -592,7 +593,7 @@ wyrelog_error_t
     wyl_policy_store_service_credential_operation_fence_fingerprint
     (WylServiceCredentialFenceOperation operation, const gchar * field_a,
     gsize field_a_len, const gchar * field_b, gsize field_b_len,
-    guint8 out[crypto_generichash_BYTES]);
+    guint8 out[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES]);
 
 /*
  * Reconciles one canonical issue/rotate request identity against the
