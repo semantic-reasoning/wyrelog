@@ -388,6 +388,7 @@ if build_client and host_machine.system() != 'windows'
       'test-wyctl-publication-windows.c',
       '../wyrelog/wyctl/wyctl-publication-private.c',
       '../wyrelog/wyctl/wyctl-publication-windows-private.c',
+      c_args : ['-DWYL_TEST_WYCTL_PUBLICATION_WINDOWS'],
       include_directories : [include_directories('../wyrelog'),
         include_directories('../wyrelog/wyctl')],
       dependencies : [wyrelog_dep, sodium_dep, advapi32_dep],

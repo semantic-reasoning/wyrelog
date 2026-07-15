@@ -41,4 +41,9 @@ wyrelog_error_t wyctl_publication_windows_cleanup
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
     WyctlPublicationResult * out_result);
 
+#ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
+gboolean wyctl_publication_windows_test_security_descriptor_is_owner_only
+    (const gchar * sddl);
+#endif
+
 G_END_DECLS

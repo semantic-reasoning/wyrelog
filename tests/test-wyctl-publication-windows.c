@@ -7,6 +7,100 @@
 
 #ifdef G_OS_WIN32
 
+#include <windows.h>
+#include <aclapi.h>
+
+static gboolean
+sid_matches_current_user (PSID sid)
+{
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  gboolean matches = FALSE;
+
+  if (sid == NULL || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY,
+          &token))
+    return FALSE;
+  if (!GetTokenInformation (token, TokenUser, NULL, 0, &needed)
+      && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
+    CloseHandle (token);
+    return FALSE;
+  }
+  user = g_malloc0 (needed);
+  if (user == NULL) {
+    CloseHandle (token);
+    return FALSE;
+  }
+  if (!GetTokenInformation (token, TokenUser, user, needed, &needed)) {
+    g_free (user);
+    CloseHandle (token);
+    return FALSE;
+  }
+  matches = EqualSid (sid, user->User.Sid);
+  g_free (user);
+  CloseHandle (token);
+  return matches;
+}
+
+static gboolean
+security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
+{
+  BOOL dacl_present = FALSE;
+  BOOL dacl_defaulted = FALSE;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  PACL dacl = NULL;
+  PSID owner = NULL;
+  ACL_SIZE_INFORMATION size_info = { 0 };
+  ACCESS_ALLOWED_ACE *ace = NULL;
+
+  if (descriptor == NULL
+      || !GetSecurityDescriptorControl (descriptor, &control, NULL)
+      || (control & SE_DACL_PROTECTED) == 0
+      || !GetSecurityDescriptorOwner (descriptor, &owner, NULL)
+      || owner == NULL || !sid_matches_current_user (owner)
+      || !GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
+          &dacl_defaulted)
+      || !dacl_present || dacl == NULL || dacl_defaulted)
+    return FALSE;
+  if (!GetAclInformation (dacl, &size_info, sizeof size_info,
+          AclSizeInformation) || size_info.AceCount != 1)
+    return FALSE;
+  if (!GetAce (dacl, 0, (LPVOID *) & ace) || ace == NULL
+      || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+    return FALSE;
+  return EqualSid ((PSID) & ace->SidStart, owner)
+      && ace->Mask == FILE_ALL_ACCESS;
+}
+
+static void
+assert_path_owner_only_acl (const gchar *path)
+{
+  g_autofree wchar_t *wpath = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  DWORD sec_len = 0;
+  PSECURITY_DESCRIPTOR sec = NULL;
+
+  g_assert_nonnull (wpath);
+  handle = CreateFileW (wpath, READ_CONTROL, FILE_SHARE_READ | FILE_SHARE_WRITE
+      | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  g_assert_cmpint (handle != INVALID_HANDLE_VALUE, !=, FALSE);
+
+  g_assert_false (GetKernelObjectSecurity (handle,
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0,
+          &sec_len));
+  g_assert_cmpuint (GetLastError (), ==, ERROR_INSUFFICIENT_BUFFER);
+  sec = g_malloc0 (sec_len);
+  g_assert_nonnull (sec);
+  g_assert_true (GetKernelObjectSecurity (handle,
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, sec,
+          sec_len, &sec_len));
+  g_assert_true (security_descriptor_is_owner_only (sec));
+
+  g_free (sec);
+  CloseHandle (handle);
+}
+
 typedef struct
 {
   WyctlPublicationWindowsBackend backend;
@@ -50,6 +144,11 @@ test_plan_prepare_commit_roundtrip (void)
   g_assert_cmpint (wyctl_publication_windows_prepare (&fixture.backend,
           &planned, &receipt), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_receipt_is_valid (&receipt));
+  {
+    g_autofree gchar *stage = g_build_filename (fixture.root_dir,
+        planned.stage_basename, NULL);
+    assert_path_owner_only_acl (stage);
+  }
 
   g_assert_cmpint (wyctl_publication_windows_commit (&fixture.backend, &planned,
           &receipt, credential_id, credential_secret, &result), ==,
@@ -114,6 +213,11 @@ test_cleanup_refuses_foreign_stage (void)
   g_assert_cmpint (wyctl_publication_windows_prepare (&fixture.backend,
           &planned, &receipt), ==, WYRELOG_E_OK);
   stage = g_build_filename (fixture.root_dir, planned.stage_basename, NULL);
+  {
+    g_autofree wchar_t *wstage = g_utf8_to_utf16 (stage, -1, NULL, NULL, NULL);
+    g_assert_nonnull (wstage);
+    g_assert_true (DeleteFileW (wstage));
+  }
   g_assert_true (g_file_set_contents (stage, "foreign", -1, NULL));
   g_assert_cmpint (wyctl_publication_windows_cleanup (&fixture.backend,
           &planned, &receipt, &result), ==, WYRELOG_E_OK);
@@ -127,6 +231,22 @@ test_cleanup_refuses_foreign_stage (void)
   windows_fixture_teardown (&fixture);
 }
 
+#ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
+static void
+test_owner_only_security_descriptor_predicate (void)
+{
+  g_assert_true
+      (wyctl_publication_windows_test_security_descriptor_is_owner_only
+      ("D:P(A;;FA;;;OW)"));
+  g_assert_false
+      (wyctl_publication_windows_test_security_descriptor_is_owner_only
+      ("D:(A;;FA;;;OW)"));
+  g_assert_false
+      (wyctl_publication_windows_test_security_descriptor_is_owner_only
+      ("D:P(A;;FA;;;WD)"));
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -137,6 +257,10 @@ main (int argc, char **argv)
       test_plan_rejects_existing_destination);
   g_test_add_func ("/wyctl/publication/windows/refuses-foreign-cleanup",
       test_cleanup_refuses_foreign_stage);
+#ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
+  g_test_add_func ("/wyctl/publication/windows/owner-only-security-descriptor",
+      test_owner_only_security_descriptor_predicate);
+#endif
   return g_test_run ();
 }
 
