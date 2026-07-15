@@ -30,6 +30,7 @@ def check(source: str) -> None:
     refresh_prepare = function_body(source, "prepare_human_refresh_candidate")
     latch = function_body(source, "human_refresh_test_latch_reach")
     context_new = function_body(source, "wyl_daemon_http_context_new")
+    nonzero_counter = function_body(source, "human_refresh_next_nonzero")
     forbidden = (
         "WylHumanRefreshRotation", "WylHumanRefreshWaiter",
         "human_refresh_rotation_", "human_refresh_waiter_",
@@ -61,6 +62,9 @@ def check(source: str) -> None:
         raise SystemExit("dispatch ownership gate must precede token lookup")
     if "g_main_context_ref_thread_default ()" not in context_new:
         raise SystemExit("HTTP context no longer captures its dispatch context")
+    if "value == 0" not in nonzero_counter or source.count(
+            "human_refresh_next_nonzero (&ctx->next_refresh_epoch)") < 2:
+        raise SystemExit("refresh epoch counter lost zero-skipping wrap handling")
     begin = handler.find("/* HUMAN_REFRESH_PUBLICATION_BEGIN */")
     end = handler.find("/* HUMAN_REFRESH_PUBLICATION_END */")
     if begin < 0 or end <= begin:
@@ -131,6 +135,28 @@ def check(source: str) -> None:
     refresh_free = function_body(source, "wyl_refresh_token_state_free")
     if "wyl_sensitive_string_free (state->token)" not in refresh_free:
         raise SystemExit("refresh token is not wiped")
+    synchronous_helpers = (access_prepare, refresh_prepare, publishable,
+                           classifier)
+    hidden_async = (
+        "g_main_context_", "g_source_", "g_idle_", "g_timeout_",
+        "soup_", "GSocket", "GInputStream", "GOutputStream",
+        "g_file_", "GTask", "callback", "g_cond_wait",
+    )
+    for helper in synchronous_helpers:
+        for forbidden_call in hidden_async:
+            if forbidden_call in helper:
+                raise SystemExit(
+                    f"synchronous prepare callgraph regained {forbidden_call}")
+    for phase in (
+        "WYL_DAEMON_REFRESH_BEFORE_CLAIM",
+        "WYL_DAEMON_REFRESH_AFTER_CLAIM",
+        "WYL_DAEMON_REFRESH_AFTER_ACCESS_PREPARE",
+        "WYL_DAEMON_REFRESH_AFTER_REFRESH_PREPARE",
+        "WYL_DAEMON_REFRESH_BEFORE_PUBLICATION",
+        "WYL_DAEMON_REFRESH_AFTER_PUBLICATION",
+    ):
+        if handler.count(phase) != 1:
+            raise SystemExit(f"fixed typed latch phase lost: {phase}")
 
 
 def check_test_lifecycle(source: str) -> None:

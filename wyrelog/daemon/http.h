@@ -63,8 +63,22 @@ typedef enum
 } WylDaemonServiceTokenField;
 typedef enum
 {
-  WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE = 1,
+  WYL_DAEMON_REFRESH_BEFORE_CLAIM = 1,
+  WYL_DAEMON_REFRESH_AFTER_CLAIM,
+  WYL_DAEMON_REFRESH_AFTER_ACCESS_PREPARE,
+  WYL_DAEMON_REFRESH_AFTER_REFRESH_PREPARE,
+  WYL_DAEMON_REFRESH_BEFORE_PUBLICATION,
+  WYL_DAEMON_REFRESH_AFTER_PUBLICATION,
 } WylDaemonRefreshPhase;
+typedef enum
+{
+  WYL_DAEMON_REFRESH_FAULT_NONE = 0,
+  WYL_DAEMON_REFRESH_FAULT_ACCESS_PREPARE,
+  WYL_DAEMON_REFRESH_FAULT_REFRESH_PREPARE,
+  WYL_DAEMON_REFRESH_FAULT_RESULT_PREPARE,
+  WYL_DAEMON_REFRESH_FAULT_PREPUBLICATION,
+  WYL_DAEMON_REFRESH_FAULT_RESPONSE_BUILD,
+} WylDaemonRefreshFault;
 typedef struct
 {
   guint handler_entries;
@@ -183,6 +197,17 @@ gboolean wyl_daemon_http_set_refresh_times_for_test (SoupServer * server,
     const gchar * token, gint64 expires_at, gint64 consumed_at);
 void wyl_daemon_http_fail_next_refresh_publication_for_test
     (SoupServer * server);
+void wyl_daemon_http_set_refresh_fault_for_test (SoupServer * server,
+    WylDaemonRefreshFault fault);
+gchar **wyl_daemon_http_snapshot_session_access_ids_for_test
+    (SoupServer * server, const gchar * session_id);
+gchar **wyl_daemon_http_snapshot_session_refresh_ids_for_test
+    (SoupServer * server, const gchar * session_id);
+gchar **wyl_daemon_http_snapshot_generated_refresh_ids_for_test
+    (SoupServer * server);
+void wyl_daemon_http_sensitive_strv_free_for_test (gchar ** values);
+void wyl_daemon_http_revoke_human_session_for_test (SoupServer * server,
+    const gchar * session_id);
 void wyl_daemon_http_terminalize_refreshes_for_test (SoupServer * server);
 guint64 wyl_daemon_http_arm_refresh_latch_for_test (SoupServer * server,
     WylDaemonRefreshPhase phase);

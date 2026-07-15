@@ -1193,7 +1193,7 @@ check_concurrent_human_refresh_single_flight (SoupServer *server,
   wyl_daemon_access_token_snapshot_t lineage = { 0 };
   wyl_daemon_http_reset_refresh_counters_for_test (server);
   guint64 latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE);
+      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   RefreshThreadBarrier barrier = { 0 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
@@ -1356,7 +1356,7 @@ check_human_refresh_response_loss (SoupServer *server, const gchar *base_url)
       (server, predecessor, &refresh_before, &access_before);
   wyl_daemon_http_reset_refresh_counters_for_test (server);
   latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE);
+      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   DroppedHumanRefresh dropped = {
     .base_url = base_url,
     .refresh_token = predecessor,
@@ -1461,7 +1461,7 @@ check_human_refresh_prepared_expiry (SoupServer *server, const gchar *base_url)
   before = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
       &refresh_before, &access_before);
   latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE);
+      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   request.base_url = base_url;
   request.refresh_token = predecessor;
   thread = g_thread_new ("refresh-prepared-expiry",
@@ -1506,6 +1506,79 @@ cleanup:
 }
 
 static gint
+check_human_refresh_logout_ordering (SoupServer *server, const gchar *base_url)
+{
+  const WylDaemonRefreshPhase phases[] = {
+    WYL_DAEMON_REFRESH_BEFORE_PUBLICATION,
+    WYL_DAEMON_REFRESH_AFTER_PUBLICATION,
+  };
+  g_autoptr (SoupSession) session = soup_session_new ();
+  for (guint i = 0; i < G_N_ELEMENTS (phases); i++) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_login (session, "POST", base_url,
+            "username=login-user&skip_mfa=true", &status, &body) != 0
+        || status != 200)
+      return 2320 + (gint) i *10;
+    g_autofree gchar *session_id = extract_json_string (body, "session_token");
+    g_autofree gchar *predecessor = extract_json_string (body,
+        "refresh_token");
+    guint refresh_before = 0, access_before = 0;
+    g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
+        (server, predecessor, &refresh_before, &access_before);
+    guint64 generation = wyl_daemon_http_arm_refresh_latch_for_test (server,
+        phases[i]);
+    RawHumanRefresh request = {
+      .base_url = base_url,
+      .refresh_token = predecessor,
+    };
+    GThread *thread = g_thread_new ("refresh-logout-order",
+        raw_human_refresh_thread, &request);
+    if (!wyl_daemon_http_wait_refresh_latch_for_test (server, generation,
+            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      wyl_daemon_http_release_refresh_latch_for_test (server, generation);
+      g_thread_join (thread);
+      wyl_daemon_http_disarm_refresh_latch_for_test (server, generation);
+      g_free (request.body);
+      return 2321 + (gint) i *10;
+    }
+    wyl_daemon_http_revoke_human_session_for_test (server, session_id);
+    wyl_daemon_http_release_refresh_latch_for_test (server, generation);
+    g_thread_join (thread);
+    wyl_daemon_http_disarm_refresh_latch_for_test (server, generation);
+    guint refresh_after = 0, access_after = 0;
+    g_autofree gchar *after = wyl_daemon_http_dup_refresh_state_for_test
+        (server, predecessor, &refresh_after, &access_after);
+    if (i == 0) {
+      if (request.status == 200 || before == NULL || after == NULL
+          || refresh_after != refresh_before || access_after != access_before)
+        return 2322;
+    } else {
+      g_autofree gchar *access = extract_json_string (request.body,
+          "access_token");
+      g_autofree gchar *refresh = extract_json_string (request.body,
+          "refresh_token");
+      g_autofree gchar *jti = access_token_jti (server, access);
+      wyl_daemon_access_token_snapshot_t access_state = { 0 };
+      guint successor_refresh_count = 0, successor_access_count = 0;
+      g_autofree gchar *successor =
+          wyl_daemon_http_dup_refresh_state_for_test (server, refresh,
+          &successor_refresh_count, &successor_access_count);
+      gboolean revoked = wyl_daemon_http_snapshot_access_token_for_test
+          (server, jti, &access_state) && access_state.revoked;
+      wyl_daemon_access_token_snapshot_clear (&access_state);
+      if (request.status != 200 || access == NULL || refresh == NULL
+          || refresh_after != refresh_before + 1
+          || access_after != access_before + 1 || !revoked
+          || successor == NULL || strstr (successor, "|0|1|") == NULL)
+        return 2332;
+    }
+    g_free (request.body);
+  }
+  return 0;
+}
+
+static gint
 check_human_refresh_shutdown_ordering (SoupServer *server,
     const gchar *base_url)
 {
@@ -1527,7 +1600,7 @@ check_human_refresh_shutdown_ordering (SoupServer *server,
   g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
       (server, predecessor, &refresh_before, &access_before);
   latch_generation = wyl_daemon_http_arm_refresh_latch_for_test
-      (server, WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE);
+      (server, WYL_DAEMON_REFRESH_BEFORE_PUBLICATION);
   request.base_url = base_url;
   request.refresh_token = predecessor;
   thread = g_thread_new ("refresh-shutdown",
@@ -1606,6 +1679,116 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
   return rc == 0 && status == 400 && owned == 1 && wrong == 0 ? 0 : 2266;
+}
+
+static gint
+check_human_refresh_fault_matrix (SoupServer *server, const gchar *base_url)
+{
+  const WylDaemonRefreshFault faults[] = {
+    WYL_DAEMON_REFRESH_FAULT_ACCESS_PREPARE,
+    WYL_DAEMON_REFRESH_FAULT_REFRESH_PREPARE,
+    WYL_DAEMON_REFRESH_FAULT_RESULT_PREPARE,
+    WYL_DAEMON_REFRESH_FAULT_PREPUBLICATION,
+  };
+  g_autoptr (SoupSession) session = soup_session_new ();
+  for (guint i = 0; i < G_N_ELEMENTS (faults); i++) {
+    guint status = 0;
+    g_autofree gchar *body = NULL;
+    if (send_raw_login (session, "POST", base_url,
+            "username=login-user&skip_mfa=true", &status, &body) != 0
+        || status != 200)
+      return 2270 + (gint) i *10;
+    g_autofree gchar *predecessor = extract_json_string (body,
+        "refresh_token");
+    g_autofree gchar *session_id = extract_json_string (body,
+        "session_token");
+    gchar **access_ids_before =
+        wyl_daemon_http_snapshot_session_access_ids_for_test (server,
+        session_id);
+    gchar **refresh_ids_before =
+        wyl_daemon_http_snapshot_session_refresh_ids_for_test (server,
+        session_id);
+    guint refresh_before = 0, access_before = 0;
+    g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
+        (server, predecessor, &refresh_before, &access_before);
+    wyl_daemon_http_reset_refresh_counters_for_test (server);
+    wyl_daemon_http_set_refresh_fault_for_test (server, faults[i]);
+    g_clear_pointer (&body, g_free);
+    if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
+            &body) != 0 || status != 500)
+      return 2271 + (gint) i *10;
+    guint refresh_failed = 0, access_failed = 0;
+    g_autofree gchar *failed = wyl_daemon_http_dup_refresh_state_for_test
+        (server, predecessor, &refresh_failed, &access_failed);
+    gchar **access_ids_failed =
+        wyl_daemon_http_snapshot_session_access_ids_for_test (server,
+        session_id);
+    gchar **refresh_ids_failed =
+        wyl_daemon_http_snapshot_session_refresh_ids_for_test (server,
+        session_id);
+    gchar **generated_refresh =
+        wyl_daemon_http_snapshot_generated_refresh_ids_for_test (server);
+    if (before == NULL || failed == NULL || refresh_failed != refresh_before
+        || access_failed != access_before || strstr (failed, "|0|0|") == NULL
+        || !g_strv_equal ((const gchar * const *) access_ids_before,
+            (const gchar * const *) access_ids_failed)
+        || !g_strv_equal ((const gchar * const *) refresh_ids_before,
+            (const gchar * const *) refresh_ids_failed))
+      return 2272 + (gint) i *10;
+    for (guint generated = 0; generated_refresh != NULL
+        && generated_refresh[generated] != NULL; generated++)
+      if (g_strv_contains ((const gchar * const *) refresh_ids_failed,
+              generated_refresh[generated]))
+        return 2274 + (gint) i *10;
+    g_strfreev (access_ids_before);
+    g_strfreev (access_ids_failed);
+    wyl_daemon_http_sensitive_strv_free_for_test (refresh_ids_before);
+    wyl_daemon_http_sensitive_strv_free_for_test (refresh_ids_failed);
+    wyl_daemon_http_sensitive_strv_free_for_test (generated_refresh);
+    g_clear_pointer (&body, g_free);
+    if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
+            &body) != 0 || status != 200)
+      return 2273 + (gint) i *10;
+  }
+
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_login (session, "POST", base_url,
+          "username=login-user&skip_mfa=true", &status, &body) != 0
+      || status != 200)
+    return 2310;
+  g_autofree gchar *predecessor = extract_json_string (body, "refresh_token");
+  guint refresh_before = 0, access_before = 0;
+  g_autofree gchar *before = wyl_daemon_http_dup_refresh_state_for_test
+      (server, predecessor, &refresh_before, &access_before);
+  wyl_daemon_http_reset_refresh_counters_for_test (server);
+  wyl_daemon_http_set_refresh_fault_for_test (server,
+      WYL_DAEMON_REFRESH_FAULT_RESPONSE_BUILD);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
+          &body) != 0 || status != 500
+      || strstr (body, "refresh_response_failed") == NULL)
+    return 2311;
+  guint refresh_after = 0, access_after = 0;
+  g_autofree gchar *committed = wyl_daemon_http_dup_refresh_state_for_test
+      (server, predecessor, &refresh_after, &access_after);
+  if (before == NULL || committed == NULL
+      || refresh_after != refresh_before + 1
+      || access_after != access_before + 1)
+    return 2312;
+  WylDaemonRefreshCounters counters_before = { 0 }, counters_after = { 0 };
+  wyl_daemon_http_refresh_counters_for_test (server, &counters_before);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_refresh (session, "POST", base_url, predecessor, &status,
+          &body) != 0 || status != 200)
+    return 2313;
+  wyl_daemon_http_refresh_counters_for_test (server, &counters_after);
+  if (memcmp (&counters_before.access_id_successes,
+          &counters_after.access_id_successes,
+          sizeof counters_before - G_STRUCT_OFFSET (WylDaemonRefreshCounters,
+              access_id_successes)) != 0)
+    return 2314;
+  return 0;
 }
 
 static gint
@@ -1769,6 +1952,7 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
         TRUE},
   };
   g_autoptr (SoupSession) client = soup_session_new ();
+  wyl_daemon_http_reset_refresh_counters_for_test (server);
   for (guint i = 0; i < G_N_ELEMENTS (invalid); i++) {
     const gchar *successor_access =
         invalid[i].consumed ? "cached-access" : NULL;
@@ -1796,6 +1980,12 @@ check_service_refresh_isolation (SoupServer *server, const gchar *base_url,
     if (g_strcmp0 (after, before) != 0 || after_refresh != before_refresh
         || after_access != before_access)
       return 1930 + (gint) i;
+    WylDaemonRefreshCounters counters = { 0 };
+    wyl_daemon_http_refresh_counters_for_test (server, &counters);
+    if (counters.access_id_successes != 0 || counters.jwt_sign_attempts != 0
+        || counters.jwt_sign_successes != 0
+        || counters.refresh_id_successes != 0 || counters.publications != 0)
+      return 1940 + (gint) i;
   }
   return 0;
 }
@@ -3572,7 +3762,13 @@ check_raw_login_contract (SoupServer *server, WylHandle *handle,
   rc = check_human_refresh_prepared_expiry (server, base_url);
   if (rc != 0)
     return rc;
+  rc = check_human_refresh_fault_matrix (server, base_url);
+  if (rc != 0)
+    return rc;
   rc = check_human_refresh_failure_and_clock_boundaries (server, base_url);
+  if (rc != 0)
+    return rc;
+  rc = check_human_refresh_logout_ordering (server, base_url);
   if (rc != 0)
     return rc;
 
