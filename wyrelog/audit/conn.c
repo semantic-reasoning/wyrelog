@@ -37,6 +37,38 @@ struct wyl_audit_conn_t
   gboolean sink_metadata_initialization_pending;
 };
 
+static wyrelog_error_t
+open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
+{
+  duckdb_config config = NULL;
+  char *error = NULL;
+  const gchar *effective_path = path;
+
+  if (out_db != NULL)
+    *out_db = NULL;
+  if (path != NULL && g_strcmp0 (path, ":memory:") == 0)
+    effective_path = NULL;
+
+  if (duckdb_create_config (&config) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_set_config (config, "threads", "1") != DuckDBSuccess) {
+    duckdb_destroy_config (&config);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_open_ext (effective_path, out_db, config, &error) != DuckDBSuccess) {
+    if (out_db != NULL && *out_db != NULL)
+      duckdb_close (out_db);
+    duckdb_destroy_config (&config);
+    if (error != NULL)
+      duckdb_free (error);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_config (&config);
+  if (error != NULL)
+    duckdb_free (error);
+  return WYRELOG_E_OK;
+}
+
 guint64
 wyl_audit_conn_service_exchange_get_entry_count_for_test (wyl_audit_conn_t
     *conn)
@@ -172,15 +204,8 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
   if (out_conn == NULL)
     return WYRELOG_E_INVALID;
 
-  /* DuckDB treats NULL as "open an in-memory database"; the
-   * literal ":memory:" string maps to the same outcome but going
-   * through NULL avoids a DuckDB-version-dependent string parse. */
-  const gchar *effective_path = path;
-  if (path != NULL && g_strcmp0 (path, ":memory:") == 0)
-    effective_path = NULL;
-
   wyl_audit_conn_t *self = g_new0 (wyl_audit_conn_t, 1);
-  if (duckdb_open (effective_path, &self->db) != DuckDBSuccess) {
+  if (open_duckdb_with_thread_budget (path, &self->db) != WYRELOG_E_OK) {
     g_free (self);
     return WYRELOG_E_IO;
   }
@@ -193,7 +218,8 @@ wyl_audit_conn_open (const gchar *path, wyl_audit_conn_t **out_conn)
   g_mutex_init (&self->service_exchange_checkpoint_lock);
   self->chain_tail_cache = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, (GDestroyNotify) audit_chain_tail_free);
-  self->persistent = effective_path != NULL && effective_path[0] != '\0';
+  self->persistent = path != NULL && path[0] != '\0'
+      && g_strcmp0 (path, ":memory:") != 0;
 
   *out_conn = self;
   return WYRELOG_E_OK;
