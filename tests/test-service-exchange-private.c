@@ -2,9 +2,12 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include "auth/jwt-private.h"
 #include "auth/service-credential-domain-private.h"
+#include "wyrelog/daemon/auth-registry-private.h"
 #include "wyrelog/auth/service-exchange-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-session-private.h"
 
 typedef struct
 {
@@ -15,6 +18,27 @@ typedef struct
   gchar *key_path;
   gchar *key_spec;
 } Fixture;
+
+typedef struct
+{
+  WylServiceAuthRegistry *registry;
+  gboolean fail_activate;
+  guint reserve_calls;
+  guint activate_calls;
+  guint remove_calls;
+  gchar *session_id;
+  gchar *jti;
+} RegistryHooksState;
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistry,
+    wyl_service_auth_registry_unref);
+
+static void
+reservation_free (gpointer memory, gpointer user_data)
+{
+  (void) user_data;
+  g_free (memory);
+}
 
 static void
 fixture_clear (Fixture *fixture)
@@ -41,6 +65,17 @@ fixture_clear (Fixture *fixture)
   g_free (fixture->db_path);
   g_free (fixture->dir);
   memset (fixture, 0, sizeof (*fixture));
+}
+
+static void
+registry_hooks_state_clear (RegistryHooksState *state)
+{
+  if (state == NULL)
+    return;
+  g_free (state->session_id);
+  g_free (state->jti);
+  g_clear_pointer (&state->registry, wyl_service_auth_registry_unref);
+  memset (state, 0, sizeof (*state));
 }
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (Fixture, fixture_clear);
@@ -95,6 +130,100 @@ issue_service_credential (WylHandle *handle, const gchar *subject_id,
   g_assert_cmpint (wyl_service_credential_issue (handle, subject_id,
           tenant_id, "admin", request_id, expires_at_us, out), ==,
       WYRELOG_E_OK);
+}
+
+static WylServiceAuthReservation
+reservation_from_session (const WylSession *session)
+{
+  WylServiceAuthReservation reservation = { 0 };
+  g_assert_nonnull (session);
+  wyl_id_t sid = WYL_ID_NIL;
+  wyrelog_error_t rc = wyl_session_copy_persistent_id_private (session, &sid);
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  gchar session_text[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_format (&sid, session_text, sizeof session_text), ==,
+      WYRELOG_E_OK);
+  reservation.session_id = g_strdup (session_text);
+  reservation.jti = wyl_session_dup_service_jti_private (session);
+  reservation.credential_id = wyl_session_dup_service_credential_id_private
+      (session);
+  reservation.generation = wyl_session_get_service_credential_generation_private
+      (session);
+  reservation.principal = wyl_session_dup_service_subject_private (session);
+  reservation.tenant = wyl_session_dup_service_tenant_private (session);
+  reservation._free = reservation_free;
+  reservation._free_data = NULL;
+  return reservation;
+}
+
+static void
+reservation_clear_stack (WylServiceAuthReservation *reservation)
+{
+  if (reservation == NULL)
+    return;
+  wyl_service_auth_reservation_clear (reservation);
+}
+
+static wyrelog_error_t
+registry_reserve_hook (gpointer user_data, const gchar *session_id,
+    const gchar *jti, const gchar *credential_id, guint64 generation,
+    const gchar *principal, const gchar *tenant)
+{
+  RegistryHooksState *state = user_data;
+  state->reserve_calls++;
+  g_free (state->session_id);
+  g_free (state->jti);
+  state->session_id = g_strdup (session_id);
+  state->jti = g_strdup (jti);
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) session_id,
+    .jti = (gchar *) jti,
+    .credential_id = (gchar *) credential_id,
+    .generation = generation,
+    .principal = (gchar *) principal,
+    .tenant = (gchar *) tenant,
+  };
+  return wyl_service_auth_registry_reserve (state->registry, &reservation);
+}
+
+static wyrelog_error_t
+registry_activate_hook (gpointer user_data, const gchar *session_id,
+    const gchar *jti, const gchar *credential_id, guint64 generation,
+    const gchar *principal, const gchar *tenant, gboolean *out_changed)
+{
+  RegistryHooksState *state = user_data;
+  state->activate_calls++;
+  if (state->fail_activate)
+    return WYRELOG_E_POLICY;
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) session_id,
+    .jti = (gchar *) jti,
+    .credential_id = (gchar *) credential_id,
+    .generation = generation,
+    .principal = (gchar *) principal,
+    .tenant = (gchar *) tenant,
+  };
+  return wyl_service_auth_registry_activate (state->registry, &reservation,
+      out_changed);
+}
+
+static wyrelog_error_t
+registry_remove_hook (gpointer user_data, const gchar *session_id,
+    const gchar *jti, const gchar *credential_id, guint64 generation,
+    const gchar *principal, const gchar *tenant, gboolean *out_removed)
+{
+  RegistryHooksState *state = user_data;
+  state->remove_calls++;
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) session_id,
+    .jti = (gchar *) jti,
+    .credential_id = (gchar *) credential_id,
+    .generation = generation,
+    .principal = (gchar *) principal,
+    .tenant = (gchar *) tenant,
+  };
+  return wyl_service_auth_registry_remove_exact (state->registry, &reservation,
+      out_removed);
 }
 
 static void
@@ -223,6 +352,216 @@ test_denials_share_one_category (void)
   wyl_service_credential_issue_result_clear (&issued);
 }
 
+static void
+test_prepare_token_success (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:exchange:worker");
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
+  issue_service_credential (handle, "svc:exchange:worker", "tenant-a",
+      "exchange-issue-a", expiry, &issued);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+
+  WylServiceExchangeAuthority authority = { 0 };
+  g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
+          issued.credential.credential_id, secret, secret_len,
+          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+
+  WylServiceExchangePrepared prepared = { 0 };
+  g_autofree guint8 *token_secret = g_memdup2 ("0123456789abcdef"
+      "0123456789abcdef", 32);
+  g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
+          "test-key", "wyrelogd", "wyrelog",
+          g_get_real_time () / G_USEC_PER_SEC, token_secret, 32, &prepared), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (prepared.session);
+  g_assert_nonnull (prepared.access_token);
+  gboolean active = wyl_session_is_active_private (prepared.session);
+  gint auth_method = wyl_session_get_auth_method_private (prepared.session);
+  g_assert_true (active);
+  g_assert_cmpint (auth_method, ==, WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL);
+  g_autofree gchar *subject = wyl_session_dup_service_subject_private
+      (prepared.session);
+  g_autofree gchar *tenant = wyl_session_dup_service_tenant_private
+      (prepared.session);
+  g_autofree gchar *credential_id =
+      wyl_session_dup_service_credential_id_private (prepared.session);
+  guint64 generation = wyl_session_get_service_credential_generation_private
+      (prepared.session);
+  gint64 issued_at = wyl_session_get_service_issued_at_seconds_private
+      (prepared.session);
+  gint64 expires_at = wyl_session_get_service_expires_at_seconds_private
+      (prepared.session);
+  g_assert_cmpstr (subject, ==, "svc:exchange:worker");
+  g_assert_cmpstr (tenant, ==, "tenant-a");
+  g_assert_cmpstr (credential_id, ==, issued.credential.credential_id);
+  g_assert_cmpuint (generation, ==, issued.credential.generation);
+  g_assert_cmpint (expires_at - issued_at, ==, 300);
+
+  g_autoptr (GBytes) payload = NULL;
+  g_assert_cmpint (wyl_jwt_verify_hs256_signature (prepared.access_token,
+          token_secret, 32, "test-key", &payload), ==, WYRELOG_E_OK);
+  wyl_jwt_access_claims_t claims = { 0 };
+  g_assert_cmpint (wyl_jwt_parse_access_claims_json (payload, &claims), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (claims.auth_method, ==, "service_credential");
+  g_assert_cmpstr (claims.subject, ==, "svc:exchange:worker");
+  g_assert_cmpstr (claims.tenant, ==, "tenant-a");
+  g_assert_cmpstr (claims.credential_id, ==, issued.credential.credential_id);
+  g_assert_cmpuint (claims.credential_generation, ==,
+      issued.credential.generation);
+  g_assert_cmpint (claims.expires_at - claims.issued_at, ==, 300);
+  wyl_jwt_access_claims_clear (&claims);
+
+  wyl_service_exchange_prepared_clear (&prepared);
+  wyl_service_exchange_authority_rollback (&authority);
+  wyl_service_credential_issue_result_clear (&issued);
+}
+
+static void
+test_complete_token_success (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:exchange:worker");
+
+  g_autoptr (WylServiceAuthRegistry) registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  RegistryHooksState hooks = {
+    .registry = wyl_service_auth_registry_ref (registry),
+  };
+  WylServiceExchangeRegistryHooks registry_hooks = {
+    .reserve = registry_reserve_hook,
+    .activate = registry_activate_hook,
+    .remove_exact = registry_remove_hook,
+    .user_data = &hooks,
+  };
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
+  issue_service_credential (handle, "svc:exchange:worker", "tenant-a",
+      "exchange-issue-a", expiry, &issued);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+
+  WylServiceExchangeAuthority authority = { 0 };
+  g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
+          issued.credential.credential_id, secret, secret_len,
+          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+
+  WylServiceExchangePrepared prepared = { 0 };
+  g_autofree guint8 *token_secret = g_memdup2 ("0123456789abcdef"
+      "0123456789abcdef", 32);
+  g_assert_cmpint (wyl_service_exchange_authority_complete (&authority,
+          "test-key", "wyrelogd", "wyrelog",
+          g_get_real_time () / G_USEC_PER_SEC, token_secret, 32,
+          &registry_hooks, &prepared), ==, WYRELOG_E_OK);
+  g_assert_nonnull (prepared.session);
+  g_assert_nonnull (prepared.access_token);
+  g_assert_cmpuint (hooks.reserve_calls, ==, 1);
+  g_assert_cmpuint (hooks.activate_calls, ==, 1);
+  g_assert_cmpuint (hooks.remove_calls, ==, 0);
+
+  WylServiceAuthReservation reservation = reservation_from_session
+      (prepared.session);
+  WylServiceAuthReservation snapshot = { 0 };
+  WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
+  gboolean found = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
+          reservation.session_id, reservation.jti, &snapshot, &state, &found),
+      ==, WYRELOG_E_OK);
+  g_assert_true (found);
+  g_assert_cmpint (state, ==, WYL_SERVICE_AUTH_ACTIVE);
+  reservation_clear_stack (&snapshot);
+  reservation_clear_stack (&reservation);
+  wyl_service_exchange_prepared_clear (&prepared);
+  wyl_service_exchange_authority_rollback (&authority);
+  wyl_service_credential_issue_result_clear (&issued);
+  registry_hooks_state_clear (&hooks);
+}
+
+static void
+test_complete_token_activation_failure_cleans_registry (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:exchange:worker");
+
+  g_autoptr (WylServiceAuthRegistry) registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  RegistryHooksState hooks = {
+    .registry = wyl_service_auth_registry_ref (registry),
+    .fail_activate = TRUE,
+  };
+  WylServiceExchangeRegistryHooks registry_hooks = {
+    .reserve = registry_reserve_hook,
+    .activate = registry_activate_hook,
+    .remove_exact = registry_remove_hook,
+    .user_data = &hooks,
+  };
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
+  issue_service_credential (handle, "svc:exchange:worker", "tenant-a",
+      "exchange-issue-a", expiry, &issued);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+
+  WylServiceExchangeAuthority authority = { 0 };
+  g_assert_cmpint (wyl_service_exchange_authority_begin (handle,
+          issued.credential.credential_id, secret, secret_len,
+          g_get_real_time (), &authority), ==, WYRELOG_E_OK);
+
+  WylServiceExchangePrepared prepared = { 0 };
+  g_autofree guint8 *token_secret = g_memdup2 ("0123456789abcdef"
+      "0123456789abcdef", 32);
+  g_assert_cmpint (wyl_service_exchange_authority_complete (&authority,
+          "test-key", "wyrelogd", "wyrelog",
+          g_get_real_time () / G_USEC_PER_SEC, token_secret, 32,
+          &registry_hooks, &prepared), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (hooks.reserve_calls, ==, 1);
+  g_assert_cmpuint (hooks.activate_calls, ==, 1);
+  g_assert_cmpuint (hooks.remove_calls, ==, 1);
+  g_assert_null (prepared.session);
+  g_assert_null (prepared.access_token);
+  WylServiceAuthReservation snapshot = { 0 };
+  WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
+  gboolean found = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
+          hooks.session_id, hooks.jti, &snapshot, &state, &found), ==,
+      WYRELOG_E_OK);
+  g_assert_false (found);
+  reservation_clear_stack (&snapshot);
+
+  wyl_service_exchange_prepared_clear (&prepared);
+  wyl_service_exchange_authority_rollback (&authority);
+  wyl_service_credential_issue_result_clear (&issued);
+  registry_hooks_state_clear (&hooks);
+}
+
+static void
+test_prepare_token_rejects_invalid_inputs (void)
+{
+  WylServiceExchangeAuthority authority = { 0 };
+  WylServiceExchangePrepared prepared = { 0 };
+  guint8 secret[32] = { 0 };
+  g_assert_cmpint (wyl_service_exchange_authority_prepare_token (&authority,
+          "test-key", "wyrelogd", "wyrelog", 1, secret, sizeof secret,
+          &prepared), ==, WYRELOG_E_INVALID);
+  g_assert_null (prepared.session);
+  g_assert_null (prepared.access_token);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -231,5 +570,14 @@ main (int argc, char **argv)
       test_begin_success_and_rollback);
   g_test_add_func ("/service-exchange-private/denials-one-category",
       test_denials_share_one_category);
+  g_test_add_func ("/service-exchange-private/prepare-token-success",
+      test_prepare_token_success);
+  g_test_add_func ("/service-exchange-private/complete-token-success",
+      test_complete_token_success);
+  g_test_add_func
+      ("/service-exchange-private/complete-token-activation-failure",
+      test_complete_token_activation_failure_cleans_registry);
+  g_test_add_func ("/service-exchange-private/prepare-token-invalid",
+      test_prepare_token_rejects_invalid_inputs);
   return g_test_run ();
 }

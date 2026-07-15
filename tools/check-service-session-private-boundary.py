@@ -76,6 +76,26 @@ for symbol in PROTECTED:
                             "wyl_session_is_active_private"} else 1)
 MANIFEST["wyl_session_new_service_detached"][
     "tests/test-daemon-http-decide.c"] = 4
+MANIFEST["wyl_session_copy_persistent_id_private"][
+    "tests/test-service-exchange-private.c"] = 1
+MANIFEST["wyl_session_dup_service_jti_private"][
+    "tests/test-service-exchange-private.c"] = 1
+MANIFEST["wyl_session_dup_service_subject_private"][
+    "tests/test-service-exchange-private.c"] = 2
+MANIFEST["wyl_session_dup_service_tenant_private"][
+    "tests/test-service-exchange-private.c"] = 2
+MANIFEST["wyl_session_dup_service_credential_id_private"][
+    "tests/test-service-exchange-private.c"] = 2
+MANIFEST["wyl_session_get_auth_method_private"][
+    "tests/test-service-exchange-private.c"] = 1
+MANIFEST["wyl_session_is_active_private"][
+    "tests/test-service-exchange-private.c"] = 1
+MANIFEST["wyl_session_get_service_credential_generation_private"][
+    "tests/test-service-exchange-private.c"] = 2
+MANIFEST["wyl_session_get_service_issued_at_seconds_private"][
+    "tests/test-service-exchange-private.c"] = 1
+MANIFEST["wyl_session_get_service_expires_at_seconds_private"][
+    "tests/test-service-exchange-private.c"] = 1
 
 
 class BoundaryError(RuntimeError):

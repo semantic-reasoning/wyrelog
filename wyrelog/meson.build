@@ -144,15 +144,15 @@ if get_option('enable_audit').allowed()
     'auth/service-exchange-projector-private.c',
     include_directories : wyrelog_inc,
     dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep, sodium_dep,
-      libchronoid_dep],
+      libchronoid_dep, service_session_private_dep],
     c_args : ['-DWYL_HAS_AUDIT'],
     install : false,
     build_by_default : false,
   )
   service_exchange_private_dep = declare_dependency(
-    link_with : service_exchange_private_lib,
+    link_with : [service_exchange_private_lib, service_session_private_lib],
     dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep, sodium_dep,
-      libchronoid_dep],
+      libchronoid_dep, service_session_private_dep],
   )
 
   service_exchange_startup_private_lib = static_library(

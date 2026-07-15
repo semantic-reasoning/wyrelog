@@ -1,9 +1,13 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "service-exchange-private.h"
 
+#include <sodium.h>
 #include <string.h>
 
+#include "auth/jwt-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-session-layout-private.h"
+#include "wyrelog/wyl-session-private.h"
 
 static void
 service_exchange_authority_dispose (WylServiceExchangeAuthority *authority)
@@ -45,6 +49,25 @@ wyl_service_exchange_authority_clear (WylServiceExchangeAuthority *authority)
   service_exchange_authority_dispose (authority);
   if (authority != NULL)
     memset (authority, 0, sizeof *authority);
+}
+
+static void
+service_exchange_prepared_dispose (WylServiceExchangePrepared *prepared)
+{
+  if (prepared == NULL)
+    return;
+  if (prepared->access_token != NULL)
+    sodium_memzero (prepared->access_token, strlen (prepared->access_token));
+  g_clear_object (&prepared->session);
+  g_clear_pointer (&prepared->access_token, g_free);
+}
+
+void
+wyl_service_exchange_prepared_clear (WylServiceExchangePrepared *prepared)
+{
+  service_exchange_prepared_dispose (prepared);
+  if (prepared != NULL)
+    memset (prepared, 0, sizeof *prepared);
 }
 
 static wyrelog_error_t
@@ -210,4 +233,306 @@ wyl_service_exchange_authority_rollback (WylServiceExchangeAuthority *authority)
   authority->denial = WYL_SERVICE_EXCHANGE_DENIAL_NONE;
   authority->verified = FALSE;
   return rc;
+}
+
+static gboolean
+credential_secret_is_sane (const guint8 *secret, gsize secret_len)
+{
+  return secret != NULL && secret_len > 0;
+}
+
+static void
+append_json_string (GString *json, const gchar *value)
+{
+  g_string_append_c (json, '"');
+  for (const guchar * p = (const guchar *)value; *p != '\0'; p++) {
+    switch (*p) {
+      case '"':
+        g_string_append (json, "\\\"");
+        break;
+      case '\\':
+        g_string_append (json, "\\\\");
+        break;
+      case '\b':
+        g_string_append (json, "\\b");
+        break;
+      case '\f':
+        g_string_append (json, "\\f");
+        break;
+      case '\n':
+        g_string_append (json, "\\n");
+        break;
+      case '\r':
+        g_string_append (json, "\\r");
+        break;
+      case '\t':
+        g_string_append (json, "\\t");
+        break;
+      default:
+        if (*p < 0x20)
+          g_string_append_printf (json, "\\u%04x", (guint) * p);
+        else
+          g_string_append_c (json, (gchar) * p);
+    }
+  }
+  g_string_append_c (json, '"');
+}
+
+static wyrelog_error_t
+exchange_sign_service_token (const gchar *key_id, const WylSession *session,
+    const gchar *session_text, const gchar *issuer, const gchar *audience,
+    const guint8 *secret, gsize secret_len, gchar **out_token)
+{
+  if (out_token == NULL || key_id == NULL || session == NULL
+      || session_text == NULL || issuer == NULL || audience == NULL
+      || secret == NULL || secret_len == 0)
+    return WYRELOG_E_INVALID;
+  *out_token = NULL;
+
+  g_autofree gchar *header = NULL;
+  wyrelog_error_t rc = wyl_jwt_build_header_json (key_id, &header);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  GString *payload = g_string_new ("{\"jti\":");
+#define APPEND_STRING_CLAIM(name, value) G_STMT_START { \
+  g_string_append (payload, name); append_json_string (payload, value); \
+} G_STMT_END
+  append_json_string (payload, session->service_jti);
+  APPEND_STRING_CLAIM (",\"sub\":", session->service_subject_id);
+  APPEND_STRING_CLAIM (",\"iss\":", issuer);
+  APPEND_STRING_CLAIM (",\"aud\":", audience);
+  g_string_append_printf (payload,
+      ",\"iat\":%" G_GINT64_FORMAT ",\"nbf\":%" G_GINT64_FORMAT
+      ",\"exp\":%" G_GINT64_FORMAT, session->service_issued_at_seconds,
+      session->service_issued_at_seconds,
+      session->service_issued_at_seconds + WYL_JWT_SERVICE_ACCESS_TTL_SECONDS);
+  APPEND_STRING_CLAIM (",\"tenant\":", session->tenant);
+  g_string_append (payload, ",\"principal_state_at_issue\":\"authenticated\"");
+  APPEND_STRING_CLAIM (",\"session_id\":", session_text);
+  g_string_append (payload, ",\"auth_method\":\"service_credential\"");
+  APPEND_STRING_CLAIM (",\"credential_id\":", session->service_credential_id);
+#undef APPEND_STRING_CLAIM
+  g_string_append_printf (payload, ",\"credential_generation\":%"
+      G_GUINT64_FORMAT "}", session->service_credential_generation);
+
+  g_autofree gchar *header_segment = NULL;
+  g_autofree gchar *payload_segment = NULL;
+  rc = wyl_jwt_base64url_encode ((const guint8 *) header, strlen (header),
+      &header_segment);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_jwt_base64url_encode ((const guint8 *) payload->str,
+        payload->len, &payload_segment);
+  g_string_free (payload, TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *signing_input = g_strdup_printf ("%s.%s",
+      header_segment, payload_segment);
+  if (sodium_init () < 0)
+    return WYRELOG_E_INTERNAL;
+
+  guint8 signature[crypto_auth_hmacsha256_BYTES];
+  crypto_auth_hmacsha256_state state;
+  crypto_auth_hmacsha256_init (&state, secret, secret_len);
+  crypto_auth_hmacsha256_update (&state, (const guint8 *) signing_input,
+      strlen (signing_input));
+  crypto_auth_hmacsha256_final (&state, signature);
+
+  g_autofree gchar *signature_segment = NULL;
+  rc = wyl_jwt_base64url_encode (signature, sizeof signature,
+      &signature_segment);
+  if (rc == WYRELOG_E_OK)
+    *out_token = g_strdup_printf ("%s.%s", signing_input, signature_segment);
+  return rc;
+}
+
+static wyrelog_error_t
+exchange_build_prepared (const WylServiceExchangeAuthority *authority,
+    const gchar *session_text, const gchar *jti_text, const gchar *key_id,
+    const gchar *issuer, const gchar *audience, gint64 issued_at_seconds,
+    const guint8 *token_secret, gsize token_secret_len,
+    WylServiceExchangePrepared *out_prepared)
+{
+  if (out_prepared != NULL)
+    wyl_service_exchange_prepared_clear (out_prepared);
+  if (authority == NULL || !authority->verified || authority->handle == NULL
+      || session_text == NULL || jti_text == NULL || key_id == NULL
+      || issuer == NULL || audience == NULL || issued_at_seconds < 0
+      || out_prepared == NULL || !credential_secret_is_sane (token_secret,
+          token_secret_len))
+    return WYRELOG_E_INVALID;
+  if (authority->credential.credential_id == NULL
+      || authority->credential.subject_id == NULL
+      || authority->credential.tenant_id == NULL
+      || authority->credential.generation == 0)
+    return WYRELOG_E_INVALID;
+
+  wyl_service_session_descriptor_t descriptor = {
+    .session_id = WYL_ID_NIL,
+    .jti = jti_text,
+    .subject_id = authority->credential.subject_id,
+    .tenant_id = authority->credential.tenant_id,
+    .credential_id = authority->credential.credential_id,
+    .credential_generation = authority->credential.generation,
+    .issued_at_seconds = issued_at_seconds,
+    .expires_at_seconds = issued_at_seconds +
+        WYL_JWT_SERVICE_ACCESS_TTL_SECONDS,
+  };
+  if (wyl_id_parse (session_text, &descriptor.session_id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+
+  WylSession *session = g_object_new (WYL_TYPE_SESSION, NULL);
+  session->id = descriptor.session_id;
+  session->state = WYL_SESSION_STATE_ACTIVE;
+  session->auth_method = WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
+  session->service_jti = g_strdup (descriptor.jti);
+  session->service_subject_id = g_strdup (descriptor.subject_id);
+  session->tenant = g_strdup (descriptor.tenant_id);
+  session->service_credential_id = g_strdup (descriptor.credential_id);
+  session->service_credential_generation = descriptor.credential_generation;
+  session->service_issued_at_seconds = descriptor.issued_at_seconds;
+  session->service_expires_at_seconds = descriptor.expires_at_seconds;
+
+  gchar *token = NULL;
+  wyrelog_error_t rc = exchange_sign_service_token (key_id, session,
+      session_text, issuer, audience, token_secret, token_secret_len, &token);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_object (&session);
+    return rc;
+  }
+
+  *out_prepared = (WylServiceExchangePrepared) {
+  .session = session,.access_token = token,};
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+exchange_prepare_and_publish (const WylServiceExchangeAuthority *authority,
+    const gchar *key_id, const gchar *issuer, const gchar *audience,
+    gint64 issued_at_seconds, const guint8 *token_secret,
+    gsize token_secret_len, const WylServiceExchangeRegistryHooks *hooks,
+    WylServiceExchangePrepared *out_prepared)
+{
+  if (out_prepared != NULL)
+    wyl_service_exchange_prepared_clear (out_prepared);
+  if (authority == NULL || hooks == NULL || hooks->reserve == NULL
+      || hooks->activate == NULL || hooks->remove_exact == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_id_t session_id = WYL_ID_NIL;
+  if (wyl_id_new (&session_id) != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+  gchar session_text[WYL_ID_STRING_BUF];
+  if (wyl_id_format (&session_id, session_text, sizeof session_text)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+
+  wyl_id_t jti = WYL_ID_NIL;
+  if (wyl_id_new (&jti) != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+  gchar jti_text[WYL_ID_STRING_BUF];
+  if (wyl_id_format (&jti, jti_text, sizeof jti_text) != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+
+  wyrelog_error_t rc = hooks->reserve (hooks->user_data, session_text,
+      jti_text, authority->credential.credential_id,
+      authority->credential.generation, authority->credential.subject_id,
+      authority->credential.tenant_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylServiceExchangePrepared prepared = { 0 };
+  rc = exchange_build_prepared (authority, session_text, jti_text, key_id,
+      issuer, audience, issued_at_seconds, token_secret, token_secret_len,
+      &prepared);
+  if (rc != WYRELOG_E_OK) {
+    gboolean removed = FALSE;
+    (void) hooks->remove_exact (hooks->user_data, session_text, jti_text,
+        authority->credential.credential_id,
+        authority->credential.generation, authority->credential.subject_id,
+        authority->credential.tenant_id, &removed);
+    return rc;
+  }
+
+  gboolean activated = FALSE;
+  rc = hooks->activate (hooks->user_data, session_text, jti_text,
+      authority->credential.credential_id, authority->credential.generation,
+      authority->credential.subject_id, authority->credential.tenant_id,
+      &activated);
+  if (rc == WYRELOG_E_OK && !activated)
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK) {
+    gboolean removed = FALSE;
+    wyrelog_error_t cleanup_rc = hooks->remove_exact (hooks->user_data,
+        session_text, jti_text, authority->credential.credential_id,
+        authority->credential.generation, authority->credential.subject_id,
+        authority->credential.tenant_id, &removed);
+    if (cleanup_rc != WYRELOG_E_OK)
+      rc = cleanup_rc;
+    wyl_service_exchange_prepared_clear (&prepared);
+    return rc;
+  }
+
+  *out_prepared = prepared;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_service_exchange_authority_prepare_token (WylServiceExchangeAuthority
+    *authority, const gchar *key_id, const gchar *issuer, const gchar *audience,
+    gint64 issued_at_seconds, const guint8 *token_secret,
+    gsize token_secret_len, WylServiceExchangePrepared *out_prepared)
+{
+  if (out_prepared != NULL)
+    wyl_service_exchange_prepared_clear (out_prepared);
+  if (authority == NULL || !authority->verified || authority->handle == NULL
+      || key_id == NULL || issuer == NULL || audience == NULL
+      || issued_at_seconds < 0 || out_prepared == NULL
+      || !credential_secret_is_sane (token_secret, token_secret_len))
+    return WYRELOG_E_INVALID;
+  if (authority->credential.credential_id == NULL
+      || authority->credential.subject_id == NULL
+      || authority->credential.tenant_id == NULL
+      || authority->credential.generation == 0)
+    return WYRELOG_E_INVALID;
+
+  wyl_id_t session_id = WYL_ID_NIL;
+  if (wyl_id_new (&session_id) != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+  gchar session_text[WYL_ID_STRING_BUF];
+  if (wyl_id_format (&session_id, session_text, sizeof session_text)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+
+  wyl_id_t jti = WYL_ID_NIL;
+  if (wyl_id_new (&jti) != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+  gchar jti_text[WYL_ID_STRING_BUF];
+  if (wyl_id_format (&jti, jti_text, sizeof jti_text) != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
+  return exchange_build_prepared (authority, session_text, jti_text, key_id,
+      issuer, audience, issued_at_seconds, token_secret, token_secret_len,
+      out_prepared);
+}
+
+wyrelog_error_t
+wyl_service_exchange_authority_complete (WylServiceExchangeAuthority *authority,
+    const gchar *key_id, const gchar *issuer, const gchar *audience,
+    gint64 issued_at_seconds, const guint8 *token_secret,
+    gsize token_secret_len, const WylServiceExchangeRegistryHooks *hooks,
+    WylServiceExchangePrepared *out_prepared)
+{
+  if (authority == NULL || !authority->verified || authority->handle == NULL
+      || key_id == NULL || issuer == NULL || audience == NULL
+      || issued_at_seconds < 0 || out_prepared == NULL
+      || !credential_secret_is_sane (token_secret, token_secret_len))
+    return WYRELOG_E_INVALID;
+  if (authority->credential.credential_id == NULL
+      || authority->credential.subject_id == NULL
+      || authority->credential.tenant_id == NULL
+      || authority->credential.generation == 0)
+    return WYRELOG_E_INVALID;
+  return exchange_prepare_and_publish (authority, key_id, issuer, audience,
+      issued_at_seconds, token_secret, token_secret_len, hooks, out_prepared);
 }

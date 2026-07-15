@@ -1448,6 +1448,7 @@ if get_option('enable_audit').allowed()
   test_service_exchange_private = executable(
     'test-service-exchange-private',
     'test-service-exchange-private.c',
+    '../wyrelog/daemon/auth-registry-private.c',
     c_args : ['-DWYL_HAS_AUDIT'],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : [service_exchange_private_dep],
