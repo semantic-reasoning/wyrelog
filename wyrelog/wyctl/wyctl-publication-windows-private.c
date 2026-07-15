@@ -107,6 +107,8 @@ wide_path_exists (const gchar *path, DWORD *out_attrs, DWORD *out_error)
   return attrs != INVALID_FILE_ATTRIBUTES;
 }
 
+static gboolean info_is_reparse_point (const BY_HANDLE_FILE_INFORMATION * info);
+
 static wyrelog_error_t
 open_root_anchor (const WyctlPublicationWindowsBackend *backend,
     WyctlPublicationWindowsAnchor *anchor)
