@@ -2,6 +2,12 @@ project('duckdb-amalgamated', 'cpp',
   version : '1.5.2',
   license : 'MIT',
   default_options : [
+    # Keep the source fallback on a release-like optimization profile even
+    # when the parent wyrelog build is debug. The DuckDB amalgamation is a
+    # large single translation unit, and inheriting O0 from the root build
+    # makes the fact/audit tests miss their runtime envelope on high-core
+    # hosts.
+    'buildtype=release',
     'cpp_std=c++17',
     'warning_level=0',
   ],

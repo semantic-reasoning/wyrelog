@@ -77,6 +77,40 @@ make_schema (const wyl_policy_fact_relation_schema_column_t *columns,
 }
 
 static gint
+check_fact_store_thread_budget (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-fact-store-threads-XXXXXX",
+      &error);
+  if (dir == NULL)
+    return 100;
+  g_autofree gchar *path = g_build_filename (dir, "fact.db", NULL);
+  g_autoptr (wyl_fact_store_t) store = NULL;
+  if (wyl_fact_store_open (path, &store) != WYRELOG_E_OK)
+    return 101;
+  if (wyl_fact_store_create_schema (store) != WYRELOG_E_OK)
+    return 102;
+
+  duckdb_connection conn = wyl_fact_store_get_connection (store);
+  g_autofree gchar *threads = NULL;
+  if (!query_text (conn,
+          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+          &threads) || g_strcmp0 (threads, "1") != 0)
+    return 103;
+
+  g_autoptr (wyl_fact_store_t) memory_store = NULL;
+  if (wyl_fact_store_open (NULL, &memory_store) != WYRELOG_E_OK)
+    return 104;
+  if (wyl_fact_store_create_schema (memory_store) != WYRELOG_E_OK)
+    return 105;
+  if (!query_text (wyl_fact_store_get_connection (memory_store),
+          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+          &threads) || g_strcmp0 (threads, "1") != 0)
+    return 106;
+  return 0;
+}
+
+static gint
 check_fact_store_appends_idempotently (void)
 {
   g_autoptr (wyl_fact_store_t) store = NULL;
@@ -1323,7 +1357,10 @@ check_fact_forget_audit_table_exists (void)
 int
 main (void)
 {
-  gint rc = check_fact_forget_audit_table_exists ();
+  gint rc = check_fact_store_thread_budget ();
+  if (rc != 0)
+    return rc;
+  rc = check_fact_forget_audit_table_exists ();
   if (rc != 0)
     return rc;
   rc = check_fact_store_forget ();

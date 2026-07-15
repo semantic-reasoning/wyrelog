@@ -19,6 +19,20 @@ check_open_memory_null_path (void)
     return 1;
   if (conn == NULL)
     return 2;
+  duckdb_connection h = wyl_audit_conn_get_connection (conn);
+  duckdb_result result;
+  if (duckdb_query (h,
+          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return 3;
+  }
+  gchar *threads = duckdb_value_varchar (&result, 0, 0);
+  gboolean ok = g_strcmp0 (threads, "1") == 0;
+  duckdb_free (threads);
+  duckdb_destroy_result (&result);
+  if (!ok)
+    return 4;
   return 0;
 }
 
@@ -58,6 +72,24 @@ check_open_tempfile_and_query (void)
     return 22;
   }
   duckdb_destroy_result (&result);
+
+  if (duckdb_query (h,
+          "SELECT value FROM duckdb_settings() WHERE name = 'threads';",
+          &result) != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    g_unlink (path);
+    g_rmdir (tmpdir);
+    return 23;
+  }
+  gchar *threads = duckdb_value_varchar (&result, 0, 0);
+  gboolean ok = g_strcmp0 (threads, "1") == 0;
+  duckdb_free (threads);
+  duckdb_destroy_result (&result);
+  if (!ok) {
+    g_unlink (path);
+    g_rmdir (tmpdir);
+    return 24;
+  }
 
   /* close before unlink so the database file is no longer mapped. */
   wyl_audit_conn_close (g_steal_pointer (&conn));

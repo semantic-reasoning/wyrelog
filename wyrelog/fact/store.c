@@ -13,6 +13,38 @@ struct wyl_fact_store_t
 };
 
 static wyrelog_error_t
+open_duckdb_with_thread_budget (const gchar *path, duckdb_database *out_db)
+{
+  duckdb_config config = NULL;
+  char *error = NULL;
+  const gchar *effective_path = path;
+
+  if (out_db != NULL)
+    *out_db = NULL;
+  if (path != NULL && g_strcmp0 (path, ":memory:") == 0)
+    effective_path = NULL;
+
+  if (duckdb_create_config (&config) != DuckDBSuccess)
+    return WYRELOG_E_IO;
+  if (duckdb_set_config (config, "threads", "1") != DuckDBSuccess) {
+    duckdb_destroy_config (&config);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_open_ext (effective_path, out_db, config, &error) != DuckDBSuccess) {
+    if (out_db != NULL && *out_db != NULL)
+      duckdb_close (out_db);
+    duckdb_destroy_config (&config);
+    if (error != NULL)
+      duckdb_free (error);
+    return WYRELOG_E_IO;
+  }
+  duckdb_destroy_config (&config);
+  if (error != NULL)
+    duckdb_free (error);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 exec_sql (duckdb_connection conn, const gchar *sql)
 {
   duckdb_result result = { 0 };
@@ -346,12 +378,9 @@ wyl_fact_store_open (const gchar *path, wyl_fact_store_t **out_store)
 {
   if (out_store == NULL)
     return WYRELOG_E_INVALID;
-  const gchar *effective_path = path;
-  if (path != NULL && g_strcmp0 (path, ":memory:") == 0)
-    effective_path = NULL;
 
   wyl_fact_store_t *self = g_new0 (wyl_fact_store_t, 1);
-  if (duckdb_open (effective_path, &self->db) != DuckDBSuccess) {
+  if (open_duckdb_with_thread_budget (path, &self->db) != WYRELOG_E_OK) {
     g_free (self);
     return WYRELOG_E_IO;
   }
