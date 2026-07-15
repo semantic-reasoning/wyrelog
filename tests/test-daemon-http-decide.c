@@ -5746,26 +5746,101 @@ check_tenant_gate_codes_contract (void)
 }
 
 /*
- * The daemon-http-decide test surface has been split across two binaries
+ * The daemon-http-decide test surface has been split across three binaries
  * compiled from this single translation unit:
  *
  *   - WYL_TEST_VARIANT_AUDIT undefined: HTTP-decide protocol contracts
- *     (readyz, request-id headers, raw decide, policy mutation, raw login)
- *     plus the login + decide and login + guarded-decide flows.
+ *     (readyz, request-id headers, raw decide, policy mutation, login + decide,
+ *     and login + guarded-decide).
+ *
+ *   - WYL_TEST_VARIANT_REFRESH defined: the raw-login, JWT-rotation, and
+ *     human-refresh shutdown flows that would otherwise push the non-audit
+ *     binary over the wall-clock ceiling on slower CI runners.
  *
  *   - WYL_TEST_VARIANT_AUDIT defined: end-to-end audit pipeline. Generates
  *     the decide and policy events the audit verification depends on, then
  *     verifies the audit log via raw HTTP, the readyz audit-projection
  *     contract, and a series of audit_event_present queries.
  *
- * Splitting was driven by Meson's per-test 30s timeout: under CI parallel
- * scheduling the merged test serialised on local TCP and DuckDB and crossed
- * the wall-clock ceiling. Both variants now run in parallel, each with its
- * own daemon, and each finishes well under the timeout. Variant-irrelevant
- * static helpers stay defined in this file; the build silences the
- * resulting -Wunused-function warnings.
+ * Splitting was driven by Meson's per-test timeout and the slower macOS CI
+ * runner: the merged surface serialised on local TCP and DuckDB, and the
+ * refresh-heavy tail could overrun the wall-clock ceiling. The binaries now
+ * run in parallel, each with its own daemon, and each finishes well under
+ * the timeout. Variant-irrelevant static helpers stay defined in this file;
+ * the build silences the resulting -Wunused-function warnings.
  */
-#ifndef WYL_TEST_VARIANT_AUDIT
+#if defined(WYL_TEST_VARIANT_REFRESH)
+int
+main (void)
+{
+  gint tenant_gate_rc = check_tenant_gate_codes_contract ();
+  if (tenant_gate_rc != 0)
+    return tenant_gate_rc;
+
+  gint policy_shutdown_rc = check_daemon_policy_write_shutdown_contract ();
+  if (policy_shutdown_rc != 0)
+    return policy_shutdown_rc;
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1;
+  if (insert_allow_fixture (handle) != WYRELOG_E_OK)
+    return 2;
+  if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
+    return 10;
+  if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 11;
+
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  WylDaemonRuntime runtime = {
+    .handle = handle,
+  };
+  if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
+    return 14;
+  gint dispatch_context_rc = check_explicit_refresh_dispatch_context (handle,
+      &runtime);
+  if (dispatch_context_rc != 0)
+    return dispatch_context_rc;
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GError) error = NULL;
+  http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
+      &runtime, &error);
+  if (http.server == NULL)
+    return 3;
+  GThread *thread = g_thread_new ("daemon-http-decide-refresh",
+      test_http_server_thread, &http);
+
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL)
+    return 4;
+  g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  gint raw_login_rc = check_raw_login_contract (http.server, handle,
+      base_url);
+  if (raw_login_rc != 0)
+    return raw_login_rc;
+  gint jwt_rc = check_jwt_epoch_rotation_contract (http.server, handle,
+      base_url);
+  if (jwt_rc != 0)
+    return jwt_rc;
+  gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
+      (http.server, base_url);
+  if (refresh_shutdown_rc != 0)
+    return refresh_shutdown_rc;
+
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return 0;
+}
+#elif !defined(WYL_TEST_VARIANT_AUDIT)
 int
 main (void)
 {
@@ -5885,53 +5960,6 @@ main (void)
   if (decision != WYL_DECISION_DENY)
     return 13;
 
-  raw_rc = check_raw_login_contract (http.server, handle, base_url);
-  if (raw_rc != 0)
-    return raw_rc;
-  raw_rc = check_jwt_epoch_rotation_contract (http.server, handle, base_url);
-  if (raw_rc != 0)
-    return raw_rc;
-
-  /* A raw-login-issued bearer must pass a real protected route unchanged. */
-  g_autoptr (SoupSession) human_session = soup_session_new ();
-  guint human_status = 0;
-  g_autofree gchar *human_body = NULL;
-  if (send_raw_login (human_session, "POST", base_url,
-          "username=login-user&skip_mfa=true", &human_status,
-          &human_body) != 0 || human_status != 200)
-    return 1979;
-  g_autofree gchar *human_access = extract_json_string (human_body,
-      "access_token");
-  if (human_access == NULL)
-    return 1980;
-  g_clear_pointer (&human_body, g_free);
-  if (send_raw_decide_bearer (human_session, "POST", base_url, "login-user",
-          "wr.login.skip_mfa", "login", NULL, human_access, &human_status,
-          &human_body) != 0 || human_status != 200)
-    return 1981;
-  g_autofree gchar *human_control_body = g_strdup (human_body);
-  g_clear_pointer (&human_body, g_free);
-  if (wyl_daemon_http_latch_service_unavailable_for_test (http.server)
-      != WYRELOG_E_OK)
-    return 1982;
-  WylServiceAuthAuthoritySnapshot human_before = { 0 }, human_after = { 0 };
-  wyl_daemon_http_service_authority_snapshot_for_test (http.server,
-      &human_before);
-  if (send_raw_decide_bearer (human_session, "POST", base_url, "login-user",
-          "wr.login.skip_mfa", "login", NULL, human_access, &human_status,
-          &human_body) != 0 || human_status != 200
-      || g_strcmp0 (human_body, human_control_body) != 0)
-    return 1983;
-  wyl_daemon_http_service_authority_snapshot_for_test (http.server,
-      &human_after);
-  if (human_before.active_readers != 0 || human_before.waiting_readers != 0
-      || human_after.active_readers != 0 || human_after.waiting_readers != 0)
-    return 1984;
-
-  gint refresh_shutdown_rc = check_human_refresh_shutdown_ordering
-      (http.server, base_url);
-  if (refresh_shutdown_rc != 0)
-    return refresh_shutdown_rc;
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
   soup_server_disconnect (http.server);
