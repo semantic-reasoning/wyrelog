@@ -223,6 +223,8 @@ typedef struct _WylDaemonHttpContext
   guint refresh_token_id_successes;
   guint refresh_publications;
   gboolean fail_next_refresh_publication;
+  WylDaemonRefreshFault refresh_fault;
+  GPtrArray *refresh_generated_ids;
   WylHumanRefreshTestLatch refresh_latch;
 #endif
 } WylDaemonHttpContext;
@@ -232,6 +234,15 @@ typedef struct
   WylServiceAuthWriteLease *lease;
   wyl_policy_store_t *store;    /* borrowed from the lease-owned pin */
 } WylDaemonPolicyWrite;
+
+static guint64
+human_refresh_next_nonzero (guint64 *counter)
+{
+  guint64 value = (*counter)++;
+  if (value == 0)
+    value = (*counter)++;
+  return value;
+}
 
 static void
 wyl_daemon_policy_write_clear (WylDaemonPolicyWrite *write)
@@ -502,6 +513,7 @@ wyl_daemon_http_context_unref (gpointer data)
   g_clear_pointer (&ctx->revoked_session_tokens, g_hash_table_unref);
   g_clear_pointer (&ctx->dispatch_context, g_main_context_unref);
 #ifdef WYL_TEST_DAEMON_HTTP
+  g_clear_pointer (&ctx->refresh_generated_ids, g_ptr_array_unref);
   g_mutex_clear (&ctx->refresh_latch.mutex);
   g_cond_clear (&ctx->refresh_latch.changed);
 #endif
@@ -681,6 +693,8 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_init (&ctx->refresh_latch.mutex);
   g_cond_init (&ctx->refresh_latch.changed);
+  ctx->refresh_generated_ids = g_ptr_array_new_with_free_func
+      ((GDestroyNotify) wyl_sensitive_string_free);
 #endif
   ctx->next_refresh_epoch = 1;
   ctx->next_refresh_claim = 1;
@@ -883,7 +897,7 @@ wyl_daemon_http_context_store_refresh_token (WylDaemonHttpContext *ctx,
     wyl_refresh_token_state_free (state);
     return FALSE;
   }
-  state->epoch = ctx->next_refresh_epoch++;
+  state->epoch = human_refresh_next_nonzero (&ctx->next_refresh_epoch);
   g_hash_table_replace (ctx->refresh_tokens_by_token, g_strdup (token), state);
   g_mutex_unlock (&ctx->lock);
   return TRUE;
@@ -1868,7 +1882,7 @@ wyl_daemon_http_seed_refresh_for_test (SoupServer *server,
     state->successor = wyl_human_refresh_result_new_take
         (g_strdup (successor_access), g_strdup (successor_refresh));
   g_mutex_lock (&ctx->lock);
-  state->epoch = ctx->next_refresh_epoch++;
+  state->epoch = human_refresh_next_nonzero (&ctx->next_refresh_epoch);
   g_hash_table_replace (ctx->sessions_by_token, g_strdup (session_id),
       g_object_ref (session));
   g_hash_table_replace (ctx->refresh_tokens_by_token, g_strdup (token), state);
@@ -1918,6 +1932,7 @@ wyl_daemon_http_reset_refresh_counters_for_test (SoupServer *server)
   g_atomic_int_set ((gint *) & ctx->refresh_jwt_sign_successes, 0);
   g_atomic_int_set ((gint *) & ctx->refresh_token_id_successes, 0);
   g_atomic_int_set ((gint *) & ctx->refresh_publications, 0);
+  g_ptr_array_set_size (ctx->refresh_generated_ids, 0);
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -1985,6 +2000,111 @@ wyl_daemon_http_fail_next_refresh_publication_for_test (SoupServer *server)
   g_mutex_lock (&ctx->lock);
   ctx->fail_next_refresh_publication = TRUE;
   g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_set_refresh_fault_for_test (SoupServer *server,
+    WylDaemonRefreshFault fault)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->refresh_fault = fault;
+  g_mutex_unlock (&ctx->lock);
+}
+
+static gint
+human_refresh_id_compare (gconstpointer left, gconstpointer right)
+{
+  return g_strcmp0 (*(const gchar * const *) left,
+      *(const gchar * const *) right);
+}
+
+static gchar **
+human_refresh_snapshot_ids_locked (WylDaemonHttpContext *ctx,
+    const gchar *session_id, gboolean refresh_ids)
+{
+  GPtrArray *values = g_ptr_array_new_with_free_func (g_free);
+  GHashTableIter iter;
+  gpointer value = NULL;
+  g_hash_table_iter_init (&iter, refresh_ids ? ctx->refresh_tokens_by_token
+      : ctx->access_tokens_by_jti);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    const gchar *owner = refresh_ids
+        ? ((WylRefreshTokenState *) value)->session_id
+        : ((WylAccessTokenState *) value)->session_id;
+    const gchar *id = refresh_ids ? ((WylRefreshTokenState *) value)->token
+        : ((WylAccessTokenState *) value)->jti;
+    if (g_strcmp0 (owner, session_id) == 0)
+      g_ptr_array_add (values, g_strdup (id));
+  }
+  g_ptr_array_sort (values, human_refresh_id_compare);
+  g_ptr_array_add (values, NULL);
+  return (gchar **) g_ptr_array_free (values, FALSE);
+}
+
+gchar **
+wyl_daemon_http_snapshot_session_access_ids_for_test (SoupServer *server,
+    const gchar *session_id)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session_id == NULL)
+    return NULL;
+  g_mutex_lock (&ctx->lock);
+  gchar **values = human_refresh_snapshot_ids_locked (ctx, session_id, FALSE);
+  g_mutex_unlock (&ctx->lock);
+  return values;
+}
+
+gchar **
+wyl_daemon_http_snapshot_session_refresh_ids_for_test (SoupServer *server,
+    const gchar *session_id)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session_id == NULL)
+    return NULL;
+  g_mutex_lock (&ctx->lock);
+  gchar **values = human_refresh_snapshot_ids_locked (ctx, session_id, TRUE);
+  g_mutex_unlock (&ctx->lock);
+  return values;
+}
+
+gchar **
+wyl_daemon_http_snapshot_generated_refresh_ids_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return NULL;
+  g_mutex_lock (&ctx->lock);
+  gchar **values = g_new0 (gchar *, ctx->refresh_generated_ids->len + 1);
+  for (guint i = 0; i < ctx->refresh_generated_ids->len; i++)
+    values[i] = g_strdup (g_ptr_array_index (ctx->refresh_generated_ids, i));
+  g_mutex_unlock (&ctx->lock);
+  return values;
+}
+
+void
+wyl_daemon_http_sensitive_strv_free_for_test (gchar **values)
+{
+  if (values == NULL)
+    return;
+  for (guint i = 0; values[i] != NULL; i++)
+    wyl_sensitive_string_free (values[i]);
+  g_free (values);
+}
+
+void
+wyl_daemon_http_revoke_human_session_for_test (SoupServer *server,
+    const gchar *session_id)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session_id == NULL)
+    return;
+  wyl_daemon_http_context_revoke_session_refresh_tokens (ctx, session_id);
+  wyl_daemon_http_context_revoke_session_access_tokens (ctx, session_id);
+  wyl_daemon_http_context_mark_session_revoked (ctx, session_id);
+  wyl_daemon_http_context_remove_session (ctx, session_id);
 }
 
 void
@@ -5692,6 +5812,18 @@ human_refresh_test_latch_reach (WylDaemonHttpContext *ctx,
   gboolean released = latch->generation == generation && latch->released;
   return released;
 }
+
+static gboolean
+human_refresh_test_fault_take (WylDaemonHttpContext *ctx,
+    WylDaemonRefreshFault fault)
+{
+  g_mutex_lock (&ctx->lock);
+  gboolean taken = ctx->refresh_fault == fault;
+  if (taken)
+    ctx->refresh_fault = WYL_DAEMON_REFRESH_FAULT_NONE;
+  g_mutex_unlock (&ctx->lock);
+  return taken;
+}
 #endif
 
 static wyrelog_error_t
@@ -5699,6 +5831,11 @@ prepare_human_access_candidate (WylHumanRefreshClaim *claim,
     gint64 issued_at, WylHumanAccessCandidate *candidate)
 {
   WylDaemonHttpContext *ctx = claim->ctx;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (human_refresh_test_fault_take (ctx,
+          WYL_DAEMON_REFRESH_FAULT_ACCESS_PREPARE))
+    return WYRELOG_E_INTERNAL;
+#endif
   guint8 secret[WYL_DAEMON_JWT_KEY_LEN];
   g_mutex_lock (&ctx->lock);
   gboolean current = ctx->access_token_secret_ready
@@ -5766,6 +5903,11 @@ static wyrelog_error_t
 prepare_human_refresh_candidate (WylHumanRefreshClaim *claim,
     gint64 issued_at, WylHumanRefreshCandidate *candidate)
 {
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (human_refresh_test_fault_take (claim->ctx,
+          WYL_DAEMON_REFRESH_FAULT_REFRESH_PREPARE))
+    return WYRELOG_E_INTERNAL;
+#endif
   if (issued_at > G_MAXINT64 - WYL_DAEMON_REFRESH_TTL_SECONDS)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = new_token_id_string (&candidate->token);
@@ -5774,6 +5916,9 @@ prepare_human_refresh_candidate (WylHumanRefreshClaim *claim,
 #ifdef WYL_TEST_DAEMON_HTTP
   WylDaemonHttpContext *ctx = claim->ctx;
   g_atomic_int_inc ((gint *) & ctx->refresh_token_id_successes);
+  g_mutex_lock (&ctx->lock);
+  g_ptr_array_add (ctx->refresh_generated_ids, g_strdup (candidate->token));
+  g_mutex_unlock (&ctx->lock);
 #endif
   candidate->cache_token = g_strdup (candidate->token);
   candidate->map_key = g_strdup (candidate->token);
@@ -5930,6 +6075,10 @@ wyl_daemon_http_test_human_refresh_classifier (SoupServer *server)
       && refresh_ids == g_atomic_int_get
       ((gint *) & ctx->refresh_token_id_successes);
   g_mutex_unlock (&ctx->lock);
+  guint64 wrapping_counter = G_MAXUINT64;
+  ok = ok && human_refresh_next_nonzero (&wrapping_counter) == G_MAXUINT64
+      && human_refresh_next_nonzero (&wrapping_counter) == 1
+      && wrapping_counter == 2;
   return ok;
 }
 #endif
@@ -6025,6 +6174,12 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     .auth_epoch = auth_epoch,
     .key_epoch = key_epoch,
   };
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (!human_refresh_test_latch_reach (ctx, WYL_DAEMON_REFRESH_BEFORE_CLAIM)) {
+    set_json_error (msg, 500, "refresh_failed");
+    return;
+  }
+#endif
   g_mutex_lock (&ctx->lock);
   gint64 claim_at = human_refresh_now_locked (ctx);
   state = g_hash_table_lookup (ctx->refresh_tokens_by_token, refresh_token);
@@ -6042,9 +6197,7 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   WylHumanRefreshDecision decision = human_refresh_classify_locked (state,
       exact_current, predecessor_epoch, claim_at, &replay);
   if (decision == WYL_HUMAN_REFRESH_DECISION_AVAILABLE) {
-    claim.claim_epoch = ctx->next_refresh_claim++;
-    if (claim.claim_epoch == 0)
-      claim.claim_epoch = ctx->next_refresh_claim++;
+    claim.claim_epoch = human_refresh_next_nonzero (&ctx->next_refresh_claim);
     state->rotating = TRUE;
     state->rotation_claim = claim.claim_epoch;
     claim.predecessor_state = state;
@@ -6074,24 +6227,51 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
     set_json_error (msg, 401, "refresh_auth_required");
     return;
   }
+#ifdef WYL_TEST_DAEMON_HTTP
+  gboolean test_latch_ok = human_refresh_test_latch_reach (ctx,
+      WYL_DAEMON_REFRESH_AFTER_CLAIM);
+#endif
 
   g_mutex_lock (&ctx->lock);
   gint64 issued_at = human_refresh_now_locked (ctx);
   g_mutex_unlock (&ctx->lock);
   g_auto (WylHumanAccessCandidate) access = { 0 };
   g_auto (WylHumanRefreshCandidate) refresh = { 0 };
-  wyrelog_error_t rc = prepare_human_access_candidate (&claim, issued_at,
-      &access);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (!test_latch_ok)
+    rc = WYRELOG_E_INTERNAL;
+#endif
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_human_access_candidate (&claim, issued_at, &access);
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (!human_refresh_test_latch_reach (ctx,
+          WYL_DAEMON_REFRESH_AFTER_ACCESS_PREPARE))
+    rc = WYRELOG_E_INTERNAL;
+#endif
   if (rc == WYRELOG_E_OK)
     rc = prepare_human_refresh_candidate (&claim, issued_at, &refresh);
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (!human_refresh_test_latch_reach (ctx,
+          WYL_DAEMON_REFRESH_AFTER_REFRESH_PREPARE))
+    rc = WYRELOG_E_INTERNAL;
+#endif
   g_autoptr (WylHumanRefreshResult) result = NULL;
+#ifdef WYL_TEST_DAEMON_HTTP
+  if (rc == WYRELOG_E_OK && human_refresh_test_fault_take (ctx,
+          WYL_DAEMON_REFRESH_FAULT_RESULT_PREPARE))
+    rc = WYRELOG_E_INTERNAL;
+#endif
   if (rc == WYRELOG_E_OK)
     result = wyl_human_refresh_result_new_take
         (g_steal_pointer (&access.cache_token),
         g_steal_pointer (&refresh.cache_token));
 #ifdef WYL_TEST_DAEMON_HTTP
   if (!human_refresh_test_latch_reach (ctx,
-          WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE))
+          WYL_DAEMON_REFRESH_BEFORE_PUBLICATION))
+    rc = WYRELOG_E_INTERNAL;
+  if (rc == WYRELOG_E_OK && human_refresh_test_fault_take (ctx,
+          WYL_DAEMON_REFRESH_FAULT_PREPUBLICATION))
     rc = WYRELOG_E_INTERNAL;
 #endif
   gboolean session_live = human_session_matches (ctx, session, session_id,
@@ -6130,7 +6310,8 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       && !g_hash_table_contains (ctx->access_tokens_by_jti, access.state->jti)
       && !g_hash_table_contains (ctx->refresh_tokens_by_token,
           refresh.state->token)) {
-    refresh.state->epoch = ctx->next_refresh_epoch++;
+    refresh.state->epoch = human_refresh_next_nonzero
+        (&ctx->next_refresh_epoch);
     gchar *access_key = g_steal_pointer (&access.map_key);
     gchar *refresh_key = g_steal_pointer (&refresh.map_key);
     WylAccessTokenState *access_state = g_steal_pointer (&access.state);
@@ -6164,6 +6345,15 @@ refresh_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
       set_json_error (msg, 401, "refresh_auth_required");
     return;
   }
+#ifdef WYL_TEST_DAEMON_HTTP
+  (void) human_refresh_test_latch_reach (ctx,
+      WYL_DAEMON_REFRESH_AFTER_PUBLICATION);
+  if (human_refresh_test_fault_take (ctx,
+          WYL_DAEMON_REFRESH_FAULT_RESPONSE_BUILD)) {
+    set_json_error (msg, 500, "refresh_response_failed");
+    return;
+  }
+#endif
   g_autofree gchar *body = build_login_json (session_id, subject, tenant,
       "authenticated", access.token, refresh.token);
   attach_request_id_header (msg);
