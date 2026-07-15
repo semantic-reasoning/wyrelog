@@ -61,6 +61,20 @@ typedef enum
   WYL_DAEMON_SERVICE_TOKEN_CREDENTIAL,
   WYL_DAEMON_SERVICE_TOKEN_GENERATION,
 } WylDaemonServiceTokenField;
+typedef enum
+{
+  WYL_DAEMON_REFRESH_AFTER_DETACHED_PREPARE = 1,
+} WylDaemonRefreshPhase;
+typedef struct
+{
+  guint handler_entries;
+  guint wrong_context;
+  guint access_id_successes;
+  guint jwt_sign_attempts;
+  guint jwt_sign_successes;
+  guint refresh_id_successes;
+  guint publications;
+} WylDaemonRefreshCounters;
 void wyl_daemon_http_set_service_resolver_checkpoint_for_test
     (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,
     gpointer data);
@@ -160,6 +174,30 @@ gboolean wyl_daemon_http_seed_refresh_for_test (SoupServer * server,
     const gchar * successor_refresh);
 gchar *wyl_daemon_http_dup_refresh_state_for_test (SoupServer * server,
     const gchar * token, guint * out_refresh_count, guint * out_access_count);
+void wyl_daemon_http_reset_refresh_counters_for_test (SoupServer * server);
+void wyl_daemon_http_refresh_counters_for_test (SoupServer * server,
+    WylDaemonRefreshCounters * out_counters);
+void wyl_daemon_http_set_refresh_clock_for_test (SoupServer * server,
+    gboolean enabled, gint64 now);
+gboolean wyl_daemon_http_set_refresh_times_for_test (SoupServer * server,
+    const gchar * token, gint64 expires_at, gint64 consumed_at);
+void wyl_daemon_http_fail_next_refresh_publication_for_test
+    (SoupServer * server);
+void wyl_daemon_http_terminalize_refreshes_for_test (SoupServer * server);
+guint64 wyl_daemon_http_arm_refresh_latch_for_test (SoupServer * server,
+    WylDaemonRefreshPhase phase);
+gboolean wyl_daemon_http_wait_refresh_latch_for_test (SoupServer * server,
+    guint64 generation, gint64 deadline_us);
+void wyl_daemon_http_release_refresh_latch_for_test (SoupServer * server,
+    guint64 generation);
+void wyl_daemon_http_disarm_refresh_latch_for_test (SoupServer * server,
+    guint64 generation);
+void wyl_daemon_http_refresh_lifecycle_counts_for_test (SoupServer * server,
+    guint * out_owned, guint * out_wrong);
+gboolean wyl_daemon_http_refresh_context_owned_for_test (SoupServer * server);
+gboolean wyl_daemon_http_refresh_context_is_for_test (SoupServer * server,
+    GMainContext * expected);
+gboolean wyl_daemon_http_test_human_refresh_classifier (SoupServer * server);
 typedef void (*WylDaemonPolicyWriteCheckpoint) (gpointer data);
 /* Runs a representative daemon policy mutation while holding its WRITE lease. */
 wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
