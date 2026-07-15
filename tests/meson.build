@@ -474,6 +474,17 @@ test('policy-store-service-schema', test_policy_store_service_schema,
   timeout : 90,
 )
 
+test_policy_store_service_operation_fence = executable(
+  'test-policy-store-service-operation-fence',
+  'test-policy-store-service-operation-fence.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sodium_dep],
+)
+
+test('policy-store-service-operation-fence',
+  test_policy_store_service_operation_fence,
+)
+
 test_fact_schema = executable('test-fact-schema',
   'test-fact-schema.c',
   include_directories : include_directories('../wyrelog'),

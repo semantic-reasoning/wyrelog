@@ -754,11 +754,6 @@ wyrelog_error_t wyl_policy_store_ensure_service_cvk_for_issuance
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
 void wyl_policy_store_service_credential_operation_reconcile_result_clear
     (WylPolicyServiceCredentialOperationReconcileResult * result);
-wyrelog_error_t wyl_policy_store_service_credential_operation_fingerprint_v1
-    (WylServiceCredentialOperationKind operation, const gchar * subject_id,
-    const gchar * tenant_id, const gchar * old_credential_id,
-    GBytes ** out_transcript,
-    guint8 out_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES]);
 wyrelog_error_t wyl_policy_store_service_credential_operation_reconcile
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * request_id,

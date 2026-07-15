@@ -698,6 +698,20 @@ static const gchar service_schema_ddl[] =
     ");"
     "CREATE INDEX IF NOT EXISTS idx_service_credential_operation_fences_created"
     " ON service_credential_operation_fences (created_at_us, request_id);"
+    "CREATE TABLE IF NOT EXISTS service_domain_requests ("
+    " request_id TEXT NOT NULL PRIMARY KEY CHECK ("
+    "   length(request_id) BETWEEN 1 AND 256 AND"
+    "   instr(request_id, char(0)) = 0),"
+    " operation TEXT NOT NULL CHECK (operation IN ("
+    "   'principal_create','principal_disable','credential_issue',"
+    "   'credential_revoke','credential_rotate')) ,"
+    " resource_id TEXT NOT NULL CHECK ("
+    "   length(resource_id) BETWEEN 1 AND 128 AND"
+    "   instr(resource_id, char(0)) = 0),"
+    " input_fingerprint BLOB NOT NULL CHECK ("
+    "   typeof(input_fingerprint) = 'blob' AND length(input_fingerprint) = 32),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0)"
+    ");"
     "CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_update"
     " BEFORE UPDATE ON service_credential_operation_fences"
     " BEGIN SELECT RAISE(ABORT, 'service credential operation fences are append-only'); END;"
@@ -714,20 +728,6 @@ static const gchar service_schema_ddl[] =
     "   SELECT 1 FROM service_domain_requests"
     "   WHERE request_id = NEW.request_id)"
     " BEGIN SELECT RAISE(ABORT, 'service credential terminal fence conflicts with committed request'); END;"
-    "CREATE TABLE IF NOT EXISTS service_domain_requests ("
-    " request_id TEXT NOT NULL PRIMARY KEY CHECK ("
-    "   length(request_id) BETWEEN 1 AND 256 AND"
-    "   instr(request_id, char(0)) = 0),"
-    " operation TEXT NOT NULL CHECK (operation IN ("
-    "   'principal_create','principal_disable','credential_issue',"
-    "   'credential_revoke','credential_rotate')) ,"
-    " resource_id TEXT NOT NULL CHECK ("
-    "   length(resource_id) BETWEEN 1 AND 128 AND"
-    "   instr(resource_id, char(0)) = 0),"
-    " input_fingerprint BLOB NOT NULL CHECK ("
-    "   typeof(input_fingerprint) = 'blob' AND length(input_fingerprint) = 32),"
-    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0)"
-    ");"
     "CREATE TABLE IF NOT EXISTS service_authority_writer_gate ("
     " singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
     " lock_word INTEGER NOT NULL CHECK (lock_word = 0)"
@@ -974,7 +974,7 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
   {"service_credential_operation_fences",
         "request_id:TEXT:1::1,operation:TEXT:1::0,operation_target_fingerprint:BLOB:1::0,terminal_state:TEXT:1::0,created_at_us:INTEGER:1::0",
         service_credential_operation_fence_needles, 5, "",
-      "idx_service_credential_operation_fences_created:0:c:0:0:4:created_at_us:0:BINARY:1,1:1:request_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_credential_operation_fences_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+      "idx_service_credential_operation_fences_created:0:c:0:0:4:created_at_us:0:BINARY:1,1:0:request_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_credential_operation_fences_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_domain_requests",
         "request_id:TEXT:1::1,operation:TEXT:1::0,resource_id:TEXT:1::0,input_fingerprint:BLOB:1::0,created_at_us:INTEGER:1::0",
         service_domain_request_needles, 5, "",
@@ -1002,6 +1002,12 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
       "createtriggertrg_service_credential_events_no_updatebeforeupdateonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
   {"trg_service_credential_events_no_delete", "service_credential_events",
       "createtriggertrg_service_credential_events_no_deletebeforedeleteonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
+  {"trg_service_credential_operation_fences_no_update",
+        "service_credential_operation_fences",
+      "createtriggertrg_service_credential_operation_fences_no_updatebeforeupdateonservice_credential_operation_fencesbeginselectraise(abort,'servicecredentialoperationfencesareappend-only');end"},
+  {"trg_service_credential_operation_fences_no_delete",
+        "service_credential_operation_fences",
+      "createtriggertrg_service_credential_operation_fences_no_deletebeforedeleteonservice_credential_operation_fencesbeginselectraise(abort,'servicecredentialoperationfencesareappend-only');end"},
   {"trg_service_domain_requests_reject_operation_fence",
         "service_domain_requests",
       "createtriggertrg_service_domain_requests_reject_operation_fencebeforeinsertonservice_domain_requestswhenexists(select1fromservice_credential_operation_fenceswhererequest_id=new.request_id)beginselectraise(abort,'servicecredentialoperationrequestconflictswithterminalfence');end"},
@@ -5244,6 +5250,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_principal_events_no_delete',"
       "'trg_service_credential_events_no_update',"
       "'trg_service_credential_events_no_delete',"
+      "'trg_service_credential_operation_fences_no_update',"
+      "'trg_service_credential_operation_fences_no_delete',"
       "'trg_service_domain_requests_reject_operation_fence',"
       "'trg_service_credential_operation_fences_reject_domain_request',"
       "'trg_service_domain_requests_no_update',"
@@ -8371,6 +8379,278 @@ wyrelog_error_t
   else
     g_free (transcript);
   return WYRELOG_E_OK;
+}
+
+void wyl_policy_store_service_credential_operation_reconcile_result_clear
+    (WylPolicyServiceCredentialOperationReconcileResult * result)
+{
+  if (result == NULL)
+    return;
+  g_free (result->credential_id);
+  memset (result, 0, sizeof (*result));
+}
+
+static const gchar *
+service_credential_operation_sql_name (WylServiceCredentialOperationKind op)
+{
+  return op == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ?
+      "credential_rotate" : "credential_issue";
+}
+
+static const gchar *service_credential_operation_successor_event_name
+    (WylServiceCredentialOperationKind op)
+{
+  return op == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ? "rotated" : "issued";
+}
+
+static gboolean
+    service_credential_operation_target_matches
+    (WylServiceCredentialOperationKind op, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * old_credential_id,
+    const gchar * resource_id)
+{
+  (void) tenant_id;
+  if (op == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
+    return g_strcmp0 (resource_id, old_credential_id) == 0;
+  return g_strcmp0 (resource_id, subject_id) == 0;
+}
+
+static wyrelog_error_t
+service_credential_operation_load_request (wyl_policy_store_t *store,
+    const gchar *request_id, gchar **out_operation, gchar **out_resource_id,
+    guint8 out_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES],
+    gboolean *out_found)
+{
+  if (out_found != NULL)
+    *out_found = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT operation,resource_id,input_fingerprint"
+      " FROM service_domain_requests WHERE request_id=?;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, request_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    if (out_found != NULL)
+      *out_found = TRUE;
+    if ((rc = read_owned_text (stmt, 0, FALSE, 1, 64, out_operation))
+        != WYRELOG_E_OK
+        || (rc = read_owned_text (stmt, 1, FALSE, 1, 128, out_resource_id))
+        != WYRELOG_E_OK
+        || (rc = read_fixed_blob (stmt, 2, out_fingerprint,
+                WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES))
+        != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_ROW ? WYRELOG_E_OK :
+      (step_rc == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO);
+}
+
+static wyrelog_error_t
+service_credential_operation_load_fence (wyl_policy_store_t *store,
+    const gchar *request_id, gchar **out_operation,
+    guint8 out_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES],
+    gboolean *out_found)
+{
+  if (out_found != NULL)
+    *out_found = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT operation,operation_target_fingerprint"
+      " FROM service_credential_operation_fences WHERE request_id=?;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, request_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    if (out_found != NULL)
+      *out_found = TRUE;
+    if ((rc = read_owned_text (stmt, 0, FALSE, 1, 32, out_operation))
+        != WYRELOG_E_OK
+        || (rc = read_fixed_blob (stmt, 1, out_fingerprint,
+                WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES))
+        != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_ROW || step_rc == SQLITE_DONE ? WYRELOG_E_OK :
+      WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
+service_credential_operation_load_successor (wyl_policy_store_t *store,
+    const gchar *request_id, const gchar *event_name,
+    WylPolicyServiceCredentialOperationReconcileResult *out)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT credential_id,generation FROM service_credential_events"
+      " WHERE request_id=? AND event=? ORDER BY event_id DESC LIMIT 1;",
+      &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, request_id)) != WYRELOG_E_OK
+      || (rc = bind_text (stmt, 2, event_name)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    g_autofree gchar *credential_id = NULL;
+    guint64 generation = 0;
+    if ((rc = read_owned_text (stmt, 0, FALSE, 1,
+                WYL_SERVICE_CREDENTIAL_ID_LEN, &credential_id)) != WYRELOG_E_OK
+        || (rc = read_positive_u64 (stmt, 1, &generation)) != WYRELOG_E_OK) {
+      sqlite3_finalize (stmt);
+      return rc;
+    }
+    wyl_policy_store_service_credential_operation_reconcile_result_clear (out);
+    out->state = WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED;
+    out->credential_id = g_steal_pointer (&credential_id);
+    out->generation = generation;
+  }
+  sqlite3_finalize (stmt);
+  return step_rc == SQLITE_ROW || step_rc == SQLITE_DONE ? WYRELOG_E_OK :
+      WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_credential_operation_reconcile
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const gchar * request_id, WylServiceCredentialOperationKind operation,
+    const gchar * subject_id, const gchar * tenant_id,
+    const gchar * old_credential_id,
+    WylPolicyServiceCredentialOperationReconcileResult * out)
+{
+  if (out != NULL)
+    wyl_policy_store_service_credential_operation_reconcile_result_clear (out);
+  if (transaction == NULL || store == NULL || request_id == NULL
+      || !service_domain_text_is_valid (request_id, 256)
+      || out == NULL)
+    return WYRELOG_E_INVALID;
+  if (operation == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
+    if (subject_id == NULL || tenant_id == NULL || old_credential_id != NULL
+        || !wyl_policy_service_subject_is_valid (subject_id,
+            strlen (subject_id))
+        || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+      return WYRELOG_E_INVALID;
+  } else if (operation == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
+    if (old_credential_id == NULL || subject_id != NULL || tenant_id != NULL
+        || !wyl_service_credential_id_is_canonical (old_credential_id,
+            strlen (old_credential_id)))
+      return WYRELOG_E_INVALID;
+  } else {
+    return WYRELOG_E_INVALID;
+  }
+
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  const gchar *operation_name =
+      service_credential_operation_sql_name (operation);
+  guint8 expected_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES];
+  rc = wyl_policy_store_service_credential_operation_fingerprint (1,
+      operation == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ? 2 : 1,
+      subject_id, subject_id != NULL ? strlen (subject_id) : 0, tenant_id,
+      tenant_id != NULL ? strlen (tenant_id) : 0, old_credential_id,
+      old_credential_id != NULL ? strlen (old_credential_id) : 0, NULL,
+      expected_fingerprint);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  for (guint attempt = 0; attempt < 2; attempt++) {
+    g_autofree gchar *request_operation = NULL;
+    g_autofree gchar *request_resource = NULL;
+    guint8 request_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES];
+    gboolean request_found = FALSE;
+    rc = service_credential_operation_load_request (store, request_id,
+        &request_operation, &request_resource, request_fingerprint,
+        &request_found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (request_found) {
+      if (!g_str_equal (request_operation, operation_name)
+          || !service_credential_operation_target_matches (operation,
+              subject_id, tenant_id, old_credential_id, request_resource)
+          || memcmp (request_fingerprint, expected_fingerprint,
+              WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES) != 0) {
+        out->state =
+            WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT;
+        return WYRELOG_E_OK;
+      }
+      rc = service_credential_operation_load_successor (store, request_id,
+          service_credential_operation_successor_event_name (operation), out);
+      return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+    }
+
+    g_autofree gchar *fence_operation = NULL;
+    guint8 fence_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES];
+    gboolean fence_found = FALSE;
+    rc = service_credential_operation_load_fence (store, request_id,
+        &fence_operation, fence_fingerprint, &fence_found);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (fence_found) {
+      if (!g_str_equal (fence_operation, operation_name)
+          || memcmp (fence_fingerprint, expected_fingerprint,
+              WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES) != 0) {
+        out->state =
+            WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT;
+        return WYRELOG_E_OK;
+      }
+      out->state =
+          WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL;
+      return WYRELOG_E_OK;
+    }
+
+    if (attempt == 1)
+      break;
+    sqlite3_stmt *stmt = NULL;
+    rc = prepare_stmt (store->db,
+        "INSERT INTO service_credential_operation_fences"
+        " (request_id,operation,operation_target_fingerprint,terminal_state,"
+        " created_at_us) VALUES(?,?,?,?,?);", &stmt);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    gint64 now_us = g_get_real_time ();
+    if ((rc = bind_text (stmt, 1, request_id)) != WYRELOG_E_OK
+        || (rc = bind_text (stmt, 2, operation_name)) != WYRELOG_E_OK
+        || sqlite3_bind_blob (stmt, 3, expected_fingerprint,
+            WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES, SQLITE_TRANSIENT)
+        != SQLITE_OK
+        || (rc = bind_text (stmt, 4, "not_committed_terminal")) != WYRELOG_E_OK
+        || sqlite3_bind_int64 (stmt, 5, now_us) != SQLITE_OK) {
+      sqlite3_finalize (stmt);
+      return WYRELOG_E_IO;
+    }
+    int step_rc = sqlite3_step (stmt);
+    sqlite3_finalize (stmt);
+    if (step_rc == SQLITE_DONE) {
+      out->state =
+          WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL;
+      return WYRELOG_E_OK;
+    }
+    if ((step_rc & 0xff) == SQLITE_CONSTRAINT)
+      continue;
+    return WYRELOG_E_IO;
+  }
+
+  return WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t

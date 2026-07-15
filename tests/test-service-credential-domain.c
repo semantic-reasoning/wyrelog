@@ -2,11 +2,9 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
-#include <sodium.h>
 #include <string.h>
 
 #include "auth/service-credential-domain-private.h"
-#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 #define COLLISION_ID "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"

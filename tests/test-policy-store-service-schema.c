@@ -16,6 +16,7 @@ static const gchar *const service_tables[] = {
   "service_credential_cvk",
   "service_principal_events",
   "service_credential_events",
+  "service_credential_operation_fences",
   "service_domain_requests",
   "service_exchange_audit_intentions",
 };
@@ -95,7 +96,8 @@ service_object_count (sqlite3 *db)
       "SELECT count(*) FROM sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions');");
+      "'service_credential_operation_fences','service_domain_requests',"
+      "'service_exchange_audit_intentions');");
 }
 
 static gchar *
@@ -118,8 +120,8 @@ service_schema_fingerprint (sqlite3 *db)
       "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions') "
-      "ORDER BY type,name;";
+      "'service_credential_operation_fences','service_domain_requests',"
+      "'service_exchange_audit_intentions') " "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
@@ -141,7 +143,8 @@ service_schema_fingerprint (sqlite3 *db)
       "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests') ORDER BY name;";
+      "'service_credential_operation_fences','service_domain_requests') "
+      "ORDER BY name;";
   g_assert_cmpint (sqlite3_prepare_v2 (db, index_sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW) {

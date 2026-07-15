@@ -687,6 +687,23 @@ CREATE INDEX IF NOT EXISTS idx_service_credential_events_owner_time
 CREATE INDEX IF NOT EXISTS idx_service_credential_events_request
     ON service_credential_events (request_id);
 
+CREATE TABLE IF NOT EXISTS service_credential_operation_fences (
+    request_id                  TEXT NOT NULL PRIMARY KEY CHECK (
+        length(request_id) BETWEEN 1 AND 256
+        AND instr(request_id, char(0)) = 0),
+    operation                   TEXT NOT NULL CHECK (
+        operation IN ('credential_issue', 'credential_rotate')),
+    operation_target_fingerprint BLOB NOT NULL CHECK (
+        typeof(operation_target_fingerprint) = 'blob'
+        AND length(operation_target_fingerprint) = 32),
+    terminal_state              TEXT NOT NULL CHECK (
+        terminal_state = 'not_committed_terminal'),
+    created_at_us               INTEGER NOT NULL CHECK (created_at_us > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_credential_operation_fences_created
+    ON service_credential_operation_fences (created_at_us, request_id);
+
 CREATE TABLE IF NOT EXISTS service_domain_requests (
     request_id        TEXT NOT NULL PRIMARY KEY CHECK (
         length(request_id) BETWEEN 1 AND 256
@@ -702,6 +719,40 @@ CREATE TABLE IF NOT EXISTS service_domain_requests (
         AND length(input_fingerprint) = 32),
     created_at_us     INTEGER NOT NULL CHECK (created_at_us > 0)
 );
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_update
+BEFORE UPDATE ON service_credential_operation_fences
+BEGIN
+    SELECT RAISE(ABORT, 'service credential operation fences are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_delete
+BEFORE DELETE ON service_credential_operation_fences
+BEGIN
+    SELECT RAISE(ABORT, 'service credential operation fences are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_reject_operation_fence
+BEFORE INSERT ON service_domain_requests
+WHEN EXISTS (
+    SELECT 1 FROM service_credential_operation_fences
+    WHERE request_id = NEW.request_id
+)
+BEGIN
+    SELECT RAISE(ABORT,
+        'service credential operation request conflicts with terminal fence');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_reject_domain_request
+BEFORE INSERT ON service_credential_operation_fences
+WHEN EXISTS (
+    SELECT 1 FROM service_domain_requests
+    WHERE request_id = NEW.request_id
+)
+BEGIN
+    SELECT RAISE(ABORT,
+        'service credential terminal fence conflicts with committed request');
+END;
 
 CREATE TABLE IF NOT EXISTS service_authority_writer_gate (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
