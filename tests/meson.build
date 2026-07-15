@@ -1318,6 +1318,10 @@ test('supply-chain-pins', check_supply_chain_pins,
   args : [meson.project_source_root()],
 )
 
+test('duckdb-source-codegen-boundary', python3,
+  args : [files('test-duckdb-source-codegen-boundary.py'),
+    meson.project_source_root()])
+
 if host_machine.system() != 'windows'
   valgrind_gate = find_program(
     '../tools/run-valgrind-gate.sh',
