@@ -69,6 +69,18 @@
 #define WYL_DAEMON_ERR_TENANT_INVALID "tenant_invalid"
 #define WYL_DAEMON_ERR_TENANT_DENIED  "tenant_denied"
 #define WYL_DAEMON_ERR_TENANT_SEALED  "tenant_sealed"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_AUTH_REQUIRED \
+  "service_credential_operation_reconcile_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_INVALID \
+  "invalid_service_credential_operation_reconcile_request"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_DENIED \
+  "service_credential_operation_reconcile_denied"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED \
+  "service_credential_operation_reconcile_failed"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE \
+  "service_credential_operation_reconcile_unavailable"
+#define WYL_DAEMON_ERR_OPERATION_REQUEST_CONFLICT \
+  "operation_request_conflict"
 
 typedef gchar WylSensitiveChar;
 
@@ -5322,6 +5334,421 @@ fail:
   return FALSE;
 }
 
+#ifdef WYL_TEST_DAEMON_HTTP
+typedef struct
+{
+  gchar *request_id;
+  gchar *operation;
+  gchar *subject;
+  gchar *tenant;
+  gchar *old_credential_id;
+} WylServiceCredentialOperationReconcileRequest;
+
+static void
+    service_credential_operation_reconcile_request_clear
+    (WylServiceCredentialOperationReconcileRequest * request)
+{
+  if (request == NULL)
+    return;
+  g_free (request->request_id);
+  g_free (request->operation);
+  g_free (request->subject);
+  g_free (request->tenant);
+  g_free (request->old_credential_id);
+  memset (request, 0, sizeof (*request));
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WylServiceCredentialOperationReconcileRequest,
+    service_credential_operation_reconcile_request_clear);
+
+static gboolean
+    service_credential_operation_reconcile_request_id_is_canonical
+    (const gchar * value)
+{
+  if (value == NULL || strlen (value) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++) {
+    if (!g_ascii_isalnum (value[i]))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+static gboolean
+    service_credential_operation_reconcile_parse_json_string
+    (const gchar ** cursor, gchar ** out)
+{
+  const gchar *p = skip_ascii_spaces (*cursor);
+  if (*p++ != '"')
+    return FALSE;
+  g_autoptr (GString) value = g_string_new (NULL);
+  while (*p != '\0' && *p != '"') {
+    if ((guchar) * p < 0x20)
+      return FALSE;
+    if (*p == '\\') {
+      p++;
+      switch (*p) {
+        case '"':
+        case '\\':
+        case '/':
+          g_string_append_c (value, *p++);
+          break;
+        case 'n':
+          g_string_append_c (value, '\n');
+          p++;
+          break;
+        case 'r':
+          g_string_append_c (value, '\r');
+          p++;
+          break;
+        case 't':
+          g_string_append_c (value, '\t');
+          p++;
+          break;
+        default:
+          return FALSE;
+      }
+      continue;
+    }
+    g_string_append_c (value, *p++);
+  }
+  if (*p != '"')
+    return FALSE;
+  p++;
+  *cursor = p;
+  *out = g_string_free (g_steal_pointer (&value), FALSE);
+  return TRUE;
+}
+
+static gboolean
+    service_credential_operation_reconcile_parse_json_uint
+    (const gchar ** cursor, guint * out)
+{
+  const gchar *p = skip_ascii_spaces (*cursor);
+  if (!g_ascii_isdigit (*p))
+    return FALSE;
+  errno = 0;
+  gchar *end = NULL;
+  guint64 parsed = g_ascii_strtoull (p, &end, 10);
+  if (errno != 0 || end == p || parsed > G_MAXUINT)
+    return FALSE;
+  *cursor = end;
+  *out = (guint) parsed;
+  return TRUE;
+}
+
+static gboolean
+    service_credential_operation_reconcile_parse_target_issue
+    (const gchar ** cursor, gchar ** out_subject, gchar ** out_tenant)
+{
+  g_autofree gchar *key = NULL;
+  if (!service_credential_operation_reconcile_parse_json_string (cursor, &key)
+      || g_strcmp0 (key, "subject") != 0)
+    return FALSE;
+  const gchar *p = skip_ascii_spaces (*cursor);
+  if (*p++ != ':')
+    return FALSE;
+  *cursor = p;
+  if (!service_credential_operation_reconcile_parse_json_string (cursor,
+          out_subject))
+    return FALSE;
+  p = skip_ascii_spaces (*cursor);
+  if (*p++ != ',')
+    return FALSE;
+  *cursor = p;
+  g_clear_pointer (&key, g_free);
+  if (!service_credential_operation_reconcile_parse_json_string (cursor, &key)
+      || g_strcmp0 (key, "tenant") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (*cursor);
+  if (*p++ != ':')
+    return FALSE;
+  *cursor = p;
+  return service_credential_operation_reconcile_parse_json_string (cursor,
+      out_tenant);
+}
+
+static gboolean
+    service_credential_operation_reconcile_parse_target_rotate
+    (const gchar ** cursor, gchar ** out_old_credential_id)
+{
+  g_autofree gchar *key = NULL;
+  if (!service_credential_operation_reconcile_parse_json_string (cursor, &key)
+      || g_strcmp0 (key, "old_credential_id") != 0)
+    return FALSE;
+  const gchar *p = skip_ascii_spaces (*cursor);
+  if (*p++ != ':')
+    return FALSE;
+  *cursor = p;
+  return service_credential_operation_reconcile_parse_json_string (cursor,
+      out_old_credential_id);
+}
+
+static gboolean
+    service_credential_operation_reconcile_parse_request
+    (const gchar * json, WylServiceCredentialOperationReconcileRequest * out)
+{
+  if (json == NULL || out == NULL)
+    return FALSE;
+  service_credential_operation_reconcile_request_clear (out);
+
+  const gchar *p = skip_ascii_spaces (json);
+  if (*p++ != '{')
+    return FALSE;
+
+  g_autofree gchar *key = NULL;
+  g_autofree gchar *operation = NULL;
+  guint version = 0;
+
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &key)
+      || g_strcmp0 (key, "version") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ':')
+    return FALSE;
+  if (!service_credential_operation_reconcile_parse_json_uint (&p, &version)
+      || version != 1)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ',')
+    return FALSE;
+
+  g_clear_pointer (&key, g_free);
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &key)
+      || g_strcmp0 (key, "request_id") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ':')
+    return FALSE;
+  if (!service_credential_operation_reconcile_parse_json_string (&p,
+          &out->request_id) ||
+      !service_credential_operation_reconcile_request_id_is_canonical
+      (out->request_id))
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ',')
+    return FALSE;
+
+  g_clear_pointer (&key, g_free);
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &key)
+      || g_strcmp0 (key, "operation") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ':')
+    return FALSE;
+  if (!service_credential_operation_reconcile_parse_json_string (&p,
+          &operation))
+    return FALSE;
+  if (g_strcmp0 (operation, "issue") != 0 &&
+      g_strcmp0 (operation, "rotate") != 0)
+    return FALSE;
+  out->operation = g_steal_pointer (&operation);
+  p = skip_ascii_spaces (p);
+  if (*p++ != ',')
+    return FALSE;
+
+  g_clear_pointer (&key, g_free);
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &key)
+      || g_strcmp0 (key, "target") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ':')
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != '{')
+    return FALSE;
+
+  if (g_strcmp0 (out->operation, "issue") == 0) {
+    if (!service_credential_operation_reconcile_parse_target_issue (&p,
+            &out->subject, &out->tenant))
+      return FALSE;
+    if (out->subject == NULL || out->subject[0] == '\0' ||
+        out->tenant == NULL || out->tenant[0] == '\0' ||
+        !wyl_policy_service_subject_is_valid (out->subject,
+            strlen (out->subject)) ||
+        !wyl_policy_store_tenant_id_is_valid (out->tenant))
+      return FALSE;
+  } else {
+    if (!service_credential_operation_reconcile_parse_target_rotate (&p,
+            &out->old_credential_id))
+      return FALSE;
+    if (out->old_credential_id == NULL || out->old_credential_id[0] == '\0' ||
+        !wyl_service_credential_id_is_canonical (out->old_credential_id,
+            strlen (out->old_credential_id)))
+      return FALSE;
+  }
+
+  p = skip_ascii_spaces (p);
+  if (*p++ != '}')
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != '}')
+    return FALSE;
+  if (*skip_ascii_spaces (p) != '\0')
+    return FALSE;
+  return TRUE;
+}
+
+static const gchar *service_credential_operation_reconcile_result_state_string
+    (WylServiceCredentialFenceResultState state)
+{
+  switch (state) {
+    case WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED:
+      return "committed";
+    case WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL:
+      return "not_committed_terminal";
+    case WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT:
+      return "conflict";
+    default:
+      return "failed";
+  }
+}
+
+static gchar *service_credential_operation_reconcile_build_response
+    (const WylServiceCredentialOperationReconcileRequest * request,
+    const WylServiceCredentialFenceResult * result)
+{
+  g_autoptr (GString) body = g_string_new ("{\"version\":1,\"request_id\":");
+  append_json_string (body, request->request_id);
+  g_string_append (body, ",\"operation\":");
+  append_json_string (body, request->operation);
+  g_string_append (body, ",\"target\":{");
+  if (g_strcmp0 (request->operation, "issue") == 0) {
+    g_string_append (body, "\"subject\":");
+    append_json_string (body, request->subject);
+    g_string_append (body, ",\"tenant\":");
+    append_json_string (body, request->tenant);
+  } else {
+    g_string_append (body, "\"old_credential_id\":");
+    append_json_string (body, request->old_credential_id);
+  }
+  g_string_append (body, "},\"status\":");
+  append_json_string (body,
+      service_credential_operation_reconcile_result_state_string
+      (result->state));
+  if (result->state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED) {
+    g_string_append (body, ",\"credential_id\":");
+    append_json_string (body, result->successor_credential_id);
+    g_string_append_printf (body, ",\"generation\":%" G_GUINT64_FORMAT,
+        result->successor_generation);
+  }
+  g_string_append_c (body, '}');
+  return g_string_free (g_steal_pointer (&body), FALSE);
+}
+
+static gboolean
+service_credential_operation_reconcile_execute (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx)
+{
+  if (ctx->profile != WYL_DAEMON_PROFILE_SYSTEM) {
+    set_json_error (msg, 403,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_DENIED);
+    return FALSE;
+  }
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.service_credential.manage", NULL,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED, NULL))
+    return FALSE;
+
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 4096, &body)) {
+    set_json_error (msg, 400,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_INVALID);
+    return FALSE;
+  }
+
+  g_auto (WylServiceCredentialOperationReconcileRequest) request = { 0 };
+  if (!service_credential_operation_reconcile_parse_request (body, &request)) {
+    set_json_error (msg, 400,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_INVALID);
+    return FALSE;
+  }
+
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK) {
+    guint status = (rc == WYRELOG_E_BUSY) ? 503 : 500;
+    set_json_error (msg, status, (rc == WYRELOG_E_BUSY)
+        ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE
+        : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
+  g_autoptr (WylServiceAuthorityTransaction) txn = NULL;
+  rc = wyl_policy_store_service_authority_transaction_begin (write.store,
+      ctx->handle, write.lease, &txn);
+  if (rc != WYRELOG_E_OK) {
+    guint status = (rc == WYRELOG_E_BUSY) ? 503 : 500;
+    set_json_error (msg, status, (rc == WYRELOG_E_BUSY)
+        ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE
+        : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
+  WylServiceCredentialFenceResult fence = { 0 };
+  WylServiceCredentialFenceOperation operation =
+      g_strcmp0 (request.operation, "issue") == 0 ?
+      WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE :
+      WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE;
+  rc = wyl_policy_store_reconcile_service_credential_operation_fence (txn,
+      write.store, NULL, operation, request.request_id, request.subject,
+      request.tenant, request.old_credential_id, &fence);
+  if (rc != WYRELOG_E_OK) {
+    guint status = (rc == WYRELOG_E_BUSY) ? 503 : 500;
+    set_json_error (msg, status, (rc == WYRELOG_E_BUSY)
+        ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE
+        : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
+  rc = wyl_policy_store_service_authority_transaction_commit (txn);
+  if (rc != WYRELOG_E_OK) {
+    guint status = (rc == WYRELOG_E_BUSY) ? 503 : 500;
+    set_json_error (msg, status, (rc == WYRELOG_E_BUSY)
+        ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE
+        : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
+  if (fence.state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT) {
+    set_json_error (msg, 409, WYL_DAEMON_ERR_OPERATION_REQUEST_CONFLICT);
+    return TRUE;
+  }
+
+  g_autofree gchar *response =
+      service_credential_operation_reconcile_build_response (&request, &fence);
+  if (response == NULL) {
+    set_json_error (msg, 500,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, response, strlen (response));
+  return TRUE;
+}
+
+static void
+service_credential_operation_reconcile_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) path;
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  (void) service_credential_operation_reconcile_execute (server, msg, query,
+      ctx);
+}
+#endif
+
 static void
 mfa_enroll_start_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -6723,6 +7150,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       policy_role_revoke_handler, ctx, NULL);
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
       ctx, NULL);
+#ifdef WYL_TEST_DAEMON_HTTP
+  soup_server_add_handler (server, "/__test/reconcile",
+      service_credential_operation_reconcile_handler, ctx, NULL);
+#endif
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);
     return NULL;
