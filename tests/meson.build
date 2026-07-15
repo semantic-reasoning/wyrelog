@@ -130,7 +130,7 @@ if build_client
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-    # The three daemon-http-decide variants share one source file with one
+    # The four daemon-http-decide variants share one source file with one
     # main() per variant; helpers irrelevant to the active variant remain
     # defined to keep the source readable.
     '-Wno-unused-function',
@@ -176,6 +176,21 @@ if build_client
   )
 
   test('daemon-http-decide-refresh', test_daemon_http_decide_refresh,
+    timeout : 240,
+  )
+
+  test_daemon_http_decide_service = executable('test-daemon-http-decide-service',
+    'test-daemon-http-decide.c',
+    '../wyrelog/daemon/auth-registry-private.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    c_args : test_daemon_http_decide_c_args + '-DWYL_TEST_VARIANT_SERVICE',
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_daemon_http_decide_deps,
+  )
+
+  test('daemon-http-decide-service', test_daemon_http_decide_service,
     timeout : 240,
   )
 

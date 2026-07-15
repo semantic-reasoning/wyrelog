@@ -5796,7 +5796,7 @@ check_tenant_gate_codes_contract (void)
 }
 
 /*
- * The daemon-http-decide test surface has been split across three binaries
+ * The daemon-http-decide test surface has been split across four binaries
  * compiled from this single translation unit:
  *
  *   - WYL_TEST_VARIANT_AUDIT undefined: HTTP-decide protocol contracts
@@ -5807,6 +5807,10 @@ check_tenant_gate_codes_contract (void)
  *     check plus the raw-login, JWT-rotation, and human-refresh shutdown
  *     flows that would otherwise push the non-audit binary over the wall-clock
  *     ceiling on slower CI runners.
+ *
+ *   - WYL_TEST_VARIANT_SERVICE defined: the service access-token state and
+ *     bearer-resolver contracts that are heavy enough to deserve their own
+ *     binary on slower CI runners.
  *
  *   - WYL_TEST_VARIANT_AUDIT defined: end-to-end audit pipeline. Generates
  *     the decide and policy events the audit verification depends on, then
@@ -5851,6 +5855,10 @@ main (void)
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 14;
+  gint dispatch_context_rc = check_explicit_refresh_dispatch_context (handle,
+      &runtime);
+  if (dispatch_context_rc != 0)
+    return dispatch_context_rc;
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
@@ -5918,10 +5926,6 @@ main (void)
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 14;
-  gint dispatch_context_rc = check_explicit_refresh_dispatch_context (handle,
-      &runtime);
-  if (dispatch_context_rc != 0)
-    return dispatch_context_rc;
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
@@ -5929,15 +5933,6 @@ main (void)
       &runtime, &error);
   if (http.server == NULL)
     return 3;
-  wyl_daemon_access_token_snapshot_t service_token_snapshot = { 0 };
-  gint service_state_rc = check_service_access_token_state_contract
-      (http.server, &service_token_snapshot);
-  if (service_state_rc != 0)
-    return service_state_rc;
-  gint service_resolver_rc = check_service_bearer_resolver_contract
-      (http.server);
-  if (service_resolver_rc != 0)
-    return service_resolver_rc;
   GThread *thread = g_thread_new ("daemon-http-decide",
       test_http_server_thread, &http);
   if (!wyl_daemon_http_refresh_context_is_for_test (http.server,
@@ -6011,13 +6006,60 @@ main (void)
   g_thread_join (thread);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
-  if (g_strcmp0 (service_token_snapshot.subject, "svc:state:test") != 0
-      || g_strcmp0 (service_token_snapshot.credential_id, NULL) == 0) {
-    wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
-    return 1957;
-  }
-  wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  return 0;
+}
+#elif defined(WYL_TEST_VARIANT_SERVICE)
+int
+main (void)
+{
+  gint tenant_gate_rc = check_tenant_gate_codes_contract ();
+  if (tenant_gate_rc != 0)
+    return tenant_gate_rc;
+
+  gint policy_shutdown_rc = check_daemon_policy_write_shutdown_contract ();
+  if (policy_shutdown_rc != 0)
+    return policy_shutdown_rc;
+
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1;
+  if (insert_allow_fixture (handle) != WYRELOG_E_OK)
+    return 2;
+  if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
+    return 10;
+  if (insert_guarded_fixture (handle) != WYRELOG_E_OK)
+    return 11;
+
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  WylDaemonRuntime runtime = {
+    .handle = handle,
+  };
+  if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
+    return 14;
+  g_autoptr (GError) error = NULL;
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (NULL, FALSE);
+  http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
+      &runtime, &error);
+  if (http.server == NULL)
+    return 3;
+  wyl_daemon_access_token_snapshot_t service_token_snapshot = { 0 };
+  gint service_state_rc = check_service_access_token_state_contract
+      (http.server, &service_token_snapshot);
+  if (service_state_rc != 0)
+    return service_state_rc;
+  wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
+  gint service_resolver_rc = check_service_bearer_resolver_contract
+      (http.server);
+  if (service_resolver_rc != 0)
+    return service_resolver_rc;
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
   return 0;
 }
 #else /* WYL_TEST_VARIANT_AUDIT */
