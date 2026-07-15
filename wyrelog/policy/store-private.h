@@ -15,6 +15,7 @@ G_BEGIN_DECLS;
 
 #define WYL_POLICY_FACT_QUERY_DEFAULT_MAX_ROWS 1000
 #define WYL_POLICY_FACT_QUERY_MAX_ROWS 1000000
+#define WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES 32u
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 typedef struct _WylServiceAuthorityTransaction WylServiceAuthorityTransaction;
@@ -102,6 +103,26 @@ typedef enum
   WYL_POLICY_SERVICE_ROTATE_FAIL_INTENTION,
   WYL_POLICY_SERVICE_ROTATE_FAIL_VALIDATOR,
 } wyl_policy_service_rotate_fail_stage_t;
+
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE = 1,
+  WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE = 2,
+} WylServiceCredentialOperationKind;
+
+typedef enum
+{
+  WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED,
+  WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL,
+  WYL_POLICY_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT,
+} WylPolicyServiceCredentialOperationReconcileState;
+
+typedef struct
+{
+  WylPolicyServiceCredentialOperationReconcileState state;
+  gchar *credential_id;
+  guint64 generation;
+} WylPolicyServiceCredentialOperationReconcileResult;
 
 /* rotation_runtime is a private, per-call fault seam. rotate_keyprovider uses
  * only old_opts->rotation_runtime and the CVK runtime snapshotted while opening
@@ -731,6 +752,19 @@ wyrelog_error_t wyl_policy_store_materialize_service_cvk_existing
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
 wyrelog_error_t wyl_policy_store_ensure_service_cvk_for_issuance
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+void wyl_policy_store_service_credential_operation_reconcile_result_clear
+    (WylPolicyServiceCredentialOperationReconcileResult * result);
+wyrelog_error_t wyl_policy_store_service_credential_operation_fingerprint_v1
+    (WylServiceCredentialOperationKind operation, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * old_credential_id,
+    GBytes ** out_transcript,
+    guint8 out_fingerprint[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES]);
+wyrelog_error_t wyl_policy_store_service_credential_operation_reconcile
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * request_id,
+    WylServiceCredentialOperationKind operation, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * old_credential_id,
+    WylPolicyServiceCredentialOperationReconcileResult * out);
 /* Issuance initializes/materializes the CVK before its lifecycle savepoint.
  * A later domain failure may therefore leave only the idempotent CVK row;
  * credential, event, ledger and audit rows still roll back together. */
@@ -1224,5 +1258,12 @@ wyrelog_error_t wyl_policy_store_totp_enrollment_update_step
  */
 wyrelog_error_t wyl_policy_store_totp_enrollment_delete (wyl_policy_store_t *
     store, const gchar * subject_id);
+
+wyrelog_error_t wyl_policy_store_service_credential_operation_fingerprint
+    (guint32 version, guint8 operation_tag, const gchar * subject_id,
+    gsize subject_id_len, const gchar * tenant_id, gsize tenant_id_len,
+    const gchar * old_credential_id, gsize old_credential_id_len,
+    GBytes ** out_transcript,
+    guint8 out[WYL_POLICY_STORE_OPERATION_FINGERPRINT_BYTES]);
 
 G_END_DECLS;

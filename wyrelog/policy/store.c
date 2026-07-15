@@ -549,6 +549,7 @@ static const gchar *const required_tables[] = {
   "service_credential_cvk",
   "service_principal_events",
   "service_credential_events",
+  "service_credential_operation_fences",
   "service_domain_requests",
   "service_exchange_audit_intentions",
   "service_authority_writer_gate",
@@ -683,6 +684,36 @@ static const gchar service_schema_ddl[] =
     " ON service_credential_events (subject_id, tenant_id, created_at_us, event_id);"
     "CREATE INDEX IF NOT EXISTS idx_service_credential_events_request"
     " ON service_credential_events (request_id);"
+    "CREATE TABLE IF NOT EXISTS service_credential_operation_fences ("
+    " request_id TEXT NOT NULL PRIMARY KEY CHECK ("
+    "   length(request_id) BETWEEN 1 AND 256 AND"
+    "   instr(request_id, char(0)) = 0),"
+    " operation TEXT NOT NULL CHECK (operation IN ("
+    "   'credential_issue','credential_rotate')),"
+    " operation_target_fingerprint BLOB NOT NULL CHECK ("
+    "   typeof(operation_target_fingerprint) = 'blob' AND"
+    "   length(operation_target_fingerprint) = 32),"
+    " terminal_state TEXT NOT NULL CHECK (terminal_state = 'not_committed_terminal'),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_credential_operation_fences_created"
+    " ON service_credential_operation_fences (created_at_us, request_id);"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_update"
+    " BEFORE UPDATE ON service_credential_operation_fences"
+    " BEGIN SELECT RAISE(ABORT, 'service credential operation fences are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_delete"
+    " BEFORE DELETE ON service_credential_operation_fences"
+    " BEGIN SELECT RAISE(ABORT, 'service credential operation fences are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_reject_operation_fence"
+    " BEFORE INSERT ON service_domain_requests WHEN EXISTS ("
+    "   SELECT 1 FROM service_credential_operation_fences"
+    "   WHERE request_id = NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT, 'service credential operation request conflicts with terminal fence'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_reject_domain_request"
+    " BEFORE INSERT ON service_credential_operation_fences WHEN EXISTS ("
+    "   SELECT 1 FROM service_domain_requests"
+    "   WHERE request_id = NEW.request_id)"
+    " BEGIN SELECT RAISE(ABORT, 'service credential terminal fence conflicts with committed request'); END;"
     "CREATE TABLE IF NOT EXISTS service_domain_requests ("
     " request_id TEXT NOT NULL PRIMARY KEY CHECK ("
     "   length(request_id) BETWEEN 1 AND 256 AND"
@@ -872,6 +903,15 @@ static const gchar *const service_credential_event_needles[] = {
   NULL,
 };
 
+static const gchar *const service_credential_operation_fence_needles[] = {
+  "check(length(request_id)between1and256andinstr(request_id,char(0))=0)",
+  "check(operationin('credential_issue','credential_rotate'))",
+  "check(typeof(operation_target_fingerprint)='blob'andlength(operation_target_fingerprint)=32)",
+  "check(terminal_state='not_committed_terminal')",
+  "check(created_at_us>0)",
+  NULL,
+};
+
 static const gchar *const service_domain_request_needles[] = {
   "check(length(request_id)between1and256andinstr(request_id,char(0))=0)",
   "check(operationin('principal_create','principal_disable','credential_issue','credential_revoke','credential_rotate'))",
@@ -931,6 +971,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         service_credential_event_needles, 7,
         "0:0:service_credentials:related_credential_id:credential_id:RESTRICT:RESTRICT:NONE;0:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;0:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE;1:0:service_credentials:credential_id:credential_id:RESTRICT:RESTRICT:NONE;1:1:service_credentials:subject_id:subject_id:RESTRICT:RESTRICT:NONE;1:2:service_credentials:tenant_id:tenant_id:RESTRICT:RESTRICT:NONE",
       "idx_service_credential_events_credential_time:0:c:0:0:1:credential_id:0:BINARY:1,1:11:created_at_us:0:BINARY:1,2:0:event_id:0:BINARY:1,3:-1::0:BINARY:0;idx_service_credential_events_owner_time:0:c:0:0:2:subject_id:0:BINARY:1,1:3:tenant_id:0:BINARY:1,2:11:created_at_us:0:BINARY:1,3:0:event_id:0:BINARY:1,4:-1::0:BINARY:0;idx_service_credential_events_request:0:c:0:0:9:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_credential_operation_fences",
+        "request_id:TEXT:1::1,operation:TEXT:1::0,operation_target_fingerprint:BLOB:1::0,terminal_state:TEXT:1::0,created_at_us:INTEGER:1::0",
+        service_credential_operation_fence_needles, 5, "",
+      "idx_service_credential_operation_fences_created:0:c:0:0:4:created_at_us:0:BINARY:1,1:1:request_id:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_credential_operation_fences_1:1:pk:0:0:0:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_domain_requests",
         "request_id:TEXT:1::1,operation:TEXT:1::0,resource_id:TEXT:1::0,input_fingerprint:BLOB:1::0,created_at_us:INTEGER:1::0",
         service_domain_request_needles, 5, "",
@@ -958,6 +1002,12 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
       "createtriggertrg_service_credential_events_no_updatebeforeupdateonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
   {"trg_service_credential_events_no_delete", "service_credential_events",
       "createtriggertrg_service_credential_events_no_deletebeforedeleteonservice_credential_eventsbeginselectraise(abort,'servicecredentialeventsareappend-only');end"},
+  {"trg_service_domain_requests_reject_operation_fence",
+        "service_domain_requests",
+      "createtriggertrg_service_domain_requests_reject_operation_fencebeforeinsertonservice_domain_requestswhenexists(select1fromservice_credential_operation_fenceswhererequest_id=new.request_id)beginselectraise(abort,'servicecredentialoperationrequestconflictswithterminalfence');end"},
+  {"trg_service_credential_operation_fences_reject_domain_request",
+        "service_credential_operation_fences",
+      "createtriggertrg_service_credential_operation_fences_reject_domain_requestbeforeinsertonservice_credential_operation_fenceswhenexists(select1fromservice_domain_requestswhererequest_id=new.request_id)beginselectraise(abort,'servicecredentialterminalfenceconflictswithcommittedrequest');end"},
   {"trg_service_domain_requests_no_update", "service_domain_requests",
       "createtriggertrg_service_domain_requests_no_updatebeforeupdateonservice_domain_requestsbeginselectraise(abort,'servicedomainrequestsareappend-only');end"},
   {"trg_service_domain_requests_no_delete", "service_domain_requests",
@@ -5185,7 +5235,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "SELECT 1 FROM main.sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions') "
+      "'service_credential_operation_fences','service_domain_requests',"
+      "'service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
       "'trg_service_credentials_identity_immutable',"
@@ -5193,6 +5244,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_principal_events_no_delete',"
       "'trg_service_credential_events_no_update',"
       "'trg_service_credential_events_no_delete',"
+      "'trg_service_domain_requests_reject_operation_fence',"
+      "'trg_service_credential_operation_fences_reject_domain_request',"
       "'trg_service_domain_requests_no_update',"
       "'trg_service_domain_requests_no_delete',"
       "'trg_service_exchange_audit_no_update',"
@@ -5207,12 +5260,14 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       " temp_object.tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_credential_operation_fences','service_domain_requests',"
+      "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_credential_operation_fences','service_domain_requests',"
+      "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate')) LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -5243,8 +5298,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "SELECT 1 FROM pragma_foreign_key_check "
       "WHERE \"table\" IN ('service_principals','service_credentials',"
       "'service_credential_cvk','service_principal_events',"
-      "'service_credential_events','service_domain_requests') LIMIT 1;",
-      &found);
+      "'service_credential_events','service_credential_operation_fences',"
+      "'service_domain_requests') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -8236,34 +8291,98 @@ wyl_policy_store_ensure_service_cvk_for_issuance (wyl_policy_store_t *store,
   return service_cvk_materialize (store, TRUE, out_cvk, out_len);
 }
 
+wyrelog_error_t
+    wyl_policy_store_service_credential_operation_fingerprint
+    (guint32 version, guint8 operation_tag, const gchar * subject_id,
+    gsize subject_id_len, const gchar * tenant_id, gsize tenant_id_len,
+    const gchar * old_credential_id, gsize old_credential_id_len,
+    GBytes ** out_transcript, guint8 out[crypto_generichash_BYTES])
+{
+  static const guint8 domain[] =
+      "wyrelog.service-credential-operation-fence.v1";
+  if (out == NULL || version != 1)
+    return WYRELOG_E_INVALID;
+
+  gboolean issue = operation_tag == 1;
+  gboolean rotate = operation_tag == 2;
+  if (!issue && !rotate)
+    return WYRELOG_E_INVALID;
+  if (issue) {
+    if (subject_id == NULL || tenant_id == NULL || old_credential_id != NULL
+        || subject_id_len == 0 || tenant_id_len == 0
+        || subject_id_len > G_MAXUINT32 || tenant_id_len > G_MAXUINT32
+        || !wyl_policy_service_subject_is_valid (subject_id, subject_id_len)
+        || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+      return WYRELOG_E_INVALID;
+  } else {
+    if (old_credential_id == NULL || subject_id != NULL || tenant_id != NULL
+        || old_credential_id_len == 0 || old_credential_id_len > G_MAXUINT32
+        || !wyl_service_credential_id_is_canonical (old_credential_id,
+            old_credential_id_len))
+      return WYRELOG_E_INVALID;
+  }
+
+  gsize transcript_len = 4 + (sizeof domain - 1) + 1 + 1;
+  transcript_len += issue ? 4 + subject_id_len + 4 + tenant_id_len :
+      4 + old_credential_id_len;
+  guint8 *transcript = g_try_malloc (transcript_len);
+  if (transcript == NULL)
+    return WYRELOG_E_IO;
+
+  guint8 *cursor = transcript;
+  guint32 be = GUINT32_TO_BE ((guint32) (sizeof domain - 1));
+  memcpy (cursor, &be, sizeof be);
+  cursor += sizeof be;
+  memcpy (cursor, domain, sizeof domain - 1);
+  cursor += sizeof domain - 1;
+  *cursor++ = (guint8) version;
+  *cursor++ = operation_tag;
+
+  if (issue) {
+    be = GUINT32_TO_BE ((guint32) subject_id_len);
+    memcpy (cursor, &be, sizeof be);
+    cursor += sizeof be;
+    memcpy (cursor, subject_id, subject_id_len);
+    cursor += subject_id_len;
+    be = GUINT32_TO_BE ((guint32) tenant_id_len);
+    memcpy (cursor, &be, sizeof be);
+    cursor += sizeof be;
+    memcpy (cursor, tenant_id, tenant_id_len);
+    cursor += tenant_id_len;
+  } else {
+    be = GUINT32_TO_BE ((guint32) old_credential_id_len);
+    memcpy (cursor, &be, sizeof be);
+    cursor += sizeof be;
+    memcpy (cursor, old_credential_id, old_credential_id_len);
+    cursor += old_credential_id_len;
+  }
+
+  if ((gsize) (cursor - transcript) != transcript_len) {
+    g_free (transcript);
+    return WYRELOG_E_CRYPTO;
+  }
+  if (crypto_generichash (out, crypto_generichash_BYTES, transcript,
+          transcript_len, NULL, 0) != 0) {
+    g_free (transcript);
+    return WYRELOG_E_CRYPTO;
+  }
+  if (out_transcript != NULL)
+    *out_transcript = g_bytes_new_take (transcript, transcript_len);
+  else
+    g_free (transcript);
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 service_credential_issue_fingerprint (const gchar *subject_id,
     const gchar *tenant_id, const gchar *actor_subject_id,
     gint64 expires_at_us, guint8 out[crypto_generichash_BYTES])
 {
-  g_autofree gchar *expiry = g_strdup_printf ("%" G_GINT64_FORMAT,
-      expires_at_us);
-  crypto_generichash_state state;
-  static const guint8 domain[] = "wyrelog.service-credential-issue-request.v1";
-  if (crypto_generichash_init (&state, NULL, 0, crypto_generichash_BYTES) != 0
-      || crypto_generichash_update (&state, domain, sizeof domain - 1) != 0)
-    return WYRELOG_E_CRYPTO;
-  const gchar *fields[] = {
-    subject_id, tenant_id, actor_subject_id, expiry,
-  };
-  static const guint8 separator = 0;
-  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++) {
-    if (crypto_generichash_update (&state, (const guint8 *) fields[i],
-            strlen (fields[i])) != 0
-        || crypto_generichash_update (&state, &separator, 1) != 0) {
-      sodium_memzero (&state, sizeof state);
-      return WYRELOG_E_CRYPTO;
-    }
-  }
-  int failed = crypto_generichash_final (&state, out,
-      crypto_generichash_BYTES);
-  sodium_memzero (&state, sizeof state);
-  return failed == 0 ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+  (void) actor_subject_id;
+  (void) expires_at_us;
+  return wyl_policy_store_service_credential_operation_fingerprint (1, 1,
+      subject_id, strlen (subject_id), tenant_id, strlen (tenant_id), NULL, 0,
+      NULL, out);
 }
 
 static wyrelog_error_t
@@ -8843,26 +8962,11 @@ service_credential_rotate_fingerprint (const gchar *old_credential_id,
     const gchar *actor_subject_id, gint64 expires_at_us,
     guint8 out[crypto_generichash_BYTES])
 {
-  g_autofree gchar *expiry = g_strdup_printf ("%" G_GINT64_FORMAT,
-      expires_at_us);
-  crypto_generichash_state state;
-  static const guint8 domain[] = "wyrelog.service-credential-rotate-request.v1";
-  if (crypto_generichash_init (&state, NULL, 0, crypto_generichash_BYTES) != 0
-      || crypto_generichash_update (&state, domain, sizeof domain - 1) != 0)
-    return WYRELOG_E_CRYPTO;
-  const gchar *fields[] = { old_credential_id, actor_subject_id, expiry };
-  static const guint8 separator = 0;
-  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++)
-    if (crypto_generichash_update (&state, (const guint8 *) fields[i],
-            strlen (fields[i])) != 0
-        || crypto_generichash_update (&state, &separator, 1) != 0) {
-      sodium_memzero (&state, sizeof state);
-      return WYRELOG_E_CRYPTO;
-    }
-  int failed = crypto_generichash_final (&state, out,
-      crypto_generichash_BYTES);
-  sodium_memzero (&state, sizeof state);
-  return failed == 0 ? WYRELOG_E_OK : WYRELOG_E_CRYPTO;
+  (void) actor_subject_id;
+  (void) expires_at_us;
+  return wyl_policy_store_service_credential_operation_fingerprint (1, 2,
+      NULL, 0, NULL, 0, old_credential_id, strlen (old_credential_id), NULL,
+      out);
 }
 
 static wyrelog_error_t
