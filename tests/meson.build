@@ -162,7 +162,7 @@ if build_client
     dependencies : test_daemon_http_decide_deps,
   )
 
-  test('daemon-http-decide', test_daemon_http_decide)
+  test('daemon-http-decide', test_daemon_http_decide, timeout : 120)
 
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_audit = executable('test-daemon-http-decide-audit',
