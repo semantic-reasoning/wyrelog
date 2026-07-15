@@ -1344,6 +1344,7 @@ check_human_refresh_response_loss (SoupServer *server, const gchar *base_url)
   g_autoptr (SoupSession) login = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
+  g_autofree gchar *after = NULL;
   if (send_raw_login (login, "POST", base_url,
           "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200)
@@ -1591,6 +1592,7 @@ check_human_refresh_shutdown_ordering (SoupServer *server,
   g_autoptr (SoupSession) login = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
+  g_autofree gchar *after = NULL;
   if (send_raw_login (login, "POST", base_url,
           "username=login-user&skip_mfa=true", &status, &body) != 0
       || status != 200)
@@ -1618,8 +1620,8 @@ check_human_refresh_shutdown_ordering (SoupServer *server,
   thread_joined = TRUE;
   wyl_daemon_http_disarm_refresh_latch_for_test (server, latch_generation);
   guint refresh_after = 0, access_after = 0;
-  g_autofree gchar *after = wyl_daemon_http_dup_refresh_state_for_test
-      (server, predecessor, &refresh_after, &access_after);
+  after = wyl_daemon_http_dup_refresh_state_for_test (server, predecessor,
+      &refresh_after, &access_after);
   gboolean ok = request.status == 503 && request.body != NULL
       && strstr (request.body, "server_shutting_down") != NULL
       && before != NULL && after != NULL
