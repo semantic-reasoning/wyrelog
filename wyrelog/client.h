@@ -40,6 +40,41 @@ typedef struct
   gboolean visible;
 } WylClientFactColumn;
 
+typedef enum
+{
+  WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE = 1,
+  WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE = 2,
+} WylClientServiceCredentialOperationReconcileOperation;
+
+typedef enum
+{
+  WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED = 1,
+  WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL = 2,
+  WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT =
+      3,
+} WylClientServiceCredentialOperationReconcileResultKind;
+
+typedef struct
+{
+  /*
+   * Borrowed request fields. The client duplicates them into the
+   * outbound JSON body and never takes ownership of the pointers.
+   */
+  WylClientServiceCredentialOperationReconcileOperation operation;
+  const gchar *request_id;
+  const gchar *subject_id;
+  const gchar *tenant_id;
+  const gchar *old_credential_id;
+} WylClientServiceCredentialOperationReconcileRequest;
+
+typedef struct
+{
+  /* Owned response fields. Clear with the matching helper. */
+  WylClientServiceCredentialOperationReconcileResultKind kind;
+  gchar *credential_id;
+  guint64 generation;
+} WylClientServiceCredentialOperationReconcileResult;
+
 /* Lifecycle */
 wyrelog_error_t wyl_client_new (const gchar * base_url,
     WylClient ** out_client);
@@ -194,6 +229,20 @@ const gchar *wyl_client_fact_append_result_get_batch_id
     (const WylClientFactAppendResult * result);
 gchar *wyl_client_fact_append_result_dup_batch_id
     (const WylClientFactAppendResult * result);
+void wyl_client_service_credential_operation_reconcile_request_clear
+    (WylClientServiceCredentialOperationReconcileRequest * request);
+void wyl_client_service_credential_operation_reconcile_result_clear
+    (WylClientServiceCredentialOperationReconcileResult * result);
+/*
+ * Reconciles one exact service credential issue/rotate request against the
+ * server's terminal operation-fence contract. The request must carry the
+ * canonical request id and exact target values; the result is fully owned by
+ * the caller and must be cleared with the matching helper.
+ */
+wyrelog_error_t wyl_client_service_credential_operation_reconcile
+    (WylClient * client,
+    const WylClientServiceCredentialOperationReconcileRequest * request,
+    WylClientServiceCredentialOperationReconcileResult * out_result);
 
 gchar *wyl_audit_iter_dup_query_filter (const WylAuditIter * iter);
 gchar *wyl_audit_iter_dup_request_uri (const WylAuditIter * iter);
@@ -221,3 +270,15 @@ G_END_DECLS;
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
     G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientFactAppendResult,
     wyl_client_fact_append_result_free)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredentialOperationReconcileRequest,
+    wyl_client_service_credential_operation_reconcile_request_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredentialOperationReconcileResult,
+    wyl_client_service_credential_operation_reconcile_result_clear)
+    G_DEFINE_AUTOPTR_CLEANUP_FUNC
+    (WylClientServiceCredentialOperationReconcileRequest,
+    wyl_client_service_credential_operation_reconcile_request_clear)
+    G_DEFINE_AUTOPTR_CLEANUP_FUNC
+    (WylClientServiceCredentialOperationReconcileResult,
+    wyl_client_service_credential_operation_reconcile_result_clear)
