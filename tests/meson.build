@@ -1,5 +1,9 @@
 fs = import('fs')
 python3 = find_program('python3')
+if host_machine.system() == 'windows'
+  advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
+    required : true)
+endif
 
 test_smoke = executable('test-smoke',
   'test-smoke.c',
@@ -379,6 +383,17 @@ if build_client and host_machine.system() != 'windows'
     )
 
     test('wyctl-publication-posix', test_wyctl_publication_posix)
+  else
+    test_wyctl_publication_windows = executable('test-wyctl-publication-windows',
+      'test-wyctl-publication-windows.c',
+      '../wyrelog/wyctl/wyctl-publication-private.c',
+      '../wyrelog/wyctl/wyctl-publication-windows-private.c',
+      include_directories : [include_directories('../wyrelog'),
+        include_directories('../wyrelog/wyctl')],
+      dependencies : [wyrelog_dep, sodium_dep, advapi32_dep],
+    )
+
+    test('wyctl-publication-windows', test_wyctl_publication_windows)
   endif
 
   test_wyctl_basic = executable('test-wyctl-basic',
