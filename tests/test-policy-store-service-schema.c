@@ -18,6 +18,7 @@ static const gchar *const service_tables[] = {
   "service_credential_events",
   "service_domain_requests",
   "service_exchange_audit_intentions",
+  "service_credential_operation_fences",
 };
 
 static void
@@ -95,7 +96,8 @@ service_object_count (sqlite3 *db)
       "SELECT count(*) FROM sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions');");
+      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_credential_operation_fences');");
 }
 
 static gchar *
@@ -118,7 +120,8 @@ service_schema_fingerprint (sqlite3 *db)
       "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions') "
+      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_credential_operation_fences') "
       "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
@@ -141,7 +144,8 @@ service_schema_fingerprint (sqlite3 *db)
       "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests') ORDER BY name;";
+      "'service_domain_requests','service_credential_operation_fences') "
+      "ORDER BY name;";
   g_assert_cmpint (sqlite3_prepare_v2 (db, index_sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW) {
@@ -577,6 +581,33 @@ test_corruption_matrix (void)
         " main.service_exchange_audit_intentions BEGIN SELECT 1; END;");
     g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
         WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "CREATE TRIGGER trg_service_credential_operation_fences_extra"
+        " BEFORE INSERT ON service_credential_operation_fences"
+        " BEGIN SELECT 1; END;");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    sqlite3 *db = wyl_policy_store_get_db (store);
+    exec_ok (db,
+        "INSERT INTO service_credential_operation_fences"
+        " (request_id,operation,operation_fingerprint,terminal_state,created_at_us)"
+        " VALUES('req-append-only','credential_issue',zeroblob(32),'not_committed',1);");
+    exec_rejected (db,
+        "UPDATE service_credential_operation_fences"
+        " SET terminal_state='not_committed' WHERE request_id='req-append-only';");
+    exec_rejected (db,
+        "DELETE FROM service_credential_operation_fences"
+        " WHERE request_id='req-append-only';");
   }
   {
     g_autoptr (wyl_policy_store_t) store = NULL;
