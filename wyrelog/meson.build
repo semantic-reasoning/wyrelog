@@ -75,6 +75,8 @@ wyrelog_c_args = [
   '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
 ]
 
+daemon_http_private_dep = disabler()
+
 if get_option('enable_audit').allowed()
   wyrelog_sources += files('audit/conn.c')
   wyrelog_deps += duckdb_dep
@@ -221,7 +223,19 @@ wyrelogd_c_args = [
   '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
 ]
 if libsoup_dep.found()
+  daemon_http_private_lib = static_library('wyrelog-daemon-http-private',
+    'daemon/http-guards-private.c',
+    include_directories : wyrelog_inc,
+    dependencies : [glib_dep, gio_dep, libsoup_dep],
+    install : false,
+    build_by_default : false,
+  )
+  daemon_http_private_dep = declare_dependency(
+    link_with : daemon_http_private_lib,
+    dependencies : [glib_dep, gio_dep, libsoup_dep],
+  )
   wyrelogd_deps += [libsoup_dep, sodium_dep, service_session_private_dep]
+  wyrelogd_deps += daemon_http_private_dep
   wyrelogd_c_args += '-DWYL_HAS_DAEMON_HTTP'
 endif
 if get_option('enable_audit').allowed()

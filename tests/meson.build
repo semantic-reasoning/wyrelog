@@ -150,6 +150,7 @@ if build_client
     test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
     test_daemon_http_decide_deps += duckdb_dep
   endif
+  test_daemon_http_decide_deps += daemon_http_private_dep
   test_daemon_http_decide = executable('test-daemon-http-decide',
     'test-daemon-http-decide.c',
     '../wyrelog/daemon/auth-registry-private.c',
@@ -179,6 +180,19 @@ if build_client
       timeout : 60,
     )
   endif
+
+  test_daemon_http_guards = executable('test-daemon-http-guards',
+    'test-daemon-http-guards.c',
+    dependencies : [wyrelog_dep, libsoup_dep, daemon_http_private_dep],
+  )
+  test('daemon-http-guards', test_daemon_http_guards)
+
+  test('daemon-http-guards-structure', python3,
+    args : [
+      meson.current_source_dir() / 'test-daemon-http-guards-structure.py',
+      meson.project_source_root() / 'wyrelog' / 'daemon' / 'http.c',
+    ],
+  )
 
   test_daemon_http_mfa_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
