@@ -1064,6 +1064,14 @@ test('check-service-exchange-private-header', python3,
   ],
 )
 
+test('check-service-exchange-limiter-private-header', python3,
+  args : [
+    files('test-private-header-not-installed.py'),
+    meson.project_build_root(),
+    'service-exchange-limiter-private.h',
+  ],
+)
+
 test_service_exchange_private_root_include = executable(
   'test-service-exchange-private-root-include',
   'test-service-exchange-private-root-include.c',
@@ -1484,6 +1492,17 @@ if get_option('enable_audit').allowed()
   )
   test('service-exchange-private', test_service_exchange_private,
     env : audit_conn_test_env, timeout : 180)
+
+  test_service_exchange_limiter_private = executable(
+    'test-service-exchange-limiter-private',
+    'test-service-exchange-limiter-private.c',
+    c_args : ['-DWYL_HAS_AUDIT'],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [service_exchange_private_dep],
+  )
+  test('service-exchange-limiter-private',
+    test_service_exchange_limiter_private,
+    timeout : 180)
 
   test('service-exchange-projector-boundary', python3,
     args : [files('test-service-exchange-projector-boundary.py'),
