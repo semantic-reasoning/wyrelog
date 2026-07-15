@@ -42,6 +42,13 @@ typedef struct
 {
   GMutex mutex;
   GCond changed;
+  gboolean ready;
+} MainLoopReadyBarrier;
+
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
   SoupServer *server;
   WylHandle *handle;
   gboolean write_entered;
@@ -220,6 +227,18 @@ test_http_server_thread (gpointer data)
 
   g_main_loop_run (http->loop);
   return NULL;
+}
+
+static gboolean
+mark_main_loop_ready (gpointer data)
+{
+  MainLoopReadyBarrier *barrier = data;
+
+  g_mutex_lock (&barrier->mutex);
+  barrier->ready = TRUE;
+  g_cond_broadcast (&barrier->changed);
+  g_mutex_unlock (&barrier->mutex);
+  return G_SOURCE_REMOVE;
 }
 
 static wyrelog_error_t
@@ -1662,9 +1681,38 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
     return 2264;
   GThread *thread = g_thread_new ("refresh-explicit-context",
       test_http_server_thread, &http);
+  MainLoopReadyBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready) {
+    if (!g_cond_wait_until (&barrier.changed, &barrier.mutex,
+            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      g_mutex_unlock (&barrier.mutex);
+      g_main_loop_quit (http.loop);
+      g_thread_join (thread);
+      soup_server_disconnect (http.server);
+      g_clear_object (&http.server);
+      g_clear_pointer (&http.loop, g_main_loop_unref);
+      g_cond_clear (&barrier.changed);
+      g_mutex_clear (&barrier.mutex);
+      return 2266;
+    }
+  }
+  g_mutex_unlock (&barrier.mutex);
   GSList *uris = soup_server_get_uris (http.server);
-  if (uris == NULL)
+  if (uris == NULL) {
+    g_main_loop_quit (http.loop);
+    g_thread_join (thread);
+    soup_server_disconnect (http.server);
+    g_clear_object (&http.server);
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    g_cond_clear (&barrier.changed);
+    g_mutex_clear (&barrier.mutex);
     return 2265;
+  }
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
   g_autoptr (SoupSession) session = soup_session_new ();
@@ -1680,6 +1728,8 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
   return rc == 0 && status == 400 && owned == 1 && wrong == 0 ? 0 : 2266;
 }
 
