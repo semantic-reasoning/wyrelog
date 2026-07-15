@@ -5951,10 +5951,25 @@ main (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
-  gint raw_login_rc = check_raw_login_contract (http.server, handle,
-      base_url);
-  if (raw_login_rc != 0)
-    return raw_login_rc;
+  if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
+          (handle), "login-user", "wr.login.skip_mfa", "login")
+      != WYRELOG_E_OK)
+    return 15;
+  if (wyl_policy_store_set_permission_state (wyl_handle_get_policy_store
+          (handle), "login-user", "wr.login.skip_mfa", "login", "armed")
+      != WYRELOG_E_OK)
+    return 16;
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 17;
+
+  g_autoptr (SoupSession) login = soup_session_new ();
+  guint login_status = 0;
+  g_autofree gchar *login_body = NULL;
+  if (send_raw_login (login, "POST", base_url,
+          "username=login-user&skip_mfa=true", &login_status, &login_body)
+      != 0 || login_status != 200)
+    return 18;
+
   gint jwt_rc = check_jwt_epoch_rotation_contract (http.server, handle,
       base_url);
   if (jwt_rc != 0)
