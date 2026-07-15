@@ -358,6 +358,16 @@ if build_client and host_machine.system() != 'windows'
 
   test('wyctl-token-file', test_wyctl_token_file)
 
+  test_wyctl_publication = executable('test-wyctl-publication',
+    'test-wyctl-publication.c',
+    '../wyrelog/wyctl/wyctl-publication-private.c',
+    include_directories : [include_directories('../wyrelog'),
+      include_directories('../wyrelog/wyctl')],
+    dependencies : [wyrelog_dep, sodium_dep],
+  )
+
+  test('wyctl-publication', test_wyctl_publication)
+
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
     c_args : [
