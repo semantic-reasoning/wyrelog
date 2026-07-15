@@ -15,6 +15,7 @@ typedef struct
   guint status;
   gchar *last_method;
   gchar *last_path;
+  gchar *last_body;
   gchar *last_user;
   gchar *last_subject;
   gchar *last_perm;
@@ -69,6 +70,7 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
 
   g_free (http->last_method);
   g_free (http->last_path);
+  g_free (http->last_body);
   g_free (http->last_user);
   g_free (http->last_subject);
   g_free (http->last_perm);
@@ -86,6 +88,12 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
   g_free (http->last_guard_risk);
   http->last_method = g_strdup (soup_server_message_get_method (msg));
   http->last_path = g_strdup (path);
+  SoupMessageBody *request_body = soup_server_message_get_request_body (msg);
+  if (request_body != NULL && request_body->data != NULL &&
+      request_body->length > 0)
+    http->last_body = g_strndup (request_body->data, request_body->length);
+  else
+    http->last_body = NULL;
   if (query != NULL) {
     const gchar *user = g_hash_table_lookup (query, "user");
     if (user == NULL)
@@ -350,6 +358,107 @@ main (void)
       g_strcmp0 (client_principal_state, "authenticated") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 152;
+
+  g_auto (WylClientServiceCredentialOperationReconcileRequest)
+  reconcile_request = { 0 };
+  g_auto (WylClientServiceCredentialOperationReconcileResult)
+  reconcile_result = { 0 };
+  reconcile_request.operation =
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE;
+  reconcile_request.request_id = "ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
+  reconcile_request.subject_id = "svc:client:reconcile";
+  reconcile_request.tenant_id = "tenant-a";
+
+  const gchar *reconcile_issue_body =
+      "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
+      "\"tenant\":\"tenant-a\"}}";
+  const gchar *reconcile_issue_response =
+      "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
+      "\"tenant\":\"tenant-a\"},\"status\":\"committed\","
+      "\"credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"generation\":7}";
+  http.body = reconcile_issue_response;
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_OK)
+    return 210;
+  if (reconcile_result.kind !=
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_COMMITTED ||
+      g_strcmp0 (reconcile_result.credential_id,
+          "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+      reconcile_result.generation != 7)
+    return 211;
+  if (g_strcmp0 (http.last_method, "POST") != 0 ||
+      g_strcmp0 (http.last_path,
+          "/service-credential-operations/reconcile") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
+      g_strcmp0 (http.last_body, reconcile_issue_body) != 0)
+    return 212;
+  wyl_client_service_credential_operation_reconcile_result_clear
+      (&reconcile_result);
+
+  reconcile_request.operation =
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE;
+  reconcile_request.request_id = "BCDEFGHIJKLMNOPQRSTUVWXYZ12";
+  reconcile_request.subject_id = NULL;
+  reconcile_request.tenant_id = NULL;
+  reconcile_request.old_credential_id = "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1";
+
+  const gchar *reconcile_rotate_body =
+      "{\"version\":1,\"request_id\":\"BCDEFGHIJKLMNOPQRSTUVWXYZ12\","
+      "\"operation\":\"rotate\",\"target\":{"
+      "\"old_credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}}";
+  const gchar *reconcile_rotate_response =
+      "{\"version\":1,\"request_id\":\"BCDEFGHIJKLMNOPQRSTUVWXYZ12\","
+      "\"operation\":\"rotate\",\"target\":{"
+      "\"old_credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"},"
+      "\"status\":\"not_committed_terminal\"}";
+  http.body = reconcile_rotate_response;
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_OK)
+    return 213;
+  if (reconcile_result.kind !=
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_NOT_COMMITTED_TERMINAL
+      || reconcile_result.credential_id != NULL
+      || reconcile_result.generation != 0)
+    return 214;
+  if (g_strcmp0 (http.last_body, reconcile_rotate_body) != 0)
+    return 215;
+  wyl_client_service_credential_operation_reconcile_result_clear
+      (&reconcile_result);
+
+  const gchar *reconcile_conflict_body =
+      "{\"error\":\"operation_request_conflict\"}";
+  http.status = 409;
+  http.body = reconcile_conflict_body;
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_OK)
+    return 216;
+  if (reconcile_result.kind !=
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_OPERATION_REQUEST_CONFLICT
+      || reconcile_result.credential_id != NULL
+      || reconcile_result.generation != 0)
+    return 217;
+  if (g_strcmp0 (http.last_body, reconcile_rotate_body) != 0 ||
+      http.status != 409)
+    return 218;
+  http.status = 0;
+  wyl_client_service_credential_operation_reconcile_result_clear
+      (&reconcile_result);
+
+  http.body = "{\"version\":1,\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"issue\",\"target\":{\"subject\":\"svc:client:reconcile\","
+      "\"tenant\":\"tenant-a\",\"extra\":\"x\"}}";
+  if (wyl_client_service_credential_operation_reconcile (local_client,
+          &reconcile_request, &reconcile_result) != WYRELOG_E_IO)
+    return 219;
+  if (reconcile_result.kind != 0 || reconcile_result.credential_id != NULL ||
+      reconcile_result.generation != 0)
+    return 220;
+  http.body = reconcile_issue_response;
   if (wyl_client_set_bearer_credentials (NULL, "access-ctl",
           "__wr_default") != WYRELOG_E_INVALID)
     return 192;
@@ -961,6 +1070,7 @@ main (void)
   g_clear_object (&http.server);
   g_clear_pointer (&http.last_method, g_free);
   g_clear_pointer (&http.last_path, g_free);
+  g_clear_pointer (&http.last_body, g_free);
   g_clear_pointer (&http.last_user, g_free);
   g_clear_pointer (&http.last_subject, g_free);
   g_clear_pointer (&http.last_perm, g_free);
