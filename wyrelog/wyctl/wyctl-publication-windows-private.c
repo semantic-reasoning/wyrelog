@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include <windows.h>
+#include <aclapi.h>
 #include <sddl.h>
 
 typedef struct
@@ -112,6 +113,7 @@ open_root_anchor (const WyctlPublicationWindowsBackend *backend,
 {
   wchar_t *wroot = NULL;
   HANDLE handle = INVALID_HANDLE_VALUE;
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
 
   if (!backend_is_valid (backend) || anchor == NULL)
     return WYRELOG_E_INVALID;
@@ -127,6 +129,15 @@ open_root_anchor (const WyctlPublicationWindowsBackend *backend,
   g_free (wroot);
   if (handle == INVALID_HANDLE_VALUE)
     return map_win32_error (GetLastError ());
+  if (!GetFileInformationByHandle (handle, &info)) {
+    wyrelog_error_t rc = map_win32_error (GetLastError ());
+    CloseHandle (handle);
+    return rc;
+  }
+  if (info_is_reparse_point (&info)) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
   anchor->dir_handle = handle;
   anchor->root_dir = g_strdup (backend->root_dir);
   if (anchor->root_dir == NULL) {
@@ -186,6 +197,101 @@ identity_matches_info (const gchar *identity,
   return string_is_present (identity) && expected != NULL
       && g_strcmp0 (identity, expected) == 0;
 }
+
+static gboolean
+info_is_reparse_point (const BY_HANDLE_FILE_INFORMATION *info)
+{
+  return info != NULL
+      && (info->dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+}
+
+static gboolean
+sid_matches_current_user (PSID sid)
+{
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  gboolean matches = FALSE;
+
+  if (sid == NULL || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY,
+          &token))
+    return FALSE;
+  if (!GetTokenInformation (token, TokenUser, NULL, 0, &needed)
+      && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
+    CloseHandle (token);
+    return FALSE;
+  }
+  user = g_malloc0 (needed);
+  if (user == NULL) {
+    CloseHandle (token);
+    return FALSE;
+  }
+  if (!GetTokenInformation (token, TokenUser, user, needed, &needed)) {
+    g_free (user);
+    CloseHandle (token);
+    return FALSE;
+  }
+  matches = EqualSid (sid, user->User.Sid);
+  g_free (user);
+  CloseHandle (token);
+  return matches;
+}
+
+static gboolean
+security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
+{
+  BOOL dacl_present = FALSE;
+  BOOL dacl_defaulted = FALSE;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  PACL dacl = NULL;
+  PSID owner = NULL;
+  ACL_SIZE_INFORMATION size_info = { 0 };
+  ACCESS_ALLOWED_ACE *ace = NULL;
+
+  if (descriptor == NULL
+      || !GetSecurityDescriptorControl (descriptor, &control, NULL)
+      || (control & SE_DACL_PROTECTED) == 0
+      || !GetSecurityDescriptorOwner (descriptor, &owner, NULL)
+      || owner == NULL || !sid_matches_current_user (owner)
+      || !GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
+          &dacl_defaulted)
+      || !dacl_present || dacl == NULL || dacl_defaulted)
+    return FALSE;
+  if (!GetAclInformation (dacl, &size_info, sizeof size_info,
+          AclSizeInformation) || size_info.AceCount != 1)
+    return FALSE;
+  if (!GetAce (dacl, 0, (LPVOID *) & ace) || ace == NULL
+      || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
+    return FALSE;
+  return EqualSid ((PSID) & ace->SidStart, owner)
+      && ace->Mask == FILE_ALL_ACCESS;
+}
+
+#ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
+gboolean
+    wyctl_publication_windows_test_security_descriptor_is_owner_only
+    (const gchar * sddl)
+{
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  gboolean result = FALSE;
+  wchar_t *wsddl = NULL;
+
+  if (sddl == NULL)
+    return FALSE;
+  wsddl = utf8_to_wide (sddl);
+  if (wsddl == NULL)
+    return FALSE;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW (wsddl,
+          SDDL_REVISION_1, &descriptor, NULL)) {
+    g_free (wsddl);
+    return FALSE;
+  }
+  result = security_descriptor_is_owner_only (descriptor);
+  LocalFree (descriptor);
+  g_free (wsddl);
+  return result;
+}
+#endif
 
 static wyrelog_error_t
 read_all_handle (HANDLE handle, gchar **out_text, gsize *out_len)
@@ -298,6 +404,10 @@ file_identity_for_path (const gchar *path, gboolean allow_missing,
     return WYRELOG_E_NOT_FOUND;
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (info_is_reparse_point (&info)) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
   if (out_identity != NULL)
     *out_identity = identity_from_info (&info);
   if (out_handle != NULL)
@@ -379,7 +489,6 @@ wyctl_publication_windows_plan (const WyctlPublicationWindowsBackend *backend,
     const WyctlPublicationPlan *request, WyctlPublicationPlan *out_plan)
 {
   g_autofree gchar *destination_path = NULL;
-  DWORD attrs = 0;
   DWORD error = 0;
 
   if (out_plan == NULL)
@@ -391,7 +500,7 @@ wyctl_publication_windows_plan (const WyctlPublicationWindowsBackend *backend,
   destination_path = path_for_plan (backend, request, request->destination);
   if (destination_path == NULL)
     return WYRELOG_E_NOMEM;
-  if (wide_path_exists (destination_path, &attrs, &error))
+  if (wide_path_exists (destination_path, NULL, &error))
     return WYRELOG_E_POLICY;
   if (error != ERROR_FILE_NOT_FOUND && error != ERROR_PATH_NOT_FOUND
       && error != 0)
@@ -450,11 +559,40 @@ wyctl_publication_windows_prepare (const WyctlPublicationWindowsBackend
   }
 
   if (!GetFileInformationByHandle (stage_handle, &info)
-      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+      || info_is_reparse_point (&info)) {
     CloseHandle (stage_handle);
     delete_path_exact (stage_path);
     close_root_anchor (&anchor);
     return WYRELOG_E_POLICY;
+  }
+  {
+    DWORD sec_len = 0;
+    PSECURITY_DESCRIPTOR sec = NULL;
+    if (!GetKernelObjectSecurity (stage_handle,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0,
+            &sec_len) && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
+      CloseHandle (stage_handle);
+      delete_path_exact (stage_path);
+      close_root_anchor (&anchor);
+      return WYRELOG_E_POLICY;
+    }
+    sec = g_malloc0 (sec_len);
+    if (sec == NULL) {
+      CloseHandle (stage_handle);
+      delete_path_exact (stage_path);
+      close_root_anchor (&anchor);
+      return WYRELOG_E_NOMEM;
+    }
+    if (!GetKernelObjectSecurity (stage_handle,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, sec,
+            sec_len, &sec_len) || !security_descriptor_is_owner_only (sec)) {
+      g_free (sec);
+      CloseHandle (stage_handle);
+      delete_path_exact (stage_path);
+      close_root_anchor (&anchor);
+      return WYRELOG_E_POLICY;
+    }
+    g_free (sec);
   }
 
   identity = identity_from_info (&info);
@@ -588,6 +726,10 @@ wyrelog_error_t
         FILE_READ_ATTRIBUTES | GENERIC_READ,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, &handle, &info);
+    if (rc == WYRELOG_E_OK && info_is_reparse_point (&info)) {
+      CloseHandle (handle);
+      return WYRELOG_E_POLICY;
+    }
     if (rc == WYRELOG_E_OK
         && identity_matches_info (receipt->stage_identity, &info)) {
       rc = read_all_handle (handle, &content, &content_len);
