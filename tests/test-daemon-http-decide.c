@@ -1092,6 +1092,44 @@ drop_human_refresh_response (DroppedHumanRefresh *request)
   g_mutex_unlock (&request->mutex);
 }
 
+static gboolean
+http_response_parse_content_length (const guint8 *data, gsize length,
+    gsize *out_content_length)
+{
+  const gchar *text = (const gchar *) data;
+  const gchar *headers_end = g_strstr_len (text, length, "\r\n\r\n");
+  if (headers_end == NULL)
+    return FALSE;
+
+  gsize header_length = (gsize) (headers_end - text);
+  const gchar *content_length = g_strstr_len (text, header_length,
+      "\nContent-Length:");
+  if (content_length == NULL) {
+    if (header_length >= strlen ("Content-Length:")
+        && g_ascii_strncasecmp (text, "Content-Length:",
+            strlen ("Content-Length:")) == 0)
+      content_length = text;
+    else
+      return FALSE;
+  } else {
+    content_length++;
+  }
+
+  content_length += strlen ("Content-Length:");
+  while (content_length < text + header_length
+      && g_ascii_isspace (*content_length))
+    content_length++;
+
+  gchar *end = NULL;
+  guint64 parsed = g_ascii_strtoull (content_length, &end, 10);
+  if (end == content_length)
+    return FALSE;
+  if (parsed > G_MAXSIZE)
+    return FALSE;
+
+  *out_content_length = (gsize) parsed;
+  return TRUE;
+}
 
 static gpointer
 raw_human_refresh_thread (gpointer data)
@@ -1143,6 +1181,19 @@ raw_human_refresh_thread (gpointer data)
     if (count == 0)
       break;
     g_byte_array_append (response, chunk, (guint) count);
+
+    gsize content_length = 0;
+    if (http_response_parse_content_length (response->data, response->len,
+            &content_length)) {
+      const gchar *headers_end = g_strstr_len ((const gchar *) response->data,
+          response->len, "\r\n\r\n");
+      if (headers_end != NULL) {
+        gsize header_length =
+            (gsize) (headers_end - (const gchar *) response->data);
+        if (response->len >= header_length + 4 + content_length)
+          break;
+      }
+    }
   }
   g_byte_array_append (response, (const guint8 *) "\0", 1);
   gchar *headers_end = strstr ((gchar *) response->data, "\r\n\r\n");
