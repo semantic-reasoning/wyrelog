@@ -368,6 +368,19 @@ if build_client and host_machine.system() != 'windows'
 
   test('wyctl-publication', test_wyctl_publication)
 
+  if host_machine.system() != 'windows'
+    test_wyctl_publication_posix = executable('test-wyctl-publication-posix',
+      'test-wyctl-publication-posix.c',
+      '../wyrelog/wyctl/wyctl-publication-private.c',
+      '../wyrelog/wyctl/wyctl-publication-posix-private.c',
+      include_directories : [include_directories('../wyrelog'),
+        include_directories('../wyrelog/wyctl')],
+      dependencies : [wyrelog_dep, sodium_dep],
+    )
+
+    test('wyctl-publication-posix', test_wyctl_publication_posix)
+  endif
+
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
     c_args : [
