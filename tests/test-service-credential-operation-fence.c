@@ -17,6 +17,28 @@ typedef struct
   WylServiceAuthorityCommitEvidence *evidence;
 } Txn;
 
+typedef struct
+{
+  WylHandle *handle;
+  Txn txn;
+  gboolean ready;
+  gboolean release;
+  GMutex mutex;
+  GCond cond;
+  wyrelog_error_t rc;
+  WylServiceCredentialFenceResult result;
+} OvertakeContender;
+
+typedef struct
+{
+  WylHandle *handle;
+  gchar *dir;
+  gchar *db_path;
+  gchar *audit_path;
+  gchar *key_path;
+  gchar *key_spec;
+} ProvisionedHandle;
+
 static WylHandle *
 open_handle (const gchar *path)
 {
@@ -25,6 +47,32 @@ open_handle (const gchar *path)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
       WYRELOG_E_OK);
   return handle;
+}
+
+static WylHandle *
+open_provisioned_handle (void)
+{
+  ProvisionedHandle fixture = { 0 };
+  fixture.dir = g_dir_make_tmp ("wyl-fence-issue-XXXXXX", NULL);
+  g_assert_nonnull (fixture.dir);
+  fixture.db_path = g_build_filename (fixture.dir, "policy.db", NULL);
+  fixture.audit_path = g_build_filename (fixture.dir, "audit.db", NULL);
+  fixture.key_path = g_build_filename (fixture.dir, "policy.key", NULL);
+  guint8 key[32];
+  for (guint i = 0; i < sizeof key; i++)
+    key[i] = (guint8) (i + 1);
+  g_assert_true (g_file_set_contents (fixture.key_path,
+          (const gchar *) key, sizeof key, NULL));
+  fixture.key_spec = g_strdup_printf ("file:%s", fixture.key_path);
+  WylHandleOpenOptions options = {
+    .policy_store_path = fixture.db_path,
+    .policy_keyprovider_path = fixture.key_spec,
+    .audit_store_path = fixture.audit_path,
+    .production_mode = TRUE,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture.handle),
+      ==, WYRELOG_E_OK);
+  return g_steal_pointer (&fixture.handle);
 }
 
 /* Mirrors tests/test-service-exchange-intention-store.c's fixture: prepares
@@ -70,6 +118,26 @@ scalar (sqlite3 *db, const gchar *sql)
   gint64 value = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
   return value;
+}
+
+static gpointer
+overtake_contender_thread (gpointer data)
+{
+  OvertakeContender *contender = data;
+  contender->txn = begin_txn (contender->handle);
+  g_mutex_lock (&contender->mutex);
+  contender->ready = TRUE;
+  g_cond_signal (&contender->cond);
+  while (!contender->release)
+    g_cond_wait (&contender->cond, &contender->mutex);
+  g_mutex_unlock (&contender->mutex);
+
+  contender->rc = wyl_policy_store_reconcile_service_credential_operation_fence
+      (contender->txn.txn, wyl_handle_get_policy_store (contender->handle),
+      NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, "req-overtake", NULL,
+      NULL, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &contender->result);
+  finish_txn (&contender->txn, FALSE);
+  return NULL;
 }
 
 static void
@@ -288,7 +356,7 @@ test_fence_conflict_on_target_mismatch (void)
 static void
 test_committed_issue_returns_successor (void)
 {
-  g_autoptr (WylHandle) handle = open_handle (NULL);
+  g_autoptr (WylHandle) handle = open_provisioned_handle ();
   prepare_authority (handle, "svc:fence:issue");
   wyl_service_credential_issue_result_t issued = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:fence:issue",
@@ -320,7 +388,7 @@ test_committed_issue_returns_successor (void)
 static void
 test_committed_issue_conflict_on_mismatch (void)
 {
-  g_autoptr (WylHandle) handle = open_handle (NULL);
+  g_autoptr (WylHandle) handle = open_provisioned_handle ();
   prepare_authority (handle, "svc:fence:issue2");
   wyl_service_credential_issue_result_t issued = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:fence:issue2",
@@ -344,7 +412,7 @@ test_committed_issue_conflict_on_mismatch (void)
 static void
 test_committed_rotate_returns_new_successor (void)
 {
-  g_autoptr (WylHandle) handle = open_handle (NULL);
+  g_autoptr (WylHandle) handle = open_provisioned_handle ();
   prepare_authority (handle, "svc:fence:rotate");
   wyl_service_credential_issue_result_t issued = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:fence:rotate",
@@ -367,8 +435,7 @@ test_committed_rotate_returns_new_successor (void)
   g_assert_cmpint
       (wyl_policy_store_reconcile_service_credential_operation_fence (t.txn,
           store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
-          "req-rotate-commit", NULL, NULL, old_id, &result), ==,
-      WYRELOG_E_OK);
+          "req-rotate-commit", NULL, NULL, old_id, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==,
       WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED);
   g_assert_cmpstr (result.successor_credential_id, ==, new_id);
@@ -429,6 +496,19 @@ test_reconcile_overtaking_across_connections (void)
   g_autoptr (WylHandle) first = open_handle (path);
   g_autoptr (WylHandle) second = open_handle (path);
 
+  OvertakeContender contender = {
+    .handle = second,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&contender.mutex);
+  g_cond_init (&contender.cond);
+  g_autoptr (GThread) thread = g_thread_new ("fence-overtake-contender",
+      overtake_contender_thread, &contender);
+  g_mutex_lock (&contender.mutex);
+  while (!contender.ready)
+    g_cond_wait (&contender.cond, &contender.mutex);
+  g_mutex_unlock (&contender.mutex);
+
   Txn t1 = begin_txn (first);
   WylServiceCredentialFenceResult result1 = { 0 };
   g_assert_cmpint
@@ -442,15 +522,13 @@ test_reconcile_overtaking_across_connections (void)
   /* Second connection races the identical request identity while the first
    * connection's write intent and SQLite write transaction are still open:
    * it must fail closed, not silently insert a second row. */
-  Txn t2 = begin_txn (second);
-  WylServiceCredentialFenceResult result2 = { 0xff, "x", 7 };
-  g_assert_cmpint
-      (wyl_policy_store_reconcile_service_credential_operation_fence (t2.txn,
-          wyl_handle_get_policy_store (second), NULL,
-          WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, "req-overtake", NULL, NULL,
-          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &result2), ==, WYRELOG_E_BUSY);
-  g_assert_cmpint (result2.state, ==, 0);
-  finish_txn (&t2, FALSE);
+  g_mutex_lock (&contender.mutex);
+  contender.release = TRUE;
+  g_cond_signal (&contender.cond);
+  g_mutex_unlock (&contender.mutex);
+  g_thread_join (g_steal_pointer (&thread));
+  g_assert_cmpint (contender.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (contender.result.state, ==, 0);
 
   /* The first connection's fence commits durably. */
   finish_txn (&t1, TRUE);

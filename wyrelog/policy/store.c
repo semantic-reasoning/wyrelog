@@ -5226,7 +5226,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "SELECT 1 FROM main.sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions') "
+      "'service_domain_requests','service_credential_operation_fences',"
+      "'service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
       "'trg_service_credentials_identity_immutable',"
@@ -5236,6 +5237,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_credential_events_no_delete',"
       "'trg_service_domain_requests_no_update',"
       "'trg_service_domain_requests_no_delete',"
+      "'trg_service_credential_operation_fences_no_update',"
+      "'trg_service_credential_operation_fences_no_delete',"
       "'trg_service_exchange_audit_no_update',"
       "'trg_service_exchange_audit_no_delete') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
@@ -5248,12 +5251,14 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       " temp_object.tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_domain_requests','service_credential_operation_fences',"
+      "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_exchange_audit_intentions',"
+      "'service_domain_requests','service_credential_operation_fences',"
+      "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate')) LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -5284,8 +5289,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "SELECT 1 FROM pragma_foreign_key_check "
       "WHERE \"table\" IN ('service_principals','service_credentials',"
       "'service_credential_cvk','service_principal_events',"
-      "'service_credential_events','service_domain_requests') LIMIT 1;",
-      &found);
+      "'service_credential_events','service_domain_requests',"
+      "'service_credential_operation_fences') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -5775,12 +5780,13 @@ service_domain_claim_request (wyl_policy_store_t *store,
  * persists, looks up, reconciles, or conflict-checks a service credential
  * operation fence must go through this one helper. */
 static wyrelog_error_t
-service_credential_operation_fence_fingerprint (
-    WylServiceCredentialFenceOperation operation, const gchar *field_a,
-    gsize field_a_len, const gchar *field_b, gsize field_b_len,
+    service_credential_operation_fence_fingerprint
+    (WylServiceCredentialFenceOperation operation, const gchar * field_a,
+    gsize field_a_len, const gchar * field_b, gsize field_b_len,
     guint8 out[crypto_generichash_BYTES])
 {
-  static const guint8 domain[] = "wyrelog.service-credential-operation-fence.v1";
+  static const guint8 domain[] =
+      "wyrelog.service-credential-operation-fence.v1";
   gboolean is_issue = operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE;
   if ((!is_issue && operation != WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE)
       || field_a == NULL || field_a_len > G_MAXUINT32
@@ -5850,7 +5856,8 @@ wyrelog_error_t
 static wyrelog_error_t
 service_credential_operation_fence_committed_lookup (wyl_policy_store_t *store,
     const gchar *request_id, WylServiceCredentialFenceOperation operation,
-    gboolean *out_operation_matches, guint8 out_fingerprint[crypto_generichash_BYTES],
+    gboolean *out_operation_matches,
+    guint8 out_fingerprint[crypto_generichash_BYTES],
     gchar out_credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF],
     guint64 *out_generation)
 {
@@ -5879,7 +5886,7 @@ service_credential_operation_fence_committed_lookup (wyl_policy_store_t *store,
   gboolean is_issue = operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE;
   gboolean operation_matches = db_operation != NULL
       && g_str_equal (db_operation, is_issue ? "credential_issue" :
-          "credential_rotate");
+      "credential_rotate");
   sqlite3_finalize (stmt);
   *out_operation_matches = operation_matches;
   if (!operation_matches)
@@ -5916,8 +5923,9 @@ service_credential_operation_fence_committed_lookup (wyl_policy_store_t *store,
   }
   gboolean row_valid = credential_id != NULL && generation > 0
       && (is_issue ? (subject_copy != NULL && tenant_copy != NULL) :
-          old_id_copy != NULL);
-  if (row_valid && g_utf8_strlen (credential_id, -1) >= WYL_SERVICE_CREDENTIAL_ID_BUF)
+      old_id_copy != NULL);
+  if (row_valid
+      && g_utf8_strlen (credential_id, -1) >= WYL_SERVICE_CREDENTIAL_ID_BUF)
     row_valid = FALSE;
   if (!row_valid) {
     sqlite3_finalize (stmt);
@@ -5965,7 +5973,7 @@ service_credential_operation_fence_lookup (wyl_policy_store_t *store,
   gboolean is_issue = operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE;
   gboolean operation_matches = db_operation != NULL
       && g_str_equal (db_operation, is_issue ? "credential_issue" :
-          "credential_rotate");
+      "credential_rotate");
   *out_operation_matches = operation_matches;
   if (operation_matches) {
     if (sqlite3_column_type (stmt, 1) != SQLITE_BLOB
@@ -6043,11 +6051,7 @@ wyrelog_error_t
           || tenant_id != NULL))
     return WYRELOG_E_INVALID;
 
-  wyrelog_error_t rc =
-      wyl_policy_store_service_authority_transaction_enter_participant (txn,
-      store);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_validate_service_schema (store);
+  wyrelog_error_t rc = wyl_policy_store_validate_service_schema (store);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -6124,7 +6128,8 @@ wyrelog_error_t
   sodium_memzero (requested_fingerprint, sizeof requested_fingerprint);
   if (rc != WYRELOG_E_OK)
     return rc;
-  out_result->state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL;
+  out_result->state =
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL;
   return WYRELOG_E_OK;
 }
 
