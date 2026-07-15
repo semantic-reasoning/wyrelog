@@ -150,15 +150,11 @@ jobs:
         shell: cmd
         run: pip install meson ninja
 
-      - name: Install pkg-config (chocolatey)
-        shell: cmd
-        run: choco install pkgconfiglite -y --allow-empty-checksums
-
       - name: Install C dependencies (vcpkg)
         shell: cmd
         run: |
           @echo off
-          "%VCPKG_ROOT%\vcpkg.exe" install glib:x64-windows sqlite3:x64-windows libsodium:x64-windows libsoup:x64-windows --x-abi-tools-use-exact-versions
+          "%VCPKG_ROOT%\vcpkg.exe" install pkgconf:x64-windows glib:x64-windows sqlite3:x64-windows libsodium:x64-windows libsoup:x64-windows --x-abi-tools-use-exact-versions
 
       # Installing outside the checkout is only worth anything if nothing under
       # it can still be mistaken for project source, and a cache entry rooted at
@@ -197,8 +193,9 @@ jobs:
         run: |
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig
-          set PATH=%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig;%VCPKG_INSTALLED_DIR%\share\pkgconfig
+          set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           set CC=sccache clang-cl
           meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
 
@@ -207,7 +204,8 @@ jobs:
         run: |
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
-          set PATH=%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
+          set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir wyctl wyrelogd
           if not exist builddir\wyrelog\wyctl.exe exit /b 1
           builddir\wyrelog\wyctl.exe --help >NUL
