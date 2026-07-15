@@ -5935,6 +5935,27 @@ main (void)
     return 3;
   GThread *thread = g_thread_new ("daemon-http-decide",
       test_http_server_thread, &http);
+  MainLoopReadyBarrier barrier = { 0 };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (g_main_context_default (),
+      G_PRIORITY_DEFAULT, mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready) {
+    if (!g_cond_wait_until (&barrier.changed, &barrier.mutex,
+            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+      g_mutex_unlock (&barrier.mutex);
+      g_main_loop_quit (http.loop);
+      g_thread_join (thread);
+      soup_server_disconnect (http.server);
+      g_clear_object (&http.server);
+      g_clear_pointer (&http.loop, g_main_loop_unref);
+      g_cond_clear (&barrier.changed);
+      g_mutex_clear (&barrier.mutex);
+      return 2270;
+    }
+  }
+  g_mutex_unlock (&barrier.mutex);
   if (!wyl_daemon_http_refresh_context_is_for_test (http.server,
           g_main_context_default ()))
     return 2267;
@@ -6007,6 +6028,8 @@ main (void)
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
   return 0;
 }
 #elif defined(WYL_TEST_VARIANT_SERVICE)
