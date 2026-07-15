@@ -1064,6 +1064,78 @@ wyl_daemon_http_access_token_is_active_for_test (SoupServer *server,
   return wyl_daemon_http_context_access_token_is_active (ctx, &claims, now);
 }
 
+static gboolean
+    service_auth_invalidation_validate_locked
+    (const WylDaemonServiceAuthInvalidation * invalidation)
+{
+  if (invalidation == NULL)
+    return FALSE;
+  switch (invalidation->kind) {
+    case WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL:
+      return invalidation->credential_id != NULL
+          && invalidation->credential_generation > 0
+          && wyl_service_credential_id_is_canonical
+          (invalidation->credential_id, strlen (invalidation->credential_id));
+    case WYL_DAEMON_SERVICE_AUTH_INVALIDATE_PRINCIPAL:
+      return invalidation->principal != NULL
+          && wyl_policy_service_subject_is_valid (invalidation->principal,
+          strlen (invalidation->principal));
+    case WYL_DAEMON_SERVICE_AUTH_INVALIDATE_TENANT:
+      return wyl_policy_store_tenant_id_is_valid (invalidation->tenant);
+    default:
+      return FALSE;
+  }
+}
+
+static wyrelog_error_t
+service_auth_invalidation_execute_locked (WylDaemonHttpContext *ctx,
+    const WylDaemonServiceAuthInvalidation *invalidation,
+    WylServiceAuthRevokeResult *out_result)
+{
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc;
+
+  if (ctx == NULL || invalidation == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_result, 0, sizeof *out_result);
+  if (!service_auth_invalidation_validate_locked (invalidation))
+    return WYRELOG_E_INVALID;
+
+  rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
+      &lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  switch (invalidation->kind) {
+    case WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL:
+      rc = wyl_service_auth_registry_revoke_credential_generation
+          (ctx->service_auth_registry, invalidation->credential_id,
+          invalidation->credential_generation, out_result);
+      break;
+    case WYL_DAEMON_SERVICE_AUTH_INVALIDATE_PRINCIPAL:
+      rc = wyl_service_auth_registry_revoke_principal
+          (ctx->service_auth_registry, invalidation->principal, out_result);
+      break;
+    case WYL_DAEMON_SERVICE_AUTH_INVALIDATE_TENANT:
+      rc = wyl_service_auth_registry_revoke_tenant
+          (ctx->service_auth_registry, invalidation->tenant, out_result);
+      break;
+    default:
+      rc = WYRELOG_E_INVALID;
+      break;
+  }
+
+  if (rc != WYRELOG_E_OK)
+    (void) wyl_service_auth_write_lease_mark_unavailable (lease, ctx->handle,
+        WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+  if (wyl_service_auth_write_lease_release (lease) != WYRELOG_E_OK
+      && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  wyl_service_auth_write_lease_free (lease);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_daemon_http_seed_service_session_for_test (SoupServer *server,
     WylSession *session, const gchar *session_id, const gchar *jti,
@@ -1097,6 +1169,21 @@ wyl_daemon_http_seed_service_session_for_test (SoupServer *server,
       g_object_ref (session));
   g_mutex_unlock (&ctx->lock);
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_daemon_http_invalidate_service_auth_for_test (SoupServer *server,
+    const WylDaemonServiceAuthInvalidation *invalidation,
+    WylServiceAuthRevokeResult *out_result)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+
+  if (out_result != NULL)
+    memset (out_result, 0, sizeof *out_result);
+  if (ctx == NULL || invalidation == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  return service_auth_invalidation_execute_locked (ctx, invalidation,
+      out_result);
 }
 
 void

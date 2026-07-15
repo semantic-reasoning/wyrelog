@@ -11,6 +11,7 @@
 
 #include "daemon/delta.h"
 #ifdef WYL_TEST_DAEMON_HTTP
+#include "daemon/auth-registry-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #endif
 
@@ -36,6 +37,20 @@ typedef enum
   WYL_DAEMON_SERVICE_REGISTRY_REVOKE,
   WYL_DAEMON_SERVICE_REGISTRY_REMOVE,
 } WylDaemonServiceRegistryOperation;
+typedef enum
+{
+  WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL = 1,
+  WYL_DAEMON_SERVICE_AUTH_INVALIDATE_PRINCIPAL,
+  WYL_DAEMON_SERVICE_AUTH_INVALIDATE_TENANT,
+} WylDaemonServiceAuthInvalidationKind;
+typedef struct
+{
+  WylDaemonServiceAuthInvalidationKind kind;
+  const gchar *credential_id;
+  guint64 credential_generation;
+  const gchar *principal;
+  const gchar *tenant;
+} WylDaemonServiceAuthInvalidation;
 typedef enum
 {
   WYL_DAEMON_SERVICE_SESSION_INACTIVE = 1,
@@ -100,6 +115,10 @@ wyrelog_error_t wyl_daemon_http_service_registry_transition_for_test
     (SoupServer * server, const gchar * session_id, const gchar * jti,
     const gchar * credential_id, guint64 generation, const gchar * principal,
     const gchar * tenant, gint operation, gboolean * out_changed);
+wyrelog_error_t wyl_daemon_http_invalidate_service_auth_for_test
+    (SoupServer * server,
+    const WylDaemonServiceAuthInvalidation * invalidation,
+    WylServiceAuthRevokeResult * out_result);
 gboolean wyl_daemon_http_replace_session_for_test
     (SoupServer * server, const gchar * session_id, WylSession * session);
 gboolean wyl_daemon_http_seed_human_session_for_test

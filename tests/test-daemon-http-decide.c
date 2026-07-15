@@ -2362,6 +2362,82 @@ service_resolver_expect (SoupServer *server,
       && g_strcmp0 (tenant, fixture->tenant) == 0;
 }
 
+static WylDaemonServiceAuthInvalidation
+service_auth_invalidation_for_fixture (const ServiceResolverFixture *fixture,
+    WylDaemonServiceAuthInvalidationKind kind)
+{
+  return (WylDaemonServiceAuthInvalidation) {
+  .kind = kind,.credential_id = fixture->credential,.credential_generation =
+        9,.principal = "svc:resolver:test",.tenant = fixture->tenant,};
+}
+
+static WylDaemonServiceAuthInvalidation
+service_auth_invalidation_no_match (const ServiceResolverFixture *fixture,
+    WylDaemonServiceAuthInvalidationKind kind)
+{
+  return (WylDaemonServiceAuthInvalidation) {
+  .kind = kind,.credential_id =
+        fixture->other_credential,.credential_generation = 10,.principal =
+        "svc:resolver:other",.tenant = "tenant-other",};
+}
+
+typedef struct
+{
+  SoupServer *server;
+  WylDaemonServiceAuthInvalidation invalidation;
+  WylServiceAuthRevokeResult result;
+  wyrelog_error_t rc;
+} ServiceAuthInvalidationCall;
+
+static gpointer
+service_auth_invalidation_thread (gpointer data)
+{
+  ServiceAuthInvalidationCall *call = data;
+  call->rc = wyl_daemon_http_invalidate_service_auth_for_test (call->server,
+      &call->invalidation, &call->result);
+  return NULL;
+}
+
+static gboolean
+service_auth_invalidation_wait_writer_queued (SoupServer *server)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  do {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+    if (snapshot.active_readers == 1 && snapshot.waiting_writers == 1
+        && !snapshot.writer_active)
+      return TRUE;
+    g_thread_yield ();
+  } while (g_get_monotonic_time () < deadline);
+  return FALSE;
+}
+
+static gboolean
+check_service_auth_invalidator_contract (SoupServer *server)
+{
+  ServiceResolverFixture pending = { 0 };
+  if (!service_resolver_fixture_init (server, &pending,
+          WYL_SERVICE_AUTH_PENDING, 0))
+    return FALSE;
+
+  ServiceAuthInvalidationCall pending_call = {
+    .server = server,
+    .invalidation = service_auth_invalidation_for_fixture (&pending,
+        WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL),
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  pending_call.result = (WylServiceAuthRevokeResult) {
+  0};
+  if (pending_call.invalidation.kind !=
+      WYL_DAEMON_SERVICE_AUTH_INVALIDATE_CREDENTIAL)
+    return FALSE;
+  if (wyl_daemon_http_invalidate_service_auth_for_test (server, NULL,
+          &pending_call.result) != WYRELOG_E_INVALID)
+    return FALSE;
+  return TRUE;
+}
+
 static gchar *
 service_resolver_sign_variant (SoupServer *server,
     const ServiceResolverFixture *fixture, guint field)
