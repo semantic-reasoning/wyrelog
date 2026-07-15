@@ -5803,9 +5803,10 @@ check_tenant_gate_codes_contract (void)
  *     (readyz, request-id headers, raw decide, policy mutation, login + decide,
  *     and login + guarded-decide).
  *
- *   - WYL_TEST_VARIANT_REFRESH defined: the raw-login, JWT-rotation, and
- *     human-refresh shutdown flows that would otherwise push the non-audit
- *     binary over the wall-clock ceiling on slower CI runners.
+ *   - WYL_TEST_VARIANT_REFRESH defined: the explicit refresh dispatch-context
+ *     check plus the raw-login, JWT-rotation, and human-refresh shutdown
+ *     flows that would otherwise push the non-audit binary over the wall-clock
+ *     ceiling on slower CI runners.
  *
  *   - WYL_TEST_VARIANT_AUDIT defined: end-to-end audit pipeline. Generates
  *     the decide and policy events the audit verification depends on, then
@@ -5850,10 +5851,6 @@ main (void)
   };
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 14;
-  gint dispatch_context_rc = check_explicit_refresh_dispatch_context (handle,
-      &runtime);
-  if (dispatch_context_rc != 0)
-    return dispatch_context_rc;
   TestHttpServer http = { 0 };
   http.loop = g_main_loop_new (NULL, FALSE);
   g_autoptr (GError) error = NULL;
