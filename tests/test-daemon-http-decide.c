@@ -12,6 +12,7 @@
 #include "daemon/auth-registry-private.h"
 #include "daemon/http.h"
 #include "wyrelog/auth/jwt-private.h"
+#include "wyrelog/auth/service-credential-domain-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/policy/store-private.h"
@@ -4470,6 +4471,61 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
   return 0;
 }
 
+static gint
+send_raw_reconcile_full (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, const gchar *body,
+    guint *out_status, gchar **out_body, gchar **out_request_id)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 166;
+  *out_status = 0;
+  *out_body = NULL;
+  if (out_request_id != NULL)
+    *out_request_id = NULL;
+
+  g_autofree gchar *root = g_strdup (base_url);
+  while (root[0] != '\0' && g_str_has_suffix (root, "/"))
+    root[strlen (root) - 1] = '\0';
+
+  g_autofree gchar *uri = query != NULL ?
+      g_strdup_printf ("%s/__test/reconcile?%s", root, query) :
+      g_strdup_printf ("%s/__test/reconcile", root);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 167;
+  g_autoptr (GBytes) request_bytes = g_bytes_new_static (body, strlen (body));
+  soup_message_set_request_body_from_bytes (msg, "application/json",
+      request_bytes);
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) response_bytes = soup_session_send_and_read (session,
+      msg, NULL, &error);
+  if (response_bytes == NULL)
+    return 168;
+  gint rc = check_response_request_id_header (msg, 169);
+  if (rc != 0)
+    return rc;
+  if (out_request_id != NULL) {
+    const gchar *request_id = soup_message_headers_get_one
+        (soup_message_get_response_headers (msg), "X-Wyrelog-Request-Id");
+    *out_request_id = g_strdup (request_id);
+  }
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (response_bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
+static gint
+send_raw_reconcile (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *query, const gchar *body,
+    guint *out_status, gchar **out_body)
+{
+  return send_raw_reconcile_full (session, method, base_url, query, body,
+      out_status, out_body, NULL);
+}
+
 typedef struct
 {
   const gchar *base_url;
@@ -4501,6 +4557,25 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_policy_store_set_session_state (store, scope, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return wyl_handle_reload_engine_pair (handle);
+}
+
+static wyrelog_error_t
+grant_service_credential_manage_authority (WylHandle *handle,
+    const gchar *subject, const gchar *scope)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyrelog_error_t rc = wyl_policy_store_grant_direct_permission (store, subject,
+      "wr.service_credential.manage", scope);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_session_state (store, scope, "active");
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_store_set_permission_state (store, subject,
+      "wr.service_credential.manage", scope, "armed");
   if (rc != WYRELOG_E_OK)
     return rc;
   return wyl_handle_reload_engine_pair (handle);
@@ -5852,6 +5927,220 @@ check_audit_event_present (WylClient *client, const gchar *filter,
       return 0;
   }
 }
+
+static wyrelog_error_t
+prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id)
+{
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t rc = wyl_service_principal_create (handle, subject_id,
+      subject_id, "admin", "principal-create", &principal);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  wyl_service_principal_clear (&principal);
+  gboolean created = FALSE;
+  rc = wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
+      "tenant-a", &created);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return WYRELOG_E_OK;
+}
+
+static gint
+check_service_credential_operation_reconcile_contract (SoupServer *server,
+    WylHandle *handle, const gchar *base_url)
+{
+  (void) server;
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  wyl_handle_set_login_skip_mfa_allowed (handle, TRUE);
+  gint rc = send_raw_login (session, "POST", base_url,
+      "username=http-allow-user&skip_mfa=true", &status, &body);
+  wyl_handle_set_login_skip_mfa_allowed (handle, FALSE);
+  if (rc != 0)
+    return rc;
+  if (status != 200)
+    return 1921;
+  g_autofree gchar *session_token = extract_json_string (body,
+      "session_token");
+  if (session_token == NULL)
+    return 1922;
+  if (grant_service_credential_manage_authority (handle, "http-allow-user",
+          session_token) != WYRELOG_E_OK)
+    return 1923;
+
+  g_autofree gchar *escaped_session = g_uri_escape_string (session_token,
+      NULL, TRUE);
+  g_autofree gchar *query =
+      g_strdup_printf
+      ("session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69", escaped_session);
+
+  if (prepare_service_credential_subject (handle, "svc:reconcile:issue")
+      != WYRELOG_E_OK)
+    return 1924;
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK)
+    return 1925;
+  wyl_service_credential_issue_result_t issue_result = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:reconcile:issue",
+          "tenant-a", "http-allow-user", issue_request_id,
+          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issue_result)
+      != WYRELOG_E_OK)
+    return 1926;
+  g_autofree gchar *issue_credential_id = g_strdup
+      (issue_result.credential.credential_id);
+  guint64 issue_generation = issue_result.credential.generation;
+  wyl_service_credential_issue_result_clear (&issue_result);
+
+  g_autofree gchar *issue_body =
+      g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
+      issue_request_id);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, issue_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"status\":\"committed\"") == NULL ||
+      strstr (body, "\"operation\":\"issue\"") == NULL)
+    return 1927;
+  g_autofree gchar *response_issue_credential_id = extract_json_string (body,
+      "credential_id");
+  if (response_issue_credential_id == NULL ||
+      g_strcmp0 (response_issue_credential_id, issue_credential_id) != 0)
+    return 1928;
+  g_autofree gchar *issue_generation_needle =
+      g_strdup_printf ("\"generation\":%" G_GUINT64_FORMAT, issue_generation);
+  if (strstr (body, issue_generation_needle) == NULL)
+    return 1929;
+
+  if (prepare_service_credential_subject (handle, "svc:reconcile:rotate")
+      != WYRELOG_E_OK)
+    return 1930;
+  gchar rotate_seed_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (rotate_seed_request_id, sizeof rotate_seed_request_id)
+      != WYRELOG_E_OK)
+    return 1931;
+  wyl_service_credential_issue_result_t rotate_seed = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:reconcile:rotate",
+          "tenant-a", "http-allow-user", rotate_seed_request_id,
+          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rotate_seed)
+      != WYRELOG_E_OK)
+    return 1932;
+  g_autofree gchar *rotate_old_credential_id =
+      g_strdup (rotate_seed.credential.credential_id);
+  wyl_service_credential_issue_result_clear (&rotate_seed);
+
+  gchar rotate_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (rotate_request_id, sizeof rotate_request_id)
+      != WYRELOG_E_OK)
+    return 1933;
+  wyl_service_credential_issue_result_t rotate_result = { 0 };
+  if (wyl_service_credential_rotate (handle, rotate_old_credential_id,
+          "http-allow-user", rotate_request_id,
+          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &rotate_result)
+      != WYRELOG_E_OK)
+    return 1934;
+  g_autofree gchar *rotate_credential_id =
+      g_strdup (rotate_result.credential.credential_id);
+  guint64 rotate_generation = rotate_result.credential.generation;
+  wyl_service_credential_issue_result_clear (&rotate_result);
+
+  g_autofree gchar *rotate_body =
+      g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"rotate\","
+      "\"target\":{\"old_credential_id\":\"%s\"}}",
+      rotate_request_id, rotate_old_credential_id);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, rotate_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 || strstr (body, "\"status\":\"committed\"") == NULL ||
+      strstr (body, "\"operation\":\"rotate\"") == NULL)
+    return 1935;
+  g_autofree gchar *response_rotate_credential_id = extract_json_string (body,
+      "credential_id");
+  if (response_rotate_credential_id == NULL ||
+      g_strcmp0 (response_rotate_credential_id, rotate_credential_id) != 0)
+    return 1936;
+  g_autofree gchar *rotate_generation_needle =
+      g_strdup_printf ("\"generation\":%" G_GUINT64_FORMAT, rotate_generation);
+  if (strstr (body, rotate_generation_needle) == NULL)
+    return 1937;
+
+  gchar pending_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (pending_request_id, sizeof pending_request_id)
+      != WYRELOG_E_OK)
+    return 1938;
+  g_autofree gchar *pending_body =
+      g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:reconcile:pending\",\"tenant\":\"tenant-a\"}}",
+      pending_request_id);
+  if (prepare_service_credential_subject (handle, "svc:reconcile:pending")
+      != WYRELOG_E_OK)
+    return 1939;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, pending_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"status\":\"not_committed_terminal\"") == NULL ||
+      strstr (body, "\"operation\":\"issue\"") == NULL ||
+      strstr (body, "\"credential_id\":") != NULL)
+    return 1940;
+
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, pending_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 200 ||
+      strstr (body, "\"status\":\"not_committed_terminal\"") == NULL)
+    return 1941;
+
+  g_autofree gchar *conflict_body =
+      g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:reconcile:conflict\",\"tenant\":\"tenant-a\"}}",
+      pending_request_id);
+  if (prepare_service_credential_subject (handle, "svc:reconcile:conflict")
+      != WYRELOG_E_OK)
+    return 1942;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, conflict_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 409 ||
+      strstr (body, "\"error\":\"operation_request_conflict\"") == NULL)
+    return 1943;
+
+  g_autofree gchar *invalid_body =
+      g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:reconcile:bad\",\"tenant\":\"tenant-a\","
+      "\"extra\":\"x\"}}", pending_request_id);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, invalid_body,
+      &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 400 ||
+      strstr (body,
+          "\"error\":\"invalid_service_credential_operation_reconcile_request\"")
+      == NULL)
+    return 1944;
+
+  return 0;
+}
 #endif
 
 /*
@@ -6222,6 +6511,10 @@ main (void)
       (http.server);
   if (service_resolver_rc != 0)
     return service_resolver_rc;
+  gint reconcile_rc = check_service_credential_operation_reconcile_contract
+      (http.server, handle, base_url);
+  if (reconcile_rc != 0)
+    return reconcile_rc;
   g_clear_pointer (&http.loop, g_main_loop_unref);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
