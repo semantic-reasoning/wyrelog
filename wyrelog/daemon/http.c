@@ -5334,6 +5334,7 @@ fail:
   return FALSE;
 }
 
+#ifdef WYL_HAS_FACT_STORE
 static const gchar *skip_ascii_spaces (const gchar * p);
 static gboolean request_body_dup (SoupServerMessage * msg, gsize max_len,
     gchar ** out_body);
@@ -5751,6 +5752,7 @@ service_credential_operation_reconcile_handler (SoupServer *server,
   (void) service_credential_operation_reconcile_execute (server, msg, query,
       ctx);
 }
+#endif /* WYL_HAS_FACT_STORE */
 #endif
 
 static void
@@ -7155,8 +7157,10 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
       ctx, NULL);
 #ifdef WYL_TEST_DAEMON_HTTP
+#ifdef WYL_HAS_FACT_STORE
   soup_server_add_handler (server, "/__test/reconcile",
       service_credential_operation_reconcile_handler, ctx, NULL);
+#endif
 #endif
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);

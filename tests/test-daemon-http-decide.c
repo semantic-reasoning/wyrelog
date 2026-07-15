@@ -4471,6 +4471,7 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
   return 0;
 }
 
+#ifdef WYL_HAS_FACT_STORE
 static gint
 send_raw_reconcile_full (SoupSession *session, const gchar *method,
     const gchar *base_url, const gchar *query, const gchar *body,
@@ -4525,6 +4526,7 @@ send_raw_reconcile (SoupSession *session, const gchar *method,
   return send_raw_reconcile_full (session, method, base_url, query, body,
       out_status, out_body, NULL);
 }
+#endif
 
 typedef struct
 {
@@ -4562,6 +4564,7 @@ grant_policy_write_authority (WylHandle *handle, const gchar *subject,
   return wyl_handle_reload_engine_pair (handle);
 }
 
+#ifdef WYL_HAS_FACT_STORE
 static wyrelog_error_t
 grant_service_credential_manage_authority (WylHandle *handle,
     const gchar *subject, const gchar *scope)
@@ -6142,6 +6145,7 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   return 0;
 }
 #endif
+#endif
 
 /*
  * Unit-style coverage for the tenant-gate wire codes. Drives the
@@ -6511,10 +6515,12 @@ main (void)
       (http.server);
   if (service_resolver_rc != 0)
     return service_resolver_rc;
+#ifdef WYL_HAS_FACT_STORE
   gint reconcile_rc = check_service_credential_operation_reconcile_contract
       (http.server, handle, base_url);
   if (reconcile_rc != 0)
     return reconcile_rc;
+#endif
   g_clear_pointer (&http.loop, g_main_loop_unref);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
