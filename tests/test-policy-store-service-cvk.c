@@ -1311,6 +1311,35 @@ test_rotation_intent_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
           sizeof auth_key, &loaded), ==, WYRELOG_E_OK);
   g_assert_cmpmem (&loaded, sizeof loaded, &intent, sizeof intent);
+  guint8 wrong_key[crypto_generichash_KEYBYTES];
+  memset (wrong_key, 0x5d, sizeof wrong_key);
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, wrong_key,
+          sizeof wrong_key, &loaded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          1, &loaded), ==, WYRELOG_E_INVALID);
+
+  g_autofree gchar *sidecar_path = g_strconcat (path,
+      ".wyrelog-rotation-intent", NULL);
+  const guint8 malformed[] = { 0x57, 0x59, 0x4c };
+  g_assert_true (g_file_set_contents (sidecar_path,
+          (const gchar *) malformed, sizeof malformed, NULL));
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+  gchar *tampered = NULL;
+  gsize tampered_len = 0;
+  g_assert_true (g_file_get_contents (sidecar_path, &tampered, &tampered_len,
+          NULL));
+  g_assert_cmpuint (tampered_len, >, 0);
+  tampered[tampered_len / 2] ^= 0x01;
+  g_assert_true (g_file_set_contents (sidecar_path, tampered, tampered_len,
+          NULL));
+  g_free (tampered);
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
