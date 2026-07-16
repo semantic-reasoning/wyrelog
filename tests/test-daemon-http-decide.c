@@ -6345,9 +6345,13 @@ check_service_principal_management_contract (void)
   wyl_policy_store_t *policy_store = NULL;
   gboolean tenant_created = FALSE;
   wyl_service_credential_issue_result_t issued = { 0 };
+  wyl_service_credential_issue_result_t rotate_seed = { 0 };
   g_autofree gchar *credential_path = NULL;
+  g_autofree gchar *rotate_path = NULL;
+  g_autofree gchar *cross_tenant_rotate_path = NULL;
   g_autofree gchar *tenant_query = NULL;
   g_autofree gchar *issued_secret = NULL;
+  g_autofree gchar *rotated_secret = NULL;
   const gchar *session_token = "human-principal-admin";
   guint status = 0;
   const gchar *create_body =
@@ -6522,6 +6526,82 @@ check_service_principal_management_contract (void)
           &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1987;
+    goto cleanup;
+  }
+  if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
+          "human-principal-admin", "http-credential-rotate", 999999999,
+          &rotate_seed) != WYRELOG_E_OK
+      || rotate_seed.credential.credential_id == NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 1997;
+    goto cleanup;
+  }
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
+          session_token, "human-principal-admin", "tenant-a")) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 1998;
+    goto cleanup;
+  }
+  g_clear_pointer (&query, g_free);
+  query = g_strdup_printf
+      ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0", session_token);
+  rotate_path = g_strdup_printf ("/__test/service-credentials/%s/rotate",
+      rotate_seed.credential.credential_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
+          query,
+          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\"}",
+          &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "credential_secret") == NULL
+      || strstr (body, "\"rotated_from_id\":") == NULL
+      || (rotated_secret = extract_json_string (body, "credential_secret"))
+      == NULL
+      || strlen (rotated_secret) != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
+      || strstr (body, "credential_secret") !=
+      g_strrstr (body, "credential_secret")) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 1999;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
+          query,
+          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\"}",
+          &status, &body) != 0 || status != 409 || body == NULL
+      || strstr (body, "service_credential_conflict") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 2000;
+    goto cleanup;
+  }
+  wyl_service_credential_issue_result_clear (&rotate_seed);
+  cross_tenant_rotate_path = g_strdup_printf
+      ("/__test/service-credentials/%s/rotate",
+      issued.credential.credential_id);
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
+          session_token, "human-principal-admin", "__wr_default")) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 2001;
+    goto cleanup;
+  }
+  g_clear_pointer (&query, g_free);
+  query = g_strdup_printf
+      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+      session_token);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          cross_tenant_rotate_path, query,
+          "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\"}",
+          &status, &body) != 0 || status != 404 || body == NULL
+      || strstr (body, "service_credential_not_found") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 2002;
     goto cleanup;
   }
   credential_path = g_strdup_printf
