@@ -16,6 +16,7 @@
 #include "wyctl-token-file.h"
 
 #include <errno.h>
+#include <glib/gstdio.h>
 #include <string.h>
 
 #ifdef G_OS_WIN32
@@ -36,6 +37,58 @@ wyctl_token_file_free_sensitive (gchar *value, gsize capacity)
   for (gsize i = 0; i < capacity; i++)
     wipe[i] = 0;
   g_free (value);
+}
+
+WyctlTokenFileStatus
+wyctl_token_file_write_protected (const gchar *path, const gchar *token,
+    gsize token_len)
+{
+  if (path == NULL || path[0] == '\0')
+    return WYCTL_TOKEN_FILE_MISSING_PATH;
+  if (token == NULL || token_len == 0 || token_len > WYCTL_TOKEN_FILE_MAX_BYTES)
+    return WYCTL_TOKEN_FILE_INVALID_BYTES;
+#ifdef G_OS_WIN32
+  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wpath == NULL)
+    return WYCTL_TOKEN_FILE_IO;
+  HANDLE h = CreateFileW (wpath, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+      FILE_ATTRIBUTE_READONLY, NULL);
+  g_free (wpath);
+  if (h == INVALID_HANDLE_VALUE)
+    return GetLastError () == ERROR_FILE_EXISTS
+        ? WYCTL_TOKEN_FILE_IO : WYCTL_TOKEN_FILE_IO;
+  DWORD written = 0;
+  gboolean ok = WriteFile (h, token, (DWORD) token_len, &written, NULL)
+      && written == token_len && FlushFileBuffers (h);
+  CloseHandle (h);
+  if (!ok) {
+    g_unlink (path);
+    return WYCTL_TOKEN_FILE_IO;
+  }
+  return WYCTL_TOKEN_FILE_OK;
+#else
+  int fd = open (path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
+      0600);
+  if (fd < 0)
+    return WYCTL_TOKEN_FILE_IO;
+  gsize written = 0;
+  while (written < token_len) {
+    ssize_t n = write (fd, token + written, token_len - written);
+    if (n < 0 && errno == EINTR)
+      continue;
+    if (n <= 0) {
+      close (fd);
+      g_unlink (path);
+      return WYCTL_TOKEN_FILE_IO;
+    }
+    written += (gsize) n;
+  }
+  if (fsync (fd) != 0 || close (fd) != 0) {
+    g_unlink (path);
+    return WYCTL_TOKEN_FILE_IO;
+  }
+  return WYCTL_TOKEN_FILE_OK;
+#endif
 }
 
 const gchar *
