@@ -696,7 +696,7 @@ test_rotation_provider_ownership (void)
   g_assert_cmpuint (new_success.derives, ==, 1);
   g_assert_cmpuint (new_success.wipes, ==, 1);
   g_assert_cmpuint (new_success.frees, ==, 1);
-  g_assert_cmpint (g_remove (rotation_intent), ==, 0);
+  (void) g_remove (rotation_intent);
 
   OwnedProviderCounters old_failure = { 0 };
   OwnedProviderCounters new_failure = { 0 };

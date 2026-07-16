@@ -2104,6 +2104,58 @@ rotation_intent_write_pending (wyl_policy_store_t *store,
   return rc;
 }
 
+static wyrelog_error_t
+rotation_intent_finalize_committed (wyl_policy_store_t *store,
+    const guint8 *new_key_material)
+{
+  if (store == NULL || new_key_material == NULL)
+    return WYRELOG_E_INVALID;
+  guint8 auth_key[crypto_generichash_KEYBYTES] = { 0 };
+  WylPolicyRotationIntent intent = { 0 };
+  wyrelog_error_t rc = wyl_policy_rotation_intent_derive_auth_key (store,
+      auth_key, sizeof auth_key);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+        sizeof auth_key, &intent);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    goto out;
+  if (rc == WYRELOG_E_OK
+      && memcmp (intent.old_provider_id, store->encryption_key_id,
+          sizeof intent.old_provider_id) != 0)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && memcmp (intent.new_provider_id,
+          new_key_material + WYL_POLICY_STORE_KEY_LEN,
+          sizeof intent.new_provider_id) != 0)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && intent.state != WYL_POLICY_ROTATION_INTENT_PENDING
+      && intent.state != WYL_POLICY_ROTATION_INTENT_COMMITTED)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    wyl_policy_service_cvk_info_t info = { 0 };
+    wyrelog_error_t info_rc = wyl_policy_store_load_service_cvk (store, &info);
+    if (info_rc == WYRELOG_E_OK) {
+      if (info.generation != intent.expected_new_generation)
+        rc = WYRELOG_E_POLICY;
+    } else if (info_rc != WYRELOG_E_NOT_FOUND || intent.old_generation != 0) {
+      rc = info_rc;
+    }
+    wyl_policy_service_cvk_info_clear (&info);
+  }
+  if (rc == WYRELOG_E_OK && intent.state == WYL_POLICY_ROTATION_INTENT_PENDING) {
+    intent.state = WYL_POLICY_ROTATION_INTENT_COMMITTED;
+    rc = wyl_policy_rotation_intent_write_sidecar (store, &intent, auth_key,
+        sizeof auth_key);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_rotation_intent_clear_sidecar (store);
+out:
+  sodium_memzero (auth_key, sizeof auth_key);
+  sodium_memzero (&intent, sizeof intent);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_rotation_recovery_classify (const WylPolicyRotationRecoveryProbe
     *probe, WylPolicyRotationRecoveryState *out_state)
@@ -3619,6 +3671,11 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
   if (replaced) {
     /* Rename/MoveFileEx is the linearization point. No later fallible cleanup
      * may reverse or report failure for the committed rotation. */
+    wyrelog_error_t intent_rc = rotation_intent_finalize_committed (store,
+        new_key_material);
+    if (intent_rc != WYRELOG_E_OK && intent_rc != WYRELOG_E_NOT_FOUND)
+      WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+          "policy store rotation committed but intent finalization needs recovery");
     rc = WYRELOG_E_OK;
   }
   /* suppress_close_persist makes the new key unnecessary after publish. Keep
