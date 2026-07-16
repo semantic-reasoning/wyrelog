@@ -895,10 +895,13 @@ client_service_secret_is_valid (const WylClientSensitiveText *secret)
 {
   static const gchar allowed[] =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  return secret != NULL && secret->text != NULL
-      && secret->len == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
-      && strlen (secret->text) == secret->len && strspn (secret->text, allowed)
-      == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN;
+  if (secret == NULL || secret->text == NULL
+      || secret->len != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN)
+    return FALSE;
+  for (gsize i = 0; i < secret->len; i++)
+    if (strchr (allowed, secret->text[i]) == NULL)
+      return FALSE;
+  return TRUE;
 }
 
 wyrelog_error_t
@@ -1073,6 +1076,7 @@ wyl_client_service_token_exchange (WylClient *client,
   g_autoptr (GString) json = NULL;
   g_autoptr (GBytes) request_body = NULL;
   g_autoptr (GBytes) response = NULL;
+  g_autofree gchar *secret_text = NULL;
   guint status = 0;
   if (out_result == NULL || request == NULL
       || !client_service_credential_id_is_valid (request->credential_id)
@@ -1097,10 +1101,19 @@ wyl_client_service_token_exchange (WylClient *client,
   json = g_string_new ("{\"credential_id\":");
   if (json == NULL)
     return WYRELOG_E_NOMEM;
+  secret_text = g_memdup2 (request->credential_secret->text,
+      request->credential_secret->len + 1);
+  if (secret_text == NULL) {
+    g_string_free (g_steal_pointer (&json), TRUE);
+    return WYRELOG_E_NOMEM;
+  }
+  secret_text[request->credential_secret->len] = '\0';
   append_json_string (json, request->credential_id);
   g_string_append (json, ",\"credential_secret\":");
-  append_json_string (json, request->credential_secret->text);
+  append_json_string (json, secret_text);
   g_string_append_c (json, '}');
+  sodium_memzero (secret_text, request->credential_secret->len + 1);
+  g_clear_pointer (&secret_text, g_free);
   gsize json_len = json->len;
   gpointer body_data = g_memdup2 (json->str, json_len);
   ClientSecretBytes *body_owner = NULL;
