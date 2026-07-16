@@ -6347,6 +6347,7 @@ check_service_principal_management_contract (void)
   wyl_service_credential_issue_result_t issued = { 0 };
   g_autofree gchar *credential_path = NULL;
   g_autofree gchar *tenant_query = NULL;
+  g_autofree gchar *issued_secret = NULL;
   const gchar *session_token = "human-principal-admin";
   guint status = 0;
   const gchar *create_body =
@@ -6464,6 +6465,17 @@ check_service_principal_management_contract (void)
   tenant_query = g_strdup_printf
       ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
       "guard_loc_class=trusted&guard_risk=0", session_token);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/__test/service-principals/svc:tenant-b:worker/credentials",
+          tenant_query,
+          "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+          "\"request_id\":\"000000000000000000000000000\"}",
+          &status, &body) != 0 || status != 400 || body == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 1987;
+    goto cleanup;
+  }
   const gchar *issue_body =
       "{\"version\":\"1\",\"tenant\":\"tenant-a\","
       "\"request_id\":\"111111111111111111111111111\","
@@ -6473,7 +6485,12 @@ check_service_principal_management_contract (void)
           "/__test/service-principals/svc:tenant-a:worker/credentials",
           tenant_query, issue_body, &status, &body) != 0 || status != 200
       || body == NULL || strstr (body, "credential_secret") == NULL
-      || strstr (body, "service_credential") == NULL) {
+      || strstr (body, "service_credential") == NULL
+      || !g_str_has_prefix (body, "{\"service_credential\":{")
+      || !g_str_has_suffix (body, "\"}")
+      || (issued_secret =
+          extract_json_string (body, "credential_secret")) == NULL
+      || strlen (issued_secret) != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN) {
     rc = 1990;
     goto cleanup;
   }

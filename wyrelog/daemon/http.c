@@ -3925,6 +3925,21 @@ service_credential_parse_expiry (const gchar *text, gint64 *out_expiry)
   return TRUE;
 }
 
+static gboolean
+service_credential_subject_matches_tenant (const gchar *subject,
+    const gchar *tenant)
+{
+  if (subject == NULL || tenant == NULL || !g_str_has_prefix (subject, "svc:"))
+    return FALSE;
+  const gchar *tenant_start = subject + strlen ("svc:");
+  const gchar *tenant_end = strchr (tenant_start, ':');
+  if (tenant_end == NULL || tenant_end == tenant_start)
+    return FALSE;
+  return strlen (tenant) == (gsize) (tenant_end - tenant_start)
+      && memcmp (tenant_start, tenant,
+      (gsize) (tenant_end - tenant_start)) == 0;
+}
+
 static void
 service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -3988,7 +4003,8 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
   }
   if (!parsed || g_strcmp0 (values[0], "1") != 0
       || g_strcmp0 (values[1], lookup_request_tenant (query)) != 0
-      || !service_credential_request_id_is_valid (values[2])) {
+      || !service_credential_request_id_is_valid (values[2])
+      || !service_credential_subject_matches_tenant (subject, values[1])) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
