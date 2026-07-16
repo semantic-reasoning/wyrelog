@@ -248,8 +248,8 @@ if libsoup_dep.found()
   wyrelogd_c_args += '-DWYL_HAS_DAEMON_HTTP'
 endif
 if get_option('enable_audit').allowed()
-  wyrelogd_deps += [service_exchange_private_dep,
-    service_exchange_startup_private_dep]
+  wyrelogd_deps += service_exchange_private_dep
+  wyrelogd_deps += service_exchange_startup_private_dep
   wyrelogd_c_args += '-DWYL_HAS_AUDIT'
 elif get_option('enable_fact_store').allowed()
   wyrelogd_deps += duckdb_dep
