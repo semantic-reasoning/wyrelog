@@ -1074,6 +1074,7 @@ test_providerless_plaintext_dual_open (void)
 static void
 test_plaintext_provider_is_rejected (void)
 {
+  g_assert_false (wyl_policy_store_pinned_backend_available ());
   g_autofree gchar *dir = make_tmpdir ();
   g_autofree gchar *path = g_build_filename (dir, "plain-provider.sqlite",
       NULL);

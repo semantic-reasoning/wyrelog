@@ -18,6 +18,12 @@ G_BEGIN_DECLS;
 #define WYL_POLICY_FACT_QUERY_MAX_ROWS 1000000
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
+
+/* No pinned SQLite VFS is shipped yet. File-backed plaintext provider stores
+ * remain fail-closed until a platform implementation can bind SQLite's main
+ * database and every journal/WAL/SHM path to the retained lease authority. */
+gboolean wyl_policy_store_pinned_backend_available (void);
+
 typedef struct _WylServiceAuthorityTransaction WylServiceAuthorityTransaction;
 typedef struct _WylServiceExchangeReceipt WylServiceExchangeReceipt;
 typedef struct _WylServiceAuthorityCommitEvidence
