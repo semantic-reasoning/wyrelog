@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <errno.h>
+#include <string.h>
 #include <sodium.h>
 
 #include "wyrelog/wyl-client-private.h"
@@ -851,6 +852,37 @@ client_decode_secret_result (GBytes *body,
   return rc;
 }
 
+static wyrelog_error_t
+client_decode_token_result (GBytes *body, WylClientServiceTokenResult *out)
+{
+  gsize body_size = 0;
+  const guint8 *body_data =
+      body != NULL ? g_bytes_get_data (body, &body_size) : NULL;
+  guint8 *copy = NULL;
+  wyrelog_error_t rc;
+  if (body_data == NULL || body_size == 0)
+    return WYRELOG_E_INVALID;
+  copy = g_memdup2 (body_data, body_size);
+  if (copy == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_client_service_token_result_decode ((const gchar *) copy,
+      body_size, out);
+  sodium_memzero (copy, body_size);
+  g_free (copy);
+  return rc;
+}
+
+static gboolean
+client_service_secret_is_valid (const WylClientSensitiveText *secret)
+{
+  static const gchar allowed[] =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  return secret != NULL && secret->text != NULL
+      && secret->len == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
+      && strlen (secret->text) == secret->len && strspn (secret->text, allowed)
+      == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN;
+}
+
 wyrelog_error_t
 wyl_client_service_credential_get (WylClient *client,
     const gchar *credential_id, gint64 guard_timestamp,
@@ -1010,6 +1042,80 @@ wyl_client_service_credential_rotate (WylClient *client,
   if (rc != WYRELOG_E_OK)
     return rc;
   return client_decode_secret_result (body, out_result);
+}
+
+wyrelog_error_t
+wyl_client_service_token_exchange (WylClient *client,
+    const WylClientServiceTokenRequest *request,
+    WylClientServiceTokenResult *out_result)
+{
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *uri = NULL;
+  g_autoptr (SoupMessage) message = NULL;
+  g_autoptr (GString) json = NULL;
+  g_autoptr (GBytes) request_body = NULL;
+  g_autoptr (GBytes) response = NULL;
+  guint status = 0;
+  if (out_result == NULL || request == NULL
+      || !client_service_credential_id_is_valid (request->credential_id)
+      || !client_service_secret_is_valid (request->credential_secret))
+    return WYRELOG_E_INVALID;
+  wyl_client_service_token_result_clear (out_result);
+  if (client == NULL || !WYL_IS_CLIENT (client))
+    return WYRELOG_E_INVALID;
+  base_url = wyl_client_dup_base_url (client);
+  if (base_url == NULL)
+    return WYRELOG_E_INVALID;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+  if (!wyl_client_secret_url_is_canonical_literal_loopback (base_url))
+    return WYRELOG_E_INVALID;
+  uri = g_strdup_printf ("%s/auth/service-token", base_url);
+  message = soup_message_new ("POST", uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  json = g_string_new ("{\"credential_id\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, request->credential_id);
+  g_string_append (json, ",\"credential_secret\":");
+  append_json_string (json, request->credential_secret->text);
+  g_string_append_c (json, '}');
+  request_body = g_bytes_new (json->str, json->len);
+  if (request_body == NULL) {
+    sodium_memzero (json->str, json->len);
+    g_string_free (g_steal_pointer (&json), TRUE);
+    return WYRELOG_E_NOMEM;
+  }
+  soup_message_set_request_body_from_bytes (message, "application/json",
+      request_body);
+  sodium_memzero (json->str, json->len);
+  g_string_free (g_steal_pointer (&json), TRUE);
+  if (client_send_message_collect (client, message, &response, &status)
+      != WYRELOG_E_OK) {
+    client->last_http_status = status;
+    return WYRELOG_E_IO;
+  }
+  client->last_http_status = status;
+  if (status < 200 || status >= 300) {
+    if (status >= 300 && status < 400) {
+      const gchar *location = soup_message_headers_get_one
+          (soup_message_get_response_headers (message), "Location");
+      g_autofree gchar *origin = location != NULL
+          ? g_uri_to_string (soup_message_get_uri (message)) : NULL;
+      if (origin == NULL
+          || !wyl_client_secret_redirect_is_same_authority (origin, location))
+        return WYRELOG_E_IO;
+    }
+    if (status == 400)
+      return WYRELOG_E_INVALID;
+    if (status == 401 || status == 403)
+      return WYRELOG_E_AUTH;
+    if (status == 429)
+      return WYRELOG_E_IO;
+    return WYRELOG_E_IO;
+  }
+  return client_decode_token_result (response, out_result);
 }
 
 wyrelog_error_t
