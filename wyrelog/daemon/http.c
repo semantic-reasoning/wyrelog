@@ -114,6 +114,8 @@
   "service_credential_denied"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED \
   "service_credential_failed"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT \
+  "service_credential_conflict"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND \
   "service_credential_not_found"
 
@@ -3894,6 +3896,161 @@ service_credential_build_json (const wyl_service_credential_t *info)
   return g_string_free (g_steal_pointer (&body), FALSE);
 }
 
+static gboolean
+service_credential_request_id_is_valid (const gchar *request_id)
+{
+  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+  for (gsize i = 0; i < WYL_REQUEST_ID_STRING_LEN; i++)
+    if (!g_ascii_isalnum (request_id[i]))
+      return FALSE;
+  return TRUE;
+}
+
+static gboolean
+service_credential_parse_expiry (const gchar *text, gint64 *out_expiry)
+{
+  gchar *end = NULL;
+  gint64 expiry = 0;
+  if (out_expiry == NULL)
+    return FALSE;
+  *out_expiry = 0;
+  if (text == NULL || text[0] == '\0')
+    return FALSE;
+  errno = 0;
+  expiry = g_ascii_strtoll (text, &end, 10);
+  if (errno != 0 || end == text || *end != '\0' || expiry < 0)
+    return FALSE;
+  *out_expiry = expiry;
+  return TRUE;
+}
+
+static void
+service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_credential.manage",
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor))
+    return;
+  if (path == NULL || path[0] != '/') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  const gchar *tail = strchr (path + 1, '/');
+  if (tail == NULL || g_strcmp0 (tail, "/credentials") != 0 || tail == path + 1) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  g_autofree gchar *subject = g_strndup (path + 1,
+      (gsize) (tail - (path + 1)));
+  if (subject == NULL || subject[0] == '\0') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+
+  SoupMessageBody *request_body = soup_server_message_get_request_body (msg);
+  if (request_body == NULL || request_body->data == NULL
+      || request_body->length <= 0 || request_body->length > 4096) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"version", 8},
+    {"tenant", 128},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN},
+    {"expires_at_us", 32},
+  };
+  static const WylDaemonHttpStrictJsonField fields_without_expiry[] = {
+    {"version", 8},
+    {"tenant", 128},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  gboolean parsed = wyl_daemon_http_dup_strict_json_object
+      (request_body->data, (gsize) request_body->length, fields,
+      G_N_ELEMENTS (fields), values);
+  if (!parsed) {
+    wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (fields));
+    values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+    parsed = wyl_daemon_http_dup_strict_json_object
+        (request_body->data, (gsize) request_body->length,
+        fields_without_expiry, G_N_ELEMENTS (fields_without_expiry), values);
+  }
+  if (!parsed || g_strcmp0 (values[0], "1") != 0
+      || g_strcmp0 (values[1], lookup_request_tenant (query)) != 0
+      || !service_credential_request_id_is_valid (values[2])) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  gint64 expires_at_us = 0;
+  if (values[3] != NULL && !service_credential_parse_expiry (values[3],
+          &expires_at_us)) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  wyrelog_error_t rc = wyl_service_credential_issue (ctx->handle, subject,
+      values[1], actor, values[2], expires_at_us, &issued);
+  if (rc == WYRELOG_E_INVALID) {
+    wyl_service_credential_issue_result_clear (&issued);
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    wyl_service_credential_issue_result_clear (&issued);
+    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
+    return;
+  }
+  if (rc != WYRELOG_E_OK || issued.secret == NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  g_autoptr (WylSensitiveChar) response = NULL;
+  if (secret == NULL || secret_len == 0) {
+    wyl_service_credential_issue_result_clear (&issued);
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  response = g_strdup_printf ("{\"service_credential\":");
+  if (response != NULL) {
+    g_autofree gchar *metadata = service_credential_build_json
+        (&issued.credential);
+    if (metadata != NULL) {
+      g_autoptr (WylSensitiveChar) secret_json = g_strdup_printf
+          (",\"credential_secret\":\"%.*s\"}", (gint) secret_len, secret);
+      if (secret_json != NULL) {
+        g_free (response);
+        response = g_strdup_printf ("%.*s%s", (gint) (strlen (metadata) - 1),
+            metadata, secret_json);
+      }
+    }
+  }
+  wyl_service_credential_issue_result_clear (&issued);
+  if (response == NULL) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      response, strlen (response));
+}
+
 typedef struct
 {
   GString *json;
@@ -4248,6 +4405,12 @@ service_principal_management_handler (SoupServer *server,
   if (g_strcmp0 (soup_server_message_get_method (msg), "GET") == 0
       && g_str_has_suffix (path, "/credentials")) {
     service_credential_list_handler (server, msg, path, query, user_data);
+    return;
+  }
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0
+      && g_str_has_suffix (path, "/credentials")) {
+    service_credential_issue_handler (server, msg, path, query, user_data);
     return;
   }
 
