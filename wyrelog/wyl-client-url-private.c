@@ -71,3 +71,26 @@ wyl_client_secret_url_is_canonical_literal_loopback (const gchar *url)
     return ipv4_is_canonical (host, address);
   return ipv6_is_canonical_loopback (host, address);
 }
+
+gboolean
+wyl_client_secret_redirect_is_same_authority (const gchar *origin_url,
+    const gchar *redirect_url)
+{
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GUri) origin = NULL;
+  g_autoptr (GUri) redirect = NULL;
+
+  if (!wyl_client_secret_url_is_canonical_literal_loopback (origin_url)
+      || !wyl_client_secret_url_is_canonical_literal_loopback (redirect_url))
+    return FALSE;
+  origin = g_uri_parse (origin_url, G_URI_FLAGS_NONE, &error);
+  if (origin == NULL)
+    return FALSE;
+  g_clear_error (&error);
+  redirect = g_uri_parse (redirect_url, G_URI_FLAGS_NONE, &error);
+  if (redirect == NULL)
+    return FALSE;
+  return g_strcmp0 (g_uri_get_scheme (origin), g_uri_get_scheme (redirect)) == 0
+      && g_strcmp0 (g_uri_get_host (origin), g_uri_get_host (redirect)) == 0
+      && g_uri_get_port (origin) == g_uri_get_port (redirect);
+}

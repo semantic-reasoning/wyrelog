@@ -224,6 +224,15 @@ check_secret_url_preflight (void)
   for (gsize i = 0; i < G_N_ELEMENTS (rejected); i++)
     if (wyl_client_secret_url_is_canonical_literal_loopback (rejected[i]))
       return FALSE;
+  if (!wyl_client_secret_redirect_is_same_authority
+      ("http://127.0.0.1:8080/api", "http://127.0.0.1:8080/other")
+      || wyl_client_secret_redirect_is_same_authority
+      ("http://127.0.0.1:8080/api", "http://127.0.0.1:8081/other")
+      || wyl_client_secret_redirect_is_same_authority
+      ("http://127.0.0.1:8080/api", "https://127.0.0.1:8080/other")
+      || wyl_client_secret_redirect_is_same_authority
+      ("http://127.0.0.1:8080/api", "/relative"))
+    return FALSE;
   return TRUE;
 }
 
