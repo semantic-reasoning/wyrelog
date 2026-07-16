@@ -1715,6 +1715,144 @@ write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 }
 #endif /* G_OS_WIN32 */
 
+#define WYL_POLICY_ROTATION_INTENT_MAGIC "WYLROT1\0"
+#define WYL_POLICY_ROTATION_INTENT_MAGIC_LEN 8u
+#define WYL_POLICY_ROTATION_INTENT_AUTH_LEN crypto_generichash_BYTES
+#define WYL_POLICY_ROTATION_INTENT_WIRE_LEN \
+  (WYL_POLICY_ROTATION_INTENT_MAGIC_LEN + 1u + 1u + 2u + WYL_ID_BYTES \
+   + (crypto_generichash_BYTES * 3u) + (sizeof (guint64) * 2u) \
+   + WYL_POLICY_ROTATION_INTENT_AUTH_LEN)
+
+static gboolean
+rotation_intent_bytes_nonzero (const guint8 *bytes, gsize len)
+{
+  guint8 acc = 0;
+  for (gsize i = 0; i < len; i++)
+    acc |= bytes[i];
+  return acc != 0;
+}
+
+static wyrelog_error_t
+rotation_intent_validate (const WylPolicyRotationIntent *intent)
+{
+  if (intent == NULL || wyl_id_equal (&intent->transaction_id, &WYL_ID_NIL)
+      || !rotation_intent_bytes_nonzero (intent->canonical_digest,
+          sizeof intent->canonical_digest)
+      || !rotation_intent_bytes_nonzero (intent->old_provider_id,
+          sizeof intent->old_provider_id)
+      || !rotation_intent_bytes_nonzero (intent->new_provider_id,
+          sizeof intent->new_provider_id)
+      || intent->expected_new_generation <= intent->old_generation
+      || (intent->state != WYL_POLICY_ROTATION_INTENT_PENDING
+          && intent->state != WYL_POLICY_ROTATION_INTENT_COMMITTED))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent *intent,
+    const guint8 *auth_key, guint8 **out_bytes, gsize *out_len)
+{
+  if (out_bytes != NULL)
+    *out_bytes = NULL;
+  if (out_len != NULL)
+    *out_len = 0;
+  if (out_bytes == NULL || out_len == NULL || auth_key == NULL
+      || rotation_intent_validate (intent) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+
+  guint8 *wire = g_malloc0 (WYL_POLICY_ROTATION_INTENT_WIRE_LEN);
+  if (wire == NULL)
+    return WYRELOG_E_NOMEM;
+  gsize offset = 0;
+  memcpy (wire + offset, WYL_POLICY_ROTATION_INTENT_MAGIC,
+      WYL_POLICY_ROTATION_INTENT_MAGIC_LEN);
+  offset += WYL_POLICY_ROTATION_INTENT_MAGIC_LEN;
+  wire[offset++] = WYL_POLICY_ROTATION_INTENT_VERSION;
+  wire[offset++] = (guint8) intent->state;
+  offset += 2;
+  memcpy (wire + offset, intent->transaction_id.bytes, WYL_ID_BYTES);
+  offset += WYL_ID_BYTES;
+  memcpy (wire + offset, intent->canonical_digest,
+      sizeof intent->canonical_digest);
+  offset += sizeof intent->canonical_digest;
+  memcpy (wire + offset, intent->old_provider_id,
+      sizeof intent->old_provider_id);
+  offset += sizeof intent->old_provider_id;
+  memcpy (wire + offset, intent->new_provider_id,
+      sizeof intent->new_provider_id);
+  offset += sizeof intent->new_provider_id;
+  guint64 old_generation = GUINT64_TO_BE (intent->old_generation);
+  guint64 new_generation = GUINT64_TO_BE (intent->expected_new_generation);
+  memcpy (wire + offset, &old_generation, sizeof old_generation);
+  offset += sizeof old_generation;
+  memcpy (wire + offset, &new_generation, sizeof new_generation);
+  offset += sizeof new_generation;
+  if (crypto_generichash (wire + offset, WYL_POLICY_ROTATION_INTENT_AUTH_LEN,
+          wire, offset, auth_key, crypto_generichash_KEYBYTES) != 0) {
+    sodium_memzero (wire, WYL_POLICY_ROTATION_INTENT_WIRE_LEN);
+    g_free (wire);
+    return WYRELOG_E_CRYPTO;
+  }
+  *out_bytes = wire;
+  *out_len = WYL_POLICY_ROTATION_INTENT_WIRE_LEN;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_decode (const guint8 *bytes, gsize len,
+    const guint8 *auth_key, WylPolicyRotationIntent *out_intent)
+{
+  if (out_intent != NULL)
+    memset (out_intent, 0, sizeof *out_intent);
+  if (bytes == NULL || auth_key == NULL || out_intent == NULL
+      || len != WYL_POLICY_ROTATION_INTENT_WIRE_LEN
+      || memcmp (bytes, WYL_POLICY_ROTATION_INTENT_MAGIC,
+          WYL_POLICY_ROTATION_INTENT_MAGIC_LEN) != 0
+      || bytes[WYL_POLICY_ROTATION_INTENT_MAGIC_LEN]
+      != WYL_POLICY_ROTATION_INTENT_VERSION
+      || bytes[WYL_POLICY_ROTATION_INTENT_MAGIC_LEN + 2] != 0
+      || bytes[WYL_POLICY_ROTATION_INTENT_MAGIC_LEN + 3] != 0)
+    return WYRELOG_E_POLICY;
+  guint8 expected_auth[WYL_POLICY_ROTATION_INTENT_AUTH_LEN];
+  gsize body_len = len - WYL_POLICY_ROTATION_INTENT_AUTH_LEN;
+  if (crypto_generichash (expected_auth, sizeof expected_auth, bytes, body_len,
+          auth_key, crypto_generichash_KEYBYTES) != 0
+      || sodium_memcmp (expected_auth, bytes + body_len,
+          sizeof expected_auth) != 0) {
+    sodium_memzero (expected_auth, sizeof expected_auth);
+    return WYRELOG_E_POLICY;
+  }
+  sodium_memzero (expected_auth, sizeof expected_auth);
+  gsize offset = WYL_POLICY_ROTATION_INTENT_MAGIC_LEN + 4;
+  memcpy (out_intent->transaction_id.bytes, bytes + offset, WYL_ID_BYTES);
+  offset += WYL_ID_BYTES;
+  memcpy (out_intent->canonical_digest, bytes + offset,
+      sizeof out_intent->canonical_digest);
+  offset += sizeof out_intent->canonical_digest;
+  memcpy (out_intent->old_provider_id, bytes + offset,
+      sizeof out_intent->old_provider_id);
+  offset += sizeof out_intent->old_provider_id;
+  memcpy (out_intent->new_provider_id, bytes + offset,
+      sizeof out_intent->new_provider_id);
+  offset += sizeof out_intent->new_provider_id;
+  guint64 old_generation = 0;
+  guint64 new_generation = 0;
+  memcpy (&old_generation, bytes + offset, sizeof old_generation);
+  offset += sizeof old_generation;
+  memcpy (&new_generation, bytes + offset, sizeof new_generation);
+  out_intent->old_generation = GUINT64_FROM_BE (old_generation);
+  out_intent->expected_new_generation = GUINT64_FROM_BE (new_generation);
+  out_intent->state =
+      (WylPolicyRotationIntentState) bytes[WYL_POLICY_ROTATION_INTENT_MAGIC_LEN
+      + 1];
+  if (rotation_intent_validate (out_intent) != WYRELOG_E_OK) {
+    memset (out_intent, 0, sizeof *out_intent);
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
 /* Pinned canonical-file helpers (CWE-367 / CodeQL
  * cpp/toctou-race-condition).
  *
