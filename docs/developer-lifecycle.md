@@ -195,6 +195,13 @@ responses. A successful response contains only the short-lived access token;
 session metadata, tenant data, credential secrets, and raw request material are
 never echoed.
 
+Client code that carries a credential secret or access token must first accept
+only a canonical literal loopback URL. Hostnames, ambiguous numeric addresses,
+IPv4-mapped IPv6, zone identifiers, userinfo, non-loopback authorities, and
+authority-changing redirects are rejected before the secret-bearing request is
+sent. Client cleanup wipes only buffers owned by the client; transport-library,
+kernel, and caller-owned immutable buffers are outside that guarantee.
+
 The daemon listener is loopback-only, so a non-loopback peer cannot reach the
 production route at the network layer. The HTTP smoke suite therefore covers a
 successful production-route exchange and exercises the core transport guard

@@ -2,6 +2,7 @@
 #include <errno.h>
 
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-client-url-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/wyl-request-id-private.h"
@@ -335,6 +336,19 @@ wyl_client_send_message (WylClient *client, SoupMessage *message,
   if (rc != WYRELOG_E_OK)
     return rc;
   if (status < 200 || status >= 300) {
+    if (status >= 300 && status < 400) {
+      const gchar *location = soup_message_headers_get_one
+          (soup_message_get_response_headers (message), "Location");
+      g_autofree gchar *origin = NULL;
+      if (location != NULL)
+        origin = g_uri_to_string (soup_message_get_uri (message));
+      /* The transport never follows redirects, and secret-bearing callers
+       * must additionally prove that an absolute redirect preserves the
+       * canonical loopback authority before choosing to follow one. */
+      if (origin == NULL
+          || !wyl_client_secret_redirect_is_same_authority (origin, location))
+        return WYRELOG_E_IO;
+    }
     return WYRELOG_E_IO;
   }
 
