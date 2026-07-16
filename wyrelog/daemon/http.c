@@ -106,6 +106,16 @@
   "service_principal_not_found"
 #define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_EXISTS \
   "service_principal_exists"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED \
+  "service_credential_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID \
+  "invalid_service_credential_request"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED \
+  "service_credential_denied"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED \
+  "service_credential_failed"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND \
+  "service_credential_not_found"
 
 typedef gchar WylSensitiveChar;
 
@@ -3715,11 +3725,16 @@ append_service_principal_json (const wyl_service_principal_t *info,
 static gboolean
 service_principal_management_authorize (SoupServer *server,
     SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
+    const gchar *action,
     const gchar *auth_required_code, const gchar *invalid_code,
     const gchar *denied_code, const gchar *failed_code,
     WylDaemonAuthContext *out_auth, gchar **out_actor)
 {
-  (void) failed_code;
+  if (ctx == NULL || ctx->profile != WYL_DAEMON_PROFILE_SYSTEM
+      || action == NULL || action[0] == '\0') {
+    set_json_error (msg, 403, denied_code);
+    return FALSE;
+  }
   const gchar *session_token = NULL;
   const gchar *guard_timestamp = NULL;
   const gchar *guard_loc_class = NULL;
@@ -3791,6 +3806,27 @@ service_principal_management_authorize (SoupServer *server,
     return FALSE;
   }
 
+  g_autoptr (wyl_decide_req_t) req = wyl_decide_req_new ();
+  g_autoptr (wyl_decide_resp_t) resp = wyl_decide_resp_new ();
+  wyl_decide_req_set_subject_id (req, auth.actor);
+  wyl_decide_req_set_action (req, action);
+  wyl_decide_req_set_resource_id (req, auth.session_id);
+  wyl_decide_req_set_guard_context (req, timestamp, guard_loc_class, risk);
+  wyl_decide_req_set_request_id (req, ensure_request_id_header (msg));
+  wyrelog_error_t decision_rc = wyl_decide (ctx->handle, req, resp);
+  if (decision_rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, invalid_code);
+    return FALSE;
+  }
+  if (decision_rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, failed_code);
+    return FALSE;
+  }
+  if (wyl_decide_resp_get_decision (resp) != WYL_DECISION_ALLOW) {
+    set_json_error (msg, 403, denied_code);
+    return FALSE;
+  }
+
   gchar *actor_copy = g_strdup (auth.actor);
   if (out_auth != NULL) {
     out_auth->session_id = g_steal_pointer (&auth.session_id);
@@ -3815,6 +3851,187 @@ service_principal_build_json (const wyl_service_principal_t *info)
 }
 
 static void
+append_service_credential_json_object (GString *json,
+    const wyl_service_credential_t *info)
+{
+  g_string_append (json, "{\"credential_id\":");
+  append_json_string (json, info->credential_id);
+  g_string_append_printf (json, ",\"credential_format_version\":%u",
+      info->credential_format_version);
+  g_string_append (json, ",\"subject_id\":");
+  append_json_string (json, info->subject_id);
+  g_string_append (json, ",\"tenant_id\":");
+  append_json_string (json, info->tenant_id);
+  g_string_append_printf (json, ",\"generation\":%" G_GUINT64_FORMAT,
+      info->generation);
+  g_string_append (json, ",\"state\":");
+  append_json_string (json, info->state);
+  g_string_append (json, ",\"created_by\":");
+  append_json_string (json, info->created_by);
+  g_string_append_printf (json, ",\"created_at_us\":%" G_GINT64_FORMAT,
+      info->created_at_us);
+  g_string_append_printf (json, ",\"updated_at_us\":%" G_GINT64_FORMAT,
+      info->updated_at_us);
+  g_string_append_printf (json, ",\"expires_at_us\":%" G_GINT64_FORMAT,
+      info->expires_at_us);
+  g_string_append_printf (json, ",\"last_used_at_us\":%" G_GINT64_FORMAT,
+      info->last_used_at_us);
+  g_string_append_c (json, ',');
+  append_json_nullable_string (json, "revoked_by", info->revoked_by);
+  g_string_append_printf (json, ",\"revoked_at_us\":%" G_GINT64_FORMAT,
+      info->revoked_at_us);
+  g_string_append_c (json, ',');
+  append_json_nullable_string (json, "rotated_from_id", info->rotated_from_id);
+  g_string_append_c (json, '}');
+}
+
+static gchar *
+service_credential_build_json (const wyl_service_credential_t *info)
+{
+  g_autoptr (GString) body = g_string_new ("{\"service_credential\":");
+  append_service_credential_json_object (body, info);
+  g_string_append_c (body, '}');
+  return g_string_free (g_steal_pointer (&body), FALSE);
+}
+
+typedef struct
+{
+  GString *json;
+  gboolean first;
+} ServiceCredentialListJsonCtx;
+
+static wyrelog_error_t
+append_service_credential_json (const wyl_service_credential_t *info,
+    gpointer user_data)
+{
+  ServiceCredentialListJsonCtx *ctx = user_data;
+  if (ctx == NULL || ctx->json == NULL || info == NULL)
+    return WYRELOG_E_INVALID;
+  if (!ctx->first)
+    g_string_append_c (ctx->json, ',');
+  ctx->first = FALSE;
+  append_service_credential_json_object (ctx->json, info);
+  return WYRELOG_E_OK;
+}
+
+static void
+service_credential_list_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) path;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_credential.manage",
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor))
+    return;
+
+  if (path == NULL || path[0] != '/') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  const gchar *tail = strchr (path + 1, '/');
+  if (tail == NULL || g_strcmp0 (tail, "/credentials") != 0) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  g_autofree gchar *subject = g_strndup (path + 1,
+      (gsize) (tail - (path + 1)));
+  if (subject == NULL || subject[0] == '\0') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  const gchar *tenant = lookup_request_tenant (query);
+  g_autoptr (GString) body = g_string_new ("{\"service_credentials\":[");
+  ServiceCredentialListJsonCtx json_ctx = {.json = body,.first = TRUE };
+  wyrelog_error_t rc = wyl_service_credential_foreach (ctx->handle, subject,
+      tenant, append_service_credential_json, &json_ctx);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      body->str, body->len);
+}
+
+static void
+service_credential_get_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_credential.manage",
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor))
+    return;
+  if (path == NULL || path[0] != '/' || path[1] == '\0'
+      || strchr (path + 1, '/') != NULL) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  const gchar *credential_id = path + 1;
+  wyl_service_credential_t credential = { 0 };
+  wyrelog_error_t rc = wyl_service_credential_get (ctx->handle, credential_id,
+      &credential);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
+    return;
+  }
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  if (g_strcmp0 (credential.tenant_id, lookup_request_tenant (query)) != 0) {
+    wyl_service_credential_clear (&credential);
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
+    return;
+  }
+  g_autofree gchar *response = service_credential_build_json (&credential);
+  wyl_service_credential_clear (&credential);
+  if (response == NULL) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      response, strlen (response));
+}
+
+static void
+service_credential_management_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  if (path == NULL || path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  service_credential_get_handler (server, msg, path, query, user_data);
+}
+
+static void
 service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
 {
@@ -3829,6 +4046,7 @@ service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
   if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_principal.manage",
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID,
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED,
@@ -3906,6 +4124,7 @@ service_principal_list_handler (SoupServer *server, SoupServerMessage *msg,
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
   if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_principal.manage",
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID,
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED,
@@ -3962,6 +4181,7 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
   if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_principal.manage",
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID,
           WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED,
@@ -4022,6 +4242,12 @@ service_principal_management_handler (SoupServer *server,
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0
       && g_str_has_suffix (path, "/disable")) {
     service_principal_disable_handler (server, msg, path, query, user_data);
+    return;
+  }
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") == 0
+      && g_str_has_suffix (path, "/credentials")) {
+    service_credential_list_handler (server, msg, path, query, user_data);
     return;
   }
 
@@ -8037,6 +8263,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
 #endif
   soup_server_add_handler (server, "/" "__test/" "service-" "principals",
       service_principal_management_handler, ctx, NULL);
+  soup_server_add_handler (server, "/" "__test/" "service-" "credentials",
+      service_credential_management_handler, ctx, NULL);
 #endif
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);

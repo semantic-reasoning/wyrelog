@@ -6382,6 +6382,23 @@ check_service_principal_management_contract (void)
     rc = 1979;
     goto cleanup;
   }
+  wyl_policy_store_t *policy_store = wyl_handle_get_policy_store (handle);
+  if (wyl_policy_store_grant_direct_permission (policy_store,
+          "human-principal-admin", "wr.service_principal.manage",
+          session_token) != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (policy_store,
+          "human-principal-admin", "wr.service_principal.manage",
+          session_token, "armed") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (policy_store,
+          "human-principal-admin", "wr.service_credential.manage",
+          session_token) != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (policy_store,
+          "human-principal-admin", "wr.service_credential.manage",
+          session_token, "armed") != WYRELOG_E_OK
+      || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
+    rc = 1989;
+    goto cleanup;
+  }
   query =
       g_strdup_printf
       ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
@@ -6408,6 +6425,52 @@ check_service_principal_management_contract (void)
     rc = 1981;
     goto cleanup;
   }
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/__test/service-principals/svc:tenant-a:worker/credentials",
+          query, NULL, &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"service_credentials\":[") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 1984;
+    goto cleanup;
+  }
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/__test/service-credentials/wlc_000000000000000000000000000",
+          query, NULL, &status, &body) != 0 || status != 404 || body == NULL
+      || strstr (body, "service_credential_not_found") == NULL) {
+    rc = 1985;
+    goto cleanup;
+  }
+
+  gboolean tenant_created = FALSE;
+  if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
+          "tenant-a", &tenant_created) != WYRELOG_E_OK || !tenant_created) {
+    rc = 1986;
+    goto cleanup;
+  }
+  wyl_service_credential_issue_result_t issued = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
+          "human-principal-admin", "http-credential-read", 999999999,
+          &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 1987;
+    goto cleanup;
+  }
+  g_autofree gchar *credential_path = g_strdup_printf
+      ("/__test/service-credentials/%s", issued.credential.credential_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          credential_path, query, NULL, &status, &body) != 0 || status != 404
+      || body == NULL || strstr (body, "service_credential_not_found") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 1988;
+    goto cleanup;
+  }
+  wyl_service_credential_issue_result_clear (&issued);
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
