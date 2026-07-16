@@ -6342,6 +6342,10 @@ check_service_principal_management_contract (void)
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   g_autofree gchar *body = NULL;
   GSList *uris = NULL;
+  wyl_policy_store_t *policy_store = NULL;
+  gboolean tenant_created = FALSE;
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_autofree gchar *credential_path = NULL;
   const gchar *session_token = "human-principal-admin";
   guint status = 0;
   const gchar *create_body =
@@ -6382,7 +6386,7 @@ check_service_principal_management_contract (void)
     rc = 1979;
     goto cleanup;
   }
-  wyl_policy_store_t *policy_store = wyl_handle_get_policy_store (handle);
+  policy_store = wyl_handle_get_policy_store (handle);
   if (wyl_policy_store_grant_direct_permission (policy_store,
           "human-principal-admin", "wr.service_principal.manage",
           session_token) != WYRELOG_E_OK
@@ -6445,13 +6449,11 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
 
-  gboolean tenant_created = FALSE;
   if (wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
           "tenant-a", &tenant_created) != WYRELOG_E_OK || !tenant_created) {
     rc = 1986;
     goto cleanup;
   }
-  wyl_service_credential_issue_result_t issued = { 0 };
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
           "human-principal-admin", "http-credential-read", 999999999,
           &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
@@ -6459,7 +6461,7 @@ check_service_principal_management_contract (void)
     rc = 1987;
     goto cleanup;
   }
-  g_autofree gchar *credential_path = g_strdup_printf
+  credential_path = g_strdup_printf
       ("/__test/service-credentials/%s", issued.credential.credential_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
