@@ -1361,6 +1361,11 @@ check_public_headers = find_program(
 
 test('check-public-headers-no-novelty-tokens', check_public_headers)
 
+test('check-sccache-fallback-workflows', python3,
+  args : [meson.project_source_root() / 'tools' / 'check-sccache-fallback.py',
+    meson.project_source_root()],
+)
+
 check_no_derived_fsm_replay = find_program(
   '../tools/check-no-derived-fsm-replay.sh',
 )
