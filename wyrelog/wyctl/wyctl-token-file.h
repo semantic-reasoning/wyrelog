@@ -53,6 +53,9 @@ typedef enum
 WyctlTokenFileStatus wyctl_token_file_read (const gchar * path,
     gchar ** out_token);
 
+/* Wipe and release bytes returned by wyctl_token_file_read. */
+void wyctl_token_file_free_sensitive (gchar * value, gsize capacity);
+
 #ifndef G_OS_WIN32
 /* Pure-function classifier: given the result of fstat on an already-
  * opened fd and the invoking process's effective uid, decide whether
