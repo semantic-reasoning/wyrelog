@@ -2655,6 +2655,53 @@ test_status_kill_switch_disables_gsettings (void)
   g_assert_null (g_strstr_len (stderr_buf, -1, "daemon unavailable:"));
 }
 
+static void
+test_service_token_preflight_and_malformed_input (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *credential_path = NULL;
+  gint fd = g_file_open_tmp ("wyctl-service-credential-XXXXXX",
+      &credential_path, &error);
+  g_assert_no_error (error);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_assert_true (g_file_set_contents (credential_path,
+          "credential-secret-canary", -1, &error));
+  g_assert_no_error (error);
+  g_assert_cmpint (g_chmod (credential_path, 0600), ==, 0);
+  g_autofree gchar *output_path = g_build_filename (g_get_tmp_dir (),
+      "wyctl-service-token-no-output", NULL);
+  g_unlink (output_path);
+  gchar *non_loopback_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://example.invalid",
+    "auth", "service-token", "--credential-file", credential_path,
+    "--token-output", output_path, NULL,
+  };
+  g_autofree gchar *stdout_buf = NULL;
+  g_autofree gchar *stderr_buf = NULL;
+  gint wait_status = 0;
+  run_child (non_loopback_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1, "wyctl: invalid daemon URL"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "credential-secret-canary"));
+  g_assert_false (g_file_test (output_path, G_FILE_TEST_EXISTS));
+
+  gchar *malformed_argv[] = {
+    WYL_TEST_WYCTL_PATH, "--daemon-url", "http://127.0.0.1:1",
+    "auth", "service-token", "--credential-file", credential_path,
+    "--token-output", output_path, NULL,
+  };
+  g_clear_pointer (&stdout_buf, g_free);
+  g_clear_pointer (&stderr_buf, g_free);
+  run_child (malformed_argv, &stdout_buf, &stderr_buf, &wait_status);
+  g_assert_false (wait_status_is_success (wait_status));
+  g_assert_nonnull (g_strstr_len (stderr_buf, -1,
+          "wyctl: invalid service credential file"));
+  g_assert_null (g_strstr_len (stderr_buf, -1, "credential-secret-canary"));
+  g_assert_false (g_file_test (output_path, G_FILE_TEST_EXISTS));
+  g_unlink (credential_path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2720,6 +2767,8 @@ main (int argc, char **argv)
       test_policy_check_safety_reject_prevents_http);
   g_test_add_func ("/wyctl/audit-query-safety-reject-prevents-http",
       test_audit_query_safety_reject_prevents_http);
+  g_test_add_func ("/wyctl/service-token-preflight-and-malformed-input",
+      test_service_token_preflight_and_malformed_input);
 
   return g_test_run ();
 }
