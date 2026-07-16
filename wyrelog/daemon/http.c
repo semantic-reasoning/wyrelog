@@ -4193,12 +4193,104 @@ service_credential_get_handler (SoupServer *server, SoupServerMessage *msg,
 }
 
 static void
+service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  if (g_strcmp0 (soup_server_message_get_method (msg), "DELETE") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          "wr.service_credential.manage",
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor))
+    return;
+  if (path == NULL || path[0] != '/' || path[1] == '\0'
+      || strchr (path + 1, '/') != NULL
+      || !wyl_service_credential_id_is_canonical (path + 1,
+          strlen (path + 1))) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"version", 8},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024, fields,
+          G_N_ELEMENTS (fields), values)
+      || g_strcmp0 (values[0], "1") != 0
+      || !service_credential_request_id_is_valid (values[1])) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+
+  wyl_service_credential_t current = { 0 };
+  wyrelog_error_t rc = wyl_service_credential_get (ctx->handle, path + 1,
+      &current);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_credential_clear (&current);
+    set_json_error (msg, rc == WYRELOG_E_INVALID ? 400 : 500,
+        rc == WYRELOG_E_INVALID ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID
+        : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  if (g_strcmp0 (current.tenant_id, lookup_request_tenant (query)) != 0) {
+    wyl_service_credential_clear (&current);
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
+    return;
+  }
+  wyl_service_credential_clear (&current);
+
+  wyl_service_credential_t revoked = { 0 };
+  rc = wyl_service_credential_revoke (ctx->handle, path + 1, actor, values[1],
+      &revoked);
+  if (rc == WYRELOG_E_INVALID) {
+    wyl_service_credential_clear (&revoked);
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    wyl_service_credential_clear (&revoked);
+    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_credential_clear (&revoked);
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  g_autofree gchar *response = service_credential_build_json (&revoked);
+  wyl_service_credential_clear (&revoked);
+  if (response == NULL) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+    return;
+  }
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      response, strlen (response));
+}
+
+static void
 service_credential_management_handler (SoupServer *server,
     SoupServerMessage *msg, const char *path, GHashTable *query,
     gpointer user_data)
 {
   if (path == NULL || path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  if (g_strcmp0 (soup_server_message_get_method (msg), "DELETE") == 0) {
+    service_credential_revoke_handler (server, msg, path, query, user_data);
     return;
   }
   service_credential_get_handler (server, msg, path, query, user_data);
