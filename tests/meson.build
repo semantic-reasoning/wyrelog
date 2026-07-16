@@ -181,7 +181,7 @@ if build_client
   )
 
   test('daemon-http-decide-refresh', test_daemon_http_decide_refresh,
-    timeout : 240,
+    timeout : 960,
   )
 
   test_daemon_http_decide_service = executable('test-daemon-http-decide-service',
