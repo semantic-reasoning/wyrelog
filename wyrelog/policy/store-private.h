@@ -3,7 +3,6 @@
 
 #include <glib.h>
 #include <sqlite3.h>
-#include <sodium.h>
 
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
@@ -94,6 +93,7 @@ typedef struct
 } wyl_policy_store_rotation_runtime_t;
 
 #define WYL_POLICY_ROTATION_INTENT_VERSION 1u
+#define WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES 32u
 
 typedef enum
 {
@@ -104,9 +104,9 @@ typedef enum
 typedef struct
 {
   wyl_id_t transaction_id;
-  guint8 canonical_digest[crypto_generichash_BYTES];
-  guint8 old_provider_id[crypto_generichash_BYTES];
-  guint8 new_provider_id[crypto_generichash_BYTES];
+  guint8 canonical_digest[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
+  guint8 old_provider_id[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
+  guint8 new_provider_id[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
   guint64 old_generation;
   guint64 expected_new_generation;
   WylPolicyRotationIntentState state;
