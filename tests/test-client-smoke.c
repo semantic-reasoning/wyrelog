@@ -6,6 +6,7 @@
 #include "wyrelog/audit/iter-private.h"
 #include "wyrelog/client.h"
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-client-codec-private.h"
 
 typedef struct
 {
@@ -143,9 +144,63 @@ test_http_server_handler (SoupServer *server, SoupServerMessage *msg,
       body, strlen (body));
 }
 
+static gboolean
+check_service_credential_codecs (void)
+{
+  WylClientServiceTokenResult token = { 0 };
+  WylClientServiceCredentialIssueResult issue = { 0 };
+  const gchar *token_json = " { \"access_token\": \"access-1\" } ";
+  const gchar *issue_json =
+      "{\"service_credential\":{\"generation\":7,"
+      "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      "abcdefghijklmnopq\","
+      "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"}}";
+
+  if (wyl_client_service_token_result_decode (token_json, strlen (token_json),
+          &token) != WYRELOG_E_OK
+      || g_strcmp0 (token.access_token.text, "access-1") != 0)
+    return FALSE;
+  wyl_client_service_token_result_clear (&token);
+  if (token.access_token.text != NULL || token.access_token.len != 0)
+    return FALSE;
+
+  if (wyl_client_service_credential_issue_result_decode (issue_json,
+          strlen (issue_json), &issue) != WYRELOG_E_OK
+      || g_strcmp0 (issue.credential_id,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
+      || issue.generation != 7 || issue.credential_secret.len != 43)
+    return FALSE;
+  wyl_client_service_credential_issue_result_clear (&issue);
+  if (issue.credential_id != NULL || issue.credential_secret.text != NULL)
+    return FALSE;
+
+  const gchar *invalid[] = {
+    "{\"access_token\":\"a\",\"access_token\":\"b\"}",
+    "{\"access_token\":\"a\",\"unknown\":1}",
+    "{\"access_token\":\"a\"} trailing",
+    "{\"access_token\":\"a\\u0000b\"}",
+    "{\"service_credential\":{\"credential_id\":\"x\","
+        "\"generation\":0,\"credential_secret\":\"bad\"}}",
+    "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+        "\"generation\":01,\"credential_secret\":\"bad\"}}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    if (wyl_client_service_token_result_decode (invalid[i], strlen (invalid[i]),
+            &token) == WYRELOG_E_OK
+        || token.access_token.text != NULL
+        || wyl_client_service_credential_issue_result_decode (invalid[i],
+            strlen (invalid[i]), &issue) == WYRELOG_E_OK
+        || issue.credential_secret.text != NULL)
+      return FALSE;
+  }
+  return TRUE;
+}
+
 int
 main (void)
 {
+  if (!check_service_credential_codecs ())
+    return 230;
   const gchar *version = wyrelog_client_version_string ();
   if (version == NULL || version[0] == '\0')
     return 1;
