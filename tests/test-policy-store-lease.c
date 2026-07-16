@@ -379,6 +379,17 @@ test_provider_lifetime_success (void)
   g_assert_cmpuint (plaintext_counters.frees, ==, 1);
   g_assert_false (g_file_test (plaintext_path, G_FILE_TEST_EXISTS));
 
+  CountingProvider memory_provider = { 0 };
+  wyl_policy_store_open_options_t memory_options =
+      plaintext_provider_opts (":memory:", &memory_provider);
+  wyl_policy_store_t *memory = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&memory_options,
+          &memory), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (memory_provider.probes, ==, 1);
+  wyl_policy_store_close (memory);
+  g_assert_cmpuint (memory_provider.wipes, ==, 1);
+  g_assert_true (memory_provider.wiped);
+
   CountingProvider stack_provider = { 0 };
   wyl_policy_store_open_options_t stack_options = encrypted_opts (stack_path,
       &stack_provider);
