@@ -1,9 +1,17 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef G_OS_WIN32
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L
+#endif
+#endif
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sodium.h>
 #include <sqlite3.h>
 #include <string.h>
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#endif
 
 #include "auth/service-credential-private.h"
 #include "policy/store-private.h"
@@ -1340,6 +1348,16 @@ test_rotation_intent_sidecar_lifecycle (void)
           sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
           auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+#ifndef G_OS_WIN32
+  g_assert_cmpint (g_remove (sidecar_path), ==, 0);
+  g_autofree gchar *symlink_target = g_build_filename (dir, "target", NULL);
+  g_assert_cmpint (symlink (symlink_target, sidecar_path), ==, 0);
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          sizeof auth_key, &loaded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (sidecar_path), ==, 0);
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+#endif
   g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
