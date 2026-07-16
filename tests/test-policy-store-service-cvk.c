@@ -1454,6 +1454,152 @@ test_rotation_intent_sidecar_lifecycle (void)
 }
 
 static void
+test_rotation_intent_status (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-rotation-status-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  const guint8 *materialized = NULL;
+  gsize materialized_len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &materialized, &materialized_len), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (store);
+  store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+
+  WylPolicyRotationIntentStatus status = { 0 };
+  memset (&status, 0xa5, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (NULL, &status),
+      ==, WYRELOG_E_INVALID);
+  g_assert_true (sodium_is_zero ((const unsigned char *) &status,
+          sizeof status));
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT);
+  g_assert_true (status.probe_required);
+
+  guint8 auth_key[crypto_generichash_KEYBYTES];
+  g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+  WylPolicyRotationIntent intent = { 0 };
+  g_assert_cmpint (wyl_id_new (&intent.transaction_id), ==, WYRELOG_E_OK);
+  gchar *canonical = NULL;
+  gsize canonical_len = 0;
+  g_assert_true (g_file_get_contents (path, &canonical, &canonical_len, NULL));
+  g_assert_cmpint (crypto_generichash (intent.canonical_digest,
+          sizeof intent.canonical_digest, (const guint8 *) canonical,
+          canonical_len, NULL, 0), ==, 0);
+  guint8 store_key[crypto_generichash_KEYBYTES];
+  for (gsize i = 0; i < sizeof store_key; i++)
+    store_key[i] = (guint8) (0x40 + i);
+  g_assert_cmpint (crypto_generichash (intent.old_provider_id,
+          sizeof intent.old_provider_id, store_key, sizeof store_key, NULL,
+          0), ==, 0);
+  sodium_memzero (store_key, sizeof store_key);
+  memset (intent.new_provider_id, 0x53, sizeof intent.new_provider_id);
+  intent.old_generation = 21;
+  intent.expected_new_generation = 22;
+  intent.state = WYL_POLICY_ROTATION_INTENT_PENDING;
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+
+  memset (&status, 0, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==, WYL_POLICY_ROTATION_INTENT_STATUS_PENDING);
+  g_assert_cmpmem (&status.transaction_id, sizeof status.transaction_id,
+      &intent.transaction_id, sizeof intent.transaction_id);
+  g_assert_cmpmem (status.old_provider_id, sizeof status.old_provider_id,
+      intent.old_provider_id, sizeof intent.old_provider_id);
+  g_assert_cmpmem (status.new_provider_id, sizeof status.new_provider_id,
+      intent.new_provider_id, sizeof intent.new_provider_id);
+  g_assert_cmpuint (status.old_generation, ==, 21);
+  g_assert_cmpuint (status.expected_new_generation, ==, 22);
+  g_assert_true (status.probe_required);
+
+  g_assert_true (g_file_set_contents (path, "stale", 5, NULL));
+  memset (&status, 0xa5, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+      ==, WYRELOG_E_POLICY);
+  g_assert_true (sodium_is_zero ((const unsigned char *) &status,
+          sizeof status));
+  g_assert_true (g_file_set_contents (path, canonical, canonical_len, NULL));
+
+  memset (intent.old_provider_id, 0x99, sizeof intent.old_provider_id);
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+  memset (&status, 0xa5, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+      ==, WYRELOG_E_POLICY);
+  g_assert_true (sodium_is_zero ((const unsigned char *) &status,
+          sizeof status));
+  /* Restore the provider ID derived from the deterministic test key. */
+  for (gsize i = 0; i < sizeof store_key; i++)
+    store_key[i] = (guint8) (0x40 + i);
+  g_assert_cmpint (crypto_generichash (intent.old_provider_id,
+          sizeof intent.old_provider_id, store_key, sizeof store_key, NULL,
+          0), ==, 0);
+  sodium_memzero (store_key, sizeof store_key);
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+
+  intent.state = WYL_POLICY_ROTATION_INTENT_COMMITTED;
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+  memset (&status, 0, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (status.state, ==,
+      WYL_POLICY_ROTATION_INTENT_STATUS_COMMITTED);
+
+  g_autofree gchar *sidecar_path = g_strconcat (path,
+      ".wyrelog-rotation-intent", NULL);
+  gchar *tampered = NULL;
+  gsize tampered_len = 0;
+  g_assert_true (g_file_get_contents (sidecar_path, &tampered, &tampered_len,
+          NULL));
+  tampered[tampered_len / 2] ^= 0x01;
+  g_assert_true (g_file_set_contents (sidecar_path, tampered, tampered_len,
+          NULL));
+  g_free (tampered);
+  memset (&status, 0xa5, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+      ==, WYRELOG_E_POLICY);
+  g_assert_true (sodium_is_zero ((const unsigned char *) &status,
+          sizeof status));
+
+  sodium_memzero (auth_key, sizeof auth_key);
+  g_free (canonical);
+  wyl_policy_store_close (store);
+
+  wyl_policy_store_t *providerless = NULL;
+  wyl_policy_store_open_options_t providerless_options = {
+    .path = ":memory:",
+  };
+  g_assert_cmpint (wyl_policy_store_open_with_options (&providerless_options,
+          &providerless), ==, WYRELOG_E_OK);
+  memset (&status, 0xa5, sizeof status);
+  g_assert_cmpint (wyl_policy_store_rotation_intent_status (providerless,
+          &status), ==, WYRELOG_E_POLICY);
+  g_assert_true (sodium_is_zero ((const unsigned char *) &status,
+          sizeof status));
+  wyl_policy_store_close (providerless);
+
+  g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
 test_rotation_recovery_classifier (void)
 {
   WylPolicyRotationRecoveryProbe probe = {
@@ -1805,6 +1951,8 @@ main (int argc, char **argv)
       test_rotation_intent_auth_key_derivation);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-sidecar",
       test_rotation_intent_sidecar_lifecycle);
+  g_test_add_func ("/policy-store-service-cvk/rotation-intent-status",
+      test_rotation_intent_status);
   g_test_add_func ("/policy-store-service-cvk/rotation-recovery-classifier",
       test_rotation_recovery_classifier);
   g_test_add_func ("/policy-store-service-cvk/rotation-recovery-plan",

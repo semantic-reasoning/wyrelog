@@ -120,6 +120,24 @@ typedef struct
 
 typedef enum
 {
+  WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT = 0,
+  WYL_POLICY_ROTATION_INTENT_STATUS_PENDING = 1,
+  WYL_POLICY_ROTATION_INTENT_STATUS_COMMITTED = 2,
+} WylPolicyRotationIntentStatusState;
+
+typedef struct
+{
+  WylPolicyRotationIntentStatusState state;
+  wyl_id_t transaction_id;
+  guint8 old_provider_id[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
+  guint8 new_provider_id[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
+  guint64 old_generation;
+  guint64 expected_new_generation;
+  gboolean probe_required;
+} WylPolicyRotationIntentStatus;
+
+typedef enum
+{
   WYL_POLICY_ROTATION_RECOVERY_OLD = 1,
   WYL_POLICY_ROTATION_RECOVERY_NEW = 2,
   WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS = 3,
@@ -496,11 +514,13 @@ wyrelog_error_t wyl_policy_rotation_intent_decode (const guint8 * bytes,
 wyrelog_error_t wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *
     store, const WylPolicyRotationIntent * intent, const guint8 * auth_key,
     gsize auth_key_len);
-wyrelog_error_t wyl_policy_rotation_intent_read_sidecar (wyl_policy_store_t *
-    store, const guint8 * auth_key, gsize auth_key_len,
+wyrelog_error_t wyl_policy_rotation_intent_read_sidecar (const
+    wyl_policy_store_t * store, const guint8 * auth_key, gsize auth_key_len,
     WylPolicyRotationIntent * out_intent);
 wyrelog_error_t wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *
     store);
+wyrelog_error_t wyl_policy_store_rotation_intent_status (const
+    wyl_policy_store_t * store, WylPolicyRotationIntentStatus * out_status);
 wyrelog_error_t wyl_policy_rotation_recovery_classify (const
     WylPolicyRotationRecoveryProbe * probe,
     WylPolicyRotationRecoveryState * out_state);
