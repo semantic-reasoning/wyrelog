@@ -283,7 +283,50 @@ fi
 ROTATE_DB="$INSTALL_ROOT/var/lib/wyrelog/system/rotate.sqlite"
 ROTATE_AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/system/rotate-audit.duckdb"
 ROTATE_NEW_KEY="$INSTALL_ROOT/etc/wyrelog/system/policy-rotated.key"
+ROTATE_VERIFY_KEY="$INSTALL_ROOT/etc/wyrelog/system/policy-verify.key"
+
+# --check intentionally uses disposable scratch stores. Start a short-lived
+# normal runtime to create the dedicated rotation fixture, then stop it
+# before exercising wyctl rotation.
+"$WYRELOGD" --production \
+  --profile system \
+  --template-dir "$TEMPLATE_INSTALL" \
+  --policy-db "$ROTATE_DB" \
+  --policy-keyprovider "file:$KEY" \
+  --audit-db "$ROTATE_AUDIT_DB" \
+  $FACT_ARGS \
+  --listen-port "$PORT" &
+PID=$!
+i=0
+while [ "$i" -lt 150 ]; do
+  i=$((i + 1))
+  if "$WYCTL" --daemon-url "$BASE_URL" --timeout-ms 500 status \
+      >"$TMPDIR/rotate-status.out" 2>"$TMPDIR/rotate-status.err"; then
+    if [ "$(cat "$TMPDIR/rotate-status.out")" = "ok" ]; then
+      break
+    fi
+  fi
+  sleep 0.1
+done
+if [ "$i" -ge 150 ]; then
+  echo "rotation fixture daemon did not become ready" >&2
+  cat "$TMPDIR/rotate-status.err" >&2 || true
+  exit 1
+fi
+kill -TERM "$PID"
+wait "$PID"
+PID=
+test -s "$ROTATE_DB"
+
 "$PYTHON" - "$ROTATE_NEW_KEY" <<'PY'
+import os
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+path.write_bytes(os.urandom(32))
+PY
+"$PYTHON" - "$ROTATE_VERIFY_KEY" <<'PY'
 import os
 import pathlib
 import sys
@@ -316,7 +359,13 @@ if "$WYCTL" key rotate --store "$ROTATE_DB" \
 fi
 "$WYCTL" key rotate --store "$ROTATE_DB" \
   --from-keyprovider "file:$ROTATE_NEW_KEY" \
-  --to-keyprovider "file:$ROTATE_NEW_KEY" >"$TMPDIR/rotate-verify.out"
+  --to-keyprovider "file:$ROTATE_VERIFY_KEY" >"$TMPDIR/rotate-verify.out"
+if [ "$(cat "$TMPDIR/rotate-verify.out")" != \
+    "status=rotated store=$ROTATE_DB" ]; then
+  echo "new keyprovider could not open rotated policy store" >&2
+  cat "$TMPDIR/rotate-verify.out" >&2
+  exit 1
+fi
 
 CREDENTIALS_DIRECTORY="$INSTALL_ROOT/etc/wyrelog/system" \
   "$WYRELOGD" --production \
