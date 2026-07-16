@@ -1201,6 +1201,8 @@ check_store_seeds_builtin_catalog (void)
     {"wr.fact.read", "sensitive"},
     {"wr.datalog.query", "sensitive"},
     {"wr.schema.manage", "critical"},
+    {"wr.service_principal.manage", "critical"},
+    {"wr.service_credential.manage", "critical"},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (permission_seeds); i++) {
     gint rc = check_permission_seed (store, permission_seeds[i].perm_id,
@@ -1943,6 +1945,146 @@ check_store_grants_direct_permission (void)
     return 68;
   if (exists)
     return 69;
+  return 0;
+}
+
+static gint
+check_store_reports_permission_planes (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_LAST_;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 80;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 81;
+
+  if (wyl_policy_store_permission_plane (store, "wr.stream.read", &plane)
+      != WYRELOG_E_OK)
+    return 82;
+  if (plane != WYL_PERMISSION_PLANE_DATA)
+    return 83;
+  if (g_strcmp0 (wyl_permission_plane_name (plane), "data") != 0)
+    return 84;
+
+  if (wyl_policy_store_permission_plane (store, "wr.policy.write", &plane)
+      != WYRELOG_E_OK)
+    return 85;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 86;
+  if (g_strcmp0 (wyl_permission_plane_name (plane), "control") != 0)
+    return 87;
+
+  if (wyl_policy_store_permission_plane (store,
+          "wr.svc.read_decision", &plane) != WYRELOG_E_OK)
+    return 88;
+  if (plane != WYL_PERMISSION_PLANE_DATA)
+    return 89;
+
+  if (wyl_policy_store_permission_plane (store,
+          "wr.service_principal.manage", &plane) != WYRELOG_E_OK)
+    return 90;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 91;
+
+  if (wyl_policy_store_permission_plane (store,
+          "wr.service_credential.manage", &plane) != WYRELOG_E_OK)
+    return 92;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 93;
+
+  if (wyl_policy_store_permission_plane (store, "site.unknown.read", &plane)
+      != WYRELOG_E_OK)
+    return 94;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 95;
+
+  if (wyl_permission_plane_name (WYL_PERMISSION_PLANE_LAST_) != NULL)
+    return 96;
+  return 0;
+}
+
+static gint
+check_store_enforces_service_permission_planes (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyl_policy_service_principal_info_t principal = { 0 };
+  gboolean eligible = FALSE;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 91;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 92;
+  if (wyl_policy_store_create_service_principal (store, "svc:plane:test",
+          "plane test", "admin-user", "req-service-plane", &principal)
+      != WYRELOG_E_OK)
+    return 93;
+  wyl_policy_service_principal_info_clear (&principal);
+
+  if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
+          "wr.stream.read", "svc-scope") != WYRELOG_E_OK)
+    return 94;
+  if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
+          "wr.service_principal.manage", "svc-scope") != WYRELOG_E_POLICY)
+    return 95;
+  if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
+          "site.unknown.read", "svc-scope") != WYRELOG_E_POLICY)
+    return 96;
+
+  if (wyl_policy_store_upsert_role (store, "site.service-role",
+          "service role") != WYRELOG_E_OK)
+    return 97;
+  if (wyl_policy_store_grant_role_permission (store, "site.service-role",
+          "wr.stream.read") != WYRELOG_E_OK)
+    return 98;
+  if (wyl_policy_store_grant_role_membership (store, "svc:plane:test",
+          "site.service-role", "svc-scope") != WYRELOG_E_OK)
+    return 99;
+  if (wyl_policy_store_role_is_service_eligible (store, "site.service-role",
+          &eligible) != WYRELOG_E_OK)
+    return 100;
+  if (!eligible)
+    return 101;
+  if (wyl_policy_store_grant_role_permission (store, "site.service-role",
+          "wr.service_principal.manage") != WYRELOG_E_POLICY)
+    return 102;
+
+  if (wyl_policy_store_upsert_role (store, "site.control-role",
+          "control role") != WYRELOG_E_OK)
+    return 103;
+  if (wyl_policy_store_grant_role_permission (store, "site.control-role",
+          "wr.service_credential.manage") != WYRELOG_E_OK)
+    return 104;
+  if (wyl_policy_store_role_is_service_eligible (store, "site.control-role",
+          &eligible) != WYRELOG_E_OK)
+    return 105;
+  if (eligible)
+    return 106;
+  if (wyl_policy_store_grant_role_membership (store, "svc:plane:test",
+          "site.control-role", "svc-scope") != WYRELOG_E_POLICY)
+    return 107;
+
+  if (wyl_policy_store_upsert_role (store, "site.control-parent",
+          "control parent") != WYRELOG_E_OK)
+    return 108;
+  if (wyl_policy_store_grant_role_permission (store, "site.control-parent",
+          "wr.service_credential.manage") != WYRELOG_E_OK)
+    return 109;
+  if (wyl_policy_store_upsert_role (store, "site.child-role",
+          "child role") != WYRELOG_E_OK)
+    return 110;
+  if (wyl_policy_store_create_service_principal (store, "svc:plane:child",
+          "plane child", "admin-user", "req-service-plane-child",
+          &principal) != WYRELOG_E_OK)
+    return 111;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (wyl_policy_store_grant_role_membership (store, "svc:plane:child",
+          "site.child-role", "svc-scope") != WYRELOG_E_OK)
+    return 112;
+  if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
+          "site.control-parent") != WYRELOG_E_POLICY)
+    return 113;
+
   return 0;
 }
 
@@ -4582,6 +4724,10 @@ main (void)
   if ((rc = check_store_grants_role_membership ()) != 0)
     return rc;
   if ((rc = check_store_grants_direct_permission ()) != 0)
+    return rc;
+  if ((rc = check_store_reports_permission_planes ()) != 0)
+    return rc;
+  if ((rc = check_store_enforces_service_permission_planes ()) != 0)
     return rc;
   if ((rc = check_store_checks_effective_subject_permission ()) != 0)
     return rc;
