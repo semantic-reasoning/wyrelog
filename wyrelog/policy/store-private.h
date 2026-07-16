@@ -136,6 +136,13 @@ typedef struct
 
 typedef enum
 {
+  WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD = 1,
+  WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW = 2,
+  WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED = 3,
+} WylPolicyRotationRecoveryAction;
+
+typedef enum
+{
   WYL_POLICY_SERVICE_ROTATE_FAIL_NONE = 0,
   WYL_POLICY_SERVICE_ROTATE_FAIL_INSERT,
   WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_UPDATE,
@@ -484,6 +491,10 @@ wyrelog_error_t wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *
 wyrelog_error_t wyl_policy_rotation_recovery_classify (const
     WylPolicyRotationRecoveryProbe * probe,
     WylPolicyRotationRecoveryState * out_state);
+wyrelog_error_t wyl_policy_rotation_recovery_plan (const WylPolicyRotationIntent
+    * intent, const WylPolicyRotationRecoveryProbe * probe,
+    WylPolicyRotationRecoveryState * out_state,
+    WylPolicyRotationRecoveryAction * out_action);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);

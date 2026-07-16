@@ -1411,6 +1411,69 @@ test_rotation_recovery_classifier (void)
 }
 
 static void
+test_rotation_recovery_plan (void)
+{
+  WylPolicyRotationIntent intent = { 0 };
+  g_assert_cmpint (wyl_id_new (&intent.transaction_id), ==, WYRELOG_E_OK);
+  memset (intent.canonical_digest, 0x11, sizeof intent.canonical_digest);
+  memset (intent.old_provider_id, 0x22, sizeof intent.old_provider_id);
+  memset (intent.new_provider_id, 0x33, sizeof intent.new_provider_id);
+  intent.old_generation = 7;
+  intent.expected_new_generation = 8;
+  intent.state = WYL_POLICY_ROTATION_INTENT_PENDING;
+  WylPolicyRotationRecoveryProbe probe = {
+    .old_root_authenticated = TRUE,
+    .old_generation_matches = TRUE,
+    .old_binding_matches = TRUE,
+    .old_inner_invariants_match = TRUE,
+  };
+  WylPolicyRotationRecoveryState state = 0;
+  WylPolicyRotationRecoveryAction action = 0;
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
+          &action), ==, WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_OLD);
+  g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD);
+
+  memset (&probe, 0, sizeof probe);
+  probe.new_root_authenticated = TRUE;
+  probe.new_generation_matches = TRUE;
+  probe.new_binding_matches = TRUE;
+  probe.new_inner_invariants_match = TRUE;
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
+          &action), ==, WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
+  g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW);
+
+  intent.state = WYL_POLICY_ROTATION_INTENT_COMMITTED;
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
+          &action), ==, WYRELOG_E_OK);
+  g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW);
+
+  probe.old_root_authenticated = TRUE;
+  probe.old_generation_matches = TRUE;
+  probe.old_binding_matches = TRUE;
+  probe.old_inner_invariants_match = TRUE;
+  probe.new_root_authenticated = FALSE;
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
+          &action), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED);
+
+  memset (&probe, 0, sizeof probe);
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
+          &action), ==, WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS);
+  g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED);
+
+  intent.expected_new_generation = 99;
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, &state,
+          &action), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (NULL, &probe, &state,
+          &action), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_rotation_recovery_plan (&intent, &probe, NULL,
+          &action), ==, WYRELOG_E_INVALID);
+}
+
+static void
 test_rotation_post_rename_warning_commits (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
@@ -1648,6 +1711,8 @@ main (int argc, char **argv)
       test_rotation_intent_sidecar_lifecycle);
   g_test_add_func ("/policy-store-service-cvk/rotation-recovery-classifier",
       test_rotation_recovery_classifier);
+  g_test_add_func ("/policy-store-service-cvk/rotation-recovery-plan",
+      test_rotation_recovery_plan);
   g_test_add_func ("/policy-store-service-cvk/rotation-failpoints",
       test_rotation_publish_failpoints);
   g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",
