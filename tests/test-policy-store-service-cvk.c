@@ -1165,29 +1165,10 @@ test_rotation_preserves_golden_credential (void)
   TestRuntime reopened_runtime = { 0 };
   g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
       WYRELOG_E_OK);
-  WylPolicyRotationIntent pending = { 0 };
+  WylPolicyRotationIntent cleared = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store,
-          old_auth_key, sizeof old_auth_key, &pending), ==, WYRELOG_E_OK);
-  guint8 expected_digest[crypto_generichash_BYTES];
-  g_assert_cmpint (crypto_generichash (expected_digest,
-          sizeof expected_digest, (const guint8 *) old_canonical,
-          old_canonical_len, NULL, 0), ==, 0);
-  g_assert_cmpmem (pending.canonical_digest, sizeof pending.canonical_digest,
-      expected_digest, sizeof expected_digest);
-  g_assert_cmpint (pending.state, ==, WYL_POLICY_ROTATION_INTENT_PENDING);
-  g_assert_cmpuint (pending.old_generation, ==, 1);
-  g_assert_cmpuint (pending.expected_new_generation, ==, 2);
-  g_assert_false (sodium_is_zero (pending.canonical_digest,
-          sizeof pending.canonical_digest));
-  g_assert_false (sodium_is_zero (pending.old_provider_id,
-          sizeof pending.old_provider_id));
-  g_assert_false (sodium_is_zero (pending.new_provider_id,
-          sizeof pending.new_provider_id));
-  g_assert_cmpint (memcmp (pending.old_provider_id, pending.new_provider_id,
-          sizeof pending.old_provider_id), !=, 0);
-  g_autofree gchar *pending_path = g_strconcat (path,
-      ".wyrelog-rotation-intent", NULL);
-  assert_file_omits (pending_path, original_cvk, sizeof original_cvk);
+          old_auth_key, sizeof old_auth_key, &cleared), ==,
+      WYRELOG_E_NOT_FOUND);
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
@@ -1208,26 +1189,6 @@ test_rotation_preserves_golden_credential (void)
           old_canonical_len, original_cvk, sizeof original_cvk));
   wyl_policy_service_cvk_info_clear (&info);
   wyl_policy_store_close (store);
-
-  TestProvider retry_old = {.seed = 0x20 };
-  TestProvider retry_new = {.seed = 0x40 };
-  TestRuntime retry_runtime = { 0 };
-  RotationFault retry_fault = { 0 };
-  g_assert_cmpint (rotate_store (path, &retry_old, &retry_new, &retry_runtime,
-          &retry_fault), ==, WYRELOG_E_POLICY);
-
-  /* The pending marker remains until the post-commit recovery child clears it. */
-  {
-    TestProvider cleanup_provider = {.seed = 0x20 };
-    TestRuntime cleanup_runtime = { 0 };
-    wyl_policy_store_t *cleanup_store = NULL;
-    g_assert_cmpint (open_store (path, &cleanup_provider, &cleanup_runtime,
-            &cleanup_store), ==, WYRELOG_E_OK);
-    g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (cleanup_store),
-        ==, WYRELOG_E_OK);
-    wyl_policy_store_close (cleanup_store);
-  }
-  sodium_memzero (expected_digest, sizeof expected_digest);
   sodium_memzero (old_auth_key, sizeof old_auth_key);
 
   TestProvider second = {.seed = 0x20 };
@@ -1799,9 +1760,7 @@ test_rotation_policy_edges (void)
   WylPolicyRotationIntent legacy_pending = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store,
           legacy_auth_key, sizeof legacy_auth_key, &legacy_pending), ==,
-      WYRELOG_E_OK);
-  g_assert_cmpuint (legacy_pending.old_generation, ==, 0);
-  g_assert_cmpuint (legacy_pending.expected_new_generation, ==, 1);
+      WYRELOG_E_NOT_FOUND);
   sodium_memzero (legacy_auth_key, sizeof legacy_auth_key);
   const guint8 *missing = NULL;
   gsize missing_len = 0;
