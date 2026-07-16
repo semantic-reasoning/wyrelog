@@ -186,13 +186,14 @@ if build_client
 
   wyrelog_client_sources = files(
     'audit/iter.c',
+    'wyl-client-codec-private.c',
     'wyl-client.c',
   )
 
   libwyrelog_client = library('wyrelog-client',
     wyrelog_client_sources,
     include_directories : wyrelog_inc,
-    dependencies : [wyrelog_dep, glib_dep, gio_dep, libsoup_dep],
+    dependencies : [wyrelog_dep, glib_dep, gio_dep, libsoup_dep, sodium_dep],
     install : true,
     soversion : '0',
   )
