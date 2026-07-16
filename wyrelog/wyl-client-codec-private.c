@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "wyrelog/auth/service-credential-private.h"
+#include "wyrelog/policy/store-private.h"
 
 #define WYL_CLIENT_CODEC_MAX_DOCUMENT (16u * 1024u)
 #define WYL_CLIENT_CODEC_MAX_STRING (4096u)
@@ -147,6 +148,40 @@ parse_uint64 (JsonCursor *cursor, guint64 *out)
     return FALSE;
   *out = value;
   return TRUE;
+}
+
+static gboolean
+parse_int64 (JsonCursor *cursor, gint64 *out)
+{
+  gboolean negative = FALSE;
+  guint64 magnitude = 0;
+  skip_ws (cursor);
+  if (cursor->pos < cursor->len && cursor->data[cursor->pos] == '-') {
+    negative = TRUE;
+    cursor->pos++;
+  }
+  if (!parse_uint64 (cursor, &magnitude)
+      || (negative && magnitude > (guint64) G_MAXINT64 + 1)
+      || (!negative && magnitude > G_MAXINT64))
+    return FALSE;
+  if (negative && magnitude == (guint64) G_MAXINT64 + 1)
+    *out = G_MININT64;
+  else
+    *out = negative ? -(gint64) magnitude : (gint64) magnitude;
+  return TRUE;
+}
+
+static gboolean
+parse_nullable_string (JsonCursor *cursor, gchar **out)
+{
+  skip_ws (cursor);
+  if (cursor->pos + 4 <= cursor->len
+      && memcmp (cursor->data + cursor->pos, "null", 4) == 0) {
+    cursor->pos += 4;
+    *out = NULL;
+    return TRUE;
+  }
+  return parse_string (cursor, out);
 }
 
 static gboolean
@@ -372,6 +407,248 @@ invalid:
     g_array_free (items, TRUE);
   }
   wyl_client_service_principal_list_clear (out_principals);
+  return WYRELOG_E_INVALID;
+}
+
+void
+wyl_client_service_credential_clear (WylClientServiceCredential *value)
+{
+  if (value == NULL)
+    return;
+  g_clear_pointer (&value->credential_id, g_free);
+  g_clear_pointer (&value->subject_id, g_free);
+  g_clear_pointer (&value->tenant_id, g_free);
+  g_clear_pointer (&value->state, g_free);
+  g_clear_pointer (&value->created_by, g_free);
+  g_clear_pointer (&value->revoked_by, g_free);
+  g_clear_pointer (&value->rotated_from_id, g_free);
+  memset (value, 0, sizeof *value);
+}
+
+void wyl_client_service_credential_list_clear
+    (WylClientServiceCredentialList * value)
+{
+  if (value == NULL)
+    return;
+  for (gsize i = 0; i < value->len; i++)
+    wyl_client_service_credential_clear (&value->items[i]);
+  g_clear_pointer (&value->items, g_free);
+  value->len = 0;
+}
+
+static gboolean
+parse_credential_object (JsonCursor *cursor, WylClientServiceCredential *out)
+{
+  gchar *key = NULL;
+  gboolean seen[14] = { FALSE };
+  if (out == NULL || !take (cursor, '{'))
+    return FALSE;
+  wyl_client_service_credential_clear (out);
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (cursor, &key) || !take (cursor, ':'))
+      goto invalid;
+    guint field = 0;
+    if (g_strcmp0 (key, "credential_id") == 0)
+      field = 1;
+    else if (g_strcmp0 (key, "credential_format_version") == 0)
+      field = 2;
+    else if (g_strcmp0 (key, "subject_id") == 0)
+      field = 3;
+    else if (g_strcmp0 (key, "tenant_id") == 0)
+      field = 4;
+    else if (g_strcmp0 (key, "generation") == 0)
+      field = 5;
+    else if (g_strcmp0 (key, "state") == 0)
+      field = 6;
+    else if (g_strcmp0 (key, "created_by") == 0)
+      field = 7;
+    else if (g_strcmp0 (key, "created_at_us") == 0)
+      field = 8;
+    else if (g_strcmp0 (key, "updated_at_us") == 0)
+      field = 9;
+    else if (g_strcmp0 (key, "expires_at_us") == 0)
+      field = 10;
+    else if (g_strcmp0 (key, "last_used_at_us") == 0)
+      field = 11;
+    else if (g_strcmp0 (key, "revoked_by") == 0)
+      field = 12;
+    else if (g_strcmp0 (key, "revoked_at_us") == 0)
+      field = 13;
+    else if (g_strcmp0 (key, "rotated_from_id") == 0)
+      field = 14;
+    else
+      goto invalid;
+    if (seen[field - 1])
+      goto invalid;
+    seen[field - 1] = TRUE;
+    switch (field) {
+      case 1:
+        if (!parse_string (cursor, &out->credential_id)
+            || !wyl_service_credential_id_is_canonical
+            (out->credential_id, strlen (out->credential_id)))
+          goto invalid;
+        break;
+      case 2:{
+        guint64 version = 0;
+        if (!parse_uint64 (cursor, &version) || version != 1)
+          goto invalid;
+        out->credential_format_version = (guint32) version;
+        break;
+      }
+      case 3:
+        if (!parse_string (cursor, &out->subject_id)
+            || !wyl_policy_service_subject_is_valid (out->subject_id,
+                strlen (out->subject_id)))
+          goto invalid;
+        break;
+      case 4:
+        if (!parse_string (cursor, &out->tenant_id)
+            || !string_is_plain_token (out->tenant_id))
+          goto invalid;
+        break;
+      case 5:
+        if (!parse_uint64 (cursor, &out->generation) || out->generation == 0)
+          goto invalid;
+        break;
+      case 6:
+        if (!parse_string (cursor, &out->state)
+            || (g_strcmp0 (out->state, "active") != 0
+                && g_strcmp0 (out->state, "revoked") != 0))
+          goto invalid;
+        break;
+      case 7:
+        if (!parse_string (cursor, &out->created_by)
+            || !string_is_plain_token (out->created_by))
+          goto invalid;
+        break;
+      case 8:
+        if (!parse_int64 (cursor, &out->created_at_us))
+          goto invalid;
+        break;
+      case 9:
+        if (!parse_int64 (cursor, &out->updated_at_us))
+          goto invalid;
+        break;
+      case 10:
+        if (!parse_int64 (cursor, &out->expires_at_us))
+          goto invalid;
+        break;
+      case 11:
+        if (!parse_int64 (cursor, &out->last_used_at_us))
+          goto invalid;
+        break;
+      case 12:
+        if (!parse_nullable_string (cursor, &out->revoked_by)
+            || (out->revoked_by != NULL
+                && !string_is_plain_token (out->revoked_by)))
+          goto invalid;
+        break;
+      case 13:
+        if (!parse_int64 (cursor, &out->revoked_at_us))
+          goto invalid;
+        break;
+      case 14:
+        if (!parse_nullable_string (cursor, &out->rotated_from_id)
+            || (out->rotated_from_id != NULL
+                && !wyl_service_credential_id_is_canonical
+                (out->rotated_from_id, strlen (out->rotated_from_id))))
+          goto invalid;
+        break;
+    }
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      goto invalid;
+  }
+  g_free (key);
+  for (guint i = 0; i < G_N_ELEMENTS (seen); i++)
+    if (!seen[i])
+      goto invalid_no_key;
+  return TRUE;
+invalid:
+  g_free (key);
+invalid_no_key:
+  wyl_client_service_credential_clear (out);
+  return FALSE;
+}
+
+static wyrelog_error_t
+credential_document_decode (const gchar *document, gsize document_len,
+    const gchar *wrapper, WylClientServiceCredential *out)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  if (out == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_clear (out);
+  if (!document_init (document, document_len, &cursor) || !take (&cursor, '{')
+      || !parse_string (&cursor, &key) || g_strcmp0 (key, wrapper) != 0
+      || !take (&cursor, ':') || !parse_credential_object (&cursor, out)
+      || !take (&cursor, '}') || !document_done (&cursor))
+    goto invalid;
+  g_free (key);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  wyl_client_service_credential_clear (out);
+  return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_client_service_credential_decode (const gchar *document,
+    gsize document_len, WylClientServiceCredential *out_credential)
+{
+  return credential_document_decode (document, document_len,
+      "service_credential", out_credential);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_list_decode (const gchar *document,
+    gsize document_len, WylClientServiceCredentialList *out_credentials)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  GArray *items = NULL;
+  if (out_credentials == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_list_clear (out_credentials);
+  if (!document_init (document, document_len, &cursor) || !take (&cursor, '{')
+      || !parse_string (&cursor, &key)
+      || g_strcmp0 (key, "service_credentials") != 0 || !take (&cursor, ':')
+      || !take (&cursor, '['))
+    goto invalid;
+  g_clear_pointer (&key, g_free);
+  items = g_array_new (FALSE, TRUE, sizeof (WylClientServiceCredential));
+  if (items == NULL)
+    goto invalid;
+  if (!take (&cursor, ']')) {
+    while (TRUE) {
+      WylClientServiceCredential item = { 0 };
+      if (!parse_credential_object (&cursor, &item))
+        goto invalid;
+      g_array_append_val (items, item);
+      if (take (&cursor, ']'))
+        break;
+      if (!take (&cursor, ','))
+        goto invalid;
+    }
+  }
+  if (!take (&cursor, '}') || !document_done (&cursor))
+    goto invalid;
+  out_credentials->len = items->len;
+  out_credentials->items = (WylClientServiceCredential *)
+      g_array_free (g_steal_pointer (&items), FALSE);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  if (items != NULL) {
+    for (gsize i = 0; i < items->len; i++)
+      wyl_client_service_credential_clear
+          (&g_array_index (items, WylClientServiceCredential, i));
+    g_array_free (items, TRUE);
+  }
+  wyl_client_service_credential_list_clear (out_credentials);
   return WYRELOG_E_INVALID;
 }
 

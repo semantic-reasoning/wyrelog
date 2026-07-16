@@ -795,6 +795,109 @@ wyl_client_service_principal_disable (WylClient *client,
       guard_timestamp, guard_loc_class, guard_risk, NULL, NULL);
 }
 
+static gboolean
+client_service_credential_id_is_valid (const gchar *credential_id)
+{
+  return credential_id != NULL
+      && wyl_service_credential_id_is_canonical (credential_id,
+      strlen (credential_id));
+}
+
+static gboolean
+client_service_request_id_is_valid (const gchar *request_id)
+{
+  if (request_id == NULL || strlen (request_id) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+  for (const guchar * p = (const guchar *)request_id; *p != '\0'; p++)
+    if (!g_ascii_isalnum (*p))
+      return FALSE;
+  return TRUE;
+}
+
+wyrelog_error_t
+wyl_client_service_credential_get (WylClient *client,
+    const gchar *credential_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential *out_credential)
+{
+  g_autofree gchar *escaped = NULL;
+  g_autofree gchar *path = NULL;
+  g_autoptr (GBytes) body = NULL;
+  gsize body_size = 0;
+  const gchar *body_data;
+  if (out_credential == NULL || !client_service_credential_id_is_valid
+      (credential_id))
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_clear (out_credential);
+  escaped = g_uri_escape_string (credential_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-credentials/%s", escaped);
+  wyrelog_error_t rc = client_service_management_request (client, "GET", path,
+      NULL, guard_timestamp, guard_loc_class, guard_risk, &body, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  body_data = g_bytes_get_data (body, &body_size);
+  return wyl_client_service_credential_decode (body_data, body_size,
+      out_credential);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_list (WylClient *client,
+    const gchar *subject_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialList *out_credentials)
+{
+  g_autofree gchar *escaped = NULL;
+  g_autofree gchar *path = NULL;
+  g_autoptr (GBytes) body = NULL;
+  gsize body_size = 0;
+  const gchar *body_data;
+  if (out_credentials == NULL || !client_service_subject_is_valid (subject_id))
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_list_clear (out_credentials);
+  escaped = g_uri_escape_string (subject_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-principals/%s/credentials", escaped);
+  wyrelog_error_t rc = client_service_management_request (client, "GET", path,
+      NULL, guard_timestamp, guard_loc_class, guard_risk, &body, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  body_data = g_bytes_get_data (body, &body_size);
+  return wyl_client_service_credential_list_decode (body_data, body_size,
+      out_credentials);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_revoke (WylClient *client,
+    const gchar *credential_id, const gchar *request_id,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential *out_credential)
+{
+  g_autofree gchar *escaped = NULL;
+  g_autofree gchar *path = NULL;
+  g_autoptr (GString) json = NULL;
+  g_autoptr (GBytes) body = NULL;
+  gsize body_size = 0;
+  const gchar *body_data;
+  if (out_credential == NULL || !client_service_credential_id_is_valid
+      (credential_id) || !client_service_request_id_is_valid (request_id))
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_clear (out_credential);
+  escaped = g_uri_escape_string (credential_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-credentials/%s", escaped);
+  json = g_string_new ("{\"version\":\"1\",\"request_id\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, request_id);
+  g_string_append_c (json, '}');
+  wyrelog_error_t rc = client_service_management_request (client, "DELETE",
+      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
+      NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  body_data = g_bytes_get_data (body, &body_size);
+  return wyl_client_service_credential_decode (body_data, body_size,
+      out_credential);
+}
+
 wyrelog_error_t
 wyl_client_policy_permission_grant (WylClient *client, const gchar *subject,
     const gchar *perm, const gchar *scope, gint64 guard_timestamp,

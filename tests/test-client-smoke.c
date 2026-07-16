@@ -207,6 +207,27 @@ check_service_credential_codecs (void)
         || principal.subject_id != NULL || principal_list.items != NULL)
       return FALSE;
   }
+  WylClientServiceCredential credential = { 0 };
+  WylClientServiceCredentialList credential_list = { 0 };
+  const gchar *credential_json =
+      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_format_version\":1,\"subject_id\":\"svc:tenant:worker\","
+      "\"tenant_id\":\"tenant-a\",\"generation\":1,\"state\":\"active\","
+      "\"created_by\":\"admin\",\"created_at_us\":1,\"updated_at_us\":2,"
+      "\"expires_at_us\":3,\"last_used_at_us\":-9223372036854775808,\"revoked_by\":null,"
+      "\"revoked_at_us\":0,\"rotated_from_id\":null}}";
+  if (wyl_client_service_credential_decode (credential_json,
+          strlen (credential_json), &credential) != WYRELOG_E_OK
+      || credential.generation != 1 || credential.last_used_at_us != G_MININT64
+      || credential.revoked_by != NULL)
+    return FALSE;
+  wyl_client_service_credential_clear (&credential);
+  const gchar *credential_list_json = "{\"service_credentials\":[]}";
+  if (wyl_client_service_credential_list_decode (credential_list_json,
+          strlen (credential_list_json), &credential_list) != WYRELOG_E_OK
+      || credential_list.len != 0)
+    return FALSE;
+  wyl_client_service_credential_list_clear (&credential_list);
   principal.subject_id = g_strdup ("svc:stale:value");
   principal_list.items = g_new0 (WylClientServicePrincipal, 1);
   principal_list.len = 1;
@@ -436,6 +457,10 @@ main (void)
   principal = { 0 };
   g_auto (WylClientServicePrincipalList)
   principal_list = { 0 };
+  g_auto (WylClientServiceCredential)
+  credential = { 0 };
+  g_auto (WylClientServiceCredentialList)
+  credential_list = { 0 };
   http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
       "\"display_name\":\"Worker\",\"state\":\"active\"}}";
   if (wyl_client_service_principal_create (local_client, "svc:alice:worker",
@@ -467,6 +492,40 @@ main (void)
   if (wyl_client_service_principal_create (local_client, "alice", "bad", 123,
           "public", 49, &principal) != WYRELOG_E_INVALID)
     return 235;
+  const gchar *mock_credential_json =
+      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_format_version\":1,\"subject_id\":\"svc:alice:worker\","
+      "\"tenant_id\":\"__wr_default\",\"generation\":1,\"state\":\"revoked\","
+      "\"created_by\":\"alice\",\"created_at_us\":1,\"updated_at_us\":2,"
+      "\"expires_at_us\":3,\"last_used_at_us\":-1,\"revoked_by\":\"alice\","
+      "\"revoked_at_us\":4,\"rotated_from_id\":null}}";
+  http.body = mock_credential_json;
+  if (wyl_client_service_credential_get (local_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 123, "public", 49,
+          &credential) != WYRELOG_E_OK
+      || g_strcmp0 (http.last_path,
+          "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
+      || g_strcmp0 (credential.state, "revoked") != 0)
+    return 236;
+  http.body = "{\"service_credentials\":[]}";
+  if (wyl_client_service_credential_list (local_client, "svc:alice:worker",
+          123, "public", 49, &credential_list) != WYRELOG_E_OK
+      || credential_list.len != 0
+      || g_strcmp0 (http.last_path,
+          "/service-principals/svc:alice:worker/credentials") != 0)
+    return 237;
+  http.body = mock_credential_json;
+  if (wyl_client_service_credential_revoke (local_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          "222222222222222222222222222", 123, "public", 49,
+          &credential) != WYRELOG_E_OK
+      || g_strcmp0 (http.last_method, "DELETE") != 0
+      || strstr (http.last_body, "request_id") == NULL)
+    return 238;
+  if (wyl_client_service_credential_revoke (local_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "bad", 123, "public", 49,
+          &credential) != WYRELOG_E_INVALID)
+    return 239;
   if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
     return 90;
   /*
