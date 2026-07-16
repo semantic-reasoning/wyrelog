@@ -230,6 +230,25 @@ test_http_server_thread (gpointer data)
   return NULL;
 }
 
+/* Like test_http_server_thread, but binds the loop's context as the
+ * thread-default for the duration of the run. A SoupServer created on a
+ * non-default GMainContext attaches each accepted connection's I/O to the
+ * thread-default context in effect on the thread that drives the loop; if
+ * that thread leaves the global-default context in place, the connection is
+ * serviced by a context nobody iterates and the request stalls until the
+ * client times out. */
+static gpointer
+test_http_server_thread_ctx (gpointer data)
+{
+  TestHttpServer *http = data;
+  GMainContext *context = g_main_loop_get_context (http->loop);
+
+  g_main_context_push_thread_default (context);
+  g_main_loop_run (http->loop);
+  g_main_context_pop_thread_default (context);
+  return NULL;
+}
+
 static gboolean
 mark_main_loop_ready (gpointer data)
 {
@@ -1732,7 +1751,7 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   if (!wyl_daemon_http_refresh_context_is_for_test (http.server, context))
     return 2264;
   GThread *thread = g_thread_new ("refresh-explicit-context",
-      test_http_server_thread, &http);
+      test_http_server_thread_ctx, &http);
   MainLoopReadyBarrier barrier = { 0 };
   g_mutex_init (&barrier.mutex);
   g_cond_init (&barrier.changed);
