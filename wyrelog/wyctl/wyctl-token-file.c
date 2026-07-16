@@ -25,6 +25,19 @@
 #include <unistd.h>
 #endif
 
+void
+wyctl_token_file_free_sensitive (gchar *value, gsize capacity)
+{
+  if (value == NULL)
+    return;
+  if (capacity == 0)
+    capacity = strlen (value) + 1;
+  volatile gchar *wipe = (volatile gchar *) value;
+  for (gsize i = 0; i < capacity; i++)
+    wipe[i] = 0;
+  g_free (value);
+}
+
 const gchar *
 wyctl_token_file_status_message (WyctlTokenFileStatus status)
 {
@@ -142,7 +155,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
     DWORD read_n = 0;
     if (!ReadFile (h, buf + got, chunk, &read_n, NULL)) {
       CloseHandle (h);
-      g_free (buf);
+      wyctl_token_file_free_sensitive (buf, cap + 1);
       return WYCTL_TOKEN_FILE_IO;
     }
     if (read_n == 0)
@@ -154,7 +167,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
     DWORD probe = 0;
     if (ReadFile (h, &overflow, 1, &probe, NULL) && probe > 0) {
       CloseHandle (h);
-      g_free (buf);
+      wyctl_token_file_free_sensitive (buf, cap + 1);
       return WYCTL_TOKEN_FILE_TOO_LARGE;
     }
   }
@@ -162,11 +175,11 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
   buf[got] = '\0';
 
   if (got == 0) {
-    g_free (buf);
+    wyctl_token_file_free_sensitive (buf, cap + 1);
     return WYCTL_TOKEN_FILE_EMPTY;
   }
   if (memchr (buf, '\0', got) != NULL) {
-    g_free (buf);
+    wyctl_token_file_free_sensitive (buf, cap + 1);
     return WYCTL_TOKEN_FILE_INVALID_BYTES;
   }
 
@@ -213,7 +226,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
       if (errno == EINTR)
         continue;
       close (fd);
-      g_free (buf);
+      wyctl_token_file_free_sensitive (buf, cap + 1);
       return WYCTL_TOKEN_FILE_IO;
     }
     if (n == 0)
@@ -228,7 +241,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
     ssize_t n = read (fd, &overflow, 1);
     if (n > 0) {
       close (fd);
-      g_free (buf);
+      wyctl_token_file_free_sensitive (buf, cap + 1);
       return WYCTL_TOKEN_FILE_TOO_LARGE;
     }
   }
@@ -236,7 +249,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
   buf[got] = '\0';
 
   if (got == 0) {
-    g_free (buf);
+    wyctl_token_file_free_sensitive (buf, cap + 1);
     return WYCTL_TOKEN_FILE_EMPTY;
   }
 
@@ -244,7 +257,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
    * INVALID_BYTES here keeps higher-level normalize logic from
    * mis-classifying the file. */
   if (memchr (buf, '\0', got) != NULL) {
-    g_free (buf);
+    wyctl_token_file_free_sensitive (buf, cap + 1);
     return WYCTL_TOKEN_FILE_INVALID_BYTES;
   }
 
