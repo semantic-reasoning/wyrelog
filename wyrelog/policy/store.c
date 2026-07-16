@@ -2007,6 +2007,40 @@ wyl_policy_rotation_recovery_classify (const WylPolicyRotationRecoveryProbe
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_policy_rotation_recovery_plan (const WylPolicyRotationIntent *intent,
+    const WylPolicyRotationRecoveryProbe *probe,
+    WylPolicyRotationRecoveryState *out_state,
+    WylPolicyRotationRecoveryAction *out_action)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS;
+  if (out_action != NULL)
+    *out_action = WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+  if (intent == NULL || probe == NULL || out_state == NULL
+      || out_action == NULL)
+    return WYRELOG_E_INVALID;
+  if (rotation_intent_validate (intent) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+
+  wyrelog_error_t rc = wyl_policy_rotation_recovery_classify (probe, out_state);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (*out_state == WYL_POLICY_ROTATION_RECOVERY_OLD
+      && intent->state == WYL_POLICY_ROTATION_INTENT_PENDING) {
+    *out_action = WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD;
+    return WYRELOG_E_OK;
+  }
+  if (*out_state == WYL_POLICY_ROTATION_RECOVERY_NEW) {
+    *out_action = WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW;
+    return WYRELOG_E_OK;
+  }
+  if (*out_state == WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS)
+    return WYRELOG_E_OK;
+  return WYRELOG_E_POLICY;
+}
+
 /* Pinned canonical-file helpers (CWE-367 / CodeQL
  * cpp/toctou-race-condition).
  *
