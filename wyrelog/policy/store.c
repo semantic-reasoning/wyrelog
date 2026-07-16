@@ -59,6 +59,8 @@
 #define WYL_POLICY_STORE_MAGIC "WYLPS"
 #define WYL_POLICY_STORE_MAGIC_LEN 5
 #define WYL_POLICY_STORE_FORMAT_VERSION 1
+#define WYL_POLICY_STORE_DESERIALIZE_GROWTH_BYTES (1024u * 1024u)
+#define WYL_POLICY_STORE_MAX_IMAGE_BYTES (64u * 1024u * 1024u)
 
 #define WYL_SERVICE_CVK_ENVELOPE_BYTES 124u
 #define WYL_SERVICE_CVK_MAGIC_OFFSET 0u
@@ -114,6 +116,10 @@ typedef struct
 struct wyl_policy_store_t
 {
   sqlite3 *db;
+  /* SQLite uses this caller-owned deserialize buffer until sqlite3_close().
+   * Retain the metadata so it can be wiped and freed immediately afterward. */
+  guint8 *deserialized_image;
+  gsize deserialized_image_capacity;
   wyl_policy_store_lease_t *lease;
   gchar *canonical_path;
   gchar *work_path;
@@ -2341,7 +2347,16 @@ decrypt_policy_store_from_bytes (wyl_policy_store_t *store,
 
   gsize plaintext_len = (gsize) cipher_len_le
       - crypto_aead_xchacha20poly1305_ietf_ABYTES;
-  g_autofree guint8 *plaintext = g_malloc (plaintext_len);
+  if (plaintext_len > G_MAXSIZE - WYL_POLICY_STORE_DESERIALIZE_GROWTH_BYTES)
+    return WYRELOG_E_POLICY;
+  if (plaintext_len > WYL_POLICY_STORE_MAX_IMAGE_BYTES)
+    return WYRELOG_E_POLICY;
+  gsize plaintext_capacity = plaintext_len
+      + WYL_POLICY_STORE_DESERIALIZE_GROWTH_BYTES;
+  guint8 *plaintext = sqlite3_malloc64 ((sqlite3_uint64) plaintext_capacity);
+  if (plaintext == NULL)
+    return WYRELOG_E_NOMEM;
+  memset (plaintext + plaintext_len, 0, plaintext_capacity - plaintext_len);
   const guint8 *ciphertext_body =
       ciphertext + sizeof (WylPolicyStoreFileHeader);
   unsigned long long decrypted_len = 0;
@@ -2349,24 +2364,47 @@ decrypt_policy_store_from_bytes (wyl_policy_store_t *store,
   if (crypto_aead_xchacha20poly1305_ietf_decrypt (plaintext, &decrypted_len,
           NULL, ciphertext_body, cipher_len_le,
           (const guint8 *) header, sizeof (WylPolicyStoreFileHeader),
-          header->nonce, store->encryption_key) != 0)
+          header->nonce, store->encryption_key) != 0) {
+    sodium_memzero (plaintext, plaintext_capacity);
+    sqlite3_free (plaintext);
     return WYRELOG_E_CRYPTO;
-  if (decrypted_len != plaintext_len)
+  }
+  if (decrypted_len != plaintext_len) {
+    sodium_memzero (plaintext, plaintext_capacity);
+    sqlite3_free (plaintext);
     return WYRELOG_E_CRYPTO;
+  }
+  /* A serialized image can retain the source connection's WAL header bits.
+   * WAL requires a filesystem sidecar, which an in-memory database cannot
+   * provide. Normalize the private image to rollback-journal semantics before
+   * deserialization; the authenticated canonical envelope is unchanged. */
+  if (plaintext_len >= 20 && plaintext[18] == 2 && plaintext[19] == 2) {
+    plaintext[18] = 1;
+    plaintext[19] = 1;
+  }
 
-#ifndef G_OS_WIN32
-  /* POSIX builds always have canonical_dirfd set when store->encrypted
-   * is true; the open path enforces the invariant. Bail with a clear
-   * error if it has been violated by a future refactor rather than
-   * fall through to the path-by-name survivor that would re-introduce
-   * the TOCTOU surface this commit closes. */
-  if (store->canonical_dirfd < 0 || store->work_basename == NULL)
-    return WYRELOG_E_INTERNAL;
-  return write_plaintext_work_through_dirfd (store->canonical_dirfd,
-      store->work_basename, plaintext, plaintext_len);
-#else
-  return write_plaintext_work_file (store->work_path, plaintext, plaintext_len);
-#endif
+  if (store->db == NULL
+      && sqlite3_open_v2 (":memory:", &store->db,
+          SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
+    if (store->db != NULL)
+      sqlite3_close (store->db);
+    store->db = NULL;
+    sodium_memzero (plaintext, plaintext_capacity);
+    sqlite3_free (plaintext);
+    return WYRELOG_E_IO;
+  }
+  if (sqlite3_deserialize (store->db, "main", plaintext,
+          (sqlite3_int64) plaintext_len, (sqlite3_int64) plaintext_capacity,
+          0) != SQLITE_OK) {
+    sqlite3_close (store->db);
+    store->db = NULL;
+    sodium_memzero (plaintext, plaintext_capacity);
+    sqlite3_free (plaintext);
+    return WYRELOG_E_POLICY;
+  }
+  store->deserialized_image = plaintext;
+  store->deserialized_image_capacity = plaintext_capacity;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -2621,34 +2659,41 @@ prepare_policy_store_encrypted (wyl_policy_store_t *store,
   *out_encrypted_len = 0;
   if (!store->encrypted)
     return WYRELOG_E_INVALID;
-  if (store->work_path == NULL || store->canonical_path == NULL
-      || store->canonical_path[0] == '\0')
+  if (store->canonical_path == NULL || store->canonical_path[0] == '\0'
+      || store->db == NULL)
     return WYRELOG_E_INVALID;
 
   if (store->db != NULL && sqlite3_db_cacheflush (store->db) != SQLITE_OK)
     return WYRELOG_E_IO;
 
-  g_autofree guint8 *plaintext = NULL;
-  gsize plaintext_len = 0;
-#ifndef G_OS_WIN32
-  /* POSIX builds always have canonical_dirfd; the open path enforces
-   * this invariant. Bail with a clear error if it's been violated by
-   * a future refactor rather than fall through to the path-by-name
-   * survivor that would re-introduce the TOCTOU surface. */
-  if (store->canonical_dirfd < 0 || store->work_basename == NULL)
-    return WYRELOG_E_INTERNAL;
-  if (read_work_through_dirfd (store->canonical_dirfd, store->work_basename,
-          &plaintext, &plaintext_len) != WYRELOG_E_OK)
+  sqlite3_int64 serialized_len = 0;
+  guint8 *serialized = sqlite3_serialize (store->db, "main",
+      &serialized_len, 0);
+  if (serialized == NULL || serialized_len <= 0
+      || (guint64) serialized_len > G_MAXSIZE
+      || (guint64) serialized_len > WYL_POLICY_STORE_MAX_IMAGE_BYTES) {
+    if (serialized != NULL)
+      sqlite3_free (serialized);
     return WYRELOG_E_IO;
-#else
-  if (read_whole_file (store->work_path, &plaintext,
-          &plaintext_len) != WYRELOG_E_OK)
-    return WYRELOG_E_IO;
-#endif
+  }
+  gsize plaintext_len = (gsize) serialized_len;
+  g_autofree guint8 *plaintext = g_try_malloc (plaintext_len);
+  if (plaintext == NULL) {
+    sodium_memzero (serialized, plaintext_len);
+    sqlite3_free (serialized);
+    return WYRELOG_E_NOMEM;
+  }
+  memcpy (plaintext, serialized, plaintext_len);
+  sodium_memzero (serialized, plaintext_len);
+  sqlite3_free (serialized);
 
   const gsize encrypted_len = sizeof (WylPolicyStoreFileHeader)
       + crypto_aead_xchacha20poly1305_ietf_ABYTES + plaintext_len;
-  guint8 *encrypted = g_malloc0 (encrypted_len);
+  guint8 *encrypted = g_try_malloc0 (encrypted_len);
+  if (encrypted == NULL) {
+    sodium_memzero (plaintext, plaintext_len);
+    return WYRELOG_E_NOMEM;
+  }
   WylPolicyStoreFileHeader *header = (WylPolicyStoreFileHeader *) encrypted;
   memcpy (header->magic, WYL_POLICY_STORE_MAGIC, WYL_POLICY_STORE_MAGIC_LEN);
   header->version = WYL_POLICY_STORE_FORMAT_VERSION;
@@ -2665,12 +2710,14 @@ prepare_policy_store_encrypted (wyl_policy_store_t *store,
           plaintext, plaintext_len,
           (const guint8 *) header, sizeof (WylPolicyStoreFileHeader), NULL,
           header->nonce, key) != 0) {
+    sodium_memzero (plaintext, plaintext_len);
     sodium_memzero (encrypted, encrypted_len);
     g_free (encrypted);
     return WYRELOG_E_CRYPTO;
   }
   if (ciphertext_len != (unsigned long long) (encrypted_len
           - sizeof (WylPolicyStoreFileHeader))) {
+    sodium_memzero (plaintext, plaintext_len);
     sodium_memzero (encrypted, encrypted_len);
     g_free (encrypted);
     return WYRELOG_E_CRYPTO;
@@ -2678,6 +2725,7 @@ prepare_policy_store_encrypted (wyl_policy_store_t *store,
 
   *out_encrypted = encrypted;
   *out_encrypted_len = encrypted_len;
+  sodium_memzero (plaintext, plaintext_len);
   return WYRELOG_E_OK;
 }
 
@@ -3528,6 +3576,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 
   const gchar *open_path = self->lease != NULL ? self->canonical_path :
       effective_path;
+  gboolean fresh_encrypted_memory = self->encrypted && self->db == NULL;
   if (self->encrypted) {
     if (path_is_memory_db (effective_path)) {
       rc = WYRELOG_E_POLICY;
@@ -3601,7 +3650,10 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
       }
     }
 #endif
-    open_path = self->work_path;
+    /* The decrypted image is loaded into an in-memory SQLite connection by
+     * decrypt_policy_store_from_bytes(). A fresh encrypted store is opened
+     * in memory below; no clear-work pathname is ever handed to SQLite. */
+    open_path = NULL;
   } else {
     if (self->keyprovider.owned
         && owned_keyprovider_probe (&self->keyprovider) != WYRELOG_E_OK) {
@@ -3619,7 +3671,17 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     goto fail;
   }
 
-  if (sqlite3_open_v2 (open_path, &self->db,
+  if (self->encrypted) {
+    if (self->db == NULL
+        && sqlite3_open_v2 (":memory:", &self->db,
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, NULL) != SQLITE_OK) {
+      if (self->db != NULL)
+        sqlite3_close (self->db);
+      self->db = NULL;
+      rc = WYRELOG_E_IO;
+      goto fail;
+    }
+  } else if (sqlite3_open_v2 (open_path, &self->db,
           SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
           NULL) != SQLITE_OK) {
     if (self->db != NULL)
@@ -3628,17 +3690,31 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     rc = WYRELOG_E_IO;
     goto fail;
   }
+  if (fresh_encrypted_memory
+      && exec_sql (self->db,
+          "CREATE TABLE __wyrelog_memory_seed (value INTEGER);"
+          "DROP TABLE __wyrelog_memory_seed;") != WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+    goto fail;
+  }
 
   if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)
       != WYRELOG_E_OK) {
     sqlite3_close (self->db);
     self->db = NULL;
+    if (self->deserialized_image != NULL) {
+      sodium_memzero (self->deserialized_image,
+          self->deserialized_image_capacity);
+      sqlite3_free (self->deserialized_image);
+      self->deserialized_image = NULL;
+      self->deserialized_image_capacity = 0;
+    }
     rc = WYRELOG_E_POLICY;
     goto fail;
   }
 
   const gchar *open_pragmas = self->encrypted ?
-      "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = MEMORY;" :
+      "PRAGMA foreign_keys = ON;" "PRAGMA temp_store = MEMORY;" :
       "PRAGMA foreign_keys = ON;" "PRAGMA journal_mode = WAL;";
   if (exec_sql (self->db, open_pragmas) != WYRELOG_E_OK) {
     rc = WYRELOG_E_IO;
@@ -3658,6 +3734,9 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   return WYRELOG_E_OK;
 
 fail:
+  /* An unsuccessful open must never serialize a partially initialized or
+   * rejected in-memory image back over the authenticated canonical bytes. */
+  self->suppress_close_persist = TRUE;
   wyl_policy_store_close (self);
   return rc;
 }
@@ -3679,6 +3758,13 @@ wyl_policy_store_close (wyl_policy_store_t *store)
       (void) persist_policy_store_encrypted (store);
     sqlite3_close (store->db);
     store->db = NULL;
+    if (store->deserialized_image != NULL) {
+      sodium_memzero (store->deserialized_image,
+          store->deserialized_image_capacity);
+      sqlite3_free (store->deserialized_image);
+      store->deserialized_image = NULL;
+      store->deserialized_image_capacity = 0;
+    }
     if (store->encrypted) {
 #ifndef G_OS_WIN32
       if (store->canonical_dirfd >= 0 && store->work_basename != NULL)
@@ -9393,7 +9479,7 @@ static wyrelog_error_t
       && (authority_cvk == NULL
           || authority_cvk_len != WYL_SERVICE_CREDENTIAL_CVK_BYTES))
     return WYRELOG_E_INVALID;
-  {
+  if (!authority_owned) {
     WylServiceCredentialFenceResult fence = { 0 };
     rc = wyl_policy_store_precheck_service_credential_operation_fence (store,
         NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, request_id, subject_id,
@@ -10021,7 +10107,7 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
           || authority_cvk_len != WYL_SERVICE_CREDENTIAL_CVK_BYTES))
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = WYRELOG_E_OK;
-  {
+  if (!authority_owned) {
     WylServiceCredentialFenceResult fence = { 0 };
     rc = wyl_policy_store_precheck_service_credential_operation_fence (store,
         NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,

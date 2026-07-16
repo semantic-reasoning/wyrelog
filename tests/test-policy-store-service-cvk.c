@@ -422,7 +422,7 @@ test_fixture_concurrency_and_reopen (void)
           expected + CVK_OFFSET, 32));
   wyl_policy_service_cvk_info_clear (&info);
   g_autofree gchar *work_path = g_strdup_printf ("%s.wyrelog-clear", path);
-  assert_file_omits (work_path, expected + CVK_OFFSET, 32);
+  g_assert_false (g_file_test (work_path, G_FILE_TEST_EXISTS));
 
   g_assert_cmpint (wyl_policy_store_begin_mutation (store), ==, WYRELOG_E_OK);
   missing = (const guint8 *) 0x1;
