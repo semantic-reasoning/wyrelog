@@ -16,6 +16,11 @@ libsoup_dep = dependency('libsoup-3.0',
 )
 sodium_dep = dependency('libsodium', required : true)
 sqlite_dep = dependency('sqlite3', required : true)
+cc = meson.get_compiler('c')
+if not cc.has_function('sqlite3_deserialize', dependencies : sqlite_dep) or \
+    not cc.has_function('sqlite3_serialize', dependencies : sqlite_dep)
+  error('SQLite must provide sqlite3_deserialize/sqlite3_serialize for encrypted policy stores')
+endif
 tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
 enable_fact_store_opt = get_option('enable_fact_store')
