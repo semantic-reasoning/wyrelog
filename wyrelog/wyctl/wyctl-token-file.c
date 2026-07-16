@@ -67,10 +67,17 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   }
   return WYCTL_TOKEN_FILE_OK;
 #else
-  int fd = open (path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY,
-      0600);
-  if (fd < 0)
+  g_autofree gchar *parent = g_path_get_dirname (path);
+  g_autofree gchar *basename = g_path_get_basename (path);
+  int dirfd = open (parent, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  if (dirfd < 0)
     return WYCTL_TOKEN_FILE_IO;
+  int fd = openat (dirfd, basename,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOCTTY | O_NOFOLLOW, 0600);
+  if (fd < 0) {
+    close (dirfd);
+    return WYCTL_TOKEN_FILE_IO;
+  }
   gsize written = 0;
   while (written < token_len) {
     ssize_t n = write (fd, token + written, token_len - written);
@@ -78,6 +85,7 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
       continue;
     if (n <= 0) {
       close (fd);
+      close (dirfd);
       g_unlink (path);
       return WYCTL_TOKEN_FILE_IO;
     }
@@ -85,7 +93,8 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   }
   gboolean sync_ok = fsync (fd) == 0;
   gboolean close_ok = close (fd) == 0;
-  if (!sync_ok || !close_ok) {
+  gboolean parent_close_ok = close (dirfd) == 0;
+  if (!sync_ok || !close_ok || !parent_close_ok) {
     g_unlink (path);
     return WYCTL_TOKEN_FILE_IO;
   }
