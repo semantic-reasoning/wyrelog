@@ -2026,6 +2026,84 @@ wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *store)
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+rotation_intent_digest_canonical (wyl_policy_store_t *store,
+    guint8 out_digest[crypto_generichash_BYTES])
+{
+  if (store == NULL || out_digest == NULL)
+    return WYRELOG_E_INVALID;
+  guint8 *canonical = NULL;
+  gsize canonical_len = 0;
+  wyrelog_error_t rc;
+#ifdef G_OS_WIN32
+  rc = read_whole_file (store->canonical_path, &canonical, &canonical_len);
+#else
+  rc = read_through_dirfd (store->canonical_dirfd, store->canonical_basename,
+      &canonical, &canonical_len);
+#endif
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (canonical_len == 0
+      || crypto_generichash (out_digest, crypto_generichash_BYTES, canonical,
+          canonical_len, NULL, 0) != 0) {
+    sodium_memzero (canonical, canonical_len);
+    g_free (canonical);
+    sodium_memzero (out_digest, crypto_generichash_BYTES);
+    return WYRELOG_E_CRYPTO;
+  }
+  sodium_memzero (canonical, canonical_len);
+  g_free (canonical);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+rotation_intent_write_pending (wyl_policy_store_t *store,
+    const wyl_policy_service_cvk_info_t *info, const guint8 *new_key_material)
+{
+  if (store == NULL || info == NULL || new_key_material == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyRotationIntent intent = { 0 };
+  guint8 auth_key[crypto_generichash_KEYBYTES] = { 0 };
+  wyrelog_error_t rc = wyl_policy_rotation_intent_derive_auth_key (store,
+      auth_key, sizeof auth_key);
+  if (rc == WYRELOG_E_OK) {
+    WylPolicyRotationIntent existing = { 0 };
+    wyrelog_error_t existing_rc =
+        wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+        sizeof auth_key, &existing);
+    sodium_memzero (&existing, sizeof existing);
+    if (existing_rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_POLICY;
+    else if (existing_rc != WYRELOG_E_NOT_FOUND)
+      rc = existing_rc;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_id_new (&intent.transaction_id);
+  if (rc == WYRELOG_E_OK)
+    rc = rotation_intent_digest_canonical (store, intent.canonical_digest);
+  if (rc == WYRELOG_E_OK)
+    memcpy (intent.old_provider_id, store->encryption_key_id,
+        sizeof intent.old_provider_id);
+  if (rc == WYRELOG_E_OK)
+    memcpy (intent.new_provider_id,
+        new_key_material + WYL_POLICY_STORE_KEY_LEN,
+        sizeof intent.new_provider_id);
+  if (rc == WYRELOG_E_OK) {
+    intent.old_generation = info->generation;
+    if (intent.old_generation == G_MAXUINT64)
+      rc = WYRELOG_E_POLICY;
+    else
+      intent.expected_new_generation = intent.old_generation + 1;
+    intent.state = WYL_POLICY_ROTATION_INTENT_PENDING;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_rotation_intent_write_sidecar (store, &intent, auth_key,
+        sizeof auth_key);
+  sodium_memzero (auth_key, sizeof auth_key);
+  sodium_memzero (&intent, sizeof intent);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_policy_rotation_recovery_classify (const WylPolicyRotationRecoveryProbe
     *probe, WylPolicyRotationRecoveryState *out_state)
@@ -9257,6 +9335,9 @@ prepare_keyprovider_rotation_work (wyl_policy_store_t *store,
   }
 
   rc = rotation_derive_store_key (store, new_provider, out_new_key_material);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+  rc = rotation_intent_write_pending (store, &info, *out_new_key_material);
   if (rc != WYRELOG_E_OK)
     goto finish;
   if (old_envelope != NULL && rotation_runtime != NULL
