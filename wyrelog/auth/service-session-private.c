@@ -88,6 +88,14 @@ wyl_session_is_active_private (const WylSession *session)
       && session->state == WYL_SESSION_STATE_ACTIVE;
 }
 
+gboolean
+wyl_session_is_active_human_private (const WylSession *session)
+{
+  return wyl_session_is_active_private (session)
+      && wyl_session_get_auth_method_private (session)
+      == WYL_SESSION_AUTH_METHOD_HUMAN;
+}
+
 wyrelog_error_t
 wyl_session_copy_persistent_id_private (const WylSession *session,
     wyl_id_t *out_id)

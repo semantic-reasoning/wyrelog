@@ -74,6 +74,10 @@ for symbol in PROTECTED:
         MANIFEST[symbol]["wyrelog/daemon/http.c"] = (
             2 if symbol in {"wyl_session_get_auth_method_private",
                             "wyl_session_is_active_private"} else 1)
+MANIFEST["wyl_session_get_auth_method_private"][
+    "wyrelog/auth/service-session-private.c"] = 2
+MANIFEST["wyl_session_is_active_private"][
+    "wyrelog/auth/service-session-private.c"] = 2
 MANIFEST["wyl_session_dup_service_subject_private"][
     "wyrelog/daemon/http.c"] = 2
 MANIFEST["wyl_session_dup_service_tenant_private"][
