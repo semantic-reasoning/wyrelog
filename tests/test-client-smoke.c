@@ -152,10 +152,14 @@ check_service_credential_codecs (void)
   WylClientServiceCredentialIssueResult issue = { 0 };
   const gchar *token_json = " { \"access_token\": \"access-1\" } ";
   const gchar *issue_json =
-      "{\"service_credential\":{\"generation\":7,"
+      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_format_version\":1,\"subject_id\":\"svc:tenant:worker\","
+      "\"tenant_id\":\"tenant-a\",\"generation\":7,\"state\":\"active\","
+      "\"created_by\":\"admin\",\"created_at_us\":1,\"updated_at_us\":2,"
+      "\"expires_at_us\":3,\"last_used_at_us\":-1,\"revoked_by\":null,"
+      "\"revoked_at_us\":0,\"rotated_from_id\":null,"
       "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-      "abcdefghijklmnopq\","
-      "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\"}}";
+      "abcdefghijklmnopq\"}}";
 
   if (wyl_client_service_token_result_decode (token_json, strlen (token_json),
           &token) != WYRELOG_E_OK
@@ -165,14 +169,19 @@ check_service_credential_codecs (void)
   if (token.access_token.text != NULL || token.access_token.len != 0)
     return FALSE;
 
-  if (wyl_client_service_credential_issue_result_decode (issue_json,
-          strlen (issue_json), &issue) != WYRELOG_E_OK
-      || g_strcmp0 (issue.credential_id,
+  wyrelog_error_t issue_decode_rc =
+      wyl_client_service_credential_issue_result_decode (issue_json,
+      strlen (issue_json), &issue);
+  if (issue_decode_rc != WYRELOG_E_OK
+      || g_strcmp0 (issue.credential.credential_id,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
-      || issue.generation != 7 || issue.credential_secret.len != 43)
+      || issue.credential.generation != 7
+      || issue.credential_secret.len != 43) {
     return FALSE;
+  }
   wyl_client_service_credential_issue_result_clear (&issue);
-  if (issue.credential_id != NULL || issue.credential_secret.text != NULL)
+  if (issue.credential.credential_id != NULL
+      || issue.credential_secret.text != NULL)
     return FALSE;
 
   WylClientServicePrincipal principal = { 0 };
@@ -461,6 +470,8 @@ main (void)
   credential = { 0 };
   g_auto (WylClientServiceCredentialList)
   credential_list = { 0 };
+  g_auto (WylClientServiceCredentialIssueResult)
+  issue_result = { 0 };
   http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
       "\"display_name\":\"Worker\",\"state\":\"active\"}}";
   if (wyl_client_service_principal_create (local_client, "svc:alice:worker",
@@ -526,6 +537,56 @@ main (void)
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", "bad", 123, "public", 49,
           &credential) != WYRELOG_E_INVALID)
     return 239;
+  WylClientServiceCredentialIssueRequest issue_request = {
+    .subject_id = "svc:alice:worker",
+    .tenant_id = "__wr_default",
+    .request_id = "333333333333333333333333333",
+    .expires_at_us = 0,
+  };
+  http.body =
+      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_format_version\":1,\"subject_id\":\"svc:alice:worker\","
+      "\"tenant_id\":\"__wr_default\",\"generation\":1,\"state\":\"active\","
+      "\"created_by\":\"alice\",\"created_at_us\":1,\"updated_at_us\":2,"
+      "\"expires_at_us\":0,\"last_used_at_us\":-1,\"revoked_by\":null,"
+      "\"revoked_at_us\":0,\"rotated_from_id\":null,"
+      "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      "abcdefghijklmnopq\"}}";
+  wyrelog_error_t issue_rc = wyl_client_service_credential_issue
+      (local_client, &issue_request, 123, "public", 49, &issue_result);
+  if (issue_rc != WYRELOG_E_OK) {
+    return 240;
+  }
+  http.status = 409;
+  if (wyl_client_service_credential_issue (local_client, &issue_request,
+          123, "public", 49, &issue_result) != WYRELOG_E_POLICY
+      || issue_result.credential_secret.text != NULL)
+    return 242;
+  http.status = 0;
+  issue_request.tenant_id = "other-tenant";
+  if (wyl_client_service_credential_issue (local_client, &issue_request,
+          123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
+    return 243;
+  issue_request.tenant_id = "__wr_default";
+  http.body =
+      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_format_version\":1,\"subject_id\":\"svc:alice:worker\","
+      "\"tenant_id\":\"__wr_default\",\"generation\":2,\"state\":\"active\","
+      "\"created_by\":\"alice\",\"created_at_us\":1,\"updated_at_us\":2,"
+      "\"expires_at_us\":0,\"last_used_at_us\":-1,\"revoked_by\":null,"
+      "\"revoked_at_us\":0,\"rotated_from_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+      "abcdefghijklmnopq\"}}";
+  if (wyl_client_service_credential_rotate (local_client,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          "444444444444444444444444444", 0, 123, "public", 49,
+          &issue_result) != WYRELOG_E_OK
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path,
+          "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv/rotate") != 0
+      || issue_result.credential.generation != 2
+      || issue_result.credential_secret.len != 43)
+    return 241;
   if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
     return 90;
   /*

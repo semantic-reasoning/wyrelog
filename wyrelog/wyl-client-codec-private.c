@@ -235,9 +235,8 @@ void wyl_client_service_credential_issue_result_clear
 {
   if (value == NULL)
     return;
-  g_clear_pointer (&value->credential_id, g_free);
+  wyl_client_service_credential_clear (&value->credential);
   wyl_client_sensitive_text_clear (&value->credential_secret);
-  value->generation = 0;
 }
 
 void
@@ -437,10 +436,13 @@ void wyl_client_service_credential_list_clear
 }
 
 static gboolean
-parse_credential_object (JsonCursor *cursor, WylClientServiceCredential *out)
+parse_credential_object (JsonCursor *cursor, WylClientServiceCredential *out,
+    gchar **out_secret)
 {
   gchar *key = NULL;
-  gboolean seen[14] = { FALSE };
+  gboolean seen[15] = { FALSE };
+  if (out_secret != NULL)
+    *out_secret = NULL;
   if (out == NULL || !take (cursor, '{'))
     return FALSE;
   wyl_client_service_credential_clear (out);
@@ -477,6 +479,8 @@ parse_credential_object (JsonCursor *cursor, WylClientServiceCredential *out)
       field = 13;
     else if (g_strcmp0 (key, "rotated_from_id") == 0)
       field = 14;
+    else if (g_strcmp0 (key, "credential_secret") == 0)
+      field = 15;
     else
       goto invalid;
     if (seen[field - 1])
@@ -555,6 +559,11 @@ parse_credential_object (JsonCursor *cursor, WylClientServiceCredential *out)
                 (out->rotated_from_id, strlen (out->rotated_from_id))))
           goto invalid;
         break;
+      case 15:
+        if (out_secret == NULL || !parse_string (cursor, out_secret)
+            || !credential_secret_is_valid (*out_secret))
+          goto invalid;
+        break;
     }
     if (take (cursor, '}'))
       break;
@@ -562,13 +571,19 @@ parse_credential_object (JsonCursor *cursor, WylClientServiceCredential *out)
       goto invalid;
   }
   g_free (key);
-  for (guint i = 0; i < G_N_ELEMENTS (seen); i++)
+  for (guint i = 0; i < 14; i++)
     if (!seen[i])
       goto invalid_no_key;
+  if (out_secret != NULL && !seen[14])
+    goto invalid_no_key;
   return TRUE;
 invalid:
   g_free (key);
 invalid_no_key:
+  if (out_secret != NULL && *out_secret != NULL) {
+    sodium_memzero (*out_secret, strlen (*out_secret));
+    g_clear_pointer (out_secret, g_free);
+  }
   wyl_client_service_credential_clear (out);
   return FALSE;
 }
@@ -584,7 +599,7 @@ credential_document_decode (const gchar *document, gsize document_len,
   wyl_client_service_credential_clear (out);
   if (!document_init (document, document_len, &cursor) || !take (&cursor, '{')
       || !parse_string (&cursor, &key) || g_strcmp0 (key, wrapper) != 0
-      || !take (&cursor, ':') || !parse_credential_object (&cursor, out)
+      || !take (&cursor, ':') || !parse_credential_object (&cursor, out, NULL)
       || !take (&cursor, '}') || !document_done (&cursor))
     goto invalid;
   g_free (key);
@@ -625,7 +640,7 @@ wyl_client_service_credential_list_decode (const gchar *document,
   if (!take (&cursor, ']')) {
     while (TRUE) {
       WylClientServiceCredential item = { 0 };
-      if (!parse_credential_object (&cursor, &item))
+      if (!parse_credential_object (&cursor, &item, NULL))
         goto invalid;
       g_array_append_val (items, item);
       if (take (&cursor, ']'))
@@ -706,13 +721,7 @@ wyl_client_service_credential_issue_result_decode (const gchar *document,
 {
   JsonCursor cursor;
   gchar *key = NULL;
-  gchar *credential_id = NULL;
   gchar *credential_secret = NULL;
-  guint64 generation = 0;
-  gboolean seen_outer = FALSE;
-  gboolean seen_id = FALSE;
-  gboolean seen_generation = FALSE;
-  gboolean seen_secret = FALSE;
   if (out_result == NULL || !document_init (document, document_len, &cursor)
       || !take (&cursor, '{')) {
     if (out_result != NULL)
@@ -720,46 +729,12 @@ wyl_client_service_credential_issue_result_decode (const gchar *document,
     return WYRELOG_E_INVALID;
   }
   wyl_client_service_credential_issue_result_clear (out_result);
-  skip_ws (&cursor);
   if (!parse_string (&cursor, &key)
       || g_strcmp0 (key, "service_credential") != 0 || !take (&cursor, ':')
-      || !take (&cursor, '{'))
+      || !parse_credential_object (&cursor, &out_result->credential,
+          &credential_secret)
+      || !take (&cursor, '}') || !document_done (&cursor))
     goto invalid;
-  seen_outer = TRUE;
-  g_clear_pointer (&key, g_free);
-  while (TRUE) {
-    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
-      goto invalid;
-    if (g_strcmp0 (key, "credential_id") == 0) {
-      if (seen_id || !parse_string (&cursor, &credential_id)
-          || !string_is_plain_token (credential_id)
-          || !wyl_service_credential_id_is_canonical (credential_id,
-              strlen (credential_id)))
-        goto invalid;
-      seen_id = TRUE;
-    } else if (g_strcmp0 (key, "generation") == 0) {
-      if (seen_generation || !parse_uint64 (&cursor, &generation))
-        goto invalid;
-      seen_generation = TRUE;
-    } else if (g_strcmp0 (key, "credential_secret") == 0) {
-      if (seen_secret || !parse_string (&cursor, &credential_secret)
-          || !credential_secret_is_valid (credential_secret))
-        goto invalid;
-      seen_secret = TRUE;
-    } else {
-      goto invalid;
-    }
-    g_clear_pointer (&key, g_free);
-    if (take (&cursor, '}'))
-      break;
-    if (!take (&cursor, ','))
-      goto invalid;
-  }
-  if (!take (&cursor, '}') || !seen_outer || !seen_id || !seen_generation
-      || !seen_secret || generation == 0 || !document_done (&cursor))
-    goto invalid;
-  out_result->credential_id = g_steal_pointer (&credential_id);
-  out_result->generation = generation;
   out_result->credential_secret.text = g_steal_pointer (&credential_secret);
   out_result->credential_secret.len = strlen
       (out_result->credential_secret.text);
@@ -767,7 +742,6 @@ wyl_client_service_credential_issue_result_decode (const gchar *document,
   return WYRELOG_E_OK;
 invalid:
   g_free (key);
-  g_free (credential_id);
   if (credential_secret != NULL) {
     sodium_memzero (credential_secret, strlen (credential_secret));
     g_free (credential_secret);
