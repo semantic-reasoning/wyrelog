@@ -2327,6 +2327,29 @@ service_token_exchange_handle (SoupServerMessage *msg,
       strlen (body) : 2);
 }
 
+static void
+service_token_exchange_http_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) server;
+  (void) path;
+  (void) query;
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  SoupMessageBody *body = soup_server_message_get_request_body (msg);
+  WylDaemonServiceTokenRequest request = {
+    .transport_ok = wyl_daemon_http_message_has_actual_loopback_transport (msg),
+    .body_oversize = body != NULL && body->length > 16 * 1024,
+    .body_json = body != NULL && body->data != NULL ? body->data : "",
+    .body_len = body != NULL ? (gsize) body->length : 0,
+  };
+  service_token_exchange_handle (msg, ctx, &request);
+}
+
 wyrelog_error_t
 wyl_daemon_http_issue_service_token_for_test (SoupServer *server,
     gboolean transport_ok, const gchar *request_body, gsize request_body_len,
@@ -8678,6 +8701,18 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
       policy_role_revoke_handler, ctx, NULL);
   soup_server_add_handler (server, "/audit/events", audit_events_handler,
       ctx, NULL);
+  soup_server_add_handler (server, "/service-principals",
+      service_principal_management_handler, ctx, NULL);
+  soup_server_add_handler (server, "/service-credentials",
+      service_credential_management_handler, ctx, NULL);
+#ifdef WYL_HAS_FACT_STORE
+  soup_server_add_handler (server, "/service-credential-operations/reconcile",
+      service_credential_operation_reconcile_handler, ctx, NULL);
+#endif
+#ifdef WYL_HAS_AUDIT
+  soup_server_add_handler (server, "/auth/service-token",
+      service_token_exchange_http_handler, ctx, NULL);
+#endif
 #ifdef WYL_TEST_DAEMON_HTTP
 #ifdef WYL_HAS_FACT_STORE
   soup_server_add_handler (server, "/__test/reconcile",
