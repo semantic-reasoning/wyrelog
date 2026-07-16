@@ -1373,6 +1373,44 @@ test_rotation_intent_sidecar_lifecycle (void)
 }
 
 static void
+test_rotation_recovery_classifier (void)
+{
+  WylPolicyRotationRecoveryProbe probe = {
+    .old_root_authenticated = TRUE,
+    .old_generation_matches = TRUE,
+    .old_binding_matches = TRUE,
+    .old_inner_invariants_match = TRUE,
+  };
+  WylPolicyRotationRecoveryState state = 0;
+  g_assert_cmpint (wyl_policy_rotation_recovery_classify (&probe, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_OLD);
+
+  probe.old_root_authenticated = FALSE;
+  probe.new_root_authenticated = TRUE;
+  probe.new_generation_matches = TRUE;
+  probe.new_binding_matches = TRUE;
+  probe.new_inner_invariants_match = TRUE;
+  g_assert_cmpint (wyl_policy_rotation_recovery_classify (&probe, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
+
+  probe.old_root_authenticated = TRUE;
+  g_assert_cmpint (wyl_policy_rotation_recovery_classify (&probe, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS);
+  probe.new_root_authenticated = FALSE;
+  probe.old_root_authenticated = FALSE;
+  g_assert_cmpint (wyl_policy_rotation_recovery_classify (&probe, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (state, ==, WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS);
+  g_assert_cmpint (wyl_policy_rotation_recovery_classify (NULL, &state), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_rotation_recovery_classify (&probe, NULL), ==,
+      WYRELOG_E_INVALID);
+}
+
+static void
 test_rotation_post_rename_warning_commits (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
@@ -1608,6 +1646,8 @@ main (int argc, char **argv)
       test_rotation_intent_codec);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-sidecar",
       test_rotation_intent_sidecar_lifecycle);
+  g_test_add_func ("/policy-store-service-cvk/rotation-recovery-classifier",
+      test_rotation_recovery_classifier);
   g_test_add_func ("/policy-store-service-cvk/rotation-failpoints",
       test_rotation_publish_failpoints);
   g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",

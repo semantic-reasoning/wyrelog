@@ -114,6 +114,28 @@ typedef struct
 
 typedef enum
 {
+  WYL_POLICY_ROTATION_RECOVERY_OLD = 1,
+  WYL_POLICY_ROTATION_RECOVERY_NEW = 2,
+  WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS = 3,
+} WylPolicyRotationRecoveryState;
+
+/* Each field is set only after the corresponding retained root has been
+ * independently checked for header/AEAD, generation/binding, and inner
+ * credential invariants. The classifier performs no provider I/O. */
+typedef struct
+{
+  gboolean old_root_authenticated;
+  gboolean old_generation_matches;
+  gboolean old_binding_matches;
+  gboolean old_inner_invariants_match;
+  gboolean new_root_authenticated;
+  gboolean new_generation_matches;
+  gboolean new_binding_matches;
+  gboolean new_inner_invariants_match;
+} WylPolicyRotationRecoveryProbe;
+
+typedef enum
+{
   WYL_POLICY_SERVICE_ROTATE_FAIL_NONE = 0,
   WYL_POLICY_SERVICE_ROTATE_FAIL_INSERT,
   WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_UPDATE,
@@ -459,6 +481,9 @@ wyrelog_error_t wyl_policy_rotation_intent_read_sidecar (wyl_policy_store_t *
     WylPolicyRotationIntent * out_intent);
 wyrelog_error_t wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *
     store);
+wyrelog_error_t wyl_policy_rotation_recovery_classify (const
+    WylPolicyRotationRecoveryProbe * probe,
+    WylPolicyRotationRecoveryState * out_state);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
