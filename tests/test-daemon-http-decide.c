@@ -6138,6 +6138,145 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   return 0;
 }
 #endif
+
+#ifdef WYL_HAS_AUDIT
+static void
+prepare_service_token_subject (WylHandle *handle, const gchar *subject_id)
+{
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_create (handle, subject_id,
+          subject_id, "admin", "principal-create", &principal), ==,
+      WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant
+      (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+      WYRELOG_E_OK);
+  g_assert_true (created);
+}
+
+static void
+issue_service_token_credential (WylHandle *handle, const gchar *subject_id,
+    const gchar *tenant_id, const gchar *request_id, gint64 expires_at_us,
+    wyl_service_credential_issue_result_t *out)
+{
+  g_assert_cmpint (wyl_service_credential_issue (handle, subject_id,
+          tenant_id, "admin", request_id, expires_at_us, out), ==,
+      WYRELOG_E_OK);
+}
+
+static gint
+check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
+    const gchar *base_url)
+{
+  prepare_service_token_subject (handle, "svc:exchange:worker");
+
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK)
+    return 1945;
+  wyl_service_credential_issue_result_t issued = { 0 };
+  issue_service_token_credential (handle, "svc:exchange:worker", "tenant-a",
+      issue_request_id, g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC,
+      &issued);
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  if (secret == NULL)
+    return 1946;
+
+  g_autofree gchar *request_body = g_strdup_printf
+      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+      issued.credential.credential_id, secret);
+  guint status = 0;
+  guint retry_after = 0;
+  g_autofree gchar *body = NULL;
+  if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
+          strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
+    return 1947;
+  if (status != 200 || body == NULL ||
+      extract_json_string (body, "access_token") == NULL ||
+      strstr (body, "session_token") != NULL ||
+      strstr (body, "username") != NULL ||
+      strstr (body, "tenant") != NULL ||
+      strstr (body, "principal_state") != NULL)
+    return 1948;
+  g_autofree gchar *access_token = extract_json_string (body, "access_token");
+  if (access_token == NULL)
+    return 1949;
+
+  guint8 secret_key[32];
+  if (wyl_daemon_http_copy_access_token_secret (server, secret_key,
+          sizeof secret_key) != WYRELOG_E_OK)
+    return 1950;
+  g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id == NULL)
+    return 1951;
+  g_autoptr (GBytes) payload = NULL;
+  if (wyl_jwt_verify_hs256_access_token (access_token, secret_key,
+          sizeof secret_key, key_id, "wyrelogd", "wyrelog-client",
+          g_get_real_time () / G_USEC_PER_SEC, &payload) != WYRELOG_E_OK)
+    return 1952;
+  gsize payload_len = 0;
+  const gchar *payload_data = g_bytes_get_data (payload, &payload_len);
+  g_autofree gchar *payload_text = g_strndup (payload_data, payload_len);
+  if (strstr (payload_text, "\"auth_method\":\"service_credential\"") == NULL)
+    return 1953;
+  if (strstr (payload_text, "\"credential_id\":\"") == NULL)
+    return 1954;
+  if (g_strstr_len (payload_text, -1, issued.credential.credential_id) == NULL)
+    return 1955;
+
+  WylServiceExchangeLimiterSnapshot limiter_snapshot = { 0 };
+  wyl_daemon_http_service_exchange_limiter_snapshot_for_test (server,
+      &limiter_snapshot);
+  if (limiter_snapshot.global_tokens != 99 ||
+      limiter_snapshot.credential_bucket_count != 1 ||
+      limiter_snapshot.anonymous_tokens != 5)
+    return 1956;
+
+  g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
+  guint route_status = 0;
+  g_autofree gchar *route_body = NULL;
+  if (send_raw_path (session, "POST", base_url, "/auth/service-token",
+          &route_status, &route_body) != 0 || route_status != 404)
+    return 1957;
+
+  g_autofree gchar *malformed_body =
+      g_strdup_printf ("{\"credential_id\":\"%s\",\"extra\":\"x\"}",
+      issued.credential.credential_id);
+  g_clear_pointer (&body, g_free);
+  if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
+          malformed_body, strlen (malformed_body), &status, &body,
+          &retry_after) != WYRELOG_E_OK)
+    return 1956;
+  if (status != 400
+      || strstr (body, "\"error\":\"invalid_service_token_request\"")
+      == NULL)
+    return 1958;
+
+  for (guint i = 0; i < 5; i++) {
+    g_clear_pointer (&body, g_free);
+    if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
+            request_body, strlen (request_body), &status, &body,
+            &retry_after) != WYRELOG_E_OK)
+      return 1960 + (gint) i;
+    if (status != 200 || body == NULL ||
+        extract_json_string (body, "access_token") == NULL)
+      return 1970 + (gint) i;
+  }
+  g_clear_pointer (&body, g_free);
+  if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
+          strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK)
+    return 1980;
+  if (status != 429 || retry_after == 0 ||
+      strstr (body, "\"error\":\"service_token_rate_limited\"") == NULL)
+    return 1981;
+
+  wyl_service_credential_issue_result_clear (&issued);
+  return 0;
+}
+#endif
 #endif
 
 /*

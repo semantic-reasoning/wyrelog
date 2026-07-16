@@ -8,6 +8,7 @@ for needle in (
     '"/service-principals"',
     '"/service-credentials"',
     '"/service-credential-operations"',
+    '"/auth/service-token"',
     'service-principals',
     'service-credentials',
     'service-credential-operations',
