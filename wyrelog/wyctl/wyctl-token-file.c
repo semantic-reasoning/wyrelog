@@ -23,6 +23,7 @@
 #include <aclapi.h>
 #include <sddl.h>
 #include <windows.h>
+#include <wchar.h>
 #else
 #include <fcntl.h>
 #include <unistd.h>
@@ -38,26 +39,99 @@ wyctl_token_file_windows_handle_is_reparse (HANDLE handle)
   return (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 }
 
+typedef struct
+{
+  HANDLE handle;
+  wchar_t *child_path;
+} WyctlTokenFileWindowsParentAnchor;
+
+static void
+wyctl_token_file_windows_parent_anchor_clear (WyctlTokenFileWindowsParentAnchor
+    *anchor)
+{
+  if (anchor == NULL)
+    return;
+  if (anchor->handle != NULL && anchor->handle != INVALID_HANDLE_VALUE)
+    CloseHandle (anchor->handle);
+  g_free (anchor->child_path);
+  anchor->handle = NULL;
+  anchor->child_path = NULL;
+}
+
+/* Open and pin the real parent directory, then construct the final path from
+ * its handle-resolved canonical name.  Omitting FILE_SHARE_DELETE keeps the
+ * pinned directory from being renamed or removed while its child is opened;
+ * using the canonical path means an ancestor junction swap cannot redirect
+ * the subsequent traversal. */
 static gboolean
-wyctl_token_file_windows_parent_is_safe (const gchar *path)
+wyctl_token_file_windows_parent_anchor_open (const gchar *path,
+    WyctlTokenFileWindowsParentAnchor *anchor)
 {
   g_autofree gchar *parent = g_path_get_dirname (path);
+  g_autofree gchar *basename = g_path_get_basename (path);
   g_autofree wchar_t *wparent = (wchar_t *) g_utf8_to_utf16 (parent, -1,
       NULL, NULL, NULL);
-  if (wparent == NULL)
+  g_autofree wchar_t *wbasename = (wchar_t *) g_utf8_to_utf16 (basename, -1,
+      NULL, NULL, NULL);
+  if (wparent == NULL || wbasename == NULL || basename[0] == '\0'
+      || g_strcmp0 (basename, ".") == 0 || g_strcmp0 (basename, "..") == 0)
     return FALSE;
+  for (const wchar_t *p = wbasename; *p != L'\0'; p++) {
+    if (*p == L'\\' || *p == L'/')
+      return FALSE;
+  }
+
   HANDLE handle = CreateFileW (wparent, FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
-      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-      NULL);
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   if (handle == INVALID_HANDLE_VALUE)
     return FALSE;
+
   BY_HANDLE_FILE_INFORMATION info;
-  gboolean safe = GetFileInformationByHandle (handle, &info)
-      && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
-      && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-  CloseHandle (handle);
-  return safe;
+  if (!GetFileInformationByHandle (handle, &info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    CloseHandle (handle);
+    return FALSE;
+  }
+
+  DWORD capacity = 512;
+  wchar_t *canonical = NULL;
+  DWORD length = 0;
+  for (;;) {
+    canonical = g_realloc (canonical, sizeof (wchar_t) * capacity);
+    length = GetFinalPathNameByHandleW (handle, canonical, capacity,
+        VOLUME_NAME_GUID);
+    if (length == 0) {
+      g_free (canonical);
+      CloseHandle (handle);
+      return FALSE;
+    }
+    if (length < capacity)
+      break;
+    if (capacity > G_MAXDWORD / 2) {
+      g_free (canonical);
+      CloseHandle (handle);
+      return FALSE;
+    }
+    capacity *= 2;
+  }
+
+  gboolean separator = length > 0 && canonical[length - 1] != L'\\'
+      && canonical[length - 1] != L'/';
+  gsize basename_len = wcslen (wbasename);
+  wchar_t *child = g_new (wchar_t, length + (separator ? 1 : 0)
+      + basename_len + 1);
+  memcpy (child, canonical, sizeof (wchar_t) * length);
+  g_free (canonical);
+  gsize offset = length;
+  if (separator)
+    child[offset++] = L'\\';
+  memcpy (child + offset, wbasename, sizeof (wchar_t) * basename_len);
+  child[offset + basename_len] = L'\0';
+  anchor->handle = handle;
+  anchor->child_path = child;
+  return TRUE;
 }
 #endif
 
@@ -83,26 +157,25 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   if (token == NULL || token_len == 0 || token_len > WYCTL_TOKEN_FILE_MAX_BYTES)
     return WYCTL_TOKEN_FILE_INVALID_BYTES;
 #ifdef G_OS_WIN32
-  if (!wyctl_token_file_windows_parent_is_safe (path))
+  WyctlTokenFileWindowsParentAnchor anchor = { NULL, NULL };
+  if (!wyctl_token_file_windows_parent_anchor_open (path, &anchor))
     return WYCTL_TOKEN_FILE_SYMLINK;
-  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
-  if (wpath == NULL)
-    return WYCTL_TOKEN_FILE_IO;
   PSECURITY_DESCRIPTOR descriptor = NULL;
   SECURITY_ATTRIBUTES security = { 0 };
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW
       (L"D:P(A;;GA;;;OW)", SDDL_REVISION_1, &descriptor, NULL)) {
-    g_free (wpath);
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     return WYCTL_TOKEN_FILE_IO;
   }
   security.nLength = sizeof security;
   security.lpSecurityDescriptor = descriptor;
-  HANDLE h = CreateFileW (wpath, GENERIC_WRITE | DELETE, FILE_SHARE_DELETE,
+  HANDLE h = CreateFileW (anchor.child_path, GENERIC_WRITE | DELETE,
+      FILE_SHARE_DELETE,
       &security, CREATE_NEW,
       FILE_ATTRIBUTE_READONLY | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   LocalFree (descriptor);
   if (h == INVALID_HANDLE_VALUE) {
-    g_free (wpath);
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     return WYCTL_TOKEN_FILE_IO;
   }
   if (wyctl_token_file_windows_handle_is_reparse (h)) {
@@ -110,7 +183,7 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     (void) SetFileInformationByHandle (h, FileDispositionInfo, &disposition,
         sizeof disposition);
     CloseHandle (h);
-    g_free (wpath);
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     return WYCTL_TOKEN_FILE_SYMLINK;
   }
   DWORD written = 0;
@@ -121,11 +194,11 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     (void) SetFileInformationByHandle (h, FileDispositionInfo, &disposition,
         sizeof disposition);
     CloseHandle (h);
-    g_free (wpath);
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     return WYCTL_TOKEN_FILE_IO;
   }
   CloseHandle (h);
-  g_free (wpath);
+  wyctl_token_file_windows_parent_anchor_clear (&anchor);
   return WYCTL_TOKEN_FILE_OK;
 #else
   g_autofree gchar *parent = g_path_get_dirname (path);
@@ -247,18 +320,17 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
 #ifdef G_OS_WIN32
   /* Convert the operator-supplied UTF-8 path to UTF-16 for the
    * Win32 wide-string API. */
-  if (!wyctl_token_file_windows_parent_is_safe (path))
+  WyctlTokenFileWindowsParentAnchor anchor = { NULL, NULL };
+  if (!wyctl_token_file_windows_parent_anchor_open (path, &anchor))
     return WYCTL_TOKEN_FILE_SYMLINK;
-  wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
-  if (wpath == NULL)
-    return WYCTL_TOKEN_FILE_IO;
 
-  HANDLE h = CreateFileW (wpath, GENERIC_READ, FILE_SHARE_READ, NULL,
+  HANDLE h = CreateFileW (anchor.child_path, GENERIC_READ, FILE_SHARE_READ,
+      NULL,
       OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
       NULL);
   DWORD err = (h == INVALID_HANDLE_VALUE) ? GetLastError () : 0;
-  g_free (wpath);
   if (h == INVALID_HANDLE_VALUE) {
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND)
       return WYCTL_TOKEN_FILE_NOT_FOUND;
     return WYCTL_TOKEN_FILE_IO;
@@ -266,12 +338,14 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
   BY_HANDLE_FILE_INFORMATION info;
   if (!GetFileInformationByHandle (h, &info)) {
     CloseHandle (h);
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     return WYCTL_TOKEN_FILE_IO;
   }
   WyctlTokenFileStatus classify =
       wyctl_token_file_classify_windows_attrs (info.dwFileAttributes);
   if (classify != WYCTL_TOKEN_FILE_OK) {
     CloseHandle (h);
+    wyctl_token_file_windows_parent_anchor_clear (&anchor);
     return classify;
   }
 
@@ -283,6 +357,7 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
     DWORD read_n = 0;
     if (!ReadFile (h, buf + got, chunk, &read_n, NULL)) {
       CloseHandle (h);
+      wyctl_token_file_windows_parent_anchor_clear (&anchor);
       wyctl_token_file_free_sensitive (buf, cap + 1);
       return WYCTL_TOKEN_FILE_IO;
     }
@@ -295,11 +370,13 @@ wyctl_token_file_read (const gchar *path, gchar **out_token)
     DWORD probe = 0;
     if (ReadFile (h, &overflow, 1, &probe, NULL) && probe > 0) {
       CloseHandle (h);
+      wyctl_token_file_windows_parent_anchor_clear (&anchor);
       wyctl_token_file_free_sensitive (buf, cap + 1);
       return WYCTL_TOKEN_FILE_TOO_LARGE;
     }
   }
   CloseHandle (h);
+  wyctl_token_file_windows_parent_anchor_clear (&anchor);
   buf[got] = '\0';
 
   if (got == 0) {
