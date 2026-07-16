@@ -6346,6 +6346,7 @@ check_service_principal_management_contract (void)
   gboolean tenant_created = FALSE;
   wyl_service_credential_issue_result_t issued = { 0 };
   g_autofree gchar *credential_path = NULL;
+  g_autofree gchar *tenant_query = NULL;
   const gchar *session_token = "human-principal-admin";
   guint status = 0;
   const gchar *create_body =
@@ -6454,6 +6455,46 @@ check_service_principal_management_contract (void)
     rc = 1986;
     goto cleanup;
   }
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
+          session_token, "human-principal-admin", "tenant-a")) {
+    rc = 1988;
+    goto cleanup;
+  }
+  g_clear_pointer (&query, g_free);
+  tenant_query = g_strdup_printf
+      ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0", session_token);
+  const gchar *issue_body =
+      "{\"version\":\"1\",\"tenant\":\"tenant-a\","
+      "\"request_id\":\"111111111111111111111111111\","
+      "\"expires_at_us\":\"0\"}";
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/__test/service-principals/svc:tenant-a:worker/credentials",
+          tenant_query, issue_body, &status, &body) != 0 || status != 200
+      || body == NULL || strstr (body, "credential_secret") == NULL
+      || strstr (body, "service_credential") == NULL) {
+    rc = 1990;
+    goto cleanup;
+  }
+  if (strstr (body, "credential_secret") !=
+      g_strrstr (body, "credential_secret")) {
+    rc = 1991;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/__test/service-principals/svc:tenant-a:worker/credentials",
+          tenant_query, issue_body, &status, &body) != 0 || status != 409
+      || body == NULL || strstr (body, "service_credential_conflict") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 1992;
+    goto cleanup;
+  }
+  g_clear_pointer (&query, g_free);
+  query = g_strdup_printf
+      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+      session_token);
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
           "human-principal-admin", "http-credential-read", 999999999,
           &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
