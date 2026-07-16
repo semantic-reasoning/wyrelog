@@ -7,6 +7,7 @@
 #include "wyrelog/client.h"
 #include "wyrelog/wyl-client-private.h"
 #include "wyrelog/wyl-client-codec-private.h"
+#include "wyrelog/wyl-client-url-private.h"
 
 typedef struct
 {
@@ -196,11 +197,43 @@ check_service_credential_codecs (void)
   return TRUE;
 }
 
+static gboolean
+check_secret_url_preflight (void)
+{
+  static const gchar *accepted[] = {
+    "http://127.0.0.1",
+    "https://127.0.0.1:8443",
+    "http://[::1]:8080",
+  };
+  static const gchar *rejected[] = {
+    "http://localhost",
+    "http://127.0.0.01",
+    "http://0177.0.0.1",
+    "http://127.0.0.1.example",
+    "http://[::ffff:127.0.0.1]",
+    "http://[::1%25lo0]",
+    "http://user:pass@127.0.0.1",
+    "http://127.0.0.1:0",
+    "ftp://127.0.0.1",
+    "http://192.0.2.1",
+    "http://127.0.0.1:65536",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (accepted); i++)
+    if (!wyl_client_secret_url_is_canonical_literal_loopback (accepted[i]))
+      return FALSE;
+  for (gsize i = 0; i < G_N_ELEMENTS (rejected); i++)
+    if (wyl_client_secret_url_is_canonical_literal_loopback (rejected[i]))
+      return FALSE;
+  return TRUE;
+}
+
 int
 main (void)
 {
   if (!check_service_credential_codecs ())
     return 230;
+  if (!check_secret_url_preflight ())
+    return 231;
   const gchar *version = wyrelog_client_version_string ();
   if (version == NULL || version[0] == '\0')
     return 1;

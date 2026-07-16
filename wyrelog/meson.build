@@ -187,6 +187,7 @@ if build_client
   wyrelog_client_sources = files(
     'audit/iter.c',
     'wyl-client-codec-private.c',
+    'wyl-client-url-private.c',
     'wyl-client.c',
   )
 
