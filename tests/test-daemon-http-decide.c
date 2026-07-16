@@ -4490,6 +4490,41 @@ send_raw_policy_mutation_bearer (SoupSession *session, const gchar *method,
   return 0;
 }
 
+static gint
+send_raw_service_principal_full (SoupSession *session, const gchar *method,
+    const gchar *base_url, const gchar *path, const gchar *query,
+    const gchar *body, guint *out_status, gchar **out_body)
+{
+  if (out_status == NULL || out_body == NULL)
+    return 120;
+  *out_status = 0;
+  *out_body = NULL;
+
+  g_autofree gchar *uri = build_policy_mutation_uri (base_url, path, query);
+  g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
+  if (msg == NULL)
+    return 121;
+  if (body != NULL) {
+    g_autoptr (GBytes) request_bytes = g_bytes_new_static (body, strlen (body));
+    soup_message_set_request_body_from_bytes (msg, "application/json",
+        request_bytes);
+  }
+
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) bytes = soup_session_send_and_read (session, msg, NULL,
+      &error);
+  if (bytes == NULL)
+    return 122;
+  gint rc = check_response_request_id_header (msg, 177);
+  if (rc != 0)
+    return rc;
+  gsize size = 0;
+  const gchar *data = g_bytes_get_data (bytes, &size);
+  *out_status = soup_message_get_status (msg);
+  *out_body = g_strndup (data, size);
+  return 0;
+}
+
 #ifdef WYL_HAS_FACT_STORE
 static gint
 send_raw_reconcile_full (SoupSession *session, const gchar *method,
@@ -6298,6 +6333,116 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
 #endif
 #endif
 
+static gint
+check_service_principal_management_contract (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autofree gchar *base_url = NULL;
+  g_autofree gchar *query = NULL;
+  g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
+  g_autofree gchar *body = NULL;
+  GSList *uris = NULL;
+  const gchar *session_token = "human-principal-admin";
+  guint status = 0;
+  const gchar *create_body =
+      "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"Worker\"}";
+  gint rc = 0;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 1975;
+  if (session == NULL)
+    return 1976;
+
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  g_main_context_push_thread_default (context);
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  GThread *thread = NULL;
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL)
+    return 1977;
+  thread = g_thread_new ("daemon-http-service-principal",
+      test_http_server_thread_ctx, &http);
+
+  uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    rc = 1978;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server, session_token,
+          "human-principal-admin", "__wr_default")) {
+    rc = 1979;
+    goto cleanup;
+  }
+  query =
+      g_strdup_printf
+      ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
+      session_token);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/__test/service-principals", query, create_body, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"service_principal\":") == NULL
+      || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
+      || strstr (body, "\"display_name\":\"Worker\"") == NULL
+      || strstr (body, "\"state\":\"active\"") == NULL
+      || strstr (body, "credential_id") != NULL) {
+    rc = 1980;
+    goto cleanup;
+  }
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/__test/service-principals", query, NULL, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"service_principals\":[") == NULL
+      || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
+      || strstr (body, "\"state\":\"active\"") == NULL) {
+    rc = 1981;
+    goto cleanup;
+  }
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/__test/service-principals/svc:tenant-a:worker/disable", query,
+          NULL, &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"service_principal\":") == NULL
+      || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
+      || strstr (body, "\"state\":\"disabled\"") == NULL
+      || strstr (body, "\"disabled_by\":\"human-principal-admin\"")
+      == NULL) {
+    rc = 1982;
+    goto cleanup;
+  }
+
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/__test/service-principals", query, NULL, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, "\"state\":\"disabled\"") == NULL
+      || strstr (body, "\"disabled_by\":\"human-principal-admin\"")
+      == NULL) {
+    rc = 1983;
+    goto cleanup;
+  }
+
+cleanup:
+  g_main_loop_quit (http.loop);
+  if (thread != NULL)
+    g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return rc;
+}
+
 /*
  * Unit-style coverage for the tenant-gate wire codes. Drives the
  * http.c decision helper through the WYL_TEST_DAEMON_HTTP seam so
@@ -6672,6 +6817,9 @@ main (void)
   if (reconcile_rc != 0)
     return reconcile_rc;
 #endif
+  gint service_principal_rc = check_service_principal_management_contract ();
+  if (service_principal_rc != 0)
+    return service_principal_rc;
   g_clear_pointer (&http.loop, g_main_loop_unref);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);

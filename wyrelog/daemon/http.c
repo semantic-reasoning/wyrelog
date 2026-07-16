@@ -94,6 +94,18 @@
   "service_token_failed"
 #define WYL_DAEMON_ERR_OPERATION_REQUEST_CONFLICT \
   "operation_request_conflict"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED \
+  "service_principal_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID \
+  "invalid_service_principal_request"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED \
+  "service_principal_denied"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED \
+  "service_principal_failed"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_NOT_FOUND \
+  "service_principal_not_found"
+#define WYL_DAEMON_ERR_SERVICE_PRINCIPAL_EXISTS \
+  "service_principal_exists"
 
 typedef gchar WylSensitiveChar;
 
@@ -3653,6 +3665,367 @@ authorize_guarded_session_action (SoupServer *server, SoupServerMessage *msg,
   if (out_actor != NULL)
     *out_actor = g_strdup (auth.actor);
   return TRUE;
+}
+
+typedef struct
+{
+  GString *json;
+  gboolean first;
+} ServicePrincipalListJsonCtx;
+
+static void
+append_service_principal_json_object (GString *json,
+    const wyl_service_principal_t *info)
+{
+  g_string_append (json, "{\"subject_id\":");
+  append_json_string (json, info->subject_id);
+  g_string_append (json, ",\"display_name\":");
+  append_json_string (json, info->display_name);
+  g_string_append (json, ",\"state\":");
+  append_json_string (json, info->state);
+  g_string_append_printf (json, ",\"generation\":%" G_GUINT64_FORMAT,
+      info->generation);
+  g_string_append (json, ",\"created_by\":");
+  append_json_string (json, info->created_by);
+  g_string_append_printf (json, ",\"created_at_us\":%" G_GINT64_FORMAT,
+      info->created_at_us);
+  g_string_append_printf (json, ",\"updated_at_us\":%" G_GINT64_FORMAT,
+      info->updated_at_us);
+  g_string_append_c (json, ',');
+  append_json_nullable_string (json, "disabled_by", info->disabled_by);
+  g_string_append_printf (json, ",\"disabled_at_us\":%" G_GINT64_FORMAT,
+      info->disabled_at_us);
+  g_string_append_c (json, '}');
+}
+
+static wyrelog_error_t
+append_service_principal_json (const wyl_service_principal_t *info,
+    gpointer user_data)
+{
+  ServicePrincipalListJsonCtx *ctx = user_data;
+  if (ctx == NULL || ctx->json == NULL || info == NULL)
+    return WYRELOG_E_INVALID;
+  if (!ctx->first)
+    g_string_append_c (ctx->json, ',');
+  ctx->first = FALSE;
+  append_service_principal_json_object (ctx->json, info);
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+service_principal_management_authorize (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
+    const gchar *auth_required_code, const gchar *invalid_code,
+    const gchar *denied_code, const gchar *failed_code,
+    WylDaemonAuthContext *out_auth, gchar **out_actor)
+{
+  (void) failed_code;
+  const gchar *session_token = NULL;
+  const gchar *guard_timestamp = NULL;
+  const gchar *guard_loc_class = NULL;
+  const gchar *guard_risk = NULL;
+  if (query != NULL) {
+    session_token = g_hash_table_lookup (query, "session_token");
+    guard_timestamp = g_hash_table_lookup (query, "guard_timestamp");
+    guard_loc_class = g_hash_table_lookup (query, "guard_loc_class");
+    guard_risk = g_hash_table_lookup (query, "guard_risk");
+  }
+  const gchar *bearer_token = lookup_bearer_token (msg);
+  gboolean has_session_token = session_token != NULL
+      && session_token[0] != '\0';
+  gboolean has_bearer_token = bearer_token != NULL && bearer_token[0] != '\0';
+  if (!has_session_token && !has_bearer_token) {
+    set_json_error (msg, 401, auth_required_code);
+    return FALSE;
+  }
+  if (has_session_token && has_bearer_token) {
+    set_json_error (msg, 400, invalid_code);
+    return FALSE;
+  }
+  if (guard_timestamp == NULL || guard_loc_class == NULL || guard_risk == NULL) {
+    set_json_error (msg, 400, invalid_code);
+    return FALSE;
+  }
+
+  gint64 timestamp = 0;
+  gint64 risk = 0;
+  if (!parse_int64_query_param (guard_timestamp, &timestamp) ||
+      !parse_int64_query_param (guard_risk, &risk) || timestamp < 0 ||
+      risk < 0 || risk > 100 ||
+      !wyl_guard_loc_class_is_valid (guard_loc_class)) {
+    set_json_error (msg, 400, invalid_code);
+    return FALSE;
+  }
+  (void) timestamp;
+  (void) risk;
+
+  g_auto (WylDaemonAuthContext) auth = { 0 };
+  const gchar *auth_tenant_error = NULL;
+  if (has_session_token) {
+    wyrelog_error_t auth_rc =
+        resolve_session_token_auth (server, ctx, session_token, &auth,
+        &auth_tenant_error);
+    if (auth_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 401,
+          auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
+      return FALSE;
+    }
+  } else {
+    wyrelog_error_t auth_rc = resolve_bearer_session (server, ctx,
+        bearer_token, &auth, &auth_tenant_error);
+    if (auth_rc != WYRELOG_E_OK) {
+      set_json_error (msg, 401,
+          auth_tenant_error != NULL ? auth_tenant_error : auth_required_code);
+      return FALSE;
+    }
+  }
+
+  if (!ensure_auth_context_request_tenant (msg, query, ctx, &auth))
+    return FALSE;
+
+  g_autoptr (WylSession) session = wyl_daemon_http_ref_session (server,
+      auth.session_id);
+  if (session == NULL || !WYL_IS_SESSION (session)
+      || !wyl_session_is_active_human_private (session)) {
+    set_json_error (msg, 403, denied_code);
+    return FALSE;
+  }
+
+  gchar *actor_copy = g_strdup (auth.actor);
+  if (out_auth != NULL) {
+    out_auth->session_id = g_steal_pointer (&auth.session_id);
+    out_auth->actor = g_steal_pointer (&auth.actor);
+    out_auth->tenant = g_steal_pointer (&auth.tenant);
+    out_auth->bearer = auth.bearer;
+  }
+  if (out_actor != NULL)
+    *out_actor = actor_copy;
+  else
+    g_free (actor_copy);
+  return TRUE;
+}
+
+static gchar *
+service_principal_build_json (const wyl_service_principal_t *info)
+{
+  g_autoptr (GString) body = g_string_new ("{\"service_principal\":");
+  append_service_principal_json_object (body, info);
+  g_string_append_c (body, '}');
+  return g_string_free (g_steal_pointer (&body), FALSE);
+}
+
+static void
+service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED, NULL, &actor))
+    return;
+
+  SoupMessageBody *request_body = soup_server_message_get_request_body (msg);
+  if (request_body == NULL || request_body->data == NULL
+      || request_body->length <= 0 || request_body->length > 4096) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"subject_id", 128},
+    {"display_name", 256},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  if (!wyl_daemon_http_dup_strict_json_object (request_body->data,
+          (gsize) request_body->length, fields,
+          G_N_ELEMENTS (fields), values)) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+
+  const gchar *subject_id = values[0];
+  const gchar *display_name = values[1];
+  if (subject_id == NULL || display_name == NULL || subject_id[0] == '\0'
+      || display_name[0] == '\0') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t rc = wyl_service_principal_create (ctx->handle, subject_id,
+      display_name, actor, ensure_request_id_header (msg), &principal);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_EXISTS);
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED);
+    return;
+  }
+
+  g_autofree gchar *response = service_principal_build_json (&principal);
+  wyl_service_principal_clear (&principal);
+  if (response == NULL) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED);
+    return;
+  }
+
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, response, strlen (response));
+}
+
+static void
+service_principal_list_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+  (void) path;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED, NULL, &actor))
+    return;
+
+  g_autoptr (GString) body = g_string_new ("{\"service_principals\":[");
+  ServicePrincipalListJsonCtx json_ctx = {
+    .json = body,
+    .first = TRUE,
+  };
+  wyrelog_error_t rc = wyl_service_principal_foreach (ctx->handle,
+      append_service_principal_json, &json_ctx);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED);
+    return;
+  }
+  g_string_append (body, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body->str, body->len);
+}
+
+static void
+service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
+    const char *path, GHashTable *query, gpointer user_data)
+{
+  (void) server;
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  const gchar *subject_id = NULL;
+  if (path == NULL || path[0] != '/') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+  const gchar *tail = strchr (path + 1, '/');
+  if (tail == NULL || g_strcmp0 (tail, "/disable") != 0) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+  g_autofree gchar *subject_copy = g_strndup (path + 1,
+      (gsize) (tail - (path + 1)));
+  subject_id = subject_copy;
+  if (subject_id == NULL || subject_id[0] == '\0') {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+
+  WylDaemonHttpContext *ctx = user_data;
+  g_autofree gchar *actor = NULL;
+  if (!service_principal_management_authorize (server, msg, query, ctx,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED,
+          WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED, NULL, &actor))
+    return;
+
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t rc = wyl_service_principal_disable (ctx->handle, subject_id,
+      actor, ensure_request_id_header (msg), &principal);
+  if (rc == WYRELOG_E_INVALID) {
+    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_NOT_FOUND);
+    return;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_DENIED);
+    return;
+  }
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED);
+    return;
+  }
+
+  g_autofree gchar *response = service_principal_build_json (&principal);
+  wyl_service_principal_clear (&principal);
+  if (response == NULL) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_FAILED);
+    return;
+  }
+
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, response, strlen (response));
+}
+
+static void
+service_principal_management_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  if (path == NULL || path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
+    if (g_strcmp0 (soup_server_message_get_method (msg), "GET") == 0) {
+      service_principal_list_handler (server, msg, path, query, user_data);
+      return;
+    }
+    if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0) {
+      service_principal_create_handler (server, msg, path, query, user_data);
+      return;
+    }
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") == 0
+      && g_str_has_suffix (path, "/disable")) {
+    service_principal_disable_handler (server, msg, path, query, user_data);
+    return;
+  }
+
+  set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
 }
 
 #ifdef WYL_HAS_AUDIT
@@ -7662,6 +8035,8 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/__test/reconcile",
       service_credential_operation_reconcile_handler, ctx, NULL);
 #endif
+  soup_server_add_handler (server, "/" "__test/" "service-" "principals",
+      service_principal_management_handler, ctx, NULL);
 #endif
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);
