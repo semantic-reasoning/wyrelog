@@ -32,6 +32,7 @@ typedef struct
   guint derives;
   guint wipes;
   gboolean wiped;
+  guint8 key_byte;
 } CountingProvider;
 
 static wyrelog_error_t
@@ -49,7 +50,7 @@ counting_derive (gpointer data, const gchar *label, guint8 *out, gsize out_len)
   provider->derives++;
   if (provider->wiped || label == NULL || out == NULL)
     return WYRELOG_E_INTERNAL;
-  memset (out, 0x5a, out_len);
+  memset (out, provider->key_byte != 0 ? provider->key_byte : 0x5a, out_len);
   return WYRELOG_E_OK;
 }
 
@@ -156,6 +157,7 @@ typedef struct
 typedef struct
 {
   OwnedProviderCounters *counters;
+  guint8 key_byte;
   const gchar *probe_path_on_wipe;
   const gchar *truncate_path_on_wipe;
   wyrelog_error_t probe_rc;
@@ -205,7 +207,7 @@ owned_derive (gpointer data, const gchar *label, guint8 *out, gsize out_len)
     return provider->derive_rc;
   if (out == NULL)
     return WYRELOG_E_INVALID;
-  memset (out, 0x5a, out_len);
+  memset (out, provider->key_byte != 0 ? provider->key_byte : 0x5a, out_len);
   return WYRELOG_E_OK;
 }
 
@@ -288,6 +290,7 @@ remove_store_files (const gchar *path)
 {
   static const gchar *suffixes[] = {
     "", CLEAR_SUFFIX, LOCK_SUFFIX, ".wyrelog-tmp", "-wal", "-shm",
+    ".wyrelog-rotation-intent",
     CLEAR_SUFFIX "-journal", CLEAR_SUFFIX "-wal", CLEAR_SUFFIX "-shm",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (suffixes); i++) {
@@ -648,6 +651,9 @@ test_rotation_provider_ownership (void)
   g_assert_cmpuint (new_success.derives, ==, 0);
   g_assert_cmpuint (new_success.wipes, ==, 1);
   g_assert_cmpuint (new_success.frees, ==, 1);
+  g_autofree gchar *rotation_intent =
+      g_strdup_printf ("%s.wyrelog-rotation-intent", path);
+  (void) g_remove (rotation_intent);
 
   CountingProvider verify_provider = { 0 };
   wyl_policy_store_open_options_t verify_options = encrypted_opts (path,
@@ -678,6 +684,7 @@ test_rotation_provider_ownership (void)
   new_success_options = owned_options (&new_success, &new_success_provider);
   old_success_provider->probe_path_on_wipe = path;
   old_success_provider->truncate_path_on_wipe = clear_path;
+  new_success_provider->key_byte = 0x6a;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
           &old_success_options, &new_success_options), ==, WYRELOG_E_OK);
   g_assert_cmpuint (old_success.probes, ==, 1);
@@ -689,6 +696,7 @@ test_rotation_provider_ownership (void)
   g_assert_cmpuint (new_success.derives, ==, 1);
   g_assert_cmpuint (new_success.wipes, ==, 1);
   g_assert_cmpuint (new_success.frees, ==, 1);
+  g_assert_cmpint (g_remove (rotation_intent), ==, 0);
 
   OwnedProviderCounters old_failure = { 0 };
   OwnedProviderCounters new_failure = { 0 };
@@ -698,6 +706,7 @@ test_rotation_provider_ownership (void)
       owned_options (&old_failure, &old_failure_provider);
   wyl_policy_store_open_options_t new_failure_options =
       owned_options (&new_failure, &new_failure_provider);
+  old_failure_provider->key_byte = 0x6a;
   new_failure_provider->derive_rc = WYRELOG_E_INTERNAL;
   new_failure_provider->probe_path_on_wipe = path;
   new_failure_provider->truncate_path_on_wipe = clear_path;
@@ -710,6 +719,7 @@ test_rotation_provider_ownership (void)
   g_assert_cmpuint (new_failure.wipes, ==, 1);
   g_assert_cmpuint (new_failure.frees, ==, 1);
   g_assert_cmpint (new_failure.wipe_probe_status, ==, 73);
+  (void) g_remove (rotation_intent);
 
   OwnedProviderCounters old_open_failure = { 0 };
   OwnedProviderCounters new_after_old_failure = { 0 };
@@ -719,6 +729,7 @@ test_rotation_provider_ownership (void)
       owned_options (&old_open_failure, &old_open_failure_provider);
   wyl_policy_store_open_options_t new_after_old_failure_options =
       owned_options (&new_after_old_failure, &new_after_old_failure_provider);
+  old_open_failure_provider->key_byte = 0x6a;
   old_open_failure_provider->probe_rc = WYRELOG_E_INTERNAL;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
           &old_open_failure_options, &new_after_old_failure_options), ==,
@@ -733,6 +744,7 @@ test_rotation_provider_ownership (void)
   CountingProvider holder_provider = { 0 };
   wyl_policy_store_open_options_t holder_options = encrypted_opts (path,
       &holder_provider);
+  holder_provider.key_byte = 0x6a;
   wyl_policy_store_t *holder = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&holder_options,
           &holder), ==, WYRELOG_E_OK);
@@ -744,6 +756,7 @@ test_rotation_provider_ownership (void)
       &old_busy_provider);
   wyl_policy_store_open_options_t new_busy_options = owned_options (&new_busy,
       &new_busy_provider);
+  old_busy_provider->key_byte = 0x6a;
   g_assert_cmpint (wyl_policy_store_rotate_keyprovider (path,
           &old_busy_options, &new_busy_options), ==, WYRELOG_E_BUSY);
   g_assert_cmpuint (old_busy.probes, ==, 0);

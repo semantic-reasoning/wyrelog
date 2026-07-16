@@ -993,6 +993,14 @@ rotate_store (const gchar *path, TestProvider *old_provider,
 }
 
 static void
+remove_rotation_sidecar (const gchar *path)
+{
+  g_autofree gchar *sidecar = g_strconcat (path,
+      ".wyrelog-rotation-intent", NULL);
+  (void) g_remove (sidecar);
+}
+
+static void
 insert_golden_credential (wyl_policy_store_t *store, const guint8 *cvk,
     gsize cvk_len, guint8 out_salt[16], guint8 out_verifier[32])
 {
@@ -1098,6 +1106,7 @@ test_rotation_preserves_golden_credential (void)
   guint8 salt[16], verifier[32], original_cvk[32];
   create_golden_store (path, salt, verifier, original_cvk);
   guint8 old_binding[32];
+  guint8 old_auth_key[crypto_generichash_KEYBYTES];
   g_autofree guint8 *old_sealed = NULL;
   gsize old_sealed_len = 0;
   {
@@ -1109,6 +1118,8 @@ test_rotation_preserves_golden_credential (void)
     wyl_policy_service_cvk_info_t inspect_info = { 0 };
     g_assert_cmpint (wyl_policy_store_load_service_cvk (inspect_store,
             &inspect_info), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (inspect_store,
+            old_auth_key, sizeof old_auth_key), ==, WYRELOG_E_OK);
     memcpy (old_binding, inspect_info.provider_binding, sizeof old_binding);
     old_sealed = g_memdup2 (inspect_info.sealed_cvk,
         inspect_info.sealed_cvk_len);
@@ -1154,6 +1165,29 @@ test_rotation_preserves_golden_credential (void)
   TestRuntime reopened_runtime = { 0 };
   g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
       WYRELOG_E_OK);
+  WylPolicyRotationIntent pending = { 0 };
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store,
+          old_auth_key, sizeof old_auth_key, &pending), ==, WYRELOG_E_OK);
+  guint8 expected_digest[crypto_generichash_BYTES];
+  g_assert_cmpint (crypto_generichash (expected_digest,
+          sizeof expected_digest, (const guint8 *) old_canonical,
+          old_canonical_len, NULL, 0), ==, 0);
+  g_assert_cmpmem (pending.canonical_digest, sizeof pending.canonical_digest,
+      expected_digest, sizeof expected_digest);
+  g_assert_cmpint (pending.state, ==, WYL_POLICY_ROTATION_INTENT_PENDING);
+  g_assert_cmpuint (pending.old_generation, ==, 1);
+  g_assert_cmpuint (pending.expected_new_generation, ==, 2);
+  g_assert_false (sodium_is_zero (pending.canonical_digest,
+          sizeof pending.canonical_digest));
+  g_assert_false (sodium_is_zero (pending.old_provider_id,
+          sizeof pending.old_provider_id));
+  g_assert_false (sodium_is_zero (pending.new_provider_id,
+          sizeof pending.new_provider_id));
+  g_assert_cmpint (memcmp (pending.old_provider_id, pending.new_provider_id,
+          sizeof pending.old_provider_id), !=, 0);
+  g_autofree gchar *pending_path = g_strconcat (path,
+      ".wyrelog-rotation-intent", NULL);
+  assert_file_omits (pending_path, original_cvk, sizeof original_cvk);
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
@@ -1174,6 +1208,27 @@ test_rotation_preserves_golden_credential (void)
           old_canonical_len, original_cvk, sizeof original_cvk));
   wyl_policy_service_cvk_info_clear (&info);
   wyl_policy_store_close (store);
+
+  TestProvider retry_old = {.seed = 0x20 };
+  TestProvider retry_new = {.seed = 0x40 };
+  TestRuntime retry_runtime = { 0 };
+  RotationFault retry_fault = { 0 };
+  g_assert_cmpint (rotate_store (path, &retry_old, &retry_new, &retry_runtime,
+          &retry_fault), ==, WYRELOG_E_POLICY);
+
+  /* The pending marker remains until the post-commit recovery child clears it. */
+  {
+    TestProvider cleanup_provider = {.seed = 0x20 };
+    TestRuntime cleanup_runtime = { 0 };
+    wyl_policy_store_t *cleanup_store = NULL;
+    g_assert_cmpint (open_store (path, &cleanup_provider, &cleanup_runtime,
+            &cleanup_store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (cleanup_store),
+        ==, WYRELOG_E_OK);
+    wyl_policy_store_close (cleanup_store);
+  }
+  sodium_memzero (expected_digest, sizeof expected_digest);
+  sodium_memzero (old_auth_key, sizeof old_auth_key);
 
   TestProvider second = {.seed = 0x20 };
   TestProvider third = {.seed = 0x40 };
@@ -1198,6 +1253,7 @@ test_rotation_preserves_golden_credential (void)
   assert_file_omits (path, original_cvk, sizeof original_cvk);
 
   g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
   g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
   (void) g_remove (lock_path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1245,6 +1301,7 @@ test_rotation_publish_failpoints (void)
         !=, WYRELOG_E_OK);
     g_assert_null (store);
     g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
     g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
     (void) g_remove (lock_path);
     g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1345,6 +1402,7 @@ test_rotation_intent_auth_key_derivation (void)
   wyl_policy_store_close (providerless);
 
   g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
   g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
   (void) g_remove (lock_path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1559,6 +1617,7 @@ test_rotation_post_rename_warning_commits (void)
   assert_golden_verifies (store, salt, verifier);
   wyl_policy_store_close (store);
   g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
   g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
   (void) g_remove (lock_path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1609,6 +1668,7 @@ test_rotation_provider_failures_preserve_old (void)
     assert_golden_verifies (store, salt, verifier);
     wyl_policy_store_close (store);
     g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
     g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
     (void) g_remove (lock_path);
     g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1644,6 +1704,7 @@ test_rotation_secure_memory_failures_preserve_old (void)
     g_assert_cmpmem (after, after_len, before, before_len);
     g_assert_cmpuint (runtime.rng_calls, ==, 0);
     g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
     g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
     (void) g_remove (lock_path);
     g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1700,6 +1761,7 @@ test_rotation_policy_edges (void)
       g_assert_cmpuint (old_provider.unseals, ==, 0);
     }
     g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
     g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
     (void) g_remove (lock_path);
     g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1714,6 +1776,9 @@ test_rotation_policy_edges (void)
   g_assert_cmpint (open_store (path, &initial, &initial_runtime, &store), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  guint8 legacy_auth_key[crypto_generichash_KEYBYTES];
+  g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store,
+          legacy_auth_key, sizeof legacy_auth_key), ==, WYRELOG_E_OK);
   wyl_policy_store_close (store);
   TestProvider old_provider = { 0 };
   TestProvider new_provider = {.seed = 0x20 };
@@ -1731,12 +1796,20 @@ test_rotation_policy_edges (void)
   store = NULL;
   g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
       WYRELOG_E_OK);
+  WylPolicyRotationIntent legacy_pending = { 0 };
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store,
+          legacy_auth_key, sizeof legacy_auth_key, &legacy_pending), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (legacy_pending.old_generation, ==, 0);
+  g_assert_cmpuint (legacy_pending.expected_new_generation, ==, 1);
+  sodium_memzero (legacy_auth_key, sizeof legacy_auth_key);
   const guint8 *missing = NULL;
   gsize missing_len = 0;
   g_assert_cmpint (wyl_policy_store_materialize_service_cvk_existing (store,
           &missing, &missing_len), ==, WYRELOG_E_NOT_FOUND);
   wyl_policy_store_close (store);
   g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
   g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
   (void) g_remove (lock_path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
