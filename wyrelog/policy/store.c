@@ -1980,6 +1980,33 @@ wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *store)
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_policy_rotation_recovery_classify (const WylPolicyRotationRecoveryProbe
+    *probe, WylPolicyRotationRecoveryState *out_state)
+{
+  if (out_state != NULL)
+    *out_state = WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS;
+  if (probe == NULL || out_state == NULL)
+    return WYRELOG_E_INVALID;
+
+  gboolean old_valid = probe->old_root_authenticated
+      && probe->old_generation_matches && probe->old_binding_matches
+      && probe->old_inner_invariants_match;
+  gboolean new_valid = probe->new_root_authenticated
+      && probe->new_generation_matches && probe->new_binding_matches
+      && probe->new_inner_invariants_match;
+  if (old_valid == new_valid) {
+    /* Neither root or both roots authenticating is deliberately ambiguous;
+     * callers must fail closed and retain both roots for operator recovery. */
+    *out_state = WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS;
+  } else if (old_valid) {
+    *out_state = WYL_POLICY_ROTATION_RECOVERY_OLD;
+  } else {
+    *out_state = WYL_POLICY_ROTATION_RECOVERY_NEW;
+  }
+  return WYRELOG_E_OK;
+}
+
 /* Pinned canonical-file helpers (CWE-367 / CodeQL
  * cpp/toctou-race-condition).
  *
