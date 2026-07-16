@@ -20,6 +20,8 @@
 #include <string.h>
 
 #ifdef G_OS_WIN32
+#include <aclapi.h>
+#include <sddl.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -51,8 +53,18 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
   wchar_t *wpath = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
   if (wpath == NULL)
     return WYCTL_TOKEN_FILE_IO;
-  HANDLE h = CreateFileW (wpath, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  SECURITY_ATTRIBUTES security = { 0 };
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW
+      (L"D:P(A;;GA;;;OW)", SDDL_REVISION_1, &descriptor, NULL)) {
+    g_free (wpath);
+    return WYCTL_TOKEN_FILE_IO;
+  }
+  security.nLength = sizeof security;
+  security.lpSecurityDescriptor = descriptor;
+  HANDLE h = CreateFileW (wpath, GENERIC_WRITE, 0, &security, CREATE_NEW,
       FILE_ATTRIBUTE_READONLY, NULL);
+  LocalFree (descriptor);
   g_free (wpath);
   if (h == INVALID_HANDLE_VALUE)
     return GetLastError () == ERROR_FILE_EXISTS
