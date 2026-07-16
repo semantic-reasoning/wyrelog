@@ -1998,7 +1998,6 @@ build_service_token_json (const gchar *access_token)
   return g_string_free (g_steal_pointer (&json), FALSE);
 }
 
-#ifdef WYL_HAS_AUDIT
 #ifndef WYL_TEST_DAEMON_HTTP
 typedef struct
 {
@@ -2007,7 +2006,6 @@ typedef struct
   const gchar *body_json;
   gsize body_len;
 } WylDaemonServiceTokenRequest;
-#endif
 #endif
 
 static void set_json_error_with_retry_after (SoupServerMessage * msg,
