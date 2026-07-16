@@ -113,8 +113,6 @@ check_bootstrap_seed_contract (const gchar *contents, gsize len)
     "approved_data_plane_permission(\"wr.stream.read\").",
     "approved_data_plane_permission(\"wr.stream.list\").",
     "approved_data_plane_permission(\"wr.svc.read_decision\").",
-    "permission_plane(P, \"data\") :- approved_data_plane_permission(P).",
-    "permission_plane(P, \"control\") :- permission(P), !approved_data_plane_permission(P).",
     "role_permission(\"wr.system_admin\", \"wr.policy.write\").",
     "role_permission(\"wr.system_admin\", \"wr.tenant.manage\").",
     "role_permission(\"wr.service_admin\", \"wr.policy.write\").",
