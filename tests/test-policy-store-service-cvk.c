@@ -1260,20 +1260,21 @@ test_rotation_intent_codec (void)
   guint8 *encoded = NULL;
   gsize encoded_len = 0;
   g_assert_cmpint (wyl_policy_rotation_intent_encode (&intent, auth_key,
-          &encoded, &encoded_len), ==, WYRELOG_E_OK);
+          sizeof auth_key, &encoded, &encoded_len), ==, WYRELOG_E_OK);
   g_assert_nonnull (encoded);
   g_assert_cmpuint (encoded_len, >, sizeof auth_key);
 
   WylPolicyRotationIntent decoded = { 0 };
   g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded, encoded_len,
-          auth_key, &decoded), ==, WYRELOG_E_OK);
+          auth_key, sizeof auth_key, &decoded), ==, WYRELOG_E_OK);
   g_assert_cmpmem (&decoded, sizeof decoded, &intent, sizeof intent);
 
   encoded[encoded_len / 2] ^= 0x01;
   g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded, encoded_len,
-          auth_key, &decoded), ==, WYRELOG_E_POLICY);
+          auth_key, sizeof auth_key, &decoded), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded,
-          encoded_len - 1, auth_key, &decoded), ==, WYRELOG_E_POLICY);
+          encoded_len - 1, auth_key, sizeof auth_key, &decoded), ==,
+      WYRELOG_E_POLICY);
   sodium_memzero (encoded, encoded_len);
   g_free (encoded);
   sodium_memzero (auth_key, sizeof auth_key);

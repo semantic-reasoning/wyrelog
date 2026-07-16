@@ -1742,7 +1742,9 @@ rotation_intent_validate (const WylPolicyRotationIntent *intent)
           sizeof intent->old_provider_id)
       || !rotation_intent_bytes_nonzero (intent->new_provider_id,
           sizeof intent->new_provider_id)
-      || intent->expected_new_generation <= intent->old_generation
+      || memcmp (intent->old_provider_id, intent->new_provider_id,
+          sizeof intent->old_provider_id) == 0
+      || intent->expected_new_generation != intent->old_generation + 1
       || (intent->state != WYL_POLICY_ROTATION_INTENT_PENDING
           && intent->state != WYL_POLICY_ROTATION_INTENT_COMMITTED))
     return WYRELOG_E_POLICY;
@@ -1751,13 +1753,15 @@ rotation_intent_validate (const WylPolicyRotationIntent *intent)
 
 wyrelog_error_t
 wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent *intent,
-    const guint8 *auth_key, guint8 **out_bytes, gsize *out_len)
+    const guint8 *auth_key, gsize auth_key_len, guint8 **out_bytes,
+    gsize *out_len)
 {
   if (out_bytes != NULL)
     *out_bytes = NULL;
   if (out_len != NULL)
     *out_len = 0;
   if (out_bytes == NULL || out_len == NULL || auth_key == NULL
+      || auth_key_len != crypto_generichash_KEYBYTES
       || rotation_intent_validate (intent) != WYRELOG_E_OK)
     return WYRELOG_E_INVALID;
 
@@ -1801,11 +1805,13 @@ wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent *intent,
 
 wyrelog_error_t
 wyl_policy_rotation_intent_decode (const guint8 *bytes, gsize len,
-    const guint8 *auth_key, WylPolicyRotationIntent *out_intent)
+    const guint8 *auth_key, gsize auth_key_len,
+    WylPolicyRotationIntent *out_intent)
 {
   if (out_intent != NULL)
     memset (out_intent, 0, sizeof *out_intent);
-  if (bytes == NULL || auth_key == NULL || out_intent == NULL
+  if (bytes == NULL || auth_key == NULL
+      || auth_key_len != crypto_generichash_KEYBYTES || out_intent == NULL
       || len != WYL_POLICY_ROTATION_INTENT_WIRE_LEN
       || memcmp (bytes, WYL_POLICY_ROTATION_INTENT_MAGIC,
           WYL_POLICY_ROTATION_INTENT_MAGIC_LEN) != 0

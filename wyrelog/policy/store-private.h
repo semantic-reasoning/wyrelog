@@ -446,9 +446,11 @@ wyrelog_error_t wyl_policy_store_rotate_keyprovider (const gchar * path,
     const wyl_policy_store_open_options_t * old_opts,
     const wyl_policy_store_open_options_t * new_opts);
 wyrelog_error_t wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent
-    * intent, const guint8 * auth_key, guint8 ** out_bytes, gsize * out_len);
+    * intent, const guint8 * auth_key, gsize auth_key_len, guint8 ** out_bytes,
+    gsize * out_len);
 wyrelog_error_t wyl_policy_rotation_intent_decode (const guint8 * bytes,
-    gsize len, const guint8 * auth_key, WylPolicyRotationIntent * out_intent);
+    gsize len, const guint8 * auth_key, gsize auth_key_len,
+    WylPolicyRotationIntent * out_intent);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
