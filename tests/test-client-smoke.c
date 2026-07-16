@@ -175,6 +175,50 @@ check_service_credential_codecs (void)
   if (issue.credential_id != NULL || issue.credential_secret.text != NULL)
     return FALSE;
 
+  WylClientServicePrincipal principal = { 0 };
+  WylClientServicePrincipalList principal_list = { 0 };
+  const gchar *principal_json =
+      "{\"service_principal\":{\"state\":\"active\","
+      "\"display_name\":\"Worker One\","
+      "\"subject_id\":\"svc:tenant:worker\"}}";
+  const gchar *principal_list_json =
+      "{\"service_principals\":[{\"subject_id\":\"svc:tenant:worker\","
+      "\"display_name\":\"Worker One\",\"state\":\"active\"}]}";
+  if (wyl_client_service_principal_decode (principal_json,
+          strlen (principal_json), &principal) != WYRELOG_E_OK
+      || g_strcmp0 (principal.subject_id, "svc:tenant:worker") != 0
+      || wyl_client_service_principal_list_decode (principal_list_json,
+          strlen (principal_list_json), &principal_list) != WYRELOG_E_OK
+      || principal_list.len != 1)
+    return FALSE;
+  wyl_client_service_principal_clear (&principal);
+  wyl_client_service_principal_list_clear (&principal_list);
+  const gchar *principal_invalid[] = {
+    "{\"service_principal\":{\"subject_id\":\"svc:x:y\","
+        "\"display_name\":\"x\",\"state\":\"active\"," "\"extra\":1}}",
+    "{\"service_principals\":[{\"subject_id\":\"svc:x:y\","
+        "\"display_name\":\"x\",\"state\":\"active\"}]} trailing",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (principal_invalid); i++) {
+    if (wyl_client_service_principal_decode (principal_invalid[i],
+            strlen (principal_invalid[i]), &principal) == WYRELOG_E_OK
+        || wyl_client_service_principal_list_decode (principal_invalid[i],
+            strlen (principal_invalid[i]), &principal_list) == WYRELOG_E_OK
+        || principal.subject_id != NULL || principal_list.items != NULL)
+      return FALSE;
+  }
+  principal.subject_id = g_strdup ("svc:stale:value");
+  principal_list.items = g_new0 (WylClientServicePrincipal, 1);
+  principal_list.len = 1;
+  principal_list.items[0].subject_id = g_strdup ("svc:stale:value");
+  if (wyl_client_service_principal_decode (principal_json, 20000,
+          &principal) != WYRELOG_E_INVALID
+      || principal.subject_id != NULL
+      || wyl_client_service_principal_list_decode (principal_list_json, 20000,
+          &principal_list) != WYRELOG_E_INVALID
+      || principal_list.items != NULL || principal_list.len != 0)
+    return FALSE;
+
   const gchar *invalid[] = {
     "{\"access_token\":\"a\",\"access_token\":\"b\"}",
     "{\"access_token\":\"a\",\"unknown\":1}",
@@ -388,6 +432,41 @@ main (void)
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
+  g_auto (WylClientServicePrincipal)
+  principal = { 0 };
+  g_auto (WylClientServicePrincipalList)
+  principal_list = { 0 };
+  http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
+      "\"display_name\":\"Worker\",\"state\":\"active\"}}";
+  if (wyl_client_service_principal_create (local_client, "svc:alice:worker",
+          "Worker", 123, "public", 49, &principal) != WYRELOG_E_OK
+      || g_strcmp0 (principal.subject_id, "svc:alice:worker") != 0
+      || g_strcmp0 (principal.display_name, "Worker") != 0
+      || g_strcmp0 (http.last_path, "/service-principals") != 0
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || strstr (http.last_body, "svc:alice:worker") == NULL
+      || g_strcmp0 (http.last_session_token, "session-1") != 0)
+    return 232;
+  http.body = "{\"service_principals\":[{\"subject_id\":\""
+      "svc:alice:worker\",\"display_name\":\"Worker\","
+      "\"state\":\"active\"}]}";
+  if (wyl_client_service_principal_list (local_client, 123, "public", 49,
+          &principal_list) != WYRELOG_E_OK || principal_list.len != 1
+      || g_strcmp0 (principal_list.items[0].subject_id,
+          "svc:alice:worker") != 0
+      || g_strcmp0 (http.last_method, "GET") != 0
+      || g_strcmp0 (http.last_path, "/service-principals") != 0)
+    return 233;
+  http.body = "{\"ok\":true}";
+  if (wyl_client_service_principal_disable (local_client,
+          "svc:alice:worker", 123, "public", 49) != WYRELOG_E_OK
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path,
+          "/service-principals/svc:alice:worker/disable") != 0)
+    return 234;
+  if (wyl_client_service_principal_create (local_client, "alice", "bad", 123,
+          "public", 49, &principal) != WYRELOG_E_INVALID)
+    return 235;
   if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
     return 90;
   /*

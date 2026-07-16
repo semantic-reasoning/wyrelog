@@ -2,9 +2,11 @@
 #include <errno.h>
 
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-client-codec-private.h"
 #include "wyrelog/wyl-client-url-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/auth/service-credential-private.h"
+#include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 
@@ -621,6 +623,176 @@ client_policy_mutation_request (WylClient *client, const gchar *path,
   if (status == 403)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_IO;
+}
+
+static gboolean
+client_service_subject_is_valid (const gchar *subject)
+{
+  return subject != NULL && g_str_has_prefix (subject, "svc:")
+      && credential_part_is_valid (subject)
+      && wyl_policy_service_subject_is_valid (subject, strlen (subject));
+}
+
+static wyrelog_error_t
+client_service_management_request (WylClient *client, const gchar *method,
+    const gchar *path, const gchar *body, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, GBytes **out_body,
+    guint *out_status)
+{
+  if (out_body != NULL)
+    *out_body = NULL;
+  if (out_status != NULL)
+    *out_status = 0;
+  if (client == NULL || !WYL_IS_CLIENT (client) || method == NULL
+      || path == NULL || path[0] != '/' || guard_timestamp < 0
+      || guard_loc_class == NULL || guard_risk < 0 || guard_risk > 100
+      || !wyl_guard_loc_class_is_valid (guard_loc_class))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *base_url = wyl_client_dup_base_url (client);
+  g_autofree gchar *tenant = wyl_client_dup_tenant (client);
+  g_autofree gchar *session_token = wyl_client_dup_session_token (client);
+  g_autofree gchar *access_token = wyl_client_dup_access_token (client);
+  if (base_url == NULL || tenant == NULL || tenant[0] == '\0'
+      || (session_token == NULL && access_token == NULL))
+    return WYRELOG_E_INVALID;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+  g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_loc =
+      g_uri_escape_string (guard_loc_class, NULL, TRUE);
+  g_autofree gchar *escaped_session = session_token != NULL
+      ? g_uri_escape_string (session_token, NULL, TRUE) : NULL;
+  g_autofree gchar *uri = NULL;
+  if (access_token != NULL) {
+    uri = g_strdup_printf ("%s%s?tenant=%s&guard_timestamp=%" G_GINT64_FORMAT
+        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT, base_url, path,
+        escaped_tenant, guard_timestamp, escaped_loc, guard_risk);
+  } else {
+    uri = g_strdup_printf ("%s%s?tenant=%s&session_token=%s"
+        "&guard_timestamp=%" G_GINT64_FORMAT "&guard_loc_class=%s"
+        "&guard_risk=%" G_GINT64_FORMAT, base_url, path, escaped_tenant,
+        escaped_session, guard_timestamp, escaped_loc, guard_risk);
+  }
+  g_autoptr (SoupMessage) message = soup_message_new (method, uri);
+  if (message == NULL)
+    return WYRELOG_E_INVALID;
+  if (body != NULL) {
+    GBytes *request_body = g_bytes_new (body, strlen (body));
+    if (request_body == NULL)
+      return WYRELOG_E_NOMEM;
+    soup_message_set_request_body_from_bytes (message, "application/json",
+        request_body);
+    g_bytes_unref (request_body);
+  }
+  if (access_token != NULL) {
+    g_autofree gchar *authorization = g_strdup_printf ("Bearer %s",
+        access_token);
+    soup_message_headers_replace (soup_message_get_request_headers (message),
+        "Authorization", authorization);
+  }
+  g_autoptr (GBytes) response = NULL;
+  guint status = 0;
+  wyrelog_error_t rc = client_send_message_collect (client, message, &response,
+      &status);
+  client->last_http_status = status;
+  if (out_status != NULL)
+    *out_status = status;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (status < 200 || status >= 300) {
+    if (status >= 300 && status < 400) {
+      const gchar *location = soup_message_headers_get_one
+          (soup_message_get_response_headers (message), "Location");
+      g_autofree gchar *origin = location != NULL
+          ? g_uri_to_string (soup_message_get_uri (message)) : NULL;
+      if (origin == NULL
+          || !wyl_client_secret_redirect_is_same_authority (origin, location))
+        return WYRELOG_E_IO;
+    }
+    if (status == 400)
+      return WYRELOG_E_INVALID;
+    if (status == 401)
+      return WYRELOG_E_AUTH;
+    if (status == 403)
+      return WYRELOG_E_POLICY;
+    if (status == 404)
+      return WYRELOG_E_NOT_FOUND;
+    return WYRELOG_E_IO;
+  }
+  if (out_body != NULL)
+    *out_body = g_steal_pointer (&response);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_client_service_principal_create (WylClient *client,
+    const gchar *subject_id, const gchar *display_name,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServicePrincipal *out_principal)
+{
+  g_autoptr (GString) json = NULL;
+  g_autoptr (GBytes) body = NULL;
+  gsize body_size = 0;
+  const gchar *body_data;
+  if (out_principal == NULL || !client_service_subject_is_valid (subject_id)
+      || display_name == NULL || display_name[0] == '\0'
+      || strlen (display_name) > 4096
+      || !g_utf8_validate (display_name, -1, NULL)
+      || strchr (display_name, '\n') != NULL
+      || strchr (display_name, '\r') != NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_principal_clear (out_principal);
+  json = g_string_new ("{\"subject_id\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, subject_id);
+  g_string_append (json, ",\"display_name\":");
+  append_json_string (json, display_name);
+  g_string_append_c (json, '}');
+  wyrelog_error_t rc = client_service_management_request (client, "POST",
+      "/service-principals", json->str, guard_timestamp, guard_loc_class,
+      guard_risk, &body, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  body_data = g_bytes_get_data (body, &body_size);
+  return wyl_client_service_principal_decode (body_data, body_size,
+      out_principal);
+}
+
+wyrelog_error_t
+wyl_client_service_principal_list (WylClient *client, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServicePrincipalList *out_principals)
+{
+  g_autoptr (GBytes) body = NULL;
+  gsize body_size = 0;
+  const gchar *body_data;
+  if (out_principals == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_principal_list_clear (out_principals);
+  wyrelog_error_t rc = client_service_management_request (client, "GET",
+      "/service-principals", NULL, guard_timestamp, guard_loc_class,
+      guard_risk, &body, NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  body_data = g_bytes_get_data (body, &body_size);
+  return wyl_client_service_principal_list_decode (body_data, body_size,
+      out_principals);
+}
+
+wyrelog_error_t
+wyl_client_service_principal_disable (WylClient *client,
+    const gchar *subject_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk)
+{
+  g_autofree gchar *escaped = NULL;
+  g_autofree gchar *path = NULL;
+  if (!client_service_subject_is_valid (subject_id))
+    return WYRELOG_E_INVALID;
+  escaped = g_uri_escape_string (subject_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-principals/%s/disable", escaped);
+  return client_service_management_request (client, "POST", path, NULL,
+      guard_timestamp, guard_loc_class, guard_risk, NULL, NULL);
 }
 
 wyrelog_error_t

@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "wyrelog/error.h"
+#include "wyrelog/client.h"
 
 G_BEGIN_DECLS;
 
@@ -37,5 +38,11 @@ wyrelog_error_t wyl_client_service_credential_issue_result_decode
 wyrelog_error_t wyl_client_service_token_result_decode
     (const gchar * document, gsize document_len,
     WylClientServiceTokenResult * out_result);
+wyrelog_error_t wyl_client_service_principal_decode
+    (const gchar * document, gsize document_len,
+    WylClientServicePrincipal * out_principal);
+wyrelog_error_t wyl_client_service_principal_list_decode
+    (const gchar * document, gsize document_len,
+    WylClientServicePrincipalList * out_principals);
 
 G_END_DECLS;

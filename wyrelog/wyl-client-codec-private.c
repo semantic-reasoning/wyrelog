@@ -162,6 +162,19 @@ string_is_plain_token (const gchar *value)
 }
 
 static gboolean
+string_is_display_name (const gchar *value)
+{
+  if (value == NULL || value[0] == '\0'
+      || strlen (value) > WYL_CLIENT_CODEC_MAX_STRING
+      || !g_utf8_validate (value, -1, NULL))
+    return FALSE;
+  for (const guchar * p = (const guchar *)value; *p != '\0'; p++)
+    if (g_ascii_iscntrl (*p))
+      return FALSE;
+  return TRUE;
+}
+
+static gboolean
 credential_secret_is_valid (const gchar *value)
 {
   static const gchar allowed[] =
@@ -200,6 +213,27 @@ wyl_client_service_token_result_clear (WylClientServiceTokenResult *value)
   wyl_client_sensitive_text_clear (&value->access_token);
 }
 
+void
+wyl_client_service_principal_clear (WylClientServicePrincipal *value)
+{
+  if (value == NULL)
+    return;
+  g_clear_pointer (&value->subject_id, g_free);
+  g_clear_pointer (&value->display_name, g_free);
+  g_clear_pointer (&value->state, g_free);
+}
+
+void wyl_client_service_principal_list_clear
+    (WylClientServicePrincipalList * value)
+{
+  if (value == NULL)
+    return;
+  for (gsize i = 0; i < value->len; i++)
+    wyl_client_service_principal_clear (&value->items[i]);
+  g_clear_pointer (&value->items, g_free);
+  value->len = 0;
+}
+
 static gboolean
 document_init (const gchar *document, gsize document_len, JsonCursor *cursor)
 {
@@ -217,6 +251,128 @@ document_done (JsonCursor *cursor)
 {
   skip_ws (cursor);
   return cursor->pos == cursor->len;
+}
+
+static gboolean
+parse_principal_object (JsonCursor *cursor, WylClientServicePrincipal *out)
+{
+  gchar *key = NULL;
+  gboolean seen_subject = FALSE;
+  gboolean seen_display = FALSE;
+  gboolean seen_state = FALSE;
+  if (out == NULL || !take (cursor, '{'))
+    return FALSE;
+  wyl_client_service_principal_clear (out);
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (cursor, &key) || !take (cursor, ':'))
+      goto invalid;
+    if (g_strcmp0 (key, "subject_id") == 0) {
+      if (seen_subject || !parse_string (cursor, &out->subject_id)
+          || !string_is_plain_token (out->subject_id))
+        goto invalid;
+      seen_subject = TRUE;
+    } else if (g_strcmp0 (key, "display_name") == 0) {
+      if (seen_display || !parse_string (cursor, &out->display_name)
+          || !string_is_display_name (out->display_name))
+        goto invalid;
+      seen_display = TRUE;
+    } else if (g_strcmp0 (key, "state") == 0) {
+      if (seen_state || !parse_string (cursor, &out->state)
+          || !string_is_plain_token (out->state))
+        goto invalid;
+      seen_state = TRUE;
+    } else {
+      goto invalid;
+    }
+    if (take (cursor, '}'))
+      break;
+    if (!take (cursor, ','))
+      goto invalid;
+  }
+  g_free (key);
+  return seen_subject && seen_display && seen_state;
+invalid:
+  g_free (key);
+  wyl_client_service_principal_clear (out);
+  return FALSE;
+}
+
+wyrelog_error_t
+wyl_client_service_principal_decode (const gchar *document,
+    gsize document_len, WylClientServicePrincipal *out_principal)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  if (out_principal == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_principal_clear (out_principal);
+  if (!document_init (document, document_len, &cursor))
+    return WYRELOG_E_INVALID;
+  if (!take (&cursor, '{') || !parse_string (&cursor, &key)
+      || g_strcmp0 (key, "service_principal") != 0 || !take (&cursor, ':'))
+    goto invalid;
+  g_free (key);
+  key = NULL;
+  if (!parse_principal_object (&cursor, out_principal)
+      || !take (&cursor, '}') || !document_done (&cursor))
+    goto invalid;
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  wyl_client_service_principal_clear (out_principal);
+  return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+wyl_client_service_principal_list_decode (const gchar *document,
+    gsize document_len, WylClientServicePrincipalList *out_principals)
+{
+  JsonCursor cursor;
+  gchar *key = NULL;
+  GArray *items = NULL;
+  if (out_principals == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_principal_list_clear (out_principals);
+  if (!document_init (document, document_len, &cursor))
+    return WYRELOG_E_INVALID;
+  if (!take (&cursor, '{') || !parse_string (&cursor, &key)
+      || g_strcmp0 (key, "service_principals") != 0 || !take (&cursor, ':')
+      || !take (&cursor, '['))
+    goto invalid;
+  g_clear_pointer (&key, g_free);
+  items = g_array_new (FALSE, TRUE, sizeof (WylClientServicePrincipal));
+  if (items == NULL)
+    goto invalid;
+  skip_ws (&cursor);
+  if (!take (&cursor, ']')) {
+    while (TRUE) {
+      WylClientServicePrincipal principal = { 0 };
+      if (!parse_principal_object (&cursor, &principal))
+        goto invalid;
+      g_array_append_val (items, principal);
+      if (take (&cursor, ']'))
+        break;
+      if (!take (&cursor, ','))
+        goto invalid;
+    }
+  }
+  if (!take (&cursor, '}') || !document_done (&cursor))
+    goto invalid;
+  out_principals->len = items->len;
+  out_principals->items = (WylClientServicePrincipal *)
+      g_array_free (g_steal_pointer (&items), FALSE);
+  return WYRELOG_E_OK;
+invalid:
+  g_free (key);
+  if (items != NULL) {
+    for (gsize i = 0; i < items->len; i++)
+      wyl_client_service_principal_clear
+          (&g_array_index (items, WylClientServicePrincipal, i));
+    g_array_free (items, TRUE);
+  }
+  wyl_client_service_principal_list_clear (out_principals);
+  return WYRELOG_E_INVALID;
 }
 
 wyrelog_error_t
