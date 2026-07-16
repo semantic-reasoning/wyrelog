@@ -1166,7 +1166,7 @@ raw_human_refresh_thread (gpointer data)
     request->rc = 1;
     return NULL;
   }
-  g_socket_set_timeout (g_socket_connection_get_socket (connection), 5);
+  g_socket_set_timeout (g_socket_connection_get_socket (connection), 15);
   g_autofree gchar *escaped = g_uri_escape_string (request->refresh_token,
       NULL, TRUE);
   g_autofree gchar *wire = g_strdup_printf
@@ -1786,7 +1786,6 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   }
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
-  g_usleep (250000);
   g_autoptr (SoupSession) session = soup_session_new ();
   guint status = 0;
   g_autofree gchar *body = NULL;
