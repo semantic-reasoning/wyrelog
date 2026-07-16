@@ -69,6 +69,26 @@ typedef struct
   gsize len;
 } WylClientServiceCredentialList;
 
+typedef struct
+{
+  gchar *text;
+  gsize len;
+} WylClientSensitiveText;
+
+typedef struct
+{
+  const gchar *subject_id;
+  const gchar *tenant_id;
+  const gchar *request_id;
+  gint64 expires_at_us;
+} WylClientServiceCredentialIssueRequest;
+
+typedef struct
+{
+  WylClientServiceCredential credential;
+  WylClientSensitiveText credential_secret;
+} WylClientServiceCredentialIssueResult;
+
 void wyl_client_service_principal_clear (WylClientServicePrincipal * value);
 void wyl_client_service_principal_list_clear
     (WylClientServicePrincipalList * value);
@@ -97,6 +117,18 @@ wyrelog_error_t wyl_client_service_credential_revoke (WylClient * client,
     const gchar * credential_id, const gchar * request_id,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
+void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
+void wyl_client_service_credential_issue_result_clear
+    (WylClientServiceCredentialIssueResult * value);
+wyrelog_error_t wyl_client_service_credential_issue (WylClient * client,
+    const WylClientServiceCredentialIssueRequest * request,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialIssueResult * out_result);
+wyrelog_error_t wyl_client_service_credential_rotate (WylClient * client,
+    const gchar * credential_id, const gchar * request_id,
+    gint64 expires_at_us, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialIssueResult * out_result);
 
 typedef struct
 {
@@ -346,6 +378,9 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
     (WylClientServiceCredential, wyl_client_service_credential_clear)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
     (WylClientServiceCredentialList, wyl_client_service_credential_list_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredentialIssueResult,
+    wyl_client_service_credential_issue_result_clear)
     G_DEFINE_AUTOPTR_CLEANUP_FUNC
     (WylClientServiceCredentialOperationReconcileRequest,
     wyl_client_service_credential_operation_reconcile_request_clear)

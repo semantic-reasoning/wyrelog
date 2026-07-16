@@ -10,19 +10,6 @@ G_BEGIN_DECLS;
 
 typedef struct
 {
-  gchar *text;
-  gsize len;
-} WylClientSensitiveText;
-
-typedef struct
-{
-  gchar *credential_id;
-  guint64 generation;
-  WylClientSensitiveText credential_secret;
-} WylClientServiceCredentialIssueResult;
-
-typedef struct
-{
   WylClientSensitiveText access_token;
 } WylClientServiceTokenResult;
 

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <errno.h>
+#include <sodium.h>
 
 #include "wyrelog/wyl-client-private.h"
 #include "wyrelog/wyl-client-codec-private.h"
@@ -715,6 +716,8 @@ client_service_management_request (WylClient *client, const gchar *method,
       return WYRELOG_E_AUTH;
     if (status == 403)
       return WYRELOG_E_POLICY;
+    if (status == 409)
+      return WYRELOG_E_POLICY;
     if (status == 404)
       return WYRELOG_E_NOT_FOUND;
     return WYRELOG_E_IO;
@@ -814,6 +817,40 @@ client_service_request_id_is_valid (const gchar *request_id)
   return TRUE;
 }
 
+static gboolean
+client_secret_transport_is_safe (WylClient *client)
+{
+  g_autofree gchar *base_url = NULL;
+  if (client == NULL || !WYL_IS_CLIENT (client))
+    return FALSE;
+  base_url = wyl_client_dup_base_url (client);
+  if (base_url == NULL)
+    return FALSE;
+  while (base_url[0] != '\0' && g_str_has_suffix (base_url, "/"))
+    base_url[strlen (base_url) - 1] = '\0';
+  return wyl_client_secret_url_is_canonical_literal_loopback (base_url);
+}
+
+static wyrelog_error_t
+client_decode_secret_result (GBytes *body,
+    WylClientServiceCredentialIssueResult *out_result)
+{
+  gsize body_size = 0;
+  const guint8 *body_data = g_bytes_get_data (body, &body_size);
+  guint8 *copy = NULL;
+  wyrelog_error_t rc;
+  if (body_data == NULL || body_size == 0)
+    return WYRELOG_E_INVALID;
+  copy = g_memdup2 (body_data, body_size);
+  if (copy == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_client_service_credential_issue_result_decode
+      ((const gchar *) copy, body_size, out_result);
+  sodium_memzero (copy, body_size);
+  g_free (copy);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_client_service_credential_get (WylClient *client,
     const gchar *credential_id, gint64 guard_timestamp,
@@ -896,6 +933,83 @@ wyl_client_service_credential_revoke (WylClient *client,
   body_data = g_bytes_get_data (body, &body_size);
   return wyl_client_service_credential_decode (body_data, body_size,
       out_credential);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_issue (WylClient *client,
+    const WylClientServiceCredentialIssueRequest *request,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialIssueResult *out_result)
+{
+  g_autofree gchar *escaped_subject = NULL;
+  g_autoptr (GString) json = NULL;
+  g_autofree gchar *path = NULL;
+  g_autoptr (GBytes) body = NULL;
+  g_autofree gchar *selected_tenant = NULL;
+  if (out_result == NULL || request == NULL
+      || !client_service_subject_is_valid (request->subject_id)
+      || request->tenant_id == NULL || request->tenant_id[0] == '\0'
+      || !client_service_request_id_is_valid (request->request_id)
+      || request->expires_at_us < 0
+      || !client_secret_transport_is_safe (client))
+    return WYRELOG_E_INVALID;
+  selected_tenant = wyl_client_dup_tenant (client);
+  if (selected_tenant == NULL
+      || g_strcmp0 (selected_tenant, request->tenant_id) != 0)
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_issue_result_clear (out_result);
+  escaped_subject = g_uri_escape_string (request->subject_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-principals/%s/credentials",
+      escaped_subject);
+  json = g_string_new ("{\"version\":\"1\",\"tenant\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, request->tenant_id);
+  g_string_append (json, ",\"request_id\":");
+  append_json_string (json, request->request_id);
+  if (request->expires_at_us > 0)
+    g_string_append_printf (json, ",\"expires_at_us\":%" G_GINT64_FORMAT,
+        request->expires_at_us);
+  g_string_append_c (json, '}');
+  wyrelog_error_t rc = client_service_management_request (client, "POST",
+      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
+      NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return client_decode_secret_result (body, out_result);
+}
+
+wyrelog_error_t
+wyl_client_service_credential_rotate (WylClient *client,
+    const gchar *credential_id, const gchar *request_id, gint64 expires_at_us,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialIssueResult *out_result)
+{
+  g_autofree gchar *escaped = NULL;
+  g_autofree gchar *path = NULL;
+  g_autoptr (GString) json = NULL;
+  g_autoptr (GBytes) body = NULL;
+  if (out_result == NULL || !client_service_credential_id_is_valid
+      (credential_id) || !client_service_request_id_is_valid (request_id)
+      || expires_at_us < 0 || !client_secret_transport_is_safe (client))
+    return WYRELOG_E_INVALID;
+  wyl_client_service_credential_issue_result_clear (out_result);
+  escaped = g_uri_escape_string (credential_id, NULL, TRUE);
+  path = g_strdup_printf ("/service-credentials/%s/rotate", escaped);
+  json = g_string_new ("{\"version\":\"1\",\"request_id\":");
+  if (json == NULL)
+    return WYRELOG_E_NOMEM;
+  append_json_string (json, request_id);
+  if (expires_at_us > 0)
+    g_string_append_printf (json, ",\"expires_at_us\":%" G_GINT64_FORMAT,
+        expires_at_us);
+  g_string_append_c (json, '}');
+  wyrelog_error_t rc = client_service_management_request (client, "POST",
+      path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
+      NULL);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return client_decode_secret_result (body, out_result);
 }
 
 wyrelog_error_t
