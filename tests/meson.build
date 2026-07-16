@@ -153,6 +153,7 @@ if build_client
   if get_option('enable_audit').allowed()
     test_daemon_http_decide_c_args += '-DWYL_HAS_AUDIT'
     test_daemon_http_decide_deps += duckdb_dep
+    test_daemon_http_decide_deps += service_exchange_private_dep
   endif
   test_daemon_http_decide_deps += daemon_http_private_dep
   test_daemon_http_decide = executable('test-daemon-http-decide',
@@ -248,7 +249,9 @@ if build_client
   if get_option('enable_audit').allowed()
     test_daemon_http_mfa_c_args += '-DWYL_HAS_AUDIT'
     test_daemon_http_mfa_deps += duckdb_dep
+    test_daemon_http_mfa_deps += service_exchange_private_dep
   endif
+  test_daemon_http_mfa_deps += daemon_http_private_dep
   test_daemon_http_mfa = executable('test-daemon-http-mfa',
     'test-daemon-http-mfa.c',
     '../wyrelog/daemon/auth-registry-private.c',
@@ -280,7 +283,9 @@ if build_client
     if get_option('enable_audit').allowed()
       test_daemon_http_facts_c_args += '-DWYL_HAS_AUDIT'
       test_daemon_http_facts_deps += duckdb_dep
+      test_daemon_http_facts_deps += service_exchange_private_dep
     endif
+    test_daemon_http_facts_deps += daemon_http_private_dep
     test_daemon_http_facts = executable('test-daemon-http-facts',
       'test-daemon-http-facts.c',
       '../wyrelog/daemon/auth-registry-private.c',
@@ -451,6 +456,7 @@ if build_client and host_machine.system() != 'windows'
     test_wyctl_policy_daemon_c_args += '-DWYL_HAS_FACT_STORE'
     test_wyctl_policy_daemon_deps += duckdb_dep
   endif
+  test_wyctl_policy_daemon_deps += daemon_http_private_dep
   test_wyctl_policy_daemon = executable('test-wyctl-policy-daemon',
     'test-wyctl-policy-daemon.c',
     '../wyrelog/daemon/auth-registry-private.c',

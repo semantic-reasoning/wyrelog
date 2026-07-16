@@ -13,6 +13,9 @@
 #ifdef WYL_TEST_DAEMON_HTTP
 #include "daemon/auth-registry-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
+#ifdef WYL_HAS_AUDIT
+#include "wyrelog/auth/service-exchange-limiter-private.h"
+#endif
 #endif
 
 SoupServer *wyl_daemon_start_http_server (const WylDaemonOptions * opts,
@@ -76,6 +79,13 @@ typedef enum
   WYL_DAEMON_SERVICE_TOKEN_CREDENTIAL,
   WYL_DAEMON_SERVICE_TOKEN_GENERATION,
 } WylDaemonServiceTokenField;
+typedef struct
+{
+  gboolean transport_ok;
+  gboolean body_oversize;
+  const gchar *body_json;
+  gsize body_len;
+} WylDaemonServiceTokenRequest;
 typedef enum
 {
   WYL_DAEMON_REFRESH_BEFORE_CLAIM = 1,
@@ -138,6 +148,10 @@ void wyl_daemon_http_service_authority_snapshot_for_test
     (SoupServer * server, WylServiceAuthAuthoritySnapshot * out_snapshot);
 wyrelog_error_t wyl_daemon_http_latch_service_unavailable_for_test
     (SoupServer * server);
+wyrelog_error_t wyl_daemon_http_issue_service_token_for_test
+    (SoupServer * server, gboolean transport_ok, const gchar * request_body,
+    gsize request_body_len, guint * out_status, gchar ** out_body,
+    guint * out_retry_after);
 gboolean wyl_daemon_http_mutate_service_session_for_test
     (SoupServer * server, const gchar * session_id, gint field,
     const gchar * text, guint64 number);
@@ -210,6 +224,13 @@ gchar *wyl_daemon_http_dup_refresh_state_for_test (SoupServer * server,
 void wyl_daemon_http_reset_refresh_counters_for_test (SoupServer * server);
 void wyl_daemon_http_refresh_counters_for_test (SoupServer * server,
     WylDaemonRefreshCounters * out_counters);
+wyrelog_error_t wyl_daemon_http_service_token_exchange_for_test (SoupServer *
+    server, const WylDaemonServiceTokenRequest * request, guint * out_status,
+    gchar ** out_body, guint * out_retry_after);
+#ifdef WYL_HAS_AUDIT
+void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
+    (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot);
+#endif
 void wyl_daemon_http_set_refresh_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now);
 gboolean wyl_daemon_http_set_refresh_times_for_test (SoupServer * server,

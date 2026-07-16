@@ -7,11 +7,14 @@
 #include <string.h>
 
 #include "daemon/auth-registry-private.h"
+#include "daemon/http-guards-private.h"
 #include "daemon/delta.h"
 #include "daemon/fact-status.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/auth/jwt-private.h"
 #include "wyrelog/auth/mfa-enrollment-private.h"
+#include "wyrelog/auth/service-exchange-limiter-private.h"
+#include "wyrelog/auth/service-exchange-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/auth/totp.h"
@@ -79,6 +82,16 @@
   "service_credential_operation_reconcile_failed"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE \
   "service_credential_operation_reconcile_unavailable"
+#define WYL_DAEMON_ERR_SERVICE_TOKEN_INVALID \
+  "invalid_service_token_request"
+#define WYL_DAEMON_ERR_SERVICE_TOKEN_DENIED \
+  "service_token_denied"
+#define WYL_DAEMON_ERR_SERVICE_TOKEN_AUTH_REQUIRED \
+  "service_token_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_TOKEN_RATE_LIMITED \
+  "service_token_rate_limited"
+#define WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED \
+  "service_token_failed"
 #define WYL_DAEMON_ERR_OPERATION_REQUEST_CONFLICT \
   "operation_request_conflict"
 
@@ -188,6 +201,11 @@ typedef struct _WylDaemonHttpContext
   guint8 access_token_secret[WYL_DAEMON_JWT_KEY_LEN];
   gchar *access_token_key_id;
   gboolean access_token_secret_ready;
+#ifdef WYL_HAS_AUDIT
+  guint8 service_token_limiter_key[crypto_generichash_KEYBYTES];
+  gboolean service_token_limiter_key_ready;
+  WylServiceExchangeLimiter *service_token_limiter;
+#endif
   gboolean production_mode;
   WylDaemonProfile profile;
   gchar *policy_keyprovider_path;
@@ -200,6 +218,9 @@ typedef struct _WylDaemonHttpContext
   GHashTable *refresh_tokens_by_token;
   GHashTable *mfa_enroll_challenges;
   GMainContext *dispatch_context;
+#ifdef WYL_HAS_AUDIT
+  WylServiceExchangeLimiter *service_exchange_limiter;
+#endif
   /*
    * Set of session_token strings that have entered the logout
    * teardown path. Once a session is in this set, both
@@ -514,6 +535,12 @@ wyl_daemon_http_context_unref (gpointer data)
 
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
   g_free (ctx->access_token_key_id);
+#ifdef WYL_HAS_AUDIT
+  sodium_memzero (ctx->service_token_limiter_key,
+      sizeof ctx->service_token_limiter_key);
+  g_clear_pointer (&ctx->service_token_limiter,
+      wyl_service_exchange_limiter_free);
+#endif
   g_free (ctx->policy_keyprovider_path);
   g_free (ctx->fact_root);
   g_free (ctx->system_url);
@@ -631,6 +658,68 @@ derive_access_token_secret (const WylDaemonOptions *opts,
   return WYRELOG_E_OK;
 }
 
+#ifdef WYL_HAS_AUDIT
+static wyrelog_error_t
+derive_service_token_limiter_key (guint8 out_key[crypto_generichash_KEYBYTES])
+{
+  if (out_key == NULL)
+    return WYRELOG_E_INVALID;
+  if (sodium_init () < 0)
+    return WYRELOG_E_CRYPTO;
+  randombytes_buf (out_key, crypto_generichash_KEYBYTES);
+  return WYRELOG_E_OK;
+}
+
+static gint64
+service_exchange_limiter_now_us (gpointer data)
+{
+  (void) data;
+  return g_get_monotonic_time ();
+}
+
+static void
+wyl_daemon_http_context_reset_service_token_limiter (WylDaemonHttpContext *ctx)
+{
+  if (ctx == NULL)
+    return;
+  g_clear_pointer (&ctx->service_token_limiter,
+      wyl_service_exchange_limiter_free);
+  sodium_memzero (ctx->service_token_limiter_key,
+      sizeof ctx->service_token_limiter_key);
+  ctx->service_token_limiter_key_ready = FALSE;
+}
+
+static wyrelog_error_t
+    wyl_daemon_http_context_refresh_service_token_limiter
+    (WylDaemonHttpContext * ctx)
+{
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+
+  guint8 next_key[crypto_generichash_KEYBYTES];
+  wyrelog_error_t rc = derive_service_token_limiter_key (next_key);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylServiceExchangeLimiter *limiter = NULL;
+  rc = wyl_service_exchange_limiter_new (next_key, sizeof next_key, 4096,
+      service_exchange_limiter_now_us, NULL, &limiter);
+  if (rc == WYRELOG_E_OK) {
+    g_clear_pointer (&ctx->service_token_limiter,
+        wyl_service_exchange_limiter_free);
+    memcpy (ctx->service_token_limiter_key, next_key, sizeof next_key);
+    ctx->service_token_limiter_key_ready = TRUE;
+    ctx->service_token_limiter = limiter;
+    limiter = NULL;
+  }
+  if (limiter != NULL)
+    wyl_service_exchange_limiter_free (limiter);
+  sodium_memzero (next_key, sizeof next_key);
+  return rc;
+}
+
+#endif
+
 static wyrelog_error_t
 wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
 {
@@ -658,6 +747,17 @@ wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
   ctx->key_epoch++;
   g_hash_table_remove_all (ctx->access_tokens_by_jti);
   g_hash_table_remove_all (ctx->refresh_tokens_by_token);
+#ifdef WYL_HAS_AUDIT
+  if (ctx->service_exchange_limiter != NULL) {
+    if (wyl_service_exchange_limiter_reseed (ctx->service_exchange_limiter,
+            ctx->access_token_secret, sizeof ctx->access_token_secret,
+            4096, service_exchange_limiter_now_us, NULL) != WYRELOG_E_OK) {
+      g_mutex_unlock (&ctx->lock);
+      sodium_memzero (next_secret, sizeof next_secret);
+      return WYRELOG_E_INTERNAL;
+    }
+  }
+#endif
   g_mutex_unlock (&ctx->lock);
   sodium_memzero (next_secret, sizeof next_secret);
   return WYRELOG_E_OK;
@@ -717,6 +817,18 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
     wyl_daemon_http_context_unref (ctx);
     return NULL;
   }
+#ifdef WYL_HAS_AUDIT
+  rc = wyl_service_exchange_limiter_new (ctx->access_token_secret,
+      sizeof ctx->access_token_secret, 4096, service_exchange_limiter_now_us,
+      NULL, &ctx->service_exchange_limiter);
+  if (rc != WYRELOG_E_OK) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
+        "service exchange limiter initialization failed: %s",
+        wyrelog_error_string (rc));
+    wyl_daemon_http_context_unref (ctx);
+    return NULL;
+  }
+#endif
   return ctx;
 }
 
@@ -1603,6 +1715,37 @@ wyl_daemon_http_rotate_access_token_key_for_test (SoupServer *server)
   return wyl_daemon_http_context_rotate_access_token_key (ctx);
 }
 
+static wyrelog_error_t service_token_exchange_core (WylDaemonHttpContext * ctx,
+    const WylDaemonServiceTokenRequest * request, guint * out_status,
+    gchar ** out_body, guint * out_retry_after);
+
+#ifdef WYL_HAS_AUDIT
+void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
+    (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot)
+{
+  if (out_snapshot == NULL)
+    return;
+  memset (out_snapshot, 0, sizeof *out_snapshot);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || ctx->service_exchange_limiter == NULL)
+    return;
+  wyl_service_exchange_limiter_snapshot_for_test (ctx->service_exchange_limiter,
+      out_snapshot);
+}
+
+wyrelog_error_t
+wyl_daemon_http_service_token_exchange_for_test (SoupServer *server,
+    const WylDaemonServiceTokenRequest *request, guint *out_status,
+    gchar **out_body, guint *out_retry_after)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  return service_token_exchange_core (ctx, request, out_status, out_body,
+      out_retry_after);
+}
+#endif
+
 gboolean
 wyl_daemon_http_session_is_revoked (SoupServer *server,
     const gchar *session_token)
@@ -1821,6 +1964,364 @@ build_login_json (const gchar *session_token, const gchar *username,
   g_string_append_c (json, '}');
   return g_string_free (g_steal_pointer (&json), FALSE);
 }
+
+static gchar *
+build_service_token_json (const gchar *access_token)
+{
+  g_autoptr (GString) json = g_string_new ("{\"access_token\":");
+  append_json_string (json, access_token);
+  g_string_append_c (json, '}');
+  return g_string_free (g_steal_pointer (&json), FALSE);
+}
+
+#ifdef WYL_HAS_AUDIT
+#ifndef WYL_TEST_DAEMON_HTTP
+typedef struct
+{
+  gboolean transport_ok;
+  gboolean body_oversize;
+  const gchar *body_json;
+  gsize body_len;
+} WylDaemonServiceTokenRequest;
+#endif
+#endif
+
+static void set_json_error_with_retry_after (SoupServerMessage * msg,
+    guint status, const gchar * code, guint retry_after_seconds);
+static wyrelog_error_t service_token_exchange_core (WylDaemonHttpContext * ctx,
+    const WylDaemonServiceTokenRequest * request, guint * out_status,
+    gchar ** out_body, guint * out_retry_after);
+static wyrelog_error_t copy_access_token_secret (WylDaemonHttpContext * ctx,
+    guint8 out_secret[WYL_DAEMON_JWT_KEY_LEN]);
+static void attach_request_id_header (SoupServerMessage * msg);
+
+#ifdef WYL_HAS_AUDIT
+typedef struct
+{
+  wyrelog_error_t (*reserve) (gpointer user_data, const gchar * session_id,
+      const gchar * jti, const gchar * credential_id, guint64 generation,
+      const gchar * principal, const gchar * tenant);
+  wyrelog_error_t (*activate) (gpointer user_data, const gchar * session_id,
+      const gchar * jti, const gchar * credential_id, guint64 generation,
+      const gchar * principal, const gchar * tenant, gboolean * out_changed);
+  wyrelog_error_t (*remove_exact) (gpointer user_data, const gchar * session_id,
+      const gchar * jti, const gchar * credential_id, guint64 generation,
+      const gchar * principal, const gchar * tenant, gboolean * out_removed);
+  gpointer user_data;
+} WylDaemonServiceTokenExchangeHooks;
+
+static wyrelog_error_t
+service_token_registry_reserve_hook (gpointer user_data,
+    const gchar *session_id, const gchar *jti, const gchar *credential_id,
+    guint64 generation, const gchar *principal, const gchar *tenant)
+{
+  return wyl_service_auth_registry_reserve (user_data,
+      &(WylServiceAuthReservation) {
+      .session_id = (gchar *) session_id,.jti = (gchar *) jti,.credential_id =
+        (gchar *) credential_id,.generation = generation,.principal =
+        (gchar *) principal,.tenant = (gchar *) tenant,}
+  );
+}
+
+static wyrelog_error_t
+service_token_registry_activate_hook (gpointer user_data,
+    const gchar *session_id, const gchar *jti, const gchar *credential_id,
+    guint64 generation, const gchar *principal, const gchar *tenant,
+    gboolean *out_changed)
+{
+  return wyl_service_auth_registry_activate (user_data,
+      &(WylServiceAuthReservation) {
+      .session_id = (gchar *) session_id,.jti = (gchar *) jti,.credential_id =
+        (gchar *) credential_id,.generation = generation,.principal =
+        (gchar *) principal,.tenant = (gchar *) tenant,}
+      , out_changed);
+}
+
+static wyrelog_error_t
+service_token_registry_remove_hook (gpointer user_data,
+    const gchar *session_id, const gchar *jti, const gchar *credential_id,
+    guint64 generation, const gchar *principal, const gchar *tenant,
+    gboolean *out_removed)
+{
+  return wyl_service_auth_registry_remove_exact (user_data,
+      &(WylServiceAuthReservation) {
+      .session_id = (gchar *) session_id,.jti = (gchar *) jti,.credential_id =
+        (gchar *) credential_id,.generation = generation,.principal =
+        (gchar *) principal,.tenant = (gchar *) tenant,}
+      , out_removed);
+}
+
+static wyrelog_error_t
+service_token_limiter_decide (WylDaemonHttpContext *ctx,
+    WylServiceExchangeLimiterRequestKind kind, const gchar *credential_id,
+    WylServiceExchangeLimiterDecision *out_decision)
+{
+  if (ctx == NULL || out_decision == NULL)
+    return WYRELOG_E_INVALID;
+  if (ctx->service_exchange_limiter == NULL)
+    return WYRELOG_E_INTERNAL;
+  return wyl_service_exchange_limiter_decide (ctx->service_exchange_limiter,
+      kind, credential_id, out_decision);
+}
+
+static wyrelog_error_t
+service_token_response_set_error (guint status, const gchar *code,
+    guint retry_after_seconds, guint *out_status, gchar **out_body,
+    guint *out_retry_after)
+{
+  if (out_status == NULL || out_body == NULL)
+    return WYRELOG_E_INVALID;
+  *out_status = status;
+  if (out_retry_after != NULL)
+    *out_retry_after = retry_after_seconds;
+  *out_body = g_strdup_printf ("{\"error\":\"%s\"}", code);
+  return *out_body != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+static wyrelog_error_t
+service_token_exchange_prepare (WylDaemonHttpContext *ctx,
+    const gchar *credential_id, const gchar *credential_secret,
+    gsize credential_secret_len, gchar **out_body)
+{
+  if (out_body != NULL)
+    *out_body = NULL;
+  if (ctx == NULL || credential_id == NULL || credential_secret == NULL
+      || credential_secret_len == 0 || out_body == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylServiceExchangeAuthority authority = { 0 };
+  wyrelog_error_t rc = wyl_service_exchange_authority_begin (ctx->handle,
+      credential_id, credential_secret, credential_secret_len,
+      g_get_real_time (), &authority);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_exchange_authority_clear (&authority);
+    return rc;
+  }
+
+  guint8 token_secret[WYL_DAEMON_JWT_KEY_LEN];
+  rc = copy_access_token_secret (ctx, token_secret);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  WylServiceExchangeRegistryHooks hooks = {
+    .reserve = service_token_registry_reserve_hook,
+    .activate = service_token_registry_activate_hook,
+    .remove_exact = service_token_registry_remove_hook,
+    .user_data = ctx->service_auth_registry,
+  };
+  WylServiceExchangePrepared prepared = { 0 };
+  rc = wyl_service_exchange_authority_complete (&authority,
+      ctx->access_token_key_id, WYL_DAEMON_JWT_ISSUER, WYL_DAEMON_JWT_AUDIENCE,
+      g_get_real_time () / G_USEC_PER_SEC, token_secret,
+      sizeof token_secret, &hooks, &prepared);
+  sodium_memzero (token_secret, sizeof token_secret);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_exchange_authority_clear (&authority);
+    return rc;
+  }
+  if (prepared.session == NULL || prepared.access_token == NULL) {
+    wyl_service_exchange_prepared_clear (&prepared);
+    wyl_service_exchange_authority_clear (&authority);
+    return WYRELOG_E_INTERNAL;
+  }
+
+  g_autofree gchar *session_id = wyl_session_dup_id_string (prepared.session);
+  g_autofree gchar *subject = wyl_session_dup_service_subject_private
+      (prepared.session);
+  g_autofree gchar *tenant = wyl_session_dup_service_tenant_private
+      (prepared.session);
+  if (session_id == NULL || subject == NULL || tenant == NULL) {
+    wyl_service_exchange_prepared_clear (&prepared);
+    wyl_service_exchange_authority_clear (&authority);
+    return WYRELOG_E_INTERNAL;
+  }
+
+  *out_body = build_service_token_json (prepared.access_token);
+  wyl_service_exchange_prepared_clear (&prepared);
+  wyl_service_exchange_authority_clear (&authority);
+  return *out_body != NULL ? WYRELOG_E_OK : WYRELOG_E_INTERNAL;
+}
+
+static wyrelog_error_t
+service_token_exchange_core (WylDaemonHttpContext *ctx,
+    const WylDaemonServiceTokenRequest *request, guint *out_status,
+    gchar **out_body, guint *out_retry_after)
+{
+  if (out_status != NULL)
+    *out_status = 0;
+  if (out_body != NULL)
+    *out_body = NULL;
+  if (out_retry_after != NULL)
+    *out_retry_after = 0;
+  if (ctx == NULL || request == NULL || out_status == NULL || out_body == NULL)
+    return WYRELOG_E_INVALID;
+
+  if (!request->transport_ok) {
+    *out_status = 403;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_AUTH_REQUIRED);
+    return WYRELOG_E_OK;
+  }
+
+  if (request->body_oversize) {
+    WylServiceExchangeLimiterDecision decision = { 0 };
+    wyrelog_error_t rc = service_token_limiter_decide (ctx,
+        WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!decision.allowed) {
+      *out_status = 429;
+      if (out_retry_after != NULL)
+        *out_retry_after = decision.retry_after_seconds;
+      *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+          WYL_DAEMON_ERR_SERVICE_TOKEN_RATE_LIMITED);
+      return WYRELOG_E_OK;
+    }
+    *out_status = 400;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_INVALID);
+    return WYRELOG_E_OK;
+  }
+
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"credential_id", 4096},
+    {"credential_secret", 16384},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  gboolean parsed = wyl_daemon_http_dup_strict_json_object
+      (request->body_json, request->body_len, fields, G_N_ELEMENTS (fields),
+      values);
+  if (!parsed) {
+    WylServiceExchangeLimiterDecision decision = { 0 };
+    wyrelog_error_t rc = service_token_limiter_decide (ctx,
+        WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision);
+    if (rc != WYRELOG_E_OK) {
+      return rc;
+    }
+    if (!decision.allowed) {
+      *out_status = 429;
+      if (out_retry_after != NULL)
+        *out_retry_after = decision.retry_after_seconds;
+      *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+          WYL_DAEMON_ERR_SERVICE_TOKEN_RATE_LIMITED);
+      return WYRELOG_E_OK;
+    }
+    *out_status = 400;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_INVALID);
+    return WYRELOG_E_OK;
+  }
+
+  const gchar *credential_id = values[0];
+  const gchar *credential_secret = values[1];
+  if (credential_id == NULL || credential_secret == NULL
+      || !wyl_service_credential_id_is_canonical (credential_id,
+          strlen (credential_id))) {
+    WylServiceExchangeLimiterDecision decision = { 0 };
+    wyrelog_error_t rc = service_token_limiter_decide (ctx,
+        WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_MALFORMED, NULL, &decision);
+    if (rc != WYRELOG_E_OK) {
+      return rc;
+    }
+    if (!decision.allowed) {
+      *out_status = 429;
+      if (out_retry_after != NULL)
+        *out_retry_after = decision.retry_after_seconds;
+      *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+          WYL_DAEMON_ERR_SERVICE_TOKEN_RATE_LIMITED);
+      return WYRELOG_E_OK;
+    }
+    *out_status = 400;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_INVALID);
+    return WYRELOG_E_OK;
+  }
+
+  WylServiceExchangeLimiterDecision decision = { 0 };
+  wyrelog_error_t rc = service_token_limiter_decide (ctx,
+      WYL_SERVICE_EXCHANGE_LIMITER_REQUEST_CANONICAL, credential_id,
+      &decision);
+  if (rc != WYRELOG_E_OK) {
+    return rc;
+  }
+  if (!decision.allowed) {
+    *out_status = 429;
+    if (out_retry_after != NULL)
+      *out_retry_after = decision.retry_after_seconds;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_RATE_LIMITED);
+    return WYRELOG_E_OK;
+  }
+
+  g_autofree gchar *body = NULL;
+  rc = service_token_exchange_prepare (ctx, credential_id, credential_secret,
+      strlen (credential_secret), &body);
+  if (rc == WYRELOG_E_AUTH) {
+    *out_status = 401;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_AUTH_REQUIRED);
+    return WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_BUSY) {
+    *out_status = 503;
+    *out_body = g_strdup_printf ("{\"error\":\"service_token_unavailable\"}");
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_OK || body == NULL) {
+    *out_status = 500;
+    *out_body = g_strdup_printf ("{\"error\":\"%s\"}",
+        WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
+    return WYRELOG_E_OK;
+  }
+  *out_body = g_steal_pointer (&body);
+  *out_status = 200;
+  return WYRELOG_E_OK;
+}
+
+static void
+service_token_exchange_handle (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, const WylDaemonServiceTokenRequest *request)
+{
+  guint status = 0;
+  guint retry_after = 0;
+  g_autofree gchar *body = NULL;
+  wyrelog_error_t rc = service_token_exchange_core (ctx, request, &status,
+      &body, &retry_after);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_TOKEN_FAILED);
+    return;
+  }
+  attach_request_id_header (msg);
+  if (status == 429 && retry_after > 0) {
+    g_autofree gchar *retry_after_str = g_strdup_printf ("%u", retry_after);
+    soup_message_headers_replace (soup_server_message_get_response_headers
+        (msg), "Retry-After", retry_after_str);
+  }
+  soup_server_message_set_status (msg, status, NULL);
+  soup_server_message_set_response (msg, "application/json",
+      SOUP_MEMORY_COPY, body != NULL ? body : "{}", body != NULL ?
+      strlen (body) : 2);
+}
+
+wyrelog_error_t
+wyl_daemon_http_issue_service_token_for_test (SoupServer *server,
+    gboolean transport_ok, const gchar *request_body, gsize request_body_len,
+    guint *out_status, gchar **out_body, guint *out_retry_after)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || out_status == NULL || out_body == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylDaemonServiceTokenRequest request = {
+    .transport_ok = transport_ok,
+    .body_oversize = request_body_len > 16 * 1024,
+    .body_json = request_body,
+    .body_len = request_body_len,
+  };
+  return service_token_exchange_core (ctx, &request, out_status, out_body,
+      out_retry_after);
+}
+#endif
 
 static wyrelog_error_t
 copy_access_token_secret (WylDaemonHttpContext *ctx,
