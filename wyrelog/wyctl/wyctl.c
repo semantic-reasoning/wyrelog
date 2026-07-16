@@ -14,12 +14,14 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/version.h"
 #include "wyrelog/wyl-client-private.h"
+#include "wyrelog/wyl-client-url-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
 #include "wyctl-config.h"
 #include "wyctl-token-file.h"
+#include "wyctl-publication-private.h"
 
 typedef struct
 {
@@ -144,6 +146,15 @@ typedef struct
   gchar *keyprovider_path;
   gchar *access_token_file;
 } WyctlMfaOptions;
+
+typedef struct
+{
+  gchar *credential_file;
+  gchar *token_output;
+} WyctlServiceTokenOptions;
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlSensitiveText,
+    wyctl_sensitive_text_clear);
 
 #define WYCTL_DEFAULT_TIMEOUT_MS 2000
 #define WYCTL_MAX_TIMEOUT_MS 60000
@@ -775,6 +786,100 @@ load_access_token_file (const gchar *path, gchar **out_access_token)
   }
 
   *out_access_token = g_steal_pointer (&raw);
+  return 0;
+}
+
+static int
+run_auth_service_token (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServiceTokenOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"credential-file", 0, 0, G_OPTION_ARG_STRING, &opts.credential_file,
+        "Protected service credential file", "PATH"},
+    {"token-output", 0, 0, G_OPTION_ARG_STRING, &opts.token_output,
+        "Protected access-token output path", "PATH"},
+    {NULL}
+  };
+  g_autoptr (GOptionContext) context = g_option_context_new ("service-token");
+  g_autoptr (GError) error = NULL;
+  g_option_context_add_main_entries (context, entries, NULL);
+  g_option_context_set_strict_posix (context, TRUE);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc != 1 || opts.credential_file == NULL
+      || opts.credential_file[0] == '\0') {
+    g_printerr ("wyctl: missing --credential-file\n");
+    return 2;
+  }
+  if (opts.token_output == NULL || opts.token_output[0] == '\0') {
+    g_printerr ("wyctl: missing --token-output\n");
+    return 2;
+  }
+  g_autofree gchar *daemon_url = wyctl_resolve_string_option
+      (global_opts->daemon_url, global_opts->settings, "daemon-url");
+  if (daemon_url == NULL || !daemon_url_is_valid (daemon_url)
+      || !wyl_client_secret_url_is_canonical_literal_loopback (daemon_url)) {
+    g_printerr ("wyctl: invalid daemon URL\n");
+    return 2;
+  }
+  g_autofree gchar *raw = NULL;
+  WyctlTokenFileStatus file_status = wyctl_token_file_read
+      (opts.credential_file, &raw);
+  if (file_status != WYCTL_TOKEN_FILE_OK) {
+    emit_token_file_diagnostic (file_status, opts.credential_file);
+    return 2;
+  }
+  g_auto (WyctlSensitiveText) credential_secret = { 0 };
+  g_autofree gchar *credential_id = NULL;
+  if (wyctl_publication_credential_document_decode (raw, strlen (raw),
+          &credential_id, &credential_secret) != WYRELOG_E_OK) {
+    wyctl_token_file_free_sensitive (g_steal_pointer (&raw), 0);
+    g_printerr ("wyctl: invalid service credential file\n");
+    return 2;
+  }
+  wyctl_token_file_free_sensitive (g_steal_pointer (&raw), 0);
+  WylClientSensitiveText exchange_secret = {
+    .text = credential_secret.text,
+    .len = credential_secret.len,
+  };
+  WylClientServiceTokenRequest request = {
+    .credential_id = credential_id,
+    .credential_secret = &exchange_secret,
+  };
+  g_autoptr (WylClient) client = NULL;
+  if (wyl_client_new (daemon_url, &client) != WYRELOG_E_OK) {
+    wyctl_sensitive_text_clear (&credential_secret);
+    g_printerr ("wyctl: service token exchange failed\n");
+    return 1;
+  }
+  guint timeout_ms = 0;
+  g_autofree gchar *timeout_arg = wyctl_resolve_string_option
+      (global_opts->timeout_ms_arg, global_opts->settings,
+      "default-timeout-ms");
+  if (!parse_timeout_ms (timeout_arg, &timeout_ms)) {
+    wyctl_sensitive_text_clear (&credential_secret);
+    g_printerr ("wyctl: invalid timeout\n");
+    return 2;
+  }
+  wyl_client_set_timeout_ms (client, timeout_ms);
+  g_auto (WylClientServiceTokenResult) result = { 0 };
+  wyrelog_error_t rc = wyl_client_service_token_exchange (client, &request,
+      &result);
+  wyctl_sensitive_text_clear (&credential_secret);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: service token exchange failed\n");
+    return 1;
+  }
+  WyctlTokenFileStatus output_status = wyctl_token_file_write_protected
+      (opts.token_output, result.access_token.text, result.access_token.len);
+  if (output_status != WYCTL_TOKEN_FILE_OK) {
+    g_printerr ("wyctl: unable to publish access token: %s\n",
+        opts.token_output);
+    return 1;
+  }
   return 0;
 }
 
@@ -2663,6 +2768,19 @@ run_key (gint argc, gchar **argv)
   return 2;
 }
 
+static int
+run_auth (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing auth command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "service-token") == 0)
+    return run_auth_service_token (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown auth command: %s\n", argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2722,6 +2840,8 @@ main (int argc, char **argv)
     return run_key (argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "mfa") == 0)
     return run_mfa (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "auth") == 0)
+    return run_auth (&opts, argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;
