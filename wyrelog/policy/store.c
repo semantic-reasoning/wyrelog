@@ -1859,6 +1859,127 @@ wyl_policy_rotation_intent_decode (const guint8 *bytes, gsize len,
   return WYRELOG_E_OK;
 }
 
+#define WYL_POLICY_ROTATION_INTENT_SUFFIX ".wyrelog-rotation-intent"
+
+#ifndef G_OS_WIN32
+static wyrelog_error_t read_through_dirfd (int dirfd, const gchar * basename,
+    guint8 ** out_bytes, gsize * out_len);
+static wyrelog_error_t write_through_dirfd (int dirfd, const gchar * basename,
+    const guint8 * bytes, gsize len,
+    const wyl_policy_store_rotation_runtime_t * rotation_runtime,
+    gboolean * out_replaced);
+#endif
+
+static wyrelog_error_t
+rotation_intent_sidecar_path (const wyl_policy_store_t *store,
+    gchar **out_path, gchar **out_basename)
+{
+  if (out_path != NULL)
+    *out_path = NULL;
+  if (out_basename != NULL)
+    *out_basename = NULL;
+  if (store == NULL || store->canonical_path == NULL
+      || store->canonical_path[0] == '\0')
+    return WYRELOG_E_INVALID;
+#ifdef G_OS_WIN32
+  if (out_path == NULL)
+    return WYRELOG_E_INVALID;
+  *out_path = g_strconcat (store->canonical_path,
+      WYL_POLICY_ROTATION_INTENT_SUFFIX, NULL);
+#else
+  if (store->canonical_dirfd < 0 || store->canonical_basename == NULL
+      || out_basename == NULL)
+    return WYRELOG_E_POLICY;
+  *out_basename = g_strconcat (store->canonical_basename,
+      WYL_POLICY_ROTATION_INTENT_SUFFIX, NULL);
+#endif
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *store,
+    const WylPolicyRotationIntent *intent, const guint8 *auth_key,
+    gsize auth_key_len)
+{
+  guint8 *wire = NULL;
+  gsize wire_len = 0;
+  wyrelog_error_t rc = wyl_policy_rotation_intent_encode (intent, auth_key,
+      auth_key_len, &wire, &wire_len);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autofree gchar *path = NULL;
+  g_autofree gchar *basename = NULL;
+  rc = rotation_intent_sidecar_path (store, &path, &basename);
+  if (rc == WYRELOG_E_OK) {
+#ifdef G_OS_WIN32
+    rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL);
+#else
+    rc = write_through_dirfd (store->canonical_dirfd, basename, wire,
+        wire_len, NULL, NULL);
+#endif
+  }
+  sodium_memzero (wire, wire_len);
+  g_free (wire);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_read_sidecar (wyl_policy_store_t *store,
+    const guint8 *auth_key, gsize auth_key_len,
+    WylPolicyRotationIntent *out_intent)
+{
+  if (out_intent != NULL)
+    memset (out_intent, 0, sizeof *out_intent);
+  if (out_intent == NULL || auth_key == NULL
+      || auth_key_len != crypto_generichash_KEYBYTES)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *path = NULL;
+  g_autofree gchar *basename = NULL;
+  wyrelog_error_t rc = rotation_intent_sidecar_path (store, &path, &basename);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  guint8 *wire = NULL;
+  gsize wire_len = 0;
+#ifdef G_OS_WIN32
+  rc = read_whole_file (path, &wire, &wire_len);
+#else
+  rc = read_through_dirfd (store->canonical_dirfd, basename, &wire, &wire_len);
+#endif
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_policy_rotation_intent_decode (wire, wire_len, auth_key,
+      auth_key_len, out_intent);
+  sodium_memzero (wire, wire_len);
+  g_free (wire);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_clear_sidecar (wyl_policy_store_t *store)
+{
+  g_autofree gchar *path = NULL;
+  g_autofree gchar *basename = NULL;
+  wyrelog_error_t rc = rotation_intent_sidecar_path (store, &path, &basename);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+#ifdef G_OS_WIN32
+  rc = reject_reparse_point_win32 (path);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_remove (path) != 0 && errno != ENOENT)
+    return WYRELOG_E_IO;
+#else
+  if (unlinkat (store->canonical_dirfd, basename, 0) != 0 && errno != ENOENT)
+    return WYRELOG_E_IO;
+  if (fsync (store->canonical_dirfd) != 0)
+    return WYRELOG_E_IO;
+#endif
+  return WYRELOG_E_OK;
+}
+
 /* Pinned canonical-file helpers (CWE-367 / CodeQL
  * cpp/toctou-race-condition).
  *

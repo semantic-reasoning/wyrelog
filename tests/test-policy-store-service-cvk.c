@@ -1281,6 +1281,51 @@ test_rotation_intent_codec (void)
 }
 
 static void
+test_rotation_intent_sidecar_lifecycle (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-rotation-intent-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+
+  WylPolicyRotationIntent intent = { 0 };
+  g_assert_cmpint (wyl_id_new (&intent.transaction_id), ==, WYRELOG_E_OK);
+  memset (intent.canonical_digest, 0x41, sizeof intent.canonical_digest);
+  memset (intent.old_provider_id, 0x42, sizeof intent.old_provider_id);
+  memset (intent.new_provider_id, 0x43, sizeof intent.new_provider_id);
+  intent.old_generation = 11;
+  intent.expected_new_generation = 12;
+  intent.state = WYL_POLICY_ROTATION_INTENT_PENDING;
+  guint8 auth_key[crypto_generichash_KEYBYTES];
+  memset (auth_key, 0x5c, sizeof auth_key);
+
+  WylPolicyRotationIntent loaded = { 0 };
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          sizeof auth_key, &loaded), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_policy_rotation_intent_write_sidecar (store, &intent,
+          auth_key, sizeof auth_key), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          sizeof auth_key, &loaded), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (&loaded, sizeof loaded, &intent, sizeof intent);
+  g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_rotation_intent_clear_sidecar (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_rotation_intent_read_sidecar (store, auth_key,
+          sizeof auth_key, &loaded), ==, WYRELOG_E_NOT_FOUND);
+  sodium_memzero (auth_key, sizeof auth_key);
+  wyl_policy_store_close (store);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
 test_rotation_post_rename_warning_commits (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
@@ -1514,6 +1559,8 @@ main (int argc, char **argv)
       test_rotation_preserves_golden_credential);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-codec",
       test_rotation_intent_codec);
+  g_test_add_func ("/policy-store-service-cvk/rotation-intent-sidecar",
+      test_rotation_intent_sidecar_lifecycle);
   g_test_add_func ("/policy-store-service-cvk/rotation-failpoints",
       test_rotation_publish_failpoints);
   g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",
