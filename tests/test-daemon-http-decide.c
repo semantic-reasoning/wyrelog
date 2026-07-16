@@ -6509,6 +6509,11 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
+          session_token, "human-principal-admin", "__wr_default")) {
+    rc = 1989;
+    goto cleanup;
+  }
   query = g_strdup_printf
       ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
       session_token);
@@ -6530,7 +6535,41 @@ check_service_principal_management_contract (void)
     rc = 1988;
     goto cleanup;
   }
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
+          session_token, "human-principal-admin", "tenant-a")) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 1993;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "DELETE", base_url,
+          credential_path, tenant_query,
+          "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
+          &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"state\":\"revoked\"") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 1994;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "DELETE", base_url,
+          credential_path, tenant_query,
+          "{\"version\":\"1\",\"request_id\":\"222222222222222222222222222\"}",
+          &status, &body) != 0 || status != 409 || body == NULL
+      || strstr (body, "service_credential_conflict") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 1995;
+    goto cleanup;
+  }
   wyl_service_credential_issue_result_clear (&issued);
+
+  if (!wyl_daemon_http_seed_human_session_for_test (http.server,
+          session_token, "human-principal-admin", "__wr_default")) {
+    rc = 1996;
+    goto cleanup;
+  }
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
