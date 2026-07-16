@@ -494,6 +494,15 @@ main (void)
       == NULL || http.last_tenant != NULL || http.last_session_token != NULL
       || http.last_refresh_token != NULL || http.last_authorization != NULL)
     return 244;
+  gchar bounded_secret[43];
+  memcpy (bounded_secret, credential_secret.text, sizeof bounded_secret);
+  credential_secret.text = bounded_secret;
+  if (wyl_client_service_token_exchange (local_client, &token_request,
+          &token_result) != WYRELOG_E_OK
+      || g_strcmp0 (token_result.access_token.text, "access-token-1") != 0)
+    return 247;
+  credential_secret.text = (gchar *)
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq";
   WylClientSensitiveText invalid_secret = {
     .text = (gchar *) "bad",
     .len = 3,
