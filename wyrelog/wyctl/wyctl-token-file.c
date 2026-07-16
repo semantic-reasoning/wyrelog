@@ -83,7 +83,9 @@ wyctl_token_file_write_protected (const gchar *path, const gchar *token,
     }
     written += (gsize) n;
   }
-  if (fsync (fd) != 0 || close (fd) != 0) {
+  gboolean sync_ok = fsync (fd) == 0;
+  gboolean close_ok = close (fd) == 0;
+  if (!sync_ok || !close_ok) {
     g_unlink (path);
     return WYCTL_TOKEN_FILE_IO;
   }

@@ -829,7 +829,8 @@ run_auth_service_token (const WyctlOptions *global_opts, gint argc,
   WyctlTokenFileStatus file_status = wyctl_token_file_read
       (opts.credential_file, &raw);
   if (file_status != WYCTL_TOKEN_FILE_OK) {
-    emit_token_file_diagnostic (file_status, opts.credential_file);
+    g_printerr ("wyctl: unable to read service credential file: %s\n",
+        opts.credential_file);
     return 2;
   }
   g_auto (WyctlSensitiveText) credential_secret = { 0 };
