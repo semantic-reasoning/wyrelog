@@ -5,6 +5,7 @@
 import argparse
 import importlib.util
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -67,12 +68,18 @@ def synthetic_db(root, real_root, real_build_root, compiler_id, compiler,
     (build_root / "compile_commands.json").write_text(json.dumps([entry]), encoding="utf-8")
     return build_root
 
-def invoke(guard, root, compiler_id, compiler, defines=(), build_root=None, extra=()):
+def invoke(guard, root, compiler_id, compiler, defines=(), build_root=None,
+           extra=(), raw_only=False):
     if build_root is None:
         build_root = synthetic_db(root, invoke.real_root, invoke.real_build_root,
             compiler_id, compiler, defines, extra, invoke.real_compiler_id)
-    return subprocess.run([sys.executable, guard, str(root), "--build-root",
-                           str(build_root), "--compiler-id", compiler_id],
+    command = [sys.executable, guard, str(root)]
+    if raw_only:
+        command.append("--raw-only")
+    else:
+        command += ["--build-root", str(build_root), "--compiler-id",
+            compiler_id]
+    return subprocess.run(command,
                           stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                           text=True)
 
@@ -85,9 +92,14 @@ def expect_compile_db_rejected(guard, root, compiler_id, compiler, build_root,
         raise SystemExit(f"guard accepted invalid compile database: {label}")
 
 def fake_clang_script(compiler, actual_cl):
-    common = ("#!/usr/bin/env python3\nimport subprocess, sys\n"
+    common = ("#!/usr/bin/env python3\nimport os, subprocess, sys\n"
         "required={'/nologo','/E','/TC'}\n"
-        "assert required.issubset(sys.argv[1:])\n")
+        "assert required.issubset(sys.argv[1:])\n"
+        "count_path=os.environ.get('WYL_FAKE_COMPILER_COUNT')\n"
+        "if count_path:\n"
+        "    with open(count_path, 'a+', encoding='utf-8') as f:\n"
+        "        f.seek(0, 2)\n"
+        "        f.write('1\\n')\n")
     if actual_cl:
         return common + "MODE='cl'\n" + f"cmd={compiler!r}+sys.argv[1:]\n" + \
             "raise SystemExit(subprocess.run(cmd).returncode)\n"
@@ -392,9 +404,19 @@ def main():
             "duplicate-target")
         (obj_build / "compile_commands.json").write_text(
             json.dumps([valid_entry]), encoding="utf-8")
+        # Most mutations exercise raw token-tree invariants and do not need a
+        # compiler process. Keep only fixtures whose outcome depends on
+        # conditional compilation or macro expansion on the active path in
+        # the expensive preprocessed pass.
+        preprocessed_fixtures = {
+            "inactive-acquire", "conditional-directive-change",
+            "test-tenant-seam-production-visible", "inactive-acquire-alias",
+            "directive-acquire-alias", "true-redefine",
+        }
         for name, text in fixtures.items():
             target.write_text(text, encoding="utf-8")
-            if invoke(ns.guard, fixture_root, ns.compiler_id, compiler, ns.define).returncode == 0:
+            if invoke(ns.guard, fixture_root, ns.compiler_id, compiler,
+                      ns.define, raw_only=name not in preprocessed_fixtures).returncode == 0:
                 raise SystemExit(f"guard accepted negative fixture: {name}")
         target.write_text(source + "\nvoid macro_helper(void) { LOCKED "
             "(NULL, NULL, NULL, NULL, NULL); }\n", encoding="utf-8")
@@ -492,8 +514,20 @@ def main():
             fake.chmod(0o755)
             target.write_text(source, encoding="utf-8")
             fake_command = [sys.executable, str(fake)]
-            if invoke(ns.guard, fixture_root, "clang-cl", fake_command, ns.define).returncode:
-                raise SystemExit("clang-cl preprocessing dialect rejected")
+            count_path = fixture_root / "fake-compiler-count"
+            old_count = os.environ.get("WYL_FAKE_COMPILER_COUNT")
+            os.environ["WYL_FAKE_COMPILER_COUNT"] = str(count_path)
+            try:
+                if invoke(ns.guard, fixture_root, "clang-cl", fake_command,
+                          ns.define).returncode:
+                    raise SystemExit("clang-cl preprocessing dialect rejected")
+            finally:
+                if old_count is None:
+                    os.environ.pop("WYL_FAKE_COMPILER_COUNT", None)
+                else:
+                    os.environ["WYL_FAKE_COMPILER_COUNT"] = old_count
+            if count_path.read_text(encoding="utf-8").count("\n") != 1:
+                raise SystemExit("baseline guard launched fake compiler more than once")
             command_build = synthetic_db(fixture_root, invoke.real_root,
                 invoke.real_build_root, "clang-cl", fake_command, ns.define,
                 real_compiler_id=ns.compiler_id)
