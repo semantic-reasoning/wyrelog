@@ -4543,8 +4543,9 @@ send_raw_reconcile_full (SoupSession *session, const gchar *method,
     root[strlen (root) - 1] = '\0';
 
   g_autofree gchar *uri = query != NULL ?
-      g_strdup_printf ("%s/__test/reconcile?%s", root, query) :
-      g_strdup_printf ("%s/__test/reconcile", root);
+      g_strdup_printf ("%s/service-credential-operations/reconcile?%s", root,
+      query) :
+      g_strdup_printf ("%s/service-credential-operations/reconcile", root);
   g_autoptr (SoupMessage) msg = soup_message_new (method, uri);
   if (msg == NULL)
     return 167;
@@ -6224,6 +6225,8 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
 {
   prepare_service_token_subject (handle, "svc:exchange:worker");
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    return 1944;
 
   gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
   if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
@@ -6292,8 +6295,23 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   guint route_status = 0;
   g_autofree gchar *route_body = NULL;
-  if (send_raw_path (session, "POST", base_url, "/auth/service-token",
-          &route_status, &route_body) != 0 || route_status != 404)
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/auth/service-token", NULL, request_body, &route_status,
+          &route_body) != 0 || route_status != 200 || route_body == NULL
+      || extract_json_string (route_body, "access_token") == NULL
+      || strstr (route_body, "session_token") != NULL
+      || strstr (route_body, "credential_secret") != NULL)
+    return 1957;
+
+  guint denied_status = 0;
+  guint denied_retry_after = 0;
+  g_autofree gchar *denied_body = NULL;
+  if (wyl_daemon_http_issue_service_token_for_test (server, FALSE,
+          request_body, strlen (request_body), &denied_status, &denied_body,
+          &denied_retry_after) != WYRELOG_E_OK
+      || denied_status != 403 || denied_body == NULL
+      || strstr (denied_body, "access_token") != NULL
+      || strstr (denied_body, "credential_secret") != NULL)
     return 1957;
 
   g_autofree gchar *malformed_body =
@@ -6309,7 +6327,7 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
       == NULL)
     return 1958;
 
-  for (guint i = 0; i < 5; i++) {
+  for (guint i = 0; i < 4; i++) {
     g_clear_pointer (&body, g_free);
     if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
             request_body, strlen (request_body), &status, &body,
@@ -6352,6 +6370,11 @@ check_service_principal_management_contract (void)
   g_autofree gchar *tenant_query = NULL;
   g_autofree gchar *issued_secret = NULL;
   g_autofree gchar *rotated_secret = NULL;
+  g_autofree gchar *http_credential_id = NULL;
+  g_autofree gchar *http_exchange_body = NULL;
+  g_autofree gchar *denied_body = NULL;
+  guint denied_status = 0;
+  guint denied_retry_after = 0;
   const gchar *session_token = "human-principal-admin";
   guint status = 0;
   const gchar *create_body =
@@ -6414,7 +6437,7 @@ check_service_principal_management_contract (void)
       ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
       session_token);
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/__test/service-principals", query, create_body, &status, &body) != 0
+          "/service-principals", query, create_body, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -6427,7 +6450,7 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
-          "/__test/service-principals", query, NULL, &status, &body) != 0
+          "/service-principals", query, NULL, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"service_principals\":[") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -6438,7 +6461,7 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
-          "/__test/service-principals/svc:tenant-a:worker/credentials",
+          "/service-principals/svc:tenant-a:worker/credentials",
           query, NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"service_credentials\":[") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -6448,7 +6471,7 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
-          "/__test/service-credentials/wlc_000000000000000000000000000",
+          "/service-credentials/wlc_000000000000000000000000000",
           query, NULL, &status, &body) != 0 || status != 404 || body == NULL
       || strstr (body, "service_credential_not_found") == NULL) {
     rc = 1985;
@@ -6471,7 +6494,7 @@ check_service_principal_management_contract (void)
       "guard_loc_class=trusted&guard_risk=0", session_token);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/__test/service-principals/svc:tenant-b:worker/credentials",
+          "/service-principals/svc:tenant-b:worker/credentials",
           tenant_query,
           "{\"version\":\"1\",\"tenant\":\"tenant-a\","
           "\"request_id\":\"000000000000000000000000000\"}",
@@ -6486,7 +6509,7 @@ check_service_principal_management_contract (void)
       "\"expires_at_us\":\"0\"}";
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/__test/service-principals/svc:tenant-a:worker/credentials",
+          "/service-principals/svc:tenant-a:worker/credentials",
           tenant_query, issue_body, &status, &body) != 0 || status != 200
       || body == NULL || strstr (body, "credential_secret") == NULL
       || strstr (body, "service_credential") == NULL
@@ -6503,9 +6526,41 @@ check_service_principal_management_contract (void)
     rc = 1991;
     goto cleanup;
   }
+#ifdef WYL_HAS_AUDIT
+  http_credential_id = extract_json_string (body, "credential_id");
+  if (http_credential_id == NULL) {
+    rc = 1993;
+    goto cleanup;
+  }
+  http_exchange_body = g_strdup_printf
+      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
+      http_credential_id, issued_secret);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/__test/service-principals/svc:tenant-a:worker/credentials",
+          "/auth/service-token", NULL, http_exchange_body, &status, &body)
+      != 0 || status != 200 || body == NULL
+      || extract_json_string (body, "access_token") == NULL
+      || strstr (body, "session_token") != NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 1993;
+    goto cleanup;
+  }
+  denied_status = 0;
+  denied_retry_after = 0;
+  g_clear_pointer (&denied_body, g_free);
+  if (wyl_daemon_http_issue_service_token_for_test (http.server, FALSE,
+          http_exchange_body, strlen (http_exchange_body), &denied_status,
+          &denied_body, &denied_retry_after) != WYRELOG_E_OK
+      || denied_status != 403 || denied_body == NULL
+      || strstr (denied_body, "access_token") != NULL
+      || strstr (denied_body, "credential_secret") != NULL) {
+    rc = 1994;
+    goto cleanup;
+  }
+#endif
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-principals/svc:tenant-a:worker/credentials",
           tenant_query, issue_body, &status, &body) != 0 || status != 409
       || body == NULL || strstr (body, "service_credential_conflict") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -6548,7 +6603,7 @@ check_service_principal_management_contract (void)
   query = g_strdup_printf
       ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
       "guard_loc_class=trusted&guard_risk=0", session_token);
-  rotate_path = g_strdup_printf ("/__test/service-credentials/%s/rotate",
+  rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
       rotate_seed.credential.credential_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
@@ -6581,8 +6636,7 @@ check_service_principal_management_contract (void)
   }
   wyl_service_credential_issue_result_clear (&rotate_seed);
   cross_tenant_rotate_path = g_strdup_printf
-      ("/__test/service-credentials/%s/rotate",
-      issued.credential.credential_id);
+      ("/service-credentials/%s/rotate", issued.credential.credential_id);
   if (!wyl_daemon_http_seed_human_session_for_test (http.server,
           session_token, "human-principal-admin", "__wr_default")) {
     wyl_service_credential_issue_result_clear (&issued);
@@ -6605,7 +6659,7 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   credential_path = g_strdup_printf
-      ("/__test/service-credentials/%s", issued.credential.credential_id);
+      ("/service-credentials/%s", issued.credential.credential_id);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
           credential_path, query, NULL, &status, &body) != 0 || status != 404
@@ -6653,7 +6707,7 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
-          "/__test/service-principals/svc:tenant-a:worker/disable", query,
+          "/service-principals/svc:tenant-a:worker/disable", query,
           NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"service_principal\":") == NULL
       || strstr (body, "\"subject_id\":\"svc:tenant-a:worker\"") == NULL
@@ -6666,7 +6720,7 @@ check_service_principal_management_contract (void)
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
-          "/__test/service-principals", query, NULL, &status, &body) != 0
+          "/service-principals", query, NULL, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, "\"state\":\"disabled\"") == NULL
       || strstr (body, "\"disabled_by\":\"human-principal-admin\"")

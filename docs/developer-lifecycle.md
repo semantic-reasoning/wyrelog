@@ -170,3 +170,34 @@ unexpected optional fact is policy corruption: reconciliation fails the
 intention without writing DuckDB or marking it committed. Normal projection
 errors roll back every input inserted by that attempt, so a partial projection
 is never a valid retry checkpoint.
+
+## Public Service Credential HTTP contract
+
+The daemon publishes the Service Credential API as one feature-gated route
+set. The management routes are `/service-principals` and
+`/service-credentials`; the audit-enabled build adds the loopback-only
+`POST /auth/service-token`, and the fact-store-enabled build adds
+`POST /service-credential-operations/reconcile`. A build without an owning
+feature does not register that feature's route or a compatibility stub.
+
+The exact management paths are `POST` and `GET /service-principals`,
+`POST /service-principals/{subject}/disable`, `POST` and `GET
+/service-principals/{subject}/credentials`, `GET /service-credentials/{id}`,
+`POST /service-credentials/{id}/rotate`, and `DELETE
+/service-credentials/{id}`. No operation-status GET, alias, legacy, hidden, or
+alternate route is supported. Reconciliation is POST-only and returns
+sanitized, non-secret terminal evidence; it never returns a credential secret.
+
+Service-token exchange accepts only a strict JSON credential ID/secret body
+over actual loopback transport. Non-loopback requests, malformed or oversized
+bodies, unknown credentials, and limiter denials fail closed with sanitized
+responses. A successful response contains only the short-lived access token;
+session metadata, tenant data, credential secrets, and raw request material are
+never echoed.
+
+The daemon listener is loopback-only, so a non-loopback peer cannot reach the
+production route at the network layer. The HTTP smoke suite therefore covers a
+successful production-route exchange and exercises the core transport guard
+with a non-loopback marker for the denial path. Fence uncertainty is represented
+by the canonical `not_committed_terminal` reconciliation outcome; there is no
+separate uncertainty enum.
