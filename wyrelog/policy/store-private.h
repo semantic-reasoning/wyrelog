@@ -480,6 +480,13 @@ wyrelog_error_t wyl_policy_store_open_with_options (const
 wyrelog_error_t wyl_policy_store_rotate_keyprovider (const gchar * path,
     const wyl_policy_store_open_options_t * old_opts,
     const wyl_policy_store_open_options_t * new_opts);
+/* Derives a caller-owned, domain-separated MAC key for rotation-intent
+ * metadata from the already materialized old store key. The caller must pass
+ * a buffer covering out_key_len; the helper wipes that supplied range on
+ * entry, rejects lengths other than the hash key size, and never retains the
+ * output. Callers must still wipe the buffer on every path. */
+wyrelog_error_t wyl_policy_rotation_intent_derive_auth_key
+    (const wyl_policy_store_t * store, guint8 * out_key, gsize out_key_len);
 wyrelog_error_t wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent
     * intent, const guint8 * auth_key, gsize auth_key_len, guint8 ** out_bytes,
     gsize * out_len);

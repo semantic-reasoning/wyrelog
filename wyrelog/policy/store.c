@@ -61,6 +61,8 @@
 #define WYL_POLICY_STORE_FORMAT_VERSION 1
 #define WYL_POLICY_STORE_DESERIALIZE_GROWTH_BYTES (1024u * 1024u)
 #define WYL_POLICY_STORE_MAX_IMAGE_BYTES (64u * 1024u * 1024u)
+#define WYL_POLICY_ROTATION_INTENT_AUTH_LABEL \
+  "wyrelog.policy.rotation-intent.auth.v1"
 
 #define WYL_SERVICE_CVK_ENVELOPE_BYTES 124u
 #define WYL_SERVICE_CVK_MAGIC_OFFSET 0u
@@ -1771,6 +1773,27 @@ rotation_intent_validate (const WylPolicyRotationIntent *intent)
       || (intent->state != WYL_POLICY_ROTATION_INTENT_PENDING
           && intent->state != WYL_POLICY_ROTATION_INTENT_COMMITTED))
     return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_rotation_intent_derive_auth_key (const wyl_policy_store_t *store,
+    guint8 *out_key, gsize out_key_len)
+{
+  if (out_key == NULL)
+    return WYRELOG_E_INVALID;
+  sodium_memzero (out_key, out_key_len);
+  if (out_key_len != crypto_generichash_KEYBYTES)
+    return WYRELOG_E_INVALID;
+  if (store == NULL || !store->encrypted || !store->key_materialized)
+    return WYRELOG_E_POLICY;
+  if (crypto_generichash (out_key, out_key_len,
+          (const guint8 *) WYL_POLICY_ROTATION_INTENT_AUTH_LABEL,
+          sizeof (WYL_POLICY_ROTATION_INTENT_AUTH_LABEL) - 1,
+          store->encryption_key, sizeof store->encryption_key) != 0) {
+    sodium_memzero (out_key, out_key_len);
+    return WYRELOG_E_CRYPTO;
+  }
   return WYRELOG_E_OK;
 }
 
