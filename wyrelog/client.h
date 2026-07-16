@@ -45,6 +45,30 @@ typedef struct
   gsize len;
 } WylClientServicePrincipalList;
 
+typedef struct
+{
+  gchar *credential_id;
+  guint32 credential_format_version;
+  gchar *subject_id;
+  gchar *tenant_id;
+  guint64 generation;
+  gchar *state;
+  gchar *created_by;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+  gint64 expires_at_us;
+  gint64 last_used_at_us;
+  gchar *revoked_by;
+  gint64 revoked_at_us;
+  gchar *rotated_from_id;
+} WylClientServiceCredential;
+
+typedef struct
+{
+  WylClientServiceCredential *items;
+  gsize len;
+} WylClientServiceCredentialList;
+
 void wyl_client_service_principal_clear (WylClientServicePrincipal * value);
 void wyl_client_service_principal_list_clear
     (WylClientServicePrincipalList * value);
@@ -58,6 +82,21 @@ wyrelog_error_t wyl_client_service_principal_list (WylClient * client,
 wyrelog_error_t wyl_client_service_principal_disable (WylClient * client,
     const gchar * subject_id, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk);
+void wyl_client_service_credential_clear (WylClientServiceCredential * value);
+void wyl_client_service_credential_list_clear
+    (WylClientServiceCredentialList * value);
+wyrelog_error_t wyl_client_service_credential_get (WylClient * client,
+    const gchar * credential_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential * out_credential);
+wyrelog_error_t wyl_client_service_credential_list (WylClient * client,
+    const gchar * subject_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialList * out_credentials);
+wyrelog_error_t wyl_client_service_credential_revoke (WylClient * client,
+    const gchar * credential_id, const gchar * request_id,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredential * out_credential);
 
 typedef struct
 {
@@ -303,6 +342,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
     (WylClientServiceCredentialOperationReconcileResult,
     wyl_client_service_credential_operation_reconcile_result_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredential, wyl_client_service_credential_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredentialList, wyl_client_service_credential_list_clear)
     G_DEFINE_AUTOPTR_CLEANUP_FUNC
     (WylClientServiceCredentialOperationReconcileRequest,
     wyl_client_service_credential_operation_reconcile_request_clear)
