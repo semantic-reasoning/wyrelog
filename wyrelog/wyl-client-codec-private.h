@@ -8,16 +8,9 @@
 
 G_BEGIN_DECLS;
 
-typedef struct
-{
-  WylClientSensitiveText access_token;
-} WylClientServiceTokenResult;
-
 void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
 void wyl_client_service_credential_issue_result_clear
     (WylClientServiceCredentialIssueResult * value);
-void wyl_client_service_token_result_clear (WylClientServiceTokenResult *
-    value);
 
 wyrelog_error_t wyl_client_service_credential_issue_result_decode
     (const gchar * document, gsize document_len,
