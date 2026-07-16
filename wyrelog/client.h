@@ -34,6 +34,33 @@ typedef struct _WylClientFactAppendResult WylClientFactAppendResult;
 
 typedef struct
 {
+  gchar *subject_id;
+  gchar *display_name;
+  gchar *state;
+} WylClientServicePrincipal;
+
+typedef struct
+{
+  WylClientServicePrincipal *items;
+  gsize len;
+} WylClientServicePrincipalList;
+
+void wyl_client_service_principal_clear (WylClientServicePrincipal * value);
+void wyl_client_service_principal_list_clear
+    (WylClientServicePrincipalList * value);
+wyrelog_error_t wyl_client_service_principal_create (WylClient * client,
+    const gchar * subject_id, const gchar * display_name,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServicePrincipal * out_principal);
+wyrelog_error_t wyl_client_service_principal_list (WylClient * client,
+    gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
+    WylClientServicePrincipalList * out_principals);
+wyrelog_error_t wyl_client_service_principal_disable (WylClient * client,
+    const gchar * subject_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk);
+
+typedef struct
+{
   const gchar *name;
   const gchar *type;
   gboolean nullable;
@@ -282,3 +309,7 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
     G_DEFINE_AUTOPTR_CLEANUP_FUNC
     (WylClientServiceCredentialOperationReconcileResult,
     wyl_client_service_credential_operation_reconcile_result_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServicePrincipal, wyl_client_service_principal_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServicePrincipalList, wyl_client_service_principal_list_clear)
