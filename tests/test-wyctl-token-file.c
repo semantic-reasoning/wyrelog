@@ -13,6 +13,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
+
 #include "wyctl-token-file.h"
 
 static gchar *
@@ -346,6 +350,75 @@ test_protected_writer_rejects_parent_symlink (void)
   g_unlink (link_dir);
   g_rmdir (real_dir);
 }
+#else
+static gboolean
+create_windows_directory_symlink (const gchar *target, const gchar *link)
+{
+  g_autofree wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1,
+      NULL, NULL, NULL);
+  g_autofree wchar_t *wlink = (wchar_t *) g_utf8_to_utf16 (link, -1,
+      NULL, NULL, NULL);
+  return wtarget != NULL && wlink != NULL
+      && CreateSymbolicLinkW (wlink, wtarget, SYMBOLIC_LINK_FLAG_DIRECTORY);
+}
+
+static gboolean
+create_windows_file_symlink (const gchar *target, const gchar *link)
+{
+  g_autofree wchar_t *wtarget = (wchar_t *) g_utf8_to_utf16 (target, -1,
+      NULL, NULL, NULL);
+  g_autofree wchar_t *wlink = (wchar_t *) g_utf8_to_utf16 (link, -1,
+      NULL, NULL, NULL);
+  return wtarget != NULL && wlink != NULL
+      && CreateSymbolicLinkW (wlink, wtarget, 0);
+}
+
+static void
+test_windows_parent_reparse_is_rejected (void)
+{
+  g_autofree gchar *real_dir = g_dir_make_tmp ("wyctl-parent-XXXXXX", NULL);
+  g_assert_nonnull (real_dir);
+  g_autofree gchar *link_dir = g_strdup_printf ("%s-link", real_dir);
+  if (!create_windows_directory_symlink (real_dir, link_dir)) {
+    g_rmdir (real_dir);
+    g_test_skip ("creating Windows directory symlinks requires a privilege");
+    return;
+  }
+  g_autofree gchar *path = g_build_filename (link_dir, "token", NULL);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
+      !=, WYCTL_TOKEN_FILE_OK);
+  g_assert_false (g_file_test (g_build_filename (real_dir, "token", NULL),
+          G_FILE_TEST_EXISTS));
+  g_remove (link_dir);
+  g_rmdir (real_dir);
+}
+
+static void
+test_windows_final_reparse_is_rejected (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyctl-final-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *real = g_build_filename (dir, "real-token", NULL);
+  g_autofree gchar *link = g_build_filename (dir, "token", NULL);
+  g_assert_true (g_file_set_contents (real, "access-1", -1, NULL));
+  g_autofree wchar_t *wreal = (wchar_t *) g_utf8_to_utf16 (real, -1,
+      NULL, NULL, NULL);
+  g_assert_nonnull (wreal);
+  SetFileAttributesW (wreal, FILE_ATTRIBUTE_READONLY);
+  if (!create_windows_file_symlink (real, link)) {
+    g_remove (real);
+    g_rmdir (dir);
+    g_test_skip ("creating Windows file symlinks requires a privilege");
+    return;
+  }
+  g_autofree gchar *token = NULL;
+  g_assert_cmpint (wyctl_token_file_read (link, &token), ==,
+      WYCTL_TOKEN_FILE_SYMLINK);
+  g_assert_null (token);
+  g_remove (link);
+  g_remove (real);
+  g_rmdir (dir);
+}
 #endif
 
 int
@@ -383,6 +456,11 @@ main (int argc, char **argv)
 #ifndef G_OS_WIN32
   g_test_add_func ("/wyctl/token-file/protected-writer-rejects-parent-symlink",
       test_protected_writer_rejects_parent_symlink);
+#else
+  g_test_add_func ("/wyctl/token-file/windows-parent-reparse-rejected",
+      test_windows_parent_reparse_is_rejected);
+  g_test_add_func ("/wyctl/token-file/windows-final-reparse-rejected",
+      test_windows_final_reparse_is_rejected);
 #endif
   return g_test_run ();
 }
