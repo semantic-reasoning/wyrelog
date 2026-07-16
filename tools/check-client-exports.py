@@ -18,6 +18,8 @@ REQUIRED = {
     "wyl_client_service_credential_get",
     "wyl_client_service_credential_revoke",
     "wyl_client_service_credential_rotate",
+    "wyl_client_service_token_exchange",
+    "wyl_client_service_token_result_clear",
     "wyl_client_service_principal_clear",
     "wyl_client_service_principal_create",
     "wyl_client_service_principal_disable",
