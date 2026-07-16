@@ -130,6 +130,15 @@ test_client_smoke = executable('test-client-smoke',
 test('client-smoke', test_client_smoke)
 
 if build_client
+  test('client-exports', python3,
+    args : [
+      meson.project_source_root() / 'tools' / 'check-client-exports.py',
+      libwyrelog_client.full_path(),
+    ],
+  )
+endif
+
+if build_client
   test_daemon_http_decide_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
