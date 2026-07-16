@@ -91,9 +91,9 @@ wyl_session_is_active_private (const WylSession *session)
 gboolean
 wyl_session_is_active_human_private (const WylSession *session)
 {
-  return wyl_session_is_active_private (session)
-      && wyl_session_get_auth_method_private (session)
-      == WYL_SESSION_AUTH_METHOD_HUMAN;
+  return WYL_IS_SESSION ((gpointer) session)
+      && session->state == WYL_SESSION_STATE_ACTIVE
+      && session->auth_method == WYL_SESSION_AUTH_METHOD_HUMAN;
 }
 
 wyrelog_error_t
