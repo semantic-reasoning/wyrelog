@@ -19,6 +19,11 @@ typedef struct
   WylServiceAuthorityTransaction *transaction;
   WylServiceAuthorityCommitEvidence *evidence;
   gboolean owns_handle_pin;
+    wyrelog_error_t (*invalidate_credential) (gpointer data,
+      const gchar * credential_id, guint64 generation);
+  gpointer invalidation_data;
+  const gchar *invalidation_credential_id;
+  guint64 invalidation_generation;
 } ServiceMutation;
 
 static wyrelog_error_t
@@ -95,6 +100,14 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     }
     wyl_policy_store_service_authority_transaction_free (mutation->transaction);
     mutation->transaction = NULL;
+  }
+  if (result == WYRELOG_E_OK && mutation->invalidate_credential != NULL) {
+    result = mutation->invalidate_credential (mutation->invalidation_data,
+        mutation->invalidation_credential_id,
+        mutation->invalidation_generation);
+    if (result != WYRELOG_E_OK && mutation->lease != NULL)
+      (void) wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
+          mutation->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
   }
   if (mutation->evidence != NULL) {
     wyl_policy_store_service_authority_commit_evidence_unref
@@ -416,8 +429,10 @@ wyl_service_credential_verify_authoritative (WylHandle *handle,
 }
 
 wyrelog_error_t
-wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
+wyl_service_credential_revoke_with_runtime (WylHandle *handle,
+    const gchar *credential_id,
     const gchar *actor_subject_id, const gchar *request_id,
+    const wyl_service_credential_revoke_runtime_t *runtime,
     wyl_service_credential_t *out)
 {
   if (out != NULL)
@@ -426,6 +441,10 @@ wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (rc == WYRELOG_E_OK && runtime != NULL) {
+    mutation.invalidate_credential = runtime->invalidate_credential;
+    mutation.invalidation_data = runtime->invalidation_data;
+  }
   wyl_policy_service_credential_info_t stored = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
@@ -433,11 +452,25 @@ wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
     rc = wyl_policy_store_revoke_service_credential_core
         (mutation.transaction, mutation.store, credential_id,
         actor_subject_id, request_id, &stored);
+  if (rc == WYRELOG_E_OK && mutation.invalidate_credential != NULL
+      && stored.generation > 0) {
+    mutation.invalidation_credential_id = stored.credential_id;
+    mutation.invalidation_generation = stored.generation - 1;
+  }
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK)
     copy_credential (&stored, out);
   wyl_policy_service_credential_info_clear (&stored);
   return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
+    const gchar *actor_subject_id, const gchar *request_id,
+    wyl_service_credential_t *out)
+{
+  return wyl_service_credential_revoke_with_runtime (handle, credential_id,
+      actor_subject_id, request_id, NULL, out);
 }
 
 wyrelog_error_t
@@ -451,8 +484,17 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  if (runtime != NULL && runtime->invalidate_credential != NULL
+      && runtime->old_credential_generation == 0)
+    return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (rc == WYRELOG_E_OK && runtime != NULL) {
+    mutation.invalidate_credential = runtime->invalidate_credential;
+    mutation.invalidation_data = runtime->invalidation_data;
+    mutation.invalidation_credential_id = old_credential_id;
+    mutation.invalidation_generation = runtime->old_credential_generation;
+  }
   wyl_policy_service_credential_info_t stored = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
   const guint8 *cvk = NULL;

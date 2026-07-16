@@ -55,7 +55,20 @@ typedef struct
   gint64 (*now_us) (gpointer data);
   const wyl_service_credential_runtime_t *credential_runtime;
   gpointer data;
+  /* Invoked after the authority commit and before lease release. */
+    wyrelog_error_t (*invalidate_credential) (gpointer data,
+      const gchar * credential_id, guint64 generation);
+  gpointer invalidation_data;
+  guint64 old_credential_generation;
 } wyl_service_credential_rotate_runtime_t;
+
+typedef struct
+{
+  /* Invoked after the authority commit and before lease release. */
+  wyrelog_error_t (*invalidate_credential) (gpointer data,
+      const gchar * credential_id, guint64 generation);
+  gpointer invalidation_data;
+} wyl_service_credential_revoke_runtime_t;
 
 typedef wyrelog_error_t (*wyl_service_principal_cb) (const
     wyl_service_principal_t * principal, gpointer user_data);
@@ -128,6 +141,11 @@ wyrelog_error_t wyl_service_credential_verify_authoritative_with_runtime
 wyrelog_error_t wyl_service_credential_revoke (WylHandle * handle,
     const gchar * credential_id, const gchar * actor_subject_id,
     const gchar * request_id, wyl_service_credential_t * out);
+wyrelog_error_t wyl_service_credential_revoke_with_runtime
+    (WylHandle * handle, const gchar * credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    const wyl_service_credential_revoke_runtime_t * runtime,
+    wyl_service_credential_t * out);
 /* Rotation derives subject and tenant from old_credential_id and returns the
  * successor secret exactly once, only after the local savepoint is released.
  *

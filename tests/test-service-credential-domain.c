@@ -20,6 +20,28 @@ typedef struct
   gchar *key_spec;
 } Fixture;
 
+typedef struct
+{
+  gboolean called;
+  gboolean fail;
+  gchar *credential_id;
+  guint64 generation;
+} InvalidationProbe;
+
+static wyrelog_error_t
+probe_credential_invalidation (gpointer data, const gchar *credential_id,
+    guint64 generation)
+{
+  InvalidationProbe *probe = data;
+  if (probe == NULL)
+    return WYRELOG_E_INVALID;
+  probe->called = TRUE;
+  g_free (probe->credential_id);
+  probe->credential_id = g_strdup (credential_id);
+  probe->generation = generation;
+  return probe->fail ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
 static void
 fixture_clear (Fixture *fixture)
 {
@@ -1293,6 +1315,25 @@ test_revoke_lifecycle_and_remediation (void)
           "SELECT count(*) FROM service_domain_requests "
           "WHERE request_id='revoke-unknown';"), ==, 0);
 
+  wyl_service_credential_issue_result_t hooked = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:revoke:worker",
+          "tenant-a", "admin", "revoke-hook-issue", 0, &hooked), ==,
+      WYRELOG_E_OK);
+  InvalidationProbe probe = { 0 };
+  wyl_service_credential_revoke_runtime_t revoke_runtime = {
+    .invalidate_credential = probe_credential_invalidation,
+    .invalidation_data = &probe,
+  };
+  g_assert_cmpint (wyl_service_credential_revoke_with_runtime (handle,
+          hooked.credential.credential_id, "admin", "revoke-hook",
+          &revoke_runtime, &credential), ==, WYRELOG_E_OK);
+  g_assert_true (probe.called);
+  g_assert_cmpstr (probe.credential_id, ==, hooked.credential.credential_id);
+  g_assert_cmpuint (probe.generation, ==, 1);
+  g_clear_pointer (&probe.credential_id, g_free);
+  wyl_service_credential_issue_result_clear (&hooked);
+  wyl_service_credential_clear (&credential);
+
   wyl_service_credential_issue_result_t remediation = { 0 };
   g_assert_cmpint (wyl_service_credential_issue (handle, "svc:revoke:worker",
           "tenant-b", "admin", "remediation-issue", 0, &remediation), ==,
@@ -1473,8 +1514,19 @@ test_rotate_happy_linkage_no_grace (void)
   g_assert_cmpint (wyl_service_credential_rotate (handle, old_id, "admin",
           "rotate-old", expiry, &rotated), ==, WYRELOG_E_POLICY);
   g_assert_null (rotated.secret);
-  g_assert_cmpint (wyl_service_credential_rotate (handle, old_id, "admin",
-          "rotate-happy", expiry, &rotated), ==, WYRELOG_E_OK);
+  InvalidationProbe probe = { 0 };
+  wyl_service_credential_rotate_runtime_t rotate_runtime = {
+    .invalidate_credential = probe_credential_invalidation,
+    .invalidation_data = &probe,
+    .old_credential_generation = 1,
+  };
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle, old_id,
+          "admin", "rotate-happy", expiry, &rotate_runtime, &rotated), ==,
+      WYRELOG_E_OK);
+  g_assert_true (probe.called);
+  g_assert_cmpstr (probe.credential_id, ==, old_id);
+  g_assert_cmpuint (probe.generation, ==, 1);
+  g_clear_pointer (&probe.credential_id, g_free);
   g_assert_nonnull (rotated.secret);
   g_assert_cmpstr (rotated.credential.subject_id, ==, "svc:rotate:worker");
   g_assert_cmpstr (rotated.credential.tenant_id, ==, "tenant-a");
@@ -1874,6 +1926,34 @@ test_rotate_missing_cvk_does_not_recreate (void)
   wyl_service_credential_issue_result_clear (&old);
 }
 
+static void
+test_revoke_invalidation_failure_marks_result_unavailable (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  prepare_authority (fixture.handle, "svc:revoke-hook:worker");
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (fixture.handle,
+          "svc:revoke-hook:worker", "tenant-a", "admin", "hook-issue", 0,
+          &issued), ==, WYRELOG_E_OK);
+  InvalidationProbe probe = {.fail = TRUE };
+  wyl_service_credential_revoke_runtime_t runtime = {
+    .invalidate_credential = probe_credential_invalidation,
+    .invalidation_data = &probe,
+  };
+  wyl_service_credential_t out = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke_with_runtime (fixture.handle,
+          issued.credential.credential_id, "admin", "hook-revoke", &runtime,
+          &out), ==, WYRELOG_E_IO);
+  g_assert_true (probe.called);
+  g_assert_null (out.credential_id);
+  g_assert_cmpint (scalar (db_of (fixture.handle),
+          "SELECT count(*) FROM service_credentials WHERE state='revoked';"),
+      ==, 1);
+  g_clear_pointer (&probe.credential_id, g_free);
+  wyl_service_credential_issue_result_clear (&issued);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1920,5 +2000,8 @@ main (int argc, char **argv)
       test_rotate_faults_and_overflow);
   g_test_add_func ("/auth/service-credential/rotate-missing-cvk",
       test_rotate_missing_cvk_does_not_recreate);
+  g_test_add_func
+      ("/auth/service-credential/revoke-invalidation-failure-unavailable",
+      test_revoke_invalidation_failure_marks_result_unavailable);
   return g_test_run ();
 }

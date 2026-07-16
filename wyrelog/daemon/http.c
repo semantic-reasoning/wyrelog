@@ -3940,6 +3940,19 @@ service_credential_subject_matches_tenant (const gchar *subject,
       (gsize) (tenant_end - tenant_start)) == 0;
 }
 
+static wyrelog_error_t
+service_credential_registry_invalidate (gpointer data,
+    const gchar *credential_id, guint64 generation)
+{
+  WylDaemonHttpContext *ctx = data;
+  if (ctx == NULL || ctx->service_auth_registry == NULL
+      || credential_id == NULL || generation == 0)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthRevokeResult result = { 0 };
+  return wyl_service_auth_registry_revoke_credential_generation
+      (ctx->service_auth_registry, credential_id, generation, &result);
+}
+
 static void
 service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -4270,11 +4283,17 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND);
     return;
   }
+  guint64 current_generation = current.generation;
   wyl_service_credential_clear (&current);
 
   wyl_service_credential_issue_result_t rotated = { 0 };
-  rc = wyl_service_credential_rotate (ctx->handle, credential_id, actor,
-      values[1], expires_at_us, &rotated);
+  wyl_service_credential_rotate_runtime_t rotate_runtime = {
+    .invalidate_credential = service_credential_registry_invalidate,
+    .invalidation_data = ctx,
+    .old_credential_generation = current_generation,
+  };
+  rc = wyl_service_credential_rotate_with_runtime (ctx->handle, credential_id,
+      actor, values[1], expires_at_us, &rotate_runtime, &rotated);
   if (rc == WYRELOG_E_INVALID) {
     wyl_service_credential_issue_result_clear (&rotated);
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
@@ -4374,8 +4393,12 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
   wyl_service_credential_clear (&current);
 
   wyl_service_credential_t revoked = { 0 };
-  rc = wyl_service_credential_revoke (ctx->handle, path + 1, actor, values[1],
-      &revoked);
+  wyl_service_credential_revoke_runtime_t revoke_runtime = {
+    .invalidate_credential = service_credential_registry_invalidate,
+    .invalidation_data = ctx,
+  };
+  rc = wyl_service_credential_revoke_with_runtime (ctx->handle, path + 1,
+      actor, values[1], &revoke_runtime, &revoked);
   if (rc == WYRELOG_E_INVALID) {
     wyl_service_credential_clear (&revoked);
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
