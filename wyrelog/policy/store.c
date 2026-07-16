@@ -245,6 +245,13 @@ struct _WylServiceExchangeReceipt
   WylServiceAuthorityCommitEvidence *evidence;
 };
 
+static wyrelog_error_t prepare_stmt (sqlite3 * db, const gchar * sql,
+    sqlite3_stmt ** out_stmt);
+static wyrelog_error_t bind_text (sqlite3_stmt * stmt, int index,
+    const gchar * value);
+static wyrelog_error_t query_single_text (sqlite3 * db, const gchar * sql,
+    const gchar * id, gchar ** out_value);
+
 static void
 service_exchange_pending_clear (WylServiceAuthorityTransaction * txn);
 
@@ -491,6 +498,10 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.stream.write_reserved", "reserved stream write", "critical"},
   {"wr.stream.list", "stream list", "basic"},
   {"wr.svc.admin", "service admin", "critical"},
+  {"wr.service_principal.manage", "service principal manage",
+      "critical"},
+  {"wr.service_credential.manage", "service credential manage",
+      "critical"},
   {"wr.svc.reload", "service reload", "sensitive"},
   {"wr.svc.flush_cache", "service cache flush", "sensitive"},
   {"wr.svc.grant_role", "service role grant", "critical"},
@@ -1033,6 +1044,141 @@ find_builtin_permission (const gchar *perm_id)
       return &builtin_permissions[i];
   }
   return NULL;
+}
+
+static gboolean
+permission_class_is_data_plane (const gchar *klass)
+{
+  return g_strcmp0 (klass, "basic") == 0;
+}
+
+const gchar *
+wyl_permission_plane_name (wyl_permission_plane_t plane)
+{
+  switch (plane) {
+    case WYL_PERMISSION_PLANE_CONTROL:
+      return "control";
+    case WYL_PERMISSION_PLANE_DATA:
+      return "data";
+    case WYL_PERMISSION_PLANE_LAST_:
+    default:
+      return NULL;
+  }
+}
+
+wyrelog_error_t
+wyl_policy_store_permission_plane (wyl_policy_store_t *store,
+    const gchar *perm_id, wyl_permission_plane_t *out_plane)
+{
+  if (store == NULL || store->db == NULL || perm_id == NULL
+      || out_plane == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_plane = WYL_PERMISSION_PLANE_CONTROL;
+  static const gchar *sql = "SELECT class FROM permissions WHERE perm_id = ?;";
+  gchar *klass = NULL;
+  wyrelog_error_t rc = query_single_text (store->db, sql, perm_id, &klass);
+  if (rc == WYRELOG_E_POLICY) {
+    *out_plane = WYL_PERMISSION_PLANE_CONTROL;
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (permission_class_is_data_plane (klass)) {
+    *out_plane = WYL_PERMISSION_PLANE_DATA;
+  } else if (g_strcmp0 (klass, "sensitive") == 0
+      || g_strcmp0 (klass, "critical") == 0) {
+    *out_plane = WYL_PERMISSION_PLANE_CONTROL;
+  } else {
+    g_free (klass);
+    return WYRELOG_E_POLICY;
+  }
+  g_free (klass);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+role_has_service_principal_descendants (wyl_policy_store_t *store,
+    const gchar *role_id, gboolean *out_has_service_members)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || role_id == NULL
+      || out_has_service_members == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_has_service_members = FALSE;
+  static const gchar *sql =
+      "WITH RECURSIVE role_desc(role_id) AS ("
+      "  SELECT ?"
+      "  UNION"
+      "  SELECT ri.child_role_id"
+      "  FROM role_desc rd"
+      "  JOIN role_inheritances ri ON ri.parent_role_id = rd.role_id"
+      ") "
+      "SELECT 1 FROM role_desc rd "
+      "JOIN role_memberships rm ON rm.role_id = rd.role_id "
+      "JOIN service_principals sp ON sp.subject_id = rm.subject_id " "LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, role_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    *out_has_service_members = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_role_is_service_eligible (wyl_policy_store_t *store,
+    const gchar *role_id, gboolean *out_eligible)
+{
+  sqlite3_stmt *stmt = NULL;
+
+  if (store == NULL || store->db == NULL || role_id == NULL
+      || out_eligible == NULL)
+    return WYRELOG_E_INVALID;
+
+  *out_eligible = FALSE;
+  static const gchar *sql =
+      "WITH RECURSIVE role_closure(role_id, effective_role_id) AS ("
+      "  SELECT role_id, role_id FROM roles WHERE role_id = ?"
+      "  UNION"
+      "  SELECT rc.role_id, ri.parent_role_id"
+      "  FROM role_closure rc"
+      "  JOIN role_inheritances ri ON ri.child_role_id = rc.effective_role_id"
+      ") "
+      "SELECT 1 FROM role_closure rc "
+      "JOIN role_permissions rp ON rp.role_id = rc.effective_role_id "
+      "JOIN permissions p ON p.perm_id = rp.perm_id "
+      "WHERE p.class != 'basic' " "LIMIT 1;";
+  gboolean has_control = FALSE;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (stmt, 1, role_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
+  }
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW)
+    has_control = TRUE;
+  else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
+  *out_eligible = !has_control;
+  return WYRELOG_E_OK;
 }
 
 static gboolean
@@ -10200,6 +10346,14 @@ wyl_policy_store_grant_direct_permission (wyl_policy_store_t *store,
       subject_id, g_str_equal (perm_id, "wr.login.skip_mfa"));
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (wyl_policy_subject_has_service_prefix (subject_id)) {
+    wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_CONTROL;
+    rc = wyl_policy_store_permission_plane (store, perm_id, &plane);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (plane != WYL_PERMISSION_PLANE_DATA)
+      return WYRELOG_E_POLICY;
+  }
 
   static const gchar *sql =
       "INSERT INTO direct_permissions "
@@ -11636,12 +11790,27 @@ wyl_policy_store_grant_role_permission (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || role_id == NULL || perm_id == NULL)
     return WYRELOG_E_INVALID;
 
+  wyl_permission_plane_t plane = WYL_PERMISSION_PLANE_CONTROL;
+  wyrelog_error_t rc = wyl_policy_store_permission_plane (store, perm_id,
+      &plane);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (plane == WYL_PERMISSION_PLANE_CONTROL) {
+    gboolean has_service_members = FALSE;
+    rc = role_has_service_principal_descendants (store, role_id,
+        &has_service_members);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (has_service_members)
+      return WYRELOG_E_POLICY;
+  }
+
   static const gchar *sql =
       "INSERT INTO role_permissions (role_id, perm_id, granted_at) "
       "VALUES (?, ?, unixepoch()) "
       "ON CONFLICT(role_id, perm_id) DO UPDATE SET "
       "  granted_at = excluded.granted_at;";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, role_id)) != WYRELOG_E_OK
@@ -11704,13 +11873,28 @@ wyl_policy_store_grant_role_inheritance (wyl_policy_store_t *store,
       || parent_role_id == NULL)
     return WYRELOG_E_INVALID;
 
+  gboolean child_has_service_members = FALSE;
+  wyrelog_error_t rc = role_has_service_principal_descendants (store,
+      child_role_id, &child_has_service_members);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (child_has_service_members) {
+    gboolean parent_is_eligible = FALSE;
+    rc = wyl_policy_store_role_is_service_eligible (store, parent_role_id,
+        &parent_is_eligible);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!parent_is_eligible)
+      return WYRELOG_E_POLICY;
+  }
+
   static const gchar *sql =
       "INSERT INTO role_inheritances "
       "  (child_role_id, parent_role_id, granted_at) "
       "VALUES (?, ?, unixepoch()) "
       "ON CONFLICT(child_role_id, parent_role_id) DO UPDATE SET "
       "  granted_at = excluded.granted_at;";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, child_role_id)) != WYRELOG_E_OK
@@ -11769,6 +11953,14 @@ wyl_policy_store_grant_role_membership (wyl_policy_store_t *store,
       subject_id, FALSE);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (wyl_policy_subject_has_service_prefix (subject_id)) {
+    gboolean eligible = FALSE;
+    rc = wyl_policy_store_role_is_service_eligible (store, role_id, &eligible);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!eligible)
+      return WYRELOG_E_POLICY;
+  }
 
   static const gchar *sql =
       "INSERT INTO role_memberships "

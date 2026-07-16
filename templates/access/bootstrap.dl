@@ -31,6 +31,8 @@
 .decl is_builtin_seed(name: symbol)
 .decl role_security_officer(name: symbol)
 .decl permission(name: symbol)
+.decl approved_data_plane_permission(name: symbol)
+.decl permission_plane(permission: symbol, plane: symbol)
 .decl role_permission(role: symbol, perm: symbol)
 .decl inherits(child: symbol, parent: symbol)
 .decl tenant(id: symbol)
@@ -116,6 +118,8 @@ permission("wr.svc.grant_role").
 permission("wr.svc.freeze").
 permission("wr.svc.unfreeze").
 permission("wr.svc.read_decision").
+permission("wr.service_principal.manage").
+permission("wr.service_credential.manage").
 permission("wr.explain.read").
 permission("wr.explain.read_sensitive").
 
@@ -130,6 +134,12 @@ permission("wr.fact.write").
 permission("wr.fact.read").
 permission("wr.datalog.query").
 permission("wr.schema.manage").
+
+approved_data_plane_permission("wr.stream.read").
+approved_data_plane_permission("wr.stream.list").
+approved_data_plane_permission("wr.svc.read_decision").
+permission_plane(P, "data") :- approved_data_plane_permission(P).
+permission_plane(P, "control") :- permission(P), !approved_data_plane_permission(P).
 
 // ---------------------------------------------------------------------------
 // EDB: role_permission facts (seed)

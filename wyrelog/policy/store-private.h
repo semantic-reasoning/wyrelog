@@ -928,6 +928,19 @@ gsize wyl_policy_store_builtin_role_count (void);
 const gchar *wyl_policy_store_builtin_role_id (gsize idx);
 gsize wyl_policy_store_builtin_permission_count (void);
 const gchar *wyl_policy_store_builtin_permission_id (gsize idx);
+typedef enum
+{
+  WYL_PERMISSION_PLANE_CONTROL = 0,
+  WYL_PERMISSION_PLANE_DATA,
+  WYL_PERMISSION_PLANE_LAST_,
+} wyl_permission_plane_t;
+
+const gchar *wyl_permission_plane_name (wyl_permission_plane_t plane);
+wyrelog_error_t wyl_policy_store_permission_plane (wyl_policy_store_t * store,
+    const gchar * perm_id, wyl_permission_plane_t * out_plane);
+wyrelog_error_t wyl_policy_store_role_is_service_eligible
+    (wyl_policy_store_t * store, const gchar * role_id,
+    gboolean * out_eligible);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *
