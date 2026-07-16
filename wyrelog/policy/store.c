@@ -3663,6 +3663,16 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     rc = materialize_store_key (self, &self->keyprovider, FALSE);
     if (rc != WYRELOG_E_OK)
       goto fail;
+    /* A provider-backed plaintext database would still make SQLite resolve
+     * the main file and its journal/WAL/SHM companions by pathname.  Until a
+     * pinned-capable VFS is available, reject this combination before the
+     * first sqlite3_open_v2() so the retained lease cannot be undermined by a
+     * pathname replacement race.  Providerless plaintext and memory stores
+     * remain supported. */
+    if (self->keyprovider.owned && !path_is_memory_db (effective_path)) {
+      rc = WYRELOG_E_POLICY;
+      goto fail;
+    }
   }
 
   if (self->lease != NULL && wyl_policy_store_lease_verify_parent (self->lease)

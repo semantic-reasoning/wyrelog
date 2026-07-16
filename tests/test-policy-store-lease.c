@@ -371,14 +371,13 @@ test_provider_lifetime_success (void)
   };
   wyl_policy_store_t *plaintext = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&plaintext_options,
-          &plaintext), ==, WYRELOG_E_OK);
+          &plaintext), ==, WYRELOG_E_POLICY);
+  g_assert_null (plaintext);
   g_assert_cmpuint (plaintext_counters.probes, ==, 1);
   g_assert_cmpuint (plaintext_counters.derives, ==, 0);
-  g_assert_cmpuint (plaintext_counters.wipes, ==, 0);
-  g_assert_cmpuint (plaintext_counters.frees, ==, 0);
-  wyl_policy_store_close (plaintext);
   g_assert_cmpuint (plaintext_counters.wipes, ==, 1);
   g_assert_cmpuint (plaintext_counters.frees, ==, 1);
+  g_assert_false (g_file_test (plaintext_path, G_FILE_TEST_EXISTS));
 
   CountingProvider stack_provider = { 0 };
   wyl_policy_store_open_options_t stack_options = encrypted_opts (stack_path,
@@ -531,7 +530,7 @@ test_provider_lifetime_failures_and_vtable_snapshot (void)
     .keyprovider_state_free = owned_free,
   };
   g_assert_cmpint (wyl_policy_store_open_with_options (&sqlite_options, &store),
-      ==, WYRELOG_E_IO);
+      ==, WYRELOG_E_POLICY);
   g_assert_cmpuint (sqlite_counters.probes, ==, 1);
   g_assert_cmpuint (sqlite_counters.derives, ==, 0);
   g_assert_cmpuint (sqlite_counters.wipes, ==, 1);
@@ -1062,7 +1061,7 @@ test_providerless_plaintext_dual_open (void)
 }
 
 static void
-test_plaintext_provider_is_leased (void)
+test_plaintext_provider_is_rejected (void)
 {
   g_autofree gchar *dir = make_tmpdir ();
   g_autofree gchar *path = g_build_filename (dir, "plain-provider.sqlite",
@@ -1076,10 +1075,18 @@ test_plaintext_provider_is_leased (void)
   wyl_policy_store_t *first = NULL;
   wyl_policy_store_t *second = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&first_opts, &first), ==,
-      WYRELOG_E_OK);
+      WYRELOG_E_POLICY);
+  g_assert_null (first);
   g_assert_cmpint (wyl_policy_store_open_with_options (&second_opts, &second),
-      ==, WYRELOG_E_BUSY);
-  wyl_policy_store_close (first);
+      ==, WYRELOG_E_POLICY);
+  g_assert_null (second);
+  g_assert_cmpuint (first_provider.probes, ==, 1);
+  g_assert_cmpuint (first_provider.wipes, ==, 1);
+  g_assert_true (first_provider.wiped);
+  g_assert_cmpuint (second_provider.probes, ==, 1);
+  g_assert_cmpuint (second_provider.wipes, ==, 1);
+  g_assert_true (second_provider.wiped);
+  g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
   assert_lock_stable (path);
   remove_store_files (path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
@@ -1381,8 +1388,8 @@ main (int argc, char **argv)
       test_parent_alias_identity);
   g_test_add_func ("/policy-store-lease/providerless-plaintext",
       test_providerless_plaintext_dual_open);
-  g_test_add_func ("/policy-store-lease/plaintext-provider",
-      test_plaintext_provider_is_leased);
+  g_test_add_func ("/policy-store-lease/plaintext-provider-rejected",
+      test_plaintext_provider_is_rejected);
   g_test_add_func ("/policy-store-lease/early-error-release",
       test_early_error_releases_lease);
   g_test_add_func ("/policy-store-lease/lock-symlink",
