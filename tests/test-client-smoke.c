@@ -168,6 +168,17 @@ check_service_credential_codecs (void)
   wyl_client_service_token_result_clear (&token);
   if (token.access_token.text != NULL || token.access_token.len != 0)
     return FALSE;
+  const gchar *invalid_token_json[] = {
+    "{\"access_token\":\"access-1\",\"refresh_token\":\"refresh-1\"}",
+    "{\"access_token\":\"access-1\",\"access_token\":\"access-2\"}",
+    "{\"access_token\":\"access-1\"} trailing",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_token_json); i++) {
+    if (wyl_client_service_token_result_decode (invalid_token_json[i],
+            strlen (invalid_token_json[i]), &token) == WYRELOG_E_OK
+        || token.access_token.text != NULL || token.access_token.len != 0)
+      return FALSE;
+  }
 
   wyrelog_error_t issue_decode_rc =
       wyl_client_service_credential_issue_result_decode (issue_json,
@@ -462,6 +473,44 @@ main (void)
       g_strcmp0 (client_principal_state, "mfa_required") != 0 ||
       g_strcmp0 (client_session_state, "active") != 0)
     return 138;
+  g_auto (WylClientServiceTokenResult)
+  token_result = { 0 };
+  WylClientSensitiveText credential_secret = {
+    .text = (gchar *) "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+    .len = 43,
+  };
+  WylClientServiceTokenRequest token_request = {
+    .credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+    .credential_secret = &credential_secret,
+  };
+  http.body = "{\"access_token\":\"access-token-1\"}";
+  if (wyl_client_service_token_exchange (local_client, &token_request,
+          &token_result) != WYRELOG_E_OK
+      || g_strcmp0 (token_result.access_token.text, "access-token-1") != 0
+      || g_strcmp0 (http.last_method, "POST") != 0
+      || g_strcmp0 (http.last_path, "/auth/service-token") != 0
+      || strstr (http.last_body,
+          "{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq\"}")
+      == NULL || http.last_tenant != NULL || http.last_session_token != NULL
+      || http.last_refresh_token != NULL || http.last_authorization != NULL)
+    return 244;
+  WylClientSensitiveText invalid_secret = {
+    .text = (gchar *) "bad",
+    .len = 3,
+  };
+  token_request.credential_secret = &invalid_secret;
+  if (wyl_client_service_token_exchange (local_client, &token_request,
+          &token_result) != WYRELOG_E_INVALID
+      || g_strcmp0 (http.last_path, "/auth/service-token") != 0)
+    return 245;
+  token_request.credential_secret = &credential_secret;
+  http.status = 429;
+  http.body = "{\"error\":\"rate_limited\"}";
+  if (wyl_client_service_token_exchange (local_client, &token_request,
+          &token_result) != WYRELOG_E_IO
+      || token_result.access_token.text != NULL)
+    return 246;
+  http.status = 0;
   g_auto (WylClientServicePrincipal)
   principal = { 0 };
   g_auto (WylClientServicePrincipalList)
