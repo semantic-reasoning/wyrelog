@@ -311,6 +311,25 @@ test_status_message_table_has_no_token_placeholder (void)
   }
 }
 
+static void
+test_protected_writer_is_no_replace (void)
+{
+  g_autofree gchar *path = NULL;
+  gint fd = g_file_open_tmp ("wyctl-output-XXXXXX", &path, NULL);
+  g_assert_cmpint (fd, >=, 0);
+  g_assert_true (g_close (fd, NULL));
+  g_unlink (path);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
+      ==, WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "access-2", 8),
+      !=, WYCTL_TOKEN_FILE_OK);
+  g_autofree gchar *token = NULL;
+  g_assert_cmpint (wyctl_token_file_read (path, &token), ==,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_cmpstr (token, ==, "access-1");
+  g_unlink (path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -341,5 +360,7 @@ main (int argc, char **argv)
       test_windows_attrs_reject_not_readonly);
   g_test_add_func ("/wyctl/token-file/windows-attrs-reject-reparse-point",
       test_windows_attrs_reject_reparse_point);
+  g_test_add_func ("/wyctl/token-file/protected-writer-no-replace",
+      test_protected_writer_is_no_replace);
   return g_test_run ();
 }
