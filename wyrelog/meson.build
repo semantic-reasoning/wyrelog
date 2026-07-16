@@ -207,13 +207,17 @@ if build_client
     dependencies : [wyrelog_dep, glib_dep, gio_dep],
   )
 
+  wyctl_deps = [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep,
+    sodium_dep, sqlite_dep]
+  if host_machine.system() == 'windows'
+    wyctl_deps += advapi32_dep
+  endif
   wyctl_exe = executable('wyctl',
     files('wyctl/wyctl.c', 'wyctl/wyctl-config.c',
         'wyctl/wyctl-token-file.c', 'wyctl/wyctl-publication-private.c',
         'wyctl/wyctl-publication-windows-private.c'),
     include_directories : wyrelog_inc,
-    dependencies : [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep,
-        sodium_dep, sqlite_dep, advapi32_dep],
+    dependencies : wyctl_deps,
     install : true,
   )
 
