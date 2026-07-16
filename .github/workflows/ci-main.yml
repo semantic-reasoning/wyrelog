@@ -19,6 +19,12 @@ jobs:
   build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      # Relativise absolute paths baked into debug info so cache entries stay
+      # valid across runs even though the workspace path is fixed on hosted
+      # runners; matches the Windows job.
+      SCCACHE_BASEDIRS: ${{ github.workspace }}
     strategy:
       fail-fast: false
       matrix:
@@ -56,7 +62,19 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-packagecache-
 
+      - name: Set up sccache
+        uses: mozilla-actions/sccache-action@v0.0.10
+
       - name: Configure
+        env:
+          # Route every compile through sccache. Wrapping both CC and CXX is
+          # required: the from-source DuckDB amalgamation is a large C++ single
+          # translation unit, and the subprojects (wirelog, libchronoid,
+          # nanoarrow, xxHash) are C. Their pinned sources rarely change, so
+          # these compilations become cross-run cache hits instead of a full
+          # rebuild each CI run.
+          CC: sccache cc
+          CXX: sccache c++
         run: |
           meson setup builddir \
             -Denable_tpm=${{ matrix.tpm }} \
@@ -65,6 +83,10 @@ jobs:
 
       - name: Build and test
         run: meson test -C builddir --print-errorlogs --suite wyrelog
+
+      - name: Show sccache statistics
+        if: always()
+        run: sccache --show-stats
 
       - name: Upload meson logs on failure
         if: failure()
