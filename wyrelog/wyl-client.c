@@ -872,6 +872,24 @@ client_decode_token_result (GBytes *body, WylClientServiceTokenResult *out)
   return rc;
 }
 
+typedef struct
+{
+  gpointer data;
+  gsize size;
+} ClientSecretBytes;
+
+static void
+client_secret_bytes_free (gpointer user_data)
+{
+  ClientSecretBytes *owner = user_data;
+  if (owner == NULL)
+    return;
+  if (owner->data != NULL)
+    sodium_memzero (owner->data, owner->size);
+  g_free (owner->data);
+  g_free (owner);
+}
+
 static gboolean
 client_service_secret_is_valid (const WylClientSensitiveText *secret)
 {
@@ -1071,6 +1089,8 @@ wyl_client_service_token_exchange (WylClient *client,
   if (!wyl_client_secret_url_is_canonical_literal_loopback (base_url))
     return WYRELOG_E_INVALID;
   uri = g_strdup_printf ("%s/auth/service-token", base_url);
+  if (uri == NULL)
+    return WYRELOG_E_NOMEM;
   message = soup_message_new ("POST", uri);
   if (message == NULL)
     return WYRELOG_E_INVALID;
@@ -1081,8 +1101,28 @@ wyl_client_service_token_exchange (WylClient *client,
   g_string_append (json, ",\"credential_secret\":");
   append_json_string (json, request->credential_secret->text);
   g_string_append_c (json, '}');
-  request_body = g_bytes_new (json->str, json->len);
+  gsize json_len = json->len;
+  gpointer body_data = g_memdup2 (json->str, json_len);
+  ClientSecretBytes *body_owner = NULL;
+  if (body_data == NULL) {
+    sodium_memzero (json->str, json->len);
+    g_string_free (g_steal_pointer (&json), TRUE);
+    return WYRELOG_E_NOMEM;
+  }
+  body_owner = g_new (ClientSecretBytes, 1);
+  if (body_owner == NULL) {
+    sodium_memzero (body_data, json_len);
+    g_free (body_data);
+    sodium_memzero (json->str, json->len);
+    g_string_free (g_steal_pointer (&json), TRUE);
+    return WYRELOG_E_NOMEM;
+  }
+  body_owner->data = body_data;
+  body_owner->size = json_len;
+  request_body = g_bytes_new_with_free_func (body_data, json_len,
+      client_secret_bytes_free, body_owner);
   if (request_body == NULL) {
+    client_secret_bytes_free (body_owner);
     sodium_memzero (json->str, json->len);
     g_string_free (g_steal_pointer (&json), TRUE);
     return WYRELOG_E_NOMEM;
