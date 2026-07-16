@@ -1289,6 +1289,68 @@ test_rotation_intent_codec (void)
 }
 
 static void
+test_rotation_intent_auth_key_derivation (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-rotation-auth-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+
+  guint8 first[crypto_generichash_KEYBYTES];
+  guint8 second[crypto_generichash_KEYBYTES];
+  g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store, first,
+          sizeof first), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (store, second,
+          sizeof second), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (first, sizeof first, second, sizeof second);
+  g_assert_false (sodium_is_zero (first, sizeof first));
+  guint8 store_key[crypto_generichash_KEYBYTES];
+  guint8 expected[crypto_generichash_KEYBYTES];
+  for (gsize i = 0; i < sizeof store_key; i++)
+    store_key[i] = (guint8) (0x40 + i);
+  g_assert_cmpint (crypto_generichash (expected, sizeof expected,
+          (const guint8 *) "wyrelog.policy.rotation-intent.auth.v1",
+          strlen ("wyrelog.policy.rotation-intent.auth.v1"), store_key,
+          sizeof store_key), ==, 0);
+  g_assert_cmpmem (first, sizeof first, expected, sizeof expected);
+  g_assert_false (sodium_is_zero (store_key, sizeof store_key));
+  sodium_memzero (store_key, sizeof store_key);
+  sodium_memzero (expected, sizeof expected);
+  sodium_memzero (first, sizeof first);
+  sodium_memzero (second, sizeof second);
+  wyl_policy_store_close (store);
+
+  guint8 short_key[16];
+  memset (short_key, 0xa5, sizeof short_key);
+  g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (NULL,
+          short_key, sizeof short_key), ==, WYRELOG_E_INVALID);
+  g_assert_true (sodium_is_zero (short_key, sizeof short_key));
+
+  wyl_policy_store_t *providerless = NULL;
+  wyl_policy_store_open_options_t providerless_options = {
+    .path = ":memory:",
+  };
+  g_assert_cmpint (wyl_policy_store_open_with_options (&providerless_options,
+          &providerless), ==, WYRELOG_E_OK);
+  guint8 rejected[crypto_generichash_KEYBYTES];
+  memset (rejected, 0xa5, sizeof rejected);
+  g_assert_cmpint (wyl_policy_rotation_intent_derive_auth_key (providerless,
+          rejected, sizeof rejected), ==, WYRELOG_E_POLICY);
+  g_assert_true (sodium_is_zero (rejected, sizeof rejected));
+  sodium_memzero (rejected, sizeof rejected);
+  wyl_policy_store_close (providerless);
+
+  g_assert_cmpint (g_remove (path), ==, 0);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
 test_rotation_intent_sidecar_lifecycle (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-rotation-intent-XXXXXX", NULL);
@@ -1707,6 +1769,8 @@ main (int argc, char **argv)
       test_rotation_preserves_golden_credential);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-codec",
       test_rotation_intent_codec);
+  g_test_add_func ("/policy-store-service-cvk/rotation-intent-auth-key",
+      test_rotation_intent_auth_key_derivation);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-sidecar",
       test_rotation_intent_sidecar_lifecycle);
   g_test_add_func ("/policy-store-service-cvk/rotation-recovery-classifier",
