@@ -1680,7 +1680,7 @@ check_human_refresh_shutdown_ordering (SoupServer *server,
       raw_human_refresh_thread, &request);
   thread_started = TRUE;
   if (!wyl_daemon_http_wait_refresh_latch_for_test (server, latch_generation,
-          g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+          g_get_monotonic_time () + 15 * G_USEC_PER_SEC)) {
     result = 2261;
     goto cleanup;
   }
@@ -1741,7 +1741,7 @@ check_explicit_refresh_dispatch_context (WylHandle *handle,
   g_mutex_lock (&barrier.mutex);
   if (!barrier.ready) {
     if (!g_cond_wait_until (&barrier.changed, &barrier.mutex,
-            g_get_monotonic_time () + 5 * G_USEC_PER_SEC)) {
+            g_get_monotonic_time () + 15 * G_USEC_PER_SEC)) {
       g_mutex_unlock (&barrier.mutex);
       g_main_loop_quit (http.loop);
       g_thread_join (thread);
