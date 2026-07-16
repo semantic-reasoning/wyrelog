@@ -56,6 +56,10 @@ WyctlTokenFileStatus wyctl_token_file_read (const gchar * path,
 /* Wipe and release bytes returned by wyctl_token_file_read. */
 void wyctl_token_file_free_sensitive (gchar * value, gsize capacity);
 
+/* Create a protected, no-replace bearer-token destination. */
+WyctlTokenFileStatus wyctl_token_file_write_protected (const gchar * path,
+    const gchar * token, gsize token_len);
+
 #ifndef G_OS_WIN32
 /* Pure-function classifier: given the result of fstat on an already-
  * opened fd and the invoking process's effective uid, decide whether
