@@ -157,6 +157,23 @@ struct wyl_policy_store_t
   guint8 *service_cvk_envelope;
 };
 
+gboolean
+wyl_policy_store_pinned_backend_available (void)
+{
+  /* Keep the platform matrix explicit until the first VFS implementation is
+   * merged. No supported build currently provides the required pinned
+   * xOpen/xDelete/xAccess/xFullPathname and journal/WAL/SHM semantics. */
+#if defined(G_OS_WIN32)
+  return FALSE;                 /* HANDLE/reparse-aware VFS is tracked separately. */
+#elif defined(__APPLE__)
+  return FALSE;                 /* dirfd-backed VFS is not available in this slice. */
+#elif defined(__linux__)
+  return FALSE;                 /* POSIX rollback-journal VFS is tracked separately. */
+#else
+  return FALSE;                 /* Unknown platforms fail closed by default. */
+#endif
+}
+
 typedef enum
 {
   WYL_SERVICE_AUTHORITY_EVIDENCE_PENDING,
@@ -3669,7 +3686,8 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
      * first sqlite3_open_v2() so the retained lease cannot be undermined by a
      * pathname replacement race.  Providerless plaintext and memory stores
      * remain supported. */
-    if (self->keyprovider.owned && !path_is_memory_db (effective_path)) {
+    if (self->keyprovider.owned && !path_is_memory_db (effective_path)
+        && !wyl_policy_store_pinned_backend_available ()) {
       rc = WYRELOG_E_POLICY;
       goto fail;
     }
