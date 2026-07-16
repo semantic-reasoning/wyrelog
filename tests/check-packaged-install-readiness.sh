@@ -284,6 +284,15 @@ ROTATE_DB="$INSTALL_ROOT/var/lib/wyrelog/system/rotate.sqlite"
 ROTATE_AUDIT_DB="$INSTALL_ROOT/var/log/wyrelog/system/rotate-audit.duckdb"
 ROTATE_NEW_KEY="$INSTALL_ROOT/etc/wyrelog/system/policy-rotated.key"
 ROTATE_VERIFY_KEY="$INSTALL_ROOT/etc/wyrelog/system/policy-verify.key"
+ROTATE_PORT=$($PYTHON - <<'PY'
+import socket
+
+with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+    sock.bind(("127.0.0.1", 0))
+    print(sock.getsockname()[1])
+PY
+)
+ROTATE_BASE_URL="http://127.0.0.1:$ROTATE_PORT"
 
 # --check intentionally uses disposable scratch stores. Start a short-lived
 # normal runtime to create the dedicated rotation fixture, then stop it
@@ -295,12 +304,12 @@ ROTATE_VERIFY_KEY="$INSTALL_ROOT/etc/wyrelog/system/policy-verify.key"
   --policy-keyprovider "file:$KEY" \
   --audit-db "$ROTATE_AUDIT_DB" \
   $FACT_ARGS \
-  --listen-port "$PORT" &
+  --listen-port "$ROTATE_PORT" &
 PID=$!
 i=0
 while [ "$i" -lt 150 ]; do
   i=$((i + 1))
-  if "$WYCTL" --daemon-url "$BASE_URL" --timeout-ms 500 status \
+  if "$WYCTL" --daemon-url "$ROTATE_BASE_URL" --timeout-ms 500 status \
       >"$TMPDIR/rotate-status.out" 2>"$TMPDIR/rotate-status.err"; then
     if [ "$(cat "$TMPDIR/rotate-status.out")" = "ok" ]; then
       break
