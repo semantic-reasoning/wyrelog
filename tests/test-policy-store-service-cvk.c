@@ -1244,6 +1244,42 @@ test_rotation_publish_failpoints (void)
 }
 
 static void
+test_rotation_intent_codec (void)
+{
+  WylPolicyRotationIntent intent = { 0 };
+  g_assert_cmpint (wyl_id_new (&intent.transaction_id), ==, WYRELOG_E_OK);
+  memset (intent.canonical_digest, 0x11, sizeof intent.canonical_digest);
+  memset (intent.old_provider_id, 0x22, sizeof intent.old_provider_id);
+  memset (intent.new_provider_id, 0x33, sizeof intent.new_provider_id);
+  intent.old_generation = 7;
+  intent.expected_new_generation = 8;
+  intent.state = WYL_POLICY_ROTATION_INTENT_PENDING;
+  guint8 auth_key[crypto_generichash_KEYBYTES];
+  memset (auth_key, 0x5a, sizeof auth_key);
+
+  guint8 *encoded = NULL;
+  gsize encoded_len = 0;
+  g_assert_cmpint (wyl_policy_rotation_intent_encode (&intent, auth_key,
+          &encoded, &encoded_len), ==, WYRELOG_E_OK);
+  g_assert_nonnull (encoded);
+  g_assert_cmpuint (encoded_len, >, sizeof auth_key);
+
+  WylPolicyRotationIntent decoded = { 0 };
+  g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded, encoded_len,
+          auth_key, &decoded), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (&decoded, sizeof decoded, &intent, sizeof intent);
+
+  encoded[encoded_len / 2] ^= 0x01;
+  g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded, encoded_len,
+          auth_key, &decoded), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_rotation_intent_decode (encoded,
+          encoded_len - 1, auth_key, &decoded), ==, WYRELOG_E_POLICY);
+  sodium_memzero (encoded, encoded_len);
+  g_free (encoded);
+  sodium_memzero (auth_key, sizeof auth_key);
+}
+
+static void
 test_rotation_post_rename_warning_commits (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
@@ -1475,6 +1511,8 @@ main (int argc, char **argv)
       test_binding_and_unseal_boundaries);
   g_test_add_func ("/policy-store-service-cvk/rotation-golden",
       test_rotation_preserves_golden_credential);
+  g_test_add_func ("/policy-store-service-cvk/rotation-intent-codec",
+      test_rotation_intent_codec);
   g_test_add_func ("/policy-store-service-cvk/rotation-failpoints",
       test_rotation_publish_failpoints);
   g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",

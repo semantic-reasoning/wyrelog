@@ -3,6 +3,7 @@
 
 #include <glib.h>
 #include <sqlite3.h>
+#include <sodium.h>
 
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
@@ -10,6 +11,7 @@
 #include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/wyl-traits-private.h"
+#include "wyrelog/wyl-id-private.h"
 
 G_BEGIN_DECLS;
 
@@ -90,6 +92,25 @@ typedef struct
   int (*checkpoint) (gpointer data, wyl_policy_store_rotation_stage_t stage);
   gpointer data;
 } wyl_policy_store_rotation_runtime_t;
+
+#define WYL_POLICY_ROTATION_INTENT_VERSION 1u
+
+typedef enum
+{
+  WYL_POLICY_ROTATION_INTENT_PENDING = 1,
+  WYL_POLICY_ROTATION_INTENT_COMMITTED = 2,
+} WylPolicyRotationIntentState;
+
+typedef struct
+{
+  wyl_id_t transaction_id;
+  guint8 canonical_digest[crypto_generichash_BYTES];
+  guint8 old_provider_id[crypto_generichash_BYTES];
+  guint8 new_provider_id[crypto_generichash_BYTES];
+  guint64 old_generation;
+  guint64 expected_new_generation;
+  WylPolicyRotationIntentState state;
+} WylPolicyRotationIntent;
 
 typedef enum
 {
@@ -424,6 +445,10 @@ wyrelog_error_t wyl_policy_store_open_with_options (const
 wyrelog_error_t wyl_policy_store_rotate_keyprovider (const gchar * path,
     const wyl_policy_store_open_options_t * old_opts,
     const wyl_policy_store_open_options_t * new_opts);
+wyrelog_error_t wyl_policy_rotation_intent_encode (const WylPolicyRotationIntent
+    * intent, const guint8 * auth_key, guint8 ** out_bytes, gsize * out_len);
+wyrelog_error_t wyl_policy_rotation_intent_decode (const guint8 * bytes,
+    gsize len, const guint8 * auth_key, WylPolicyRotationIntent * out_intent);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
