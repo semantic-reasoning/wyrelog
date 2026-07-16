@@ -63,18 +63,25 @@ jobs:
             ${{ runner.os }}-packagecache-
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
 
+      - name: Select compiler cache
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache.outcome }}" = success ] \
+            && command -v sccache >/dev/null 2>&1 \
+            && sccache --version >/dev/null 2>&1; then
+            echo 'CC=sccache cc' >> "$GITHUB_ENV"
+            echo 'CXX=sccache c++' >> "$GITHUB_ENV"
+          else
+            echo 'CC=cc' >> "$GITHUB_ENV"
+            echo 'CXX=c++' >> "$GITHUB_ENV"
+            echo 'sccache unavailable; using native compiler'
+          fi
+
       - name: Configure
-        env:
-          # Route every compile through sccache. Wrapping both CC and CXX is
-          # required: the from-source DuckDB amalgamation is a large C++ single
-          # translation unit, and the subprojects (wirelog, libchronoid,
-          # nanoarrow, xxHash) are C. Their pinned sources rarely change, so
-          # these compilations become cross-run cache hits instead of a full
-          # rebuild each CI run.
-          CC: sccache cc
-          CXX: sccache c++
         run: |
           meson setup builddir \
             -Denable_tpm=${{ matrix.tpm }} \
@@ -86,7 +93,12 @@ jobs:
 
       - name: Show sccache statistics
         if: always()
-        run: sccache --show-stats
+        run: |
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo 'sccache statistics unavailable'
+          else
+            echo 'sccache unavailable; no statistics to show'
+          fi
 
       - name: Upload meson logs on failure
         if: failure()
@@ -126,7 +138,21 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Set up sccache
+        id: sccache
+        continue-on-error: true
         uses: mozilla-actions/sccache-action@v0.0.10
+
+      - name: Select Windows compiler cache
+        shell: bash
+        run: |
+          if [ "${{ steps.sccache.outcome }}" = success ] \
+            && command -v sccache >/dev/null 2>&1 \
+            && sccache --version >/dev/null 2>&1; then
+            echo 'WYRELOG_USE_SCCACHE=1' >> "$GITHUB_ENV"
+          else
+            echo 'WYRELOG_USE_SCCACHE=0' >> "$GITHUB_ENV"
+            echo 'sccache unavailable; using native clang-cl'
+          fi
 
       - name: Remove system vcpkg
         shell: bash
@@ -218,7 +244,8 @@ jobs:
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig;%VCPKG_INSTALLED_DIR%\share\pkgconfig
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
-          set CC=sccache clang-cl
+          if "%WYRELOG_USE_SCCACHE%"=="1" (set CC=sccache clang-cl) else (set CC=clang-cl)
+          if "%WYRELOG_USE_SCCACHE%"=="1" (set CXX=sccache clang-cl) else (set CXX=clang-cl)
           meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
 
       - name: Build and test (clang-cl)
@@ -238,7 +265,11 @@ jobs:
         if: always()
         shell: bash
         run: |
-          "${SCCACHE_PATH}" --show-stats
+          if command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats || echo 'sccache statistics unavailable'
+          else
+            echo 'sccache unavailable; no statistics to show'
+          fi
 
       - name: Upload meson logs on failure
         if: failure()
