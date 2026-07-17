@@ -20,6 +20,9 @@ typedef struct
 #else
   HANDLE root_handle;
   GPtrArray *ancestor_handles;
+  DWORD root_volume_serial;
+  DWORD root_file_index_high;
+  DWORD root_file_index_low;
 #endif
 } WylServiceCredentialOperationStorage;
 

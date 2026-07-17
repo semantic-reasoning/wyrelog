@@ -381,6 +381,14 @@ wyrelog_error_t
     return rc;
   }
   out_storage->root_handle = root_handle;
+  BY_HANDLE_FILE_INFORMATION root_info = { 0 };
+  if (!GetFileInformationByHandle (root_handle, &root_info)) {
+    wyl_service_credential_operation_storage_clear (out_storage);
+    return WYRELOG_E_POLICY;
+  }
+  out_storage->root_volume_serial = root_info.dwVolumeSerialNumber;
+  out_storage->root_file_index_high = root_info.nFileIndexHigh;
+  out_storage->root_file_index_low = root_info.nFileIndexLow;
 #endif
   return WYRELOG_E_OK;
 }
@@ -409,6 +417,9 @@ void wyl_service_credential_operation_storage_clear
     CloseHandle (storage->root_handle);
   }
   storage->root_handle = INVALID_HANDLE_VALUE;
+  storage->root_volume_serial = 0;
+  storage->root_file_index_high = 0;
+  storage->root_file_index_low = 0;
 #endif
   g_clear_pointer (&storage->root_path, g_free);
 }
