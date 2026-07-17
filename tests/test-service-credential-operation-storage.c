@@ -12,6 +12,9 @@
 #endif
 
 #include "auth/service-credential-operation-storage-private.h"
+#ifdef G_OS_WIN32
+#include "auth/service-credential-operation-storage-windows-private.h"
+#endif
 
 #ifndef G_OS_WIN32
 static void
@@ -258,6 +261,21 @@ test_child_name_and_anchor_contract (void)
 
 #ifdef G_OS_WIN32
 static void
+test_windows_child_read_validation (void)
+{
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  g_assert_cmpint (wyl_win_child_read (NULL, NULL, NULL, &bytes), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("missing", &name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_read (NULL, NULL, &name, &bytes), ==,
+      WYRELOG_E_POLICY);
+  wyl_service_credential_operation_child_name_clear (&name);
+}
+
+static void
 test_rejects_relative_override (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -292,6 +310,8 @@ main (int argc, char **argv)
       test_posix_child_backend);
 #endif
 #ifdef G_OS_WIN32
+  g_test_add_func ("/operation-storage/windows/child-read-validation",
+      test_windows_child_read_validation);
   g_test_add_func ("/operation-storage/windows/relative-override",
       test_rejects_relative_override);
 #endif
