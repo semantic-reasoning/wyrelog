@@ -90,6 +90,10 @@ test_child_name_and_anchor_contract (void)
     "C:\\absolute", "\\\\server\\share", "has:colon", "has/slash",
     "has\\slash", "trailing.", "trailing ", NULL
   };
+  static const gchar *const reserved[] = {
+    "CON", "con.txt", "PrN.log", "AUX", "NUL.backup", "COM1",
+    "com9.data", "LPT1", "lpt9.log", NULL
+  };
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -100,6 +104,9 @@ test_child_name_and_anchor_contract (void)
   for (gsize i = 0; invalid[i] != NULL; i++)
     g_assert_cmpint (wyl_service_credential_operation_child_name_validate
         (invalid[i], &name), ==, WYRELOG_E_POLICY);
+  for (gsize i = 0; reserved[i] != NULL; i++)
+    g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+        (reserved[i], &name), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
       (invalid_utf8, &name), ==, WYRELOG_E_POLICY);
   too_long[255] = 'a';

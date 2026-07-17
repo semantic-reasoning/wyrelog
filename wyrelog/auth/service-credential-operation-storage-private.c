@@ -540,6 +540,22 @@ wyrelog_error_t
   if (length > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_MAX_BYTES
       || g_str_equal (raw, ".") || g_str_equal (raw, ".."))
     return WYRELOG_E_POLICY;
+  {
+    static const gchar *const reserved[] = {
+      "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4",
+      "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2",
+      "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9", NULL
+    };
+    g_autofree gchar *device = g_strdup (raw);
+    gchar *dot = device != NULL ? strchr (device, '.') : NULL;
+    if (device == NULL)
+      return WYRELOG_E_NOMEM;
+    if (dot != NULL)
+      *dot = '\0';
+    for (gsize i = 0; reserved[i] != NULL; i++)
+      if (g_ascii_strcasecmp (device, reserved[i]) == 0)
+        return WYRELOG_E_POLICY;
+  }
   for (gsize i = 0; i < length; i++) {
     gchar c = raw[i];
     if ((guchar) c < 0x20 || c == '/' || c == '\\' || c == ':'

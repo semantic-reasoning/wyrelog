@@ -29,7 +29,10 @@ typedef struct
 #define WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_MAX_BYTES 255u
 
 /* A child component is deliberately not a path.  It is the single canonical
- * name consumed by a future handle-relative child operation. */
+ * name consumed by a future handle-relative child operation. Initialize an
+ * output with WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT (or clear a
+ * previously populated value) before every validation call; validation clears
+ * and replaces component ownership on success. */
 typedef struct
 {
   gchar *component;
