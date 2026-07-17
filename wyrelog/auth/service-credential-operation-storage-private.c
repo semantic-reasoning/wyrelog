@@ -180,6 +180,49 @@ out:
   return result;
 }
 
+static PSID
+win_copy_token_sid (TOKEN_INFORMATION_CLASS information_class)
+{
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  gpointer information = NULL;
+  PSID source = NULL;
+  PSID copy = NULL;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return NULL;
+  GetTokenInformation (token, information_class, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+    goto out;
+  information = g_malloc (needed);
+  if (information == NULL || !GetTokenInformation (token, information_class,
+          information, needed, &needed))
+    goto out;
+  source = information_class == TokenOwner
+      ? ((TOKEN_OWNER *) information)->Owner
+      : ((TOKEN_USER *) information)->User.Sid;
+  if (source == NULL || !IsValidSid (source))
+    goto out;
+  DWORD length = GetLengthSid (source);
+  if (length == 0)
+    goto out;
+  copy = g_malloc (length);
+  if (copy == NULL || !CopySid (length, copy, source)) {
+    g_free (copy);
+    copy = NULL;
+  }
+out:
+  g_free (information);
+  CloseHandle (token);
+  return copy;
+}
+
+static PSID
+win_copy_preferred_token_sid (void)
+{
+  PSID sid = win_copy_token_sid (TokenOwner);
+  return sid != NULL ? sid : win_copy_token_sid (TokenUser);
+}
+
 static gboolean
 win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
 {
@@ -297,6 +340,7 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
     return WYRELOG_E_NOMEM;
   for (gsize i = 0; parts[i] != NULL; i++) {
     g_autofree gchar *next = NULL;
+    gboolean created = FALSE;
     if (!win_component_is_safe (parts[i]))
       goto policy;
     next = g_build_filename (prefix, parts[i], NULL);
@@ -313,23 +357,35 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
       if (GetLastError () != ERROR_FILE_NOT_FOUND
           && GetLastError () != ERROR_PATH_NOT_FOUND)
         goto policy;
+      BOOL made_directory = FALSE;
       if (!win_init_owner_only_attributes (&attrs, &descriptor)
-          || (!CreateDirectoryW ((LPCWSTR) wide, &attrs)
+          || (!(made_directory = CreateDirectoryW ((LPCWSTR) wide, &attrs))
               && GetLastError () != ERROR_ALREADY_EXISTS)) {
         if (descriptor != NULL)
           LocalFree (descriptor);
         goto policy;
       }
+      created = made_directory;
       LocalFree (descriptor);
       descriptor = NULL;
       h = CreateFileW ((LPCWSTR) wide,
           FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL |
+          WRITE_OWNER |
           SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
           NULL, OPEN_EXISTING,
           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     }
     if (h == INVALID_HANDLE_VALUE)
       goto policy;
+    if (created) {
+      g_autofree PSID owner_sid = win_copy_preferred_token_sid ();
+      if (owner_sid == NULL
+          || SetSecurityInfo (h, SE_FILE_OBJECT, OWNER_SECURITY_INFORMATION,
+              owner_sid, NULL, NULL, NULL) != ERROR_SUCCESS) {
+        CloseHandle (h);
+        goto policy;
+      }
+    }
     BY_HANDLE_FILE_INFORMATION info = { 0 };
     if (!GetFileInformationByHandle (h, &info)
         || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
