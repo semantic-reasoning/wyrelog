@@ -301,7 +301,8 @@ def semantic_arguments(arguments: list[str], directory: Path,
     return result
 
 
-def normalize_direct_compiler(compiler: list[str], arguments: list[str]) -> list[str]:
+def normalize_direct_compiler(compiler: list[str], arguments: list[str],
+                             compiler_id: str = "") -> list[str]:
     """Drop a duplicated compiler token from direct boundary argv.
 
     Meson compile databases may retain the compiler token in semantic
@@ -312,7 +313,13 @@ def normalize_direct_compiler(compiler: list[str], arguments: list[str]) -> list
         return arguments
     compiler_name = Path(compiler[0]).name.lower()
     first_name = Path(arguments[0]).name.lower()
-    if first_name == compiler_name:
+    expected = {
+        "gcc": {"cc", "gcc"},
+        "clang": {"cc", "clang"},
+        "clang-cl": {"clang-cl"},
+        "msvc": {"cl"},
+    }.get(compiler_id, {compiler_name})
+    if first_name == compiler_name or first_name in expected:
         return arguments[1:]
     return arguments
 
@@ -333,7 +340,7 @@ def compile_database_contexts(build_root: Path | None, compiler_id: str,
         source = (directory / source).resolve() if not source.is_absolute() else source.resolve()
         semantics = normalize_direct_compiler(
             [arguments[0]], semantic_arguments(arguments, directory, source,
-                                                windows))
+                                                windows), compiler_id)
         quote_roots, angle_roots = include_roots(
             [arguments[0], *semantics], directory)
         context = (quote_roots, angle_roots, semantics)
@@ -986,7 +993,7 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
     fixture_semantics = normalize_direct_compiler(
         [compiler[0]], semantic_arguments(
             expanded_fixture, root, (root / "__boundary_fixture__.c").resolve(),
-            windows))
+            windows), compiler_id)
     fallback_quote, fallback_angle = include_roots(expanded_fixture, root)
     bases = [base.resolve() for base in (root, build_root)
              if base is not None]
