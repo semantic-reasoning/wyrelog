@@ -38,6 +38,7 @@ def main() -> int:
         require(text, "c = ['clang-cl']", path)
         require(text, "cpp = ['clang-cl']", path)
         require(text, "ninja -C builddir -t commands", path)
+        require(text, "findstr /I /C:\"sccache\"", path)
         require(text, "Compile requests[[:space:]]+[1-9][0-9]*", path)
     print("sccache fallback workflow guard: OK")
     return 0
