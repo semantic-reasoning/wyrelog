@@ -177,17 +177,41 @@ win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
   ACL_SIZE_INFORMATION size = { 0 };
   ACCESS_ALLOWED_ACE *ace = NULL;
   g_printerr ("storage trace: descriptor owner check enter\\n");
-  if (descriptor == NULL
-      || !GetSecurityDescriptorControl (descriptor, &control, &revision)
-      || (control & SE_DACL_PROTECTED) == 0
-      || !GetSecurityDescriptorOwner (descriptor, &owner, NULL)
-      || owner == NULL || !win_sid_matches_current_user (owner)
-      || !GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted)
-      || !present || dacl == NULL || defaulted
-      || !GetAclInformation (dacl, &size, sizeof size, AclSizeInformation)
-      || size.AceCount != 1
-      || !GetAce (dacl, 0, (LPVOID *) & ace) || ace == NULL
-      || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE
+  if (descriptor == NULL)
+    return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorControl before\\n");
+  if (!GetSecurityDescriptorControl (descriptor, &control, &revision))
+    return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorControl after\\n");
+  if ((control & SE_DACL_PROTECTED) == 0)
+    return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorOwner before\\n");
+  if (!GetSecurityDescriptorOwner (descriptor, &owner, NULL))
+    return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorOwner after\\n");
+  if (owner == NULL)
+    return FALSE;
+  g_printerr ("storage trace: win_sid_matches_current_user before\\n");
+  if (!win_sid_matches_current_user (owner))
+    return FALSE;
+  g_printerr ("storage trace: win_sid_matches_current_user after\\n");
+  g_printerr ("storage trace: GetSecurityDescriptorDacl before\\n");
+  if (!GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted))
+    return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorDacl after\\n");
+  if (!present || dacl == NULL || defaulted)
+    return FALSE;
+  g_printerr ("storage trace: GetAclInformation before\\n");
+  if (!GetAclInformation (dacl, &size, sizeof size, AclSizeInformation))
+    return FALSE;
+  g_printerr ("storage trace: GetAclInformation after\\n");
+  if (size.AceCount != 1)
+    return FALSE;
+  g_printerr ("storage trace: GetAce before\\n");
+  if (!GetAce (dacl, 0, (LPVOID *) & ace))
+    return FALSE;
+  g_printerr ("storage trace: GetAce after\\n");
+  if (ace == NULL || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE
       || ace->Header.AceFlags != 0 || ace->Mask != FILE_ALL_ACCESS)
     return FALSE;
   g_printerr ("storage trace: descriptor owner check success\\n");
