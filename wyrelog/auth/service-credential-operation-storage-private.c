@@ -176,6 +176,7 @@ win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
   PSID owner = NULL;
   ACL_SIZE_INFORMATION size = { 0 };
   ACCESS_ALLOWED_ACE *ace = NULL;
+  g_printerr ("storage trace: descriptor owner check enter\\n");
   if (descriptor == NULL
       || !GetSecurityDescriptorControl (descriptor, &control, &revision)
       || (control & SE_DACL_PROTECTED) == 0
@@ -189,6 +190,7 @@ win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
       || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE
       || ace->Header.AceFlags != 0 || ace->Mask != FILE_ALL_ACCESS)
     return FALSE;
+  g_printerr ("storage trace: descriptor owner check success\\n");
   return EqualSid (owner, (PSID) & ace->SidStart);
 }
 
@@ -198,15 +200,19 @@ win_handle_is_owner_only (HANDLE handle)
   PSECURITY_DESCRIPTOR descriptor = NULL;
   DWORD rc;
   gboolean result = FALSE;
+  g_printerr ("storage trace: handle owner check enter\\n");
   if (handle == INVALID_HANDLE_VALUE || handle == NULL)
     return FALSE;
   rc = GetSecurityInfo (handle, SE_FILE_OBJECT,
       OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, NULL,
       NULL, NULL, &descriptor);
   if (rc == ERROR_SUCCESS) {
+    g_printerr ("storage trace: GetSecurityInfo success\\n");
     result = win_descriptor_is_owner_only (descriptor);
+    g_printerr ("storage trace: descriptor owner check returned %d\\n", result);
     LocalFree (descriptor);
-  }
+  } else
+    g_printerr ("storage trace: GetSecurityInfo failed %lu\\n", rc);
   return result;
 }
 
@@ -261,6 +267,7 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
   PSECURITY_DESCRIPTOR descriptor = NULL;
   GPtrArray *handles = NULL;
   gboolean after_localappdata = FALSE;
+  g_printerr ("storage trace: win_open_root enter\\n");
   if (!win_path_is_absolute (path) || !win_path_under_localappdata (path))
     return WYRELOG_E_POLICY;
   parts = g_strsplit_set (path + 3, "\\/", -1);
@@ -272,6 +279,7 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
     g_autofree gchar *next = NULL;
     if (!win_component_is_safe (parts[i]))
       goto policy;
+    g_printerr ("storage trace: component %zu\\n", i);
     next = g_build_filename (prefix, parts[i], NULL);
     g_autofree gunichar2 *wide = g_utf8_to_utf16 (next, -1, NULL, NULL, NULL);
     if (wide == NULL)
@@ -282,6 +290,7 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
         NULL);
+    g_printerr ("storage trace: CreateFile component %zu handle=%p\\n", i, h);
     if (h == INVALID_HANDLE_VALUE) {
       if (GetLastError () != ERROR_FILE_NOT_FOUND
           && GetLastError () != ERROR_PATH_NOT_FOUND)
@@ -300,10 +309,13 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
           SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
           NULL, OPEN_EXISTING,
           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+      g_printerr ("storage trace: CreateFile retry component %zu handle=%p\\n",
+          i, h);
     }
     if (h == INVALID_HANDLE_VALUE)
       goto policy;
     BY_HANDLE_FILE_INFORMATION info = { 0 };
+    g_printerr ("storage trace: GetFileInformation component %zu\\n", i);
     if (!GetFileInformationByHandle (h, &info)
         || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
         || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
@@ -312,6 +324,7 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
     }
     if ((after_localappdata || parts[i + 1] == NULL)
         && !win_handle_is_owner_only (h)) {
+      g_printerr ("storage trace: owner check rejected component %zu\\n", i);
       CloseHandle (h);
       goto policy;
     }
@@ -383,7 +396,9 @@ wyrelog_error_t
   out_storage->owns_root_fd = TRUE;
 #else
   HANDLE root_handle = INVALID_HANDLE_VALUE;
+  g_printerr ("storage trace: storage_open before win_open_root\\n");
   rc = win_open_root (root, &root_handle, &out_storage->ancestor_handles);
+  g_printerr ("storage trace: storage_open after win_open_root rc=%d\\n", rc);
   if (rc != WYRELOG_E_OK) {
     out_storage->root_path = NULL;
     g_free (root);
@@ -393,6 +408,7 @@ wyrelog_error_t
   /* #482 anchors and validates the root only.  Handle-relative child
    * linearization and replacement-race protection are owned by #483. */
   BY_HANDLE_FILE_INFORMATION root_info = { 0 };
+  g_printerr ("storage trace: root GetFileInformation\\n");
   if (!GetFileInformationByHandle (root_handle, &root_info)) {
     wyl_service_credential_operation_storage_clear (out_storage);
     return WYRELOG_E_POLICY;
