@@ -58,6 +58,9 @@ test_posix_child_backend (void)
       (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
       ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (storage.root_path, "record",
+      NULL);
+  g_remove (record);
 
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
           &anchor, &name, one), ==, WYRELOG_E_OK);
@@ -301,8 +304,11 @@ test_windows_child_read_fixture (void)
       ("record", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
       WYRELOG_E_NOT_FOUND);
-  g_assert_true (wyl_win_nt_create_relative (storage.root_handle, &name,
-          GENERIC_WRITE, WYL_WIN_CHILD_CREATE, &handle, &identity, &error));
+  if (!wyl_win_nt_create_relative (storage.root_handle, &name, GENERIC_WRITE,
+          WYL_WIN_CHILD_CREATE, &handle, &identity, &error)) {
+    g_test_message ("NtCreateFile child create error=%d", error);
+    g_assert_not_reached ();
+  }
   DWORD written = 0;
   g_assert_true (WriteFile (handle, "hello", 5, &written, NULL));
   g_assert_cmpuint (written, ==, 5);
@@ -313,8 +319,6 @@ test_windows_child_read_fixture (void)
       WYRELOG_E_OK);
   gsize size = 0;
   g_assert_cmpmem (g_bytes_get_data (bytes, &size), size, "hello", 5);
-  g_autofree gchar *record = g_build_filename (storage.root_path, "record",
-      NULL);
   g_remove (record);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
