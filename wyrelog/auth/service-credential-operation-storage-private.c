@@ -170,13 +170,14 @@ static gboolean
 win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
 {
   SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
   BOOL present = FALSE, defaulted = FALSE;
   PACL dacl = NULL;
   PSID owner = NULL;
   ACL_SIZE_INFORMATION size = { 0 };
   ACCESS_ALLOWED_ACE *ace = NULL;
   if (descriptor == NULL
-      || !GetSecurityDescriptorControl (descriptor, &control, NULL)
+      || !GetSecurityDescriptorControl (descriptor, &control, &revision)
       || (control & SE_DACL_PROTECTED) == 0
       || !GetSecurityDescriptorOwner (descriptor, &owner, NULL)
       || owner == NULL || !win_sid_matches_current_user (owner)
