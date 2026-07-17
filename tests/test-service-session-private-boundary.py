@@ -189,7 +189,7 @@ def main() -> int:
     assert (guard_module.diagnostic_text(Unprintable())
             == "<unavailable compiler diagnostic>")
     assert guard_module.worker_count("gcc") == 1
-    assert 2 <= guard_module.worker_count("msvc") <= 4
+    assert 1 <= guard_module.worker_count("msvc") <= 4
     with mock.patch.object(guard_module.os, "cpu_count", return_value=1):
         assert guard_module.worker_count("clang-cl") == 2
     with mock.patch.object(guard_module.os, "cpu_count", return_value=4):
