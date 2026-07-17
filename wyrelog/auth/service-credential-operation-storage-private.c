@@ -29,6 +29,16 @@ path_is_owner_private_directory (const gchar *path)
 
 #ifndef G_OS_WIN32
 static gboolean
+fd_is_owner_private_directory (gint fd)
+{
+  struct stat st;
+  return fstat (fd, &st) == 0 && S_ISDIR (st.st_mode)
+      && st.st_uid == geteuid () && (st.st_mode & 0777) == 0700;
+}
+#endif
+
+#ifndef G_OS_WIN32
+static gboolean
 path_has_safe_ancestors (const gchar *path)
 {
   if (!g_path_is_absolute (path))
@@ -112,10 +122,16 @@ wyrelog_error_t
     return errno == EACCES || errno == EPERM || errno == ELOOP
         ? WYRELOG_E_POLICY : WYRELOG_E_IO;
   }
+  if (!fd_is_owner_private_directory (root_fd)) {
+    close (root_fd);
+    g_free (root);
+    return WYRELOG_E_POLICY;
+  }
 #endif
   out_storage->root_path = root;
 #ifndef G_OS_WIN32
   out_storage->root_fd = root_fd;
+  out_storage->owns_root_fd = TRUE;
 #endif
   return WYRELOG_E_OK;
 }
@@ -126,9 +142,10 @@ void wyl_service_credential_operation_storage_clear
   if (storage == NULL)
     return;
 #ifndef G_OS_WIN32
-  if (storage->root_fd >= 0)
+  if (storage->owns_root_fd && storage->root_fd >= 0)
     close (storage->root_fd);
   storage->root_fd = -1;
+  storage->owns_root_fd = FALSE;
 #endif
   g_clear_pointer (&storage->root_path, g_free);
 }
