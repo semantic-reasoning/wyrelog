@@ -38,6 +38,9 @@ typedef struct
   gchar *tenant_id;
   gchar *destination;
   gchar *parent_identity;
+  guint32 publication_receipt_version;
+  gchar *reservation_id;
+  gchar *stage_basename;
   gchar *stage_identity;
   gchar *old_credential_id;
   gchar *successor_credential_id;
