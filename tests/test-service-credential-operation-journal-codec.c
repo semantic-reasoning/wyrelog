@@ -114,6 +114,9 @@ test_rejects_invalid_record (void)
   record.request_id = (gchar *) "000000000000000000000000000";
   record.destination = (gchar *) "../outside";
   g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
+  record.request_id = (gchar *) "000000000000000000000000000";
+  record.destination = (gchar *) "nested\\file";
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
 }
 
 int

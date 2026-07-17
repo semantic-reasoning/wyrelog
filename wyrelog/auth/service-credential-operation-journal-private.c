@@ -85,7 +85,8 @@ static gboolean
 destination_is_safe_relative_path (const gchar *value)
 {
   if (value == NULL || value[0] == '\0' || value[0] == '/'
-      || value[0] == '\\' || strchr (value, ':') != NULL)
+      || value[0] == '\\' || strchr (value, '\\') != NULL
+      || strchr (value, ':') != NULL)
     return FALSE;
   const gchar *cursor = value;
   while (*cursor != '\0') {
@@ -125,6 +126,21 @@ gboolean
       || !text_is_valid (record->publication_receipt_id, FALSE)
       || record->attempts > G_MAXINT32 || record->created_at_us <= 0
       || record->updated_at_us < record->created_at_us)
+    return FALSE;
+  if (record->publication_receipt_version == 0
+      && ((record->reservation_id != NULL && record->reservation_id[0] != '\0')
+          || (record->stage_basename != NULL
+              && record->stage_basename[0] != '\0')
+          || (record->stage_identity != NULL
+              && record->stage_identity[0] != '\0')
+          || (record->publication_receipt_id != NULL
+              && record->publication_receipt_id[0] != '\0')))
+    return FALSE;
+  if (record->publication_receipt_version == 1
+      && (!text_is_valid (record->reservation_id, TRUE)
+          || !text_is_valid (record->stage_basename, TRUE)
+          || !text_is_valid (record->stage_identity, TRUE)
+          || !text_is_valid (record->publication_receipt_id, TRUE)))
     return FALSE;
   if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
       && !wyl_service_credential_id_is_canonical (record->old_credential_id,
