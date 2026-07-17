@@ -125,6 +125,10 @@ wyl_win_child_read (const WylServiceCredentialOperationStorage *storage,
     return WYRELOG_E_POLICY;
   }
   data = g_malloc (info.nFileSizeLow > 0 ? info.nFileSizeLow : 1);
+  if (data == NULL) {
+    CloseHandle (handle);
+    return WYRELOG_E_NOMEM;
+  }
   for (DWORD offset = 0; offset < info.nFileSizeLow;) {
     if (!ReadFile (handle, data + offset, info.nFileSizeLow - offset, &got,
             NULL) || got == 0) {
@@ -133,6 +137,19 @@ wyl_win_child_read (const WylServiceCredentialOperationStorage *storage,
       return WYRELOG_E_IO;
     }
     offset += got;
+  }
+  BY_HANDLE_FILE_INFORMATION after;
+  if (!GetFileInformationByHandle (handle, &after)
+      || after.dwVolumeSerialNumber != identity.volume_serial
+      || after.nFileIndexHigh != identity.file_index_high
+      || after.nFileIndexLow != identity.file_index_low
+      || (after.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+              | FILE_ATTRIBUTE_DIRECTORY))
+      || after.nFileSizeHigh != info.nFileSizeHigh
+      || after.nFileSizeLow != info.nFileSizeLow) {
+    g_free (data);
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
   }
   CloseHandle (handle);
   if (!wyl_service_credential_operation_storage_anchor_matches (storage,
