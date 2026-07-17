@@ -74,8 +74,14 @@ test_rejects_file_root (void)
 static void
 test_rejects_relative_override (void)
 {
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_assert_cmpint (local[1], ==, ':');
+  g_autofree gchar *short_path = g_strdup_printf ("%c:\\", local[0]);
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (short_path,
+          &storage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_storage_open ("state\\ops",
           &storage), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_service_credential_operation_storage_open ("C:state",

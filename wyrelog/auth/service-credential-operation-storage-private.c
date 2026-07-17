@@ -231,6 +231,10 @@ win_path_under_localappdata (const gchar *path)
   DWORD n = GetEnvironmentVariableW (L"LOCALAPPDATA", value,
       G_N_ELEMENTS (value));
   g_autofree gchar *base = NULL;
+  gsize path_len;
+  gsize base_len;
+  if (path == NULL)
+    return FALSE;
   if (n == 0 || n >= G_N_ELEMENTS (value))
     return FALSE;
   base = (gchar *) g_utf16_to_utf8 ((gunichar2 *) value, n, NULL, NULL, NULL);
@@ -238,9 +242,13 @@ win_path_under_localappdata (const gchar *path)
     return FALSE;
   while (g_str_has_suffix (base, "\\") || g_str_has_suffix (base, "/"))
     base[strlen (base) - 1] = '\0';
-  return g_ascii_strncasecmp (path, base, strlen (base)) == 0
-      && (path[strlen (base)] == '\0' || path[strlen (base)] == '\\'
-      || path[strlen (base)] == '/');
+  path_len = strlen (path);
+  base_len = strlen (base);
+  if (path_len < base_len)
+    return FALSE;
+  return g_ascii_strncasecmp (path, base, base_len) == 0
+      && (path[base_len] == '\0' || path[base_len] == '\\'
+      || path[base_len] == '/');
 }
 
 static wyrelog_error_t
