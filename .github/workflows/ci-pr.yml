@@ -146,11 +146,15 @@ jobs:
         shell: bash
         run: |
           sccache_path="${SCCACHE_PATH:-$(command -v sccache || true)}"
+          sccache_exe="$(cygpath -w "$sccache_path" 2>/dev/null || true)"
+          case "$sccache_exe" in *.exe|*.EXE) ;; *) sccache_exe="" ;; esac
           if [ "${{ steps.sccache.outcome }}" = success \
-            ] && [ -n "$sccache_path" ] && [ -x "$sccache_path" ] \
+            ] && [ -n "$sccache_exe" ] \
+            && [ -x "$sccache_path" ] \
             && "$sccache_path" --version >/dev/null 2>&1; then
             echo 'WYRELOG_USE_SCCACHE=1' >> "$GITHUB_ENV"
-            echo "SCCACHE_PATH=$sccache_path" >> "$GITHUB_ENV"
+            echo "SCCACHE_EXE=$sccache_exe" >> "$GITHUB_ENV"
+            dirname "$sccache_path" >> "$GITHUB_PATH"
           else
             echo 'WYRELOG_USE_SCCACHE=0' >> "$GITHUB_ENV"
             echo 'sccache unavailable; using native clang-cl'
@@ -256,12 +260,13 @@ jobs:
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig;%VCPKG_INSTALLED_DIR%\share\pkgconfig
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
-          set "SCCACHE_LAUNCHER=%SCCACHE_PATH%"
-          if not defined SCCACHE_LAUNCHER for /f "delims=" %%I in ('where sccache 2^>NUL') do if not defined SCCACHE_LAUNCHER set "SCCACHE_LAUNCHER=%%I"
+          set "SCCACHE_LAUNCHER=%SCCACHE_EXE%"
           if exist builddir rmdir /s /q builddir
           if "%WYRELOG_USE_SCCACHE%"=="1" (
-            "%SCCACHE_LAUNCHER%" clang-cl --version >NUL 2>&1
-            if errorlevel 1 (
+            if not exist "%SCCACHE_LAUNCHER%" set /a SCCACHE_PROBE_FAILED=1
+            if not defined SCCACHE_PROBE_FAILED "%SCCACHE_LAUNCHER%" clang-cl --version >NUL 2>&1
+            if errorlevel 1 set /a SCCACHE_PROBE_FAILED=1
+            if defined SCCACHE_PROBE_FAILED (
               set WYRELOG_USE_SCCACHE=0
               echo WYRELOG_USE_SCCACHE=0>>"%GITHUB_ENV%"
             )
@@ -308,7 +313,7 @@ jobs:
         if: always()
         shell: bash
         run: |
-          sccache_path="${SCCACHE_PATH:-$(command -v sccache || true)}"
+          sccache_path="$(cygpath -u "${SCCACHE_EXE:-}" 2>/dev/null || true)"
           if [ -n "$sccache_path" ] && [ -x "$sccache_path" ]; then
             stats="$("$sccache_path" --show-stats 2>&1)" || {
               echo "$stats"
