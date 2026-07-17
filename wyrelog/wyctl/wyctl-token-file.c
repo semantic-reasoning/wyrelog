@@ -89,7 +89,7 @@ wyctl_token_file_windows_parent_matches_input (HANDLE handle,
     }
     if (full_length < capacity)
       break;
-    if (capacity > G_MAXDWORD / 2) {
+    if (capacity > UINT32_MAX / 2) {
       g_free (full);
       return FALSE;
     }
@@ -107,7 +107,7 @@ wyctl_token_file_windows_parent_matches_input (HANDLE handle,
     }
     if (actual_length < capacity)
       break;
-    if (capacity > G_MAXDWORD / 2) {
+    if (capacity > UINT32_MAX / 2) {
       g_free (full);
       g_free (actual);
       return FALSE;
@@ -202,7 +202,7 @@ wyctl_token_file_windows_parent_anchor_open (const gchar *path,
     }
     if (length < capacity)
       break;
-    if (capacity > G_MAXDWORD / 2) {
+    if (capacity > UINT32_MAX / 2) {
       g_free (canonical);
       CloseHandle (handle);
       return FALSE;
