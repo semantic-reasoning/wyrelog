@@ -162,4 +162,56 @@ wyl_win_child_read (const WylServiceCredentialOperationStorage *storage,
   *out_bytes = g_bytes_new_take (data, info.nFileSizeLow);
   return *out_bytes == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
 }
+
+wyrelog_error_t
+wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, GBytes *bytes)
+{
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity = { 0 };
+  wyrelog_error_t error = WYRELOG_E_INVALID;
+  gsize size = 0;
+  const guint8 *data;
+  if (storage == NULL || anchor == NULL || name == NULL || bytes == NULL
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  data = g_bytes_get_data (bytes, &size);
+  if (size > 64u * 1024u)
+    return WYRELOG_E_POLICY;
+  if (!wyl_win_nt_create_relative (storage->root_handle, name,
+          GENERIC_WRITE, WYL_WIN_CHILD_CREATE, &handle, &identity, &error))
+    return error;
+  for (gsize offset = 0; offset < size;) {
+    DWORD written = 0;
+    if (!WriteFile (handle, data + offset, (DWORD) (size - offset), &written,
+            NULL) || written == 0) {
+      CloseHandle (handle);
+      return WYRELOG_E_IO;
+    }
+    offset += written;
+  }
+  if (!FlushFileBuffers (handle)) {
+    CloseHandle (handle);
+    return WYRELOG_E_IO;
+  }
+  BY_HANDLE_FILE_INFORMATION info;
+  BY_HANDLE_FILE_INFORMATION after;
+  if (!GetFileInformationByHandle (handle, &info)
+      || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+              | FILE_ATTRIBUTE_DIRECTORY))
+      || info.nFileSizeHigh != 0 || info.nFileSizeLow != size
+      || !GetFileInformationByHandle (handle, &after)
+      || after.dwVolumeSerialNumber != identity.volume_serial
+      || after.nFileIndexHigh != identity.file_index_high
+      || after.nFileIndexLow != identity.file_index_low
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor)) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
+  CloseHandle (handle);
+  return WYRELOG_E_OK;
+}
 #endif
