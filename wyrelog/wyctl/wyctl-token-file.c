@@ -54,15 +54,16 @@ wyctl_token_file_windows_normalize_final_path (const wchar_t *path)
     start += 8;
   else if (wcsncmp (start, L"\\\\?\\", 4) == 0)
     start += 4;
-  gsize length = wcslen (start) + (unc ? 2 : 0);
-  while (length > 1 && (start[length - 1] == L'\\'
-          || start[length - 1] == L'/'))
-    length--;
+  gsize payload_length = wcslen (start);
+  while (payload_length > 1 && (start[payload_length - 1] == L'\\'
+          || start[payload_length - 1] == L'/'))
+    payload_length--;
+  gsize length = payload_length + (unc ? 2 : 0);
   wchar_t *normalized = g_new (wchar_t, length + 1);
   if (unc) {
     normalized[0] = L'\\';
     normalized[1] = L'\\';
-    memcpy (normalized + 2, start, sizeof (wchar_t) * (length - 2));
+    memcpy (normalized + 2, start, sizeof (wchar_t) * payload_length);
   } else {
     memcpy (normalized, start, sizeof (wchar_t) * length);
   }
