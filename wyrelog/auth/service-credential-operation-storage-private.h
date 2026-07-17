@@ -5,6 +5,10 @@
 
 #include "wyrelog/error.h"
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
+
 G_BEGIN_DECLS;
 
 typedef struct
@@ -13,13 +17,16 @@ typedef struct
 #ifndef G_OS_WIN32
   gint root_fd;
   gboolean owns_root_fd;
+#else
+  HANDLE root_handle;
+  GPtrArray *ancestor_handles;
 #endif
 } WylServiceCredentialOperationStorage;
 
 #ifndef G_OS_WIN32
 #define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { .root_fd = -1, .owns_root_fd = FALSE }
 #else
-#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { 0 }
+#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { .root_handle = INVALID_HANDLE_VALUE }
 #endif
 
 /* The override is intended for tests and an explicitly configured state root.
