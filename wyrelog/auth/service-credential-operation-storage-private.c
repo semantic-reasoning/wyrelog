@@ -26,11 +26,39 @@ path_is_owner_private_directory (const gchar *path)
   return TRUE;
 }
 
+#ifndef G_OS_WIN32
+static gboolean
+path_has_safe_ancestors (const gchar *path)
+{
+  if (!g_path_is_absolute (path))
+    return FALSE;
+  g_auto (GStrv) parts = g_strsplit (path + 1, "/", -1);
+  g_autofree gchar *prefix = g_strdup ("/");
+  for (gsize i = 0; parts != NULL && parts[i] != NULL; i++) {
+    if (parts[i][0] == '\0' || g_strcmp0 (parts[i], ".") == 0
+        || g_strcmp0 (parts[i], "..") == 0 || strchr (parts[i], '\\') != NULL)
+      return FALSE;
+    g_autofree gchar *next = g_build_filename (prefix, parts[i], NULL);
+    GStatBuf st;
+    if (g_lstat (next, &st) == 0
+        && (S_ISLNK (st.st_mode) || !S_ISDIR (st.st_mode)))
+      return FALSE;
+    g_free (g_steal_pointer (&prefix));
+    prefix = g_steal_pointer (&next);
+  }
+  return TRUE;
+}
+#endif
+
 static wyrelog_error_t
 ensure_private_directory (const gchar *path)
 {
   if (path == NULL || path[0] == '\0')
     return WYRELOG_E_INVALID;
+#ifndef G_OS_WIN32
+  if (!path_has_safe_ancestors (path))
+    return WYRELOG_E_POLICY;
+#endif
   if (g_mkdir_with_parents (path, 0700) != 0 && errno != EEXIST)
     return errno == EACCES || errno == EPERM || errno == ENOTDIR
         ? WYRELOG_E_POLICY : WYRELOG_E_IO;
