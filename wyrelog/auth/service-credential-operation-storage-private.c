@@ -62,7 +62,8 @@ path_has_safe_ancestors (const gchar *path)
      * may legitimately be symlinks.  The final root is still checked with
      * lstat() and opened with O_NOFOLLOW below, so a caller cannot select a
      * symlink as the journal root itself. */
-    if (g_lstat (next, &st) == 0 && !S_ISDIR (st.st_mode))
+    if (g_lstat (next, &st) == 0 && !S_ISDIR (st.st_mode)
+        && !S_ISLNK (st.st_mode))
       return FALSE;
     g_free (g_steal_pointer (&prefix));
     prefix = g_steal_pointer (&next);
