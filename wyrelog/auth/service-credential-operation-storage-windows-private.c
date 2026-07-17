@@ -68,6 +68,8 @@ wyl_win_nt_create_relative (HANDLE root,
   attributes.RootDirectory = root;
   attributes.ObjectName = &unicode_name;
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
+  if (out_identity != NULL)
+    access |= FILE_READ_ATTRIBUTES;
   status = nt_create (&handle, access | SYNCHRONIZE, &attributes, &iosb, NULL,
       FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE
       | FILE_SHARE_DELETE, disposition == WYL_WIN_CHILD_CREATE
