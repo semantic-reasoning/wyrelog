@@ -254,9 +254,23 @@ jobs:
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
           set PKG_CONFIG_PATH=%VCPKG_INSTALLED_DIR%\lib\pkgconfig;%VCPKG_INSTALLED_DIR%\share\pkgconfig
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
-          if "%WYRELOG_USE_SCCACHE%"=="1" (set CC=sccache clang-cl) else (set CC=clang-cl)
-          if "%WYRELOG_USE_SCCACHE%"=="1" (set CXX=sccache clang-cl) else (set CXX=clang-cl)
-          meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
+          if exist builddir rmdir /s /q builddir
+          if "%WYRELOG_USE_SCCACHE%"=="1" sccache clang-cl --version >NUL 2>&1 || (
+            set WYRELOG_USE_SCCACHE=0
+            echo WYRELOG_USE_SCCACHE=0>>"%GITHUB_ENV%"
+          )
+          if "%WYRELOG_USE_SCCACHE%"=="1" (
+            >windows-native.ini echo [binaries]
+            >>windows-native.ini echo c = ['sccache', 'clang-cl']
+            >>windows-native.ini echo cpp = ['sccache', 'clang-cl']
+            echo Windows compiler mode: sccache clang-cl
+          ) else (
+            >windows-native.ini echo [binaries]
+            >>windows-native.ini echo c = ['clang-cl']
+            >>windows-native.ini echo cpp = ['clang-cl']
+            echo Windows compiler mode: native clang-cl
+          )
+          meson setup builddir --native-file windows-native.ini -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
 
       - name: Save meson packagecache
         if: steps.meson-packagecache.outputs.cache-hit != 'true'
@@ -284,8 +298,16 @@ jobs:
         shell: bash
         run: |
           if command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats || echo 'sccache statistics unavailable'
+            stats="$(sccache --show-stats 2>&1)" || {
+              echo "$stats"
+              test "$WYRELOG_USE_SCCACHE" != 1
+            }
+            echo "$stats"
+            if [ "$WYRELOG_USE_SCCACHE" = 1 ]; then
+              echo "$stats" | grep -Eq 'Compile requests[[:space:]]*:[[:space:]]*[1-9][0-9]*'
+            fi
           else
+            test "$WYRELOG_USE_SCCACHE" != 1
             echo 'sccache unavailable; no statistics to show'
           fi
 
