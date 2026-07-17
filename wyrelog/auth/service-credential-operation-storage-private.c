@@ -517,3 +517,93 @@ void wyl_service_credential_operation_storage_clear
 #endif
   g_clear_pointer (&storage->root_path, g_free);
 }
+
+void wyl_service_credential_operation_child_name_clear
+    (WylServiceCredentialOperationChildName * name)
+{
+  if (name == NULL)
+    return;
+  g_clear_pointer (&name->component, g_free);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_name_validate
+    (const gchar * raw, WylServiceCredentialOperationChildName * out_name)
+{
+  gsize length;
+  if (out_name == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_service_credential_operation_child_name_clear (out_name);
+  if (raw == NULL || raw[0] == '\0' || !g_utf8_validate (raw, -1, NULL))
+    return WYRELOG_E_POLICY;
+  length = strlen (raw);
+  if (length > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_MAX_BYTES
+      || g_str_equal (raw, ".") || g_str_equal (raw, ".."))
+    return WYRELOG_E_POLICY;
+  for (gsize i = 0; i < length; i++) {
+    gchar c = raw[i];
+    if ((guchar) c < 0x20 || c == '/' || c == '\\' || c == ':'
+        || c == '<' || c == '>' || c == '"' || c == '|' || c == '?' || c == '*')
+      return WYRELOG_E_POLICY;
+  }
+  if (raw[length - 1] == '.' || raw[length - 1] == ' ')
+    return WYRELOG_E_POLICY;
+  out_name->component = g_strdup (raw);
+  return out_name->component != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+void wyl_service_credential_operation_root_anchor_clear
+    (WylServiceCredentialOperationRootAnchor * anchor)
+{
+  if (anchor == NULL)
+    return;
+  anchor->initialized = FALSE;
+  anchor->identity_a = 0;
+  anchor->identity_b = 0;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_storage_capture_anchor
+    (const WylServiceCredentialOperationStorage * storage,
+    WylServiceCredentialOperationRootAnchor * out_anchor)
+{
+  WylServiceCredentialOperationRootAnchor captured =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  if (storage == NULL || out_anchor == NULL)
+    return WYRELOG_E_INVALID;
+#ifndef G_OS_WIN32
+  struct stat info;
+  if (storage->root_fd < 0 || fstat (storage->root_fd, &info) != 0)
+    return WYRELOG_E_POLICY;
+  captured.identity_a = (guint64) info.st_dev;
+  captured.identity_b = (guint64) info.st_ino;
+#else
+  if (storage->root_handle == INVALID_HANDLE_VALUE
+      || storage->root_handle == NULL
+      || storage->root_volume_serial == 0
+      || (storage->root_file_index_high == 0
+          && storage->root_file_index_low == 0))
+    return WYRELOG_E_POLICY;
+  captured.identity_a = storage->root_volume_serial;
+  captured.identity_b = ((guint64) storage->root_file_index_high << 32)
+      | storage->root_file_index_low;
+#endif
+  captured.initialized = TRUE;
+  *out_anchor = captured;
+  return WYRELOG_E_OK;
+}
+
+gboolean
+    wyl_service_credential_operation_storage_anchor_matches
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor)
+{
+  WylServiceCredentialOperationRootAnchor current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  return anchor != NULL && anchor->initialized
+      && wyl_service_credential_operation_storage_capture_anchor
+      (storage, &current) == WYRELOG_E_OK
+      && current.initialized
+      && current.identity_a == anchor->identity_a
+      && current.identity_b == anchor->identity_b;
+}
