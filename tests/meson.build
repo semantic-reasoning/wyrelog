@@ -1135,7 +1135,7 @@ service_session_boundary_cc_id = meson.get_compiler('c').get_id()
 # Meson records an sccache launcher, strip only that wrapper so clang-cl sees
 # its normal -E invocation; the build itself remains fully cache-backed.
 if service_session_boundary_cc.length() > 1 \
-    and service_session_boundary_cc[0].to_lower().contains('sccache')
+    and service_session_boundary_cc[0].to_lower().contains('cache')
   service_session_boundary_cc = [service_session_boundary_cc[1]]
 endif
 
