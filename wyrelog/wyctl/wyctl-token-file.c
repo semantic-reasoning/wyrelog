@@ -45,6 +45,86 @@ typedef struct
   wchar_t *child_path;
 } WyctlTokenFileWindowsParentAnchor;
 
+static wchar_t *
+wyctl_token_file_windows_normalize_final_path (const wchar_t *path)
+{
+  const wchar_t *start = path;
+  gboolean unc = wcsncmp (start, L"\\\\?\\UNC\\", 8) == 0;
+  if (unc)
+    start += 8;
+  else if (wcsncmp (start, L"\\\\?\\", 4) == 0)
+    start += 4;
+  gsize length = wcslen (start) + (unc ? 2 : 0);
+  while (length > 1 && (start[length - 1] == L'\\'
+          || start[length - 1] == L'/'))
+    length--;
+  wchar_t *normalized = g_new (wchar_t, length + 1);
+  if (unc) {
+    normalized[0] = L'\\';
+    normalized[1] = L'\\';
+    memcpy (normalized + 2, start, sizeof (wchar_t) * (length - 2));
+  } else {
+    memcpy (normalized, start, sizeof (wchar_t) * length);
+  }
+  normalized[length] = L'\0';
+  return normalized;
+}
+
+static gboolean
+wyctl_token_file_windows_parent_matches_input (HANDLE handle,
+    const wchar_t *input_parent)
+{
+  DWORD capacity = 512;
+  wchar_t *full = NULL;
+  wchar_t *actual = NULL;
+  DWORD full_length = 0;
+  DWORD actual_length = 0;
+  for (;;) {
+    full = g_realloc (full, sizeof (wchar_t) * capacity);
+    full_length = GetFullPathNameW (input_parent, capacity, full, NULL);
+    if (full_length == 0) {
+      g_free (full);
+      return FALSE;
+    }
+    if (full_length < capacity)
+      break;
+    if (capacity > G_MAXDWORD / 2) {
+      g_free (full);
+      return FALSE;
+    }
+    capacity *= 2;
+  }
+  capacity = 512;
+  for (;;) {
+    actual = g_realloc (actual, sizeof (wchar_t) * capacity);
+    actual_length = GetFinalPathNameByHandleW (handle, actual, capacity,
+        VOLUME_NAME_DOS);
+    if (actual_length == 0) {
+      g_free (full);
+      g_free (actual);
+      return FALSE;
+    }
+    if (actual_length < capacity)
+      break;
+    if (capacity > G_MAXDWORD / 2) {
+      g_free (full);
+      g_free (actual);
+      return FALSE;
+    }
+    capacity *= 2;
+  }
+  wchar_t *normalized_full =
+      wyctl_token_file_windows_normalize_final_path (full);
+  wchar_t *normalized_actual =
+      wyctl_token_file_windows_normalize_final_path (actual);
+  gboolean matches = _wcsicmp (normalized_full, normalized_actual) == 0;
+  g_free (normalized_full);
+  g_free (normalized_actual);
+  g_free (full);
+  g_free (actual);
+  return matches;
+}
+
 static void
 wyctl_token_file_windows_parent_anchor_clear (WyctlTokenFileWindowsParentAnchor
     *anchor)
@@ -76,6 +156,11 @@ wyctl_token_file_windows_parent_anchor_open (const gchar *path,
   if (wparent == NULL || wbasename == NULL || basename[0] == '\0'
       || g_strcmp0 (basename, ".") == 0 || g_strcmp0 (basename, "..") == 0)
     return FALSE;
+  /* Drive-relative paths (for example C:token) depend on a per-drive
+   * current directory and cannot be safely anchored by this contract. */
+  if (wparent[0] != L'\0' && wparent[1] == L':'
+      && wparent[2] != L'\\' && wparent[2] != L'/')
+    return FALSE;
   for (const wchar_t *p = wbasename; *p != L'\0'; p++) {
     if (*p == L'\\' || *p == L'/')
       return FALSE;
@@ -91,6 +176,13 @@ wyctl_token_file_windows_parent_anchor_open (const gchar *path,
   if (!GetFileInformationByHandle (handle, &info)
       || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0
       || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    CloseHandle (handle);
+    return FALSE;
+  }
+  /* OPEN_REPARSE_POINT protects only the final parent component. Comparing
+   * the handle-resolved DOS path with the lexical absolute input rejects an
+   * already-present junction/reparse in any ancestor component. */
+  if (!wyctl_token_file_windows_parent_matches_input (handle, wparent)) {
     CloseHandle (handle);
     return FALSE;
   }
