@@ -12,11 +12,12 @@ typedef struct
   gchar *root_path;
 #ifndef G_OS_WIN32
   gint root_fd;
+  gboolean owns_root_fd;
 #endif
 } WylServiceCredentialOperationStorage;
 
 #ifndef G_OS_WIN32
-#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { .root_fd = -1 }
+#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { .root_fd = -1, .owns_root_fd = FALSE }
 #else
 #define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { 0 }
 #endif
