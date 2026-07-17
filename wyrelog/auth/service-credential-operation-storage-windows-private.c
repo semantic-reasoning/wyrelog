@@ -9,7 +9,8 @@ typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
     ULONG, ULONG, PVOID, ULONG);
 
 BOOL
-wyl_win_nt_create_relative (HANDLE root, const gchar *component,
+wyl_win_nt_create_relative (HANDLE root,
+    const WylServiceCredentialOperationChildName *name,
     ACCESS_MASK access, HANDLE *out_handle)
 {
   static WylNtCreateFile nt_create;
@@ -24,9 +25,18 @@ wyl_win_nt_create_relative (HANDLE root, const gchar *component,
   if (out_handle == NULL)
     return FALSE;
   *out_handle = INVALID_HANDLE_VALUE;
-  if (root == NULL || root == INVALID_HANDLE_VALUE || component == NULL
-      || component[0] == '\0')
+  if (root == NULL || root == INVALID_HANDLE_VALUE || name == NULL
+      || name->component == NULL)
     return FALSE;
+  WylServiceCredentialOperationChildName canonical =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  if (wyl_service_credential_operation_child_name_validate (name->component,
+          &canonical) != WYRELOG_E_OK
+      || !g_str_equal (canonical.component, name->component)) {
+    wyl_service_credential_operation_child_name_clear (&canonical);
+    return FALSE;
+  }
+  wyl_service_credential_operation_child_name_clear (&canonical);
   if (nt_create == NULL) {
     HMODULE ntdll = GetModuleHandleW (L"ntdll.dll");
     if (ntdll == NULL)
@@ -35,7 +45,7 @@ wyl_win_nt_create_relative (HANDLE root, const gchar *component,
   }
   if (nt_create == NULL)
     return FALSE;
-  wide = g_utf8_to_utf16 (component, -1, NULL, &units, NULL);
+  wide = g_utf8_to_utf16 (name->component, -1, NULL, &units, NULL);
   if (wide == NULL || units == 0 || units > G_MAXUSHORT / sizeof (gunichar2))
     return FALSE;
   name.Length = (USHORT) (units * sizeof (gunichar2));
