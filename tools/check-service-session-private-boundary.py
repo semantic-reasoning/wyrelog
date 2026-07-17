@@ -301,6 +301,22 @@ def semantic_arguments(arguments: list[str], directory: Path,
     return result
 
 
+def normalize_direct_compiler(compiler: list[str], arguments: list[str]) -> list[str]:
+    """Drop a duplicated compiler token from direct boundary argv.
+
+    Meson compile databases may retain the compiler token in semantic
+    arguments after a launcher (sccache) has been stripped.  Passing both
+    `cc cc` (or `clang clang`) makes preprocessing fail on macOS/Windows.
+    """
+    if len(compiler) != 1 or not arguments:
+        return arguments
+    compiler_name = Path(compiler[0]).name.lower()
+    first_name = Path(arguments[0]).name.lower()
+    if first_name == compiler_name:
+        return arguments[1:]
+    return arguments
+
+
 def compile_database_contexts(build_root: Path | None, compiler_id: str,
                               source_root: Path | None = None):
     database = {}
@@ -315,7 +331,9 @@ def compile_database_contexts(build_root: Path | None, compiler_id: str,
             else shlex.split(entry["command"]))
         source = Path(entry["file"])
         source = (directory / source).resolve() if not source.is_absolute() else source.resolve()
-        semantics = semantic_arguments(arguments, directory, source, windows)
+        semantics = normalize_direct_compiler(
+            [arguments[0]], semantic_arguments(arguments, directory, source,
+                                                windows))
         quote_roots, angle_roots = include_roots(
             [arguments[0], *semantics], directory)
         context = (quote_roots, angle_roots, semantics)
@@ -965,9 +983,10 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
     windows = compiler_id in {"msvc", "clang-cl"}
     expanded_fixture = ([compiler[0]]
                         + expand_response_files(compiler[1:], root, windows))
-    fixture_semantics = semantic_arguments(
-        expanded_fixture, root, (root / "__boundary_fixture__.c").resolve(),
-        windows)
+    fixture_semantics = normalize_direct_compiler(
+        [compiler[0]], semantic_arguments(
+            expanded_fixture, root, (root / "__boundary_fixture__.c").resolve(),
+            windows))
     fallback_quote, fallback_angle = include_roots(expanded_fixture, root)
     bases = [base.resolve() for base in (root, build_root)
              if base is not None]

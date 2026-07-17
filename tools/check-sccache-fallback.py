@@ -43,6 +43,11 @@ def main() -> int:
     meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
     require(meson, "[service_session_boundary_cc[1]]", root / "tests/meson.build")
     require(meson, "contains('sccache')", root / "tests/meson.build")
+    boundary = (root / "tools" /
+                "check-service-session-private-boundary.py").read_text(
+                    encoding="utf-8")
+    require(boundary, "normalize_direct_compiler", root / "tools")
+    require(boundary, "return arguments[1:]", root / "tools")
     print("sccache fallback workflow guard: OK")
     return 0
 
