@@ -381,6 +381,8 @@ wyrelog_error_t
     return rc;
   }
   out_storage->root_handle = root_handle;
+  /* #482 anchors and validates the root only.  Handle-relative child
+   * linearization and replacement-race protection are owned by #483. */
   BY_HANDLE_FILE_INFORMATION root_info = { 0 };
   if (!GetFileInformationByHandle (root_handle, &root_info)) {
     wyl_service_credential_operation_storage_clear (out_storage);
