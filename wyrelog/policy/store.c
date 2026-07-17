@@ -9292,6 +9292,8 @@ wyl_policy_store_rotation_probe (const gchar *path,
 
   wyl_policy_store_t *old_store = NULL;
   wyl_policy_store_t *new_store = NULL;
+  guint8 old_digest[crypto_generichash_BYTES] = { 0 };
+  gboolean old_digest_valid = FALSE;
   wyrelog_error_t old_rc = wyl_policy_store_open_with_options (old_opts,
       &old_store);
   /* A probe is strictly read-only. Encrypted fresh opens use an in-memory
@@ -9306,6 +9308,9 @@ wyl_policy_store_rotation_probe (const gchar *path,
     memcpy (out_result->old_provider_id, old_store->encryption_key_id,
         sizeof out_result->old_provider_id);
     out_result->old_inner_invariants_match = out_result->old_root_authenticated;
+    if (rotation_intent_digest_canonical (old_store, old_digest)
+        == WYRELOG_E_OK)
+      old_digest_valid = TRUE;
 
     WylPolicyRotationIntentStatus status = { 0 };
     if (wyl_policy_store_rotation_intent_status (old_store, &status)
@@ -9340,6 +9345,19 @@ wyl_policy_store_rotation_probe (const gchar *path,
     memcpy (out_result->new_provider_id, new_store->encryption_key_id,
         sizeof out_result->new_provider_id);
     out_result->new_inner_invariants_match = out_result->new_root_authenticated;
+    if (old_digest_valid) {
+      guint8 new_digest[crypto_generichash_BYTES] = { 0 };
+      wyrelog_error_t digest_rc =
+          rotation_intent_digest_canonical (new_store, new_digest);
+      if (digest_rc != WYRELOG_E_OK
+          || sodium_memcmp (old_digest, new_digest, sizeof old_digest) != 0) {
+        sodium_memzero (new_digest, sizeof new_digest);
+        wyl_policy_store_close (new_store);
+        sodium_memzero (old_digest, sizeof old_digest);
+        return digest_rc == WYRELOG_E_OK ? WYRELOG_E_BUSY : digest_rc;
+      }
+      sodium_memzero (new_digest, sizeof new_digest);
+    }
   } else if (new_rc != WYRELOG_E_OK && new_rc != WYRELOG_E_CRYPTO
       && new_rc != WYRELOG_E_POLICY && new_rc != WYRELOG_E_NOT_FOUND) {
     if (new_store != NULL)
@@ -9354,6 +9372,7 @@ wyl_policy_store_rotation_probe (const gchar *path,
 
   if (new_store != NULL)
     wyl_policy_store_close (new_store);
+  sodium_memzero (old_digest, sizeof old_digest);
   return WYRELOG_E_OK;
 }
 
