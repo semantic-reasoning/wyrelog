@@ -21,6 +21,9 @@ test_resolves_and_rejects_symlink (void)
   g_autofree gchar *base = g_strdup_printf ("%s%cwyrelog-operation-root-%lu",
       local, G_DIR_SEPARATOR, (gulong) GetCurrentProcessId ());
   g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  /* A killed prior run may leave these deterministic test directories. */
+  g_rmdir (root);
+  g_rmdir (base);
 #else
   g_autofree gchar *base = g_dir_make_tmp ("wyl-operation-root-XXXXXX", NULL);
   g_assert_nonnull (base);
