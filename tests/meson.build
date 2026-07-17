@@ -1136,7 +1136,7 @@ service_session_boundary_cc_id = meson.get_compiler('c').get_id()
 # its normal -E invocation; the build itself remains fully cache-backed.
 if service_session_boundary_cc.length() > 1 \
     and service_session_boundary_cc[0].to_lower().contains('sccache')
-  service_session_boundary_cc = service_session_boundary_cc[1:]
+  service_session_boundary_cc = [service_session_boundary_cc[1]]
 endif
 
 test('check-service-session-private-boundary',
