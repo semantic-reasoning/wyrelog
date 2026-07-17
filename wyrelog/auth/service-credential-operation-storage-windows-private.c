@@ -14,7 +14,7 @@ wyl_win_nt_create_relative (HANDLE root,
     ACCESS_MASK access, HANDLE *out_handle)
 {
   static WylNtCreateFile nt_create;
-  UNICODE_STRING name = { 0 };
+  UNICODE_STRING unicode_name = { 0 };
   OBJECT_ATTRIBUTES attributes = { 0 };
   IO_STATUS_BLOCK iosb = { 0 };
   HANDLE handle = INVALID_HANDLE_VALUE;
@@ -48,12 +48,12 @@ wyl_win_nt_create_relative (HANDLE root,
   wide = g_utf8_to_utf16 (name->component, -1, NULL, &units, NULL);
   if (wide == NULL || units == 0 || units > G_MAXUSHORT / sizeof (gunichar2))
     return FALSE;
-  name.Length = (USHORT) (units * sizeof (gunichar2));
-  name.MaximumLength = name.Length;
-  name.Buffer = (PWSTR) wide;
+  unicode_name.Length = (USHORT) (units * sizeof (gunichar2));
+  unicode_name.MaximumLength = unicode_name.Length;
+  unicode_name.Buffer = (PWSTR) wide;
   attributes.Length = sizeof (attributes);
   attributes.RootDirectory = root;
-  attributes.ObjectName = &name;
+  attributes.ObjectName = &unicode_name;
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
   status = nt_create (&handle, access | SYNCHRONIZE, &attributes, &iosb, NULL,
       FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE
