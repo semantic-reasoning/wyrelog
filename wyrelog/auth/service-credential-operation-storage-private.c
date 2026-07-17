@@ -146,22 +146,36 @@ static gboolean
 win_sid_matches_token_owner (PSID sid)
 {
   HANDLE token = NULL;
-  DWORD needed = 0;
+  DWORD owner_needed = 0;
+  DWORD user_needed = 0;
   TOKEN_OWNER *owner_info = NULL;
+  TOKEN_USER *user_info = NULL;
   gboolean result = FALSE;
   if (sid == NULL || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY,
           &token))
     return FALSE;
-  GetTokenInformation (token, TokenOwner, NULL, 0, &needed);
-  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
-    goto out;
-  owner_info = g_malloc (needed);
-  if (owner_info == NULL || !GetTokenInformation (token, TokenOwner,
-          owner_info, needed, &needed))
-    goto out;
-  result = owner_info->Owner != NULL && EqualSid (sid, owner_info->Owner);
+  /* Elevated services can expose either the token owner or interactive user
+   * as the ACL owner; every other descriptor SID remains rejected. */
+  GetTokenInformation (token, TokenOwner, NULL, 0, &owner_needed);
+  if (GetLastError () == ERROR_INSUFFICIENT_BUFFER && owner_needed != 0) {
+    owner_info = g_malloc (owner_needed);
+    if (owner_info != NULL && GetTokenInformation (token, TokenOwner,
+            owner_info, owner_needed, &owner_needed))
+      result = owner_info->Owner != NULL && EqualSid (sid, owner_info->Owner);
+  }
+  if (!result) {
+    GetTokenInformation (token, TokenUser, NULL, 0, &user_needed);
+    if (GetLastError () == ERROR_INSUFFICIENT_BUFFER && user_needed != 0) {
+      user_info = g_malloc (user_needed);
+      if (user_info != NULL && GetTokenInformation (token, TokenUser,
+              user_info, user_needed, &user_needed))
+        result = user_info->User.Sid != NULL
+            && EqualSid (sid, user_info->User.Sid);
+    }
+  }
 out:
   g_free (owner_info);
+  g_free (user_info);
   CloseHandle (token);
   return result;
 }
