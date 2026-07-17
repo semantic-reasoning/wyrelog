@@ -28,6 +28,10 @@ wyrelog_error_t wyl_win_child_read
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, GBytes ** out_bytes);
+wyrelog_error_t wyl_win_child_create
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * bytes);
 
 G_END_DECLS
 #endif
