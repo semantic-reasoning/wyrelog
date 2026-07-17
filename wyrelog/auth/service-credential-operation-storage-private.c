@@ -359,8 +359,11 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
     g_autofree gunichar2 *wide = g_utf8_to_utf16 (next, -1, NULL, NULL, NULL);
     if (wide == NULL)
       goto invalid;
-    HANDLE h = CreateFileW ((LPCWSTR) wide,
-        FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
+    DWORD directory_access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
+        | READ_CONTROL | SYNCHRONIZE;
+    if (parts[i + 1] == NULL)
+      directory_access |= FILE_ADD_FILE | FILE_DELETE_CHILD;
+    HANDLE h = CreateFileW ((LPCWSTR) wide, directory_access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,
         FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
@@ -379,9 +382,8 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
       }
       LocalFree (descriptor);
       descriptor = NULL;
-      h = CreateFileW ((LPCWSTR) wide,
-          FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES | READ_CONTROL |
-          SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      h = CreateFileW ((LPCWSTR) wide, directory_access,
+          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
           NULL, OPEN_EXISTING,
           FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
     }
