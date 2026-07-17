@@ -64,6 +64,18 @@ test_posix_child_backend (void)
   g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
           &anchor, &name, two), ==, WYRELOG_E_OK);
   assert_child_contents (&storage, &anchor, &name, "two");
+  g_autofree gchar *long_component = g_malloc (256);
+  memset (long_component, 'x', 255);
+  long_component[255] = '\0';
+  WylServiceCredentialOperationChildName long_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      (long_component, &long_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
+          &anchor, &long_name, one), ==, WYRELOG_E_OK);
+  assert_child_contents (&storage, &anchor, &long_name, "one");
+  g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
+          &anchor, &long_name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
           &anchor, &name), ==, WYRELOG_E_OK);
   g_autoptr (GBytes) missing = NULL;
@@ -75,8 +87,6 @@ test_posix_child_backend (void)
   g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
           &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
 
-  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
-          &anchor, &name, one), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
           &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
@@ -86,6 +96,8 @@ test_posix_child_backend (void)
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
           &anchor, &name, &second_lock_fd), ==, WYRELOG_E_OK);
   wyl_service_credential_operation_child_unlock (second_lock_fd);
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, one), ==, WYRELOG_E_OK);
 
   WylServiceCredentialOperationRootAnchor mismatch = anchor;
   mismatch.identity_a++;
@@ -115,8 +127,16 @@ test_posix_child_backend (void)
   g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
           &anchor, &name), ==, WYRELOG_E_OK);
 
+  g_autoptr (GDir) entries = g_dir_open (storage.root_path, 0, NULL);
+  const gchar *entry;
+  while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
+    if (g_str_has_prefix (entry, ".lock-")
+        || g_str_has_prefix (entry, ".replace-"))
+      g_remove (g_build_filename (storage.root_path, entry, NULL));
+
   wyl_service_credential_operation_child_name_clear (&directory_name);
   wyl_service_credential_operation_child_name_clear (&link_name);
+  wyl_service_credential_operation_child_name_clear (&long_name);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);

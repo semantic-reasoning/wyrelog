@@ -759,10 +759,16 @@ wyrelog_error_t
     rc = WYRELOG_E_POLICY;
   if (close (fd) != 0 && rc == WYRELOG_E_OK)
     rc = WYRELOG_E_IO;
-  if (rc != WYRELOG_E_OK)
-    unlinkat (storage->root_fd, name->component, 0);
-  else if (fsync (storage->root_fd) != 0) {
-    unlinkat (storage->root_fd, name->component, 0);
+  if (rc != WYRELOG_E_OK) {
+    /* Never unlink by pathname after the anchor has changed. */
+    if (wyl_service_credential_operation_storage_anchor_matches (storage,
+            anchor))
+      unlinkat (storage->root_fd, name->component, 0);
+    return rc;
+  } else if (fsync (storage->root_fd) != 0) {
+    if (wyl_service_credential_operation_storage_anchor_matches (storage,
+            anchor))
+      unlinkat (storage->root_fd, name->component, 0);
     rc = WYRELOG_E_IO;
   }
   if (rc == WYRELOG_E_OK
@@ -779,7 +785,7 @@ wyrelog_error_t
     const WylServiceCredentialOperationChildName * name, GBytes * bytes)
 {
   g_autofree gchar *temporary = NULL;
-  g_autofree gchar *uuid = NULL;
+  g_autofree gchar *digest = NULL;
   gint fd = -1;
   wyrelog_error_t rc;
   if (storage == NULL || anchor == NULL || name == NULL
@@ -787,8 +793,9 @@ wyrelog_error_t
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
           anchor))
     return WYRELOG_E_POLICY;
-  uuid = g_uuid_string_random ();
-  temporary = g_strdup_printf (".%s.replace-%s", name->component, uuid);
+  digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      name->component, -1);
+  temporary = g_strdup_printf (".replace-%s", digest);
   if (temporary == NULL)
     return WYRELOG_E_NOMEM;
   fd = openat (storage->root_fd, temporary,
@@ -800,13 +807,19 @@ wyrelog_error_t
     rc = WYRELOG_E_POLICY;
   if (close (fd) != 0 && rc == WYRELOG_E_OK)
     rc = WYRELOG_E_IO;
-  if (rc == WYRELOG_E_OK
-      && (!wyl_service_credential_operation_storage_anchor_matches
-          (storage, anchor)
-          || renameat (storage->root_fd, temporary, storage->root_fd,
-              name->component) != 0 || fsync (storage->root_fd) != 0))
-    rc = WYRELOG_E_POLICY;
-  if (rc != WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
+    if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+            anchor))
+      rc = WYRELOG_E_POLICY;
+    else if (renameat (storage->root_fd, temporary, storage->root_fd,
+            name->component) != 0)
+      rc = posix_child_errno (errno);
+    else if (fsync (storage->root_fd) != 0)
+      rc = WYRELOG_E_IO;
+  }
+  if (rc != WYRELOG_E_OK
+      && wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
     unlinkat (storage->root_fd, temporary, 0);
   return rc;
 }
@@ -840,7 +853,28 @@ wyrelog_error_t
   if (out_fd == NULL)
     return WYRELOG_E_INVALID;
   *out_fd = -1;
-  wyrelog_error_t rc = posix_child_open (storage, anchor, name, O_RDWR, out_fd);
+  g_autofree gchar *digest = NULL;
+  g_autofree gchar *lock_name = NULL;
+  gint fd;
+  wyrelog_error_t rc;
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || storage->root_fd < 0 || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      name->component, -1);
+  lock_name = g_strdup_printf (".lock-%s", digest);
+  fd = openat (storage->root_fd, lock_name,
+      O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return posix_child_errno (errno);
+  if (!posix_child_file_is_private (fd)) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  *out_fd = fd;
+  rc = WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK)
     return rc;
   if (flock (*out_fd, LOCK_EX | LOCK_NB) != 0) {
