@@ -984,6 +984,13 @@ test_service_credential_operation_journal_codec = executable('test-service-crede
 test('service-credential-operation-journal-codec',
   test_service_credential_operation_journal_codec)
 
+test_service_credential_operation_coordinator = executable('test-service-credential-operation-coordinator',
+  'test-service-credential-operation-coordinator.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+test('service-credential-operation-coordinator', test_service_credential_operation_coordinator)
+
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
   'test-service-credential-operation-storage.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
