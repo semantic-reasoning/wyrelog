@@ -9278,6 +9278,10 @@ wyl_policy_store_rotation_probe (const gchar *path,
   if (path == NULL || path[0] == '\0' || old_opts == NULL || new_opts == NULL
       || out_result == NULL)
     return WYRELOG_E_INVALID;
+  if (old_opts == new_opts
+      || (old_opts->keyprovider_state != NULL
+          && old_opts->keyprovider_state == new_opts->keyprovider_state))
+    return WYRELOG_E_INVALID;
   out_result->state = WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS;
   out_result->intent_state = WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT;
 
@@ -9290,8 +9294,11 @@ wyl_policy_store_rotation_probe (const gchar *path,
   wyl_policy_store_t *new_store = NULL;
   wyrelog_error_t old_rc = wyl_policy_store_open_with_options (old_opts,
       &old_store);
-  wyrelog_error_t new_rc = wyl_policy_store_open_with_options (new_opts,
-      &new_store);
+  /* A probe is strictly read-only. Encrypted fresh opens use an in-memory
+   * SQLite image and would otherwise persist a newly-created canonical file
+   * during close when the requested path is absent. */
+  if (old_store != NULL)
+    old_store->suppress_close_persist = TRUE;
   if (old_rc == WYRELOG_E_OK && old_store != NULL) {
     out_result->old_root_authenticated =
         rotation_probe_store_authenticated (old_store,
@@ -9311,7 +9318,21 @@ wyl_policy_store_rotation_probe (const gchar *path,
         out_result->old_inner_invariants_match = FALSE;
       }
     }
+    wyl_policy_store_close (old_store);
+    old_store = NULL;
+  } else if (old_rc != WYRELOG_E_OK && old_rc != WYRELOG_E_CRYPTO
+      && old_rc != WYRELOG_E_POLICY && old_rc != WYRELOG_E_NOT_FOUND) {
+    if (old_store != NULL)
+      wyl_policy_store_close (old_store);
+    return old_rc;
+  } else if (old_store != NULL) {
+    wyl_policy_store_close (old_store);
+    old_store = NULL;
   }
+  wyrelog_error_t new_rc = wyl_policy_store_open_with_options (new_opts,
+      &new_store);
+  if (new_store != NULL)
+    new_store->suppress_close_persist = TRUE;
   if (new_rc == WYRELOG_E_OK && new_store != NULL) {
     out_result->new_root_authenticated =
         rotation_probe_store_authenticated (new_store,
@@ -9319,6 +9340,11 @@ wyl_policy_store_rotation_probe (const gchar *path,
     memcpy (out_result->new_provider_id, new_store->encryption_key_id,
         sizeof out_result->new_provider_id);
     out_result->new_inner_invariants_match = out_result->new_root_authenticated;
+  } else if (new_rc != WYRELOG_E_OK && new_rc != WYRELOG_E_CRYPTO
+      && new_rc != WYRELOG_E_POLICY && new_rc != WYRELOG_E_NOT_FOUND) {
+    if (new_store != NULL)
+      wyl_policy_store_close (new_store);
+    return new_rc;
   }
   if (out_result->old_root_authenticated && !out_result->new_root_authenticated)
     out_result->state = WYL_POLICY_ROTATION_RECOVERY_OLD;
@@ -9326,8 +9352,6 @@ wyl_policy_store_rotation_probe (const gchar *path,
       && out_result->new_root_authenticated)
     out_result->state = WYL_POLICY_ROTATION_RECOVERY_NEW;
 
-  if (old_store != NULL)
-    wyl_policy_store_close (old_store);
   if (new_store != NULL)
     wyl_policy_store_close (new_store);
   return WYRELOG_E_OK;
