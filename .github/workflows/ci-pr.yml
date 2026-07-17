@@ -284,7 +284,7 @@ jobs:
           )
           meson setup builddir --native-file windows-native.ini -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
           if "%WYRELOG_USE_SCCACHE%"=="1" (
-            ninja -C builddir -t commands | findstr /I "clang-cl" >NUL
+            ninja -C builddir -t commands | findstr /I /C:"sccache" >NUL
             if errorlevel 1 exit /b 1
           )
 
