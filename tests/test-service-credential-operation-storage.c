@@ -37,6 +37,18 @@ test_resolves_and_rejects_symlink (void)
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
           &storage), ==, WYRELOG_E_OK);
   g_assert_true (g_file_test (storage.root_path, G_FILE_TEST_IS_DIR));
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_credential_operation_storage_anchor_matches
+      (&storage, &anchor));
+  anchor.identity_a++;
+  g_assert_false (wyl_service_credential_operation_storage_anchor_matches
+      (&storage, &anchor));
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  g_assert_false (wyl_service_credential_operation_storage_anchor_matches
+      (&storage, &anchor));
 #ifndef G_OS_WIN32
   g_assert_cmpint (g_chmod (storage.root_path, 0777), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
@@ -70,6 +82,38 @@ test_rejects_file_root (void)
   g_assert_cmpint (g_rmdir (base), ==, 0);
 }
 
+static void
+test_child_name_and_anchor_contract (void)
+{
+  static const gchar *const invalid[] = {
+    "", ".", "..", "/absolute", "\\absolute", "C:relative",
+    "C:\\absolute", "\\\\server\\share", "has:colon", "has/slash",
+    "has\\slash", "trailing.", "trailing ", NULL
+  };
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_autofree gchar *too_long = g_malloc0 (256);
+  const gchar invalid_utf8[] = "bad\xff";
+  memset (too_long, 'a', 255);
+  for (gsize i = 0; invalid[i] != NULL; i++)
+    g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+        (invalid[i], &name), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      (invalid_utf8, &name), ==, WYRELOG_E_POLICY);
+  too_long[255] = 'a';
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      (too_long, &name), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record-01", &name), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (name.component, ==, "record-01");
+  wyl_service_credential_operation_child_name_clear (&name);
+  g_assert_null (name.component);
+  g_assert_false (wyl_service_credential_operation_storage_anchor_matches
+      (NULL, &anchor));
+}
+
 #ifdef G_OS_WIN32
 static void
 test_rejects_relative_override (void)
@@ -99,6 +143,8 @@ main (int argc, char **argv)
   g_test_add_func ("/operation-storage/private-root",
       test_resolves_and_rejects_symlink);
   g_test_add_func ("/operation-storage/file-root", test_rejects_file_root);
+  g_test_add_func ("/operation-storage/child-contract",
+      test_child_name_and_anchor_contract);
 #ifdef G_OS_WIN32
   g_test_add_func ("/operation-storage/windows/relative-override",
       test_rejects_relative_override);
