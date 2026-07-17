@@ -276,6 +276,52 @@ test_windows_child_read_validation (void)
 }
 
 static void
+test_windows_child_read_fixture (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-read-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity;
+  wyrelog_error_t error;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_true (wyl_win_nt_create_relative (storage.root_handle, &name,
+          GENERIC_WRITE, WYL_WIN_CHILD_CREATE, &handle, &identity, &error));
+  DWORD written = 0;
+  g_assert_true (WriteFile (handle, "hello", 5, &written, NULL));
+  g_assert_cmpuint (written, ==, 5);
+  g_assert_true (FlushFileBuffers (handle));
+  CloseHandle (handle);
+  handle = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
+      WYRELOG_E_OK);
+  gsize size = 0;
+  g_assert_cmpmem (g_bytes_get_data (bytes, &size), size, "hello", 5);
+  g_autofree gchar *record = g_build_filename (storage.root_path, "record",
+      NULL);
+  g_remove (record);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+}
+
+static void
 test_rejects_relative_override (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -312,6 +358,8 @@ main (int argc, char **argv)
 #ifdef G_OS_WIN32
   g_test_add_func ("/operation-storage/windows/child-read-validation",
       test_windows_child_read_validation);
+  g_test_add_func ("/operation-storage/windows/child-read-fixture",
+      test_windows_child_read_fixture);
   g_test_add_func ("/operation-storage/windows/relative-override",
       test_rejects_relative_override);
 #endif
