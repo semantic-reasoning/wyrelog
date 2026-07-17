@@ -149,17 +149,26 @@ win_sid_matches_current_user (PSID sid)
   DWORD needed = 0;
   TOKEN_USER *user = NULL;
   gboolean result = FALSE;
+  g_printerr ("storage trace: SID check enter\\n");
+  g_printerr ("storage trace: OpenProcessToken before\\n");
   if (sid == NULL || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY,
           &token))
     return FALSE;
+  g_printerr ("storage trace: OpenProcessToken after\\n");
+  g_printerr ("storage trace: GetTokenInformation size before\\n");
   GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  g_printerr ("storage trace: GetTokenInformation size after\\n");
   if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
     goto out;
   user = g_malloc (needed);
+  g_printerr ("storage trace: GetTokenInformation value before\\n");
   if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
           &needed))
     goto out;
+  g_printerr ("storage trace: GetTokenInformation value after\\n");
+  g_printerr ("storage trace: EqualSid before\\n");
   result = EqualSid (sid, user->User.Sid);
+  g_printerr ("storage trace: EqualSid after\\n");
 out:
   g_free (user);
   CloseHandle (token);
@@ -183,22 +192,31 @@ win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
     return FALSE;
   if ((control & SE_DACL_PROTECTED) == 0)
     return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorOwner before\\n");
   if (!GetSecurityDescriptorOwner (descriptor, &owner, &owner_defaulted))
     return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorOwner after\\n");
   if (owner == NULL)
     return FALSE;
   if (!win_sid_matches_current_user (owner))
     return FALSE;
+  g_printerr ("storage trace: SID check returned true\\n");
+  g_printerr ("storage trace: GetSecurityDescriptorDacl before\\n");
   if (!GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted))
     return FALSE;
+  g_printerr ("storage trace: GetSecurityDescriptorDacl after\\n");
   if (!present || dacl == NULL || defaulted)
     return FALSE;
+  g_printerr ("storage trace: GetAclInformation before\\n");
   if (!GetAclInformation (dacl, &size, sizeof size, AclSizeInformation))
     return FALSE;
+  g_printerr ("storage trace: GetAclInformation after\\n");
   if (size.AceCount != 1)
     return FALSE;
+  g_printerr ("storage trace: GetAce before\\n");
   if (!GetAce (dacl, 0, (LPVOID *) & ace))
     return FALSE;
+  g_printerr ("storage trace: GetAce after\\n");
   if (ace == NULL || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE
       || ace->Header.AceFlags != 0 || ace->Mask != FILE_ALL_ACCESS)
     return FALSE;
