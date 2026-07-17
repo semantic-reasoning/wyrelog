@@ -9245,6 +9245,94 @@ fail:
   return rc;
 }
 
+static gboolean
+rotation_probe_store_authenticated (wyl_policy_store_t *store,
+    guint64 *out_generation)
+{
+  if (out_generation != NULL)
+    *out_generation = 0;
+  if (store == NULL)
+    return FALSE;
+  wyl_policy_service_cvk_info_t info = { 0 };
+  guint8 *envelope = NULL;
+  wyrelog_error_t rc = wyl_policy_store_load_service_cvk (store, &info);
+  if (rc == WYRELOG_E_OK)
+    rc = service_cvk_unseal_validate (store, &store->keyprovider, &info,
+        &envelope);
+  if (rc == WYRELOG_E_OK && out_generation != NULL)
+    *out_generation = info.generation;
+  if (envelope != NULL)
+    cvk_locked_free (store, envelope, WYL_SERVICE_CVK_ENVELOPE_BYTES);
+  wyl_policy_service_cvk_info_clear (&info);
+  return rc == WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_rotation_probe (const gchar *path,
+    wyl_policy_store_open_options_t *old_opts,
+    wyl_policy_store_open_options_t *new_opts,
+    WylPolicyRotationRecoveryProbeResult *out_result)
+{
+  if (out_result != NULL)
+    memset (out_result, 0, sizeof *out_result);
+  if (path == NULL || path[0] == '\0' || old_opts == NULL || new_opts == NULL
+      || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  out_result->state = WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS;
+  out_result->intent_state = WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT;
+
+  old_opts->path = path;
+  old_opts->require_encrypted = TRUE;
+  new_opts->path = path;
+  new_opts->require_encrypted = TRUE;
+
+  wyl_policy_store_t *old_store = NULL;
+  wyl_policy_store_t *new_store = NULL;
+  wyrelog_error_t old_rc = wyl_policy_store_open_with_options (old_opts,
+      &old_store);
+  wyrelog_error_t new_rc = wyl_policy_store_open_with_options (new_opts,
+      &new_store);
+  if (old_rc == WYRELOG_E_OK && old_store != NULL) {
+    out_result->old_root_authenticated =
+        rotation_probe_store_authenticated (old_store,
+        &out_result->old_generation);
+    memcpy (out_result->old_provider_id, old_store->encryption_key_id,
+        sizeof out_result->old_provider_id);
+    out_result->old_inner_invariants_match = out_result->old_root_authenticated;
+
+    WylPolicyRotationIntentStatus status = { 0 };
+    if (wyl_policy_store_rotation_intent_status (old_store, &status)
+        == WYRELOG_E_OK) {
+      out_result->intent_state = status.state;
+      out_result->transaction_id = status.transaction_id;
+      if (status.state != WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT
+          && memcmp (status.old_provider_id, out_result->old_provider_id,
+              sizeof status.old_provider_id) != 0) {
+        out_result->old_inner_invariants_match = FALSE;
+      }
+    }
+  }
+  if (new_rc == WYRELOG_E_OK && new_store != NULL) {
+    out_result->new_root_authenticated =
+        rotation_probe_store_authenticated (new_store,
+        &out_result->new_generation);
+    memcpy (out_result->new_provider_id, new_store->encryption_key_id,
+        sizeof out_result->new_provider_id);
+    out_result->new_inner_invariants_match = out_result->new_root_authenticated;
+  }
+  if (out_result->old_root_authenticated && !out_result->new_root_authenticated)
+    out_result->state = WYL_POLICY_ROTATION_RECOVERY_OLD;
+  else if (!out_result->old_root_authenticated
+      && out_result->new_root_authenticated)
+    out_result->state = WYL_POLICY_ROTATION_RECOVERY_NEW;
+
+  if (old_store != NULL)
+    wyl_policy_store_close (old_store);
+  if (new_store != NULL)
+    wyl_policy_store_close (new_store);
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 service_cvk_insert_initial (wyl_policy_store_t *store, guint8 **out_envelope)
 {
