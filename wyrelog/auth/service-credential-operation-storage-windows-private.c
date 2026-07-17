@@ -3,6 +3,7 @@
 
 #ifdef G_OS_WIN32
 #include <winternl.h>
+#include <string.h>
 
 typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
     POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG,
@@ -28,6 +29,8 @@ wyl_win_nt_create_relative (HANDLE root,
     return FALSE;
   *out_handle = INVALID_HANDLE_VALUE;
   *out_error = WYRELOG_E_INVALID;
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof (*out_identity));
   if (root == NULL || root == INVALID_HANDLE_VALUE || name == NULL
       || name->component == NULL)
     return FALSE;
@@ -49,13 +52,15 @@ wyl_win_nt_create_relative (HANDLE root,
       return FALSE;
     nt_create = (WylNtCreateFile) GetProcAddress (ntdll, "NtCreateFile");
   }
-  if (nt_create == NULL)
+  if (nt_create == NULL) {
     *out_error = WYRELOG_E_POLICY;
-  return FALSE;
+    return FALSE;
+  }
   wide = g_utf8_to_utf16 (name->component, -1, NULL, &units, NULL);
-  if (wide == NULL || units == 0 || units > G_MAXUSHORT / sizeof (gunichar2))
+  if (wide == NULL || units == 0 || units > G_MAXUSHORT / sizeof (gunichar2)) {
     *out_error = WYRELOG_E_POLICY;
-  return FALSE;
+    return FALSE;
+  }
   unicode_name.Length = (USHORT) (units * sizeof (gunichar2));
   unicode_name.MaximumLength = unicode_name.Length;
   unicode_name.Buffer = (PWSTR) wide;
