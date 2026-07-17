@@ -1131,6 +1131,13 @@ check_service_session_private_boundary = find_program(
 )
 service_session_boundary_cc = meson.get_compiler('c').cmd_array()
 service_session_boundary_cc_id = meson.get_compiler('c').get_id()
+# The boundary checker invokes the compiler directly for preprocessing.  When
+# Meson records an sccache launcher, strip only that wrapper so clang-cl sees
+# its normal -E invocation; the build itself remains fully cache-backed.
+if service_session_boundary_cc.length() > 1 \
+    and service_session_boundary_cc[0].to_lower().contains('sccache')
+  service_session_boundary_cc = service_session_boundary_cc[1:]
+endif
 
 test('check-service-session-private-boundary',
   check_service_session_private_boundary,
