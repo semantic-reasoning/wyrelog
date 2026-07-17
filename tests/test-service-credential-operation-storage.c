@@ -6,11 +6,124 @@
 #include <glib/gstdio.h>
 #ifndef G_OS_WIN32
 #include <unistd.h>
+#include <sys/stat.h>
 #else
 #include <windows.h>
 #endif
 
 #include "auth/service-credential-operation-storage-private.h"
+
+#ifndef G_OS_WIN32
+static void
+assert_child_contents (WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, const gchar *expected)
+{
+  g_autoptr (GBytes) bytes = NULL;
+  gsize length = 0;
+  gconstpointer data;
+  g_assert_cmpint (wyl_service_credential_operation_child_read (storage,
+          anchor, name, &bytes), ==, WYRELOG_E_OK);
+  data = g_bytes_get_data (bytes, &length);
+  g_assert_cmpuint (length, ==, strlen (expected));
+  g_assert_true (memcmp (data, expected, length) == 0);
+}
+
+static void
+test_posix_child_backend (void)
+{
+  g_autofree gchar *base = g_dir_make_tmp ("wyl-child-XXXXXX", NULL);
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_autoptr (GBytes) oversized = g_bytes_new_take (g_malloc0
+      (WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1),
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1);
+  gint lock_fd = -1;
+  gint second_lock_fd = -1;
+
+  g_assert_nonnull (base);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, one), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, one), ==, WYRELOG_E_POLICY);
+  assert_child_contents (&storage, &anchor, &name, "one");
+  g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
+          &anchor, &name, two), ==, WYRELOG_E_OK);
+  assert_child_contents (&storage, &anchor, &name, "two");
+  g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
+          &anchor, &name), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) missing = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
+          &anchor, &name, &missing), ==, WYRELOG_E_NOT_FOUND);
+
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_child_replace (&storage,
+          &anchor, &name, oversized), ==, WYRELOG_E_POLICY);
+
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, one), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
+          &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
+          &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
+  wyl_service_credential_operation_child_unlock (lock_fd);
+  lock_fd = -1;
+  g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
+          &anchor, &name, &second_lock_fd), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_child_unlock (second_lock_fd);
+
+  WylServiceCredentialOperationRootAnchor mismatch = anchor;
+  mismatch.identity_a++;
+  g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
+          &mismatch, &name, &missing), ==, WYRELOG_E_POLICY);
+
+  g_autofree gchar *link = g_build_filename (storage.root_path, "link", NULL);
+  g_assert_cmpint (symlink ("record", link), ==, 0);
+  WylServiceCredentialOperationChildName link_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("link", &link_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
+          &anchor, &link_name, &missing), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (link), ==, 0);
+
+  g_autofree gchar *directory = g_build_filename (storage.root_path,
+      "directory", NULL);
+  g_assert_cmpint (g_mkdir (directory, 0700), ==, 0);
+  WylServiceCredentialOperationChildName directory_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("directory", &directory_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_read (&storage,
+          &anchor, &directory_name, &missing), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete (&storage,
+          &anchor, &name), ==, WYRELOG_E_OK);
+
+  wyl_service_credential_operation_child_name_clear (&directory_name);
+  wyl_service_credential_operation_child_name_clear (&link_name);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+#endif
 
 static void
 test_resolves_and_rejects_symlink (void)
@@ -152,6 +265,10 @@ main (int argc, char **argv)
   g_test_add_func ("/operation-storage/file-root", test_rejects_file_root);
   g_test_add_func ("/operation-storage/child-contract",
       test_child_name_and_anchor_contract);
+#ifndef G_OS_WIN32
+  g_test_add_func ("/operation-storage/posix-child/backend",
+      test_posix_child_backend);
+#endif
 #ifdef G_OS_WIN32
   g_test_add_func ("/operation-storage/windows/relative-override",
       test_rejects_relative_override);

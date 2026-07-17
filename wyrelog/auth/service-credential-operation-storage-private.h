@@ -53,6 +53,10 @@ typedef struct
   { .initialized = FALSE, .identity_a = 0, .identity_b = 0 }
 
 #ifndef G_OS_WIN32
+#define WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES (64u * 1024u)
+#endif
+
+#ifndef G_OS_WIN32
 #define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT \
   { .root_path = NULL, .root_fd = -1, .owns_root_fd = FALSE }
 #else
@@ -85,5 +89,29 @@ wyrelog_error_t wyl_service_credential_operation_storage_capture_anchor
 gboolean wyl_service_credential_operation_storage_anchor_matches
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor);
+
+#ifndef G_OS_WIN32
+wyrelog_error_t wyl_service_credential_operation_child_read
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes ** out_bytes);
+wyrelog_error_t wyl_service_credential_operation_child_create
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * bytes);
+wyrelog_error_t wyl_service_credential_operation_child_replace
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * bytes);
+wyrelog_error_t wyl_service_credential_operation_child_delete
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name);
+wyrelog_error_t wyl_service_credential_operation_child_lock
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, gint * out_fd);
+void wyl_service_credential_operation_child_unlock (gint fd);
+#endif
 
 G_END_DECLS;
