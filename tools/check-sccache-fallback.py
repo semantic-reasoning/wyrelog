@@ -39,8 +39,10 @@ def main() -> int:
         require(text, "cpp = ['clang-cl']", path)
         require(text, "ninja -C builddir -t commands", path)
         require(text, "findstr /I /C:\"sccache\"", path)
-        require(text, "set SCCACHE_DISABLE=1", path)
         require(text, "Compile requests[[:space:]]+[1-9][0-9]*", path)
+    meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
+    require(meson, "service_session_boundary_cc[1:]", root / "tests/meson.build")
+    require(meson, "contains('sccache')", root / "tests/meson.build")
     print("sccache fallback workflow guard: OK")
     return 0
 
