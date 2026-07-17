@@ -158,6 +158,25 @@ typedef struct
   gboolean new_inner_invariants_match;
 } WylPolicyRotationRecoveryProbe;
 
+/* Result of probing both retained provider roots against the canonical
+ * encrypted artifact. The provider states supplied to the probe are consumed
+ * exactly once, following wyl_policy_store_open_with_options() ownership
+ * rules; the result contains only non-secret fingerprints and generations. */
+typedef struct
+{
+  WylPolicyRotationRecoveryState state;
+  gboolean old_root_authenticated;
+  gboolean new_root_authenticated;
+  gboolean old_inner_invariants_match;
+  gboolean new_inner_invariants_match;
+  guint8 old_provider_id[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
+  guint8 new_provider_id[WYL_POLICY_ROTATION_INTENT_DIGEST_BYTES];
+  guint64 old_generation;
+  guint64 new_generation;
+  WylPolicyRotationIntentStatusState intent_state;
+  wyl_id_t transaction_id;
+} WylPolicyRotationRecoveryProbeResult;
+
 typedef enum
 {
   WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD = 1,
@@ -528,6 +547,10 @@ wyrelog_error_t wyl_policy_rotation_recovery_plan (const WylPolicyRotationIntent
     * intent, const WylPolicyRotationRecoveryProbe * probe,
     WylPolicyRotationRecoveryState * out_state,
     WylPolicyRotationRecoveryAction * out_action);
+wyrelog_error_t wyl_policy_store_rotation_probe (const gchar * path,
+    wyl_policy_store_open_options_t * old_opts,
+    wyl_policy_store_open_options_t * new_opts,
+    WylPolicyRotationRecoveryProbeResult * out_result);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
