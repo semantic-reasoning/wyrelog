@@ -938,7 +938,9 @@ def preprocess(command: list[str], compiler_id: str, source: str,
                rel: str) -> str:
     if not command:
         raise BoundaryError("C preprocessor command is unavailable")
-    if compiler_id in {"msvc", "clang-cl"}:
+    if compiler_id == "msvc":
+        return min(4, max(1, os.cpu_count() or 1))
+    if compiler_id == "clang-cl":
         argv = command + ["/nologo", "/EP", "/TC", "-"]
     else:
         argv = command + ["-E", "-P", "-x", "c", "-"]
