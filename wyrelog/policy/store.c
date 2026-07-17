@@ -9313,8 +9313,9 @@ wyl_policy_store_rotation_probe (const gchar *path,
       old_digest_valid = TRUE;
 
     WylPolicyRotationIntentStatus status = { 0 };
-    if (wyl_policy_store_rotation_intent_status (old_store, &status)
-        == WYRELOG_E_OK) {
+    wyrelog_error_t intent_rc =
+        wyl_policy_store_rotation_intent_status (old_store, &status);
+    if (intent_rc == WYRELOG_E_OK) {
       out_result->intent_state = status.state;
       out_result->transaction_id = status.transaction_id;
       if (status.state != WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT
@@ -9322,11 +9323,15 @@ wyl_policy_store_rotation_probe (const gchar *path,
               sizeof status.old_provider_id) != 0) {
         out_result->old_inner_invariants_match = FALSE;
       }
+    } else if (intent_rc != WYRELOG_E_NOT_FOUND) {
+      wyl_policy_store_close (old_store);
+      sodium_memzero (old_digest, sizeof old_digest);
+      return intent_rc;
     }
     wyl_policy_store_close (old_store);
     old_store = NULL;
   } else if (old_rc != WYRELOG_E_OK && old_rc != WYRELOG_E_CRYPTO
-      && old_rc != WYRELOG_E_POLICY && old_rc != WYRELOG_E_NOT_FOUND) {
+      && old_rc != WYRELOG_E_NOT_FOUND) {
     if (old_store != NULL)
       wyl_policy_store_close (old_store);
     return old_rc;
@@ -9359,7 +9364,7 @@ wyl_policy_store_rotation_probe (const gchar *path,
       sodium_memzero (new_digest, sizeof new_digest);
     }
   } else if (new_rc != WYRELOG_E_OK && new_rc != WYRELOG_E_CRYPTO
-      && new_rc != WYRELOG_E_POLICY && new_rc != WYRELOG_E_NOT_FOUND) {
+      && new_rc != WYRELOG_E_NOT_FOUND) {
     if (new_store != NULL)
       wyl_policy_store_close (new_store);
     return new_rc;
