@@ -10,9 +10,16 @@ G_BEGIN_DECLS;
 typedef struct
 {
   gchar *root_path;
+#ifndef G_OS_WIN32
+  gint root_fd;
+#endif
 } WylServiceCredentialOperationStorage;
 
+#ifndef G_OS_WIN32
+#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { .root_fd = -1 }
+#else
 #define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { 0 }
+#endif
 
 /* The override is intended for tests and an explicitly configured state root.
  * A NULL/empty override resolves the platform default and creates only
