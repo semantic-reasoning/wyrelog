@@ -960,7 +960,10 @@ def preprocess(command: list[str], compiler_id: str, source: str,
 def worker_count(compiler_id: str) -> int:
     """Bound native Windows parallelism without regressing GNU runners."""
     if compiler_id in {"msvc", "clang-cl"}:
-        return min(4, max(1, os.cpu_count() or 1))
+        # clang-cl preprocessing is the dominant boundary cost on Windows;
+        # use up to two workers per core while retaining an 8-worker memory
+        # ceiling for hosted runners.
+        return min(8, max(2, 2 * (os.cpu_count() or 1)))
     return 1
 
 

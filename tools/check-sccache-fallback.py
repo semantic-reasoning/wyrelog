@@ -48,6 +48,8 @@ def main() -> int:
                     encoding="utf-8")
     require(boundary, "normalize_direct_compiler", root / "tools")
     require(boundary, "return arguments[1:]", root / "tools")
+    require(boundary, "min(8, max(2, 2 * (os.cpu_count() or 1)))",
+            root / "tools")
     print("sccache fallback workflow guard: OK")
     return 0
 
