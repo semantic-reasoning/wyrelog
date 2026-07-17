@@ -24,6 +24,10 @@ BOOL wyl_win_nt_create_relative
     ACCESS_MASK access, WylWinChildDisposition disposition,
     HANDLE * out_handle, WylWinChildIdentity * out_identity,
     wyrelog_error_t * out_error);
+wyrelog_error_t wyl_win_child_read
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes ** out_bytes);
 
 G_END_DECLS
 #endif
