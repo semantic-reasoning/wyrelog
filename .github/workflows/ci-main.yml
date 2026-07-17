@@ -288,6 +288,7 @@ jobs:
           if not exist builddir\wyrelog\wyctl.exe exit /b 1
           builddir\wyrelog\wyctl.exe --help >NUL
           builddir\wyrelog\wyrelogd.exe --help | findstr /C:"--listen-port"
+          set SCCACHE_DISABLE=1
           meson test -C builddir --print-errorlogs --suite wyrelog
 
       - name: Show sccache statistics
