@@ -302,6 +302,9 @@ test_windows_child_read_fixture (void)
       (&storage, &anchor), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
       ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (storage.root_path, "record",
+      NULL);
+  g_remove (record);
   g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
       WYRELOG_E_NOT_FOUND);
   if (!wyl_win_nt_create_relative (storage.root_handle, &name, GENERIC_WRITE,
