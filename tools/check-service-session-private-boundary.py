@@ -971,6 +971,34 @@ def worker_count(compiler_id: str) -> int:
     return 1
 
 
+SEMANTIC_BATCH_CHUNK_SIZE = 8
+
+
+def semantic_batch_tasks(tasks, compiler: list[str], compiler_id: str,
+                         chunk_size: int = SEMANTIC_BATCH_CHUNK_SIZE):
+    """Group probes by semantics and split each group deterministically.
+
+    A single clang-cl preprocessing invocation can become very expensive when
+    a semantic context accumulates many translation units.  Keeping chunks
+    bounded prevents one oversized batch from monopolizing a worker while
+    preserving the exact probe set and ordering within every context.
+    """
+    if chunk_size < 1:
+        raise ValueError("semantic batch chunk size must be positive")
+    groups = {}
+    for rel, probe, protected_items, _compiler, _compiler_kind, semantics in tasks:
+        groups.setdefault(tuple(semantics), []).append(
+            (rel, probe, protected_items))
+
+    batch_tasks = []
+    for key in sorted(groups):
+        items = groups[key]
+        for offset in range(0, len(items), chunk_size):
+            batch_tasks.append((items[offset:offset + chunk_size], compiler,
+                                compiler_id, list(key)))
+    return batch_tasks
+
+
 def guarded_inspect(root: Path, manifest: dict[str, dict[str, int]],
             protected: tuple[str, ...], compiler: list[str],
             compiler_id: str, build_root: Path | None = None,
@@ -1083,12 +1111,7 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
     scan_started = time.monotonic()
     reporter.update("compiler", "preprocess", tus=len(tasks), tasks=len(tasks))
     if compiler_id in {"msvc", "clang-cl"}:
-        groups = {}
-        for rel, probe, protected_items, compiler_items, compiler_kind, semantics in tasks:
-            key = tuple(semantics)
-            groups.setdefault(key, []).append((rel, probe, protected_items))
-        batch_tasks = [(items, compiler, compiler_id, list(key))
-                       for key, items in groups.items()]
+        batch_tasks = semantic_batch_tasks(tasks, compiler, compiler_id)
         print(f"boundary semantic contexts: tus={len(tasks)} "
               f"groups={len(batch_tasks)} batches={len(batch_tasks)} "
               f"workers={workers}", file=sys.stderr, flush=True)

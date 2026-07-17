@@ -194,6 +194,48 @@ def main() -> int:
         assert guard_module.worker_count("clang-cl") == 2
     with mock.patch.object(guard_module.os, "cpu_count", return_value=4):
         assert guard_module.worker_count("clang-cl") == 8
+    semantic_tasks = [
+        (f"probe-{index}.c", object(), (PROTECTED[0],), ["clang-cl"],
+         "clang-cl", semantics)
+        for index, semantics in enumerate((
+            ["/DSECOND"], ["/DFIRST"], ["/DSECOND"], ["/DSECOND"],
+            ["/DFIRST"], ["/DSECOND"], ["/DFIRST"], ["/DSECOND"],
+            ["/DSECOND"], ["/DSECOND"], ["/DSECOND"],
+        ))
+    ]
+    source_groups = {}
+    for task in semantic_tasks:
+        source_groups.setdefault(tuple(task[5]), []).append(task[0])
+    expected_rel_order = [
+        rel for key in sorted(source_groups) for rel in source_groups[key]
+    ]
+    first_batches = guard_module.semantic_batch_tasks(
+        semantic_tasks, ["clang-cl"], "clang-cl", chunk_size=3)
+    second_batches = guard_module.semantic_batch_tasks(
+        semantic_tasks, ["clang-cl"], "clang-cl", chunk_size=3)
+    default_batches = guard_module.semantic_batch_tasks(
+        semantic_tasks, ["clang-cl"], "clang-cl")
+    assert [tuple(item[0] for item in batch[0]) for batch in first_batches] == [
+        tuple(item[0] for item in batch[0]) for batch in second_batches]
+    actual_rel_order = [item[0] for batch in default_batches for item in batch[0]]
+    assert actual_rel_order == expected_rel_order
+    assert len(actual_rel_order) == len(semantic_tasks)
+    assert len(set(actual_rel_order)) == len(actual_rel_order)
+    source_semantics = {task[0]: tuple(task[5]) for task in semantic_tasks}
+    for batch in default_batches:
+        assert all(source_semantics[item[0]] == tuple(batch[3])
+                   for item in batch[0])
+    assert [len(batch[0]) for batch in first_batches] == [3, 3, 3, 2]
+    assert all(len(batch[0]) <= 3 for batch in first_batches)
+    assert [len(batch[0]) for batch in default_batches] == [3, 8]
+    assert all(len(batch[0]) <= guard_module.SEMANTIC_BATCH_CHUNK_SIZE
+               for batch in default_batches)
+    try:
+        guard_module.semantic_batch_tasks(semantic_tasks, ["clang-cl"],
+                                          "clang-cl", chunk_size=0)
+        raise AssertionError("zero semantic batch chunk size was accepted")
+    except ValueError:
+        pass
     heartbeats = []
     waits = iter((False, False, True))
     synthetic = guard_module.HeartbeatReporter(
