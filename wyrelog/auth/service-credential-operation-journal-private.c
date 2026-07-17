@@ -8,7 +8,7 @@
 
 #define JOURNAL_MAGIC "WYLJNL01"
 #define JOURNAL_MAGIC_LEN 8u
-#define JOURNAL_FIELD_COUNT 10u
+#define JOURNAL_FIELD_COUNT 12u
 
 static void
 put_u32 (guint8 out[4], guint32 value)
@@ -82,11 +82,22 @@ state_is_valid (WylServiceCredentialOperationState state)
 }
 
 static gboolean
-destination_is_safe_basename (const gchar *value)
+destination_is_safe_relative_path (const gchar *value)
 {
-  return value != NULL && value[0] != '\0' && strcmp (value, ".") != 0
-      && strcmp (value, "..") != 0 && strchr (value, '/') == NULL
-      && strchr (value, '\\') == NULL;
+  if (value == NULL || value[0] == '\0' || value[0] == '/'
+      || value[0] == '\\' || strchr (value, ':') != NULL)
+    return FALSE;
+  const gchar *cursor = value;
+  while (*cursor != '\0') {
+    const gchar *slash = strchr (cursor, '/');
+    gsize component_len = slash == NULL ? strlen (cursor)
+        : (gsize) (slash - cursor);
+    if (component_len == 0 || (component_len == 1 && cursor[0] == '.')
+        || (component_len == 2 && cursor[0] == '.' && cursor[1] == '.'))
+      return FALSE;
+    cursor = slash == NULL ? cursor + component_len : slash + 1;
+  }
+  return TRUE;
 }
 
 gboolean
@@ -102,8 +113,11 @@ gboolean
       || !text_is_valid (record->tenant_id,
           record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
       || !text_is_valid (record->destination, TRUE)
-      || !destination_is_safe_basename (record->destination)
+      || !destination_is_safe_relative_path (record->destination)
       || !text_is_valid (record->parent_identity, TRUE)
+      || record->publication_receipt_version > 1
+      || !text_is_valid (record->reservation_id, FALSE)
+      || !text_is_valid (record->stage_basename, FALSE)
       || !text_is_valid (record->stage_identity, FALSE)
       || !text_is_valid (record->old_credential_id,
           record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
@@ -122,6 +136,10 @@ gboolean
       !wyl_service_credential_id_is_canonical (record->successor_credential_id,
           strlen (record->successor_credential_id)))
     return FALSE;
+  if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE
+      && record->old_credential_id != NULL
+      && record->old_credential_id[0] != '\0')
+    return FALSE;
   if (record->successor_generation > G_MAXINT64)
     return FALSE;
   return TRUE;
@@ -138,6 +156,8 @@ void wyl_service_credential_operation_record_clear
   g_clear_pointer (&record->tenant_id, g_free);
   g_clear_pointer (&record->destination, g_free);
   g_clear_pointer (&record->parent_identity, g_free);
+  g_clear_pointer (&record->reservation_id, g_free);
+  g_clear_pointer (&record->stage_basename, g_free);
   g_clear_pointer (&record->stage_identity, g_free);
   g_clear_pointer (&record->old_credential_id, g_free);
   g_clear_pointer (&record->successor_credential_id, g_free);
@@ -192,6 +212,9 @@ wyrelog_error_t
   append_text (bytes, record->tenant_id);
   append_text (bytes, record->destination);
   append_text (bytes, record->parent_identity);
+  append_u32 (bytes, record->publication_receipt_version);
+  append_text (bytes, record->reservation_id);
+  append_text (bytes, record->stage_basename);
   append_text (bytes, record->stage_identity);
   append_text (bytes, record->old_credential_id);
   append_text (bytes, record->successor_credential_id);
@@ -228,8 +251,6 @@ read_text (const guint8 *data, gsize len, gsize *offset, gchar **out)
 wyrelog_error_t
     wyl_service_credential_operation_record_decode
     (GBytes * bytes, WylServiceCredentialOperationRecord * out_record) {
-  if (out_record != NULL)
-    wyl_service_credential_operation_record_clear (out_record);
   if (bytes == NULL || out_record == NULL)
     return WYRELOG_E_INVALID;
   gsize len = 0;
@@ -238,41 +259,54 @@ wyrelog_error_t
       || len < JOURNAL_MAGIC_LEN + 20
       || memcmp (data, JOURNAL_MAGIC, JOURNAL_MAGIC_LEN) != 0)
     return WYRELOG_E_POLICY;
+  WylServiceCredentialOperationRecord decoded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   gsize offset = JOURNAL_MAGIC_LEN;
-  out_record->version = get_u32 (data + offset);
+  decoded.version = get_u32 (data + offset);
   offset += 4;
-  out_record->kind = get_u32 (data + offset);
+  decoded.kind = get_u32 (data + offset);
   offset += 4;
-  out_record->state = get_u32 (data + offset);
+  decoded.state = get_u32 (data + offset);
   offset += 4;
   if (get_u32 (data + offset) != JOURNAL_FIELD_COUNT)
     goto invalid;
   offset += 4;
-  if (!read_text (data, len, &offset, &out_record->operation_id)
-      || !read_text (data, len, &offset, &out_record->request_id)
-      || !read_text (data, len, &offset, &out_record->subject_id)
-      || !read_text (data, len, &offset, &out_record->tenant_id)
-      || !read_text (data, len, &offset, &out_record->destination)
-      || !read_text (data, len, &offset, &out_record->parent_identity)
-      || !read_text (data, len, &offset, &out_record->stage_identity)
-      || !read_text (data, len, &offset, &out_record->old_credential_id)
-      || !read_text (data, len, &offset, &out_record->successor_credential_id)
-      || !read_text (data, len, &offset, &out_record->publication_receipt_id)
+  if (!read_text (data, len, &offset, &decoded.operation_id)
+      || !read_text (data, len, &offset, &decoded.request_id)
+      || !read_text (data, len, &offset, &decoded.subject_id)
+      || !read_text (data, len, &offset, &decoded.tenant_id)
+      || !read_text (data, len, &offset, &decoded.destination)
+      || !read_text (data, len, &offset, &decoded.parent_identity)
+      || len - offset < 4)
+    goto invalid;
+  decoded.publication_receipt_version = get_u32 (data + offset);
+  offset += 4;
+  if (!read_text (data, len, &offset, &decoded.reservation_id)
+      || !read_text (data, len, &offset, &decoded.stage_basename)
+      || !read_text (data, len, &offset, &decoded.stage_identity)
+      || !read_text (data, len, &offset, &decoded.old_credential_id)
+      || !read_text (data, len, &offset, &decoded.successor_credential_id)
+      || !read_text (data, len, &offset, &decoded.publication_receipt_id)
       || len - offset < 28)
     goto invalid;
-  out_record->successor_generation = get_u64 (data + offset);
+  decoded.successor_generation = get_u64 (data + offset);
   offset += 8;
-  out_record->created_at_us = (gint64) get_u64 (data + offset);
+  guint64 created_raw = get_u64 (data + offset);
   offset += 8;
-  out_record->updated_at_us = (gint64) get_u64 (data + offset);
+  guint64 updated_raw = get_u64 (data + offset);
   offset += 8;
-  out_record->attempts = get_u32 (data + offset);
+  decoded.attempts = get_u32 (data + offset);
   offset += 4;
-  if (offset != len
-      || !wyl_service_credential_operation_record_is_valid (out_record))
+  if (created_raw > G_MAXINT64 || updated_raw > G_MAXINT64)
     goto invalid;
+  decoded.created_at_us = (gint64) created_raw;
+  decoded.updated_at_us = (gint64) updated_raw;
+  if (offset != len
+      || !wyl_service_credential_operation_record_is_valid (&decoded))
+    goto invalid;
+  *out_record = decoded;
   return WYRELOG_E_OK;
 invalid:
-  wyl_service_credential_operation_record_clear (out_record);
+  wyl_service_credential_operation_record_clear (&decoded);
   return WYRELOG_E_POLICY;
 }
