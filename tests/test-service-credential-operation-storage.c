@@ -1,6 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <glib.h>
 #include <glib/gstdio.h>
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#endif
 
 #include "auth/service-credential-operation-storage-private.h"
 
@@ -17,8 +23,15 @@ test_resolves_and_rejects_symlink (void)
   g_assert_true (g_file_test (storage.root_path, G_FILE_TEST_IS_DIR));
   g_assert_cmpint (g_chmod (storage.root_path, 0777), ==, 0);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
-          &storage), ==, WYRELOG_E_OK);
+          &storage), ==, WYRELOG_E_POLICY);
   wyl_service_credential_operation_storage_clear (&storage);
+#ifndef G_OS_WIN32
+  g_autofree gchar *link = g_build_filename (base, "link", NULL);
+  g_assert_cmpint (symlink (root, link), ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (link,
+          &storage), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (link), ==, 0);
+#endif
   g_assert_cmpint (g_rmdir (root), ==, 0);
   g_assert_cmpint (g_rmdir (base), ==, 0);
 }

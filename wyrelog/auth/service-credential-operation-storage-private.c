@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #ifndef G_OS_WIN32
 #include <unistd.h>
+#include <fcntl.h>
 #endif
 
 #define JOURNAL_SUBPATH "wyrelog/service-credential-operations"
@@ -62,10 +63,6 @@ ensure_private_directory (const gchar *path)
   if (g_mkdir_with_parents (path, 0700) != 0 && errno != EEXIST)
     return errno == EACCES || errno == EPERM || errno == ENOTDIR
         ? WYRELOG_E_POLICY : WYRELOG_E_IO;
-#ifndef G_OS_WIN32
-  if (g_chmod (path, 0700) != 0)
-    return WYRELOG_E_POLICY;
-#endif
   if (!path_is_owner_private_directory (path))
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
@@ -108,7 +105,18 @@ wyrelog_error_t
     g_free (root);
     return rc;
   }
+#ifndef G_OS_WIN32
+  gint root_fd = open (root, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  if (root_fd < 0) {
+    g_free (root);
+    return errno == EACCES || errno == EPERM || errno == ELOOP
+        ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+#endif
   out_storage->root_path = root;
+#ifndef G_OS_WIN32
+  out_storage->root_fd = root_fd;
+#endif
   return WYRELOG_E_OK;
 }
 
@@ -117,5 +125,10 @@ void wyl_service_credential_operation_storage_clear
 {
   if (storage == NULL)
     return;
+#ifndef G_OS_WIN32
+  if (storage->root_fd >= 0)
+    close (storage->root_fd);
+  storage->root_fd = -1;
+#endif
   g_clear_pointer (&storage->root_path, g_free);
 }
