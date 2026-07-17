@@ -95,4 +95,52 @@ wyl_win_nt_create_relative (HANDLE root,
   *out_error = WYRELOG_E_OK;
   return TRUE;
 }
+
+wyrelog_error_t
+wyl_win_child_read (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, GBytes **out_bytes)
+{
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity = { 0 };
+  wyrelog_error_t error = WYRELOG_E_INVALID;
+  guint8 *data = NULL;
+  DWORD got;
+  BY_HANDLE_FILE_INFORMATION info;
+  if (out_bytes == NULL)
+    return WYRELOG_E_INVALID;
+  *out_bytes = NULL;
+  if (storage == NULL || anchor == NULL || name == NULL
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  if (!wyl_win_nt_create_relative (storage->root_handle, name, GENERIC_READ,
+          WYL_WIN_CHILD_OPEN, &handle, &identity, &error))
+    return error;
+  if (!GetFileInformationByHandle (handle, &info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      || info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY
+      || info.nFileSizeHigh != 0 || info.nFileSizeLow > 64u * 1024u) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
+  data = g_malloc (info.nFileSizeLow > 0 ? info.nFileSizeLow : 1);
+  for (DWORD offset = 0; offset < info.nFileSizeLow;) {
+    if (!ReadFile (handle, data + offset, info.nFileSizeLow - offset, &got,
+            NULL) || got == 0) {
+      g_free (data);
+      CloseHandle (handle);
+      return WYRELOG_E_IO;
+    }
+    offset += got;
+  }
+  CloseHandle (handle);
+  if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor)) {
+    g_free (data);
+    return WYRELOG_E_POLICY;
+  }
+  *out_bytes = g_bytes_new_take (data, info.nFileSizeLow);
+  return *out_bytes == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
+}
 #endif
