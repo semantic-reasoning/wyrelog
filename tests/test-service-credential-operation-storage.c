@@ -31,6 +31,9 @@ test_resolves_and_rejects_symlink (void)
 #endif
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  /* The first open clears caller-owned state; an initialized value must be
+   * safe to clear before it has ever held a root. */
+  wyl_service_credential_operation_storage_clear (&storage);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
           &storage), ==, WYRELOG_E_OK);
   g_assert_true (g_file_test (storage.root_path, G_FILE_TEST_IS_DIR));

@@ -27,10 +27,12 @@ typedef struct
 } WylServiceCredentialOperationStorage;
 
 #ifndef G_OS_WIN32
-#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT { .root_fd = -1, .owns_root_fd = FALSE }
+#define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT \
+  { .root_path = NULL, .root_fd = -1, .owns_root_fd = FALSE }
 #else
 #define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT \
-  { .root_handle = INVALID_HANDLE_VALUE, .ancestor_handles = NULL, \
+  { .root_path = NULL, .root_handle = INVALID_HANDLE_VALUE, \
+    .ancestor_handles = NULL, \
     .root_volume_serial = 0, .root_file_index_high = 0, \
     .root_file_index_low = 0 }
 #endif
