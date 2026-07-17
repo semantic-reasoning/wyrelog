@@ -186,7 +186,7 @@ win_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
       || size.AceCount != 1
       || !GetAce (dacl, 0, (LPVOID *) & ace) || ace == NULL
       || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE
-      || ace->Mask != FILE_ALL_ACCESS)
+      || ace->Header.AceFlags != 0 || ace->Mask != FILE_ALL_ACCESS)
     return FALSE;
   return EqualSid (owner, (PSID) & ace->SidStart);
 }
@@ -301,7 +301,8 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
       CloseHandle (h);
       goto policy;
     }
-    if (after_localappdata && !win_handle_is_owner_only (h)) {
+    if ((after_localappdata || parts[i + 1] == NULL)
+        && !win_handle_is_owner_only (h)) {
       CloseHandle (h);
       goto policy;
     }
