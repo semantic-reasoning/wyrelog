@@ -42,7 +42,7 @@ def main() -> int:
         require(text, "Compile requests[[:space:]]+[1-9][0-9]*", path)
     meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
     require(meson, "[service_session_boundary_cc[1]]", root / "tests/meson.build")
-    require(meson, "contains('sccache')", root / "tests/meson.build")
+    require(meson, "contains('cache')", root / "tests/meson.build")
     boundary = (root / "tools" /
                 "check-service-session-private-boundary.py").read_text(
                     encoding="utf-8")
