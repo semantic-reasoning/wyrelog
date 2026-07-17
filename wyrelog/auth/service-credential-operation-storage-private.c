@@ -18,8 +18,15 @@ static gboolean
 path_is_owner_private_directory (const gchar *path)
 {
   GStatBuf st;
-  if (g_lstat (path, &st) != 0 || !S_ISDIR (st.st_mode))
+  if (g_lstat (path, &st) != 0)
     return FALSE;
+#ifdef G_OS_WIN32
+  if (!g_file_test (path, G_FILE_TEST_IS_DIR))
+    return FALSE;
+#else
+  if (!S_ISDIR (st.st_mode))
+    return FALSE;
+#endif
 #ifndef G_OS_WIN32
   if (st.st_uid != geteuid () || (st.st_mode & 0777) != 0700)
     return FALSE;
