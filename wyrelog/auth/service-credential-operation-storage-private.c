@@ -10,6 +10,7 @@
 #ifndef G_OS_WIN32
 #include <unistd.h>
 #include <fcntl.h>
+#include <sys/file.h>
 #else
 #include <windows.h>
 #include <aclapi.h>
@@ -623,3 +624,248 @@ gboolean
       && current.identity_a == anchor->identity_a
       && current.identity_b == anchor->identity_b;
 }
+
+#ifndef G_OS_WIN32
+static wyrelog_error_t
+posix_child_errno (gint error)
+{
+  if (error == ENOENT)
+    return WYRELOG_E_NOT_FOUND;
+  if (error == EEXIST || error == ELOOP || error == ENOTDIR
+      || error == EACCES || error == EPERM)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_IO;
+}
+
+static gboolean
+posix_child_file_is_private (gint fd)
+{
+  struct stat info;
+  if (fstat (fd, &info) != 0 || !S_ISREG (info.st_mode)
+      || info.st_uid != geteuid () || (info.st_mode & 0777) != 0600)
+    return FALSE;
+  return TRUE;
+}
+
+static wyrelog_error_t
+posix_child_open (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, gint flags,
+    gint *out_fd)
+{
+  if (out_fd == NULL || storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || storage->root_fd < 0
+      || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches
+      (storage, anchor))
+    return WYRELOG_E_POLICY;
+  gint fd = openat (storage->root_fd, name->component,
+      flags | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return posix_child_errno (errno);
+  if (!posix_child_file_is_private (fd)
+      || !wyl_service_credential_operation_storage_anchor_matches
+      (storage, anchor)) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  *out_fd = fd;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+posix_child_write_all (gint fd, GBytes *bytes)
+{
+  gsize size = 0;
+  const guint8 *data = bytes != NULL ? g_bytes_get_data (bytes, &size) : NULL;
+  if (size > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES)
+    return WYRELOG_E_POLICY;
+  for (gsize offset = 0; offset < size;) {
+    ssize_t written = write (fd, data + offset, size - offset);
+    if (written < 0)
+      return WYRELOG_E_IO;
+    if (written == 0)
+      return WYRELOG_E_IO;
+    offset += (gsize) written;
+  }
+  return fsync (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_read
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes ** out_bytes)
+{
+  gint fd = -1;
+  struct stat info;
+  guint8 *data = NULL;
+  gsize size;
+  wyrelog_error_t rc;
+  if (out_bytes == NULL)
+    return WYRELOG_E_INVALID;
+  *out_bytes = NULL;
+  rc = posix_child_open (storage, anchor, name, O_RDONLY, &fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (fstat (fd, &info) != 0 || info.st_size < 0
+      || (guint64) info.st_size >
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  size = (gsize) info.st_size;
+  data = g_malloc (size > 0 ? size : 1);
+  if (data == NULL) {
+    close (fd);
+    return WYRELOG_E_NOMEM;
+  }
+  for (gsize offset = 0; offset < size;) {
+    ssize_t count = read (fd, data + offset, size - offset);
+    if (count <= 0) {
+      g_free (data);
+      close (fd);
+      return WYRELOG_E_IO;
+    }
+    offset += (gsize) count;
+  }
+  close (fd);
+  if (!wyl_service_credential_operation_storage_anchor_matches
+      (storage, anchor)) {
+    g_free (data);
+    return WYRELOG_E_POLICY;
+  }
+  *out_bytes = g_bytes_new_take (data, size);
+  return *out_bytes != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_create
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * bytes)
+{
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || storage->root_fd < 0 || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  gint fd = openat (storage->root_fd, name->component,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return posix_child_errno (errno);
+  wyrelog_error_t rc = posix_child_write_all (fd, bytes);
+  if (rc == WYRELOG_E_OK && !posix_child_file_is_private (fd))
+    rc = WYRELOG_E_POLICY;
+  if (close (fd) != 0 && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (rc != WYRELOG_E_OK)
+    unlinkat (storage->root_fd, name->component, 0);
+  else if (fsync (storage->root_fd) != 0) {
+    unlinkat (storage->root_fd, name->component, 0);
+    rc = WYRELOG_E_IO;
+  }
+  if (rc == WYRELOG_E_OK
+      && !wyl_service_credential_operation_storage_anchor_matches
+      (storage, anchor))
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_replace
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * bytes)
+{
+  g_autofree gchar *temporary = NULL;
+  g_autofree gchar *uuid = NULL;
+  gint fd = -1;
+  wyrelog_error_t rc;
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || storage->root_fd < 0 || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  uuid = g_uuid_string_random ();
+  temporary = g_strdup_printf (".%s.replace-%s", name->component, uuid);
+  if (temporary == NULL)
+    return WYRELOG_E_NOMEM;
+  fd = openat (storage->root_fd, temporary,
+      O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return posix_child_errno (errno);
+  rc = posix_child_write_all (fd, bytes);
+  if (rc == WYRELOG_E_OK && !posix_child_file_is_private (fd))
+    rc = WYRELOG_E_POLICY;
+  if (close (fd) != 0 && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (!wyl_service_credential_operation_storage_anchor_matches
+          (storage, anchor)
+          || renameat (storage->root_fd, temporary, storage->root_fd,
+              name->component) != 0 || fsync (storage->root_fd) != 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK)
+    unlinkat (storage->root_fd, temporary, 0);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_delete
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name)
+{
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  if (unlinkat (storage->root_fd, name->component, 0) != 0)
+    return posix_child_errno (errno);
+  if (fsync (storage->root_fd) != 0
+      || !wyl_service_credential_operation_storage_anchor_matches
+      (storage, anchor))
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_lock
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, gint * out_fd)
+{
+  if (out_fd == NULL)
+    return WYRELOG_E_INVALID;
+  *out_fd = -1;
+  wyrelog_error_t rc = posix_child_open (storage, anchor, name, O_RDWR, out_fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (flock (*out_fd, LOCK_EX | LOCK_NB) != 0) {
+    rc = (errno == EWOULDBLOCK || errno == EAGAIN)
+        ? WYRELOG_E_BUSY : WYRELOG_E_IO;
+    close (*out_fd);
+    *out_fd = -1;
+    return rc;
+  }
+  if (!wyl_service_credential_operation_storage_anchor_matches
+      (storage, anchor)) {
+    flock (*out_fd, LOCK_UN);
+    close (*out_fd);
+    *out_fd = -1;
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_service_credential_operation_child_unlock (gint fd)
+{
+  if (fd >= 0) {
+    flock (fd, LOCK_UN);
+    close (fd);
+  }
+}
+#endif
