@@ -394,6 +394,36 @@ test_windows_parent_reparse_is_rejected (void)
 }
 
 static void
+test_windows_ancestor_reparse_is_rejected (void)
+{
+  g_autofree gchar *real_root = g_dir_make_tmp ("wyctl-ancestor-XXXXXX",
+      NULL);
+  g_assert_nonnull (real_root);
+  g_autofree gchar *real_parent = g_build_filename (real_root, "inner", NULL);
+  g_assert_cmpint (g_mkdir (real_parent, 0700), ==, 0);
+  g_autofree gchar *alias_root = g_strdup_printf ("%s-alias", real_root);
+  if (!create_windows_directory_symlink (real_root, alias_root)) {
+    g_rmdir (real_parent);
+    g_rmdir (real_root);
+    g_test_skip ("creating Windows directory symlinks requires a privilege");
+    return;
+  }
+  g_autofree gchar *path = g_build_filename (alias_root, "inner", "token",
+      NULL);
+  g_assert_cmpint (wyctl_token_file_write_protected (path, "access-1", 8),
+      !=, WYCTL_TOKEN_FILE_OK);
+  g_autofree gchar *token = NULL;
+  g_assert_cmpint (wyctl_token_file_read (path, &token), !=,
+      WYCTL_TOKEN_FILE_OK);
+  g_assert_null (token);
+  g_assert_false (g_file_test (g_build_filename (real_parent, "token", NULL),
+          G_FILE_TEST_EXISTS));
+  g_remove (alias_root);
+  g_rmdir (real_parent);
+  g_rmdir (real_root);
+}
+
+static void
 test_windows_final_reparse_is_rejected (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyctl-final-XXXXXX", NULL);
@@ -459,6 +489,8 @@ main (int argc, char **argv)
 #else
   g_test_add_func ("/wyctl/token-file/windows-parent-reparse-rejected",
       test_windows_parent_reparse_is_rejected);
+  g_test_add_func ("/wyctl/token-file/windows-ancestor-reparse-rejected",
+      test_windows_ancestor_reparse_is_rejected);
   g_test_add_func ("/wyctl/token-file/windows-final-reparse-rejected",
       test_windows_final_reparse_is_rejected);
 #endif
