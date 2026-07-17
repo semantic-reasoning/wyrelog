@@ -873,6 +873,11 @@ wyrelog_error_t
     close (fd);
     return WYRELOG_E_POLICY;
   }
+  if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor)) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
   *out_fd = fd;
   rc = WYRELOG_E_OK;
   if (rc != WYRELOG_E_OK)
@@ -894,11 +899,30 @@ wyrelog_error_t
   return WYRELOG_E_OK;
 }
 
-void
-wyl_service_credential_operation_child_unlock (gint fd)
+void wyl_service_credential_operation_child_unlock
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, gint fd)
 {
   if (fd >= 0) {
+    struct stat held = { 0 };
+    struct stat current = { 0 };
+    g_autofree gchar *digest = NULL;
+    g_autofree gchar *lock_name = NULL;
     flock (fd, LOCK_UN);
+    if (storage != NULL && anchor != NULL && name != NULL
+        && name->component != NULL
+        && wyl_service_credential_operation_storage_anchor_matches (storage,
+            anchor)
+        && fstat (fd, &held) == 0) {
+      digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+          name->component, -1);
+      lock_name = g_strdup_printf (".lock-%s", digest);
+      if (fstatat (storage->root_fd, lock_name, &current,
+              AT_SYMLINK_NOFOLLOW) == 0
+          && held.st_dev == current.st_dev && held.st_ino == current.st_ino)
+        unlinkat (storage->root_fd, lock_name, 0);
+    }
     close (fd);
   }
 }

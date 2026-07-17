@@ -111,7 +111,10 @@ wyrelog_error_t wyl_service_credential_operation_child_lock
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, gint * out_fd);
-void wyl_service_credential_operation_child_unlock (gint fd);
+void wyl_service_credential_operation_child_unlock
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, gint fd);
 #endif
 
 G_END_DECLS;

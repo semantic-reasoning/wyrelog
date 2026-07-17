@@ -91,11 +91,13 @@ test_posix_child_backend (void)
           &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
           &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
-  wyl_service_credential_operation_child_unlock (lock_fd);
+  wyl_service_credential_operation_child_unlock (&storage, &anchor, &name,
+      lock_fd);
   lock_fd = -1;
   g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
           &anchor, &name, &second_lock_fd), ==, WYRELOG_E_OK);
-  wyl_service_credential_operation_child_unlock (second_lock_fd);
+  wyl_service_credential_operation_child_unlock (&storage, &anchor, &name,
+      second_lock_fd);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
           &anchor, &name, one), ==, WYRELOG_E_OK);
 
