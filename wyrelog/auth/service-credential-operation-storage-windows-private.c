@@ -12,7 +12,7 @@ typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
 BOOL
 wyl_win_nt_create_relative (HANDLE root,
     const WylServiceCredentialOperationChildName *name,
-    ACCESS_MASK access, WylWinChildDisposition disposition,
+    ACCESS_MASK access, WylWinChildDisposition disposition, ULONG share_mode,
     HANDLE *out_handle, WylWinChildIdentity *out_identity,
     wyrelog_error_t *out_error)
 {
@@ -23,6 +23,7 @@ wyl_win_nt_create_relative (HANDLE root,
   HANDLE handle = INVALID_HANDLE_VALUE;
   g_autofree gunichar2 *wide = NULL;
   glong units = 0;
+  ULONG create_disposition;
   NTSTATUS status;
 
   if (out_handle == NULL || out_error == NULL)
@@ -34,7 +35,8 @@ wyl_win_nt_create_relative (HANDLE root,
   if (root == NULL || root == INVALID_HANDLE_VALUE || name == NULL
       || name->component == NULL)
     return FALSE;
-  if (disposition != WYL_WIN_CHILD_OPEN && disposition != WYL_WIN_CHILD_CREATE)
+  if (disposition != WYL_WIN_CHILD_OPEN && disposition != WYL_WIN_CHILD_CREATE
+      && disposition != WYL_WIN_CHILD_OPEN_ALWAYS)
     return FALSE;
   WylServiceCredentialOperationChildName canonical =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
@@ -71,16 +73,27 @@ wyl_win_nt_create_relative (HANDLE root,
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
   if (out_identity != NULL)
     access |= FILE_READ_ATTRIBUTES;
+  switch (disposition) {
+    case WYL_WIN_CHILD_CREATE:
+      create_disposition = FILE_CREATE;
+      break;
+    case WYL_WIN_CHILD_OPEN_ALWAYS:
+      create_disposition = FILE_OPEN_IF;
+      break;
+    default:
+      create_disposition = FILE_OPEN;
+      break;
+  }
   status = nt_create (&handle, access | SYNCHRONIZE, &attributes, &iosb, NULL,
-      FILE_ATTRIBUTE_NORMAL, FILE_SHARE_READ | FILE_SHARE_WRITE
-      | FILE_SHARE_DELETE, disposition == WYL_WIN_CHILD_CREATE
-      ? FILE_CREATE : FILE_OPEN, FILE_NON_DIRECTORY_FILE
-      | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+      FILE_ATTRIBUTE_NORMAL, share_mode, create_disposition,
+      FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
+      | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
   if (status < 0 || handle == INVALID_HANDLE_VALUE) {
     *out_error = status == (NTSTATUS) 0xC0000034L
         ? WYRELOG_E_NOT_FOUND : status == (NTSTATUS) 0xC0000035L
         ? WYRELOG_E_POLICY : status == (NTSTATUS) 0xC0000022L
-        ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+        ? WYRELOG_E_POLICY : status == (NTSTATUS) 0xC0000043L
+        ? WYRELOG_E_BUSY : WYRELOG_E_IO;
     return FALSE;
   }
   if (out_identity != NULL) {
@@ -118,7 +131,8 @@ wyl_win_child_read (const WylServiceCredentialOperationStorage *storage,
           anchor))
     return WYRELOG_E_POLICY;
   if (!wyl_win_nt_create_relative (storage->root_handle, name, GENERIC_READ,
-          WYL_WIN_CHILD_OPEN, &handle, &identity, &error))
+          WYL_WIN_CHILD_OPEN, FILE_SHARE_READ | FILE_SHARE_WRITE
+          | FILE_SHARE_DELETE, &handle, &identity, &error))
     return error;
   if (!GetFileInformationByHandle (handle, &info)
       || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
@@ -182,7 +196,8 @@ wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
   if (size > 64u * 1024u)
     return WYRELOG_E_POLICY;
   if (!wyl_win_nt_create_relative (storage->root_handle, name,
-          GENERIC_WRITE, WYL_WIN_CHILD_CREATE, &handle, &identity, &error))
+          GENERIC_WRITE, WYL_WIN_CHILD_CREATE, FILE_SHARE_READ
+          | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &handle, &identity, &error))
     return error;
   for (gsize offset = 0; offset < size;) {
     DWORD written = 0;

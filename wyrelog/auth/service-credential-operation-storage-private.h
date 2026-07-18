@@ -52,9 +52,7 @@ typedef struct
 #define WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT \
   { .initialized = FALSE, .identity_a = 0, .identity_b = 0 }
 
-#ifndef G_OS_WIN32
 #define WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES (64u * 1024u)
-#endif
 
 #ifndef G_OS_WIN32
 #define WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT \

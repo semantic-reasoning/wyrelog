@@ -308,7 +308,8 @@ test_windows_child_read_fixture (void)
   g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
       WYRELOG_E_NOT_FOUND);
   if (!wyl_win_nt_create_relative (storage.root_handle, &name, GENERIC_WRITE,
-          WYL_WIN_CHILD_CREATE, &handle, &identity, &error)) {
+          WYL_WIN_CHILD_CREATE, FILE_SHARE_READ | FILE_SHARE_WRITE
+          | FILE_SHARE_DELETE, &handle, &identity, &error)) {
     g_test_message ("NtCreateFile child create error=%d", error);
     g_assert_not_reached ();
   }
