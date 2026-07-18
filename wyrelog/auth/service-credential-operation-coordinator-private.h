@@ -4,7 +4,7 @@
 #include "auth/service-credential-operation-journal-private.h"
 #include "wyrelog/error.h"
 G_BEGIN_DECLS;
-#define WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_VERSION 1u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_VERSION 2u
 typedef struct
 {
   guint32 version;
@@ -16,6 +16,7 @@ typedef struct
    * drive prefix, empty, dot, or traversal component. */
   gchar *destination;
   gchar *parent_identity;
+  gchar *actor_subject_id;
   gchar *old_credential_id;
   gint64 expires_at_us;
   guint64 expected_generation;

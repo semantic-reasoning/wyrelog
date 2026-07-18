@@ -5,10 +5,11 @@
 #include <string.h>
 
 #include "auth/service-credential-private.h"
+#include "policy/store-private.h"
 
 #define JOURNAL_MAGIC "WYLJNL01"
 #define JOURNAL_MAGIC_LEN 8u
-#define JOURNAL_FIELD_COUNT 13u
+#define JOURNAL_FIELD_COUNT 14u
 
 static void
 put_u32 (guint8 out[4], guint32 value)
@@ -116,6 +117,7 @@ gboolean
       || !text_is_valid (record->destination, TRUE)
       || !destination_is_safe_relative_path (record->destination)
       || !text_is_valid (record->parent_identity, TRUE)
+      || !wyl_policy_service_actor_subject_is_valid (record->actor_subject_id)
       || record->publication_receipt_version > 1
       || !text_is_valid (record->reservation_id, FALSE)
       || !text_is_valid (record->stage_basename, FALSE)
@@ -187,6 +189,7 @@ void wyl_service_credential_operation_record_clear
   g_clear_pointer (&record->tenant_id, g_free);
   g_clear_pointer (&record->destination, g_free);
   g_clear_pointer (&record->parent_identity, g_free);
+  g_clear_pointer (&record->actor_subject_id, g_free);
   g_clear_pointer (&record->reservation_id, g_free);
   g_clear_pointer (&record->stage_basename, g_free);
   g_clear_pointer (&record->stage_identity, g_free);
@@ -243,6 +246,7 @@ wyrelog_error_t
   append_text (bytes, record->tenant_id);
   append_text (bytes, record->destination);
   append_text (bytes, record->parent_identity);
+  append_text (bytes, record->actor_subject_id);
   append_u32 (bytes, record->publication_receipt_version);
   append_text (bytes, record->reservation_id);
   append_text (bytes, record->stage_basename);
@@ -310,6 +314,7 @@ wyrelog_error_t
       || !read_text (data, len, &offset, &decoded.tenant_id)
       || !read_text (data, len, &offset, &decoded.destination)
       || !read_text (data, len, &offset, &decoded.parent_identity)
+      || !read_text (data, len, &offset, &decoded.actor_subject_id)
       || len - offset < 4)
     goto invalid;
   decoded.publication_receipt_version = get_u32 (data + offset);

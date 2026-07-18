@@ -26,6 +26,7 @@ wyrelog_error_t
   temp.tenant_id = g_strdup (request->tenant_id);
   temp.destination = g_strdup (request->destination);
   temp.parent_identity = g_strdup (request->parent_identity);
+  temp.actor_subject_id = g_strdup (request->actor_subject_id);
   temp.old_credential_id = g_strdup (request->old_credential_id);
   temp.expected_generation = request->expected_generation;
   temp.expires_at_us = request->expires_at_us;
@@ -36,6 +37,7 @@ wyrelog_error_t
           && temp.subject_id == NULL)
       || temp.destination == NULL
       || temp.parent_identity == NULL
+      || temp.actor_subject_id == NULL
       || (request->tenant_id != NULL && temp.tenant_id == NULL)
       || (request->old_credential_id != NULL && temp.old_credential_id == NULL)) {
     wyl_service_credential_operation_record_clear (&temp);

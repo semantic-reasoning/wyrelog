@@ -537,6 +537,7 @@ test_precheck_with_committed (void)
   request.tenant_id = "tenant-a";
   request.destination = "credential";
   request.parent_identity = "parent";
+  request.actor_subject_id = "admin";
   request.expires_at_us = 1;
   WylServiceCredentialOperationRecord prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
@@ -576,6 +577,7 @@ test_precheck_with_committed (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING);
   g_assert_cmpint (recovered.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
+  g_assert_cmpstr (recovered.actor_subject_id, ==, "admin");
   g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
   wyl_service_credential_operation_record_clear (&recovered);
   wyl_service_credential_operation_record_clear (&begun);
@@ -687,6 +689,7 @@ test_precheck_with_committed (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED);
   g_assert_cmpint (recovered.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpstr (recovered.actor_subject_id, ==, "admin");
   g_assert_cmpstr (recovered.successor_credential_id, ==, issued_id);
   g_assert_cmpuint (recovered.successor_generation, ==, issued_generation);
   gint64 recovered_updated_at_us = recovered.updated_at_us;
@@ -746,6 +749,7 @@ test_precheck_with_committed (void)
   rotate_request.subject_id = "svc:fence:precheck";
   rotate_request.destination = "rotated-credential";
   rotate_request.parent_identity = "parent";
+  rotate_request.actor_subject_id = "admin";
   rotate_request.old_credential_id = issued_id;
   rotate_request.expected_generation = issued_generation;
   rotate_request.expires_at_us = 1;
@@ -758,6 +762,7 @@ test_precheck_with_committed (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED);
   g_assert_cmpint (recovered.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpstr (recovered.actor_subject_id, ==, "admin");
   g_assert_cmpstr (recovered.successor_credential_id, ==, rotated_id);
   g_assert_cmpuint (recovered.successor_generation, ==, rotated_generation);
   wyl_service_credential_operation_record_clear (&recovered);

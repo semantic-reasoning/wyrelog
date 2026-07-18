@@ -7,7 +7,7 @@
 
 G_BEGIN_DECLS;
 
-#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 3u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 4u
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES (64u * 1024u)
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_TEXT 4096u
 
@@ -38,6 +38,8 @@ typedef struct
   gchar *tenant_id;
   gchar *destination;
   gchar *parent_identity;
+  /* Immutable execution identity; distinct from parent provenance. */
+  gchar *actor_subject_id;
   guint32 publication_receipt_version;
   gchar *reservation_id;
   gchar *stage_basename;

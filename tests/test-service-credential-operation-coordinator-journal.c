@@ -24,6 +24,7 @@ request (void)
   r.tenant_id = g_strdup ("tenant");
   r.destination = g_strdup ("record");
   r.parent_identity = g_strdup ("parent");
+  r.actor_subject_id = g_strdup ("admin");
   r.expires_at_us = 1;
   return r;
 }
@@ -520,6 +521,7 @@ test_begin_or_replay (JournalFixture *fixture, gconstpointer unused)
           &decoded), ==, WYRELOG_E_OK);
   g_assert_cmpstr (decoded.operation_id, ==, r.request_id);
   g_assert_cmpstr (decoded.subject_id, ==, "subject");
+  g_assert_cmpstr (decoded.actor_subject_id, ==, "admin");
   wyl_service_credential_operation_record_clear (&decoded);
   g_clear_pointer (&bytes, g_bytes_unref);
   wyl_service_credential_operation_storage_clear (&fixture->storage);
@@ -557,17 +559,37 @@ test_begin_or_replay_conflict (JournalFixture *fixture, gconstpointer unused)
   WylServiceCredentialOperationCoordinatorRequest r = request ();
   WylServiceCredentialOperationRecord out =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) before = NULL;
+  g_autoptr (GBytes) after = NULL;
   gboolean replayed = FALSE;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
       (&fixture->storage, &fixture->anchor, &r, 1, &replayed, &out), ==,
       WYRELOG_E_OK);
   g_autofree gchar *saved_operation = g_strdup (out.operation_id);
+  record_name (r.request_id, &name);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &before), ==,
+      WYRELOG_E_OK);
+  g_clear_pointer (&r.actor_subject_id, g_free);
+  r.actor_subject_id = g_strdup ("other-admin");
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, 2, &replayed, &out), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpstr (out.operation_id, ==, saved_operation);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &after), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (before, after));
+  g_clear_pointer (&after, g_bytes_unref);
+  g_clear_pointer (&r.actor_subject_id, g_free);
+  r.actor_subject_id = g_strdup ("admin");
   g_clear_pointer (&r.destination, g_free);
   r.destination = g_strdup ("changed");
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
       (&fixture->storage, &fixture->anchor, &r, 2, &replayed, &out), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpstr (out.operation_id, ==, saved_operation);
+  wyl_service_credential_operation_child_name_clear (&name);
   g_clear_pointer (&r.destination, g_free);
   r.destination = g_strdup ("record");
   r.expires_at_us++;
@@ -689,6 +711,18 @@ test_server_committed_checkpoint (JournalFixture *fixture, gconstpointer unused)
           &replayed, &loaded), ==, WYRELOG_E_OK);
   g_assert_true (replayed);
   g_assert_cmpint (loaded.updated_at_us, ==, 11);
+  g_assert_cmpstr (loaded.actor_subject_id, ==, "admin");
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+  g_clear_pointer (&r.actor_subject_id, g_free);
+  r.actor_subject_id = g_strdup ("other-admin");
+  g_autofree gchar *saved_actor = g_strdup (loaded.actor_subject_id);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, 100, NULL, &loaded), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpstr (loaded.actor_subject_id, ==, saved_actor);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
   g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
       WYRELOG_E_OK);
   g_assert_true (g_bytes_equal (first_bytes, replay_bytes));

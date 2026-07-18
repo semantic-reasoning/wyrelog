@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "auth/service-credential-operation-coordinator-private.h"
 #include "auth/service-credential-private.h"
+#include "policy/store-private.h"
 #include <chronoid/ksuid.h>
 #include <string.h>
 
@@ -56,6 +57,7 @@ void wyl_service_credential_operation_coordinator_request_clear
   g_clear_pointer (&r->tenant_id, g_free);
   g_clear_pointer (&r->destination, g_free);
   g_clear_pointer (&r->parent_identity, g_free);
+  g_clear_pointer (&r->actor_subject_id, g_free);
   g_clear_pointer (&r->old_credential_id, g_free);
   memset (r, 0, sizeof *r);
 }
@@ -73,6 +75,7 @@ wyl_service_credential_operation_coordinator_request_is_valid (const
           r->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
       || !destination_ok (r->destination)
       || !text_ok (r->parent_identity, TRUE)
+      || !wyl_policy_service_actor_subject_is_valid (r->actor_subject_id)
       || r->expires_at_us <= 0 || r->expected_generation > G_MAXINT64)
     return FALSE;
   if (r->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)

@@ -24,6 +24,7 @@ record_new (gchar request_id[WYL_REQUEST_ID_STRING_BUF],
     .tenant_id = g_strdup ("tenant-1"),
     .destination = g_strdup ("credentials.json"),
     .parent_identity = g_strdup ("parent-fingerprint"),
+    .actor_subject_id = g_strdup ("admin"),
     .stage_identity = g_strdup (""),
     .old_credential_id = g_strdup (""),
     .successor_credential_id = g_strdup (credential_id),
@@ -56,6 +57,7 @@ test_roundtrip (void)
           &output), ==, WYRELOG_E_OK);
   g_assert_cmpstr (output.request_id, ==, input.request_id);
   g_assert_cmpstr (output.destination, ==, input.destination);
+  g_assert_cmpstr (output.actor_subject_id, ==, input.actor_subject_id);
   g_assert_cmpuint (output.successor_generation, ==, 1);
   g_assert_cmpuint (output.expected_generation, ==, 0);
   g_assert_cmpint (output.expires_at_us, ==, input.expires_at_us);
@@ -106,6 +108,16 @@ test_rejects_trailing_and_unknown (void)
   g_assert_cmpint (wyl_service_credential_operation_record_decode (v2,
           &output), ==, WYRELOG_E_POLICY);
   g_assert_null (output.request_id);
+  prior_version = g_memdup2 (data, len);
+  prior_version[8] = 0;
+  prior_version[9] = 0;
+  prior_version[10] = 0;
+  prior_version[11] = 3;
+  GBytes *v3 = g_bytes_new_take (prior_version, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (v3,
+          &output), ==, WYRELOG_E_POLICY);
+  g_assert_null (output.request_id);
+  g_bytes_unref (v3);
   g_bytes_unref (v2);
   g_bytes_unref (prior);
   g_bytes_unref (bad);
@@ -126,6 +138,7 @@ test_rejects_invalid_record (void)
     .tenant_id = (gchar *) "tenant-1",
     .destination = (gchar *) "credentials.json",
     .parent_identity = (gchar *) "parent",
+    .actor_subject_id = (gchar *) "admin",
     .expires_at_us = 1,
     .created_at_us = 1,
     .updated_at_us = 1,
@@ -141,6 +154,15 @@ test_rejects_invalid_record (void)
   g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
   record.request_id = (gchar *) "000000000000000000000000000";
   record.destination = (gchar *) "nested\\file";
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
+  record.destination = (gchar *) "credentials.json";
+  record.actor_subject_id = (gchar *) "";
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
+  g_autofree gchar *long_actor = g_strnfill (129, 'a');
+  record.actor_subject_id = long_actor;
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
+  gchar malformed_actor[] = { (gchar) 0xff, '\0' };
+  record.actor_subject_id = malformed_actor;
   g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
 }
 

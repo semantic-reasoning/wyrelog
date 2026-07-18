@@ -14,9 +14,29 @@ test_request (void)
   r.tenant_id = g_strdup ("tenant");
   r.destination = g_strdup ("record");
   r.parent_identity = g_strdup ("parent");
+  r.actor_subject_id = g_strdup ("admin");
   r.expires_at_us = 1;
   r.expires_at_us = 1;
   r.parent_identity = g_strdup ("parent");
+  g_free (r.actor_subject_id);
+  r.actor_subject_id = NULL;
+  g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
+      (&r));
+  r.actor_subject_id = g_strdup ("admin");
+  g_free (r.actor_subject_id);
+  r.actor_subject_id = g_strdup ("");
+  g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
+      (&r));
+  g_free (r.actor_subject_id);
+  r.actor_subject_id = g_strnfill (129, 'a');
+  g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
+      (&r));
+  g_free (r.actor_subject_id);
+  r.actor_subject_id = g_strdup ("admin");
+  r.actor_subject_id[0] = (gchar) 0xff;
+  g_assert_false (wyl_service_credential_operation_coordinator_request_is_valid
+      (&r));
+  r.actor_subject_id[0] = 'a';
   r.destination = g_strdup ("record");
   g_assert_true (wyl_service_credential_operation_coordinator_request_is_valid
       (&r));
