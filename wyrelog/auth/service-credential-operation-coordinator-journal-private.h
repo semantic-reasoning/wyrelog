@@ -9,4 +9,14 @@ G_BEGIN_DECLS
     (const WylServiceCredentialOperationCoordinatorRequest * request,
     const gchar * operation_id, gint64 now_us,
     WylServiceCredentialOperationRecord * out_record);
+
+/* Advance a valid v2 PREPARED record after the server-side credential
+ * mutation has committed.  A matching SERVER_COMMITTED record is replayed
+ * without changing its durable timestamp.  out_record is unchanged on
+ * failure. */
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_server_committed
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * successor_credential_id, guint64 successor_generation,
+    gint64 now_us, WylServiceCredentialOperationRecord * out_record);
 G_END_DECLS

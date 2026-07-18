@@ -72,6 +72,15 @@ storage_child_create (const WylServiceCredentialOperationStorage *storage,
 }
 
 static wyrelog_error_t
+storage_child_replace (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, GBytes *bytes)
+{
+  return wyl_service_credential_operation_child_replace (storage, anchor, name,
+      bytes);
+}
+
+static wyrelog_error_t
 storage_child_lock (const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationRootAnchor *anchor,
     const WylServiceCredentialOperationChildName *name,
@@ -107,6 +116,14 @@ storage_child_create (const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationChildName *name, GBytes *bytes)
 {
   return wyl_win_child_create (storage, anchor, name, bytes);
+}
+
+static wyrelog_error_t
+storage_child_replace (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, GBytes *bytes)
+{
+  return wyl_win_child_replace (storage, anchor, name, bytes);
 }
 
 static wyrelog_error_t
@@ -232,6 +249,79 @@ out:
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_record_clear (&existing);
   wyl_service_credential_operation_record_clear (&prepared);
+  if (rc == WYRELOG_E_OK && out_replayed != NULL)
+    *out_replayed = replayed;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_server_committed
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * successor_credential_id,
+    guint64 successor_generation, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord existing =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock lock = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  gboolean replayed = FALSE;
+  wyrelog_error_t rc;
+
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (storage == NULL || anchor == NULL || out_record == NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id))
+    return WYRELOG_E_INVALID;
+  rc = record_child_name (request_id, &name);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_lock (storage, anchor, &name, &lock);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_service_credential_operation_record_decode (bytes, &existing);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!g_str_equal (existing.request_id, request_id)
+      || !g_str_equal (existing.operation_id, request_id)) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  replayed =
+      existing.state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED;
+  rc = wyl_service_credential_operation_coordinator_build_server_committed
+      (&existing, successor_credential_id, successor_generation, now_us,
+      &committed);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!replayed) {
+    g_clear_pointer (&bytes, g_bytes_unref);
+    rc = wyl_service_credential_operation_record_encode (&committed, &bytes);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    rc = storage_child_replace (storage, anchor, &name, bytes);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+  }
+  wyl_service_credential_operation_record_clear (out_record);
+  *out_record = committed;
+  committed = (WylServiceCredentialOperationRecord)
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+out:
+  if (lock != WYL_COORDINATOR_JOURNAL_LOCK_INIT)
+    storage_child_unlock (storage, anchor, &name, lock);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&existing);
   if (rc == WYRELOG_E_OK && out_replayed != NULL)
     *out_replayed = replayed;
   return rc;
