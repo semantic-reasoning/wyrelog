@@ -3,6 +3,7 @@
 
 #ifdef G_OS_WIN32
 #include <winternl.h>
+#include <stddef.h>
 #include <string.h>
 
 typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
@@ -13,7 +14,16 @@ typedef NTSTATUS (NTAPI * WylNtSetInformationFile) (HANDLE, PIO_STATUS_BLOCK,
     PVOID, ULONG, int);
 
 /* FILE_INFORMATION_CLASS values not reliably exposed by winternl.h. */
+#define WYL_NT_FILE_RENAME_INFO_CLASS 10
 #define WYL_NT_FILE_DISPOSITION_INFO_CLASS 13
+
+typedef struct
+{
+  BOOLEAN ReplaceIfExists;
+  HANDLE RootDirectory;
+  ULONG FileNameLength;
+  WCHAR FileName[1];
+} WylFileRenameInfo;
 
 typedef struct
 {
@@ -61,6 +71,46 @@ wyl_win_flush_directory (HANDLE root)
 {
   if (root != NULL && root != INVALID_HANDLE_VALUE)
     FlushFileBuffers (root);
+}
+
+/* Atomically bind `name` to an already-written temp handle, replacing any
+ * existing record.  The destination is resolved relative to the pinned root
+ * directory handle, never a re-walked path, so a substituted root or ancestor
+ * cannot redirect the rename. */
+static wyrelog_error_t
+wyl_win_rename_relative (HANDLE handle, HANDLE root,
+    const WylServiceCredentialOperationChildName *name)
+{
+  WylNtSetInformationFile nt_set = wyl_win_nt_set_information ();
+  IO_STATUS_BLOCK iosb = { 0 };
+  g_autofree gunichar2 *wide = NULL;
+  g_autofree WylFileRenameInfo *info = NULL;
+  glong units = 0;
+  gsize name_bytes;
+  gsize total;
+  NTSTATUS status;
+  if (nt_set == NULL || root == NULL || root == INVALID_HANDLE_VALUE
+      || name == NULL || name->component == NULL)
+    return WYRELOG_E_POLICY;
+  wide = g_utf8_to_utf16 (name->component, -1, NULL, &units, NULL);
+  if (wide == NULL || units <= 0
+      || (gsize) units > G_MAXUSHORT / sizeof (gunichar2))
+    return WYRELOG_E_POLICY;
+  name_bytes = (gsize) units * sizeof (gunichar2);
+  total = offsetof (WylFileRenameInfo, FileName) + name_bytes;
+  info = g_malloc0 (total);
+  if (info == NULL)
+    return WYRELOG_E_NOMEM;
+  info->ReplaceIfExists = TRUE;
+  info->RootDirectory = root;
+  info->FileNameLength = (ULONG) name_bytes;
+  memcpy (info->FileName, wide, name_bytes);
+  status = nt_set (handle, &iosb, info, (ULONG) total,
+      WYL_NT_FILE_RENAME_INFO_CLASS);
+  if (status < 0)
+    return status == (NTSTATUS) 0xC0000022L || status == (NTSTATUS) 0xC0000035L
+        || status == (NTSTATUS) 0xC00000D4L ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  return WYRELOG_E_OK;
 }
 
 BOOL
@@ -284,6 +334,84 @@ wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
   else
     wyl_win_set_delete_disposition (handle);
   CloseHandle (handle);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, GBytes *bytes)
+{
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity = { 0 };
+  wyrelog_error_t error = WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  gsize size = 0;
+  const guint8 *data;
+  g_autofree gchar *digest = NULL;
+  gboolean renamed = FALSE;
+  WylServiceCredentialOperationChildName temporary =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  BY_HANDLE_FILE_INFORMATION info;
+  if (storage == NULL || anchor == NULL || name == NULL || bytes == NULL
+      || name->component == NULL
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  data = g_bytes_get_data (bytes, &size);
+  if (size > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES)
+    return WYRELOG_E_POLICY;
+  digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      name->component, -1);
+  temporary.component = g_strdup_printf (".replace-%s", digest);
+  if (temporary.component == NULL)
+    return WYRELOG_E_NOMEM;
+  if (!wyl_win_nt_create_relative (storage->root_handle, &temporary,
+          GENERIC_WRITE | DELETE, WYL_WIN_CHILD_CREATE, FILE_SHARE_READ
+          | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &handle, &identity, &error)) {
+    wyl_service_credential_operation_child_name_clear (&temporary);
+    return error;
+  }
+  for (gsize offset = 0; rc == WYRELOG_E_OK && offset < size;) {
+    DWORD written = 0;
+    if (!WriteFile (handle, data + offset, (DWORD) (size - offset), &written,
+            NULL) || written == 0)
+      rc = WYRELOG_E_IO;
+    else
+      offset += written;
+  }
+  if (rc == WYRELOG_E_OK && !FlushFileBuffers (handle))
+    rc = WYRELOG_E_IO;
+  /* Verify the temp is the object we created and the root is unchanged before
+   * the atomic rename linearization point. */
+  if (rc == WYRELOG_E_OK
+      && (!GetFileInformationByHandle (handle, &info)
+          || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+                  | FILE_ATTRIBUTE_DIRECTORY))
+          || info.nFileSizeHigh != 0 || info.nFileSizeLow != size
+          || info.dwVolumeSerialNumber != identity.volume_serial
+          || info.nFileIndexHigh != identity.file_index_high
+          || info.nFileIndexLow != identity.file_index_low
+          || !wyl_service_credential_operation_storage_anchor_matches (storage,
+              anchor)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_win_rename_relative (handle, storage->root_handle, name);
+    if (rc == WYRELOG_E_OK)
+      renamed = TRUE;
+  }
+  if (renamed) {
+    wyl_win_flush_directory (storage->root_handle);
+    if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+            anchor))
+      rc = WYRELOG_E_POLICY;
+  } else {
+    /* The rename never took effect; the temp still exists under its own name,
+     * so remove it through the held handle rather than by path. */
+    wyl_win_set_delete_disposition (handle);
+  }
+  CloseHandle (handle);
+  wyl_service_credential_operation_child_name_clear (&temporary);
   return rc;
 }
 #endif
