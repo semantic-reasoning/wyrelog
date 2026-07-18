@@ -3,6 +3,7 @@
 #include <glib/gstdio.h>
 #include <string.h>
 #include "wyrelog/auth/service-credential-operation-coordinator-journal-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-fence-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-storage-private.h"
 #include "wyrelog/auth/service-credential-operation-storage-private.h"
 #ifdef G_OS_WIN32
@@ -134,6 +135,213 @@ test_server_committed_builder (void)
       (&prepared, successor, 2, 9, &committed), ==, WYRELOG_E_INVALID);
   g_assert_null (committed.operation_id);
   wyl_service_credential_operation_record_clear (&prepared);
+  wyl_service_credential_operation_coordinator_request_clear (&rotate);
+  wyl_service_credential_operation_coordinator_request_clear (&issue);
+}
+
+static void
+assert_record_bytes_unchanged (const WylServiceCredentialOperationRecord
+    *record, GBytes *before)
+{
+  g_autoptr (GBytes) after = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (record,
+          &after), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (before, after));
+}
+
+static void
+test_fence_classification (void)
+{
+  const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  const gchar *other_successor = "wlc_000000000000000000000000001";
+  WylServiceCredentialOperationCoordinatorRequest issue = request ();
+  WylServiceCredentialOperationCoordinatorRequest rotate = request ();
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialFenceResult fence = { 0 };
+  WylServiceCredentialOperationFenceClassification output;
+  g_autoptr (GBytes) prepared_bytes = NULL;
+  g_autoptr (GBytes) committed_bytes = NULL;
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (&issue, issue.request_id, 10, &prepared), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_server_committed
+      (&prepared, successor, 1, 11, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&prepared,
+          &prepared_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&committed,
+          &committed_bytes), ==, WYRELOG_E_OK);
+
+  rotate.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE;
+  g_clear_pointer (&rotate.tenant_id, g_free);
+  rotate.old_credential_id = g_strdup (successor);
+  rotate.expected_generation = 1;
+  WylServiceCredentialOperationRecord rotate_prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (&rotate, rotate.request_id, 10, &rotate_prepared), ==, WYRELOG_E_OK);
+  memset (&fence, 0, sizeof fence);
+  fence.state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED;
+  g_strlcpy (fence.successor_credential_id, successor,
+      sizeof fence.successor_credential_id);
+  fence.successor_generation = 2;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&rotate_prepared, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_OK);
+  g_assert_cmpint (output, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_COMMIT_REQUIRED);
+  /* A rotate target is exactly the old credential: a tenant-bearing rotate
+   * record cannot be interpreted as the same immutable fence target. */
+  rotate_prepared.tenant_id = g_strdup ("unexpected-tenant");
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&rotate_prepared, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+  g_clear_pointer (&rotate_prepared.tenant_id, g_free);
+
+  typedef struct
+  {
+    const gchar *name;
+    const WylServiceCredentialOperationRecord *record;
+    wyrelog_error_t precheck_rc;
+    WylServiceCredentialFenceResultState state;
+    gboolean committed_successor;
+    wyrelog_error_t expected_rc;
+    WylServiceCredentialOperationFenceClassification expected;
+  } Case;
+  const Case cases[] = {
+    {"prepared/no-fence", &prepared, WYRELOG_E_NOT_FOUND, 0, FALSE,
+        WYRELOG_E_OK, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING},
+    {"prepared/committed", &prepared, WYRELOG_E_OK,
+          WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED, TRUE, WYRELOG_E_OK,
+        WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_COMMIT_REQUIRED},
+    {"prepared/terminal", &prepared, WYRELOG_E_OK,
+          WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL, FALSE,
+          WYRELOG_E_OK,
+        WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_TERMINAL_NO_COMMIT},
+    {"prepared/conflict", &prepared, WYRELOG_E_OK,
+          WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT, FALSE, WYRELOG_E_OK,
+        WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_CONFLICT},
+    {"committed/no-fence", &committed, WYRELOG_E_NOT_FOUND, 0, FALSE,
+        WYRELOG_E_POLICY, 0},
+    {"committed/committed", &committed, WYRELOG_E_OK,
+          WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED, TRUE, WYRELOG_E_OK,
+        WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_REPLAY_COMMITTED},
+    {"committed/terminal", &committed, WYRELOG_E_OK,
+          WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL, FALSE,
+        WYRELOG_E_POLICY, 0},
+    {"committed/conflict", &committed, WYRELOG_E_OK,
+          WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT, FALSE, WYRELOG_E_POLICY,
+        0},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_test_message ("%s", cases[i].name);
+    memset (&fence, 0, sizeof fence);
+    fence.state = cases[i].state;
+    if (cases[i].committed_successor) {
+      g_strlcpy (fence.successor_credential_id, successor,
+          sizeof fence.successor_credential_id);
+      fence.successor_generation = 1;
+    }
+    WylServiceCredentialFenceResult fence_before = fence;
+    output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_CONFLICT;
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_classify_fence
+        (cases[i].record, cases[i].precheck_rc, &fence, &output), ==,
+        cases[i].expected_rc);
+    if (cases[i].expected_rc == WYRELOG_E_OK)
+      g_assert_cmpint (output, ==, cases[i].expected);
+    else
+      g_assert_cmpint (output, ==,
+          WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_CONFLICT);
+    g_assert_cmpmem (&fence, sizeof fence, &fence_before, sizeof fence_before);
+    assert_record_bytes_unchanged (cases[i].record,
+        cases[i].record == &prepared ? prepared_bytes : committed_bytes);
+  }
+
+  /* Neither a malformed fence result nor a mismatched committed tuple may
+   * cause a journal write or overwrite the caller's output. */
+  memset (&fence, 0, sizeof fence);
+  fence.state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED;
+  g_strlcpy (fence.successor_credential_id, "not-canonical",
+      sizeof fence.successor_credential_id);
+  fence.successor_generation = 1;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+  assert_record_bytes_unchanged (&prepared, prepared_bytes);
+
+  memset (&fence, 'x', sizeof fence);
+  fence.state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED;
+  fence.successor_generation = 1;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+  assert_record_bytes_unchanged (&prepared, prepared_bytes);
+
+  memset (&fence, 0, sizeof fence);
+  fence.state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED;
+  g_strlcpy (fence.successor_credential_id, successor,
+      sizeof fence.successor_credential_id);
+  fence.successor_generation = 2;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&committed, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+  assert_record_bytes_unchanged (&committed, committed_bytes);
+
+  g_strlcpy (fence.successor_credential_id, other_successor,
+      sizeof fence.successor_credential_id);
+  fence.successor_generation = 1;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&committed, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+  assert_record_bytes_unchanged (&committed, committed_bytes);
+
+  memset (&fence, 0, sizeof fence);
+  fence.state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL;
+  fence.successor_generation = 1;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+
+  memset (&fence, 0, sizeof fence);
+  fence.state = (WylServiceCredentialFenceResultState) 99;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_OK, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_BUSY, &fence, &output), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+
+  memset (&fence, 0, sizeof fence);
+  fence.state = WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_NOT_FOUND, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+
+  WylServiceCredentialOperationRecord invalid = prepared;
+  invalid.state = (WylServiceCredentialOperationState) 99;
+  output = WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&invalid, WYRELOG_E_NOT_FOUND, &fence, &output), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (output, ==, WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING);
+  /* invalid aliases prepared's owned fields; never clear it */
+
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&prepared);
+  wyl_service_credential_operation_record_clear (&rotate_prepared);
   wyl_service_credential_operation_coordinator_request_clear (&rotate);
   wyl_service_credential_operation_coordinator_request_clear (&issue);
 }
@@ -716,6 +924,8 @@ main (int argc, char **argv)
   g_test_add_func ("/coordinator/journal/builder", test_builder);
   g_test_add_func ("/coordinator/journal/server-committed-builder",
       test_server_committed_builder);
+  g_test_add_func ("/coordinator/journal/fence-classification",
+      test_fence_classification);
   g_test_add ("/coordinator/journal/begin-or-replay", JournalFixture, NULL,
       journal_fixture_set_up, test_begin_or_replay, journal_fixture_tear_down);
   g_test_add ("/coordinator/journal/begin-or-replay-conflict", JournalFixture,
