@@ -6,9 +6,12 @@
 #include <string.h>
 
 #include "auth/service-credential-domain-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-fence-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-journal-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
+#include "wyl-request-id-private.h"
 
 typedef struct
 {
@@ -118,6 +121,14 @@ scalar (sqlite3 *db, const gchar *sql)
   gint64 value = sqlite3_column_int64 (stmt, 0);
   sqlite3_finalize (stmt);
   return value;
+}
+
+static void
+exec_sql (sqlite3 *db, const gchar *sql)
+{
+  gchar *error = NULL;
+  g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, &error), ==, SQLITE_OK);
+  g_assert_null (error);
 }
 
 static gpointer
@@ -447,6 +458,151 @@ test_committed_rotate_returns_new_successor (void)
 }
 
 static void
+test_precheck_with_committed (void)
+{
+  const gchar *old_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  g_autoptr (WylHandle) handle = open_provisioned_handle ();
+  prepare_authority (handle, "svc:fence:precheck");
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  WylServiceCredentialFenceResult result = { 0 };
+  gchar journal_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (journal_request_id,
+          sizeof journal_request_id), ==, WYRELOG_E_OK);
+  gint total_changes = sqlite3_total_changes (db);
+
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, "req-no-row",
+          "svc:fence:precheck", "tenant-a", NULL, &result), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (result.state, ==, 0);
+  g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle, "svc:fence:precheck",
+          "tenant-a", "admin", journal_request_id, 0, &issued), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *issued_id = g_strdup (issued.credential.credential_id);
+  guint64 issued_generation = issued.credential.generation;
+  wyl_service_credential_issue_result_clear (&issued);
+
+  total_changes = sqlite3_total_changes (db);
+  memset (&result, 0xff, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          journal_request_id, "svc:fence:precheck", "tenant-a", NULL,
+          &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED);
+  g_assert_cmpstr (result.successor_credential_id, ==, issued_id);
+  g_assert_cmpuint (result.successor_generation, ==, issued_generation);
+  g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
+
+  WylServiceCredentialOperationCoordinatorRequest request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  request.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE;
+  request.request_id = journal_request_id;
+  request.subject_id = "svc:fence:precheck";
+  request.tenant_id = "tenant-a";
+  request.destination = "credential";
+  request.parent_identity = "parent";
+  request.expires_at_us = 1;
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationFenceClassification classification = 0;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (&request, journal_request_id, 1, &prepared), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_classify_fence
+      (&prepared, WYRELOG_E_OK, &result, &classification), ==, WYRELOG_E_OK);
+  g_assert_cmpint (classification, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_COMMIT_REQUIRED);
+  wyl_service_credential_operation_record_clear (&prepared);
+
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          journal_request_id, "svc:fence:precheck", "tenant-b", NULL,
+          &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT);
+
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+          journal_request_id, NULL, NULL, old_id, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT);
+
+  wyl_service_credential_issue_result_t rotated = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate (handle, issued_id, "admin",
+          "req-precheck-rotate", 0, &rotated), ==, WYRELOG_E_OK);
+  g_autofree gchar *rotated_id = g_strdup (rotated.credential.credential_id);
+  guint64 rotated_generation = rotated.credential.generation;
+  wyl_service_credential_issue_result_clear (&rotated);
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+          "req-precheck-rotate", NULL, NULL, issued_id, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED);
+  g_assert_cmpstr (result.successor_credential_id, ==, rotated_id);
+  g_assert_cmpuint (result.successor_generation, ==, rotated_generation);
+
+  Txn t = begin_txn (handle);
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint (wyl_policy_store_reconcile_service_credential_operation_fence
+      (t.txn, store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+          "req-precheck-terminal", NULL, NULL, old_id, &result), ==,
+      WYRELOG_E_OK);
+  finish_txn (&t, TRUE);
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
+          "req-precheck-terminal", NULL, NULL, old_id, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result.state, ==,
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL);
+
+  exec_sql (db,
+      "INSERT INTO service_domain_requests(request_id,operation,resource_id,"
+      "input_fingerprint,created_at_us) VALUES('req-precheck-missing-event',"
+      "'credential_issue','svc:fence:precheck',zeroblob(32),1);");
+  memset (&result, 0xff, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          "req-precheck-missing-event", "svc:fence:precheck", "tenant-a",
+          NULL, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result.state, ==, 0);
+
+  exec_sql (db, "PRAGMA foreign_keys=OFF; PRAGMA ignore_check_constraints=ON;");
+  exec_sql (db,
+      "INSERT INTO service_domain_requests(request_id,operation,resource_id,"
+      "input_fingerprint,created_at_us) VALUES('req-precheck-malformed',"
+      "'credential_issue','svc:fence:precheck',zeroblob(32),1);");
+  exec_sql (db,
+      "INSERT INTO service_credential_events(credential_id,subject_id,tenant_id,"
+      "event,from_state,to_state,generation,actor_subject_id,request_id,"
+      "created_at_us) VALUES('bad','svc:fence:precheck','tenant-a','issued',"
+      "NULL,'active',1,'admin','req-precheck-malformed',1);");
+  exec_sql (db, "PRAGMA ignore_check_constraints=OFF; PRAGMA foreign_keys=ON;");
+  memset (&result, 0xff, sizeof result);
+  g_assert_cmpint
+      (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          "req-precheck-malformed", "svc:fence:precheck", "tenant-a", NULL,
+          &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result.state, ==, 0);
+}
+
+static void
 test_fence_survives_restart (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-fence-XXXXXX", NULL);
@@ -624,6 +780,9 @@ main (int argc, char **argv)
       test_committed_issue_conflict_on_mismatch);
   g_test_add_func ("/service-credential-operation-fence/committed-rotate",
       test_committed_rotate_returns_new_successor);
+  g_test_add_func
+      ("/service-credential-operation-fence/precheck-with-committed",
+      test_precheck_with_committed);
   g_test_add_func ("/service-credential-operation-fence/survives-restart",
       test_fence_survives_restart);
   g_test_add_func
