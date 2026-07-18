@@ -8,6 +8,11 @@
 #include "auth/service-credential-domain-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-fence-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-journal-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-recovery-private.h"
+#include "wyrelog/auth/service-credential-operation-storage-private.h"
+#ifdef G_OS_WIN32
+#include "wyrelog/auth/service-credential-operation-storage-windows-private.h"
+#endif
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -129,6 +134,30 @@ exec_sql (sqlite3 *db, const gchar *sql)
   gchar *error = NULL;
   g_assert_cmpint (sqlite3_exec (db, sql, NULL, NULL, &error), ==, SQLITE_OK);
   g_assert_null (error);
+}
+
+static void
+open_recovery_storage (WylServiceCredentialOperationStorage *storage,
+    WylServiceCredentialOperationRootAnchor *anchor, gchar **out_root)
+{
+  *storage = (WylServiceCredentialOperationStorage)
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  *anchor = (WylServiceCredentialOperationRootAnchor)
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+#ifdef G_OS_WIN32
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *name = g_strdup_printf ("wyrelog-recovery-%lu-%u",
+      (gulong) GetCurrentProcessId (), g_random_int ());
+  *out_root = g_build_filename (local, name, NULL);
+#else
+  *out_root = g_dir_make_tmp ("wyrelog-recovery-XXXXXX", NULL);
+#endif
+  g_assert_nonnull (*out_root);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (*out_root,
+          storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (storage, anchor), ==, WYRELOG_E_OK);
 }
 
 static gpointer
@@ -520,6 +549,157 @@ test_precheck_with_committed (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_COMMIT_REQUIRED);
   wyl_service_credential_operation_record_clear (&prepared);
 
+  WylServiceCredentialOperationStorage storage;
+  WylServiceCredentialOperationRootAnchor anchor;
+  g_autofree gchar *journal_root = NULL;
+  open_recovery_storage (&storage, &anchor, &journal_root);
+  WylServiceCredentialOperationRecord begun =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord recovered =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecoveryOutcome recovery = 0;
+  gboolean begin_replayed = TRUE;
+
+  gchar pending_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (pending_request_id,
+          sizeof pending_request_id), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest pending_request = request;
+  pending_request.request_id = pending_request_id;
+  pending_request.expires_at_us = 3;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&storage, &anchor, &pending_request, 1, NULL, &begun), ==, WYRELOG_E_OK);
+  total_changes = sqlite3_total_changes (db);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, pending_request_id, 2, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING);
+  g_assert_cmpint (recovered.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
+  g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
+  wyl_service_credential_operation_record_clear (&recovered);
+  wyl_service_credential_operation_record_clear (&begun);
+
+  gchar expired_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (expired_request_id,
+          sizeof expired_request_id), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest expired_request = request;
+  expired_request.request_id = expired_request_id;
+  expired_request.expires_at_us = 2;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&storage, &anchor, &expired_request, 1, NULL, &begun), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) begun_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&begun,
+          &begun_bytes), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationRecord preserved =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (&pending_request, pending_request_id, 1, &preserved), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) preserved_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&preserved,
+          &preserved_bytes), ==, WYRELOG_E_OK);
+  recovery = 99;
+  total_changes = sqlite3_total_changes (db);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, expired_request_id, 2, &recovery,
+          &preserved), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (recovery, ==, 99);
+  g_autoptr (GBytes) preserved_after = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&preserved,
+          &preserved_after), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (preserved_bytes, preserved_after));
+  WylServiceCredentialOperationRecord loaded_expired =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
+          &anchor, expired_request_id, &loaded_expired), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) loaded_expired_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&loaded_expired, &loaded_expired_bytes), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (begun_bytes, loaded_expired_bytes));
+  g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
+  wyl_service_credential_operation_record_clear (&loaded_expired);
+  wyl_service_credential_operation_record_clear (&preserved);
+  wyl_service_credential_operation_record_clear (&begun);
+
+  gchar terminal_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (terminal_request_id,
+          sizeof terminal_request_id), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest terminal_request = request;
+  terminal_request.request_id = terminal_request_id;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&storage, &anchor, &terminal_request, 1, NULL, &begun), ==,
+      WYRELOG_E_OK);
+  Txn terminal_txn = begin_txn (handle);
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint (wyl_policy_store_reconcile_service_credential_operation_fence
+      (terminal_txn.txn, store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          terminal_request_id, request.subject_id, request.tenant_id, NULL,
+          &result), ==, WYRELOG_E_OK);
+  finish_txn (&terminal_txn, TRUE);
+  total_changes = sqlite3_total_changes (db);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, terminal_request_id, 2, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_TERMINAL_NO_COMMIT);
+  g_assert_cmpint (recovered.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
+  g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
+  wyl_service_credential_operation_record_clear (&recovered);
+  wyl_service_credential_operation_record_clear (&begun);
+
+  gchar conflict_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (conflict_request_id,
+          sizeof conflict_request_id), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest conflict_request = request;
+  conflict_request.request_id = conflict_request_id;
+  conflict_request.tenant_id = "tenant-b";
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&storage, &anchor, &conflict_request, 1, NULL, &begun), ==,
+      WYRELOG_E_OK);
+  Txn conflict_txn = begin_txn (handle);
+  memset (&result, 0, sizeof result);
+  g_assert_cmpint (wyl_policy_store_reconcile_service_credential_operation_fence
+      (conflict_txn.txn, store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+          conflict_request_id, request.subject_id, request.tenant_id, NULL,
+          &result), ==, WYRELOG_E_OK);
+  finish_txn (&conflict_txn, TRUE);
+  total_changes = sqlite3_total_changes (db);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, conflict_request_id, 2, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_CONFLICT);
+  g_assert_cmpint (recovered.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
+  g_assert_cmpint (sqlite3_total_changes (db), ==, total_changes);
+  wyl_service_credential_operation_record_clear (&recovered);
+  wyl_service_credential_operation_record_clear (&begun);
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&storage, &anchor, &request, 1, &begin_replayed, &begun), ==,
+      WYRELOG_E_OK);
+  g_assert_false (begin_replayed);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, journal_request_id, 2, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED);
+  g_assert_cmpint (recovered.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpstr (recovered.successor_credential_id, ==, issued_id);
+  g_assert_cmpuint (recovered.successor_generation, ==, issued_generation);
+  gint64 recovered_updated_at_us = recovered.updated_at_us;
+  wyl_service_credential_operation_record_clear (&recovered);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, journal_request_id, 3, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED_REPLAY);
+  g_assert_cmpint (recovered.updated_at_us, ==, recovered_updated_at_us);
+  wyl_service_credential_operation_record_clear (&recovered);
+  wyl_service_credential_operation_record_clear (&begun);
+
   memset (&result, 0, sizeof result);
   g_assert_cmpint
       (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
@@ -537,9 +717,12 @@ test_precheck_with_committed (void)
   g_assert_cmpint (result.state, ==,
       WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT);
 
+  gchar rotate_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (rotate_request_id,
+          sizeof rotate_request_id), ==, WYRELOG_E_OK);
   wyl_service_credential_issue_result_t rotated = { 0 };
   g_assert_cmpint (wyl_service_credential_rotate (handle, issued_id, "admin",
-          "req-precheck-rotate", 0, &rotated), ==, WYRELOG_E_OK);
+          rotate_request_id, 0, &rotated), ==, WYRELOG_E_OK);
   g_autofree gchar *rotated_id = g_strdup (rotated.credential.credential_id);
   guint64 rotated_generation = rotated.credential.generation;
   wyl_service_credential_issue_result_clear (&rotated);
@@ -547,13 +730,46 @@ test_precheck_with_committed (void)
   g_assert_cmpint
       (wyl_policy_store_precheck_service_credential_operation_fence_with_committed
       (store, NULL, WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,
-          "req-precheck-rotate", NULL, NULL, issued_id, &result), ==,
-      WYRELOG_E_OK);
+          rotate_request_id, NULL, NULL, issued_id, &result), ==, WYRELOG_E_OK);
   g_assert_cmpint (result.state, ==,
       WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED);
   g_assert_cmpstr (result.successor_credential_id, ==, rotated_id);
   g_assert_cmpuint (result.successor_generation, ==, rotated_generation);
+  /* v3 preserves the immutable pre-rotate expected generation separately
+   * from the durable successor tuple. This service returns both as 1. */
+  g_assert_cmpuint (rotated_generation, ==, issued_generation);
 
+  WylServiceCredentialOperationCoordinatorRequest rotate_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  rotate_request.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE;
+  rotate_request.request_id = rotate_request_id;
+  rotate_request.subject_id = "svc:fence:precheck";
+  rotate_request.destination = "rotated-credential";
+  rotate_request.parent_identity = "parent";
+  rotate_request.old_credential_id = issued_id;
+  rotate_request.expected_generation = issued_generation;
+  rotate_request.expires_at_us = 1;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&storage, &anchor, &rotate_request, 1, NULL, &begun), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, rotate_request_id, 2, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED);
+  g_assert_cmpint (recovered.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpstr (recovered.successor_credential_id, ==, rotated_id);
+  g_assert_cmpuint (recovered.successor_generation, ==, rotated_generation);
+  wyl_service_credential_operation_record_clear (&recovered);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
+      (&storage, &anchor, store, NULL, rotate_request_id, 3, &recovery,
+          &recovered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED_REPLAY);
+  g_assert_cmpint (recovered.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  wyl_service_credential_operation_record_clear (&recovered);
+  wyl_service_credential_operation_record_clear (&begun);
   Txn t = begin_txn (handle);
   memset (&result, 0, sizeof result);
   g_assert_cmpint (wyl_policy_store_reconcile_service_credential_operation_fence
@@ -600,6 +816,37 @@ test_precheck_with_committed (void)
           "req-precheck-malformed", "svc:fence:precheck", "tenant-a", NULL,
           &result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (result.state, ==, 0);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_autofree gchar *issue_child = g_strdup_printf ("op-%s", journal_request_id);
+  g_autofree gchar *pending_child =
+      g_strdup_printf ("op-%s", pending_request_id);
+  g_autofree gchar *expired_child =
+      g_strdup_printf ("op-%s", expired_request_id);
+  g_autofree gchar *terminal_child =
+      g_strdup_printf ("op-%s", terminal_request_id);
+  g_autofree gchar *conflict_child =
+      g_strdup_printf ("op-%s", conflict_request_id);
+  g_autofree gchar *rotate_child = g_strdup_printf ("op-%s", rotate_request_id);
+  g_autofree gchar *issue_path = g_build_filename (journal_root, issue_child,
+      NULL);
+  g_autofree gchar *rotate_path = g_build_filename (journal_root, rotate_child,
+      NULL);
+  g_autofree gchar *pending_path =
+      g_build_filename (journal_root, pending_child,
+      NULL);
+  g_autofree gchar *terminal_path = g_build_filename (journal_root,
+      terminal_child, NULL);
+  g_autofree gchar *expired_path = g_build_filename (journal_root,
+      expired_child, NULL);
+  g_autofree gchar *conflict_path = g_build_filename (journal_root,
+      conflict_child, NULL);
+  g_remove (issue_path);
+  g_remove (rotate_path);
+  g_remove (pending_path);
+  g_remove (expired_path);
+  g_remove (terminal_path);
+  g_remove (conflict_path);
+  g_rmdir (journal_root);
 }
 
 static void
