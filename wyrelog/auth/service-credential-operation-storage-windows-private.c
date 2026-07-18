@@ -22,7 +22,7 @@ wyl_win_nt_create_relative (HANDLE root,
   IO_STATUS_BLOCK iosb = { 0 };
   HANDLE handle = INVALID_HANDLE_VALUE;
   g_autofree gunichar2 *wide = NULL;
-  gsize units = 0;
+  glong units = 0;
   NTSTATUS status;
 
   if (out_handle == NULL || out_error == NULL)
@@ -57,7 +57,8 @@ wyl_win_nt_create_relative (HANDLE root,
     return FALSE;
   }
   wide = g_utf8_to_utf16 (name->component, -1, NULL, &units, NULL);
-  if (wide == NULL || units == 0 || units > G_MAXUSHORT / sizeof (gunichar2)) {
+  if (wide == NULL || units <= 0
+      || (gsize) units > G_MAXUSHORT / sizeof (gunichar2)) {
     *out_error = WYRELOG_E_POLICY;
     return FALSE;
   }
