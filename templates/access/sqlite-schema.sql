@@ -582,6 +582,32 @@ CREATE TABLE IF NOT EXISTS service_credential_cvk (
     updated_at_us           INTEGER NOT NULL CHECK (updated_at_us >= created_at_us)
 );
 
+CREATE TABLE IF NOT EXISTS service_credential_handoff_escrows (
+    escrow_id             TEXT NOT NULL PRIMARY KEY CHECK (
+        typeof(escrow_id) = 'text' AND length(escrow_id) = 36
+        AND instr(escrow_id, char(0)) = 0),
+    operation             TEXT NOT NULL CHECK (operation IN ('issue', 'rotate')),
+    request_id            TEXT NOT NULL UNIQUE CHECK (
+        typeof(request_id) = 'text' AND length(request_id) BETWEEN 1 AND 256
+        AND instr(request_id, char(0)) = 0),
+    actor_subject_id      TEXT NOT NULL CHECK (
+        typeof(actor_subject_id) = 'text' AND length(actor_subject_id) BETWEEN 1 AND 128
+        AND instr(actor_subject_id, char(0)) = 0),
+    target_digest         BLOB NOT NULL CHECK (typeof(target_digest) = 'blob' AND length(target_digest) = 32),
+    credential_id         TEXT NOT NULL CHECK (
+        typeof(credential_id) = 'text' AND length(credential_id) = 31
+        AND substr(credential_id, 1, 4) = 'wlc_' AND instr(credential_id, char(0)) = 0),
+    credential_generation INTEGER NOT NULL CHECK (credential_generation >= 1),
+    deadline_at_us        INTEGER NOT NULL CHECK (deadline_at_us > 0),
+    binding_digest        BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob' AND length(binding_digest) = 32),
+    sealed_envelope       BLOB NOT NULL CHECK (
+        typeof(sealed_envelope) = 'blob' AND length(sealed_envelope) BETWEEN 1 AND 65536),
+    created_at_us         INTEGER NOT NULL CHECK (created_at_us > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_handoff_escrows_credential
+    ON service_credential_handoff_escrows (credential_id, credential_generation);
+
 CREATE TABLE IF NOT EXISTS service_credentials (
     credential_id             TEXT    NOT NULL PRIMARY KEY CHECK (
         length(credential_id) BETWEEN 1 AND 128

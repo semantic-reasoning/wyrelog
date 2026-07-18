@@ -85,6 +85,16 @@
   "wyrelog.service-credential.cvk.provider-binding.v1"
 #define WYL_SERVICE_CVK_BINDING_DOMAIN \
   "wyrelog.service-credential.cvk.provider-binding"
+#define WYL_SERVICE_HANDOFF_ENVELOPE_BYTES 179u
+#define WYL_SERVICE_HANDOFF_MAGIC_BYTES 8u
+#define WYL_SERVICE_HANDOFF_DOMAIN_BYTES 42u
+#define WYL_SERVICE_HANDOFF_BINDING_BYTES 32u
+#define WYL_SERVICE_HANDOFF_MAGIC "WYLESC1\0"
+#define WYL_SERVICE_HANDOFF_DOMAIN "wyrelog.service-credential.handoff.escrow"
+#define WYL_SERVICE_HANDOFF_BINDING_LABEL \
+  "wyrelog.service-credential.handoff.escrow.provider-binding.v1"
+#define WYL_SERVICE_HANDOFF_BINDING_DOMAIN \
+  "wyrelog.service-credential.handoff.escrow.provider-binding"
 #define WYL_SERVICE_CREDENTIAL_ID_ATTEMPTS 4u
 
 G_STATIC_ASSERT (sizeof (WYL_SERVICE_CVK_MAGIC) - 1
@@ -93,6 +103,10 @@ G_STATIC_ASSERT (sizeof (WYL_SERVICE_CVK_DOMAIN) ==
     WYL_SERVICE_CVK_DOMAIN_BYTES);
 G_STATIC_ASSERT (WYL_SERVICE_CVK_CVK_OFFSET +
     WYL_SERVICE_CREDENTIAL_CVK_BYTES == WYL_SERVICE_CVK_ENVELOPE_BYTES);
+G_STATIC_ASSERT (sizeof (WYL_SERVICE_HANDOFF_MAGIC) - 1 ==
+    WYL_SERVICE_HANDOFF_MAGIC_BYTES);
+G_STATIC_ASSERT (sizeof (WYL_SERVICE_HANDOFF_DOMAIN) ==
+    WYL_SERVICE_HANDOFF_DOMAIN_BYTES);
 
 typedef struct
 {
@@ -583,6 +597,7 @@ static const gchar *const required_tables[] = {
   "service_principals",
   "service_credentials",
   "service_credential_cvk",
+  "service_credential_handoff_escrows",
   "service_principal_events",
   "service_credential_events",
   "service_domain_requests",
@@ -631,6 +646,29 @@ static const gchar service_schema_ddl[] =
     " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),"
     " updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us)"
     ");"
+    "CREATE TABLE IF NOT EXISTS service_credential_handoff_escrows ("
+    " escrow_id TEXT NOT NULL PRIMARY KEY CHECK (typeof(escrow_id) = 'text'"
+    "   AND length(escrow_id) = 36 AND instr(escrow_id,char(0)) = 0),"
+    " operation TEXT NOT NULL CHECK (operation IN ('issue','rotate')),"
+    " request_id TEXT NOT NULL UNIQUE CHECK (typeof(request_id) = 'text'"
+    "   AND length(request_id) BETWEEN 1 AND 256 AND instr(request_id,char(0)) = 0),"
+    " actor_subject_id TEXT NOT NULL CHECK (typeof(actor_subject_id) = 'text'"
+    "   AND length(actor_subject_id) BETWEEN 1 AND 128 AND instr(actor_subject_id,char(0)) = 0),"
+    " target_digest BLOB NOT NULL CHECK (typeof(target_digest) = 'blob'"
+    "   AND length(target_digest) = 32),"
+    " credential_id TEXT NOT NULL CHECK (typeof(credential_id) = 'text'"
+    "   AND length(credential_id) = 31 AND substr(credential_id,1,4) = 'wlc_'"
+    "   AND instr(credential_id,char(0)) = 0),"
+    " credential_generation INTEGER NOT NULL CHECK (credential_generation >= 1),"
+    " deadline_at_us INTEGER NOT NULL CHECK (deadline_at_us > 0),"
+    " binding_digest BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob'"
+    "   AND length(binding_digest) = 32),"
+    " sealed_envelope BLOB NOT NULL CHECK (typeof(sealed_envelope) = 'blob'"
+    "   AND length(sealed_envelope) BETWEEN 1 AND 65536),"
+    " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0)"
+    ");"
+    "CREATE INDEX IF NOT EXISTS idx_service_handoff_escrows_credential"
+    " ON service_credential_handoff_escrows(credential_id,credential_generation);"
     "CREATE TABLE IF NOT EXISTS service_credentials ("
     " credential_id TEXT NOT NULL PRIMARY KEY CHECK ("
     "   length(credential_id) BETWEEN 1 AND 128 AND"
@@ -886,6 +924,19 @@ static const gchar *const service_cvk_needles[] = {
   NULL,
 };
 
+static const gchar *const service_handoff_escrow_needles[] = {
+  "check(typeof(escrow_id)='text'andlength(escrow_id)=36andinstr(escrow_id,char(0))=0)",
+  "check(operationin('issue','rotate'))",
+  "check(typeof(request_id)='text'andlength(request_id)between1and256andinstr(request_id,char(0))=0)",
+  "check(typeof(actor_subject_id)='text'andlength(actor_subject_id)between1and128andinstr(actor_subject_id,char(0))=0)",
+  "check(typeof(target_digest)='blob'andlength(target_digest)=32)",
+  "check(typeof(credential_id)='text'andlength(credential_id)=31andsubstr(credential_id,1,4)='wlc_'andinstr(credential_id,char(0))=0)",
+  "check(credential_generation>=1)", "check(deadline_at_us>0)",
+  "check(typeof(binding_digest)='blob'andlength(binding_digest)=32)",
+  "check(typeof(sealed_envelope)='blob'andlength(sealed_envelope)between1and65536)",
+  "check(created_at_us>0)", NULL,
+};
+
 static const gchar *const service_credential_needles[] = {
   "check(length(credential_id)between1and128andinstr(credential_id,char(0))=0)",
   "check(credential_format_version>=1)",
@@ -988,6 +1039,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         "slot:INTEGER:0::1,generation:INTEGER:1::0,envelope_format_version:INTEGER:1::0,provider_binding:BLOB:1::0,sealed_cvk:BLOB:1::0,created_at_us:INTEGER:1::0,updated_at_us:INTEGER:1::0",
         service_cvk_needles, 7, "",
       "sqlite_autoindex_service_credential_cvk_1:1:u:0:0:1:generation:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_credential_handoff_escrows",
+        "escrow_id:TEXT:1::1,operation:TEXT:1::0,request_id:TEXT:1::0,actor_subject_id:TEXT:1::0,target_digest:BLOB:1::0,credential_id:TEXT:1::0,credential_generation:INTEGER:1::0,deadline_at_us:INTEGER:1::0,binding_digest:BLOB:1::0,sealed_envelope:BLOB:1::0,created_at_us:INTEGER:1::0",
+        service_handoff_escrow_needles, 11, "",
+      "idx_service_handoff_escrows_credential:0:c:0:0:5:credential_id:0:BINARY:1,1:6:credential_generation:0:BINARY:1,2:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_escrows_1:1:pk:0:0:0:escrow_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_escrows_2:1:u:0:0:2:request_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_principal_events",
         "event_id:INTEGER:0::1,subject_id:TEXT:1::0,event:TEXT:1::0,from_state:TEXT:0::0,to_state:TEXT:1::0,generation:INTEGER:1::0,actor_subject_id:TEXT:1::0,request_id:TEXT:0::0,created_at_us:INTEGER:1::0",
         service_principal_event_needles, 7,
@@ -6037,6 +6092,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
   wyrelog_error_t rc = query_has_rows (store->db,
       "SELECT 1 FROM main.sqlite_schema WHERE type = 'trigger' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
+      "'service_credential_handoff_escrows',"
       "'service_principal_events','service_credential_events',"
       "'service_domain_requests','service_credential_operation_fences',"
       "'service_exchange_audit_intentions') "
@@ -6062,12 +6118,14 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "SELECT 1 FROM sqlite_temp_schema AS temp_object WHERE"
       " temp_object.tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
+      "'service_credential_handoff_escrows',"
       "'service_principal_events','service_credential_events',"
       "'service_domain_requests','service_credential_operation_fences',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
+      "'service_credential_handoff_escrows',"
       "'service_principal_events','service_credential_events',"
       "'service_domain_requests','service_credential_operation_fences',"
       "'service_exchange_audit_intentions',"
@@ -6100,7 +6158,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
   rc = query_has_rows (store->db,
       "SELECT 1 FROM pragma_foreign_key_check "
       "WHERE \"table\" IN ('service_principals','service_credentials',"
-      "'service_credential_cvk','service_principal_events',"
+      "'service_credential_cvk','service_credential_handoff_escrows','service_principal_events',"
       "'service_credential_events','service_domain_requests',"
       "'service_credential_operation_fences') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
@@ -9891,6 +9949,453 @@ wyl_policy_store_ensure_service_cvk_for_issuance (wyl_policy_store_t *store,
   if (out_cvk == NULL || out_len == NULL)
     return WYRELOG_E_INVALID;
   return service_cvk_materialize (store, TRUE, out_cvk, out_len);
+}
+
+struct wyl_policy_service_handoff_secret_t
+{
+  wyl_policy_store_t *store;
+  guint8 *bytes;
+  gsize len;
+};
+
+void wyl_policy_service_handoff_escrow_info_clear
+    (wyl_policy_service_handoff_escrow_info_t * info)
+{
+  if (info == NULL)
+    return;
+  g_free (info->operation);
+  g_free (info->request_id);
+  g_free (info->actor_subject_id);
+  g_free (info->credential_id);
+  sodium_memzero (info, sizeof *info);
+}
+
+void wyl_policy_service_handoff_secret_clear
+    (wyl_policy_service_handoff_secret_t ** secret)
+{
+  if (secret == NULL || *secret == NULL)
+    return;
+  wyl_policy_service_handoff_secret_t *value = *secret;
+  cvk_locked_free (value->store, value->bytes, value->len);
+  sodium_memzero (value, sizeof *value);
+  g_free (value);
+  *secret = NULL;
+}
+
+const guint8 *wyl_policy_service_handoff_secret_peek
+    (const wyl_policy_service_handoff_secret_t * secret, gsize * out_len)
+{
+  if (out_len != NULL)
+    *out_len = secret == NULL ? 0 : secret->len;
+  return secret == NULL ? NULL : secret->bytes;
+}
+
+static wyrelog_error_t
+service_handoff_provider_binding (wyl_policy_store_t *store,
+    guint8 out[WYL_SERVICE_HANDOFF_BINDING_BYTES])
+{
+  if (store == NULL || !store->keyprovider.owned)
+    return WYRELOG_E_POLICY;
+  guint8 *scratch = cvk_locked_alloc (store, 64);
+  if (scratch == NULL)
+    return WYRELOG_E_NOMEM;
+  wyrelog_error_t rc =
+      store->keyprovider.vtable.derive (store->keyprovider.state,
+      WYL_SERVICE_HANDOFF_BINDING_LABEL, scratch, 32);
+  if (rc == WYRELOG_E_OK && crypto_generichash (out, 32, (const guint8 *)
+          WYL_SERVICE_HANDOFF_BINDING_DOMAIN,
+          sizeof WYL_SERVICE_HANDOFF_BINDING_DOMAIN - 1, scratch, 32) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  else if (rc != WYRELOG_E_OK)
+    rc = WYRELOG_E_CRYPTO;
+  cvk_locked_free (store, scratch, 64);
+  return rc;
+}
+
+static gboolean
+service_handoff_input_valid (const wyl_policy_service_handoff_escrow_input_t
+    *in)
+{
+  if (in == NULL || in->escrow_id == NULL || in->operation == NULL
+      || (!g_str_equal (in->operation, "issue")
+          && !g_str_equal (in->operation, "rotate"))
+      || in->request_id == NULL || in->request_id[0] == '\0'
+      || strlen (in->request_id) > 256
+      || !wyl_policy_service_actor_subject_is_valid (in->actor_subject_id)
+      || in->target_digest == NULL || in->binding_digest == NULL
+      || in->secret == NULL
+      || in->secret_len != WYL_SERVICE_CREDENTIAL_SECRET_BYTES
+      || in->credential_id == NULL
+      || !wyl_service_credential_id_is_canonical (in->credential_id,
+          strlen (in->credential_id))
+      || in->credential_generation == 0
+      || in->credential_generation > G_MAXINT64 || in->deadline_at_us <= 0)
+    return FALSE;
+  gchar id[WYL_ID_STRING_BUF];
+  return wyl_id_format (in->escrow_id, id, sizeof id) == WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_handoff_binding_digest (const wyl_policy_service_handoff_escrow_input_t
+    *in, guint8 out[32])
+{
+  crypto_generichash_state state;
+  if (crypto_generichash_init (&state, NULL, 0, 32) != 0)
+    return WYRELOG_E_CRYPTO;
+  const gchar *parts[] = { "wyrelog.service-credential.handoff.binding.v1",
+    in->operation, in->request_id, in->actor_subject_id, in->credential_id
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (parts); i++) {
+    guint8 len[8];
+    cvk_put_u64_be (len, strlen (parts[i]));
+    if (crypto_generichash_update (&state, len, sizeof len) != 0
+        || crypto_generichash_update (&state, (const guint8 *) parts[i],
+            strlen (parts[i])) != 0)
+      return WYRELOG_E_CRYPTO;
+  }
+  guint8 numbers[24];
+  memcpy (numbers, in->escrow_id->bytes, WYL_ID_BYTES);
+  cvk_put_u64_be (numbers + 16, in->credential_generation);
+  if (crypto_generichash_update (&state, numbers, sizeof numbers) != 0
+      || crypto_generichash_update (&state, in->target_digest, 32) != 0
+      || crypto_generichash_final (&state, out, 32) != 0)
+    return WYRELOG_E_CRYPTO;
+  sodium_memzero (numbers, sizeof numbers);
+  return WYRELOG_E_OK;
+}
+
+static void
+service_handoff_build_envelope (guint8 out[WYL_SERVICE_HANDOFF_ENVELOPE_BYTES],
+    const guint8 provider_binding[32], const guint8 binding_digest[32],
+    const wyl_id_t *escrow_id, guint64 generation, gint64 deadline_at_us,
+    const guint8 secret[WYL_SERVICE_CREDENTIAL_SECRET_BYTES])
+{
+  memcpy (out, WYL_SERVICE_HANDOFF_MAGIC, 8);
+  memcpy (out + 8, WYL_SERVICE_HANDOFF_DOMAIN, 42);
+  out[50] = 1;
+  memcpy (out + 51, provider_binding, 32);
+  memcpy (out + 83, binding_digest, 32);
+  memcpy (out + 115, escrow_id->bytes, WYL_ID_BYTES);
+  cvk_put_u64_be (out + 131, generation);
+  cvk_put_u64_be (out + 139, (guint64) deadline_at_us);
+  memcpy (out + 147, secret, WYL_SERVICE_CREDENTIAL_SECRET_BYTES);
+}
+
+static gboolean
+service_handoff_envelope_matches (const guint8 *envelope,
+    const guint8 provider_binding[32],
+    const wyl_policy_service_handoff_escrow_info_t *info)
+{
+  return memcmp (envelope, WYL_SERVICE_HANDOFF_MAGIC, 8) == 0
+      && memcmp (envelope + 8, WYL_SERVICE_HANDOFF_DOMAIN, 42) == 0
+      && envelope[50] == 1
+      && sodium_memcmp (envelope + 51, provider_binding, 32) == 0
+      && sodium_memcmp (envelope + 83, info->binding_digest, 32) == 0
+      && sodium_memcmp (envelope + 115, info->escrow_id.bytes,
+      WYL_ID_BYTES) == 0
+      && cvk_get_u64_be (envelope + 131) == info->credential_generation
+      && cvk_get_u64_be (envelope + 139) == (guint64) info->deadline_at_us;
+}
+
+wyrelog_error_t
+wyl_policy_store_service_handoff_escrow_insert (wyl_policy_store_t *store,
+    const wyl_policy_service_handoff_escrow_input_t *input)
+{
+  if (store == NULL || store->db == NULL
+      || !service_handoff_input_valid (input))
+    return WYRELOG_E_INVALID;
+  if (!store->keyprovider.owned || store->keyprovider.vtable.probe
+      (store->keyprovider.state) != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+  guint8 binding[32], computed_digest[32];
+  wyrelog_error_t rc = service_handoff_binding_digest (input, computed_digest);
+  if (rc != WYRELOG_E_OK
+      || sodium_memcmp (computed_digest, input->binding_digest, 32) != 0) {
+    sodium_memzero (computed_digest, sizeof computed_digest);
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  }
+  guint8 *envelope =
+      cvk_locked_alloc (store, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
+  if (envelope == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = service_handoff_provider_binding (store, binding);
+  if (rc == WYRELOG_E_OK)
+    service_handoff_build_envelope (envelope, binding, input->binding_digest,
+        input->escrow_id, input->credential_generation, input->deadline_at_us,
+        input->secret);
+  wyl_sealed_blob_t sealed = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = store->keyprovider.vtable.seal (store->keyprovider.state, envelope,
+        WYL_SERVICE_HANDOFF_ENVELOPE_BYTES, &sealed);
+  gchar id[WYL_ID_STRING_BUF];
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_id_format (input->escrow_id, id, sizeof id);
+  sqlite3_stmt *stmt = NULL;
+  if (rc == WYRELOG_E_OK && (sealed.bytes == NULL || sealed.len == 0
+          || sealed.len > 65536 || sealed.len > G_MAXINT))
+    rc = WYRELOG_E_CRYPTO;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+        "INSERT INTO service_credential_handoff_escrows"
+        "(escrow_id,operation,request_id,actor_subject_id,target_digest,credential_id,"
+        "credential_generation,deadline_at_us,binding_digest,sealed_envelope,created_at_us)"
+        " VALUES(?,?,?,?,?,?,?,?,?,?,?);", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_text (stmt, 2, input->operation, -1, SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_text (stmt, 3, input->request_id, -1,
+              SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_text (stmt, 4, input->actor_subject_id, -1,
+              SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 5, input->target_digest, 32,
+              SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_text (stmt, 6, input->credential_id, -1,
+              SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 7, (gint64) input->credential_generation)
+          != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 8, input->deadline_at_us) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 9, input->binding_digest, 32,
+              SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 10, sealed.bytes, (int) sealed.len,
+              SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 11, g_get_real_time ()) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    rc = step == SQLITE_DONE ? WYRELOG_E_OK :
+        ((step == SQLITE_CONSTRAINT || step == SQLITE_CONSTRAINT_PRIMARYKEY
+            || step ==
+            SQLITE_CONSTRAINT_UNIQUE) ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (sealed.bytes != NULL)
+    store->keyprovider.vtable.clear_sealed_blob
+        (store->keyprovider.state, &sealed);
+  sodium_memzero (binding, sizeof binding);
+  sodium_memzero (computed_digest, sizeof computed_digest);
+  cvk_locked_free (store, envelope, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_service_handoff_escrow_load (wyl_policy_store_t *store,
+    const wyl_id_t *escrow_id, wyl_policy_service_handoff_escrow_info_t *out)
+{
+  if (out != NULL)
+    wyl_policy_service_handoff_escrow_info_clear (out);
+  if (store == NULL || store->db == NULL || escrow_id == NULL || out == NULL)
+    return WYRELOG_E_INVALID;
+  gchar id[WYL_ID_STRING_BUF];
+  if (wyl_id_format (escrow_id, id, sizeof id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT operation,request_id,actor_subject_id,target_digest,credential_id,"
+      "credential_generation,deadline_at_us,binding_digest FROM "
+      "service_credential_handoff_escrows WHERE escrow_id=?;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step = sqlite3_step (stmt);
+  if (step == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (step != SQLITE_ROW || sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 4) != SQLITE_TEXT) {
+    sqlite3_finalize (stmt);
+    return step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+  const gchar *operation = (const gchar *) sqlite3_column_text (stmt, 0);
+  const gchar *request = (const gchar *) sqlite3_column_text (stmt, 1);
+  const gchar *actor = (const gchar *) sqlite3_column_text (stmt, 2);
+  const gchar *credential = (const gchar *) sqlite3_column_text (stmt, 4);
+  guint64 generation = 0;
+  rc = read_fixed_blob (stmt, 3, out->target_digest, 32);
+  if (rc == WYRELOG_E_OK)
+    rc = read_positive_u64 (stmt, 5, &generation);
+  if (rc == WYRELOG_E_OK && (sqlite3_column_type (stmt, 6) != SQLITE_INTEGER
+          || sqlite3_column_int64 (stmt, 6) <= 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = read_fixed_blob (stmt, 7, out->binding_digest, 32);
+  if (rc == WYRELOG_E_OK && (operation == NULL
+          || (!g_str_equal (operation, "issue")
+              && !g_str_equal (operation, "rotate"))
+          || request == NULL || actor == NULL || credential == NULL
+          || strlen (request) > 256
+          || !wyl_policy_service_actor_subject_is_valid (actor)
+          || !wyl_service_credential_id_is_canonical (credential,
+              strlen (credential))))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    out->escrow_id = *escrow_id;
+    out->operation = g_strdup (operation);
+    out->request_id = g_strdup (request);
+    out->actor_subject_id = g_strdup (actor);
+    out->credential_id = g_strdup (credential);
+    out->credential_generation = generation;
+    out->deadline_at_us = sqlite3_column_int64 (stmt, 6);
+    if (out->operation == NULL || out->request_id == NULL
+        || out->actor_subject_id == NULL || out->credential_id == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_handoff_escrow_info_clear (out);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_service_handoff_escrow_unseal (wyl_policy_store_t *store,
+    const wyl_policy_service_handoff_escrow_info_t *expected,
+    wyl_policy_service_handoff_secret_t **out_secret)
+{
+  if (out_secret != NULL)
+    wyl_policy_service_handoff_secret_clear (out_secret);
+  if (store == NULL || expected == NULL || out_secret == NULL
+      || !store->keyprovider.owned)
+    return WYRELOG_E_INVALID;
+  wyl_policy_service_handoff_escrow_info_t actual = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_service_handoff_escrow_load (store,
+      &expected->escrow_id, &actual);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (g_strcmp0 (actual.request_id, expected->request_id) != 0
+      || g_strcmp0 (actual.operation, expected->operation) != 0
+      || g_strcmp0 (actual.actor_subject_id, expected->actor_subject_id) != 0
+      || g_strcmp0 (actual.credential_id, expected->credential_id) != 0
+      || actual.credential_generation != expected->credential_generation
+      || actual.deadline_at_us != expected->deadline_at_us
+      || sodium_memcmp (actual.target_digest, expected->target_digest, 32) != 0
+      || sodium_memcmp (actual.binding_digest, expected->binding_digest,
+          32) != 0) {
+    wyl_policy_service_handoff_escrow_info_clear (&actual);
+    return WYRELOG_E_POLICY;
+  }
+  wyl_policy_service_handoff_escrow_input_t verified = {
+    .escrow_id = &actual.escrow_id,.operation = actual.operation,
+    .request_id = actual.request_id,.actor_subject_id = actual.actor_subject_id,
+    .target_digest = actual.target_digest,.credential_id = actual.credential_id,
+    .credential_generation = actual.credential_generation,
+    .deadline_at_us = actual.deadline_at_us,
+  };
+  guint8 recomputed[32];
+  rc = service_handoff_binding_digest (&verified, recomputed);
+  if (rc != WYRELOG_E_OK
+      || sodium_memcmp (recomputed, actual.binding_digest, 32) != 0) {
+    sodium_memzero (recomputed, sizeof recomputed);
+    wyl_policy_service_handoff_escrow_info_clear (&actual);
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  }
+  sodium_memzero (recomputed, sizeof recomputed);
+  gchar id[WYL_ID_STRING_BUF];
+  wyl_id_format (&expected->escrow_id, id, sizeof id);
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT sealed_envelope FROM service_credential_handoff_escrows WHERE escrow_id=?;",
+      &stmt);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  guint8 *sealed_copy = NULL;
+  gsize sealed_len = 0;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) == SQLITE_ROW
+      && sqlite3_column_type (stmt, 0) == SQLITE_BLOB) {
+    sealed_len = sqlite3_column_bytes (stmt, 0);
+    if (sealed_len > 0 && sealed_len <= 65536)
+      sealed_copy = g_memdup2 (sqlite3_column_blob (stmt, 0), sealed_len);
+    else
+      rc = WYRELOG_E_POLICY;
+    if (sealed_copy == NULL && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_NOMEM;
+  } else if (rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  guint8 binding[32];
+  guint8 *envelope = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_provider_binding (store, binding);
+  if (rc == WYRELOG_E_OK) {
+    envelope = cvk_locked_alloc (store, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
+    if (envelope == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  gsize written = 0;
+  wyl_sealed_blob_t sealed = {.bytes = sealed_copy,.len = sealed_len };
+  if (rc == WYRELOG_E_OK)
+    rc = store->keyprovider.vtable.unseal (store->keyprovider.state, &sealed,
+        envelope, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES, &written);
+  if (rc != WYRELOG_E_OK || written != WYL_SERVICE_HANDOFF_ENVELOPE_BYTES
+      || !service_handoff_envelope_matches (envelope, binding, &actual))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    wyl_policy_service_handoff_secret_t *secret =
+        g_new0 (wyl_policy_service_handoff_secret_t, 1);
+    if (secret == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else {
+      secret->bytes =
+          cvk_locked_alloc (store, WYL_SERVICE_CREDENTIAL_SECRET_BYTES);
+      if (secret->bytes == NULL) {
+        g_free (secret);
+        rc = WYRELOG_E_NOMEM;
+      } else {
+        memcpy (secret->bytes, envelope + 147, 32);
+        secret->store = store;
+        secret->len = 32;
+        *out_secret = secret;
+      }
+    }
+  }
+  sodium_memzero (binding, sizeof binding);
+  if (sealed_copy != NULL) {
+    sodium_memzero (sealed_copy, sealed_len);
+    g_free (sealed_copy);
+  }
+  cvk_locked_free (store, envelope, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
+  wyl_policy_service_handoff_escrow_info_clear (&actual);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_service_handoff_escrow_delete (wyl_policy_store_t *store,
+    const wyl_id_t *escrow_id)
+{
+  if (store == NULL || store->db == NULL || escrow_id == NULL)
+    return WYRELOG_E_INVALID;
+  gchar id[WYL_ID_STRING_BUF];
+  if (wyl_id_format (escrow_id, id, sizeof id) != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "DELETE FROM service_credential_handoff_escrows WHERE escrow_id=?;",
+      &stmt);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = sqlite3_step (stmt) == SQLITE_DONE ?
+        (sqlite3_changes (store->db) ==
+        1 ? WYRELOG_E_OK : WYRELOG_E_NOT_FOUND) : WYRELOG_E_IO;
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return rc;
 }
 
 static wyrelog_error_t

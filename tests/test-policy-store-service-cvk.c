@@ -70,7 +70,9 @@ provider_derive (gpointer data, const gchar *label, guint8 *out, gsize len)
   TestProvider *p = data;
   p->derives++;
   g_assert_cmpuint (len, ==, 32);
-  if (g_str_equal (label, "wyrelog.service-credential.cvk.provider-binding.v1")) {
+  if (g_str_equal (label, "wyrelog.service-credential.cvk.provider-binding.v1")
+      || g_str_equal (label,
+          "wyrelog.service-credential.handoff.escrow.provider-binding.v1")) {
     p->binding_derives++;
     if (p->fail_binding_derive)
       return WYRELOG_E_CRYPTO;
@@ -292,6 +294,40 @@ expected_binding (guint8 out[32])
   g_assert_cmpint (crypto_generichash_final (&state, out, 32), ==, 0);
   sodium_memzero (&state, sizeof state);
   sodium_memzero (key, sizeof key);
+}
+
+static void
+handoff_binding (const wyl_id_t *escrow_id, guint8 target[32], guint8 out[32])
+{
+  const gchar *parts[] = { "wyrelog.service-credential.handoff.binding.v1",
+    "issue", "escrow-request-1", "operator", FIXTURE_ID
+  };
+  crypto_generichash_state state;
+  g_assert_cmpint (crypto_generichash_init (&state, NULL, 0, 32), ==, 0);
+  for (gsize i = 0; i < G_N_ELEMENTS (parts); i++) {
+    guint8 len[8] = { 0 };
+    guint64 value = strlen (parts[i]);
+    for (guint j = 0; j < 8; j++)
+      len[j] = (guint8) (value >> (56 - 8 * j));
+    g_assert_cmpint (crypto_generichash_update (&state, len, sizeof len), ==,
+        0);
+    g_assert_cmpint (crypto_generichash_update (&state,
+            (const guint8 *) parts[i], strlen (parts[i])), ==, 0);
+  }
+  guint8 numbers[24];
+  memcpy (numbers, escrow_id->bytes, 16);
+  numbers[16] = 0;
+  numbers[17] = 0;
+  numbers[18] = 0;
+  numbers[19] = 0;
+  numbers[20] = 0;
+  numbers[21] = 0;
+  numbers[22] = 0;
+  numbers[23] = 1;
+  g_assert_cmpint (crypto_generichash_update (&state, numbers, sizeof numbers),
+      ==, 0);
+  g_assert_cmpint (crypto_generichash_update (&state, target, 32), ==, 0);
+  g_assert_cmpint (crypto_generichash_final (&state, out, 32), ==, 0);
 }
 
 static void
@@ -528,6 +564,60 @@ test_fixture_concurrency_and_reopen (void)
   g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
   (void) g_remove (lock_path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_handoff_escrow_roundtrip_and_tamper (void)
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (NULL, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+
+  wyl_id_t escrow_id;
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  guint8 target[32], binding[32], secret[WYL_SERVICE_CREDENTIAL_SECRET_BYTES];
+  for (guint i = 0; i < 32; i++) {
+    target[i] = (guint8) (0x10 + i);
+    secret[i] = (guint8) (0x90 + i);
+  }
+  handoff_binding (&escrow_id, target, binding);
+  wyl_policy_service_handoff_escrow_input_t input = {
+    .escrow_id = &escrow_id,.operation = "issue",.request_id =
+        "escrow-request-1",
+    .actor_subject_id = "operator",.target_digest = target,
+    .credential_id = FIXTURE_ID,.credential_generation = 1,
+    .deadline_at_us = 999999999,.binding_digest = binding,
+    .secret = secret,.secret_len = sizeof secret,
+  };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_insert (store,
+          &input), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_insert (store,
+          &input), ==, WYRELOG_E_POLICY);
+
+  wyl_policy_service_handoff_escrow_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &escrow_id, &info), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_secret_t *opened = NULL;
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
+          &info, &opened), ==, WYRELOG_E_OK);
+  gsize opened_len = 0;
+  g_assert_cmpmem (wyl_policy_service_handoff_secret_peek (opened, &opened_len),
+      opened_len, secret, sizeof secret);
+  wyl_policy_service_handoff_secret_clear (&opened);
+
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  g_assert_cmpint (sqlite3_exec (db,
+          "UPDATE service_credential_handoff_escrows "
+          "SET binding_digest=zeroblob(32);", NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
+          &info, &opened), ==, WYRELOG_E_POLICY);
+  g_assert_null (opened);
+  wyl_policy_service_handoff_escrow_info_clear (&info);
+  sodium_memzero (secret, sizeof secret);
+  wyl_policy_store_close (store);
 }
 
 static void
@@ -1927,6 +2017,8 @@ main (int argc, char **argv)
   g_assert_cmpint (sodium_init (), >=, 0);
   g_test_add_func ("/policy-store-service-cvk/fixture-concurrency-reopen",
       test_fixture_concurrency_and_reopen);
+  g_test_add_func ("/policy-store-service-cvk/handoff-escrow-roundtrip-tamper",
+      test_handoff_escrow_roundtrip_and_tamper);
   g_test_add_func ("/policy-store-service-cvk/fault-cleanup",
       test_fault_cleanup);
   g_test_add_func ("/policy-store-service-cvk/absent-with-credentials",
