@@ -551,6 +551,54 @@ test_windows_child_delete_fixture (void)
 }
 
 static void
+test_windows_child_lock_fixture (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-lock-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  HANDLE first = INVALID_HANDLE_VALUE;
+  HANDLE second = INVALID_HANDLE_VALUE;
+  HANDLE third = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &first), ==,
+      WYRELOG_E_OK);
+  /* A second lock while the first is held conflicts deterministically. */
+  g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &second), ==,
+      WYRELOG_E_BUSY);
+  wyl_win_child_unlock (&storage, &anchor, &name, first);
+  /* After unlock the lock is re-acquirable. */
+  g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &second), ==,
+      WYRELOG_E_OK);
+  wyl_win_child_unlock (&storage, &anchor, &name, second);
+  /* Anchor mismatch fails closed without creating a lock file. */
+  WylServiceCredentialOperationRootAnchor mismatch = anchor;
+  mismatch.identity_a++;
+  g_assert_cmpint (wyl_win_child_lock (&storage, &mismatch, &name, &third), ==,
+      WYRELOG_E_POLICY);
+  /* The lock file leaves no residue. */
+  g_autoptr (GDir) entries = g_dir_open (storage.root_path, 0, NULL);
+  const gchar *entry;
+  while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
+    g_assert_false (g_str_has_prefix (entry, ".lock-"));
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+}
+
+static void
 test_rejects_relative_override (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -597,6 +645,8 @@ main (int argc, char **argv)
       test_windows_replace_survives_root_substitution);
   g_test_add_func ("/operation-storage/windows/child-delete-fixture",
       test_windows_child_delete_fixture);
+  g_test_add_func ("/operation-storage/windows/child-lock-fixture",
+      test_windows_child_lock_fixture);
   g_test_add_func ("/operation-storage/windows/relative-override",
       test_rejects_relative_override);
 #endif
