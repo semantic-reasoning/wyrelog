@@ -10646,6 +10646,7 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
     const gchar *request_id, gint64 new_expires_at_us,
     gint64 (*now_us_cb) (gpointer data), gpointer now_data,
     const wyl_service_credential_runtime_t *runtime,
+    guint64 expected_generation,
     const guint8 *authority_cvk, gsize authority_cvk_len,
     wyl_policy_service_credential_info_t *out,
     wyl_service_credential_secret_t **out_secret, gboolean authority_owned)
@@ -10660,7 +10661,7 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
           strlen (old_credential_id))
       || !service_domain_text_is_valid (actor_subject_id, 128)
       || !service_domain_text_is_valid (request_id, 256)
-      || new_expires_at_us < 0)
+      || new_expires_at_us < 0 || expected_generation > G_MAXINT64)
     return WYRELOG_E_INVALID;
   if (now_us_cb == NULL)
     now_us_cb = service_credential_default_now;
@@ -10685,9 +10686,6 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
   guint8 fingerprint[crypto_generichash_BYTES];
   rc = service_credential_rotate_fingerprint
       (old_credential_id, actor_subject_id, new_expires_at_us, fingerprint);
-  gchar audit_id[WYL_ID_STRING_BUF];
-  if (rc == WYRELOG_E_OK)
-    rc = service_domain_new_audit_id (audit_id);
   if (rc != WYRELOG_E_OK) {
     sodium_memzero (fingerprint, sizeof fingerprint);
     return rc;
@@ -10724,6 +10722,7 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
   wyl_service_credential_secret_t *secret = NULL;
   wyl_policy_service_credential_info_t old = { 0 };
   wyl_policy_service_principal_info_t principal = { 0 };
+  gchar audit_id[WYL_ID_STRING_BUF] = { 0 };
   if (!authority_owned)
     g_mutex_lock (&store->service_lifecycle_mutex);
   rc = authority_owned ? WYRELOG_E_OK : wyl_policy_store_begin_mutation (store);
@@ -10739,6 +10738,9 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK && (!g_str_equal (old.state, "active")
           || (old.expires_at_us != 0 && old.expires_at_us <= now_us)
           || old.generation >= G_MAXINT64))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && expected_generation != 0
+      && old.generation != expected_generation)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_lookup_service_principal (store, old.subject_id,
@@ -10758,6 +10760,37 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
         &tenant_active);
   if (rc == WYRELOG_E_OK && !tenant_active)
     rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && service_credential_rotate_should_fail (store,
+          WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_UPDATE))
+    rc = WYRELOG_E_IO;
+
+  /* The authoritative compare-and-swap must precede every durable rotate
+   * effect. A stale expected generation rolls back this transaction. */
+  if (rc == WYRELOG_E_OK) {
+    sqlite3_stmt *stmt = NULL;
+    guint64 compare_generation = expected_generation != 0 ?
+        expected_generation : old.generation;
+    rc = prepare_stmt (store->db,
+        "UPDATE service_credentials SET state='revoked',generation=?,"
+        "updated_at_us=?,revoked_by=?,revoked_at_us=? "
+        "WHERE credential_id=? AND state='active' AND generation=?;", &stmt);
+    if (rc == WYRELOG_E_OK
+        && (sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) old.generation + 1)
+            != SQLITE_OK || sqlite3_bind_int64 (stmt, 2, now_us) != SQLITE_OK
+            || (rc = bind_text (stmt, 3, actor_subject_id)) != WYRELOG_E_OK
+            || sqlite3_bind_int64 (stmt, 4, now_us) != SQLITE_OK
+            || (rc = bind_text (stmt, 5, old_credential_id)) != WYRELOG_E_OK
+            || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64) compare_generation)
+            != SQLITE_OK))
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_new_audit_id (audit_id);
 
   for (guint attempt = 0;
       rc == WYRELOG_E_OK && attempt < WYL_SERVICE_CREDENTIAL_ID_ATTEMPTS;
@@ -10782,30 +10815,6 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = service_credential_insert_successor (store, &material, &old,
         actor_subject_id, now_us, new_expires_at_us);
-  if (rc == WYRELOG_E_OK && service_credential_rotate_should_fail (store,
-          WYL_POLICY_SERVICE_ROTATE_FAIL_OLD_UPDATE))
-    rc = WYRELOG_E_IO;
-  if (rc == WYRELOG_E_OK) {
-    sqlite3_stmt *stmt = NULL;
-    rc = prepare_stmt (store->db,
-        "UPDATE service_credentials SET state='revoked',generation=?,"
-        "updated_at_us=?,revoked_by=?,revoked_at_us=? "
-        "WHERE credential_id=? AND state='active' AND generation=?;", &stmt);
-    if (rc == WYRELOG_E_OK
-        && (sqlite3_bind_int64 (stmt, 1, (sqlite3_int64) old.generation + 1)
-            != SQLITE_OK || sqlite3_bind_int64 (stmt, 2, now_us) != SQLITE_OK
-            || (rc = bind_text (stmt, 3, actor_subject_id)) != WYRELOG_E_OK
-            || sqlite3_bind_int64 (stmt, 4, now_us) != SQLITE_OK
-            || (rc = bind_text (stmt, 5, old_credential_id)) != WYRELOG_E_OK
-            || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64) old.generation)
-            != SQLITE_OK))
-      rc = WYRELOG_E_IO;
-    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
-      rc = WYRELOG_E_IO;
-    sqlite3_finalize (stmt);
-    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
-      rc = WYRELOG_E_POLICY;
-  }
   if (rc == WYRELOG_E_OK && service_credential_rotate_should_fail (store,
           WYL_POLICY_SERVICE_ROTATE_FAIL_SUCCESSOR_EVENT))
     rc = WYRELOG_E_IO;
@@ -10869,7 +10878,7 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
 {
   return service_credential_rotate_impl (store, old_credential_id,
       actor_subject_id, request_id, new_expires_at_us, now_us_cb, now_data,
-      runtime, NULL, 0, out, out_secret, FALSE);
+      runtime, 0, NULL, 0, out, out_secret, FALSE);
 }
 
 wyrelog_error_t
@@ -10878,7 +10887,8 @@ wyrelog_error_t
     const gchar * old_credential_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 new_expires_at_us,
     gint64 (*now_us_cb) (gpointer data), gpointer now_data,
-    const wyl_service_credential_runtime_t * runtime, const guint8 * cvk,
+    const wyl_service_credential_runtime_t * runtime,
+    guint64 expected_generation, const guint8 * cvk,
     gsize cvk_len, wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret)
 {
@@ -10891,7 +10901,8 @@ wyrelog_error_t
       store);
   return rc == WYRELOG_E_OK ? service_credential_rotate_impl (store,
       old_credential_id, actor_subject_id, request_id, new_expires_at_us,
-      now_us_cb, now_data, runtime, cvk, cvk_len, out, out_secret, TRUE) : rc;
+      now_us_cb, now_data, runtime, expected_generation, cvk, cvk_len, out,
+      out_secret, TRUE) : rc;
 }
 
 wyrelog_error_t

@@ -59,6 +59,8 @@ typedef struct
     wyrelog_error_t (*invalidate_credential) (gpointer data,
       const gchar * credential_id, guint64 generation);
   gpointer invalidation_data;
+  /* The observed active generation used by the authoritative rotate CAS.
+   * Zero preserves callers that have no externally observed generation. */
   guint64 old_credential_generation;
 } wyl_service_credential_rotate_runtime_t;
 

@@ -1049,7 +1049,7 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential_core
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
     gpointer now_data, const wyl_service_credential_runtime_t * runtime,
-    const guint8 * cvk, gsize cvk_len,
+    guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret

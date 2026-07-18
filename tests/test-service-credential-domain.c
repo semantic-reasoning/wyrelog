@@ -1732,6 +1732,52 @@ test_rotate_concurrency (void)
 }
 
 static void
+test_rotate_stale_expected_generation_has_no_effects (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:rotate-cas:worker");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:rotate-cas:worker", "tenant-a", "admin", "cas-old", 0,
+          &old), ==, WYRELOG_E_OK);
+  CollisionRuntime state = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &state,
+  };
+  wyl_service_credential_rotate_runtime_t runtime = {
+    .credential_runtime = &credential_runtime,
+    .old_credential_generation = old.credential.generation + 1,
+  };
+  wyl_service_credential_issue_result_t out = { 0 };
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          old.credential.credential_id, "admin", "cas-stale", 0, &runtime,
+          &out), ==, WYRELOG_E_POLICY);
+  g_assert_null (out.secret);
+  g_assert_null (out.credential.credential_id);
+  g_assert_cmpuint (state.ids, ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credentials "
+          "WHERE rotated_from_id IS NOT NULL;"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE request_id='cas-stale';"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events WHERE request_id='cas-stale';"),
+      ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_operation_fences "
+          "WHERE request_id='cas-stale';"), ==, 0);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_domain_requests "
+          "WHERE request_id='cas-stale';"), ==, 0);
+  wyl_service_credential_issue_result_clear (&out);
+  wyl_service_credential_issue_result_clear (&old);
+}
+
+static void
 test_rotate_collision_retry_and_wipe (void)
 {
   g_auto (Fixture) fixture = { 0 };
@@ -1994,6 +2040,8 @@ main (int argc, char **argv)
       test_rotate_policy_rejections);
   g_test_add_func ("/auth/service-credential/rotate-concurrency",
       test_rotate_concurrency);
+  g_test_add_func ("/auth/service-credential/rotate-stale-expected-cas",
+      test_rotate_stale_expected_generation_has_no_effects);
   g_test_add_func ("/auth/service-credential/rotate-collision-wipe",
       test_rotate_collision_retry_and_wipe);
   g_test_add_func ("/auth/service-credential/rotate-faults-overflow",

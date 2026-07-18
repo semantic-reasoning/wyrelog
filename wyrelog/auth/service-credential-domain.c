@@ -526,7 +526,8 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
         actor_subject_id, request_id, new_expires_at_us,
         runtime != NULL ? runtime->now_us : NULL,
         runtime != NULL ? runtime->data : NULL,
-        runtime != NULL ? runtime->credential_runtime : NULL, cvk, cvk_len,
+        runtime != NULL ? runtime->credential_runtime : NULL,
+        runtime != NULL ? runtime->old_credential_generation : 0, cvk, cvk_len,
         &stored, &secret);
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK) {
