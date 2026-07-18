@@ -9,7 +9,8 @@
 G_BEGIN_DECLS typedef enum
 {
   WYL_WIN_CHILD_OPEN = 1,
-  WYL_WIN_CHILD_CREATE = 2
+  WYL_WIN_CHILD_CREATE = 2,
+  WYL_WIN_CHILD_OPEN_ALWAYS = 3
 } WylWinChildDisposition;
 
 typedef struct
@@ -21,7 +22,7 @@ typedef struct
 
 BOOL wyl_win_nt_create_relative
     (HANDLE root, const WylServiceCredentialOperationChildName * name,
-    ACCESS_MASK access, WylWinChildDisposition disposition,
+    ACCESS_MASK access, WylWinChildDisposition disposition, ULONG share_mode,
     HANDLE * out_handle, WylWinChildIdentity * out_identity,
     wyrelog_error_t * out_error);
 wyrelog_error_t wyl_win_child_read
@@ -32,6 +33,22 @@ wyrelog_error_t wyl_win_child_create
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, GBytes * bytes);
+wyrelog_error_t wyl_win_child_replace
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * bytes);
+wyrelog_error_t wyl_win_child_delete
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name);
+wyrelog_error_t wyl_win_child_lock
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, HANDLE * out_handle);
+void wyl_win_child_unlock
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, HANDLE handle);
 
 G_END_DECLS
 #endif
