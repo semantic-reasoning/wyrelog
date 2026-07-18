@@ -26,6 +26,7 @@ wyrelog_sources = files(
   'auth/service-exchange-audit-private.c',
   'auth/service-credential-operation-journal-private.c',
   'auth/service-credential-operation-coordinator-private.c',
+  'auth/service-credential-operation-coordinator-journal-private.c',
   'auth/service-credential-operation-storage-private.c',
   'auth/service-credential-operation-storage-windows-private.c',
   'auth/service-exchange-projector-private.c',

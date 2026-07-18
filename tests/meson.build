@@ -990,6 +990,10 @@ test_service_credential_operation_coordinator = executable('test-service-credent
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )
 test('service-credential-operation-coordinator', test_service_credential_operation_coordinator)
+test_service_credential_operation_coordinator_journal = executable('test-service-credential-operation-coordinator-journal',
+  'test-service-credential-operation-coordinator-journal.c', dependencies : [wyrelog_dep],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')])
+test('service-credential-operation-coordinator-journal', test_service_credential_operation_coordinator_journal)
 
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
   'test-service-credential-operation-storage.c',
