@@ -388,6 +388,120 @@ test_windows_child_create_fixture (void)
 }
 
 static void
+test_windows_child_replace_fixture (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-replace-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (storage.root_path, "record",
+      NULL);
+  g_remove (record);
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  gsize size = 0;
+  /* Replace with no existing record still lands the new content. */
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GBytes) first = NULL;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpmem (g_bytes_get_data (first, &size), size, "one", 3);
+  /* Atomic replace over an existing record. */
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GBytes) second = NULL;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &second), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpmem (g_bytes_get_data (second, &size), size, "two", 3);
+  /* Oversized payload fails closed. */
+  g_autoptr (GBytes) oversized = g_bytes_new_take (g_malloc0
+      (WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1),
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES + 1);
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, oversized),
+      ==, WYRELOG_E_POLICY);
+  /* Anchor mismatch fails closed. */
+  WylServiceCredentialOperationRootAnchor mismatch = anchor;
+  mismatch.identity_a++;
+  g_assert_cmpint (wyl_win_child_replace (&storage, &mismatch, &name, one), ==,
+      WYRELOG_E_POLICY);
+  /* No temporary residue remains. */
+  g_autoptr (GDir) entries = g_dir_open (storage.root_path, 0, NULL);
+  const gchar *entry;
+  while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
+    g_assert_false (g_str_has_prefix (entry, ".replace-"));
+  g_remove (record);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+}
+
+static void
+test_windows_replace_survives_root_substitution (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-subst-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  g_autofree gchar *aside = g_build_filename (base, "state-aside", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  gsize size = 0;
+  g_rmdir (aside);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+  /* Substitute the root directory path with a fresh decoy after the anchor is
+   * captured.  The storage root handle still pins the original object. */
+  g_autofree gunichar2 *wroot = g_utf8_to_utf16 (root, -1, NULL, NULL, NULL);
+  g_autofree gunichar2 *waside = g_utf8_to_utf16 (aside, -1, NULL, NULL, NULL);
+  g_assert_true (MoveFileExW ((LPCWSTR) wroot, (LPCWSTR) waside, 0));
+  g_assert_true (CreateDirectoryW ((LPCWSTR) wroot, NULL));
+  /* The replace must land on the original object, never the decoy. */
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GBytes) roundtrip = NULL;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &roundtrip),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
+  /* The decoy at the original path holds no record. */
+  g_autofree gchar *decoy_record = g_build_filename (root, "record", NULL);
+  g_assert_false (g_file_test (decoy_record, G_FILE_TEST_EXISTS));
+  g_rmdir (root);
+  g_autofree gchar *aside_record = g_build_filename (aside, "record", NULL);
+  g_remove (aside_record);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_rmdir (aside);
+}
+
+static void
 test_rejects_relative_override (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -428,6 +542,10 @@ main (int argc, char **argv)
       test_windows_child_read_fixture);
   g_test_add_func ("/operation-storage/windows/child-create-fixture",
       test_windows_child_create_fixture);
+  g_test_add_func ("/operation-storage/windows/child-replace-fixture",
+      test_windows_child_replace_fixture);
+  g_test_add_func ("/operation-storage/windows/replace-root-substitution",
+      test_windows_replace_survives_root_substitution);
   g_test_add_func ("/operation-storage/windows/relative-override",
       test_rejects_relative_override);
 #endif
