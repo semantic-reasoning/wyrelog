@@ -37,6 +37,7 @@ test_builder (void)
       (&r, "operation", 1, &out), ==, WYRELOG_E_OK);
   g_assert_cmpint (out.state, ==, WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
   g_assert_cmpstr (out.request_id, ==, r.request_id);
+  g_assert_cmpint (out.expires_at_us, ==, r.expires_at_us);
   g_assert_cmpint (out.created_at_us, ==, 1);
   g_autofree gchar *saved_operation = g_strdup (out.operation_id);
   g_autofree gchar *saved_request = g_strdup (out.request_id);
@@ -263,6 +264,13 @@ test_begin_or_replay_conflict (JournalFixture *fixture, gconstpointer unused)
   r.destination = g_strdup ("changed");
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
       (&fixture->storage, &fixture->anchor, &r, "operation", 2, &replayed,
+          &out), ==, WYRELOG_E_POLICY);
+  g_assert_cmpstr (out.operation_id, ==, saved_operation);
+  g_clear_pointer (&r.destination, g_free);
+  r.destination = g_strdup ("record");
+  r.expires_at_us++;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, "operation", 3, &replayed,
           &out), ==, WYRELOG_E_POLICY);
   g_assert_cmpstr (out.operation_id, ==, saved_operation);
   wyl_service_credential_operation_record_clear (&out);

@@ -29,6 +29,7 @@ record_new (gchar request_id[WYL_REQUEST_ID_STRING_BUF],
     .successor_credential_id = g_strdup (credential_id),
     .publication_receipt_id = g_strdup (""),
     .successor_generation = 1,
+    .expires_at_us = 200,
     .created_at_us = 100,
     .updated_at_us = 100,
     .attempts = 0,
@@ -55,6 +56,7 @@ test_roundtrip (void)
   g_assert_cmpstr (output.request_id, ==, input.request_id);
   g_assert_cmpstr (output.destination, ==, input.destination);
   g_assert_cmpuint (output.successor_generation, ==, 1);
+  g_assert_cmpint (output.expires_at_us, ==, input.expires_at_us);
   g_assert_cmpint (output.state, ==, input.state);
   g_assert_true (g_bytes_get_size (bytes) <
       WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES);
@@ -84,6 +86,16 @@ test_rejects_trailing_and_unknown (void)
   g_assert_cmpint (wyl_service_credential_operation_record_decode (bad,
           &output), ==, WYRELOG_E_POLICY);
   g_assert_null (output.request_id);
+  guint8 *prior_version = g_memdup2 (data, len);
+  prior_version[8] = 0;
+  prior_version[9] = 0;
+  prior_version[10] = 0;
+  prior_version[11] = 1;
+  GBytes *prior = g_bytes_new_take (prior_version, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (prior,
+          &output), ==, WYRELOG_E_POLICY);
+  g_assert_null (output.request_id);
+  g_bytes_unref (prior);
   g_bytes_unref (bad);
   g_bytes_unref (encoded);
   wyl_service_credential_operation_record_clear (&input);
@@ -102,6 +114,7 @@ test_rejects_invalid_record (void)
     .tenant_id = (gchar *) "tenant-1",
     .destination = (gchar *) "credentials.json",
     .parent_identity = (gchar *) "parent",
+    .expires_at_us = 1,
     .created_at_us = 1,
     .updated_at_us = 1,
   };

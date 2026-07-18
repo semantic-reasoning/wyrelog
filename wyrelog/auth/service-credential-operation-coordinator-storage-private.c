@@ -46,7 +46,8 @@ same_immutable_identity (const WylServiceCredentialOperationRecord *existing,
       prepared->parent_identity)
       && same_nullable_text (existing->old_credential_id,
       prepared->old_credential_id)
-      && existing->successor_generation == prepared->successor_generation;
+      && existing->successor_generation == prepared->successor_generation
+      && existing->expires_at_us == prepared->expires_at_us;
 }
 
 #ifndef G_OS_WIN32
@@ -167,15 +168,18 @@ wyrelog_error_t
     rc = wyl_service_credential_operation_record_encode (&prepared, &bytes);
     if (rc == WYRELOG_E_OK)
       rc = storage_child_create (storage, anchor, &name, bytes);
-    if (rc == WYRELOG_E_OK)
+    if (rc == WYRELOG_E_OK) {
+      wyl_service_credential_operation_record_clear (out_record);
       *out_record = prepared, prepared = (WylServiceCredentialOperationRecord)
           WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    }
   } else if (rc == WYRELOG_E_OK) {
     rc = wyl_service_credential_operation_record_decode (bytes, &existing);
     if (rc == WYRELOG_E_OK && !same_immutable_identity (&existing, &prepared))
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK) {
       replayed = TRUE;
+      wyl_service_credential_operation_record_clear (out_record);
       *out_record = existing, existing = (WylServiceCredentialOperationRecord)
           WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
     }
