@@ -454,4 +454,69 @@ wyl_win_child_delete (const WylServiceCredentialOperationStorage *storage,
   CloseHandle (handle);
   return rc;
 }
+
+wyrelog_error_t
+wyl_win_child_lock (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, HANDLE *out_handle)
+{
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity = { 0 };
+  wyrelog_error_t error = WYRELOG_E_INVALID;
+  g_autofree gchar *digest = NULL;
+  WylServiceCredentialOperationChildName lock =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  BY_HANDLE_FILE_INFORMATION info;
+  if (out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  *out_handle = INVALID_HANDLE_VALUE;
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      name->component, -1);
+  lock.component = g_strdup_printf (".lock-%s", digest);
+  if (lock.component == NULL)
+    return WYRELOG_E_NOMEM;
+  /* Exclusive share mode makes a concurrent lock open fail with a sharing
+   * violation, which the opener maps to WYRELOG_E_BUSY.  DELETE access lets
+   * the matching unlock remove the lock file through the held handle. */
+  if (!wyl_win_nt_create_relative (storage->root_handle, &lock,
+          GENERIC_READ | GENERIC_WRITE | DELETE, WYL_WIN_CHILD_OPEN_ALWAYS, 0,
+          &handle, &identity, &error)) {
+    wyl_service_credential_operation_child_name_clear (&lock);
+    return error;
+  }
+  if (!GetFileInformationByHandle (handle, &info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor)) {
+    CloseHandle (handle);
+    wyl_service_credential_operation_child_name_clear (&lock);
+    return WYRELOG_E_POLICY;
+  }
+  wyl_service_credential_operation_child_name_clear (&lock);
+  *out_handle = handle;
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_win_child_unlock (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const WylServiceCredentialOperationChildName *name, HANDLE handle)
+{
+  if (handle == NULL || handle == INVALID_HANDLE_VALUE)
+    return;
+  /* Remove the lock file through the held handle when the root still matches,
+   * targeting the exact locked object rather than a re-resolved path.  Closing
+   * releases the exclusive share and commits the removal. */
+  if (storage != NULL && anchor != NULL && name != NULL
+      && name->component != NULL
+      && wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    wyl_win_set_delete_disposition (handle);
+  CloseHandle (handle);
+}
 #endif
