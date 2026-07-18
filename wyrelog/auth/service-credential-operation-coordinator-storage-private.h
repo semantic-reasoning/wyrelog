@@ -22,4 +22,16 @@ wyrelog_error_t wyl_service_credential_operation_coordinator_begin_or_replay
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 
+/* Load a stable journal snapshot selected solely by a canonical request ID.
+ * This intentionally does not acquire the per-operation lock: an anchored
+ * atomic replace may yield either the complete old or complete new record.
+ * The caller must initialize out_record with
+ * WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT; it is unchanged on failure.
+ * Missing records return WYRELOG_E_NOT_FOUND. Malformed, unsupported, or
+ * mismatched records fail closed with WYRELOG_E_POLICY. */
+wyrelog_error_t wyl_service_credential_operation_coordinator_load
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationRecord * out_record);
+
 G_END_DECLS;

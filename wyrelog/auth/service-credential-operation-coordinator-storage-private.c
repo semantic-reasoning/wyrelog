@@ -129,6 +129,47 @@ storage_child_unlock (const WylServiceCredentialOperationStorage *storage,
 #endif
 
 wyrelog_error_t
+    wyl_service_credential_operation_coordinator_load
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord loaded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  wyrelog_error_t rc;
+
+  if (storage == NULL || anchor == NULL || out_record == NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id))
+    return WYRELOG_E_INVALID;
+  rc = record_child_name (request_id, &name);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_service_credential_operation_record_decode (bytes, &loaded);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!g_str_equal (loaded.request_id, request_id)
+      || !g_str_equal (loaded.operation_id, request_id)) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  wyl_service_credential_operation_record_clear (out_record);
+  *out_record = loaded;
+  loaded = (WylServiceCredentialOperationRecord)
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+out:
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&loaded);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_service_credential_operation_coordinator_begin_or_replay
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,

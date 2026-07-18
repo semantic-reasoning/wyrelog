@@ -14,8 +14,9 @@ text_ok (const gchar *s, gboolean required)
       && g_utf8_validate (s, -1, NULL);
 }
 
-static gboolean
-request_id_ok (const gchar *s)
+gboolean
+wyl_service_credential_operation_coordinator_request_id_is_valid (const gchar
+    *s)
 {
   if (!text_ok (s, TRUE) || strlen (s) != 27)
     return FALSE;
@@ -66,7 +67,8 @@ wyl_service_credential_operation_coordinator_request_is_valid (const
   if (!r || r->version != WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_VERSION
       || (r->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE
           && r->kind != WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
-      || !request_id_ok (r->request_id)
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (r->request_id)
       || !text_ok (r->subject_id,
           r->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
       || !destination_ok (r->destination)

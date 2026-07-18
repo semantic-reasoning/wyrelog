@@ -23,6 +23,10 @@ typedef struct
 #define WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT { .version = WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_VERSION }
 void wyl_service_credential_operation_coordinator_request_clear
     (WylServiceCredentialOperationCoordinatorRequest * request);
+/* Canonical KSUID request identifier shared by request validation and journal
+ * lookup.  It deliberately rejects alternate encodings for the same value. */
+gboolean wyl_service_credential_operation_coordinator_request_id_is_valid
+    (const gchar * request_id);
 gboolean wyl_service_credential_operation_coordinator_request_is_valid (const
     WylServiceCredentialOperationCoordinatorRequest * request);
 G_END_DECLS
