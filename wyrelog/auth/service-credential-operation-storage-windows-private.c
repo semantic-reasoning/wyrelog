@@ -9,6 +9,60 @@ typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
     POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG,
     ULONG, ULONG, PVOID, ULONG);
 
+typedef NTSTATUS (NTAPI * WylNtSetInformationFile) (HANDLE, PIO_STATUS_BLOCK,
+    PVOID, ULONG, int);
+
+/* FILE_INFORMATION_CLASS values not reliably exposed by winternl.h. */
+#define WYL_NT_FILE_DISPOSITION_INFO_CLASS 13
+
+typedef struct
+{
+  BOOLEAN DeleteFile;
+} WylFileDispositionInfo;
+
+static WylNtSetInformationFile
+wyl_win_nt_set_information (void)
+{
+  static WylNtSetInformationFile nt_set;
+  if (nt_set == NULL) {
+    HMODULE ntdll = GetModuleHandleW (L"ntdll.dll");
+    if (ntdll != NULL)
+      nt_set = (WylNtSetInformationFile) GetProcAddress (ntdll,
+          "NtSetInformationFile");
+  }
+  return nt_set;
+}
+
+/* Mark an already-open child handle for deletion on last close.  Operating on
+ * the held kernel object keeps the removal bound to the exact validated file,
+ * never a re-resolved path. */
+static wyrelog_error_t
+wyl_win_set_delete_disposition (HANDLE handle)
+{
+  WylNtSetInformationFile nt_set = wyl_win_nt_set_information ();
+  IO_STATUS_BLOCK iosb = { 0 };
+  WylFileDispositionInfo disposition = {.DeleteFile = TRUE };
+  NTSTATUS status;
+  if (nt_set == NULL)
+    return WYRELOG_E_POLICY;
+  status = nt_set (handle, &iosb, &disposition, sizeof disposition,
+      WYL_NT_FILE_DISPOSITION_INFO_CLASS);
+  if (status < 0)
+    return status == (NTSTATUS) 0xC0000121L || status == (NTSTATUS) 0xC0000022L
+        ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+/* Best-effort durability of the directory index entry.  NTFS journals its
+ * metadata for crash consistency, and some volumes reject flushing a directory
+ * handle, so an unsupported flush does not fail an otherwise committed op. */
+static void
+wyl_win_flush_directory (HANDLE root)
+{
+  if (root != NULL && root != INVALID_HANDLE_VALUE)
+    FlushFileBuffers (root);
+}
+
 BOOL
 wyl_win_nt_create_relative (HANDLE root,
     const WylServiceCredentialOperationChildName *name,
@@ -186,48 +240,50 @@ wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
   HANDLE handle = INVALID_HANDLE_VALUE;
   WylWinChildIdentity identity = { 0 };
   wyrelog_error_t error = WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_OK;
   gsize size = 0;
   const guint8 *data;
+  BY_HANDLE_FILE_INFORMATION info;
   if (storage == NULL || anchor == NULL || name == NULL || bytes == NULL
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
           anchor))
     return WYRELOG_E_POLICY;
   data = g_bytes_get_data (bytes, &size);
-  if (size > 64u * 1024u)
+  if (size > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES)
     return WYRELOG_E_POLICY;
   if (!wyl_win_nt_create_relative (storage->root_handle, name,
           GENERIC_WRITE, WYL_WIN_CHILD_CREATE, FILE_SHARE_READ
           | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &handle, &identity, &error))
     return error;
-  for (gsize offset = 0; offset < size;) {
+  for (gsize offset = 0; rc == WYRELOG_E_OK && offset < size;) {
     DWORD written = 0;
     if (!WriteFile (handle, data + offset, (DWORD) (size - offset), &written,
-            NULL) || written == 0) {
-      CloseHandle (handle);
-      return WYRELOG_E_IO;
-    }
-    offset += written;
+            NULL) || written == 0)
+      rc = WYRELOG_E_IO;
+    else
+      offset += written;
   }
-  if (!FlushFileBuffers (handle)) {
-    CloseHandle (handle);
-    return WYRELOG_E_IO;
-  }
-  BY_HANDLE_FILE_INFORMATION info;
-  BY_HANDLE_FILE_INFORMATION after;
-  if (!GetFileInformationByHandle (handle, &info)
-      || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
-              | FILE_ATTRIBUTE_DIRECTORY))
-      || info.nFileSizeHigh != 0 || info.nFileSizeLow != size
-      || !GetFileInformationByHandle (handle, &after)
-      || after.dwVolumeSerialNumber != identity.volume_serial
-      || after.nFileIndexHigh != identity.file_index_high
-      || after.nFileIndexLow != identity.file_index_low
-      || !wyl_service_credential_operation_storage_anchor_matches (storage,
-          anchor)) {
-    CloseHandle (handle);
-    return WYRELOG_E_POLICY;
-  }
+  if (rc == WYRELOG_E_OK && !FlushFileBuffers (handle))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && (!GetFileInformationByHandle (handle, &info)
+          || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+                  | FILE_ATTRIBUTE_DIRECTORY))
+          || info.nFileSizeHigh != 0 || info.nFileSizeLow != size
+          || info.dwVolumeSerialNumber != identity.volume_serial
+          || info.nFileIndexHigh != identity.file_index_high
+          || info.nFileIndexLow != identity.file_index_low
+          || !wyl_service_credential_operation_storage_anchor_matches (storage,
+              anchor)))
+    rc = WYRELOG_E_POLICY;
+  /* On any failure remove the file we exclusively created before closing.
+   * The disposition acts on the held kernel object, so it targets exactly the
+   * child we opened and never a substituted path. */
+  if (rc == WYRELOG_E_OK)
+    wyl_win_flush_directory (storage->root_handle);
+  else
+    wyl_win_set_delete_disposition (handle);
   CloseHandle (handle);
-  return WYRELOG_E_OK;
+  return rc;
 }
 #endif
