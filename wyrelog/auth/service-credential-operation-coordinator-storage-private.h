@@ -34,4 +34,16 @@ wyrelog_error_t wyl_service_credential_operation_coordinator_load
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, WylServiceCredentialOperationRecord * out_record);
 
+/* Durably checkpoint the server-side mutation.  The operation is selected by
+ * canonical request_id, locked relative to the anchored root, then atomically
+ * replaced only for PREPARED -> SERVER_COMMITTED.  A matching durable
+ * SERVER_COMMITTED tuple is a replay and leaves its bytes unchanged. */
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_server_committed
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * successor_credential_id,
+    guint64 successor_generation, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+
 G_END_DECLS;
