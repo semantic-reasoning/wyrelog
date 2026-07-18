@@ -124,7 +124,8 @@ gboolean
           record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
       || !text_is_valid (record->successor_credential_id, FALSE)
       || !text_is_valid (record->publication_receipt_id, FALSE)
-      || record->attempts > G_MAXINT32 || record->created_at_us <= 0
+      || record->attempts > G_MAXINT32 || record->expires_at_us <= 0
+      || record->created_at_us <= 0
       || record->updated_at_us < record->created_at_us)
     return FALSE;
   if (record->publication_receipt_version == 0
@@ -236,6 +237,7 @@ wyrelog_error_t
   append_text (bytes, record->successor_credential_id);
   append_text (bytes, record->publication_receipt_id);
   append_u64 (bytes, record->successor_generation);
+  append_u64 (bytes, (guint64) record->expires_at_us);
   append_u64 (bytes, (guint64) record->created_at_us);
   append_u64 (bytes, (guint64) record->updated_at_us);
   append_u32 (bytes, record->attempts);
@@ -303,9 +305,11 @@ wyrelog_error_t
       || !read_text (data, len, &offset, &decoded.old_credential_id)
       || !read_text (data, len, &offset, &decoded.successor_credential_id)
       || !read_text (data, len, &offset, &decoded.publication_receipt_id)
-      || len - offset < 28)
+      || len - offset < 36)
     goto invalid;
   decoded.successor_generation = get_u64 (data + offset);
+  offset += 8;
+  guint64 expires_raw = get_u64 (data + offset);
   offset += 8;
   guint64 created_raw = get_u64 (data + offset);
   offset += 8;
@@ -313,8 +317,10 @@ wyrelog_error_t
   offset += 8;
   decoded.attempts = get_u32 (data + offset);
   offset += 4;
-  if (created_raw > G_MAXINT64 || updated_raw > G_MAXINT64)
+  if (expires_raw > G_MAXINT64 || created_raw > G_MAXINT64
+      || updated_raw > G_MAXINT64)
     goto invalid;
+  decoded.expires_at_us = (gint64) expires_raw;
   decoded.created_at_us = (gint64) created_raw;
   decoded.updated_at_us = (gint64) updated_raw;
   if (offset != len

@@ -7,7 +7,7 @@
 
 G_BEGIN_DECLS;
 
-#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 1u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 2u
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES (64u * 1024u)
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_TEXT 4096u
 
@@ -46,6 +46,7 @@ typedef struct
   gchar *successor_credential_id;
   gchar *publication_receipt_id;
   guint64 successor_generation;
+  gint64 expires_at_us;
   gint64 created_at_us;
   gint64 updated_at_us;
   guint32 attempts;

@@ -12,8 +12,7 @@ G_BEGIN_DECLS;
  * caller must initialize out_record with
  * WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT; it is unchanged on error.
  * A successful replay may return any valid lifecycle state for the original
- * operation.  expires_at_us is deliberately not represented in the journal
- * record format and is therefore excluded from the durable identity tuple. */
+ * operation. expires_at_us is persisted as immutable operation intent. */
 wyrelog_error_t wyl_service_credential_operation_coordinator_begin_or_replay
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
