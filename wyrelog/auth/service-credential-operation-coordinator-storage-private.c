@@ -38,7 +38,6 @@ same_immutable_identity (const WylServiceCredentialOperationRecord *existing,
 {
   return existing->kind == prepared->kind
       && same_nullable_text (existing->request_id, prepared->request_id)
-      && same_nullable_text (existing->operation_id, prepared->operation_id)
       && same_nullable_text (existing->subject_id, prepared->subject_id)
       && same_nullable_text (existing->tenant_id, prepared->tenant_id)
       && same_nullable_text (existing->destination, prepared->destination)
@@ -134,7 +133,7 @@ wyrelog_error_t
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
-    const gchar * operation_id, gint64 now_us, gboolean * out_replayed,
+    gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record)
 {
   WylServiceCredentialOperationRecord prepared =
@@ -154,7 +153,7 @@ wyrelog_error_t
       || out_record == NULL)
     return WYRELOG_E_INVALID;
   rc = wyl_service_credential_operation_coordinator_build_prepared (request,
-      operation_id, now_us, &prepared);
+      request->request_id, now_us, &prepared);
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = record_child_name (prepared.request_id, &name);
@@ -175,7 +174,9 @@ wyrelog_error_t
     }
   } else if (rc == WYRELOG_E_OK) {
     rc = wyl_service_credential_operation_record_decode (bytes, &existing);
-    if (rc == WYRELOG_E_OK && !same_immutable_identity (&existing, &prepared))
+    if (rc == WYRELOG_E_OK
+        && (!g_str_equal (existing.operation_id, existing.request_id)
+            || !same_immutable_identity (&existing, &prepared)))
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK) {
       replayed = TRUE;
