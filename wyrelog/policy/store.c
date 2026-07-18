@@ -6528,6 +6528,13 @@ service_domain_text_is_valid (const gchar *value, gsize max_len)
   return len >= 1 && len <= max_len;
 }
 
+gboolean
+wyl_policy_service_actor_subject_is_valid (const gchar *actor_subject_id)
+{
+  return service_domain_text_is_valid (actor_subject_id, 128)
+      && g_utf8_validate (actor_subject_id, -1, NULL);
+}
+
 static wyrelog_error_t
 service_domain_fingerprint (const gchar *operation, const gchar *subject_id,
     const gchar *display_name, const gchar *actor_subject_id,
@@ -8782,7 +8789,7 @@ service_principal_create_impl (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || out == NULL || subject_id == NULL
       || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
       || !service_domain_text_is_valid (display_name, 256)
-      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
       || !service_domain_text_is_valid (request_id, 256))
     return WYRELOG_E_INVALID;
 
@@ -8898,7 +8905,7 @@ service_principal_disable_impl (wyl_policy_store_t *store,
     wyl_policy_service_principal_info_clear (out);
   if (store == NULL || store->db == NULL || out == NULL || subject_id == NULL
       || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
-      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
       || !service_domain_text_is_valid (request_id, 256))
     return WYRELOG_E_INVALID;
 
@@ -10027,7 +10034,7 @@ static wyrelog_error_t
       || subject_id == NULL
       || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
       || !wyl_policy_store_tenant_id_is_valid (tenant_id)
-      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
       || !service_domain_text_is_valid (request_id, 256)
       || expires_at_us < 0 || (expires_at_us != 0 && expires_at_us <= now_us))
     return WYRELOG_E_INVALID;
@@ -10391,7 +10398,7 @@ service_credential_revoke_impl (wyl_policy_store_t *store,
       || credential_id == NULL
       || !wyl_service_credential_id_is_canonical (credential_id,
           strlen (credential_id))
-      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
       || !service_domain_text_is_valid (request_id, 256))
     return WYRELOG_E_INVALID;
 
@@ -10659,7 +10666,7 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
       || old_credential_id == NULL
       || !wyl_service_credential_id_is_canonical (old_credential_id,
           strlen (old_credential_id))
-      || !service_domain_text_is_valid (actor_subject_id, 128)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
       || !service_domain_text_is_valid (request_id, 256)
       || new_expires_at_us < 0 || expected_generation > G_MAXINT64)
     return WYRELOG_E_INVALID;

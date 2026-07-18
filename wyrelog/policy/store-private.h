@@ -479,6 +479,10 @@ typedef wyrelog_error_t (*wyl_policy_service_credential_event_cb) (const
 
 gboolean wyl_policy_service_subject_is_valid (const gchar * subject_id,
     gsize subject_id_len);
+/* Canonical execution-actor lexical contract shared by the durable
+ * coordinator and authoritative service-domain mutations. */
+gboolean wyl_policy_service_actor_subject_is_valid (const gchar *
+    actor_subject_id);
 /* Lexical namespace reservation used by human-auth ingress.  This deliberately
  * recognizes malformed identifiers too: every lowercase `svc:` prefix belongs
  * to the service namespace and must never fall back to a human identity path. */
