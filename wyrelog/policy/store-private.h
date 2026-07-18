@@ -756,6 +756,21 @@ wyrelog_error_t
     const gchar * old_credential_id,
     WylServiceCredentialFenceResult * out_result);
 
+/* Read-only recovery precheck for a journaled credential operation.  It uses
+ * one SQLite snapshot to first re-derive committed issue/rotate evidence from
+ * service_domain_requests plus its successor event, then falls back to the
+ * terminal-only fence namespace only when no committed request exists.
+ * Matching committed evidence returns COMMITTED; a reused request id with a
+ * different operation or frozen target returns CONFLICT.  Missing or malformed
+ * committed successor evidence is WYRELOG_E_POLICY.  This never writes. */
+wyrelog_error_t
+    wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+    (wyl_policy_store_t * store, GCancellable * cancellable,
+    WylServiceCredentialFenceOperation operation, const gchar * request_id,
+    const gchar * subject_id, const gchar * tenant_id,
+    const gchar * old_credential_id,
+    WylServiceCredentialFenceResult * out_result);
+
 typedef enum
 {
   WYL_SERVICE_EXCHANGE_INTENTION_NONE,
