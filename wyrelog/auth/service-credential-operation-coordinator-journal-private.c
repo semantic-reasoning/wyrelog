@@ -27,7 +27,7 @@ wyrelog_error_t
   temp.destination = g_strdup (request->destination);
   temp.parent_identity = g_strdup (request->parent_identity);
   temp.old_credential_id = g_strdup (request->old_credential_id);
-  temp.successor_generation = request->expected_generation;
+  temp.expected_generation = request->expected_generation;
   temp.expires_at_us = request->expires_at_us;
   temp.created_at_us = now_us;
   temp.updated_at_us = now_us;
@@ -75,10 +75,7 @@ wyrelog_error_t
     if (g_strcmp0 (existing->successor_credential_id, successor_credential_id)
         != 0 || existing->successor_generation != successor_generation)
       return WYRELOG_E_POLICY;
-  } else if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED) {
-    if (successor_generation <= existing->successor_generation)
-      return WYRELOG_E_INVALID;
-  } else
+  } else if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     return WYRELOG_E_POLICY;
 
   /* The codec makes a deep copy while retaining the complete immutable

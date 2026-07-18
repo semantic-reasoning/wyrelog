@@ -35,11 +35,10 @@ static gboolean
     return FALSE;
   if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
     return text_is_absent (record->old_credential_id)
-        && (record->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
-        || record->successor_generation == 0);
+        && record->expected_generation == 0;
   return record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
       && text_is_absent (record->tenant_id)
-      && record->successor_generation > 0;
+      && record->expected_generation > 0;
 }
 
 static gboolean
@@ -67,8 +66,7 @@ static gboolean
     const WylServiceCredentialFenceResult * fence)
 {
   return fence_has_canonical_successor (fence)
-      && (record->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
-      || fence->successor_generation > record->successor_generation);
+      && record->state >= WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED;
 }
 
 wyrelog_error_t

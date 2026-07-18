@@ -45,7 +45,7 @@ same_immutable_identity (const WylServiceCredentialOperationRecord *existing,
       prepared->parent_identity)
       && same_nullable_text (existing->old_credential_id,
       prepared->old_credential_id)
-      && existing->successor_generation == prepared->successor_generation
+      && existing->expected_generation == prepared->expected_generation
       && existing->expires_at_us == prepared->expires_at_us;
 }
 

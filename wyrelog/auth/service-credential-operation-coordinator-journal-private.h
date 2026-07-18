@@ -10,7 +10,7 @@ G_BEGIN_DECLS
     const gchar * operation_id, gint64 now_us,
     WylServiceCredentialOperationRecord * out_record);
 
-/* Advance a valid v2 PREPARED record after the server-side credential
+/* Advance a valid v3 PREPARED record after the server-side credential
  * mutation has committed.  A matching SERVER_COMMITTED record is replayed
  * without changing its durable timestamp.  out_record is unchanged on
  * failure. */
