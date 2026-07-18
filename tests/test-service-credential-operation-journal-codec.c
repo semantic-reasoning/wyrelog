@@ -17,7 +17,7 @@ record_new (gchar request_id[WYL_REQUEST_ID_STRING_BUF],
   WylServiceCredentialOperationRecord record = {
     .version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,
     .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE,
-    .state = WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED,
+    .state = WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED,
     .operation_id = g_strdup ("operation-1"),
     .request_id = g_strdup (request_id),
     .subject_id = g_strdup ("user-1"),
@@ -28,6 +28,7 @@ record_new (gchar request_id[WYL_REQUEST_ID_STRING_BUF],
     .old_credential_id = g_strdup (""),
     .successor_credential_id = g_strdup (credential_id),
     .publication_receipt_id = g_strdup (""),
+    .expected_generation = 0,
     .successor_generation = 1,
     .expires_at_us = 200,
     .created_at_us = 100,
@@ -56,6 +57,7 @@ test_roundtrip (void)
   g_assert_cmpstr (output.request_id, ==, input.request_id);
   g_assert_cmpstr (output.destination, ==, input.destination);
   g_assert_cmpuint (output.successor_generation, ==, 1);
+  g_assert_cmpuint (output.expected_generation, ==, 0);
   g_assert_cmpint (output.expires_at_us, ==, input.expires_at_us);
   g_assert_cmpint (output.state, ==, input.state);
   g_assert_true (g_bytes_get_size (bytes) <
@@ -95,6 +97,16 @@ test_rejects_trailing_and_unknown (void)
   g_assert_cmpint (wyl_service_credential_operation_record_decode (prior,
           &output), ==, WYRELOG_E_POLICY);
   g_assert_null (output.request_id);
+  prior_version = g_memdup2 (data, len);
+  prior_version[8] = 0;
+  prior_version[9] = 0;
+  prior_version[10] = 0;
+  prior_version[11] = 2;
+  GBytes *v2 = g_bytes_new_take (prior_version, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (v2,
+          &output), ==, WYRELOG_E_POLICY);
+  g_assert_null (output.request_id);
+  g_bytes_unref (v2);
   g_bytes_unref (prior);
   g_bytes_unref (bad);
   g_bytes_unref (encoded);

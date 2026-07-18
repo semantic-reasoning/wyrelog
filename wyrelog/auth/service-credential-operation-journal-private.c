@@ -8,7 +8,7 @@
 
 #define JOURNAL_MAGIC "WYLJNL01"
 #define JOURNAL_MAGIC_LEN 8u
-#define JOURNAL_FIELD_COUNT 12u
+#define JOURNAL_FIELD_COUNT 13u
 
 static void
 put_u32 (guint8 out[4], guint32 value)
@@ -157,8 +157,22 @@ gboolean
       && record->old_credential_id != NULL
       && record->old_credential_id[0] != '\0')
     return FALSE;
-  if (record->successor_generation > G_MAXINT64)
+  if (record->expected_generation > G_MAXINT64
+      || record->successor_generation > G_MAXINT64)
     return FALSE;
+  if ((record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE
+          && record->expected_generation != 0)
+      || (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
+          && record->expected_generation == 0))
+    return FALSE;
+  if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
+    return (record->successor_credential_id == NULL
+        || record->successor_credential_id[0] == '\0')
+        && record->successor_generation == 0;
+  if (record->state >= WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED)
+    return record->successor_credential_id != NULL
+        && record->successor_credential_id[0] != '\0'
+        && record->successor_generation > 0;
   return TRUE;
 }
 
@@ -236,6 +250,7 @@ wyrelog_error_t
   append_text (bytes, record->old_credential_id);
   append_text (bytes, record->successor_credential_id);
   append_text (bytes, record->publication_receipt_id);
+  append_u64 (bytes, record->expected_generation);
   append_u64 (bytes, record->successor_generation);
   append_u64 (bytes, (guint64) record->expires_at_us);
   append_u64 (bytes, (guint64) record->created_at_us);
@@ -305,8 +320,10 @@ wyrelog_error_t
       || !read_text (data, len, &offset, &decoded.old_credential_id)
       || !read_text (data, len, &offset, &decoded.successor_credential_id)
       || !read_text (data, len, &offset, &decoded.publication_receipt_id)
-      || len - offset < 36)
+      || len - offset < 44)
     goto invalid;
+  decoded.expected_generation = get_u64 (data + offset);
+  offset += 8;
   decoded.successor_generation = get_u64 (data + offset);
   offset += 8;
   guint64 expires_raw = get_u64 (data + offset);

@@ -66,7 +66,8 @@ test_builder (void)
   g_assert_null (out.tenant_id);
   g_assert_cmpstr (out.old_credential_id, ==,
       "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv");
-  g_assert_cmpuint (out.successor_generation, ==, 1);
+  g_assert_cmpuint (out.expected_generation, ==, 1);
+  g_assert_cmpuint (out.successor_generation, ==, 0);
   g_assert_cmpint (out.created_at_us, ==, 1);
   g_assert_cmpint (out.updated_at_us, ==, 1);
   g_autofree gchar *rotate_operation = g_strdup (out.operation_id);
@@ -97,6 +98,7 @@ test_server_committed_builder (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
   g_assert_cmpstr (committed.successor_credential_id, ==, successor);
   g_assert_cmpuint (committed.successor_generation, ==, 1);
+  g_assert_cmpuint (committed.expected_generation, ==, 0);
   g_assert_cmpint (committed.created_at_us, ==, 10);
   g_assert_cmpint (committed.updated_at_us, ==, 11);
   g_autofree gchar *saved_id = g_strdup (committed.successor_credential_id);
@@ -121,18 +123,19 @@ test_server_committed_builder (void)
       (&rotate, rotate.request_id, 10, &prepared), ==, WYRELOG_E_OK);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_server_committed
-      (&prepared, successor, 2, 10, &committed), ==, WYRELOG_E_OK);
-  g_assert_cmpuint (committed.successor_generation, ==, 2);
+      (&prepared, successor, 1, 10, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (committed.successor_generation, ==, 1);
+  g_assert_cmpuint (committed.expected_generation, ==, 1);
   wyl_service_credential_operation_record_clear (&committed);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_server_committed
-      (&prepared, "not-canonical", 2, 10, &committed), ==, WYRELOG_E_INVALID);
+      (&prepared, "not-canonical", 1, 10, &committed), ==, WYRELOG_E_INVALID);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_server_committed
-      (&prepared, successor, 1, 10, &committed), ==, WYRELOG_E_INVALID);
+      (&prepared, successor, 0, 10, &committed), ==, WYRELOG_E_INVALID);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_server_committed
-      (&prepared, successor, 2, 9, &committed), ==, WYRELOG_E_INVALID);
+      (&prepared, successor, 1, 9, &committed), ==, WYRELOG_E_INVALID);
   g_assert_null (committed.operation_id);
   wyl_service_credential_operation_record_clear (&prepared);
   wyl_service_credential_operation_coordinator_request_clear (&rotate);
@@ -812,6 +815,9 @@ test_load_valid_snapshots (JournalFixture *fixture, gconstpointer unused)
       (&committed_request, committed_request.request_id, 1, &committed), ==,
       WYRELOG_E_OK);
   committed.state = WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED;
+  committed.successor_credential_id =
+      g_strdup ("wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv");
+  committed.successor_generation = 1;
   g_autoptr (GBytes) bytes = NULL;
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
@@ -834,6 +840,103 @@ test_load_valid_snapshots (JournalFixture *fixture, gconstpointer unused)
       (&committed_request);
   wyl_service_credential_operation_coordinator_request_clear
       (&prepared_request);
+}
+
+static void
+test_rotate_expected_generation_is_immutable (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  WylServiceCredentialOperationCoordinatorRequest rotate = request ();
+  WylServiceCredentialOperationCoordinatorRequest changed = request ();
+  WylServiceCredentialOperationRecord begun =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord loaded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) committed_bytes = NULL;
+  g_autoptr (GBytes) replay_bytes = NULL;
+  gboolean replayed = FALSE;
+
+  rotate.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE;
+  g_clear_pointer (&rotate.tenant_id, g_free);
+  rotate.old_credential_id = g_strdup (successor);
+  rotate.expected_generation = 1;
+  g_clear_pointer (&changed.request_id, g_free);
+  changed.request_id = g_strdup (rotate.request_id);
+  changed.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE;
+  g_clear_pointer (&changed.tenant_id, g_free);
+  changed.old_credential_id = g_strdup (successor);
+  changed.expected_generation = 2;
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &rotate, 10, &replayed,
+          &begun), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpuint (begun.expected_generation, ==, 1);
+  g_assert_cmpuint (begun.successor_generation, ==, 0);
+  g_autofree gchar *saved_operation = g_strdup (begun.operation_id);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &changed, 11, NULL, &begun), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpstr (begun.operation_id, ==, saved_operation);
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+      (&fixture->storage, &fixture->anchor, rotate.request_id, successor, 1,
+          12, &replayed, &committed), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (committed.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpuint (committed.expected_generation, ==, 1);
+  g_assert_cmpuint (committed.successor_generation, ==, 1);
+  g_assert_cmpstr (committed.successor_credential_id, ==, successor);
+  record_name (rotate.request_id, &name);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &committed_bytes), ==,
+      WYRELOG_E_OK);
+
+  wyl_service_credential_operation_storage_clear (&fixture->storage);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (fixture->root,
+          &fixture->storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+      (&fixture->storage, &fixture->anchor, rotate.request_id, &loaded), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (loaded.expected_generation, ==, 1);
+  g_assert_cmpuint (loaded.successor_generation, ==, 1);
+  g_assert_cmpstr (loaded.successor_credential_id, ==, successor);
+  wyl_service_credential_operation_record_clear (&loaded);
+
+  replayed = FALSE;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &rotate, 99, &replayed,
+          &loaded), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (loaded.updated_at_us, ==, 12);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (committed_bytes, replay_bytes));
+  g_autofree gchar *saved_loaded = g_strdup (loaded.operation_id);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &changed, 100, NULL, &loaded), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpstr (loaded.operation_id, ==, saved_loaded);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (committed_bytes, replay_bytes));
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&loaded);
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&begun);
+  wyl_service_credential_operation_coordinator_request_clear (&changed);
+  wyl_service_credential_operation_coordinator_request_clear (&rotate);
 }
 
 static void
@@ -953,6 +1056,9 @@ main (int argc, char **argv)
   g_test_add ("/coordinator/journal/load-valid-snapshots", JournalFixture,
       NULL, journal_fixture_set_up, test_load_valid_snapshots,
       journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/rotate-expected-generation", JournalFixture,
+      NULL, journal_fixture_set_up,
+      test_rotate_expected_generation_is_immutable, journal_fixture_tear_down);
   g_test_add ("/coordinator/journal/load-fails-closed", JournalFixture, NULL,
       journal_fixture_set_up, test_load_fails_closed_and_preserves_output,
       journal_fixture_tear_down);

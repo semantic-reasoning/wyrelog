@@ -7,7 +7,7 @@
 
 G_BEGIN_DECLS;
 
-#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 2u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 3u
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES (64u * 1024u)
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_TEXT 4096u
 
@@ -45,6 +45,9 @@ typedef struct
   gchar *old_credential_id;
   gchar *successor_credential_id;
   gchar *publication_receipt_id;
+  /* Immutable request intent.  It never describes the successor. */
+  guint64 expected_generation;
+  /* Actual committed successor generation; zero before server commit. */
   guint64 successor_generation;
   gint64 expires_at_us;
   gint64 created_at_us;
