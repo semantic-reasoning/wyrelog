@@ -207,15 +207,18 @@ test_begin_or_replay (JournalFixture *fixture, gconstpointer unused)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecord second =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord third =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   g_autoptr (GBytes) bytes = NULL;
   gboolean replayed = TRUE;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 10, &replayed,
-          &first), ==, WYRELOG_E_OK);
+      (&fixture->storage, &fixture->anchor, &r, 10, &replayed, &first), ==,
+      WYRELOG_E_OK);
   g_assert_false (replayed);
   g_assert_cmpint (first.state, ==, WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
+  g_assert_cmpstr (first.operation_id, ==, r.request_id);
   record_name (r.request_id, &name);
   g_assert_cmpint (fixture_child_read (fixture, &name, &bytes), ==,
       WYRELOG_E_OK);
@@ -226,7 +229,7 @@ test_begin_or_replay (JournalFixture *fixture, gconstpointer unused)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_record_decode (bytes,
           &decoded), ==, WYRELOG_E_OK);
-  g_assert_cmpstr (decoded.operation_id, ==, "operation");
+  g_assert_cmpstr (decoded.operation_id, ==, r.request_id);
   g_assert_cmpstr (decoded.subject_id, ==, "subject");
   wyl_service_credential_operation_record_clear (&decoded);
   g_clear_pointer (&bytes, g_bytes_unref);
@@ -237,12 +240,22 @@ test_begin_or_replay (JournalFixture *fixture, gconstpointer unused)
       (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
   replayed = FALSE;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 99, &replayed,
-          &second), ==, WYRELOG_E_OK);
+      (&fixture->storage, &fixture->anchor, &r, 99, &replayed, &second), ==,
+      WYRELOG_E_OK);
   g_assert_true (replayed);
   g_assert_cmpstr (second.operation_id, ==, first.operation_id);
   g_assert_cmpint (second.created_at_us, ==, first.created_at_us);
+  WylServiceCredentialOperationCoordinatorRequest r2 = request ();
+  replayed = TRUE;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r2, 100, &replayed, &third), ==,
+      WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpstr (third.operation_id, ==, r2.request_id);
+  g_assert_cmpstr (third.operation_id, !=, first.operation_id);
   wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_coordinator_request_clear (&r2);
+  wyl_service_credential_operation_record_clear (&third);
   wyl_service_credential_operation_record_clear (&second);
   wyl_service_credential_operation_record_clear (&first);
   wyl_service_credential_operation_coordinator_request_clear (&r);
@@ -257,21 +270,21 @@ test_begin_or_replay_conflict (JournalFixture *fixture, gconstpointer unused)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   gboolean replayed = FALSE;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 1, &replayed,
-          &out), ==, WYRELOG_E_OK);
+      (&fixture->storage, &fixture->anchor, &r, 1, &replayed, &out), ==,
+      WYRELOG_E_OK);
   g_autofree gchar *saved_operation = g_strdup (out.operation_id);
   g_clear_pointer (&r.destination, g_free);
   r.destination = g_strdup ("changed");
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 2, &replayed,
-          &out), ==, WYRELOG_E_POLICY);
+      (&fixture->storage, &fixture->anchor, &r, 2, &replayed, &out), ==,
+      WYRELOG_E_POLICY);
   g_assert_cmpstr (out.operation_id, ==, saved_operation);
   g_clear_pointer (&r.destination, g_free);
   r.destination = g_strdup ("record");
   r.expires_at_us++;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 3, &replayed,
-          &out), ==, WYRELOG_E_POLICY);
+      (&fixture->storage, &fixture->anchor, &r, 3, &replayed, &out), ==,
+      WYRELOG_E_POLICY);
   g_assert_cmpstr (out.operation_id, ==, saved_operation);
   wyl_service_credential_operation_record_clear (&out);
   wyl_service_credential_operation_coordinator_request_clear (&r);
@@ -292,8 +305,8 @@ test_begin_or_replay_malformed_fails_closed (JournalFixture *fixture,
   g_assert_cmpint (fixture_child_create (fixture, &name, malformed), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 1, NULL, &out),
-      ==, WYRELOG_E_POLICY);
+      (&fixture->storage, &fixture->anchor, &r, 1, NULL, &out), ==,
+      WYRELOG_E_POLICY);
   g_assert_null (out.operation_id);
   g_autoptr (GBytes) after = NULL;
   g_assert_cmpint (fixture_child_read (fixture, &name, &after), ==,
@@ -317,11 +330,28 @@ test_begin_or_replay_busy (JournalFixture *fixture, gconstpointer unused)
   g_assert_cmpint (fixture_child_lock (fixture, &name, &lock), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
-      (&fixture->storage, &fixture->anchor, &r, "operation", 1, NULL, &out),
-      ==, WYRELOG_E_BUSY);
+      (&fixture->storage, &fixture->anchor, &r, 1, NULL, &out), ==,
+      WYRELOG_E_BUSY);
   g_assert_null (out.operation_id);
   fixture_child_unlock (fixture, &name, lock);
   wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_coordinator_request_clear (&r);
+}
+
+static void
+test_begin_or_replay_rejects_noncanonical_request (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest r = request ();
+  WylServiceCredentialOperationRecord out =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_clear_pointer (&r.request_id, g_free);
+  r.request_id = g_strdup ("not-a-canonical-request-id");
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, 1, NULL, &out), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (out.operation_id);
   wyl_service_credential_operation_coordinator_request_clear (&r);
 }
 
@@ -340,6 +370,10 @@ main (int argc, char **argv)
       journal_fixture_tear_down);
   g_test_add ("/coordinator/journal/begin-or-replay-busy", JournalFixture,
       NULL, journal_fixture_set_up, test_begin_or_replay_busy,
+      journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/begin-or-replay-noncanonical-request",
+      JournalFixture, NULL, journal_fixture_set_up,
+      test_begin_or_replay_rejects_noncanonical_request,
       journal_fixture_tear_down);
   return g_test_run ();
 }
