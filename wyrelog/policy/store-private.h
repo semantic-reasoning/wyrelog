@@ -439,6 +439,50 @@ typedef struct
   gint64 updated_at_us;
 } wyl_policy_service_cvk_info_t;
 
+/* Private, provider-sealed material retained between a committed credential
+ * mutation and its owner-only delivery.  The caller supplies only a
+ * non-secret binding digest; the store independently seals the secret and
+ * verifies every persisted identity again before unsealing it. */
+#define WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES 32u
+
+typedef struct
+{
+  const wyl_id_t *escrow_id;
+  const gchar *operation;
+  const gchar *request_id;
+  const gchar *actor_subject_id;
+  const guint8 *target_digest;
+  const gchar *credential_id;
+  guint64 credential_generation;
+  gint64 deadline_at_us;
+  const guint8 *binding_digest;
+  const guint8 *secret;
+  gsize secret_len;
+} wyl_policy_service_handoff_escrow_input_t;
+
+typedef struct
+{
+  wyl_id_t escrow_id;
+  gchar *operation;
+  gchar *request_id;
+  gchar *actor_subject_id;
+  guint8 target_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  gchar *credential_id;
+  guint64 credential_generation;
+  gint64 deadline_at_us;
+  guint8 binding_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+} wyl_policy_service_handoff_escrow_info_t;
+
+typedef struct wyl_policy_service_handoff_secret_t
+    wyl_policy_service_handoff_secret_t;
+
+void wyl_policy_service_handoff_escrow_info_clear
+    (wyl_policy_service_handoff_escrow_info_t * info);
+void wyl_policy_service_handoff_secret_clear
+    (wyl_policy_service_handoff_secret_t ** secret);
+const guint8 *wyl_policy_service_handoff_secret_peek
+    (const wyl_policy_service_handoff_secret_t * secret, gsize * out_len);
+
 typedef struct
 {
   gint64 event_id;
@@ -970,6 +1014,22 @@ wyrelog_error_t wyl_policy_store_materialize_service_cvk_existing
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
 wyrelog_error_t wyl_policy_store_ensure_service_cvk_for_issuance
     (wyl_policy_store_t * store, const guint8 ** out_cvk, gsize * out_len);
+
+/* Private service-authority escrow. Sealed bytes never leave this module;
+ * unseal returns a store-runtime locked secret object only. Insert is safe to
+ * call while the caller's SQLite authority transaction is active. */
+wyrelog_error_t wyl_policy_store_service_handoff_escrow_insert
+    (wyl_policy_store_t * store,
+    const wyl_policy_service_handoff_escrow_input_t * input);
+wyrelog_error_t wyl_policy_store_service_handoff_escrow_load
+    (wyl_policy_store_t * store, const wyl_id_t * escrow_id,
+    wyl_policy_service_handoff_escrow_info_t * out_info);
+wyrelog_error_t wyl_policy_store_service_handoff_escrow_unseal
+    (wyl_policy_store_t * store,
+    const wyl_policy_service_handoff_escrow_info_t * expected,
+    wyl_policy_service_handoff_secret_t ** out_secret);
+wyrelog_error_t wyl_policy_store_service_handoff_escrow_delete
+    (wyl_policy_store_t * store, const wyl_id_t * escrow_id);
 /* Issuance initializes/materializes the CVK before its lifecycle savepoint.
  * A later domain failure may therefore leave only the idempotent CVK row;
  * credential, event, ledger and audit rows still roll back together. */
