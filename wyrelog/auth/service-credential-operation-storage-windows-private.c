@@ -30,6 +30,28 @@ typedef struct
   BOOLEAN DeleteFile;
 } WylFileDispositionInfo;
 
+static wyrelog_error_t
+wyl_win_nt_create_error (NTSTATUS status)
+{
+  switch ((ULONG) status) {
+    case 0xC0000034UL:         /* STATUS_OBJECT_NAME_NOT_FOUND */
+      return WYRELOG_E_NOT_FOUND;
+    case 0xC0000043UL:         /* STATUS_SHARING_VIOLATION */
+      return WYRELOG_E_BUSY;
+    case 0xC0000022UL:         /* STATUS_ACCESS_DENIED */
+    case 0xC0000035UL:         /* STATUS_OBJECT_NAME_COLLISION */
+    case 0xC0000024UL:         /* STATUS_OBJECT_TYPE_MISMATCH */
+    case 0xC00000BAUL:         /* STATUS_FILE_IS_A_DIRECTORY */
+    case 0xC0000103UL:         /* STATUS_NOT_A_DIRECTORY */
+    case 0xC0000279UL:         /* STATUS_IO_REPARSE_TAG_NOT_HANDLED */
+    case 0xC000050BUL:         /* STATUS_REPARSE_POINT_ENCOUNTERED */
+    case 0x8000002DUL:         /* STATUS_STOPPED_ON_SYMLINK */
+      return WYRELOG_E_POLICY;
+    default:
+      return WYRELOG_E_IO;
+  }
+}
+
 static WylNtSetInformationFile
 wyl_win_nt_set_information (void)
 {
@@ -203,8 +225,7 @@ wyl_win_nt_create_relative (HANDLE root,
   attributes.RootDirectory = root;
   attributes.ObjectName = &unicode_name;
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
-  if (out_identity != NULL)
-    access |= FILE_READ_ATTRIBUTES;
+  access |= FILE_READ_ATTRIBUTES;
   switch (disposition) {
     case WYL_WIN_CHILD_CREATE:
       create_disposition = FILE_CREATE;
@@ -221,20 +242,22 @@ wyl_win_nt_create_relative (HANDLE root,
       FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
       | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
   if (status < 0 || handle == INVALID_HANDLE_VALUE) {
-    *out_error = status == (NTSTATUS) 0xC0000034L
-        ? WYRELOG_E_NOT_FOUND : status == (NTSTATUS) 0xC0000035L
-        ? WYRELOG_E_POLICY : status == (NTSTATUS) 0xC0000022L
-        ? WYRELOG_E_POLICY : status == (NTSTATUS) 0xC0000043L
-        ? WYRELOG_E_BUSY : WYRELOG_E_IO;
+    *out_error = wyl_win_nt_create_error (status);
+    return FALSE;
+  }
+  BY_HANDLE_FILE_INFORMATION info;
+  if (!GetFileInformationByHandle (handle, &info)) {
+    CloseHandle (handle);
+    *out_error = WYRELOG_E_IO;
+    return FALSE;
+  }
+  if ((info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+              | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+    CloseHandle (handle);
+    *out_error = WYRELOG_E_POLICY;
     return FALSE;
   }
   if (out_identity != NULL) {
-    BY_HANDLE_FILE_INFORMATION info;
-    if (!GetFileInformationByHandle (handle, &info)) {
-      CloseHandle (handle);
-      *out_error = WYRELOG_E_IO;
-      return FALSE;
-    }
     out_identity->volume_serial = info.dwVolumeSerialNumber;
     out_identity->file_index_high = info.nFileIndexHigh;
     out_identity->file_index_low = info.nFileIndexLow;
