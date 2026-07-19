@@ -490,10 +490,16 @@ test_windows_directory_flush_failures (void)
   wyl_win_child_fail_next_directory_flush_for_test (ERROR_NOT_SUPPORTED);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
       WYRELOG_E_OK);
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_INVALID_FUNCTION);
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
+      WYRELOG_E_OK);
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_INVALID_HANDLE);
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
 
-  /* A real flush failure is returned even after an atomic replace has made
-   * the new record visible. */
-  wyl_win_child_fail_next_directory_flush_for_test (ERROR_WRITE_FAULT);
+  /* The root is opened writable, so access denial is an I/O failure rather
+   * than evidence that directory flushing is unsupported. */
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_ACCESS_DENIED);
   g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
       WYRELOG_E_IO);
   g_autoptr (GBytes) replaced = NULL;
