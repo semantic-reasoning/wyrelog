@@ -351,6 +351,47 @@ test_windows_child_read_validation (void)
 }
 
 static void
+test_windows_live_root_validation (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-live-root-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationRootAnchor probe =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+
+  DWORD saved_index = storage.root_file_index_low;
+  storage.root_file_index_low ^= 1u;
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &probe), ==, WYRELOG_E_POLICY);
+  storage.root_file_index_low = saved_index;
+  g_assert_true (wyl_service_credential_operation_storage_anchor_matches
+      (&storage, &anchor));
+
+  HANDLE saved_handle = storage.root_handle;
+  storage.root_handle = INVALID_HANDLE_VALUE;
+  g_assert_false (wyl_service_credential_operation_storage_anchor_matches
+      (&storage, &anchor));
+  storage.root_handle = saved_handle;
+  g_assert_true (wyl_service_credential_operation_storage_anchor_matches
+      (&storage, &anchor));
+
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+
+static void
 test_windows_child_read_fixture (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -495,7 +536,7 @@ test_windows_directory_flush_failures (void)
       WYRELOG_E_OK);
   wyl_win_child_fail_next_directory_flush_for_test (ERROR_INVALID_HANDLE);
   g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, one), ==,
-      WYRELOG_E_OK);
+      WYRELOG_E_IO);
 
   /* The root is opened writable, so access denial is an I/O failure rather
    * than evidence that directory flushing is unsupported. */
@@ -864,6 +905,8 @@ main (int argc, char **argv)
 #ifdef G_OS_WIN32
   g_test_add_func ("/operation-storage/windows/child-read-validation",
       test_windows_child_read_validation);
+  g_test_add_func ("/operation-storage/windows/live-root-validation",
+      test_windows_live_root_validation);
   g_test_add_func ("/operation-storage/windows/child-read-fixture",
       test_windows_child_read_fixture);
   g_test_add_func ("/operation-storage/windows/child-create-fixture",
