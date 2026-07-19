@@ -80,8 +80,19 @@ kind_is_valid (WylServiceCredentialOperationKind kind)
 static gboolean
 state_is_valid (WylServiceCredentialOperationState state)
 {
-  return state >= WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
-      && state <= WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+  switch (state) {
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL:
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED:
+      return TRUE;
+    default:
+      return FALSE;
+  }
 }
 
 static gboolean
@@ -164,17 +175,26 @@ gboolean
   if (record->publication_receipt_version == 1
       && (!text_is_valid (record->reservation_id, TRUE)
           || !text_is_valid (record->stage_basename, TRUE)
-          || !text_is_valid (record->stage_identity, TRUE)
           || !text_is_valid (record->publication_receipt_id, TRUE)))
     return FALSE;
   if ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
           || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED)
       && record->publication_receipt_version != 0)
     return FALSE;
-  if ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+  if ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+          || record->state
+          == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
           || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
           || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)
       && record->publication_receipt_version != 1)
+    return FALSE;
+  if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+      && text_is_valid (record->stage_identity, TRUE))
+    return FALSE;
+  if ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+          || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+          || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)
+      && !text_is_valid (record->stage_identity, TRUE))
     return FALSE;
   if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
       && !wyl_service_credential_id_is_canonical (record->old_credential_id,
@@ -210,7 +230,7 @@ gboolean
     return (record->successor_credential_id == NULL
         || record->successor_credential_id[0] == '\0')
         && record->successor_generation == 0;
-  if (record->state >= WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED)
+  if (record->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     return record->successor_credential_id != NULL
         && record->successor_credential_id[0] != '\0'
         && record->successor_generation > 0

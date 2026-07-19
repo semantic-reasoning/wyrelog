@@ -30,6 +30,13 @@ wyrelog_error_t
     WylServiceCredentialOperationRecord * out_record);
 
 wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_publication_planned
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * reservation_id, const gchar * stage_basename,
+    const gchar * publication_receipt_id, gint64 now_us,
+    WylServiceCredentialOperationRecord * out_record);
+
+wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_publication_prepared
     (const WylServiceCredentialOperationRecord * existing,
     const gchar * reservation_id, const gchar * stage_basename,

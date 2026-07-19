@@ -20,6 +20,19 @@ record_child_name (const gchar *request_id,
   return wyl_service_credential_operation_child_name_validate (raw, out_name);
 }
 
+static wyrelog_error_t
+lifecycle_lock_child_name (const gchar *request_id,
+    WylServiceCredentialOperationChildName *out_name)
+{
+  g_autofree gchar *raw = NULL;
+  if (request_id == NULL || out_name == NULL)
+    return WYRELOG_E_INVALID;
+  raw = g_strdup_printf ("lifecycle-%s", request_id);
+  if (raw == NULL)
+    return WYRELOG_E_NOMEM;
+  return wyl_service_credential_operation_child_name_validate (raw, out_name);
+}
+
 static gboolean
 same_nullable_text (const gchar *a, const gchar *b)
 {
@@ -151,6 +164,60 @@ storage_child_unlock (const WylServiceCredentialOperationStorage *storage,
   wyl_win_child_unlock (storage, anchor, name, lock);
 }
 #endif
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_lock_acquire
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    WylServiceCredentialOperationCoordinatorLock * out_lock)
+{
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock native = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  wyrelog_error_t rc;
+  if (storage == NULL || anchor == NULL || out_lock == NULL
+      || out_lock->native_handle != NULL
+      || out_lock->child_name.component != NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id))
+    return WYRELOG_E_INVALID;
+  rc = lifecycle_lock_child_name (request_id, &name);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = storage_child_lock (storage, anchor, &name, &native);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_credential_operation_child_name_clear (&name);
+    return rc;
+  }
+#ifndef G_OS_WIN32
+  out_lock->native_handle = GINT_TO_POINTER (native + 1);
+#else
+  out_lock->native_handle = native;
+#endif
+  out_lock->child_name = name;
+  return WYRELOG_E_OK;
+}
+
+void wyl_service_credential_operation_coordinator_lock_release
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    WylServiceCredentialOperationCoordinatorLock * lock)
+{
+  if (lock == NULL)
+    return;
+  if (lock->native_handle != NULL && lock->child_name.component != NULL) {
+#ifndef G_OS_WIN32
+    WylCoordinatorJournalLock native =
+        GPOINTER_TO_INT (lock->native_handle) - 1;
+#else
+    WylCoordinatorJournalLock native = lock->native_handle;
+#endif
+    storage_child_unlock (storage, anchor, &lock->child_name, native);
+  }
+  lock->native_handle = NULL;
+  wyl_service_credential_operation_child_name_clear (&lock->child_name);
+}
 
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_load
@@ -349,4 +416,143 @@ wyrelog_error_t
       wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
       (storage, anchor, request_id, successor_credential_id,
       successor_generation, NULL, now_us, out_replayed, out_record);
+}
+
+typedef enum
+{
+  CHECKPOINT_PUBLICATION_PLANNED,
+  CHECKPOINT_PUBLICATION_PREPARED,
+  CHECKPOINT_FILE_PUBLISHED,
+} PublicationCheckpoint;
+
+static wyrelog_error_t
+checkpoint_publication (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const gchar *request_id, PublicationCheckpoint checkpoint,
+    const gchar *reservation_id, const gchar *stage_basename,
+    const gchar *stage_identity, const gchar *publication_receipt_id,
+    gint64 now_us, gboolean *out_replayed,
+    WylServiceCredentialOperationRecord *out_record)
+{
+  WylServiceCredentialOperationRecord existing =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock lock = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  WylServiceCredentialOperationState target_state;
+  gboolean replayed = FALSE;
+  wyrelog_error_t rc;
+
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (storage == NULL || anchor == NULL || out_record == NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id))
+    return WYRELOG_E_INVALID;
+  rc = record_child_name (request_id, &name);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_lock (storage, anchor, &name, &lock);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_service_credential_operation_record_decode (bytes, &existing);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!g_str_equal (existing.request_id, request_id)
+      || !g_str_equal (existing.operation_id, request_id)) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  switch (checkpoint) {
+    case CHECKPOINT_PUBLICATION_PLANNED:
+      target_state = WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED;
+      rc = wyl_service_credential_operation_coordinator_build_publication_planned (&existing, reservation_id, stage_basename, publication_receipt_id, now_us, &next);
+      break;
+    case CHECKPOINT_PUBLICATION_PREPARED:
+      target_state = WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED;
+      rc = wyl_service_credential_operation_coordinator_build_publication_prepared (&existing, reservation_id, stage_basename, stage_identity, publication_receipt_id, now_us, &next);
+      break;
+    case CHECKPOINT_FILE_PUBLISHED:
+      target_state = WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED;
+      rc = wyl_service_credential_operation_coordinator_build_file_published
+          (&existing, reservation_id, stage_basename, stage_identity,
+          publication_receipt_id, now_us, &next);
+      break;
+    default:
+      rc = WYRELOG_E_INVALID;
+      goto out;
+  }
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  replayed = existing.state == target_state;
+  if (!replayed) {
+    g_clear_pointer (&bytes, g_bytes_unref);
+    rc = wyl_service_credential_operation_record_encode (&next, &bytes);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    rc = storage_child_replace (storage, anchor, &name, bytes);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+  }
+  wyl_service_credential_operation_record_clear (out_record);
+  *out_record = next;
+  next = (WylServiceCredentialOperationRecord)
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+out:
+  if (lock != WYL_COORDINATOR_JOURNAL_LOCK_INIT)
+    storage_child_unlock (storage, anchor, &name, lock);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&next);
+  wyl_service_credential_operation_record_clear (&existing);
+  if (rc == WYRELOG_E_OK && out_replayed != NULL)
+    *out_replayed = replayed;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * reservation_id,
+    const gchar * stage_basename, const gchar * publication_receipt_id,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_publication (storage, anchor, request_id,
+      CHECKPOINT_PUBLICATION_PLANNED, reservation_id, stage_basename, NULL,
+      publication_receipt_id, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * reservation_id,
+    const gchar * stage_basename, const gchar * stage_identity,
+    const gchar * publication_receipt_id, gint64 now_us,
+    gboolean * out_replayed, WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_publication (storage, anchor, request_id,
+      CHECKPOINT_PUBLICATION_PREPARED, reservation_id, stage_basename,
+      stage_identity, publication_receipt_id, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_file_published
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * reservation_id,
+    const gchar * stage_basename, const gchar * stage_identity,
+    const gchar * publication_receipt_id, gint64 now_us,
+    gboolean * out_replayed, WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_publication (storage, anchor, request_id,
+      CHECKPOINT_FILE_PUBLISHED, reservation_id, stage_basename,
+      stage_identity, publication_receipt_id, now_us, out_replayed, out_record);
 }
