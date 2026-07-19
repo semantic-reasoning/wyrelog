@@ -42,12 +42,22 @@ fixture_init (Fixture *fixture)
 static gchar *
 encode_identity_for_test (const struct stat *st)
 {
+#if defined(__APPLE__)
+  gint64 mtime_sec = (gint64) st->st_mtimespec.tv_sec;
+  gint64 mtime_nsec = (gint64) st->st_mtimespec.tv_nsec;
+#else
+  gint64 mtime_sec = (gint64) st->st_mtim.tv_sec;
+  gint64 mtime_nsec = (gint64) st->st_mtim.tv_nsec;
+#endif
   return g_strdup_printf ("%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
       "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
-      "%" G_GUINT64_FORMAT,
+      "%" G_GUINT64_FORMAT ":%" G_GINT64_FORMAT ":"
+      "%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT,
       (guint64) st->st_dev,
       (guint64) st->st_ino,
-      (guint64) st->st_uid, (guint64) st->st_gid, (guint64) st->st_mode);
+      (guint64) st->st_uid,
+      (guint64) st->st_gid,
+      (guint64) st->st_mode, (gint64) st->st_size, mtime_sec, mtime_nsec);
 }
 
 static void
@@ -207,16 +217,17 @@ test_receipt_target_lease_roundtrip_and_foreign_identity (void)
   lease = NULL;
 
   g_assert_cmpint (g_remove (destination_path), ==, 0);
-  g_assert_true (g_file_set_contents (destination_path, "foreign", -1, NULL));
-  g_assert_cmpint (g_chmod (destination_path, 0600), ==, 0);
-  g_assert_cmpint (wyctl_publication_posix_receipt_target_acquire
-      (&fixture.backend, &planned, &receipt, TRUE, &lease, &kind), ==,
-      WYRELOG_E_OK);
-  g_assert_null (lease);
-  g_assert_cmpint (kind, ==,
-      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
-
-  g_assert_cmpint (g_remove (destination_path), ==, 0);
+  for (guint i = 0; i < 100; i++) {
+    g_assert_true (g_file_set_contents (destination_path, "foreign", -1, NULL));
+    g_assert_cmpint (g_chmod (destination_path, 0600), ==, 0);
+    g_assert_cmpint (wyctl_publication_posix_receipt_target_acquire
+        (&fixture.backend, &planned, &receipt, TRUE, &lease, &kind), ==,
+        WYRELOG_E_OK);
+    g_assert_null (lease);
+    g_assert_cmpint (kind, ==,
+        WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
+    g_assert_cmpint (g_remove (destination_path), ==, 0);
+  }
   wyctl_publication_result_clear (&result);
   wyctl_publication_receipt_clear (&receipt);
   wyctl_publication_plan_clear (&planned);
@@ -310,22 +321,26 @@ test_commit_inspect_cleanup_roundtrip (void)
   WyctlPublicationPlan planned = { 0 };
   g_assert_cmpint (wyctl_publication_posix_plan (&fixture.backend, &request,
           &planned), ==, WYRELOG_E_OK);
+  g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
+      'A');
+  WyctlSensitiveText expected_secret = {.text = secret,.len = strlen (secret) };
   WyctlPublicationReceipt receipt = { 0 };
-  g_assert_cmpint (wyctl_publication_posix_prepare (&fixture.backend, &planned,
-          &receipt), ==, WYRELOG_E_OK);
+  WyctlPublicationResult result = { 0 };
+  gboolean replayed = FALSE;
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &expected_secret,
+          &receipt, &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  wyctl_publication_result_clear (&result);
 
   g_autofree gchar *stage_path = g_build_filename (fixture.dir,
       planned.stage_basename, NULL);
   g_autofree gchar *destination_path = g_build_filename (fixture.dir,
       planned.destination, NULL);
-  g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
-      'A');
-  WyctlSensitiveText expected_secret = {.text = secret,.len = strlen (secret) };
 
-  WyctlPublicationResult result = { 0 };
-  g_assert_cmpint (wyctl_publication_posix_commit (&fixture.backend, &planned,
-          &receipt, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &result), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_resync (&fixture.backend, &planned,
+          &receipt, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &expected_secret,
+          &result), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_result_is_valid (&result));
   g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
   g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
@@ -406,26 +421,22 @@ test_resync_publishes_exact_stage (void)
   WyctlPublicationPlan planned = { 0 };
   g_assert_cmpint (wyctl_publication_posix_plan (&fixture.backend, &request,
           &planned), ==, WYRELOG_E_OK);
+  g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
+      'A');
+  WyctlSensitiveText expected_secret = {.text = secret,.len = strlen (secret) };
   WyctlPublicationReceipt receipt = { 0 };
-  g_assert_cmpint (wyctl_publication_posix_prepare (&fixture.backend, &planned,
-          &receipt), ==, WYRELOG_E_OK);
+  WyctlPublicationResult result = { 0 };
+  gboolean replayed = FALSE;
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &expected_secret,
+          &receipt, &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  wyctl_publication_result_clear (&result);
 
   g_autofree gchar *stage_path = g_build_filename (fixture.dir,
       planned.stage_basename, NULL);
   g_autofree gchar *destination_path = g_build_filename (fixture.dir,
       planned.destination, NULL);
-  g_autofree gchar *doc = NULL;
-  g_autofree gchar *secret = g_strnfill (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN,
-      'A');
-  WyctlSensitiveText expected_secret = {.text = secret,.len = strlen (secret) };
-  g_assert_cmpint (wyctl_publication_credential_document_encode
-      ("wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &doc), ==, WYRELOG_E_OK);
-  int fd = open (stage_path, O_WRONLY | O_TRUNC);
-  g_assert_cmpint (fd, >=, 0);
-  g_assert_cmpint (write (fd, doc, strlen (doc)), ==, (gssize) strlen (doc));
-  g_assert_cmpint (close (fd), ==, 0);
-
-  WyctlPublicationResult result = { 0 };
   g_assert_cmpint (wyctl_publication_posix_resync (&fixture.backend, &planned,
           &receipt, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &expected_secret,
           &result), ==, WYRELOG_E_OK);

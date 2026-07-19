@@ -101,6 +101,24 @@ encode_stat_identity (const struct stat *st)
 {
   if (st == NULL)
     return NULL;
+  if (S_ISREG (st->st_mode)) {
+#if defined(__APPLE__)
+    gint64 mtime_sec = (gint64) st->st_mtimespec.tv_sec;
+    gint64 mtime_nsec = (gint64) st->st_mtimespec.tv_nsec;
+#else
+    gint64 mtime_sec = (gint64) st->st_mtim.tv_sec;
+    gint64 mtime_nsec = (gint64) st->st_mtim.tv_nsec;
+#endif
+    return g_strdup_printf ("%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
+        "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
+        "%" G_GUINT64_FORMAT ":%" G_GINT64_FORMAT ":"
+        "%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT,
+        (guint64) st->st_dev,
+        (guint64) st->st_ino,
+        (guint64) st->st_uid,
+        (guint64) st->st_gid,
+        (guint64) st->st_mode, (gint64) st->st_size, mtime_sec, mtime_nsec);
+  }
   return g_strdup_printf ("%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
       "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
       "%" G_GUINT64_FORMAT,
