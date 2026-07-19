@@ -361,8 +361,11 @@ win_open_root (const gchar *path, HANDLE *out, GPtrArray **out_ancestors)
       goto invalid;
     DWORD directory_access = FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES
         | READ_CONTROL | SYNCHRONIZE;
+    /* Only the final root is flushed after child namespace mutations.
+     * FlushFileBuffers requires write access; ancestor anchors remain
+     * read-only because they are held solely to pin the validated walk. */
     if (parts[i + 1] == NULL)
-      directory_access |= FILE_ADD_FILE | FILE_DELETE_CHILD;
+      directory_access |= GENERIC_WRITE | FILE_DELETE_CHILD;
     HANDLE h = CreateFileW ((LPCWSTR) wide, directory_access,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING,

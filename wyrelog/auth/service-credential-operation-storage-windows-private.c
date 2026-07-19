@@ -75,15 +75,11 @@ static wyrelog_error_t
 wyl_win_directory_flush_error (DWORD error)
 {
   switch (error) {
-      /* FlushFileBuffers is specified for writable file handles.  Directory
-       * handles and file systems that do not implement a directory flush report
-       * one of these errors; the operation remains crash-consistent through the
-       * file system's metadata journal, but cannot provide the stronger flush. */
-    case ERROR_SUCCESS:
+      /* A valid writable directory handle can still be rejected when the API
+       * or backing file system does not implement directory flushing. */
     case ERROR_INVALID_FUNCTION:
     case ERROR_INVALID_HANDLE:
     case ERROR_NOT_SUPPORTED:
-    case ERROR_ACCESS_DENIED:
       return WYRELOG_E_OK;
     default:
       return WYRELOG_E_IO;
