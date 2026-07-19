@@ -876,7 +876,32 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
       NULL);
   g_autofree gunichar2 *waside = g_utf8_to_utf16 (aside, -1, NULL, NULL,
       NULL);
-  g_assert_true (MoveFileExW ((LPCWSTR) wancestor, (LPCWSTR) waside, 0));
+  gboolean moved = MoveFileExW ((LPCWSTR) wancestor, (LPCWSTR) waside, 0);
+  DWORD move_error = moved ? ERROR_SUCCESS : GetLastError ();
+  if (!moved) {
+    /* Windows can deny the prerequisite namespace mutation while descendant
+     * handles are pinned.  That is itself fail-closed; prove the original
+     * object remains usable and no decoy path was reached. */
+    g_assert_true (move_error == ERROR_ACCESS_DENIED
+        || move_error == ERROR_SHARING_VIOLATION
+        || move_error == ERROR_LOCK_VIOLATION);
+    g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
+        WYRELOG_E_OK);
+    g_autoptr (GBytes) roundtrip = NULL;
+    gsize size = 0;
+    g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name,
+            &roundtrip), ==, WYRELOG_E_OK);
+    g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
+    wyl_service_credential_operation_child_name_clear (&name);
+    wyl_service_credential_operation_root_anchor_clear (&anchor);
+    wyl_service_credential_operation_storage_clear (&storage);
+    g_autofree gchar *record = g_build_filename (root, "record", NULL);
+    g_assert_cmpint (g_remove (record), ==, 0);
+    g_assert_cmpint (g_rmdir (root), ==, 0);
+    g_assert_cmpint (g_rmdir (ancestor), ==, 0);
+    g_assert_cmpint (g_rmdir (base), ==, 0);
+    return;
+  }
   g_assert_cmpint (g_mkdir_with_parents (decoy_root, 0700), ==, 0);
   g_autofree gchar *decoy_record = g_build_filename (decoy_root, "record",
       NULL);
