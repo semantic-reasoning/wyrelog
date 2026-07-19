@@ -116,7 +116,7 @@ fake_target_release (gpointer self, WyctlPublicationReceiptTargetLease *lease)
 }
 
 static wyrelog_error_t
-fake_commit (gpointer self, const WyctlPublicationReceipt *receipt,
+fake_commit (gpointer self, WyctlPublicationReceipt *receipt,
     const gchar *credential_id, const WyctlSensitiveText *credential_secret,
     WyctlPublicationResult *out_result)
 {
@@ -130,6 +130,8 @@ fake_commit (gpointer self, const WyctlPublicationReceipt *receipt,
   backend->seen_credential_id = g_strdup (credential_id);
   backend->seen_secret = g_strndup (credential_secret->text,
       credential_secret->len);
+  g_free (receipt->stage_identity);
+  receipt->stage_identity = g_strdup ("committed-stage-identity");
   *out_result = (WyctlPublicationResult) {
   .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity =
@@ -146,6 +148,7 @@ fake_inspect (gpointer self, const WyctlPublicationReceipt *receipt,
   FakeBackend *backend = self;
   fake_backend_add_call (backend, FAKE_INSPECT);
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
+  g_assert_cmpstr (receipt->stage_identity, ==, "committed-stage-identity");
   g_assert_true (wyl_service_credential_id_is_canonical
       (expected_credential_id, strlen (expected_credential_id)));
   g_assert_nonnull (expected_credential_secret);
