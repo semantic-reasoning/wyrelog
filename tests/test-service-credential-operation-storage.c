@@ -683,6 +683,9 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
       NULL);
   g_assert_true (MoveFileExW ((LPCWSTR) wancestor, (LPCWSTR) waside, 0));
   g_assert_cmpint (g_mkdir_with_parents (decoy_root, 0700), ==, 0);
+  g_autofree gchar *decoy_record = g_build_filename (decoy_root, "record",
+      NULL);
+  g_assert_true (g_file_set_contents (decoy_record, "sentinel", 8, NULL));
   g_assert_true (create_windows_directory_junction (ancestor, decoy));
 
   wyrelog_error_t rc = wyl_win_child_replace (&storage, &anchor, &name, two);
@@ -694,24 +697,37 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
             &roundtrip), ==, WYRELOG_E_OK);
     g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
   }
-  /* Regardless of safe success or fail-closed, the junction target is never
-   * used for journal data. */
-  g_autofree gchar *decoy_record = g_build_filename (decoy_root, "record",
-      NULL);
-  g_assert_false (g_file_test (decoy_record, G_FILE_TEST_EXISTS));
+  /* A path-following implementation would replace this sentinel. */
+  g_autofree gchar *decoy_contents = NULL;
+  gsize decoy_size = 0;
+  g_assert_true (g_file_get_contents (decoy_record, &decoy_contents,
+          &decoy_size, NULL));
+  g_assert_cmpmem (decoy_contents, decoy_size, "sentinel", 8);
 
+  /* Remove the junction and release every pinned handle before resolving the
+   * aside path.  This independently proves that a fail-closed replace left the
+   * original unchanged rather than deleting or partially writing it. */
   g_assert_cmpint (g_rmdir (ancestor), ==, 0);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
   g_autofree gchar *aside_record = g_build_filename (aside_root, "record",
       NULL);
-  g_remove (aside_record);
-  g_rmdir (aside_root);
-  g_rmdir (aside);
-  g_rmdir (decoy_root);
-  g_rmdir (decoy);
-  g_rmdir (base);
+  g_autofree gchar *aside_contents = NULL;
+  gsize aside_size = 0;
+  g_assert_true (g_file_get_contents (aside_record, &aside_contents,
+          &aside_size, NULL));
+  if (rc == WYRELOG_E_OK)
+    g_assert_cmpmem (aside_contents, aside_size, "two", 3);
+  else
+    g_assert_cmpmem (aside_contents, aside_size, "one", 3);
+  g_assert_cmpint (g_remove (aside_record), ==, 0);
+  g_assert_cmpint (g_remove (decoy_record), ==, 0);
+  g_assert_cmpint (g_rmdir (aside_root), ==, 0);
+  g_assert_cmpint (g_rmdir (aside), ==, 0);
+  g_assert_cmpint (g_rmdir (decoy_root), ==, 0);
+  g_assert_cmpint (g_rmdir (decoy), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
 }
 
 static void
