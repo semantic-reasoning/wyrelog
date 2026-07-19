@@ -31,14 +31,20 @@ wyrelog_error_t wyctl_publication_posix_commit
 wyrelog_error_t wyctl_publication_posix_inspect
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
     WyctlPublicationResult * out_result);
 wyrelog_error_t wyctl_publication_posix_resync
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
     WyctlPublicationResult * out_result);
 wyrelog_error_t wyctl_publication_posix_cleanup
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
     WyctlPublicationResult * out_result);
 
 G_END_DECLS;

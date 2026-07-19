@@ -67,16 +67,28 @@ typedef struct wyctl_publication_backend_vtable_t
       WyctlPublicationResult * out_result);
   wyrelog_error_t (*inspect) (gpointer self,
       const WyctlPublicationReceipt * receipt,
+      const gchar * expected_credential_id,
+      const WyctlSensitiveText * expected_credential_secret,
       WyctlPublicationResult * out_result);
   wyrelog_error_t (*resync) (gpointer self,
       const WyctlPublicationReceipt * receipt,
+      const gchar * expected_credential_id,
+      const WyctlSensitiveText * expected_credential_secret,
       WyctlPublicationResult * out_result);
   wyrelog_error_t (*cleanup) (gpointer self,
       const WyctlPublicationReceipt * receipt,
+      const gchar * expected_credential_id,
+      const WyctlSensitiveText * expected_credential_secret,
       WyctlPublicationResult * out_result);
 } WyctlPublicationBackendVTable;
 
 void wyctl_sensitive_text_clear (WyctlSensitiveText * text);
+gboolean wyctl_publication_expected_credential_is_valid
+    (const gchar * credential_id, const WyctlSensitiveText * credential_secret);
+gboolean wyctl_publication_credential_document_matches
+    (const gchar * credential_id, const WyctlSensitiveText * credential_secret,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret);
 void wyctl_publication_plan_clear (WyctlPublicationPlan * plan);
 void wyctl_publication_receipt_clear (WyctlPublicationReceipt * receipt);
 void wyctl_publication_result_clear (WyctlPublicationResult * result);
