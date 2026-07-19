@@ -293,6 +293,27 @@ void wyl_service_credential_issue_result_clear
   wyl_service_credential_secret_clear (&result->secret);
 }
 
+void
+wyl_service_credential_handoff_clear (wyl_service_credential_handoff_t *handoff)
+{
+  if (handoff == NULL)
+    return;
+  g_free (handoff->operation);
+  g_free (handoff->request_id);
+  g_free (handoff->actor_subject_id);
+  g_free (handoff->credential_id);
+  memset (handoff, 0, sizeof *handoff);
+}
+
+void wyl_service_credential_handoff_result_clear
+    (wyl_service_credential_handoff_result_t * result)
+{
+  if (result == NULL)
+    return;
+  wyl_service_credential_clear (&result->credential);
+  wyl_service_credential_handoff_clear (&result->handoff);
+}
+
 static void
 copy_credential (const wyl_policy_service_credential_info_t *source,
     wyl_service_credential_t *target)
@@ -312,6 +333,67 @@ copy_credential (const wyl_policy_service_credential_info_t *source,
   target->revoked_by = g_strdup (source->revoked_by);
   target->revoked_at_us = source->revoked_at_us;
   target->rotated_from_id = g_strdup (source->rotated_from_id);
+}
+
+static void
+copy_handoff (const wyl_policy_service_handoff_escrow_info_t *source,
+    wyl_service_credential_handoff_t *target)
+{
+  wyl_service_credential_handoff_clear (target);
+  target->escrow_id = source->escrow_id;
+  target->operation = g_strdup (source->operation);
+  target->request_id = g_strdup (source->request_id);
+  target->actor_subject_id = g_strdup (source->actor_subject_id);
+  memcpy (target->target_digest, source->target_digest,
+      sizeof target->target_digest);
+  target->credential_id = g_strdup (source->credential_id);
+  target->credential_generation = source->credential_generation;
+  target->deadline_at_us = source->deadline_at_us;
+  memcpy (target->binding_digest, source->binding_digest,
+      sizeof target->binding_digest);
+}
+
+static wyrelog_error_t
+service_mutation_precheck_handoff_fence (ServiceMutation *mutation,
+    WylServiceCredentialFenceOperation operation, const gchar *request_id,
+    const gchar *subject_id, const gchar *tenant_id,
+    const gchar *old_credential_id, gboolean *out_replay)
+{
+  *out_replay = FALSE;
+  WylServiceCredentialFenceResult fence = { 0 };
+  wyrelog_error_t rc =
+      wyl_policy_store_precheck_service_credential_operation_fence_with_committed
+      (mutation->store, NULL, operation, request_id, subject_id, tenant_id,
+      old_credential_id, &fence);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_OK;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (fence.state != WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED)
+    return WYRELOG_E_POLICY;
+  *out_replay = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyl_policy_service_handoff_request_t
+policy_handoff_request (const wyl_service_credential_handoff_request_t *handoff)
+{
+  return (wyl_policy_service_handoff_request_t) {
+  .escrow_id = handoff != NULL ? handoff->escrow_id : NULL,.target_digest =
+        handoff != NULL ? handoff->target_digest : NULL,.deadline_at_us =
+        handoff != NULL ? handoff->deadline_at_us : 0,};
+}
+
+static gboolean
+    service_handoff_request_valid
+    (const wyl_service_credential_handoff_request_t * handoff)
+{
+  if (handoff == NULL || handoff->escrow_id == NULL
+      || handoff->target_digest == NULL || handoff->deadline_at_us <= 0)
+    return FALSE;
+  gchar formatted[WYL_ID_STRING_BUF];
+  return wyl_id_format (handoff->escrow_id, formatted, sizeof formatted)
+      == WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -376,6 +458,61 @@ wyl_service_credential_issue_with_runtime (WylHandle *handle,
     secret = NULL;
   }
   wyl_service_credential_secret_clear (&secret);
+  wyl_policy_service_credential_info_clear (&stored);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_issue_handoff_with_runtime (WylHandle *handle,
+    const gchar *subject_id, const gchar *tenant_id,
+    const gchar *actor_subject_id, const gchar *request_id,
+    gint64 expires_at_us,
+    const wyl_service_credential_handoff_request_t *handoff,
+    const wyl_service_credential_issue_runtime_t *runtime,
+    wyl_service_credential_handoff_result_t *out)
+{
+  if (out != NULL)
+    wyl_service_credential_handoff_result_clear (out);
+  if (handle == NULL || !service_handoff_request_valid (handoff)
+      || out == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  wyl_policy_service_credential_info_t stored = { 0 };
+  wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  gboolean replay = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation,
+        runtime != NULL ? runtime->authorization : NULL, actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_precheck_handoff_fence (&mutation,
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, request_id, subject_id,
+        tenant_id, NULL, &replay);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_ensure_service_cvk_for_issuance (mutation.store,
+        &cvk, &cvk_len);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = service_mutation_reconcile_operation_fence (&mutation,
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE, request_id, subject_id,
+        tenant_id, NULL);
+  wyl_policy_service_handoff_request_t policy_handoff =
+      policy_handoff_request (handoff);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_issue_service_credential_handoff_core
+        (mutation.transaction, mutation.store, subject_id, tenant_id,
+        actor_subject_id, request_id, expires_at_us,
+        runtime != NULL ? runtime->credential_runtime : NULL, cvk, cvk_len,
+        &policy_handoff, &stored, &escrow);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK) {
+    copy_credential (&stored, &out->credential);
+    copy_handoff (&escrow, &out->handoff);
+  }
+  wyl_policy_service_handoff_escrow_info_clear (&escrow);
   wyl_policy_service_credential_info_clear (&stored);
   return rc;
 }
@@ -580,4 +717,68 @@ wyl_service_credential_rotate (WylHandle *handle,
   return wyl_service_credential_rotate_with_runtime (handle,
       old_credential_id, actor_subject_id, request_id, new_expires_at_us, NULL,
       out);
+}
+
+wyrelog_error_t
+wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
+    const gchar *old_credential_id, const gchar *actor_subject_id,
+    const gchar *request_id, gint64 new_expires_at_us,
+    const wyl_service_credential_handoff_request_t *handoff,
+    const wyl_service_credential_rotate_runtime_t *runtime,
+    wyl_service_credential_handoff_result_t *out)
+{
+  if (out != NULL)
+    wyl_service_credential_handoff_result_clear (out);
+  if (handle == NULL || !service_handoff_request_valid (handoff)
+      || runtime == NULL
+      || runtime->old_credential_generation == 0 || out == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  wyl_policy_service_credential_info_t stored = { 0 };
+  wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  gboolean replay = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation, runtime->authorization,
+        actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_precheck_handoff_fence (&mutation,
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,
+        old_credential_id, &replay);
+  if (rc == WYRELOG_E_OK && !replay) {
+    mutation.invalidate_credential = runtime->invalidate_credential;
+    mutation.invalidation_data = runtime->invalidation_data;
+    mutation.invalidation_credential_id = old_credential_id;
+    mutation.invalidation_generation = runtime->old_credential_generation;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_materialize_service_cvk_existing (mutation.store,
+        &cvk, &cvk_len);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && !replay)
+    rc = service_mutation_reconcile_operation_fence (&mutation,
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,
+        old_credential_id);
+  wyl_policy_service_handoff_request_t policy_handoff =
+      policy_handoff_request (handoff);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_rotate_service_credential_handoff_core
+        (mutation.transaction, mutation.store, old_credential_id,
+        actor_subject_id, request_id, new_expires_at_us, runtime->now_us,
+        runtime->data, runtime->credential_runtime,
+        runtime->old_credential_generation, cvk, cvk_len, &policy_handoff,
+        &stored, &escrow);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK) {
+    copy_credential (&stored, &out->credential);
+    copy_handoff (&escrow, &out->handoff);
+  }
+  wyl_policy_service_handoff_escrow_info_clear (&escrow);
+  wyl_policy_service_credential_info_clear (&stored);
+  return rc;
 }

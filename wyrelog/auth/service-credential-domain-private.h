@@ -4,6 +4,7 @@
 #include "wyrelog/handle.h"
 #include "wyrelog/error.h"
 #include "wyrelog/auth/service-credential-private.h"
+#include "wyrelog/wyl-id-private.h"
 
 G_BEGIN_DECLS typedef struct
 {
@@ -41,6 +42,37 @@ typedef struct
   wyl_service_credential_t credential;
   wyl_service_credential_secret_t *secret;
 } wyl_service_credential_issue_result_t;
+
+#define WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES 32u
+
+/* Non-secret, owner-delivery binding supplied by the authenticated executor.
+ * escrow_id and target_digest are borrowed only until the mutation returns. */
+typedef struct
+{
+  const wyl_id_t *escrow_id;
+  const guint8 *target_digest;
+  gint64 deadline_at_us;
+} wyl_service_credential_handoff_request_t;
+
+/* Owned, non-secret description of material sealed in the policy store. */
+typedef struct
+{
+  wyl_id_t escrow_id;
+  gchar *operation;
+  gchar *request_id;
+  gchar *actor_subject_id;
+  guint8 target_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  gchar *credential_id;
+  guint64 credential_generation;
+  gint64 deadline_at_us;
+  guint8 binding_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+} wyl_service_credential_handoff_t;
+
+typedef struct
+{
+  wyl_service_credential_t credential;
+  wyl_service_credential_handoff_t handoff;
+} wyl_service_credential_handoff_result_t;
 
 typedef struct
 {
@@ -134,6 +166,10 @@ wyrelog_error_t wyl_service_principal_disable (WylHandle * handle,
 void wyl_service_credential_clear (wyl_service_credential_t * credential);
 void wyl_service_credential_issue_result_clear
     (wyl_service_credential_issue_result_t * result);
+void wyl_service_credential_handoff_clear
+    (wyl_service_credential_handoff_t * handoff);
+void wyl_service_credential_handoff_result_clear
+    (wyl_service_credential_handoff_result_t * result);
 wyrelog_error_t wyl_service_credential_issue (WylHandle * handle,
     const gchar * subject_id, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
@@ -144,6 +180,16 @@ wyrelog_error_t wyl_service_credential_issue_with_runtime
     gint64 expires_at_us,
     const wyl_service_credential_issue_runtime_t * runtime,
     wyl_service_credential_issue_result_t * out);
+/* Creates or idempotently replays one credential into store-owned escrow.
+ * No plaintext secret crosses this API. handoff and all runtime descriptors
+ * are borrowed only until the call returns. */
+wyrelog_error_t wyl_service_credential_issue_handoff_with_runtime
+    (WylHandle * handle, const gchar * subject_id, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 expires_at_us,
+    const wyl_service_credential_handoff_request_t * handoff,
+    const wyl_service_credential_issue_runtime_t * runtime,
+    wyl_service_credential_handoff_result_t * out);
 wyrelog_error_t wyl_service_credential_get (WylHandle * handle,
     const gchar * credential_id, wyl_service_credential_t * out);
 wyrelog_error_t wyl_service_credential_foreach (WylHandle * handle,
@@ -204,5 +250,15 @@ wyrelog_error_t wyl_service_credential_rotate_with_runtime
     gint64 new_expires_at_us,
     const wyl_service_credential_rotate_runtime_t * runtime,
     wyl_service_credential_issue_result_t * out);
+/* Escrow-backed checked rotation. runtime->old_credential_generation must be
+ * non-zero and is used by the authoritative rotate CAS. No plaintext secret
+ * crosses this API; handoff and runtime are borrowed only for the call. */
+wyrelog_error_t wyl_service_credential_rotate_handoff_checked_with_runtime
+    (WylHandle * handle, const gchar * old_credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 new_expires_at_us,
+    const wyl_service_credential_handoff_request_t * handoff,
+    const wyl_service_credential_rotate_runtime_t * runtime,
+    wyl_service_credential_handoff_result_t * out);
 
 G_END_DECLS
