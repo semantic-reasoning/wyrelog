@@ -385,6 +385,30 @@ test_windows_child_read_validation (void)
 }
 
 static void
+test_windows_reparse_status_mapping (void)
+{
+  const ULONG reparse_statuses[] = {
+    0xC0000276UL,               /* STATUS_IO_REPARSE_TAG_INVALID */
+    0xC0000277UL,               /* STATUS_IO_REPARSE_TAG_MISMATCH */
+    0xC0000278UL,               /* STATUS_IO_REPARSE_DATA_INVALID */
+    0xC0000279UL,               /* STATUS_IO_REPARSE_TAG_NOT_HANDLED */
+    0xC0000280UL,               /* STATUS_REPARSE_POINT_NOT_RESOLVED */
+    0xC0000281UL,               /* STATUS_DIRECTORY_IS_A_REPARSE_POINT */
+    0xC00002B2UL,               /* STATUS_REPARSE_ATTRIBUTE_CONFLICT */
+    0xC0000368UL,               /* STATUS_MOUNT_POINT_NOT_RESOLVED */
+    0xC000050BUL,               /* STATUS_REPARSE_POINT_ENCOUNTERED */
+    0x8000002DUL                /* STATUS_STOPPED_ON_SYMLINK */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (reparse_statuses); i++)
+    g_assert_cmpint (wyl_win_child_classify_nt_create_status_for_test
+        ((LONG) reparse_statuses[i]), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_win_child_classify_nt_create_status_for_test
+      ((LONG) 0xC0000034UL), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_win_child_classify_nt_create_status_for_test
+      ((LONG) 0xC000007FUL), ==, WYRELOG_E_IO);
+}
+
+static void
 test_windows_live_root_validation (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -1077,6 +1101,8 @@ main (int argc, char **argv)
 #ifdef G_OS_WIN32
   g_test_add_func ("/operation-storage/windows/child-read-validation",
       test_windows_child_read_validation);
+  g_test_add_func ("/operation-storage/windows/reparse-status-mapping",
+      test_windows_reparse_status_mapping);
   g_test_add_func ("/operation-storage/windows/live-root-validation",
       test_windows_live_root_validation);
   g_test_add_func ("/operation-storage/windows/child-read-fixture",

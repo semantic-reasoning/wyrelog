@@ -50,6 +50,7 @@ void wyl_win_child_unlock
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, HANDLE handle);
 void wyl_win_child_fail_next_directory_flush_for_test (DWORD error);
+wyrelog_error_t wyl_win_child_classify_nt_create_status_for_test (LONG status);
 
 G_END_DECLS
 #endif
