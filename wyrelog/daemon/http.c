@@ -6882,7 +6882,6 @@ static const gchar *skip_ascii_spaces (const gchar * p);
 static gboolean request_body_dup (SoupServerMessage * msg, gsize max_len,
     gchar ** out_body);
 
-#ifdef WYL_TEST_DAEMON_HTTP
 typedef struct
 {
   gchar *request_id;
@@ -7236,6 +7235,17 @@ service_credential_operation_reconcile_execute (SoupServer *server,
     return FALSE;
   }
 
+  g_autoptr (WylServiceAuthorityCommitEvidence) evidence = NULL;
+  rc = wyl_policy_store_service_authority_prepare_commit_evidence (txn,
+      write.store, &evidence);
+  if (rc != WYRELOG_E_OK) {
+    guint status = (rc == WYRELOG_E_BUSY) ? 503 : 500;
+    set_json_error (msg, status, (rc == WYRELOG_E_BUSY)
+        ? WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE
+        : WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_FAILED);
+    return FALSE;
+  }
+
   WylServiceCredentialFenceResult fence = { 0 };
   WylServiceCredentialFenceOperation operation =
       g_strcmp0 (request.operation, "issue") == 0 ?
@@ -7296,7 +7306,6 @@ service_credential_operation_reconcile_handler (SoupServer *server,
       ctx);
 }
 #endif /* WYL_HAS_FACT_STORE */
-#endif
 
 static void
 mfa_enroll_start_handler (SoupServer *server, SoupServerMessage *msg,

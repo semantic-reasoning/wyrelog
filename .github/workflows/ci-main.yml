@@ -91,6 +91,13 @@ jobs:
       - name: Build and test
         run: meson test -C builddir --print-errorlogs --suite wyrelog
 
+      - name: Build fact-store production daemon
+        if: runner.os == 'Linux'
+        run: |
+          meson setup build-fact -Denable_fact_store=enabled \
+            -Denable_audit=enabled -Dduckdb_source=subproject
+          meson compile -C build-fact wyrelogd
+
       - name: Show sccache statistics
         if: always()
         run: |
