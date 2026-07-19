@@ -532,6 +532,152 @@ typedef struct
   gint64 created_at_us;
 } wyl_policy_service_credential_event_info_t;
 
+typedef enum
+{
+  WYL_POLICY_SERVICE_SUCCESSOR_ACTIVE = 1,
+  WYL_POLICY_SERVICE_SUCCESSOR_EXPIRED = 2,
+  WYL_POLICY_SERVICE_SUCCESSOR_REVOKED = 3,
+} WylPolicyServiceSuccessorDisposition;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED = 1,
+  WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_EXPIRED = 2,
+  WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_CANCELLED = 3,
+  WYL_POLICY_HANDOFF_DISPOSITION_SUCCESSOR_EXPIRED = 4,
+  WYL_POLICY_HANDOFF_DISPOSITION_SUCCESSOR_REVOKED = 5,
+  WYL_POLICY_HANDOFF_DISPOSITION_DELIVERED = 6,
+} WylPolicyServiceHandoffDispositionReason;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED = 1,
+  WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED = 2,
+  WYL_POLICY_HANDOFF_OUTCOME_OPERATOR_ACTION_REQUIRED = 3,
+  WYL_POLICY_HANDOFF_OUTCOME_ESCROW_DELETED = 4,
+} WylPolicyServiceHandoffDispositionOutcome;
+
+typedef struct
+{
+  /* Exactly 32 bytes. A committed tuple (non-NULL successor) must not use the
+   * all-zero digest.  successor_credential_id is NULL iff generation is 0. */
+  const gchar *original_request_id;
+  const wyl_id_t *escrow_id;
+  guint8 binding_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  const gchar *successor_credential_id;
+  guint64 successor_issuance_generation;
+  const gchar *original_actor_subject_id;
+} WylPolicyServiceHandoffExactTuple;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_FENCE_ISSUE = 1,
+  WYL_POLICY_HANDOFF_FENCE_ROTATE = 2,
+} WylPolicyServiceHandoffFenceOperation;
+
+/* Typed proof used only for a fresh NOT_COMMITTED disposition.  The store
+ * re-derives the frozen #384 operation fingerprint from these exact target
+ * fields and requires the matching terminal fence in the active WRITE txn. */
+typedef struct
+{
+  WylPolicyServiceHandoffFenceOperation operation;
+  const gchar *target_a;
+  const gchar *target_b;
+} WylPolicyServiceHandoffNoCommitEvidence;
+
+typedef struct
+{
+  const gchar *disposition_id;
+  const gchar *audit_id;
+  WylPolicyServiceHandoffExactTuple tuple;
+  const gchar *actor_subject_id;
+  WylPolicyServiceHandoffDispositionReason reason;
+  WylPolicyServiceHandoffDispositionOutcome outcome;
+  const WylPolicyServiceHandoffNoCommitEvidence *no_commit_evidence;
+} WylPolicyServiceHandoffDispositionInput;
+
+typedef struct
+{
+  gboolean replayed;
+  gchar *disposition_id;
+  gchar *audit_id;
+} WylPolicyServiceHandoffDispositionResult;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_REMEDIATION_RESUME = 1,
+  WYL_POLICY_HANDOFF_REMEDIATION_REVOKE_AND_WIPE = 2,
+} WylPolicyServiceHandoffRemediationAction;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_REMEDIATION_RECORDED = 1,
+  WYL_POLICY_HANDOFF_REMEDIATION_REVOKED_AND_WIPED = 2,
+  WYL_POLICY_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED = 3,
+  WYL_POLICY_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED = 4,
+} WylPolicyServiceHandoffRemediationOutcome;
+
+typedef struct
+{
+  const gchar *remediation_request_id;
+  const gchar *decision_request_id;
+  const gchar *current_actor_subject_id;
+  const gchar *audit_id;
+  WylPolicyServiceHandoffExactTuple tuple;
+  WylPolicyServiceHandoffRemediationAction action;
+  guint32 confirmation_version;
+  gboolean confirmed;
+} WylPolicyServiceHandoffRemediationInput;
+
+typedef struct
+{
+  gboolean replayed;
+  gboolean revoked_now;
+  WylPolicyServiceSuccessorDisposition successor_disposition;
+  WylPolicyServiceHandoffRemediationOutcome outcome;
+  guint64 invalidation_generation;
+  gchar *audit_id;
+} WylPolicyServiceHandoffRemediationResult;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_FAIL_NONE = 0,
+  WYL_POLICY_HANDOFF_FAIL_AFTER_REQUEST_CLAIM,
+  WYL_POLICY_HANDOFF_FAIL_AFTER_CLASSIFY_OR_CAS,
+  WYL_POLICY_HANDOFF_FAIL_AFTER_SUCCESSOR_EVENT,
+  WYL_POLICY_HANDOFF_FAIL_AFTER_AUDIT,
+  WYL_POLICY_HANDOFF_FAIL_AFTER_ESCROW_DELETE,
+  WYL_POLICY_HANDOFF_FAIL_AFTER_PROVENANCE,
+  WYL_POLICY_HANDOFF_FAIL_SQLITE_NOMEM,
+  WYL_POLICY_HANDOFF_FAIL_CLASSIFIER_LOOKUP_NOMEM,
+  WYL_POLICY_HANDOFF_FAIL_CLASSIFIER_REVOKED_EVENT_NOMEM,
+} WylPolicyServiceHandoffFailStage;
+
+void wyl_policy_service_handoff_disposition_result_clear
+    (WylPolicyServiceHandoffDispositionResult * result);
+void wyl_policy_service_handoff_remediation_result_clear
+    (WylPolicyServiceHandoffRemediationResult * result);
+
+typedef struct
+{
+  WylPolicyServiceSuccessorDisposition disposition;
+  gchar *observed_state;
+  guint64 observed_generation;
+  gint64 observed_expires_at_us;
+  gboolean has_revocation_event;
+  gint64 revocation_event_id;
+  guint64 revocation_event_generation;
+  gchar *revocation_event_actor_subject_id;
+  gchar *revocation_event_request_id;
+  gint64 revocation_event_created_at_us;
+} WylPolicyServiceSuccessorExactClassification;
+
+/* Owned-output contract: initialize with { 0 } before first use. The classifier
+ * clears an earlier result before validating its inputs, and every failure
+ * leaves it cleared. Call this when releasing a successful classification. */
+void wyl_policy_service_successor_exact_classification_clear
+    (WylPolicyServiceSuccessorExactClassification * classification);
+
 typedef wyrelog_error_t (*wyl_policy_service_principal_cb) (const
     wyl_policy_service_principal_info_t * info, gpointer user_data);
 typedef wyrelog_error_t (*wyl_policy_service_credential_cb) (const
@@ -1037,6 +1183,10 @@ wyrelog_error_t wyl_policy_store_disable_service_principal_core
  * before savepoint release. The operation must roll all local rows back. */
 void wyl_policy_store_service_lifecycle_fail_commit_once
     (wyl_policy_store_t * store);
+void wyl_policy_store_service_handoff_fail_once (wyl_policy_store_t * store,
+    WylPolicyServiceHandoffFailStage stage);
+wyrelog_error_t wyl_policy_store_service_handoff_sqlite_error_for_test
+    (int sqlite_rc);
 void wyl_policy_store_service_rotate_fail_once (wyl_policy_store_t * store,
     wyl_policy_service_rotate_fail_stage_t stage);
 wyrelog_error_t wyl_policy_store_lookup_service_principal (wyl_policy_store_t *
@@ -1083,6 +1233,26 @@ wyrelog_error_t wyl_policy_store_service_handoff_escrow_unseal
     wyl_policy_service_handoff_secret_t ** out_secret);
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_delete
     (wyl_policy_store_t * store, const wyl_id_t * escrow_id);
+wyrelog_error_t
+    wyl_policy_store_classify_service_credential_successor_exact_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffExactTuple * tuple, gint64 now_us,
+    WylPolicyServiceSuccessorExactClassification * out_classification);
+wyrelog_error_t wyl_policy_store_record_service_handoff_disposition_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffDispositionInput * input,
+    WylPolicyServiceHandoffDispositionResult * out_result);
+wyrelog_error_t wyl_policy_store_record_service_handoff_not_committed_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffDispositionInput * input,
+    WylPolicyServiceHandoffDispositionResult * out_result);
+wyrelog_error_t wyl_policy_store_remediate_service_handoff_exact_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffRemediationInput * input,
+    WylPolicyServiceHandoffRemediationResult * out_result);
 /* Issuance initializes/materializes the CVK before its lifecycle savepoint.
  * A later domain failure may therefore leave only the idempotent CVK row;
  * credential, event, ledger and audit rows still roll back together. */

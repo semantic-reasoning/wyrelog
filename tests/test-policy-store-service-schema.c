@@ -19,6 +19,8 @@ static const gchar *const service_tables[] = {
   "service_domain_requests",
   "service_exchange_audit_intentions",
   "service_credential_operation_fences",
+  "service_credential_handoff_dispositions",
+  "service_credential_handoff_remediation_actions",
 };
 
 static void
@@ -97,7 +99,9 @@ service_object_count (sqlite3 *db)
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
       "'service_domain_requests','service_exchange_audit_intentions',"
-      "'service_credential_operation_fences');");
+      "'service_credential_operation_fences',"
+      "'service_credential_handoff_dispositions',"
+      "'service_credential_handoff_remediation_actions');");
 }
 
 static gchar *
@@ -121,7 +125,9 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
       "'service_domain_requests','service_exchange_audit_intentions',"
-      "'service_credential_operation_fences') "
+      "'service_credential_operation_fences',"
+      "'service_credential_handoff_dispositions',"
+      "'service_credential_handoff_remediation_actions') "
       "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
@@ -144,8 +150,9 @@ service_schema_fingerprint (sqlite3 *db)
       "SELECT name FROM sqlite_schema WHERE type='index' AND tbl_name IN ("
       "'service_principals','service_credentials','service_credential_cvk',"
       "'service_principal_events','service_credential_events',"
-      "'service_domain_requests','service_credential_operation_fences') "
-      "ORDER BY name;";
+      "'service_domain_requests','service_credential_operation_fences',"
+      "'service_credential_handoff_dispositions',"
+      "'service_credential_handoff_remediation_actions') " "ORDER BY name;";
   g_assert_cmpint (sqlite3_prepare_v2 (db, index_sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW) {
@@ -375,6 +382,223 @@ test_constraints_and_triggers (void)
 }
 
 static void
+test_handoff_terminal_schema_contracts (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+
+  exec_ok (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('00000000-0000-7000-8000-000000000001',zeroblob(32),"
+      " '0ujtsYcgvSTl8PAuAdqWYSMnLOv',"
+      " '00000000-0000-7000-8000-000000000002',zeroblob(32),NULL,NULL,"
+      " 'operator','not_committed','terminal_not_committed',"
+      " '00000000-0000-7000-8000-000000000003',1);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('00000000-0000-7000-8000-000000000004',randomblob(32),"
+      " '0ujtsYcgvSTl8PAuAdqWYSMnLOv',"
+      " '00000000-0000-7000-8000-000000000002',zeroblob(32),NULL,NULL,"
+      " 'other-operator','not_committed','terminal_not_committed',"
+      " '00000000-0000-7000-8000-000000000005',2);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('00000000-0000-7000-8000-000000000006',randomblob(32),"
+      " '000000000000000000000000000',"
+      " '00000000-0000-7000-8000-000000000007',zeroblob(32),"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'operator','not_committed',"
+      " 'terminal_not_committed','00000000-0000-7000-8000-000000000008',1);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('00000000-0000-7000-8000-000000000009',randomblob(32),"
+      " '000000000000000000000000001',"
+      " '00000000-0000-7000-8000-000000000010',zeroblob(31),NULL,NULL,"
+      " 'operator','not_committed','terminal_not_committed',"
+      " '00000000-0000-7000-8000-000000000011',1);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('00000000-0000-7000-8000-000000000018',randomblob(32),"
+      " '000000000000000000000000007',"
+      " '00000000-0000-7000-8000-000000000019',zeroblob(32),"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'operator',"
+      " 'operation_expired','attention_required',"
+      " '00000000-0000-7000-8000-000000000020',1);");
+
+  exec_ok (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000001',zeroblob(32),"
+      " '000000000000000000000000002','0ujtsYcgvSTl8PAuAdqWYSMnLOv',"
+      " 'original-operator','current-operator',"
+      " '00000000-0000-7000-8000-000000000012',randomblob(32),"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'resume',0,0,'recorded',"
+      " '00000000-0000-7000-8000-000000000013',1);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000003',zeroblob(32),"
+      " '000000000000000000000000004','0ujtsYcgvSTl8PAuAdqWYSMnLOv',"
+      " 'original-operator','current-operator',"
+      " '00000000-0000-7000-8000-000000000014',randomblob(32),"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'resume',1,1,'recorded',"
+      " '00000000-0000-7000-8000-000000000015',1);");
+  exec_ok (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000005',zeroblob(32),"
+      " '000000000000000000000000006','0ujtsYcgvSTl8PAuAdqWYSMnLOv',"
+      " 'original-operator','current-operator',"
+      " '00000000-0000-7000-8000-000000000016',randomblob(32),"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'revoke_and_wipe',1,1,"
+      " 'revoked_and_wiped','00000000-0000-7000-8000-000000000017',1);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us)"
+      " SELECT '000000000000000000000000008',randomblob(32),"
+      " decision_request_id,original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,"
+      " '00000000-0000-7000-8000-000000000021',created_at_us FROM"
+      " service_credential_handoff_remediation_actions"
+      " WHERE remediation_request_id='000000000000000000000000001';");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us)"
+      " SELECT '000000000000000000000000009',randomblob(32),"
+      " '000000000000000000000000010',original_request_id,"
+      " original_actor_subject_id,current_actor_subject_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,action,confirmation_version,confirmed,"
+      " outcome,audit_id,created_at_us FROM"
+      " service_credential_handoff_remediation_actions"
+      " WHERE remediation_request_id='000000000000000000000000001';");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us)"
+      " SELECT '000000000000000000000000011',randomblob(32),"
+      " '000000000000000000000000012',original_request_id,"
+      " original_actor_subject_id,current_actor_subject_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,action,confirmation_version,confirmed,"
+      " outcome,'00000000-0000-7000-8000-000000000022',created_at_us FROM"
+      " service_credential_handoff_remediation_actions"
+      " WHERE remediation_request_id='000000000000000000000000005';");
+  exec_rejected (db,
+      "UPDATE service_credential_handoff_dispositions SET created_at_us=2;");
+  exec_rejected (db,
+      "DELETE FROM service_credential_handoff_remediation_actions;");
+  exec_rejected (db,
+      "INSERT INTO service_domain_requests"
+      " (request_id,operation,resource_id,input_fingerprint,created_at_us)"
+      " VALUES('000000000000000000000000001','credential_revoke',"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',zeroblob(32),1);");
+  exec_ok (db,
+      "INSERT INTO service_domain_requests"
+      " (request_id,operation,resource_id,input_fingerprint,created_at_us)"
+      " VALUES('000000000000000000000000020','credential_revoke',"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',zeroblob(32),1);");
+  exec_rejected (db,
+      "INSERT INTO service_credential_handoff_remediation_actions"
+      " (remediation_request_id,request_fingerprint,decision_request_id,"
+      " original_request_id,original_actor_subject_id,"
+      " current_actor_subject_id,escrow_id,binding_digest,"
+      " successor_credential_id,successor_issuance_generation,action,"
+      " confirmation_version,confirmed,outcome,audit_id,created_at_us) VALUES"
+      " ('000000000000000000000000020',zeroblob(32),"
+      " '000000000000000000000000021','000000000000000000000000022',"
+      " 'original-operator','current-operator',"
+      " '00000000-0000-7000-8000-000000000023',randomblob(32),"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'resume',0,0,'recorded',"
+      " '00000000-0000-7000-8000-000000000024',1);");
+  g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+      WYRELOG_E_OK);
+}
+
+static void
+test_handoff_remediation_legacy_upgrade (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "CREATE TABLE service_domain_requests ("
+      " request_id TEXT NOT NULL PRIMARY KEY CHECK ("
+      " length(request_id) BETWEEN 1 AND 256 AND"
+      " instr(request_id, char(0)) = 0),"
+      " operation TEXT NOT NULL CHECK (operation IN ("
+      " 'principal_create','principal_disable','credential_issue',"
+      " 'credential_revoke','credential_rotate')) ,"
+      " resource_id TEXT NOT NULL CHECK ("
+      " length(resource_id) BETWEEN 1 AND 128 AND"
+      " instr(resource_id, char(0)) = 0),"
+      " input_fingerprint BLOB NOT NULL CHECK ("
+      " typeof(input_fingerprint) = 'blob' AND length(input_fingerprint) = 32),"
+      " created_at_us INTEGER NOT NULL CHECK (created_at_us > 0));"
+      "INSERT INTO service_domain_requests"
+      " (request_id,operation,resource_id,input_fingerprint,created_at_us)"
+      " VALUES('000000000000000000000000025','credential_revoke',"
+      " 'legacy-resource',zeroblob(32),1);");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM service_domain_requests"
+          " WHERE request_id='000000000000000000000000025'"
+          " AND operation='credential_revoke';"), ==, 1);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM sqlite_schema WHERE type='trigger' AND name IN"
+          " ('trg_service_handoff_remediation_no_legacy_collision',"
+          " 'trg_service_domain_requests_no_remediation_collision');"), ==, 2);
+}
+
+static void
 test_collision_policy (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -559,6 +783,34 @@ test_corruption_matrix (void)
         "DROP INDEX idx_service_credentials_tenant_state_expiry;"
         "CREATE INDEX idx_service_credentials_tenant_state_expiry"
         " ON service_credentials(state,tenant_id,expires_at_us);");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "DROP INDEX idx_service_handoff_completed_revoke;"
+        "CREATE UNIQUE INDEX idx_service_handoff_completed_revoke ON"
+        " service_credential_handoff_remediation_actions("
+        " original_request_id,escrow_id,binding_digest,"
+        " successor_credential_id,successor_issuance_generation,action)"
+        " WHERE action='resume';");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "DROP INDEX idx_service_handoff_disposition_exact;"
+        "CREATE UNIQUE INDEX idx_service_handoff_disposition_exact ON"
+        " service_credential_handoff_dispositions(original_request_id,reason,"
+        " outcome,escrow_id,binding_digest,"
+        " coalesce(successor_credential_id,'x'),"
+        " coalesce(successor_issuance_generation,0));");
     g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
         WYRELOG_E_POLICY);
   }
@@ -1337,6 +1589,10 @@ main (int argc, char **argv)
       test_runtime_and_template_fingerprints);
   g_test_add_func ("/policy/service-schema/constraints",
       test_constraints_and_triggers);
+  g_test_add_func ("/policy/service-schema/handoff-terminal-contracts",
+      test_handoff_terminal_schema_contracts);
+  g_test_add_func ("/policy/service-schema/handoff-remediation-legacy-upgrade",
+      test_handoff_remediation_legacy_upgrade);
   g_test_add_func ("/policy/service-schema/collision-policy",
       test_collision_policy);
   g_test_add_func ("/policy/service-schema/unregistered-legacy-service",
