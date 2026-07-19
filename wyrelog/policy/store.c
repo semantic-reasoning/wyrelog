@@ -10433,6 +10433,44 @@ wyl_policy_store_service_handoff_escrow_load (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+    wyl_policy_store_service_handoff_escrow_load_by_request
+    (wyl_policy_store_t * store, const gchar * request_id,
+    wyl_policy_service_handoff_escrow_info_t * out)
+{
+  if (out != NULL)
+    wyl_policy_service_handoff_escrow_info_clear (out);
+  if (store == NULL || store->db == NULL || out == NULL
+      || !service_domain_text_is_valid (request_id, 256))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT escrow_id FROM service_credential_handoff_escrows "
+      "WHERE request_id=?;", &stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (sqlite3_bind_text (stmt, 1, request_id, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step = sqlite3_step (stmt);
+  if (step == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (step != SQLITE_ROW || sqlite3_column_type (stmt, 0) != SQLITE_TEXT) {
+    sqlite3_finalize (stmt);
+    return step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+  const gchar *id_text = (const gchar *) sqlite3_column_text (stmt, 0);
+  wyl_id_t escrow_id;
+  rc = id_text == NULL ? WYRELOG_E_POLICY : wyl_id_parse (id_text, &escrow_id);
+  sqlite3_finalize (stmt);
+  return rc == WYRELOG_E_OK ? wyl_policy_store_service_handoff_escrow_load
+      (store, &escrow_id, out) : rc;
+}
+
+wyrelog_error_t
 wyl_policy_store_service_handoff_escrow_unseal (wyl_policy_store_t *store,
     const wyl_policy_service_handoff_escrow_info_t *expected,
     wyl_policy_service_handoff_secret_t **out_secret)
@@ -10878,6 +10916,226 @@ wyrelog_error_t
   return rc == WYRELOG_E_OK ? service_credential_issue_impl (store,
       subject_id, tenant_id, actor_subject_id, request_id, expires_at_us,
       runtime, cvk, cvk_len, out, out_secret, TRUE) : rc;
+}
+
+static wyrelog_error_t
+service_credential_handoff_store (wyl_policy_store_t *store,
+    const gchar *operation, const gchar *request_id,
+    const gchar *actor_subject_id,
+    const wyl_policy_service_handoff_request_t *handoff,
+    const wyl_policy_service_credential_info_t *credential,
+    const wyl_service_credential_secret_t *secret,
+    wyl_policy_service_handoff_escrow_info_t *out_escrow)
+{
+  if (store == NULL || operation == NULL || request_id == NULL
+      || actor_subject_id == NULL || handoff == NULL
+      || handoff->escrow_id == NULL || handoff->target_digest == NULL
+      || handoff->deadline_at_us <= 0 || credential == NULL
+      || credential->credential_id == NULL || credential->generation == 0
+      || secret == NULL || out_escrow == NULL)
+    return WYRELOG_E_INVALID;
+  gchar escrow_id[WYL_ID_STRING_BUF];
+  if (wyl_id_format (handoff->escrow_id, escrow_id, sizeof escrow_id)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  gsize secret_len = 0;
+  const guint8 *raw = wyl_service_credential_secret_peek_raw (secret,
+      &secret_len);
+  if (raw == NULL || secret_len != WYL_SERVICE_CREDENTIAL_SECRET_BYTES)
+    return WYRELOG_E_POLICY;
+  guint8 binding[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
+  wyl_policy_service_handoff_escrow_input_t input = {
+    .escrow_id = handoff->escrow_id,.operation = operation,
+    .request_id = request_id,.actor_subject_id = actor_subject_id,
+    .target_digest = handoff->target_digest,
+    .credential_id = credential->credential_id,
+    .credential_generation = credential->generation,
+    .deadline_at_us = handoff->deadline_at_us,.binding_digest = binding,
+    .secret = raw,.secret_len = secret_len,
+  };
+  wyl_policy_service_handoff_escrow_info_t prepared = {
+    .escrow_id = *handoff->escrow_id,
+    .operation = g_strdup (operation),.request_id = g_strdup (request_id),
+    .actor_subject_id = g_strdup (actor_subject_id),
+    .credential_id = g_strdup (credential->credential_id),
+    .credential_generation = credential->generation,
+    .deadline_at_us = handoff->deadline_at_us,
+  };
+  memcpy (prepared.target_digest, handoff->target_digest,
+      sizeof prepared.target_digest);
+  wyrelog_error_t rc = service_handoff_binding_digest (&input, binding);
+  if (rc == WYRELOG_E_OK && (prepared.operation == NULL
+          || prepared.request_id == NULL || prepared.actor_subject_id == NULL
+          || prepared.credential_id == NULL))
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_handoff_escrow_insert (store, &input);
+  memcpy (prepared.binding_digest, binding, sizeof prepared.binding_digest);
+  sodium_memzero (binding, sizeof binding);
+  if (rc == WYRELOG_E_OK) {
+    wyl_policy_service_handoff_escrow_info_clear (out_escrow);
+    *out_escrow = prepared;
+    memset (&prepared, 0, sizeof prepared);
+  }
+  wyl_policy_service_handoff_escrow_info_clear (&prepared);
+  return rc;
+}
+
+static gboolean
+    service_credential_handoff_request_valid
+    (const wyl_policy_service_handoff_request_t * handoff)
+{
+  if (handoff == NULL || handoff->escrow_id == NULL
+      || handoff->target_digest == NULL || handoff->deadline_at_us <= 0)
+    return FALSE;
+  gchar escrow_id[WYL_ID_STRING_BUF];
+  return wyl_id_format (handoff->escrow_id, escrow_id, sizeof escrow_id)
+      == WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_credential_handoff_replay (wyl_policy_store_t *store,
+    const gchar *operation, const gchar *request_id,
+    const gchar *actor_subject_id,
+    const wyl_policy_service_handoff_request_t *handoff,
+    const gchar *domain_operation, const gchar *resource_id,
+    const guint8 request_fingerprint[crypto_generichash_BYTES],
+    wyl_policy_service_credential_info_t *out,
+    wyl_policy_service_handoff_escrow_info_t *out_escrow)
+{
+  wyl_policy_service_handoff_escrow_info_t found = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_service_handoff_escrow_load_by_request
+      (store, request_id, &found);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!g_str_equal (found.operation, operation)
+      || !g_str_equal (found.actor_subject_id, actor_subject_id)
+      || !wyl_id_equal (&found.escrow_id, handoff->escrow_id)
+      || found.deadline_at_us != handoff->deadline_at_us
+      || sodium_memcmp (found.target_digest, handoff->target_digest,
+          sizeof found.target_digest) != 0) {
+    wyl_policy_service_handoff_escrow_info_clear (&found);
+    return WYRELOG_E_POLICY;
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT operation,resource_id,input_fingerprint FROM "
+      "service_domain_requests WHERE request_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_text (stmt, 1, request_id, -1, SQLITE_TRANSIENT)
+      != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_ROW || sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 1) != SQLITE_TEXT)
+      rc = step == SQLITE_ROW ? WYRELOG_E_POLICY : WYRELOG_E_NOT_FOUND;
+    else {
+      const gchar *stored_operation = (const gchar *) sqlite3_column_text
+          (stmt, 0);
+      const gchar *stored_resource = (const gchar *) sqlite3_column_text
+          (stmt, 1);
+      guint8 stored_fingerprint[crypto_generichash_BYTES] = { 0 };
+      rc = read_fixed_blob (stmt, 2, stored_fingerprint,
+          sizeof stored_fingerprint);
+      if (rc == WYRELOG_E_OK && (stored_operation == NULL
+              || stored_resource == NULL
+              || !g_str_equal (stored_operation, domain_operation)
+              || !g_str_equal (stored_resource, resource_id)
+              || sodium_memcmp (stored_fingerprint, request_fingerprint,
+                  sizeof stored_fingerprint) != 0))
+        rc = WYRELOG_E_POLICY;
+      sodium_memzero (stored_fingerprint, sizeof stored_fingerprint);
+    }
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_service_handoff_escrow_info_clear (&found);
+    return rc;
+  }
+  wyl_policy_service_handoff_escrow_input_t input = {
+    .escrow_id = &found.escrow_id,.operation = found.operation,
+    .request_id = found.request_id,.actor_subject_id = found.actor_subject_id,
+    .target_digest = found.target_digest,.credential_id = found.credential_id,
+    .credential_generation = found.credential_generation,
+    .deadline_at_us = found.deadline_at_us,
+  };
+  guint8 binding[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
+  rc = service_handoff_binding_digest (&input, binding);
+  if (rc == WYRELOG_E_OK && sodium_memcmp (binding, found.binding_digest,
+          sizeof binding) != 0)
+    rc = WYRELOG_E_POLICY;
+  sodium_memzero (binding, sizeof binding);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_lookup_service_credential_by_id (store,
+        found.credential_id, out);
+  if (rc == WYRELOG_E_OK) {
+    *out_escrow = found;
+    memset (&found, 0, sizeof found);
+  }
+  wyl_policy_service_handoff_escrow_info_clear (&found);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_issue_service_credential_handoff_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * subject_id, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 expires_at_us, const wyl_service_credential_runtime_t * runtime,
+    const guint8 * cvk, gsize cvk_len,
+    const wyl_policy_service_handoff_request_t * handoff,
+    wyl_policy_service_credential_info_t * out,
+    wyl_policy_service_handoff_escrow_info_t * out_escrow)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (out_escrow != NULL)
+    wyl_policy_service_handoff_escrow_info_clear (out_escrow);
+  if (out == NULL || out_escrow == NULL
+      || !service_credential_handoff_request_valid (handoff))
+    return WYRELOG_E_INVALID;
+  if (subject_id == NULL
+      || !wyl_policy_service_subject_is_valid (subject_id, strlen (subject_id))
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
+      || !service_domain_text_is_valid (request_id, 256) || expires_at_us < 0)
+    return WYRELOG_E_INVALID;
+  guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
+  wyrelog_error_t rc = service_credential_issue_fingerprint (subject_id,
+      tenant_id, actor_subject_id, expires_at_us, fingerprint);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
+  rc = wyl_policy_store_service_authority_transaction_enter_participant (txn,
+      store);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
+  rc = service_credential_handoff_replay (store, "issue", request_id,
+      actor_subject_id, handoff, "credential_issue", subject_id, fingerprint,
+      out, out_escrow);
+  sodium_memzero (fingerprint, sizeof fingerprint);
+  if (rc == WYRELOG_E_OK)
+    return rc;
+  if (rc != WYRELOG_E_NOT_FOUND)
+    return rc;
+  wyl_service_credential_secret_t *secret = NULL;
+  rc = wyl_policy_store_issue_service_credential_core (txn,
+      store, subject_id, tenant_id, actor_subject_id, request_id,
+      expires_at_us, runtime, cvk, cvk_len, out, &secret);
+  if (rc == WYRELOG_E_OK)
+    rc = service_credential_handoff_store (store, "issue", request_id,
+        actor_subject_id, handoff, out, secret, out_escrow);
+  wyl_service_credential_secret_clear (&secret);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_service_credential_info_clear (out);
+    wyl_policy_service_handoff_escrow_info_clear (out_escrow);
+  }
+  return rc;
 }
 
 wyrelog_error_t
@@ -11588,6 +11846,69 @@ wyrelog_error_t
       old_credential_id, actor_subject_id, request_id, new_expires_at_us,
       now_us_cb, now_data, runtime, expected_generation, cvk, cvk_len, out,
       out_secret, TRUE) : rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_rotate_service_credential_handoff_core
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store,
+    const gchar * old_credential_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 new_expires_at_us,
+    gint64 (*now_us_cb) (gpointer data), gpointer now_data,
+    const wyl_service_credential_runtime_t * runtime,
+    guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
+    const wyl_policy_service_handoff_request_t * handoff,
+    wyl_policy_service_credential_info_t * out,
+    wyl_policy_service_handoff_escrow_info_t * out_escrow)
+{
+  if (out != NULL)
+    wyl_policy_service_credential_info_clear (out);
+  if (out_escrow != NULL)
+    wyl_policy_service_handoff_escrow_info_clear (out_escrow);
+  if (out == NULL || out_escrow == NULL
+      || !service_credential_handoff_request_valid (handoff))
+    return WYRELOG_E_INVALID;
+  if (old_credential_id == NULL
+      || !wyl_service_credential_id_is_canonical (old_credential_id,
+          strlen (old_credential_id))
+      || !wyl_policy_service_actor_subject_is_valid (actor_subject_id)
+      || !service_domain_text_is_valid (request_id, 256)
+      || new_expires_at_us < 0 || expected_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
+  wyrelog_error_t rc = service_credential_rotate_fingerprint (old_credential_id,
+      actor_subject_id, new_expires_at_us, fingerprint);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
+  rc = wyl_policy_store_service_authority_transaction_enter_participant (txn,
+      store);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return rc;
+  }
+  rc = service_credential_handoff_replay (store, "rotate", request_id,
+      actor_subject_id, handoff, "credential_rotate", old_credential_id,
+      fingerprint, out, out_escrow);
+  sodium_memzero (fingerprint, sizeof fingerprint);
+  if (rc == WYRELOG_E_OK)
+    return rc;
+  if (rc != WYRELOG_E_NOT_FOUND)
+    return rc;
+  wyl_service_credential_secret_t *secret = NULL;
+  rc = wyl_policy_store_rotate_service_credential_core (txn,
+      store, old_credential_id, actor_subject_id, request_id,
+      new_expires_at_us, now_us_cb, now_data, runtime, expected_generation,
+      cvk, cvk_len, out, &secret);
+  if (rc == WYRELOG_E_OK)
+    rc = service_credential_handoff_store (store, "rotate", request_id,
+        actor_subject_id, handoff, out, secret, out_escrow);
+  wyl_service_credential_secret_clear (&secret);
+  if (rc != WYRELOG_E_OK) {
+    wyl_policy_service_credential_info_clear (out);
+    wyl_policy_service_handoff_escrow_info_clear (out_escrow);
+  }
+  return rc;
 }
 
 wyrelog_error_t
