@@ -8,6 +8,29 @@
 
 G_BEGIN_DECLS;
 
+/* A lifecycle lock is deliberately distinct from the short-lived journal
+ * checkpoint lock.  The native POSIX fd or Windows HANDLE remains opaque to
+ * callers and may only be released through the matching API. */
+typedef struct
+{
+  gpointer native_handle;
+  WylServiceCredentialOperationChildName child_name;
+} WylServiceCredentialOperationCoordinatorLock;
+
+#define WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT \
+  { .native_handle = NULL, \
+    .child_name = WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT }
+
+wyrelog_error_t wyl_service_credential_operation_coordinator_lock_acquire
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    WylServiceCredentialOperationCoordinatorLock * out_lock);
+void wyl_service_credential_operation_coordinator_lock_release
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    WylServiceCredentialOperationCoordinatorLock * lock);
+
 /* Persist or replay the journal entry selected solely by request_id. The
  * persisted operation_id is the canonical request_id; callers cannot supply
  * a separate operation identity. The
@@ -53,5 +76,30 @@ wyrelog_error_t
     guint64 successor_generation, const guint8 * binding_digest,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * reservation_id,
+    const gchar * stage_basename, const gchar * publication_receipt_id,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * reservation_id,
+    const gchar * stage_basename, const gchar * stage_identity,
+    const gchar * publication_receipt_id, gint64 now_us,
+    gboolean * out_replayed, WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_file_published
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * reservation_id,
+    const gchar * stage_basename, const gchar * stage_identity,
+    const gchar * publication_receipt_id, gint64 now_us,
+    gboolean * out_replayed, WylServiceCredentialOperationRecord * out_record);
 
 G_END_DECLS;

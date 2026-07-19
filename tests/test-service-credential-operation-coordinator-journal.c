@@ -1089,6 +1089,8 @@ test_v5_handoff_lifecycle_builders (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecord committed =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord planned =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecord publication =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecord published =
@@ -1104,28 +1106,60 @@ test_v5_handoff_lifecycle_builders (void)
       (wyl_service_credential_operation_coordinator_build_server_committed
       (&prepared, successor, 1, 11, &committed), ==, WYRELOG_E_OK);
   g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_planned
+      (&committed, "reservation", "stage", "receipt", 12, &planned), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (planned.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED);
+  g_assert_cmpstr (planned.stage_identity, ==, "");
+  g_autoptr (GBytes) planned_bytes = NULL;
+  g_autoptr (GBytes) replay_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&planned,
+          &planned_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_planned
+      (&planned, "reservation", "stage", "receipt", 99, &published), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&published,
+          &replay_bytes), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (planned_bytes, replay_bytes));
+  wyl_service_credential_operation_record_clear (&published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_planned
+      (&planned, "other", "stage", "receipt", 13, &published), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_file_published
+      (&planned, "reservation", "stage", "stage-id", "receipt", 13,
+          &published), ==, WYRELOG_E_POLICY);
+  g_assert_null (published.operation_id);
+  g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_publication_prepared
-      (&committed, "reservation", "stage", "stage-id", "receipt", 12,
+      (&committed, "reservation", "stage", "stage-id", "receipt", 13,
+          &publication), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_prepared
+      (&planned, "reservation", "stage", "stage-id", "receipt", 13,
           &publication), ==, WYRELOG_E_OK);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_file_published
-      (&publication, "reservation", "stage", "wrong", "receipt", 13,
+      (&publication, "reservation", "stage", "wrong", "receipt", 14,
           &published), ==, WYRELOG_E_POLICY);
   g_assert_null (published.operation_id);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_file_published
-      (&publication, "reservation", "stage", "stage-id", "receipt", 13,
+      (&publication, "reservation", "stage", "stage-id", "receipt", 14,
           &published), ==, WYRELOG_E_OK);
   g_assert_cmpint (published.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_cleanup_required
-      (&published, 14, &cleanup), ==, WYRELOG_E_OK);
+      (&published, 15, &cleanup), ==, WYRELOG_E_OK);
   g_assert_cmpint (cleanup.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_operator_action_required
-      (&cleanup, "receipt-uncertain", 15, &oar), ==, WYRELOG_E_OK);
+      (&cleanup, "receipt-uncertain", 16, &oar), ==, WYRELOG_E_OK);
   g_assert_cmpint (oar.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
   g_assert_cmpstr (oar.escrow_id, ==, prepared.escrow_id);
@@ -1135,16 +1169,133 @@ test_v5_handoff_lifecycle_builders (void)
   g_assert_cmpstr (oar.successor_credential_id, ==, successor);
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_terminal
-      (&prepared, "cancelled-before-commit", 16, &cleanup), ==, WYRELOG_E_OK);
+      (&prepared, "cancelled-before-commit", 17, &cleanup), ==, WYRELOG_E_OK);
   g_assert_cmpint (cleanup.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
   wyl_service_credential_operation_record_clear (&oar);
   wyl_service_credential_operation_record_clear (&cleanup);
   wyl_service_credential_operation_record_clear (&published);
   wyl_service_credential_operation_record_clear (&publication);
+  wyl_service_credential_operation_record_clear (&planned);
   wyl_service_credential_operation_record_clear (&committed);
   wyl_service_credential_operation_record_clear (&prepared);
   wyl_service_credential_operation_coordinator_request_clear (&request_value);
+}
+
+static void
+test_publication_checkpoints_and_operation_lock (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  WylServiceCredentialOperationCoordinatorRequest r = request ();
+  WylServiceCredentialOperationRecord record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationCoordinatorLock lifecycle =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationCoordinatorLock contender =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) planned_bytes = NULL;
+  g_autoptr (GBytes) replay_bytes = NULL;
+  g_autoptr (GBytes) prepared_bytes = NULL;
+  gboolean replayed = TRUE;
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, 10, NULL, &record), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+      (&fixture->storage, &fixture->anchor, r.request_id, successor, 1, 11,
+          NULL, &record), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, r.request_id, &lifecycle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (strlen (lifecycle.child_name.component), <=,
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_MAX_BYTES);
+  g_assert_true (g_str_has_prefix (lifecycle.child_name.component,
+          "lifecycle-"));
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, r.request_id, &contender), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (contender.native_handle);
+
+  /* The lifecycle lock stays held while checkpoint APIs take their distinct,
+   * short-lived journal lock. */
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+      (&fixture->storage, &fixture->anchor, r.request_id, "reservation",
+          "stage", "receipt", 12, &replayed, &record), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (record.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED);
+  g_assert_cmpstr (record.stage_identity, ==, "");
+  record_name (r.request_id, &name);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &planned_bytes), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+      (&fixture->storage, &fixture->anchor, r.request_id, "reservation",
+          "stage", "receipt", 99, &replayed, &record), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (planned_bytes, replay_bytes));
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+      (&fixture->storage, &fixture->anchor, r.request_id, "wrong",
+          "stage", "stage-id", "receipt", 13, NULL, &record), ==,
+      WYRELOG_E_POLICY);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (planned_bytes, replay_bytes));
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+      (&fixture->storage, &fixture->anchor, r.request_id, "reservation",
+          "stage", "stage-id", "receipt", 13, NULL, &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (record.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED);
+  g_assert_cmpstr (record.stage_identity, ==, "stage-id");
+  g_assert_cmpint (fixture_child_read (fixture, &name, &prepared_bytes), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+      (&fixture->storage, &fixture->anchor, r.request_id, "reservation",
+          "stage", "stage-id", "receipt", 99, &replayed, &record), ==,
+      WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (prepared_bytes, replay_bytes));
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_file_published
+      (&fixture->storage, &fixture->anchor, r.request_id, "reservation",
+          "stage", "stage-id", "receipt", 14, &replayed, &record), ==,
+      WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (record.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+  g_assert_null (lifecycle.native_handle);
+  g_assert_null (lifecycle.child_name.component);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, r.request_id, &contender), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &contender);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&record);
+  wyl_service_credential_operation_coordinator_request_clear (&r);
 }
 
 int
@@ -1191,5 +1342,9 @@ main (int argc, char **argv)
       journal_fixture_tear_down);
   g_test_add_func ("/coordinator/journal/v5-handoff-lifecycle",
       test_v5_handoff_lifecycle_builders);
+  g_test_add ("/coordinator/journal/publication-checkpoints-operation-lock",
+      JournalFixture, NULL, journal_fixture_set_up,
+      test_publication_checkpoints_and_operation_lock,
+      journal_fixture_tear_down);
   return g_test_run ();
 }

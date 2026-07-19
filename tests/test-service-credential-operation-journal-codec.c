@@ -73,6 +73,54 @@ test_roundtrip (void)
 }
 
 static void
+test_publication_planned_roundtrip (void)
+{
+  g_assert_cmpint (WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED, ==,
+      3);
+  g_assert_cmpint (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL, ==, 7);
+  g_assert_cmpint (WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED, ==, 8);
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  WylServiceCredentialOperationRecord input = record_new (request_id,
+      credential_id);
+  WylServiceCredentialOperationRecord output =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_autoptr (GBytes) encoded = NULL;
+  g_autoptr (GBytes) replay = NULL;
+  input.state = WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED;
+  input.publication_receipt_version = 1;
+  input.reservation_id = g_strdup ("reservation");
+  input.stage_basename = g_strdup ("stage");
+  input.publication_receipt_id = g_strdup ("receipt-protocol-id");
+  g_assert_cmpstr (input.stage_identity, ==, "");
+  g_assert_true (wyl_service_credential_operation_record_is_valid (&input));
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&input,
+          &encoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (encoded,
+          &output), ==, WYRELOG_E_OK);
+  g_assert_cmpint (output.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED);
+  g_assert_cmpstr (output.parent_identity, ==, input.parent_identity);
+  g_assert_cmpstr (output.reservation_id, ==, input.reservation_id);
+  g_assert_cmpstr (output.stage_basename, ==, input.stage_basename);
+  g_assert_cmpstr (output.stage_identity, ==, "");
+  g_assert_cmpstr (output.publication_receipt_id, ==,
+      input.publication_receipt_id);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&output,
+          &replay), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (encoded, replay));
+
+  g_clear_pointer (&output.stage_identity, g_free);
+  output.stage_identity = g_strdup ("too-early");
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&output));
+  g_clear_pointer (&output.stage_identity, g_free);
+  output.state = WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED;
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&output));
+  wyl_service_credential_operation_record_clear (&output);
+  wyl_service_credential_operation_record_clear (&input);
+}
+
+static void
 test_rejects_trailing_and_unknown (void)
 {
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -184,6 +232,8 @@ main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/operation-journal/roundtrip", test_roundtrip);
+  g_test_add_func ("/operation-journal/publication-planned-roundtrip",
+      test_publication_planned_roundtrip);
   g_test_add_func ("/operation-journal/rejects-trailing",
       test_rejects_trailing_and_unknown);
   g_test_add_func ("/operation-journal/rejects-invalid",

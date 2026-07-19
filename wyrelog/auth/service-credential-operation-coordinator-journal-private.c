@@ -166,6 +166,52 @@ finish_transition (WylServiceCredentialOperationRecord *next,
 }
 
 wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_publication_planned
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * reservation_id, const gchar * stage_basename,
+    const gchar * publication_receipt_id, gint64 now_us,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED) {
+    if (g_strcmp0 (existing->reservation_id, reservation_id) != 0
+        || g_strcmp0 (existing->stage_basename, stage_basename) != 0
+        || g_strcmp0 (existing->publication_receipt_id,
+            publication_receipt_id) != 0) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    next.updated_at_us = existing->updated_at_us;
+  } else if (existing->state ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED) {
+    next.state = WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED;
+    next.publication_receipt_version = 1;
+    g_clear_pointer (&next.reservation_id, g_free);
+    g_clear_pointer (&next.stage_basename, g_free);
+    g_clear_pointer (&next.publication_receipt_id, g_free);
+    next.reservation_id = g_strdup (reservation_id);
+    next.stage_basename = g_strdup (stage_basename);
+    next.publication_receipt_id = g_strdup (publication_receipt_id);
+    if (next.reservation_id == NULL || next.stage_basename == NULL
+        || next.publication_receipt_id == NULL) {
+      rc = WYRELOG_E_NOMEM;
+      goto out;
+    }
+  } else {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  rc = finish_transition (&next, out_record);
+out:
+  wyl_service_credential_operation_record_clear (&next);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_publication_prepared
     (const WylServiceCredentialOperationRecord * existing,
     const gchar * reservation_id, const gchar * stage_basename,
@@ -177,22 +223,31 @@ wyrelog_error_t
   wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
   if (rc != WYRELOG_E_OK)
     goto out;
-  if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED) {
+  if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED) {
+    if (g_strcmp0 (existing->reservation_id, reservation_id) != 0
+        || g_strcmp0 (existing->stage_basename, stage_basename) != 0
+        || g_strcmp0 (existing->stage_identity, stage_identity) != 0
+        || g_strcmp0 (existing->publication_receipt_id,
+            publication_receipt_id) != 0) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    next.updated_at_us = existing->updated_at_us;
+    rc = finish_transition (&next, out_record);
+    goto out;
+  }
+  if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+      || g_strcmp0 (existing->reservation_id, reservation_id) != 0
+      || g_strcmp0 (existing->stage_basename, stage_basename) != 0
+      || g_strcmp0 (existing->publication_receipt_id,
+          publication_receipt_id) != 0) {
     rc = WYRELOG_E_POLICY;
     goto out;
   }
   next.state = WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED;
-  next.publication_receipt_version = 1;
-  g_clear_pointer (&next.reservation_id, g_free);
-  g_clear_pointer (&next.stage_basename, g_free);
   g_clear_pointer (&next.stage_identity, g_free);
-  g_clear_pointer (&next.publication_receipt_id, g_free);
-  next.reservation_id = g_strdup (reservation_id);
-  next.stage_basename = g_strdup (stage_basename);
   next.stage_identity = g_strdup (stage_identity);
-  next.publication_receipt_id = g_strdup (publication_receipt_id);
-  if (next.reservation_id == NULL || next.stage_basename == NULL
-      || next.stage_identity == NULL || next.publication_receipt_id == NULL)
+  if (next.stage_identity == NULL)
     rc = WYRELOG_E_NOMEM;
   else
     rc = finish_transition (&next, out_record);
@@ -213,6 +268,19 @@ wyrelog_error_t
   wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
   if (rc != WYRELOG_E_OK)
     goto out;
+  if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
+    if (g_strcmp0 (existing->reservation_id, reservation_id) != 0
+        || g_strcmp0 (existing->stage_basename, stage_basename) != 0
+        || g_strcmp0 (existing->stage_identity, stage_identity) != 0
+        || g_strcmp0 (existing->publication_receipt_id,
+            publication_receipt_id) != 0) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    next.updated_at_us = existing->updated_at_us;
+    rc = finish_transition (&next, out_record);
+    goto out;
+  }
   if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
       || g_strcmp0 (existing->reservation_id, reservation_id) != 0
       || g_strcmp0 (existing->stage_basename, stage_basename) != 0
@@ -283,6 +351,8 @@ wyrelog_error_t
 {
   if (existing == NULL || (existing->state
           != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
+          && existing->state !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
           && existing->state !=
           WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
           && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
