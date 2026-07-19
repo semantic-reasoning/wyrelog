@@ -19,6 +19,15 @@ wyrelog_error_t
     (const WylServiceCredentialOperationRecord * existing,
     const gchar * successor_credential_id, guint64 successor_generation,
     gint64 now_us, WylServiceCredentialOperationRecord * out_record);
+/* Escrow-backed path: PREPARED may carry the all-zero digest; this operation
+ * copies the durable escrow binding into SERVER_COMMITTED and makes it part of
+ * replay identity. */
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_server_committed_bound
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * successor_credential_id, guint64 successor_generation,
+    const guint8 * binding_digest, gint64 now_us,
+    WylServiceCredentialOperationRecord * out_record);
 
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_publication_prepared

@@ -198,8 +198,7 @@ gboolean
       || (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
           && record->expected_generation == 0))
     return FALSE;
-  if (!escrow_id_is_canonical (record->escrow_id)
-      || digest_is_zero (record->escrow_binding_digest))
+  if (!escrow_id_is_canonical (record->escrow_id))
     return FALSE;
   if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     return (record->successor_credential_id == NULL
@@ -215,6 +214,7 @@ gboolean
     return record->successor_credential_id != NULL
         && record->successor_credential_id[0] != '\0'
         && record->successor_generation > 0
+        && !digest_is_zero (record->escrow_binding_digest)
         && ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
             || record->state
             == WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED)

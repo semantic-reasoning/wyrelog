@@ -143,6 +143,23 @@ test_server_committed_builder (void)
   g_assert_null (committed.operation_id);
   wyl_service_credential_operation_record_clear (&prepared);
   wyl_service_credential_operation_coordinator_request_clear (&rotate);
+
+  memset (issue.escrow_binding_digest, 0, sizeof issue.escrow_binding_digest);
+  guint8 binding[WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES]
+  = { 1 };
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (&issue, issue.request_id, 20, &prepared), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_server_committed_bound
+      (&prepared, successor, 1, binding, 21, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (committed.escrow_binding_digest,
+      sizeof committed.escrow_binding_digest, binding, sizeof binding);
+  binding[0]++;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_server_committed_bound
+      (&committed, successor, 1, binding, 22, &prepared), ==, WYRELOG_E_POLICY);
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&prepared);
   wyl_service_credential_operation_coordinator_request_clear (&issue);
 }
 
