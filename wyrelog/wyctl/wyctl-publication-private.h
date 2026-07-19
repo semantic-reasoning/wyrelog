@@ -61,6 +61,15 @@ typedef struct wyctl_publication_backend_vtable_t
       const WyctlPublicationPlan * request, WyctlPublicationPlan * out_plan);
   wyrelog_error_t (*prepare) (gpointer self,
       const WyctlPublicationPlan * plan, WyctlPublicationReceipt * out_receipt);
+  /* Durably create the exact stage document, or verify an identical stage
+   * left by an interrupted invocation.  A successful return with
+   * COMMITTED_DURABLE is the stage commit point.  FOREIGN_OR_UNCERTAIN never
+   * authorizes overwrite or cleanup. */
+  wyrelog_error_t (*stage_exact) (gpointer self,
+      const WyctlPublicationPlan * plan, const gchar * credential_id,
+      const WyctlSensitiveText * credential_secret,
+      WyctlPublicationReceipt * out_receipt,
+      WyctlPublicationResult * out_result, gboolean * out_replayed);
   wyrelog_error_t (*commit) (gpointer self,
       const WyctlPublicationReceipt * receipt, const gchar * credential_id,
       const WyctlSensitiveText * credential_secret,
@@ -109,6 +118,13 @@ wyrelog_error_t wyctl_publication_receipt_create
 wyrelog_error_t wyctl_publication_receipt_clone
     (const WyctlPublicationReceipt * receipt,
     WyctlPublicationReceipt * out_receipt);
+
+wyrelog_error_t wyctl_publication_backend_stage_exact
+    (const WyctlPublicationBackendVTable * vtable, gpointer self,
+    const WyctlPublicationPlan * plan, const gchar * credential_id,
+    const WyctlSensitiveText * credential_secret,
+    WyctlPublicationReceipt * out_receipt,
+    WyctlPublicationResult * out_result, gboolean * out_replayed);
 
 wyrelog_error_t wyctl_publication_credential_document_encode
     (const gchar * credential_id, const gchar * credential_secret,

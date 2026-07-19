@@ -23,6 +23,12 @@ wyrelog_error_t wyctl_publication_windows_plan
 wyrelog_error_t wyctl_publication_windows_prepare
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, WyctlPublicationReceipt * out_receipt);
+wyrelog_error_t wyctl_publication_windows_stage_exact
+    (const WyctlPublicationWindowsBackend * backend,
+    const WyctlPublicationPlan * plan, const gchar * credential_id,
+    const WyctlSensitiveText * credential_secret,
+    WyctlPublicationReceipt * out_receipt,
+    WyctlPublicationResult * out_result, gboolean * out_replayed);
 wyrelog_error_t wyctl_publication_windows_commit
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
