@@ -334,6 +334,50 @@ wyctl_publication_receipt_clone (const WyctlPublicationReceipt *receipt,
 }
 
 wyrelog_error_t
+wyctl_publication_backend_stage_exact (const WyctlPublicationBackendVTable
+    *vtable, gpointer self, const WyctlPublicationPlan *plan,
+    const gchar *credential_id,
+    const WyctlSensitiveText *credential_secret,
+    WyctlPublicationReceipt *out_receipt,
+    WyctlPublicationResult *out_result, gboolean *out_replayed)
+{
+  wyrelog_error_t rc;
+
+  if (out_receipt == NULL || out_result == NULL || out_replayed == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_receipt_clear (out_receipt);
+  wyctl_publication_result_clear (out_result);
+  *out_replayed = FALSE;
+  if (vtable == NULL || vtable->stage_exact == NULL
+      || !wyctl_publication_plan_is_valid (plan)
+      || !wyctl_publication_expected_credential_is_valid (credential_id,
+          credential_secret))
+    return WYRELOG_E_INVALID;
+
+  rc = vtable->stage_exact (self, plan, credential_id, credential_secret,
+      out_receipt, out_result, out_replayed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!wyctl_publication_result_is_valid (out_result))
+    return WYRELOG_E_INVALID;
+  if (out_result->kind == WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE) {
+    if (!out_result->exact_identity || out_result->cleanup_required
+        || !wyctl_publication_receipt_is_valid (out_receipt))
+      return WYRELOG_E_INVALID;
+  } else if (out_result->kind == WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN) {
+    if (out_result->exact_identity || out_result->cleanup_required
+        || *out_replayed || out_receipt->version != 0)
+      return WYRELOG_E_INVALID;
+  } else if (out_result->kind == WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED) {
+    if (*out_replayed || out_receipt->version != 0)
+      return WYRELOG_E_INVALID;
+  } else {
+    return WYRELOG_E_INVALID;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyctl_publication_credential_document_encode (const gchar *credential_id,
     const gchar *credential_secret, gchar **out_document)
 {

@@ -23,6 +23,12 @@ wyrelog_error_t wyctl_publication_posix_plan
 wyrelog_error_t wyctl_publication_posix_prepare
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * plan, WyctlPublicationReceipt * out_receipt);
+wyrelog_error_t wyctl_publication_posix_stage_exact
+    (const WyctlPublicationPosixBackend * backend,
+    const WyctlPublicationPlan * plan, const gchar * credential_id,
+    const WyctlSensitiveText * credential_secret,
+    WyctlPublicationReceipt * out_receipt,
+    WyctlPublicationResult * out_result, gboolean * out_replayed);
 wyrelog_error_t wyctl_publication_posix_commit
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,

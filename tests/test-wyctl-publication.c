@@ -16,6 +16,7 @@ typedef enum
 {
   FAKE_PLAN = 1,
   FAKE_PREPARE,
+  FAKE_STAGE_EXACT,
   FAKE_COMMIT,
   FAKE_INSPECT,
   FAKE_RESYNC,
@@ -60,6 +61,27 @@ fake_prepare (gpointer self, const WyctlPublicationPlan *plan,
   fake_backend_add_call (backend, FAKE_PREPARE);
   g_assert_true (wyctl_publication_plan_is_valid (plan));
   return wyctl_publication_receipt_create (plan, "stage-identity", out_receipt);
+}
+
+static wyrelog_error_t
+fake_stage_exact (gpointer self, const WyctlPublicationPlan *plan,
+    const gchar *credential_id,
+    const WyctlSensitiveText *credential_secret,
+    WyctlPublicationReceipt *out_receipt,
+    WyctlPublicationResult *out_result, gboolean *out_replayed)
+{
+  FakeBackend *backend = self;
+  fake_backend_add_call (backend, FAKE_STAGE_EXACT);
+  g_assert_true (wyctl_publication_plan_is_valid (plan));
+  g_assert_true (wyctl_publication_expected_credential_is_valid
+      (credential_id, credential_secret));
+  *out_replayed = TRUE;
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity =
+        TRUE,.cleanup_required = FALSE,};
+  return wyctl_publication_receipt_create (plan, "exact-stage-identity",
+      out_receipt);
 }
 
 static wyrelog_error_t
@@ -293,6 +315,39 @@ test_backend_conformance_harness (void)
   wyctl_publication_result_clear (&result);
 }
 
+static void
+test_stage_exact_contract (void)
+{
+  FakeBackend backend = { 0 };
+  WyctlPublicationBackendVTable vtable = {.stage_exact = fake_stage_exact };
+  WyctlPublicationPlan plan = { 0 };
+  WyctlPublicationReceipt receipt = { 0 };
+  WyctlPublicationResult result = { 0 };
+  g_autofree gchar *secret_text = g_strnfill
+      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)
+  };
+  gboolean replayed = FALSE;
+
+  fake_backend_init (&backend);
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          "parent-identity", &plan), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_backend_stage_exact (&vtable, &backend,
+          &plan, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &receipt,
+          &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_true (wyctl_publication_receipt_is_valid (&receipt));
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
+  g_assert_cmpuint (backend.calls->len, ==, 1);
+  g_assert_cmpint (GPOINTER_TO_INT (g_ptr_array_index (backend.calls, 0)), ==,
+      FAKE_STAGE_EXACT);
+
+  wyctl_publication_result_clear (&result);
+  wyctl_publication_receipt_clear (&receipt);
+  wyctl_publication_plan_clear (&plan);
+  fake_backend_clear (&backend);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -309,5 +364,7 @@ main (int argc, char **argv)
       test_result_validation);
   g_test_add_func ("/wyctl/publication/harness",
       test_backend_conformance_harness);
+  g_test_add_func ("/wyctl/publication/stage-exact-contract",
+      test_stage_exact_contract);
   return g_test_run ();
 }

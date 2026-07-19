@@ -613,6 +613,110 @@ test_plan_rejects_nonprivate_root (void)
   wyctl_publication_plan_clear (&request);
 }
 
+static void
+test_stage_exact_crash_retry_returns_same_receipt (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  WyctlPublicationPlan request = { 0 };
+  WyctlPublicationPlan planned = { 0 };
+  WyctlPublicationReceipt first = { 0 };
+  WyctlPublicationReceipt replay = { 0 };
+  WyctlPublicationResult result = { 0 };
+  g_autofree gchar *secret_text = g_strnfill
+      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)
+  };
+  g_autofree gchar *stage_path = NULL;
+  g_autofree gchar *before = NULL;
+  g_autofree gchar *after = NULL;
+  gsize before_len = 0;
+  gsize after_len = 0;
+  struct stat before_st = { 0 };
+  struct stat after_st = { 0 };
+  gboolean replayed = TRUE;
+
+  fixture_init (&fixture);
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          fixture.dir, &request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_plan (&fixture.backend, &request,
+          &planned), ==, WYRELOG_E_OK);
+  stage_path = g_build_filename (fixture.dir, planned.stage_basename, NULL);
+
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &first,
+          &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
+  g_assert_true (wyctl_publication_receipt_is_valid (&first));
+  g_assert_cmpint (g_stat (stage_path, &before_st), ==, 0);
+  g_assert_true (g_file_get_contents (stage_path, &before, &before_len, NULL));
+
+  wyctl_publication_result_clear (&result);
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &replay,
+          &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
+  g_assert_cmpstr (replay.stage_identity, ==, first.stage_identity);
+  g_assert_cmpint (g_stat (stage_path, &after_st), ==, 0);
+  g_assert_cmpuint ((guint64) after_st.st_ino, ==, (guint64) before_st.st_ino);
+  g_assert_true (g_file_get_contents (stage_path, &after, &after_len, NULL));
+  g_assert_cmpuint (after_len, ==, before_len);
+  g_assert_cmpmem (after, after_len, before, before_len);
+
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+  wyctl_publication_result_clear (&result);
+  wyctl_publication_receipt_clear (&replay);
+  wyctl_publication_receipt_clear (&first);
+  wyctl_publication_plan_clear (&planned);
+  wyctl_publication_plan_clear (&request);
+}
+
+static void
+test_stage_exact_partial_stage_is_never_overwritten (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  WyctlPublicationPlan request = { 0 };
+  WyctlPublicationPlan planned = { 0 };
+  WyctlPublicationReceipt receipt = { 0 };
+  WyctlPublicationResult result = { 0 };
+  g_autofree gchar *secret_text = g_strnfill
+      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText secret = {.text = secret_text,.len = strlen (secret_text)
+  };
+  g_autofree gchar *stage_path = NULL;
+  g_autofree gchar *contents = NULL;
+  gsize contents_len = 0;
+  gboolean replayed = TRUE;
+
+  fixture_init (&fixture);
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          fixture.dir, &request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_plan (&fixture.backend, &request,
+          &planned), ==, WYRELOG_E_OK);
+  stage_path = g_build_filename (fixture.dir, planned.stage_basename, NULL);
+  g_assert_true (g_file_set_contents (stage_path, "partial", -1, NULL));
+  g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &receipt,
+          &result, &replayed), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (result.kind, ==,
+      WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN);
+  g_assert_false (wyctl_publication_receipt_is_valid (&receipt));
+  g_assert_true (g_file_get_contents (stage_path, &contents, &contents_len,
+          NULL));
+  g_assert_cmpuint (contents_len, ==, strlen ("partial"));
+  g_assert_cmpmem (contents, contents_len, "partial", strlen ("partial"));
+
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+  wyctl_publication_result_clear (&result);
+  wyctl_publication_receipt_clear (&receipt);
+  wyctl_publication_plan_clear (&planned);
+  wyctl_publication_plan_clear (&request);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -643,5 +747,9 @@ main (int argc, char **argv)
       test_cleanup_refuses_foreign_stage);
   g_test_add_func ("/wyctl/publication/posix/rejects-nonprivate-root",
       test_plan_rejects_nonprivate_root);
+  g_test_add_func ("/wyctl/publication/posix/stage-exact-crash-retry",
+      test_stage_exact_crash_retry_returns_same_receipt);
+  g_test_add_func ("/wyctl/publication/posix/stage-exact-partial-no-overwrite",
+      test_stage_exact_partial_stage_is_never_overwritten);
   return g_test_run ();
 }
