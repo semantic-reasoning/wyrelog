@@ -262,11 +262,12 @@ out:
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_checkpoint_server_committed
+    wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, const gchar * successor_credential_id,
-    guint64 successor_generation, gint64 now_us, gboolean * out_replayed,
+    guint64 successor_generation, const guint8 * binding_digest,
+    gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record)
 {
   WylServiceCredentialOperationRecord existing =
@@ -303,11 +304,13 @@ wyrelog_error_t
     rc = WYRELOG_E_POLICY;
     goto out;
   }
+  const guint8 *effective_binding = binding_digest != NULL ? binding_digest :
+      existing.escrow_binding_digest;
   replayed =
       existing.state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED;
-  rc = wyl_service_credential_operation_coordinator_build_server_committed
-      (&existing, successor_credential_id, successor_generation, now_us,
-      &committed);
+  rc = wyl_service_credential_operation_coordinator_build_server_committed_bound
+      (&existing, successor_credential_id, successor_generation,
+      effective_binding, now_us, &committed);
   if (rc != WYRELOG_E_OK)
     goto out;
   if (!replayed) {
@@ -332,4 +335,18 @@ out:
   if (rc == WYRELOG_E_OK && out_replayed != NULL)
     *out_replayed = replayed;
   return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_server_committed
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * successor_credential_id,
+    guint64 successor_generation, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return
+      wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+      (storage, anchor, request_id, successor_credential_id,
+      successor_generation, NULL, now_us, out_replayed, out_record);
 }

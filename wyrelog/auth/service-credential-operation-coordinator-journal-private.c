@@ -57,10 +57,11 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_build_server_committed
+    wyl_service_credential_operation_coordinator_build_server_committed_bound
     (const WylServiceCredentialOperationRecord * existing,
     const gchar * successor_credential_id, guint64 successor_generation,
-    gint64 now_us, WylServiceCredentialOperationRecord * out_record)
+    const guint8 * binding_digest, gint64 now_us,
+    WylServiceCredentialOperationRecord * out_record)
 {
   WylServiceCredentialOperationRecord next =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
@@ -72,14 +73,16 @@ wyrelog_error_t
       || !wyl_service_credential_id_is_canonical (successor_credential_id,
           successor_credential_id ==
           NULL ? 0 : strlen (successor_credential_id))
-      || successor_generation == 0)
+      || successor_generation == 0 || binding_digest == NULL)
     return WYRELOG_E_INVALID;
   if (now_us < existing->updated_at_us)
     return WYRELOG_E_INVALID;
 
   if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED) {
     if (g_strcmp0 (existing->successor_credential_id, successor_credential_id)
-        != 0 || existing->successor_generation != successor_generation)
+        != 0 || existing->successor_generation != successor_generation
+        || memcmp (existing->escrow_binding_digest, binding_digest,
+            sizeof existing->escrow_binding_digest) != 0)
       return WYRELOG_E_POLICY;
   } else if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
     return WYRELOG_E_POLICY;
@@ -101,6 +104,8 @@ wyrelog_error_t
       goto out;
     }
     next.successor_generation = successor_generation;
+    memcpy (next.escrow_binding_digest, binding_digest,
+        sizeof next.escrow_binding_digest);
     next.updated_at_us = now_us;
   }
   if (!wyl_service_credential_operation_record_is_valid (&next)) {
@@ -115,6 +120,18 @@ wyrelog_error_t
 out:
   wyl_service_credential_operation_record_clear (&next);
   return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_server_committed
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * successor_credential_id, guint64 successor_generation,
+    gint64 now_us, WylServiceCredentialOperationRecord * out_record)
+{
+  return existing == NULL ? WYRELOG_E_INVALID :
+      wyl_service_credential_operation_coordinator_build_server_committed_bound
+      (existing, successor_credential_id, successor_generation,
+      existing->escrow_binding_digest, now_us, out_record);
 }
 
 static wyrelog_error_t

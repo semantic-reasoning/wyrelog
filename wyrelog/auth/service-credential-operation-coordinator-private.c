@@ -52,16 +52,12 @@ destination_ok (const gchar *s)
 static gboolean
 escrow_identity_ok (const WylServiceCredentialOperationCoordinatorRequest *r)
 {
-  static const guint8
-      zero[WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES] =
-      { 0 };
   wyl_id_t parsed;
   gchar canonical[WYL_ID_STRING_BUF];
   return r->escrow_id != NULL
       && wyl_id_parse (r->escrow_id, &parsed) == WYRELOG_E_OK
       && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
-      && g_str_equal (r->escrow_id, canonical)
-      && sodium_memcmp (r->escrow_binding_digest, zero, sizeof zero) != 0;
+      && g_str_equal (r->escrow_id, canonical);
 }
 
 void wyl_service_credential_operation_coordinator_request_clear

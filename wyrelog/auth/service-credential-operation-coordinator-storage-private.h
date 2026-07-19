@@ -45,5 +45,13 @@ wyrelog_error_t
     const gchar * request_id, const gchar * successor_credential_id,
     guint64 successor_generation, gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, const gchar * successor_credential_id,
+    guint64 successor_generation, const guint8 * binding_digest,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
 
 G_END_DECLS;
