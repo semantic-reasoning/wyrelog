@@ -205,6 +205,17 @@ wyl_service_credential_secret_peek_encoded (const
   return secret->encoded;
 }
 
+const guint8 *
+wyl_service_credential_secret_peek_raw (const
+    wyl_service_credential_secret_t *secret, gsize *out_len)
+{
+  if (secret == NULL)
+    return NULL;
+  if (out_len != NULL)
+    *out_len = sizeof secret->raw;
+  return secret->raw;
+}
+
 void
 wyl_service_credential_secret_clear (wyl_service_credential_secret_t **secret)
 {

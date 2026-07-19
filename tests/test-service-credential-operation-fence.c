@@ -1012,6 +1012,143 @@ test_reconcile_invalid_arguments (void)
   finish_txn (&t, FALSE);
 }
 
+static void
+test_handoff_cores_commit_once_and_stale_rotate_rolls_back (void)
+{
+  g_autoptr (WylHandle) handle = open_provisioned_handle ();
+  const gchar *subject = "svc:fence:handoff";
+  prepare_authority (handle, subject);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  const guint8 *cvk = NULL;
+  gsize cvk_len = 0;
+  g_assert_cmpint (wyl_policy_store_ensure_service_cvk_for_issuance (store,
+          &cvk, &cvk_len), ==, WYRELOG_E_OK);
+
+  guint8 issue_target[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  memset (issue_target, 0x51, sizeof issue_target);
+  wyl_id_t issue_escrow_id;
+  g_assert_cmpint (wyl_id_new (&issue_escrow_id), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_request_t issue_handoff = {
+    .escrow_id = &issue_escrow_id,.target_digest = issue_target,
+    .deadline_at_us = g_get_real_time () + G_USEC_PER_SEC,
+  };
+  wyl_policy_service_credential_info_t issued = { 0 };
+  wyl_policy_service_handoff_escrow_info_t issue_escrow = { 0 };
+  Txn issue_txn = begin_txn (handle);
+  g_assert_cmpint (wyl_policy_store_issue_service_credential_handoff_core
+      (issue_txn.txn, store, subject, "tenant-a", "admin", "handoff-issue",
+          0, NULL, cvk, cvk_len, &issue_handoff, &issued, &issue_escrow), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (issued.credential_id, ==, issue_escrow.credential_id);
+  g_assert_cmpuint (issued.generation, ==, issue_escrow.credential_generation);
+  finish_txn (&issue_txn, TRUE);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credentials;"), ==, 1);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credential_handoff_escrows "
+          "WHERE request_id='handoff-issue';"), ==, 1);
+  wyl_policy_service_handoff_escrow_info_t replay = { 0 };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load_by_request
+      (store, "handoff-issue", &replay), ==, WYRELOG_E_OK);
+  g_assert_cmpmem (replay.binding_digest, sizeof replay.binding_digest,
+      issue_escrow.binding_digest, sizeof issue_escrow.binding_digest);
+  g_assert_cmpstr (replay.credential_id, ==, issued.credential_id);
+  wyl_policy_service_handoff_escrow_info_clear (&replay);
+
+  /* A committed request replays its exact sealed tuple, rather than invoking
+   * generation or claiming a second domain request. */
+  Txn replay_txn = begin_txn (handle);
+  wyl_policy_service_credential_info_t replayed = { 0 };
+  wyl_policy_service_handoff_escrow_info_t replayed_escrow = { 0 };
+  g_assert_cmpint (wyl_policy_store_issue_service_credential_handoff_core
+      (replay_txn.txn, store, subject, "tenant-a", "admin", "handoff-issue",
+          0, NULL, cvk, cvk_len, &issue_handoff, &replayed,
+          &replayed_escrow), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (replayed.credential_id, ==, issued.credential_id);
+  g_assert_cmpmem (replayed_escrow.binding_digest,
+      sizeof replayed_escrow.binding_digest, issue_escrow.binding_digest,
+      sizeof issue_escrow.binding_digest);
+  finish_txn (&replay_txn, TRUE);
+  wyl_policy_service_handoff_escrow_info_clear (&replayed_escrow);
+  wyl_policy_service_credential_info_clear (&replayed);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credentials;"), ==, 1);
+
+  /* Reusing a request ID with changed domain input must not replay it. */
+  Txn mismatched_replay_txn = begin_txn (handle);
+  g_assert_cmpint (wyl_policy_store_issue_service_credential_handoff_core
+      (mismatched_replay_txn.txn, store, subject, "tenant-b", "admin",
+          "handoff-issue", 0, NULL, cvk, cvk_len, &issue_handoff,
+          &replayed, &replayed_escrow), ==, WYRELOG_E_POLICY);
+  finish_txn (&mismatched_replay_txn, FALSE);
+
+  /* Required output validation precedes every credential or escrow write. */
+  Txn invalid_output_txn = begin_txn (handle);
+  g_assert_cmpint (wyl_policy_store_issue_service_credential_handoff_core
+      (invalid_output_txn.txn, store, subject, "tenant-a", "admin",
+          "handoff-invalid-output", 0, NULL, cvk, cvk_len, &issue_handoff,
+          &replayed, NULL), ==, WYRELOG_E_INVALID);
+  finish_txn (&invalid_output_txn, FALSE);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credentials;"), ==, 1);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credential_handoff_escrows;"), ==, 1);
+
+  guint8 rotate_target[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  memset (rotate_target, 0x52, sizeof rotate_target);
+  wyl_id_t rotate_escrow_id;
+  g_assert_cmpint (wyl_id_new (&rotate_escrow_id), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_request_t rotate_handoff = {
+    .escrow_id = &rotate_escrow_id,.target_digest = rotate_target,
+    .deadline_at_us = g_get_real_time () + G_USEC_PER_SEC,
+  };
+  wyl_policy_service_credential_info_t rotated = { 0 };
+  wyl_policy_service_handoff_escrow_info_t rotate_escrow = { 0 };
+  Txn rotate_txn = begin_txn (handle);
+  g_assert_cmpint (wyl_policy_store_rotate_service_credential_handoff_core
+      (rotate_txn.txn, store, issued.credential_id, "admin", "handoff-rotate",
+          0, NULL, NULL, NULL, issued.generation, cvk, cvk_len,
+          &rotate_handoff, &rotated, &rotate_escrow), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (rotated.credential_id, ==, rotate_escrow.credential_id);
+  g_assert_cmpuint (rotated.generation, ==,
+      rotate_escrow.credential_generation);
+  finish_txn (&rotate_txn, TRUE);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credentials WHERE state='active';"),
+      ==, 1);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credential_handoff_escrows;"), ==, 2);
+
+  guint8 stale_target[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  memset (stale_target, 0x53, sizeof stale_target);
+  wyl_id_t stale_escrow_id;
+  g_assert_cmpint (wyl_id_new (&stale_escrow_id), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_request_t stale_handoff = {
+    .escrow_id = &stale_escrow_id,.target_digest = stale_target,
+    .deadline_at_us = g_get_real_time () + G_USEC_PER_SEC,
+  };
+  g_autofree gchar *stale_old_id = g_strdup (rotated.credential_id);
+  guint64 stale_generation = rotated.generation;
+  wyl_policy_service_handoff_escrow_info_t stale_escrow = { 0 };
+  Txn stale_txn = begin_txn (handle);
+  g_assert_cmpint (wyl_policy_store_rotate_service_credential_handoff_core
+      (stale_txn.txn, store, stale_old_id, "admin", "handoff-stale",
+          0, NULL, NULL, NULL, stale_generation + 1, cvk, cvk_len,
+          &stale_handoff, &rotated, &stale_escrow), ==, WYRELOG_E_POLICY);
+  finish_txn (&stale_txn, FALSE);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credentials;"), ==, 2);
+  g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM service_credential_handoff_escrows "
+          "WHERE request_id='handoff-stale';"), ==, 0);
+
+  wyl_policy_service_credential_info_clear (&rotated);
+  wyl_policy_service_handoff_escrow_info_clear (&stale_escrow);
+  wyl_policy_service_handoff_escrow_info_clear (&rotate_escrow);
+  wyl_policy_service_handoff_escrow_info_clear (&issue_escrow);
+  wyl_policy_service_credential_info_clear (&issued);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1048,5 +1185,7 @@ main (int argc, char **argv)
       test_reconcile_overtaking_across_connections);
   g_test_add_func ("/service-credential-operation-fence/invalid-arguments",
       test_reconcile_invalid_arguments);
+  g_test_add_func ("/service-credential-operation-fence/handoff-cores-atomic",
+      test_handoff_cores_commit_once_and_stale_rotate_rolls_back);
   return g_test_run ();
 }

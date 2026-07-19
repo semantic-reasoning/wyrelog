@@ -473,6 +473,13 @@ typedef struct
   guint8 binding_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
 } wyl_policy_service_handoff_escrow_info_t;
 
+typedef struct
+{
+  const wyl_id_t *escrow_id;
+  const guint8 *target_digest;
+  gint64 deadline_at_us;
+} wyl_policy_service_handoff_request_t;
+
 typedef struct wyl_policy_service_handoff_secret_t
     wyl_policy_service_handoff_secret_t;
 
@@ -1024,6 +1031,9 @@ wyrelog_error_t wyl_policy_store_service_handoff_escrow_insert
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_load
     (wyl_policy_store_t * store, const wyl_id_t * escrow_id,
     wyl_policy_service_handoff_escrow_info_t * out_info);
+wyrelog_error_t wyl_policy_store_service_handoff_escrow_load_by_request
+    (wyl_policy_store_t * store, const gchar * request_id,
+    wyl_policy_service_handoff_escrow_info_t * out_info);
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_unseal
     (wyl_policy_store_t * store,
     const wyl_policy_service_handoff_escrow_info_t * expected,
@@ -1067,6 +1077,15 @@ wyrelog_error_t wyl_policy_store_issue_service_credential_core
     const wyl_service_credential_runtime_t * runtime, const guint8 * cvk,
     gsize cvk_len, wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
+wyrelog_error_t wyl_policy_store_issue_service_credential_handoff_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * tenant_id, const gchar * actor_subject_id,
+    const gchar * request_id, gint64 expires_at_us,
+    const wyl_service_credential_runtime_t * runtime, const guint8 * cvk,
+    gsize cvk_len, const wyl_policy_service_handoff_request_t * handoff,
+    wyl_policy_service_credential_info_t * out,
+    wyl_policy_service_handoff_escrow_info_t * out_escrow);
 /* Verification runtimes and their callback data are borrowed only for this
  * call. before_gate is a deterministic test checkpoint immediately before
  * gate acquisition. The clock and credential callbacks run under the
@@ -1116,6 +1135,16 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential_core
     guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
     wyl_policy_service_credential_info_t * out,
     wyl_service_credential_secret_t ** out_secret);
+wyrelog_error_t wyl_policy_store_rotate_service_credential_handoff_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * old_credential_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 new_expires_at_us, gint64 (*now_us) (gpointer data),
+    gpointer now_data, const wyl_service_credential_runtime_t * runtime,
+    guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
+    const wyl_policy_service_handoff_request_t * handoff,
+    wyl_policy_service_credential_info_t * out,
+    wyl_policy_service_handoff_escrow_info_t * out_escrow);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
     (wyl_policy_store_t * store,
     const wyl_policy_service_credential_info_t * credential,

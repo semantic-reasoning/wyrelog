@@ -52,6 +52,8 @@ gboolean wyl_service_credential_id_is_canonical (const gchar * id,
 
 const gchar *wyl_service_credential_secret_peek_encoded (const
     wyl_service_credential_secret_t * secret, gsize * out_len);
+const guint8 *wyl_service_credential_secret_peek_raw (const
+    wyl_service_credential_secret_t * secret, gsize * out_len);
 void wyl_service_credential_secret_clear (wyl_service_credential_secret_t **
     secret);
 wyrelog_error_t wyl_service_credential_secret_parse (guint32 format_version,
