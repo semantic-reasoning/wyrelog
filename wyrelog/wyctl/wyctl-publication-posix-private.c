@@ -6,6 +6,7 @@
 #include "wyctl-publication-posix-private.h"
 
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <sys/syscall.h>
@@ -527,6 +528,28 @@ out:
 }
 
 static wyrelog_error_t
+write_credential_document_unsynced_to_fd (int fd, const gchar *credential_id,
+    const gchar *credential_secret)
+{
+  gchar *document = NULL;
+  gsize document_len = 0;
+  wyrelog_error_t rc;
+
+  rc = wyctl_publication_credential_document_encode (credential_id,
+      credential_secret, &document);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  document_len = strlen (document);
+  if (lseek (fd, 0, SEEK_SET) < 0 || ftruncate (fd, 0) != 0)
+    rc = map_errno_to_error (errno);
+  else
+    rc = write_all (fd, (const guint8 *) document, document_len);
+  sodium_memzero (document, document_len + 1);
+  g_free (document);
+  return rc;
+}
+
+static wyrelog_error_t
 stat_path_identity (const gchar *path, struct stat *out_st,
     gboolean allow_missing)
 {
@@ -548,6 +571,8 @@ wyctl_publication_posix_backend_init (WyctlPublicationPosixBackend *backend,
     return;
   g_clear_pointer (&backend->root_dir, g_free);
   backend->root_dir = g_strdup (root_dir);
+  backend->stage_exact_hook = NULL;
+  backend->stage_exact_hook_data = NULL;
 }
 
 void
@@ -556,6 +581,18 @@ wyctl_publication_posix_backend_clear (WyctlPublicationPosixBackend *backend)
   if (backend == NULL)
     return;
   g_clear_pointer (&backend->root_dir, g_free);
+  backend->stage_exact_hook = NULL;
+  backend->stage_exact_hook_data = NULL;
+}
+
+void wyctl_publication_posix_backend_set_stage_exact_hook
+    (WyctlPublicationPosixBackend * backend,
+    WyctlPublicationStageExactHook hook, gpointer data)
+{
+  if (backend == NULL)
+    return;
+  backend->stage_exact_hook = hook;
+  backend->stage_exact_hook_data = data;
 }
 
 wyrelog_error_t
@@ -708,6 +745,154 @@ cleanup_created_stage (WyctlPublicationPosixAnchor *anchor,
   return fsync_fd_checked (anchor->dirfd) == WYRELOG_E_OK;
 }
 
+static WyctlPublicationStageExactAction
+stage_exact_hook (const WyctlPublicationPosixBackend *backend,
+    WyctlPublicationStageExactPoint point)
+{
+  if (backend->stage_exact_hook == NULL)
+    return WYCTL_PUBLICATION_STAGE_EXACT_CONTINUE;
+  return backend->stage_exact_hook (backend->stage_exact_hook_data, point);
+}
+
+static gchar *
+stage_temp_prefix (const WyctlPublicationPlan *plan)
+{
+  return g_strdup_printf (".%s.tmp-", plan->stage_basename);
+}
+
+static gchar *
+stage_temp_basename (const WyctlPublicationPlan *plan)
+{
+  wyl_id_t nonce;
+  gchar nonce_buf[WYL_ID_STRING_BUF];
+
+  if (wyl_id_new (&nonce) != WYRELOG_E_OK
+      || wyl_id_format (&nonce, nonce_buf, sizeof nonce_buf) != WYRELOG_E_OK)
+    return NULL;
+  return g_strdup_printf (".%s.tmp-%s", plan->stage_basename, nonce_buf);
+}
+
+/* A crashed writer can leave a secret-bearing sibling temp.  The random name
+ * is scoped by the plan's unique reservation, and the private anchored root
+ * excludes other users.  Recovery removes only owner-only regular entries
+ * with a canonical temp nonce and proves each basename still names the opened
+ * object before unlinking.  An unsafe matching entry makes recovery foreign
+ * rather than risking deletion. */
+static gboolean
+cleanup_stage_temp_orphans (WyctlPublicationPosixAnchor *anchor,
+    const WyctlPublicationPlan *plan)
+{
+  g_autofree gchar *prefix = stage_temp_prefix (plan);
+  DIR *dir = NULL;
+  struct dirent *entry;
+  gboolean removed = FALSE;
+  gboolean safe = TRUE;
+  int scan_fd;
+
+  if (prefix == NULL)
+    return FALSE;
+  scan_fd = dup (anchor->dirfd);
+  if (scan_fd < 0)
+    return FALSE;
+  dir = fdopendir (scan_fd);
+  if (dir == NULL) {
+    close (scan_fd);
+    return FALSE;
+  }
+  errno = 0;
+  while ((entry = readdir (dir)) != NULL) {
+    const gchar *nonce_text;
+    wyl_id_t nonce;
+    struct stat st;
+    g_autofree gchar *identity = NULL;
+    int fd;
+
+    if (!g_str_has_prefix (entry->d_name, prefix))
+      continue;
+    nonce_text = entry->d_name + strlen (prefix);
+    if (wyl_id_parse (nonce_text, &nonce) != WYRELOG_E_OK) {
+      safe = FALSE;
+      break;
+    }
+    fd = openat (anchor->dirfd, entry->d_name, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+        | O_NOFOLLOW
+#endif
+        );
+    if (fd < 0 || fstat (fd, &st) != 0
+        || !stat_is_owner_only_regular (&st, FALSE)
+        || (identity = encode_stat_identity (&st)) == NULL
+        || !named_entry_matches_receipt (anchor->dirfd, entry->d_name, identity)
+        || unlinkat (anchor->dirfd, entry->d_name, 0) != 0) {
+      if (fd >= 0)
+        close (fd);
+      safe = FALSE;
+      break;
+    }
+    close (fd);
+    removed = TRUE;
+  }
+  if (errno != 0)
+    safe = FALSE;
+  closedir (dir);
+  return safe && (!removed || fsync_fd_checked (anchor->dirfd) == WYRELOG_E_OK);
+}
+
+static wyrelog_error_t
+inspect_exact_stage (WyctlPublicationPosixAnchor *anchor,
+    const WyctlPublicationPlan *plan, const gchar *credential_id,
+    const WyctlSensitiveText *credential_secret,
+    WyctlPublicationReceipt *out_receipt,
+    WyctlPublicationResult *out_result, gboolean *out_present)
+{
+  struct stat st;
+  gboolean matches = FALSE;
+  g_autofree gchar *identity = NULL;
+  int fd;
+  wyrelog_error_t rc;
+
+  *out_present = FALSE;
+  fd = openat (anchor->dirfd, plan->stage_basename, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+      | O_NOFOLLOW
+#endif
+      );
+  if (fd < 0) {
+    if (errno == ENOENT)
+      return WYRELOG_E_OK;
+    stage_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+    *out_present = TRUE;
+    return WYRELOG_E_OK;
+  }
+  *out_present = TRUE;
+  if (fstat (fd, &st) != 0 || !stat_is_owner_only_regular (&st, FALSE)
+      || fsync_fd_checked (fd) != WYRELOG_E_OK
+      || fsync_fd_checked (anchor->dirfd) != WYRELOG_E_OK
+      || (identity = encode_stat_identity (&st)) == NULL
+      || !named_entry_matches_receipt (anchor->dirfd, plan->stage_basename,
+          identity)) {
+    close (fd);
+    stage_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+    return WYRELOG_E_OK;
+  }
+  rc = document_matches_expected_fd (fd, credential_id, credential_secret,
+      &matches);
+  close (fd);
+  if (rc != WYRELOG_E_OK || !matches) {
+    stage_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+    return WYRELOG_E_OK;
+  }
+  rc = wyctl_publication_receipt_create (plan, identity, out_receipt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  stage_result_fill (out_result, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,
+      TRUE, FALSE);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyctl_publication_posix_stage_exact (const WyctlPublicationPosixBackend
     *backend, const WyctlPublicationPlan *plan, const gchar *credential_id,
@@ -716,11 +901,12 @@ wyctl_publication_posix_stage_exact (const WyctlPublicationPosixBackend
     WyctlPublicationResult *out_result, gboolean *out_replayed)
 {
   WyctlPublicationPosixAnchor anchor = { 0 };
-  struct stat stage_st = { 0 };
-  int stage_fd = -1;
-  gboolean created = FALSE;
+  struct stat temp_st = { 0 };
+  int temp_fd = -1;
+  gboolean present = FALSE;
   gboolean matches = FALSE;
   gboolean cleanup_durable;
+  g_autofree gchar *temp_basename = NULL;
   g_autofree gchar *identity = NULL;
   wyrelog_error_t rc;
 
@@ -740,155 +926,169 @@ wyctl_publication_posix_stage_exact (const WyctlPublicationPosixBackend
     return WYRELOG_E_POLICY;
   }
 
-  stage_fd = openat (anchor.dirfd, plan->stage_basename,
-      O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC
-#ifdef O_NOFOLLOW
-      | O_NOFOLLOW
-#endif
-      , 0600);
-  if (stage_fd >= 0) {
-    created = TRUE;
-  } else if (errno == EEXIST) {
-    stage_fd = openat (anchor.dirfd, plan->stage_basename, O_RDONLY | O_CLOEXEC
+  if (!cleanup_stage_temp_orphans (&anchor, plan)) {
+    close_root_anchor (&anchor);
+    stage_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+    return WYRELOG_E_OK;
+  }
+  rc = inspect_exact_stage (&anchor, plan, credential_id, credential_secret,
+      out_receipt, out_result, &present);
+  if (rc != WYRELOG_E_OK || present) {
+    close_root_anchor (&anchor);
+    if (rc == WYRELOG_E_OK && out_result->kind ==
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE)
+      *out_replayed = TRUE;
+    return rc;
+  }
+
+  for (guint attempt = 0; attempt < 8 && temp_fd < 0; attempt++) {
+    g_clear_pointer (&temp_basename, g_free);
+    temp_basename = stage_temp_basename (plan);
+    if (temp_basename == NULL) {
+      close_root_anchor (&anchor);
+      return WYRELOG_E_CRYPTO;
+    }
+    temp_fd = openat (anchor.dirfd, temp_basename,
+        O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC
 #ifdef O_NOFOLLOW
         | O_NOFOLLOW
 #endif
-        );
-    if (stage_fd < 0) {
-      stage_result_fill (out_result,
-          WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
-      close_root_anchor (&anchor);
-      return WYRELOG_E_OK;
-    }
-  } else {
-    rc = map_errno_to_error (errno);
-    close_root_anchor (&anchor);
-    return rc;
-  }
-
-  if (fstat (stage_fd, &stage_st) != 0) {
-    close (stage_fd);
-    close_root_anchor (&anchor);
-    stage_result_fill (out_result,
-        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
-    return WYRELOG_E_OK;
-  }
-  if (!stat_is_owner_only_regular (&stage_st, created)) {
-    if (created) {
-      rc = WYRELOG_E_POLICY;
-      goto created_failure;
-    }
-    close (stage_fd);
-    close_root_anchor (&anchor);
-    stage_result_fill (out_result,
-        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
-    return WYRELOG_E_OK;
-  }
-
-  if (created) {
-    gchar *secret_copy;
-
-    if (fchmod (stage_fd, 0600) != 0) {
+        , 0600);
+    if (temp_fd < 0 && errno != EEXIST) {
       rc = map_errno_to_error (errno);
-      goto created_failure;
+      close_root_anchor (&anchor);
+      return rc;
     }
-    secret_copy = g_strndup (credential_secret->text, credential_secret->len);
+  }
+  if (temp_fd < 0) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
+  if (fchmod (temp_fd, 0600) != 0 || fstat (temp_fd, &temp_st) != 0
+      || !stat_is_owner_only_regular (&temp_st, TRUE)) {
+    rc = WYRELOG_E_POLICY;
+    goto temp_failure;
+  }
+  switch (stage_exact_hook (backend,
+          WYCTL_PUBLICATION_STAGE_EXACT_TEMP_CREATED)) {
+    case WYCTL_PUBLICATION_STAGE_EXACT_CRASH:
+      goto simulated_crash;
+    case WYCTL_PUBLICATION_STAGE_EXACT_FAIL:
+      rc = WYRELOG_E_IO;
+      goto temp_failure;
+    default:
+      break;
+  }
+  {
+    gchar *secret_copy = g_strndup (credential_secret->text,
+        credential_secret->len);
     if (secret_copy == NULL) {
       rc = WYRELOG_E_NOMEM;
-      goto created_failure;
+      goto temp_failure;
     }
-    rc = write_credential_document_to_fd (stage_fd, credential_id, secret_copy);
+    rc = write_credential_document_unsynced_to_fd (temp_fd, credential_id,
+        secret_copy);
     sodium_memzero (secret_copy, credential_secret->len + 1);
     g_free (secret_copy);
     if (rc != WYRELOG_E_OK)
-      goto created_failure;
-    if (fsync_fd_checked (anchor.dirfd) != WYRELOG_E_OK) {
+      goto temp_failure;
+  }
+  switch (stage_exact_hook (backend,
+          WYCTL_PUBLICATION_STAGE_EXACT_DOCUMENT_WRITTEN)) {
+    case WYCTL_PUBLICATION_STAGE_EXACT_CRASH:
+      goto simulated_crash;
+    case WYCTL_PUBLICATION_STAGE_EXACT_FAIL:
       rc = WYRELOG_E_IO;
-      goto created_failure;
-    }
-  } else {
-    /* Re-establish durability before accepting a crash survivor. */
-    if (fsync_fd_checked (stage_fd) != WYRELOG_E_OK
-        || fsync_fd_checked (anchor.dirfd) != WYRELOG_E_OK) {
-      close (stage_fd);
-      close_root_anchor (&anchor);
-      stage_result_fill (out_result,
-          WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
-      return WYRELOG_E_OK;
-    }
+      goto temp_failure;
+    default:
+      break;
+  }
+  if (fsync_fd_checked (temp_fd) != WYRELOG_E_OK) {
+    rc = WYRELOG_E_IO;
+    goto temp_failure;
+  }
+  switch (stage_exact_hook (backend, WYCTL_PUBLICATION_STAGE_EXACT_FILE_SYNCED)) {
+    case WYCTL_PUBLICATION_STAGE_EXACT_CRASH:
+      goto simulated_crash;
+    case WYCTL_PUBLICATION_STAGE_EXACT_FAIL:
+      rc = WYRELOG_E_IO;
+      goto temp_failure;
+    default:
+      break;
   }
 
-  rc = document_matches_expected_fd (stage_fd, credential_id,
-      credential_secret, &matches);
-  if (rc != WYRELOG_E_OK || !matches) {
-    if (created) {
-      rc = rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
-      goto created_failure;
-    }
-    close (stage_fd);
-    close_root_anchor (&anchor);
-    stage_result_fill (out_result,
-        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
-    return WYRELOG_E_OK;
-  }
-  if (fstat (stage_fd, &stage_st) != 0
-      || !stat_is_owner_only_regular (&stage_st, FALSE)) {
-    if (created) {
-      rc = WYRELOG_E_IO;
-      goto created_failure;
-    }
-    close (stage_fd);
-    close_root_anchor (&anchor);
-    stage_result_fill (out_result,
-        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
-    return WYRELOG_E_OK;
-  }
-  {
-    struct stat named_st;
-    if (fstatat (anchor.dirfd, plan->stage_basename, &named_st,
-            AT_SYMLINK_NOFOLLOW) != 0
-        || named_st.st_dev != stage_st.st_dev
-        || named_st.st_ino != stage_st.st_ino) {
-      if (created) {
-        rc = WYRELOG_E_IO;
-        goto created_failure;
-      }
-      close (stage_fd);
+  rc = rename_no_replace (backend->root_dir, anchor.dirfd, temp_basename,
+      plan->stage_basename);
+  if (rc != WYRELOG_E_OK) {
+    cleanup_durable = cleanup_created_stage (&anchor, temp_basename, temp_fd,
+        &temp_st);
+    close (temp_fd);
+    temp_fd = -1;
+    if (!cleanup_durable) {
       close_root_anchor (&anchor);
       stage_result_fill (out_result,
           WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
       return WYRELOG_E_OK;
     }
-  }
-  identity = encode_stat_identity (&stage_st);
-  if (identity == NULL) {
-    if (created) {
-      rc = WYRELOG_E_NOMEM;
-      goto created_failure;
-    }
-    close (stage_fd);
+    rc = inspect_exact_stage (&anchor, plan, credential_id,
+        credential_secret, out_receipt, out_result, &present);
     close_root_anchor (&anchor);
-    return WYRELOG_E_NOMEM;
-  }
-  rc = wyctl_publication_receipt_create (plan, identity, out_receipt);
-  if (rc != WYRELOG_E_OK) {
-    if (created)
-      goto created_failure;
-    close (stage_fd);
-    close_root_anchor (&anchor);
+    if (rc == WYRELOG_E_OK && present && out_result->kind ==
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE)
+      *out_replayed = TRUE;
+    else if (rc == WYRELOG_E_OK && !present)
+      stage_result_fill (out_result,
+          WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
     return rc;
   }
-  close (stage_fd);
+  switch (stage_exact_hook (backend, WYCTL_PUBLICATION_STAGE_EXACT_PUBLISHED)) {
+    case WYCTL_PUBLICATION_STAGE_EXACT_CRASH:
+    case WYCTL_PUBLICATION_STAGE_EXACT_FAIL:
+      goto simulated_crash;
+    default:
+      break;
+  }
+  if (fsync_fd_checked (anchor.dirfd) != WYRELOG_E_OK)
+    goto published_uncertain;
+  switch (stage_exact_hook (backend,
+          WYCTL_PUBLICATION_STAGE_EXACT_DIRECTORY_SYNCED)) {
+    case WYCTL_PUBLICATION_STAGE_EXACT_CRASH:
+    case WYCTL_PUBLICATION_STAGE_EXACT_FAIL:
+      goto simulated_crash;
+    default:
+      break;
+  }
+  rc = document_matches_expected_fd (temp_fd, credential_id,
+      credential_secret, &matches);
+  if (rc != WYRELOG_E_OK || !matches || fstat (temp_fd, &temp_st) != 0
+      || !stat_is_owner_only_regular (&temp_st, FALSE)
+      || (identity = encode_stat_identity (&temp_st)) == NULL
+      || !named_entry_matches_receipt (anchor.dirfd, plan->stage_basename,
+          identity))
+    goto published_uncertain;
+  rc = wyctl_publication_receipt_create (plan, identity, out_receipt);
+  if (rc != WYRELOG_E_OK)
+    goto published_uncertain;
+  switch (stage_exact_hook (backend,
+          WYCTL_PUBLICATION_STAGE_EXACT_BEFORE_SUCCESS_RETURN)) {
+    case WYCTL_PUBLICATION_STAGE_EXACT_CRASH:
+    case WYCTL_PUBLICATION_STAGE_EXACT_FAIL:
+      wyctl_publication_receipt_clear (out_receipt);
+      goto simulated_crash;
+    default:
+      break;
+  }
+  close (temp_fd);
   close_root_anchor (&anchor);
-  *out_replayed = !created;
   stage_result_fill (out_result, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,
       TRUE, FALSE);
   return WYRELOG_E_OK;
 
-created_failure:
-  cleanup_durable = cleanup_created_stage (&anchor, plan->stage_basename,
-      stage_fd, &stage_st);
-  close (stage_fd);
+temp_failure:
+  cleanup_durable = cleanup_created_stage (&anchor, temp_basename, temp_fd,
+      &temp_st);
+  close (temp_fd);
   close_root_anchor (&anchor);
   if (!cleanup_durable) {
     wyctl_publication_receipt_clear (out_receipt);
@@ -899,6 +1099,22 @@ created_failure:
   stage_result_fill (out_result, WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED,
       FALSE, FALSE);
   return rc;
+
+published_uncertain:
+  wyctl_publication_receipt_clear (out_receipt);
+  close (temp_fd);
+  close_root_anchor (&anchor);
+  stage_result_fill (out_result,
+      WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+  return WYRELOG_E_OK;
+
+simulated_crash:
+  wyctl_publication_receipt_clear (out_receipt);
+  close (temp_fd);
+  close_root_anchor (&anchor);
+  stage_result_fill (out_result,
+      WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+  return WYRELOG_E_IO;
 }
 
 static wyrelog_error_t

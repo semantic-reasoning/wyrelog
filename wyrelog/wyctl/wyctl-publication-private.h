@@ -55,6 +55,28 @@ typedef struct wyctl_publication_result_t
   gboolean cleanup_required;
 } WyctlPublicationResult;
 
+typedef enum
+{
+  WYCTL_PUBLICATION_STAGE_EXACT_TEMP_CREATED = 0,
+  WYCTL_PUBLICATION_STAGE_EXACT_DOCUMENT_WRITTEN,
+  WYCTL_PUBLICATION_STAGE_EXACT_FILE_SYNCED,
+  WYCTL_PUBLICATION_STAGE_EXACT_PUBLISHED,
+  WYCTL_PUBLICATION_STAGE_EXACT_DIRECTORY_SYNCED,
+  WYCTL_PUBLICATION_STAGE_EXACT_BEFORE_SUCCESS_RETURN,
+} WyctlPublicationStageExactPoint;
+
+typedef enum
+{
+  WYCTL_PUBLICATION_STAGE_EXACT_CONTINUE = 0,
+  WYCTL_PUBLICATION_STAGE_EXACT_FAIL,
+  /* Test-only process-loss simulation: abandon the exact current namespace
+   * state without cleanup so the next invocation exercises recovery. */
+  WYCTL_PUBLICATION_STAGE_EXACT_CRASH,
+} WyctlPublicationStageExactAction;
+
+typedef WyctlPublicationStageExactAction (*WyctlPublicationStageExactHook)
+  (gpointer data, WyctlPublicationStageExactPoint point);
+
 typedef struct wyctl_publication_backend_vtable_t
 {
   wyrelog_error_t (*plan) (gpointer self,
