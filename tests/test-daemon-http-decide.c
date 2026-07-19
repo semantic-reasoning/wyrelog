@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include <glib.h>
+#include <glib/gstdio.h>
 #include <sodium.h>
 #ifdef WYL_HAS_AUDIT
 #include <duckdb.h>
@@ -38,6 +39,75 @@ typedef struct
   SoupServer *server;
   GMainLoop *loop;
 } TestHttpServer;
+
+#ifdef WYL_HAS_FACT_STORE
+/* Credential issuance seals its CVK and consequently requires an owned
+ * keyprovider.  Most daemon HTTP variants deliberately use wyl_init()'s
+ * providerless in-memory store, but the fact-store service variant exercises
+ * reconcile responses for real issue/rotate operations. */
+typedef struct
+{
+  gchar *dir;
+  gchar *policy_path;
+  gchar *key_path;
+  gchar *key_spec;
+  gchar *audit_path;
+} ServiceCredentialStoreFixture;
+
+static void
+service_credential_store_fixture_clear (ServiceCredentialStoreFixture *fixture)
+{
+  if (fixture == NULL)
+    return;
+  if (fixture->policy_path != NULL) {
+    (void) g_remove (fixture->policy_path);
+    g_autofree gchar *clear = g_strdup_printf ("%s.wyrelog-clear",
+        fixture->policy_path);
+    g_autofree gchar *lock = g_strdup_printf ("%s.wyrelog-lock",
+        fixture->policy_path);
+    (void) g_remove (clear);
+    (void) g_remove (lock);
+  }
+  if (fixture->audit_path != NULL)
+    (void) g_remove (fixture->audit_path);
+  if (fixture->key_path != NULL)
+    (void) g_remove (fixture->key_path);
+  if (fixture->dir != NULL)
+    (void) g_rmdir (fixture->dir);
+  g_clear_pointer (&fixture->audit_path, g_free);
+  g_clear_pointer (&fixture->key_spec, g_free);
+  g_clear_pointer (&fixture->key_path, g_free);
+  g_clear_pointer (&fixture->policy_path, g_free);
+  g_clear_pointer (&fixture->dir, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceCredentialStoreFixture,
+    service_credential_store_fixture_clear);
+
+static gboolean
+service_credential_store_fixture_init (ServiceCredentialStoreFixture *fixture)
+{
+  guint8 key[32];
+
+  memset (fixture, 0, sizeof *fixture);
+  fixture->dir = g_dir_make_tmp ("wyl-daemon-http-service-XXXXXX", NULL);
+  if (fixture->dir == NULL)
+    return FALSE;
+  fixture->policy_path = g_build_filename (fixture->dir, "policy.db", NULL);
+  fixture->key_path = g_build_filename (fixture->dir, "policy.key", NULL);
+  fixture->audit_path = g_build_filename (fixture->dir, "audit.db", NULL);
+  if (fixture->policy_path == NULL || fixture->key_path == NULL
+      || fixture->audit_path == NULL)
+    return FALSE;
+  for (guint i = 0; i < sizeof key; i++)
+    key[i] = (guint8) (i + 1);
+  if (!g_file_set_contents (fixture->key_path, (const gchar *) key,
+          sizeof key, NULL))
+    return FALSE;
+  fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
+  return fixture->key_spec != NULL;
+}
+#endif
 
 typedef struct
 {
@@ -5966,13 +6036,19 @@ check_audit_event_present (WylClient *client, const gchar *filter,
   }
 }
 
+#endif /* WYL_HAS_AUDIT */
+
 #ifdef WYL_HAS_FACT_STORE
 static wyrelog_error_t
 prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id)
 {
   wyl_service_principal_t principal = { 0 };
+  g_autofree gchar *request_id = g_strdup_printf ("principal-create:%s",
+      subject_id);
+  if (request_id == NULL)
+    return WYRELOG_E_INTERNAL;
   wyrelog_error_t rc = wyl_service_principal_create (handle, subject_id,
-      subject_id, "admin", "principal-create", &principal);
+      subject_id, "admin", request_id, &principal);
   if (rc != WYRELOG_E_OK)
     return rc;
   wyl_service_principal_clear (&principal);
@@ -6005,6 +6081,30 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       "session_token");
   if (session_token == NULL)
     return 1922;
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK)
+    return 1925;
+  g_autofree gchar *issue_body =
+      g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
+      "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
+      issue_request_id);
+  g_autofree gchar *escaped_session = g_uri_escape_string (session_token,
+      NULL, TRUE);
+  g_autofree gchar *query =
+      g_strdup_printf
+      ("session_token=%s&guard_timestamp=123&guard_loc_class=public"
+      "&guard_risk=69", escaped_session);
+  rc = send_raw_reconcile (session, "POST", base_url, NULL, issue_body,
+      &status, &body);
+  if (rc != 0 || status != 401)
+    return 1923;
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query, issue_body,
+      &status, &body);
+  if (rc != 0 || status != 403)
+    return 1923;
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyrelog_error_t grant_rc = wyl_policy_store_grant_direct_permission (store,
       "http-allow-user", "wr.service_credential.manage", session_token);
@@ -6021,20 +6121,9 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 1923;
 
-  g_autofree gchar *escaped_session = g_uri_escape_string (session_token,
-      NULL, TRUE);
-  g_autofree gchar *query =
-      g_strdup_printf
-      ("session_token=%s&guard_timestamp=123&guard_loc_class=public"
-      "&guard_risk=69", escaped_session);
-
   if (prepare_service_credential_subject (handle, "svc:reconcile:issue")
       != WYRELOG_E_OK)
     return 1924;
-  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
-  if (wyl_request_id_new (issue_request_id, sizeof issue_request_id)
-      != WYRELOG_E_OK)
-    return 1925;
   wyl_service_credential_issue_result_t issue_result = { 0 };
   if (wyl_service_credential_issue (handle, "svc:reconcile:issue",
           "tenant-a", "http-allow-user", issue_request_id,
@@ -6046,11 +6135,6 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   guint64 issue_generation = issue_result.credential.generation;
   wyl_service_credential_issue_result_clear (&issue_result);
 
-  g_autofree gchar *issue_body =
-      g_strdup_printf
-      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
-      "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
-      issue_request_id);
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile (session, "POST", base_url, query, issue_body,
       &status, &body);
@@ -6067,6 +6151,25 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   g_autofree gchar *issue_generation_needle =
       g_strdup_printf ("\"generation\":%" G_GUINT64_FORMAT, issue_generation);
   if (strstr (body, issue_generation_needle) == NULL)
+    return 1929;
+
+  g_autofree gchar *noncanonical_request_body = g_strdup
+      ("{\"version\":1,\"request_id\":\"not-a-canonical-id\","
+      "\"operation\":\"issue\",\"target\":{\"subject\":"
+      "\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}");
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query,
+      noncanonical_request_body, &status, &body);
+  if (rc != 0 || status != 400)
+    return 1929;
+  g_autofree gchar *unknown_operation_body = g_strdup_printf
+      ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"revoke\","
+      "\"target\":{\"subject\":\"svc:reconcile:issue\",\"tenant\":\"tenant-a\"}}",
+      issue_request_id);
+  g_clear_pointer (&body, g_free);
+  rc = send_raw_reconcile (session, "POST", base_url, query,
+      unknown_operation_body, &status, &body);
+  if (rc != 0 || status != 400)
     return 1929;
 
   if (prepare_service_credential_subject (handle, "svc:reconcile:rotate")
@@ -6191,6 +6294,51 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
     return 1944;
 
   return 0;
+}
+
+static gint
+check_service_profile_reconcile_denied (WylHandle *handle)
+{
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+    .profile = WYL_DAEMON_PROFILE_SERVICE,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = g_main_context_new ();
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL) {
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    return 1945;
+  }
+  GThread *thread = g_thread_new ("daemon-http-reconcile-service-profile",
+      test_http_server_thread_ctx, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    g_main_loop_quit (http.loop);
+    g_thread_join (thread);
+    soup_server_disconnect (http.server);
+    g_clear_object (&http.server);
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    return 1946;
+  }
+  g_autofree gchar *base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  gint rc = base_url == NULL ? 1947 : send_raw_reconcile (session, "POST",
+      base_url, NULL, "{}", &status, &body);
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return rc == 0 && status == 403 ? 0 : (rc != 0 ? rc : 1948);
 }
 #endif
 
@@ -6348,7 +6496,6 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
   wyl_service_credential_issue_result_clear (&issued);
   return 0;
 }
-#endif
 #endif
 
 static gint
@@ -6922,7 +7069,7 @@ main (void)
   g_clear_pointer (&http.loop, g_main_loop_unref);
   return 0;
 }
-#elif !defined(WYL_TEST_VARIANT_AUDIT)
+#elif !defined(WYL_TEST_VARIANT_AUDIT) && !defined(WYL_TEST_VARIANT_SERVICE)
 int
 main (void)
 {
@@ -7063,6 +7210,8 @@ main (void)
 int
 main (void)
 {
+  gint result = 0;
+  GThread *thread = NULL;
   gint tenant_gate_rc = check_tenant_gate_codes_contract ();
   if (tenant_gate_rc != 0)
     return tenant_gate_rc;
@@ -7071,9 +7220,26 @@ main (void)
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
 
+#ifdef WYL_HAS_FACT_STORE
+  g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+  g_autoptr (WylHandle) handle = NULL;
+  if (!service_credential_store_fixture_init (&credential_store))
+    return 1;
+  WylHandleOpenOptions credential_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = credential_store.policy_path,
+    .policy_keyprovider_path = credential_store.key_spec,
+    .audit_store_path = credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&credential_options, &handle)
+      != WYRELOG_E_OK)
+    return 1;
+#else
   g_autoptr (WylHandle) handle = NULL;
   if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
     return 1;
+#endif
   if (insert_allow_fixture (handle) != WYRELOG_E_OK)
     return 2;
   if (insert_not_armed_fixture (handle) != WYRELOG_E_OK)
@@ -7091,35 +7257,63 @@ main (void)
   if (wyl_daemon_start_delta_callbacks (handle, &runtime) != WYRELOG_E_OK)
     return 14;
   g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = g_main_context_new ();
   TestHttpServer http = { 0 };
-  http.loop = g_main_loop_new (NULL, FALSE);
+  wyl_daemon_access_token_snapshot_t service_token_snapshot = { 0 };
+  g_autofree gchar *base_url = NULL;
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
   http.server = wyl_daemon_start_http_server_with_runtime (&opts, handle,
       &runtime, &error);
+  g_main_context_pop_thread_default (context);
   if (http.server == NULL)
     return 3;
-  wyl_daemon_access_token_snapshot_t service_token_snapshot = { 0 };
+  thread = g_thread_new ("daemon-http-decide-service",
+      test_http_server_thread_ctx, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    result = 4;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  if (base_url == NULL) {
+    result = 5;
+    goto cleanup;
+  }
   gint service_state_rc = check_service_access_token_state_contract
       (http.server, &service_token_snapshot);
-  if (service_state_rc != 0)
-    return service_state_rc;
+  if (service_state_rc != 0) {
+    result = service_state_rc;
+    goto cleanup;
+  }
   wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
   gint service_resolver_rc = check_service_bearer_resolver_contract
       (http.server);
-  if (service_resolver_rc != 0)
-    return service_resolver_rc;
+  if (service_resolver_rc != 0) {
+    result = service_resolver_rc;
+    goto cleanup;
+  }
 #ifdef WYL_HAS_FACT_STORE
   gint reconcile_rc = check_service_credential_operation_reconcile_contract
       (http.server, handle, base_url);
-  if (reconcile_rc != 0)
-    return reconcile_rc;
+  if (reconcile_rc != 0) {
+    result = reconcile_rc;
+    goto cleanup;
+  }
 #endif
-  gint service_principal_rc = check_service_principal_management_contract ();
-  if (service_principal_rc != 0)
-    return service_principal_rc;
+cleanup:
+  wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
   g_clear_pointer (&http.loop, g_main_loop_unref);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
-  return 0;
+#ifdef WYL_HAS_FACT_STORE
+  if (result == 0)
+    result = check_service_profile_reconcile_denied (handle);
+#endif
+  return result;
 }
 #else /* WYL_TEST_VARIANT_AUDIT */
 int
