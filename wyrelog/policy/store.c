@@ -396,6 +396,8 @@ static wyrelog_error_t prepare_keyprovider_rotation_work
     (wyl_policy_store_t * store, WylOwnedKeyProvider * new_provider,
     const wyl_policy_store_rotation_runtime_t * rotation_runtime,
     guint8 ** out_new_key_material);
+static wyrelog_error_t service_handoff_rewrap_all (wyl_policy_store_t * store,
+    WylOwnedKeyProvider * new_provider);
 
 static gpointer
 cvk_default_alloc (gpointer data, gsize size)
@@ -9807,6 +9809,10 @@ prepare_keyprovider_rotation_work (wyl_policy_store_t *store,
     goto finish;
   }
 
+  rc = service_handoff_rewrap_all (store, new_provider);
+  if (rc != WYRELOG_E_OK)
+    goto finish;
+
   if (old_envelope != NULL) {
     rc = service_cvk_provider_binding (store, new_provider, new_binding);
     if (rc != WYRELOG_E_OK)
@@ -10078,7 +10084,7 @@ service_handoff_build_envelope (guint8 out[WYL_SERVICE_HANDOFF_ENVELOPE_BYTES],
   memcpy (out + 115, escrow_id->bytes, WYL_ID_BYTES);
   cvk_put_u64_be (out + 131, generation);
   cvk_put_u64_be (out + 139, (guint64) deadline_at_us);
-  memcpy (out + 147, secret, WYL_SERVICE_CREDENTIAL_SECRET_BYTES);
+  memmove (out + 147, secret, WYL_SERVICE_CREDENTIAL_SECRET_BYTES);
 }
 
 static gboolean
@@ -10095,6 +10101,171 @@ service_handoff_envelope_matches (const guint8 *envelope,
       WYL_ID_BYTES) == 0
       && cvk_get_u64_be (envelope + 131) == info->credential_generation
       && cvk_get_u64_be (envelope + 139) == (guint64) info->deadline_at_us;
+}
+
+static wyrelog_error_t
+service_handoff_rewrap_one (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *new_provider,
+    const guint8 old_binding[WYL_SERVICE_HANDOFF_BINDING_BYTES],
+    const guint8 new_binding[WYL_SERVICE_HANDOFF_BINDING_BYTES],
+    const wyl_id_t *escrow_id)
+{
+  wyl_policy_service_handoff_escrow_info_t info = { 0 };
+  wyrelog_error_t rc = wyl_policy_store_service_handoff_escrow_load (store,
+      escrow_id, &info);
+  guint8 recomputed[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
+  guint8 *sealed_copy = NULL;
+  gsize sealed_len = 0;
+  guint8 *envelope = NULL;
+  wyl_sealed_blob_t sealed = { 0 };
+  sqlite3_stmt *stmt = NULL;
+  gchar id[WYL_ID_STRING_BUF];
+
+  if (rc == WYRELOG_E_OK) {
+    wyl_policy_service_handoff_escrow_input_t verified = {
+      .escrow_id = &info.escrow_id,.operation = info.operation,
+      .request_id = info.request_id,.actor_subject_id = info.actor_subject_id,
+      .target_digest = info.target_digest,.credential_id = info.credential_id,
+      .credential_generation = info.credential_generation,
+      .deadline_at_us = info.deadline_at_us,
+    };
+    rc = service_handoff_binding_digest (&verified, recomputed);
+    if (rc == WYRELOG_E_OK && sodium_memcmp (recomputed,
+            info.binding_digest, sizeof recomputed) != 0)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_id_format (escrow_id, id, sizeof id);
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+        "SELECT sealed_envelope FROM service_credential_handoff_escrows "
+        "WHERE escrow_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && sqlite3_bind_text (stmt, 1, id, -1, SQLITE_TRANSIENT) != SQLITE_OK)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) == SQLITE_ROW
+      && sqlite3_column_type (stmt, 0) == SQLITE_BLOB) {
+    sealed_len = sqlite3_column_bytes (stmt, 0);
+    if (sealed_len == 0 || sealed_len > 65536)
+      rc = WYRELOG_E_POLICY;
+    else
+      sealed_copy = g_memdup2 (sqlite3_column_blob (stmt, 0), sealed_len);
+    if (sealed_copy == NULL && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_NOMEM;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_NOT_FOUND;
+  }
+  if (stmt != NULL) {
+    sqlite3_finalize (stmt);
+    stmt = NULL;
+  }
+  if (rc == WYRELOG_E_OK) {
+    envelope = cvk_locked_alloc (store, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
+    if (envelope == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  gsize written = 0;
+  if (rc == WYRELOG_E_OK) {
+    wyl_sealed_blob_t old_sealed = {
+      .bytes = sealed_copy,.len = sealed_len
+    };
+    rc = store->keyprovider.vtable.unseal (store->keyprovider.state,
+        &old_sealed, envelope, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES, &written);
+  }
+  if (rc == WYRELOG_E_OK && (written != WYL_SERVICE_HANDOFF_ENVELOPE_BYTES
+          || !service_handoff_envelope_matches (envelope, old_binding, &info)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    service_handoff_build_envelope (envelope, new_binding,
+        info.binding_digest, &info.escrow_id, info.credential_generation,
+        info.deadline_at_us, envelope + 147);
+  if (rc == WYRELOG_E_OK)
+    rc = new_provider->vtable.seal (new_provider->state, envelope,
+        WYL_SERVICE_HANDOFF_ENVELOPE_BYTES, &sealed);
+  if (rc == WYRELOG_E_OK && (sealed.bytes == NULL || sealed.len == 0
+          || sealed.len > 65536 || sealed.len > G_MAXINT))
+    rc = WYRELOG_E_CRYPTO;
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db,
+        "UPDATE service_credential_handoff_escrows SET sealed_envelope=? "
+        "WHERE escrow_id=? AND sealed_envelope=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_blob (stmt, 1, sealed.bytes, (int) sealed.len,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_text (stmt, 2, id, -1, SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 3, sealed_copy, (int) sealed_len,
+              SQLITE_TRANSIENT) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_POLICY;
+
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (sealed.bytes != NULL)
+    new_provider->vtable.clear_sealed_blob (new_provider->state, &sealed);
+  if (sealed_copy != NULL) {
+    sodium_memzero (sealed_copy, sealed_len);
+    g_free (sealed_copy);
+  }
+  cvk_locked_free (store, envelope, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
+  sodium_memzero (recomputed, sizeof recomputed);
+  wyl_policy_service_handoff_escrow_info_clear (&info);
+  return rc;
+}
+
+static wyrelog_error_t
+service_handoff_rewrap_all (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *new_provider)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT escrow_id FROM service_credential_handoff_escrows;", &stmt);
+  GPtrArray *ids = g_ptr_array_new_with_free_func (g_free);
+  if (ids == NULL)
+    rc = WYRELOG_E_NOMEM;
+  int step = SQLITE_DONE;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    if (sqlite3_column_type (stmt, 0) != SQLITE_TEXT) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    const gchar *id = (const gchar *) sqlite3_column_text (stmt, 0);
+    gchar *copy = g_strdup (id);
+    if (id == NULL || copy == NULL) {
+      rc = id == NULL ? WYRELOG_E_POLICY : WYRELOG_E_NOMEM;
+      g_free (copy);
+      break;
+    }
+    g_ptr_array_add (ids, copy);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+
+  guint8 old_binding[WYL_SERVICE_HANDOFF_BINDING_BYTES] = { 0 };
+  guint8 new_binding[WYL_SERVICE_HANDOFF_BINDING_BYTES] = { 0 };
+  if (rc == WYRELOG_E_OK && ids->len != 0)
+    rc = service_handoff_provider_binding_for (store, &store->keyprovider,
+        old_binding);
+  if (rc == WYRELOG_E_OK && ids->len != 0)
+    rc = service_handoff_provider_binding_for (store, new_provider,
+        new_binding);
+  for (guint i = 0; rc == WYRELOG_E_OK && i < ids->len; i++) {
+    wyl_id_t escrow_id;
+    if (wyl_id_parse (g_ptr_array_index (ids, i), &escrow_id) != WYRELOG_E_OK)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = service_handoff_rewrap_one (store, new_provider, old_binding,
+          new_binding, &escrow_id);
+  }
+  sodium_memzero (old_binding, sizeof old_binding);
+  sodium_memzero (new_binding, sizeof new_binding);
+  if (ids != NULL)
+    g_ptr_array_unref (ids);
+  return rc;
 }
 
 wyrelog_error_t
