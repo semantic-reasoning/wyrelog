@@ -43,13 +43,26 @@ wyl_win_nt_create_error (NTSTATUS status)
     case 0xC0000024UL:         /* STATUS_OBJECT_TYPE_MISMATCH */
     case 0xC00000BAUL:         /* STATUS_FILE_IS_A_DIRECTORY */
     case 0xC0000103UL:         /* STATUS_NOT_A_DIRECTORY */
+    case 0xC0000276UL:         /* STATUS_IO_REPARSE_TAG_INVALID */
+    case 0xC0000277UL:         /* STATUS_IO_REPARSE_TAG_MISMATCH */
+    case 0xC0000278UL:         /* STATUS_IO_REPARSE_DATA_INVALID */
     case 0xC0000279UL:         /* STATUS_IO_REPARSE_TAG_NOT_HANDLED */
+    case 0xC0000280UL:         /* STATUS_REPARSE_POINT_NOT_RESOLVED */
+    case 0xC0000281UL:         /* STATUS_DIRECTORY_IS_A_REPARSE_POINT */
+    case 0xC00002B2UL:         /* STATUS_REPARSE_ATTRIBUTE_CONFLICT */
+    case 0xC0000368UL:         /* STATUS_MOUNT_POINT_NOT_RESOLVED */
     case 0xC000050BUL:         /* STATUS_REPARSE_POINT_ENCOUNTERED */
     case 0x8000002DUL:         /* STATUS_STOPPED_ON_SYMLINK */
       return WYRELOG_E_POLICY;
     default:
       return WYRELOG_E_IO;
   }
+}
+
+wyrelog_error_t
+wyl_win_child_classify_nt_create_status_for_test (LONG status)
+{
+  return wyl_win_nt_create_error ((NTSTATUS) status);
 }
 
 static WylNtSetInformationFile
