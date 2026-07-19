@@ -995,6 +995,20 @@ test_service_credential_operation_coordinator_journal = executable('test-service
   include_directories : [wyrelog_inc, include_directories('../wyrelog')])
 test('service-credential-operation-coordinator-journal', test_service_credential_operation_coordinator_journal)
 
+test_service_credential_operation_coordinator_execute = executable('test-service-credential-operation-coordinator-execute',
+  'test-service-credential-operation-coordinator-execute.c',
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+service_credential_operation_coordinator_execute_timeout = 180
+
+test('service-credential-operation-coordinator-execute',
+  test_service_credential_operation_coordinator_execute,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : service_credential_operation_coordinator_execute_timeout,
+)
+
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
   'test-service-credential-operation-storage.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
