@@ -9991,16 +9991,16 @@ const guint8 *wyl_policy_service_handoff_secret_peek
 }
 
 static wyrelog_error_t
-service_handoff_provider_binding (wyl_policy_store_t *store,
+service_handoff_provider_binding_for (wyl_policy_store_t *store,
+    WylOwnedKeyProvider *provider,
     guint8 out[WYL_SERVICE_HANDOFF_BINDING_BYTES])
 {
-  if (store == NULL || !store->keyprovider.owned)
+  if (store == NULL || provider == NULL || !provider->owned)
     return WYRELOG_E_POLICY;
   guint8 *scratch = cvk_locked_alloc (store, 64);
   if (scratch == NULL)
     return WYRELOG_E_NOMEM;
-  wyrelog_error_t rc =
-      store->keyprovider.vtable.derive (store->keyprovider.state,
+  wyrelog_error_t rc = provider->vtable.derive (provider->state,
       WYL_SERVICE_HANDOFF_BINDING_LABEL, scratch, 32);
   if (rc == WYRELOG_E_OK && crypto_generichash (out, 32, (const guint8 *)
           WYL_SERVICE_HANDOFF_BINDING_DOMAIN,
@@ -10118,7 +10118,8 @@ wyl_policy_store_service_handoff_escrow_insert (wyl_policy_store_t *store,
       cvk_locked_alloc (store, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
   if (envelope == NULL)
     return WYRELOG_E_NOMEM;
-  rc = service_handoff_provider_binding (store, binding);
+  rc = service_handoff_provider_binding_for (store, &store->keyprovider,
+      binding);
   if (rc == WYRELOG_E_OK)
     service_handoff_build_envelope (envelope, binding, input->binding_digest,
         input->escrow_id, input->credential_generation, input->deadline_at_us,
@@ -10330,7 +10331,8 @@ wyl_policy_store_service_handoff_escrow_unseal (wyl_policy_store_t *store,
   guint8 binding[32];
   guint8 *envelope = NULL;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_provider_binding (store, binding);
+    rc = service_handoff_provider_binding_for (store, &store->keyprovider,
+        binding);
   if (rc == WYRELOG_E_OK) {
     envelope = cvk_locked_alloc (store, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES);
     if (envelope == NULL)
