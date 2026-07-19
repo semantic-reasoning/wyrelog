@@ -486,9 +486,8 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
               anchor)))
     rc = WYRELOG_E_POLICY;
   /* Reject an existing final reparse point through the same handle-relative
-   * opener used by read/delete/lock.  Keep a validated ordinary destination
-   * pinned until the atomic rename completes.  A missing destination is the
-   * normal first-write case. */
+   * opener used by read/delete/lock.  A missing destination is the normal
+   * first-write case. */
   if (rc == WYRELOG_E_OK
       && !wyl_win_nt_create_relative (storage->root_handle, name,
           FILE_READ_ATTRIBUTES, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ
@@ -507,6 +506,13 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
           || destination_info.nFileIndexLow
           != destination_identity.file_index_low))
     rc = WYRELOG_E_POLICY;
+  /* Classic FileRenameInformation cannot replace a target which still has an
+   * open stream.  Close the validated target before the atomic rename; any
+   * subsequent namespace race is classified at NtSetInformationFile below. */
+  if (destination != INVALID_HANDLE_VALUE) {
+    CloseHandle (destination);
+    destination = INVALID_HANDLE_VALUE;
+  }
   if (rc == WYRELOG_E_OK
       && !wyl_service_credential_operation_storage_anchor_matches (storage,
           anchor))
@@ -522,8 +528,6 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
     if (rc == WYRELOG_E_OK)
       renamed = TRUE;
   }
-  if (destination != INVALID_HANDLE_VALUE)
-    CloseHandle (destination);
   if (renamed) {
     rc = wyl_win_flush_directory (storage->root_handle);
     if (!wyl_service_credential_operation_storage_anchor_matches (storage,
