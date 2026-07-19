@@ -15,7 +15,8 @@ typedef wyrelog_error_t (*WylServiceCredentialOperationRevalidateFn)
 
 /* Borrowed execution seam for a single authorize-and-execute call. All
  * pointers need only remain valid for the duration of that call.
- *   revalidate       required; runs immediately before the domain mutation.
+ *   revalidate       required; runs inside the domain WRITE lease before any
+ *                    fence, CVK, transaction or RNG side effect.
  *   revalidate_data  opaque data forwarded to revalidate.
  *   rotate_runtime   required for a ROTATE record, NULL for ISSUE; its
  *                    old_credential_generation MUST equal the record's
@@ -38,16 +39,15 @@ typedef struct
  *    domain primitive is always invoked with record->actor_subject_id so audit
  *    and event rows carry the durable bound actor, never a caller-supplied
  *    identity.
- *  - Authority is revalidated through runtime->revalidate immediately before
- *    delegating to the fenced/transactional domain primitive. In-transaction
- *    revalidation is out of scope for #508 (it would require a domain
- *    before-gate seam the issue's non-goals forbid); the domain call is itself
- *    fenced and transactional, and every denial precedes the single mutation
- *    so no side effect can occur before authorization completes.
+ *  - Authority is revalidated through runtime->revalidate after the domain
+ *    WRITE lease is acquired and before fence lookup, CVK access, transaction
+ *    start or credential RNG. Every denial therefore shares the domain's
+ *    terminal cleanup path without creating mutation side effects.
  *  - The primitive persists no token, permission snapshot or authorization
- *    artifact and does not alter the record schema. Real wyl_decide wiring and
- *    end-to-end authority coverage belong to the daemon glue in #515; here
- *    revalidate is injected and unit-tested with a stub.
+ *    artifact and does not alter the record schema. This injected callback
+ *    proves the execution boundary but does not define whether a real
+ *    wyl_decide denial emits its own audit record; production decision/audit
+ *    wiring and end-to-end authority coverage belong to daemon glue #515.
  *  - This primitive is NEVER called from recovery/replay; recovery stays
  *    metadata-only and reauth-free.
  *  - Expiry/freshness gating of committed-free intent is #515's recover-gating
