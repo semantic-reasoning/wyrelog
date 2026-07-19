@@ -105,6 +105,9 @@ wyrelog_error_t wyl_service_credential_operation_child_delete
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name);
+/* Lock namespace files are permanent, zero-length objects.  Unlock releases
+ * only the OS lock and native handle so all contenders always resolve the same
+ * underlying object. */
 wyrelog_error_t wyl_service_credential_operation_child_lock
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,

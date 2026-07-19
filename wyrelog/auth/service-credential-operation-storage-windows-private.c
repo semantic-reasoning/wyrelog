@@ -179,7 +179,7 @@ wyl_win_rename_relative (HANDLE handle, HANDLE root,
   if (wide == NULL || units <= 0
       || (gsize) units > G_MAXUSHORT / sizeof (gunichar2))
     return WYRELOG_E_POLICY;
-  name_bytes = (gsize) units * sizeof (gunichar2);
+  name_bytes = (gsize) units *sizeof (gunichar2);
   total = offsetof (WylFileRenameInfo, FileName) + name_bytes;
   info = g_malloc0 (total);
   if (info == NULL)
@@ -642,16 +642,14 @@ wyl_win_child_unlock (const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationRootAnchor *anchor,
     const WylServiceCredentialOperationChildName *name, HANDLE handle)
 {
+  (void) storage;
+  (void) anchor;
+  (void) name;
   if (handle == NULL || handle == INVALID_HANDLE_VALUE)
     return;
-  /* Remove the lock file through the held handle when the root still matches,
-   * targeting the exact locked object rather than a re-resolved path.  Closing
-   * releases the exclusive share and commits the removal. */
-  if (storage != NULL && anchor != NULL && name != NULL
-      && name->component != NULL
-      && wyl_service_credential_operation_storage_anchor_matches (storage,
-          anchor))
-    wyl_win_set_delete_disposition (handle);
+  /* Lock files are stable namespace objects.  Deleting one at unlock permits
+   * an old-inode/new-inode split brain while another waiter owns the old
+   * object.  Closing is the only release operation. */
   CloseHandle (handle);
 }
 #endif
