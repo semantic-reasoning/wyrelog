@@ -50,6 +50,27 @@ typedef struct
   gpointer data;
 } wyl_service_credential_verify_runtime_t;
 
+typedef wyrelog_error_t (*wyl_service_credential_mutation_authorize_fn)
+  (gpointer data, const gchar * actor_subject_id);
+
+/* Optional execution-boundary authorization, borrowed for one mutation call.
+ * authorize runs exactly once after the service WRITE lease is acquired and
+ * before fence lookup, CVK access, transaction start or credential RNG. It
+ * MUST be non-reentrant and MUST NOT call service mutation APIs on handle. */
+typedef struct
+{
+  wyl_service_credential_mutation_authorize_fn authorize;
+  gpointer data;
+} wyl_service_credential_mutation_authorization_t;
+
+typedef struct
+{
+  const wyl_service_credential_mutation_authorization_t *authorization;
+  /* Borrowed for the call; callback lifetime rules match the returned secret
+   * contract documented for rotation below. */
+  const wyl_service_credential_runtime_t *credential_runtime;
+} wyl_service_credential_issue_runtime_t;
+
 typedef struct
 {
   gint64 (*now_us) (gpointer data);
@@ -62,6 +83,7 @@ typedef struct
   /* The observed active generation used by the authoritative rotate CAS.
    * Zero preserves callers that have no externally observed generation. */
   guint64 old_credential_generation;
+  const wyl_service_credential_mutation_authorization_t *authorization;
 } wyl_service_credential_rotate_runtime_t;
 
 typedef struct
@@ -116,6 +138,12 @@ wyrelog_error_t wyl_service_credential_issue (WylHandle * handle,
     const gchar * subject_id, const gchar * tenant_id,
     const gchar * actor_subject_id, const gchar * request_id,
     gint64 expires_at_us, wyl_service_credential_issue_result_t * out);
+wyrelog_error_t wyl_service_credential_issue_with_runtime
+    (WylHandle * handle, const gchar * subject_id, const gchar * tenant_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    gint64 expires_at_us,
+    const wyl_service_credential_issue_runtime_t * runtime,
+    wyl_service_credential_issue_result_t * out);
 wyrelog_error_t wyl_service_credential_get (WylHandle * handle,
     const gchar * credential_id, wyl_service_credential_t * out);
 wyrelog_error_t wyl_service_credential_foreach (WylHandle * handle,
@@ -163,7 +191,9 @@ wyrelog_error_t wyl_service_credential_revoke_with_runtime
  *
  * Clock and credential callbacks may run under the domain gate, and credential
  * callbacks may also run under the lifecycle mutex. They MUST be non-reentrant
- * and MUST NOT call APIs on the same handle, store or service domain. */
+ * and MUST NOT call APIs on the same handle, store or service domain. The
+ * optional authorization descriptor is borrowed only for the call and follows
+ * the execution-boundary contract above. */
 wyrelog_error_t wyl_service_credential_rotate (WylHandle * handle,
     const gchar * old_credential_id, const gchar * actor_subject_id,
     const gchar * request_id, gint64 new_expires_at_us,

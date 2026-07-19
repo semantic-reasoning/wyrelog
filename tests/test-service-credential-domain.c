@@ -899,6 +899,138 @@ test_id_collision_retry_and_wipe (void)
           "WHERE request_id='collision-exhausted';"), ==, 0);
 }
 
+typedef struct
+{
+  WylHandle *handle;
+  guint calls;
+  gboolean saw_write_lease;
+  gchar *actor_subject_id;
+  wyrelog_error_t rc;
+} AuthorizationProbe;
+
+static wyrelog_error_t
+probe_mutation_authorization (gpointer data, const gchar *actor_subject_id)
+{
+  AuthorizationProbe *probe = data;
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  probe->calls++;
+  g_free (probe->actor_subject_id);
+  probe->actor_subject_id = g_strdup (actor_subject_id);
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (probe->handle), &snapshot);
+  probe->saw_write_lease = snapshot.writer_active;
+  return probe->rc;
+}
+
+typedef struct
+{
+  gint64 credentials;
+  gint64 events;
+  gint64 cvk;
+  gint64 fences;
+  gint64 requests;
+  gint64 audits;
+  gint64 audit_intentions;
+} MutationEffects;
+
+static MutationEffects
+mutation_effects (WylHandle *handle)
+{
+  sqlite3 *db = db_of (handle);
+  return (MutationEffects) {
+  .credentials =
+        scalar (db, "SELECT count(*) FROM service_credentials;"),.events =
+        scalar (db, "SELECT count(*) FROM service_credential_events;"),.cvk =
+        scalar (db, "SELECT count(*) FROM service_credential_cvk;"),.fences =
+        scalar (db,
+        "SELECT count(*) FROM service_credential_operation_fences;"),.requests
+        =
+        scalar (db, "SELECT count(*) FROM service_domain_requests;"),.audits =
+        scalar (db, "SELECT count(*) FROM audit_events;"),.audit_intentions =
+        scalar (db, "SELECT count(*) FROM audit_intentions;"),};
+}
+
+static void
+assert_mutation_effects_equal (MutationEffects actual, MutationEffects expected)
+{
+  g_assert_cmpint (actual.credentials, ==, expected.credentials);
+  g_assert_cmpint (actual.events, ==, expected.events);
+  g_assert_cmpint (actual.cvk, ==, expected.cvk);
+  g_assert_cmpint (actual.fences, ==, expected.fences);
+  g_assert_cmpint (actual.requests, ==, expected.requests);
+  g_assert_cmpint (actual.audits, ==, expected.audits);
+  g_assert_cmpint (actual.audit_intentions, ==, expected.audit_intentions);
+}
+
+static void
+test_mutation_authorization_denial_inside_write_lease (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:authorize:worker");
+  CollisionRuntime collision = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &collision,
+  };
+  AuthorizationProbe probe = {
+    .handle = handle,
+    .rc = WYRELOG_E_POLICY,
+  };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,
+    .data = &probe,
+  };
+  wyl_service_credential_issue_runtime_t issue_runtime = {
+    .authorization = &authorization,
+    .credential_runtime = &credential_runtime,
+  };
+  MutationEffects before = mutation_effects (handle);
+  wyl_service_credential_issue_result_t denied = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_with_runtime (handle,
+          "svc:authorize:worker", "tenant-a", "admin", "authorize-issue",
+          0, &issue_runtime, &denied), ==, WYRELOG_E_POLICY);
+  g_assert_null (denied.secret);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (probe.actor_subject_id, ==, "admin");
+  g_assert_cmpuint (collision.ids, ==, 0);
+  g_assert_cmpuint (collision.allocs, ==, 0);
+  assert_mutation_effects_equal (mutation_effects (handle), before);
+
+  wyl_service_credential_issue_result_t seed = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:authorize:worker", "tenant-a", "admin", "authorize-seed", 0,
+          &seed), ==, WYRELOG_E_OK);
+  before = mutation_effects (handle);
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
+  memset (&collision, 0, sizeof collision);
+  wyl_service_credential_rotate_runtime_t rotate_runtime = {
+    .credential_runtime = &credential_runtime,
+    .authorization = &authorization,
+  };
+  g_assert_cmpint (wyl_service_credential_rotate_with_runtime (handle,
+          seed.credential.credential_id, "admin", "authorize-rotate", 0,
+          &rotate_runtime, &denied), ==, WYRELOG_E_POLICY);
+  g_assert_null (denied.secret);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (probe.actor_subject_id, ==, "admin");
+  g_assert_cmpuint (collision.ids, ==, 0);
+  g_assert_cmpuint (collision.allocs, ==, 0);
+  assert_mutation_effects_equal (mutation_effects (handle), before);
+
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (handle), &snapshot);
+  g_assert_false (snapshot.writer_active);
+  wyl_service_credential_issue_result_clear (&seed);
+  wyl_service_credential_issue_result_clear (&denied);
+  g_free (probe.actor_subject_id);
+}
+
 static gint64
 fixed_now (gpointer data)
 {
@@ -2018,6 +2150,8 @@ main (int argc, char **argv)
       test_fault_rollback);
   g_test_add_func ("/auth/service-credential/id-collision-wipe",
       test_id_collision_retry_and_wipe);
+  g_test_add_func ("/auth/service-credential/mutation-authorization-denial",
+      test_mutation_authorization_denial_inside_write_lease);
   g_test_add_func ("/auth/service-credential/same-thread-callback-reentry",
       test_same_thread_callback_reentry_is_busy);
   g_test_add_func
