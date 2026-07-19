@@ -30,7 +30,14 @@ typedef struct
   WCHAR path_buffer[1];
 } WylTestMountPointReparseData;
 
-static gboolean
+typedef enum
+{
+  WYL_TEST_JUNCTION_FAILED = 0,
+  WYL_TEST_JUNCTION_CREATED,
+  WYL_TEST_JUNCTION_UNAVAILABLE
+} WylTestJunctionResult;
+
+static WylTestJunctionResult
 create_windows_directory_junction (const gchar *junction, const gchar *target)
 {
   g_autofree gunichar2 *wjunction = NULL;
@@ -43,12 +50,12 @@ create_windows_directory_junction (const gchar *junction, const gchar *target)
   wjunction = g_utf8_to_utf16 (junction, -1, NULL, NULL, NULL);
   wtarget = g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
   if (wjunction == NULL || wtarget == NULL)
-    return FALSE;
+    return WYL_TEST_JUNCTION_FAILED;
   substitute = g_new (wchar_t, wcslen ((wchar_t *) wtarget) + 5);
   if (substitute == NULL
       || swprintf (substitute, wcslen ((wchar_t *) wtarget) + 5,
           L"\\??\\%ls", (wchar_t *) wtarget) < 0)
-    return FALSE;
+    return WYL_TEST_JUNCTION_FAILED;
   gsize substitute_bytes = wcslen (substitute) * sizeof (wchar_t);
   gsize target_bytes = wcslen ((wchar_t *) wtarget) * sizeof (wchar_t);
   gsize path_bytes = substitute_bytes + sizeof (wchar_t) + target_bytes
@@ -57,19 +64,19 @@ create_windows_directory_junction (const gchar *junction, const gchar *target)
       + path_bytes;
   if (total > MAXIMUM_REPARSE_DATA_BUFFER_SIZE
       || !CreateDirectoryW ((LPCWSTR) wjunction, NULL))
-    return FALSE;
+    return WYL_TEST_JUNCTION_FAILED;
   handle = CreateFileW ((LPCWSTR) wjunction, GENERIC_WRITE, 0, NULL,
       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
       NULL);
   if (handle == INVALID_HANDLE_VALUE) {
     RemoveDirectoryW ((LPCWSTR) wjunction);
-    return FALSE;
+    return WYL_TEST_JUNCTION_FAILED;
   }
   data = g_malloc0 (total);
   if (data == NULL) {
     CloseHandle (handle);
     RemoveDirectoryW ((LPCWSTR) wjunction);
-    return FALSE;
+    return WYL_TEST_JUNCTION_FAILED;
   }
   data->tag = IO_REPARSE_TAG_MOUNT_POINT;
   data->data_length = (WORD) (total - 8);
@@ -81,10 +88,37 @@ create_windows_directory_junction (const gchar *junction, const gchar *target)
       wtarget, target_bytes);
   result = DeviceIoControl (handle, FSCTL_SET_REPARSE_POINT, data,
       (DWORD) total, NULL, 0, &returned, NULL);
+  DWORD error = result ? ERROR_SUCCESS : GetLastError ();
   CloseHandle (handle);
   if (!result)
     RemoveDirectoryW ((LPCWSTR) wjunction);
-  return result;
+  if (result)
+    return WYL_TEST_JUNCTION_CREATED;
+  if (error == ERROR_PRIVILEGE_NOT_HELD || error == ERROR_ACCESS_DENIED
+      || error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED)
+    return WYL_TEST_JUNCTION_UNAVAILABLE;
+  return WYL_TEST_JUNCTION_FAILED;
+}
+
+static gboolean
+require_windows_junction_capability (const gchar *base)
+{
+  g_autofree gchar *target = g_build_filename (base, "junction-probe-target",
+      NULL);
+  g_autofree gchar *junction = g_build_filename (base,
+      "junction-probe-link", NULL);
+  g_assert_cmpint (g_mkdir (target, 0700), ==, 0);
+  WylTestJunctionResult result = create_windows_directory_junction (junction,
+      target);
+  if (result == WYL_TEST_JUNCTION_CREATED)
+    g_assert_cmpint (g_rmdir (junction), ==, 0);
+  g_assert_cmpint (g_rmdir (target), ==, 0);
+  if (result == WYL_TEST_JUNCTION_UNAVAILABLE) {
+    g_test_skip ("mount-point reparse creation privilege is unavailable");
+    return FALSE;
+  }
+  g_assert_cmpint (result, ==, WYL_TEST_JUNCTION_CREATED);
+  return TRUE;
 }
 #endif
 
@@ -773,6 +807,14 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
           &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
       (&storage, &anchor), ==, WYRELOG_E_OK);
+  if (!require_windows_junction_capability (base)) {
+    wyl_service_credential_operation_root_anchor_clear (&anchor);
+    wyl_service_credential_operation_storage_clear (&storage);
+    g_assert_cmpint (g_rmdir (root), ==, 0);
+    g_assert_cmpint (g_rmdir (ancestor), ==, 0);
+    g_assert_cmpint (g_rmdir (base), ==, 0);
+    return;
+  }
   g_assert_cmpint (wyl_service_credential_operation_child_name_validate
       ("record", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
@@ -789,7 +831,8 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
   g_autofree gchar *decoy_record = g_build_filename (decoy_root, "record",
       NULL);
   g_assert_true (g_file_set_contents (decoy_record, "sentinel", 8, NULL));
-  g_assert_true (create_windows_directory_junction (ancestor, decoy));
+  g_assert_cmpint (create_windows_directory_junction (ancestor, decoy), ==,
+      WYL_TEST_JUNCTION_CREATED);
 
   wyrelog_error_t rc = wyl_win_child_replace (&storage, &anchor, &name, two);
   g_assert_true (rc == WYRELOG_E_OK || rc == WYRELOG_E_POLICY);
