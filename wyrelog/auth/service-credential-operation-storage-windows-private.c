@@ -63,14 +63,47 @@ wyl_win_set_delete_disposition (HANDLE handle)
   return WYRELOG_E_OK;
 }
 
-/* Best-effort durability of the directory index entry.  NTFS journals its
- * metadata for crash consistency, and some volumes reject flushing a directory
- * handle, so an unsupported flush does not fail an otherwise committed op. */
-static void
+static volatile LONG wyl_win_next_directory_flush_error = ERROR_SUCCESS;
+
+void
+wyl_win_child_fail_next_directory_flush_for_test (DWORD error)
+{
+  InterlockedExchange (&wyl_win_next_directory_flush_error, (LONG) error);
+}
+
+static wyrelog_error_t
+wyl_win_directory_flush_error (DWORD error)
+{
+  switch (error) {
+      /* FlushFileBuffers is specified for writable file handles.  Directory
+       * handles and file systems that do not implement a directory flush report
+       * one of these errors; the operation remains crash-consistent through the
+       * file system's metadata journal, but cannot provide the stronger flush. */
+    case ERROR_SUCCESS:
+    case ERROR_INVALID_FUNCTION:
+    case ERROR_INVALID_HANDLE:
+    case ERROR_NOT_SUPPORTED:
+    case ERROR_ACCESS_DENIED:
+      return WYRELOG_E_OK;
+    default:
+      return WYRELOG_E_IO;
+  }
+}
+
+/* Make directory-index durability failures observable.  Only errors which
+ * mean that this volume does not support flushing a directory handle are
+ * accepted as the platform's documented best-effort case. */
+static wyrelog_error_t
 wyl_win_flush_directory (HANDLE root)
 {
-  if (root != NULL && root != INVALID_HANDLE_VALUE)
-    FlushFileBuffers (root);
+  LONG forced = InterlockedExchange (&wyl_win_next_directory_flush_error,
+      ERROR_SUCCESS);
+  if (root == NULL || root == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_POLICY;
+  if (forced != ERROR_SUCCESS)
+    return wyl_win_directory_flush_error ((DWORD) forced);
+  return FlushFileBuffers (root) ? WYRELOG_E_OK
+      : wyl_win_directory_flush_error (GetLastError ());
 }
 
 /* Atomically bind `name` to an already-written temp handle, replacing any
@@ -96,7 +129,7 @@ wyl_win_rename_relative (HANDLE handle, HANDLE root,
   if (wide == NULL || units <= 0
       || (gsize) units > G_MAXUSHORT / sizeof (gunichar2))
     return WYRELOG_E_POLICY;
-  name_bytes = (gsize) units * sizeof (gunichar2);
+  name_bytes = (gsize) units *sizeof (gunichar2);
   total = offsetof (WylFileRenameInfo, FileName) + name_bytes;
   info = g_malloc0 (total);
   if (info == NULL)
@@ -302,7 +335,7 @@ wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
   if (size > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES)
     return WYRELOG_E_POLICY;
   if (!wyl_win_nt_create_relative (storage->root_handle, name,
-          GENERIC_WRITE, WYL_WIN_CHILD_CREATE, FILE_SHARE_READ
+          GENERIC_WRITE | DELETE, WYL_WIN_CHILD_CREATE, FILE_SHARE_READ
           | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &handle, &identity, &error))
     return error;
   for (gsize offset = 0; rc == WYRELOG_E_OK && offset < size;) {
@@ -315,8 +348,7 @@ wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
   }
   if (rc == WYRELOG_E_OK && !FlushFileBuffers (handle))
     rc = WYRELOG_E_IO;
-  if (rc == WYRELOG_E_OK
-      && (!GetFileInformationByHandle (handle, &info)
+  if (rc == WYRELOG_E_OK && (!GetFileInformationByHandle (handle, &info)
           || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
                   | FILE_ATTRIBUTE_DIRECTORY))
           || info.nFileSizeHigh != 0 || info.nFileSizeLow != size
@@ -330,8 +362,8 @@ wyl_win_child_create (const WylServiceCredentialOperationStorage *storage,
    * The disposition acts on the held kernel object, so it targets exactly the
    * child we opened and never a substituted path. */
   if (rc == WYRELOG_E_OK)
-    wyl_win_flush_directory (storage->root_handle);
-  else
+    rc = wyl_win_flush_directory (storage->root_handle);
+  if (rc != WYRELOG_E_OK)
     wyl_win_set_delete_disposition (handle);
   CloseHandle (handle);
   return rc;
@@ -384,8 +416,7 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
     rc = WYRELOG_E_IO;
   /* Verify the temp is the object we created and the root is unchanged before
    * the atomic rename linearization point. */
-  if (rc == WYRELOG_E_OK
-      && (!GetFileInformationByHandle (handle, &info)
+  if (rc == WYRELOG_E_OK && (!GetFileInformationByHandle (handle, &info)
           || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
                   | FILE_ATTRIBUTE_DIRECTORY))
           || info.nFileSizeHigh != 0 || info.nFileSizeLow != size
@@ -401,7 +432,7 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
       renamed = TRUE;
   }
   if (renamed) {
-    wyl_win_flush_directory (storage->root_handle);
+    rc = wyl_win_flush_directory (storage->root_handle);
     if (!wyl_service_credential_operation_storage_anchor_matches (storage,
             anchor))
       rc = WYRELOG_E_POLICY;
@@ -445,13 +476,17 @@ wyl_win_child_delete (const WylServiceCredentialOperationStorage *storage,
   }
   rc = wyl_win_set_delete_disposition (handle);
   if (rc == WYRELOG_E_OK) {
-    wyl_win_flush_directory (storage->root_handle);
+    /* The delete disposition is committed by the last close.  Flush the
+     * directory only after that metadata change has reached the namespace. */
+    CloseHandle (handle);
+    handle = INVALID_HANDLE_VALUE;
+    rc = wyl_win_flush_directory (storage->root_handle);
     if (!wyl_service_credential_operation_storage_anchor_matches (storage,
             anchor))
       rc = WYRELOG_E_POLICY;
   }
-  /* Closing the handle commits the deletion when the disposition was set. */
-  CloseHandle (handle);
+  if (handle != INVALID_HANDLE_VALUE)
+    CloseHandle (handle);
   return rc;
 }
 

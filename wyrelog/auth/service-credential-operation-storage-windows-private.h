@@ -49,6 +49,7 @@ void wyl_win_child_unlock
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, HANDLE handle);
+void wyl_win_child_fail_next_directory_flush_for_test (DWORD error);
 
 G_END_DECLS
 #endif

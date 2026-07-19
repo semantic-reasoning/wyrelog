@@ -388,6 +388,67 @@ test_windows_child_create_fixture (void)
 }
 
 static void
+test_windows_directory_flush_failures (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-flush-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (storage.root_path, "record",
+      NULL);
+  g_remove (record);
+
+  /* Unsupported directory flushes retain the platform's best-effort
+   * durability contract. */
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_NOT_SUPPORTED);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+
+  /* A real flush failure is returned even after an atomic replace has made
+   * the new record visible. */
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_WRITE_FAULT);
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
+      WYRELOG_E_IO);
+  g_autoptr (GBytes) replaced = NULL;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &replaced),
+      ==, WYRELOG_E_OK);
+  gsize size = 0;
+  g_assert_cmpmem (g_bytes_get_data (replaced, &size), size, "two", 3);
+
+  /* Delete commits on close before its directory flush, and likewise reports
+   * a genuine durability failure to the caller. */
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_WRITE_FAULT);
+  g_assert_cmpint (wyl_win_child_delete (&storage, &anchor, &name), ==,
+      WYRELOG_E_IO);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+
+  /* Create failures are cleaned through the held child handle. */
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_WRITE_FAULT);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_IO);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+}
+
+static void
 test_windows_child_replace_fixture (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -639,6 +700,8 @@ main (int argc, char **argv)
       test_windows_child_read_fixture);
   g_test_add_func ("/operation-storage/windows/child-create-fixture",
       test_windows_child_create_fixture);
+  g_test_add_func ("/operation-storage/windows/directory-flush-failures",
+      test_windows_directory_flush_failures);
   g_test_add_func ("/operation-storage/windows/child-replace-fixture",
       test_windows_child_replace_fixture);
   g_test_add_func ("/operation-storage/windows/replace-root-substitution",
