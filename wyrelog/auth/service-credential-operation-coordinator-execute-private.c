@@ -10,7 +10,6 @@ wyrelog_error_t
     const WylServiceCredentialOperationExecuteRuntime * runtime,
     wyl_service_credential_issue_result_t * out)
 {
-  wyrelog_error_t rc;
   if (out != NULL)
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || record == NULL || authenticated_actor_subject_id == NULL
@@ -37,19 +36,28 @@ wyrelog_error_t
       && runtime->rotate_runtime->old_credential_generation
       != record->expected_generation)
     return WYRELOG_E_POLICY;
-  rc = runtime->revalidate (runtime->revalidate_data, record->actor_subject_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = runtime->revalidate,
+    .data = runtime->revalidate_data,
+  };
   switch (record->kind) {
-    case WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE:
-      return wyl_service_credential_issue (handle, record->subject_id,
+    case WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE:{
+      wyl_service_credential_issue_runtime_t issue_runtime = {
+        .authorization = &authorization,
+      };
+      return wyl_service_credential_issue_with_runtime (handle,
+          record->subject_id,
           record->tenant_id, record->actor_subject_id, record->request_id,
-          record->expires_at_us, out);
-    case WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE:
+          record->expires_at_us, &issue_runtime, out);
+    }
+    case WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE:{
+      wyl_service_credential_rotate_runtime_t rotate_runtime =
+          *runtime->rotate_runtime;
+      rotate_runtime.authorization = &authorization;
       return wyl_service_credential_rotate_with_runtime (handle,
           record->old_credential_id, record->actor_subject_id,
-          record->request_id, record->expires_at_us, runtime->rotate_runtime,
-          out);
+          record->request_id, record->expires_at_us, &rotate_runtime, out);
+    }
     default:
       return WYRELOG_E_POLICY;
   }

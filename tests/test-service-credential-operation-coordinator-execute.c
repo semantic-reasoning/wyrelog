@@ -24,9 +24,11 @@ typedef struct
 
 typedef struct
 {
+  WylHandle *handle;
   guint calls;
   wyrelog_error_t rc;
   gchar *seen_actor;
+  gboolean saw_write_lease;
 } Stub;
 
 static wyrelog_error_t
@@ -36,6 +38,12 @@ stub_revalidate (gpointer data, const gchar *actor_subject_id)
   stub->calls++;
   g_free (stub->seen_actor);
   stub->seen_actor = g_strdup (actor_subject_id);
+  if (stub->handle != NULL) {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_service_auth_authority_snapshot
+        (wyl_handle_get_service_auth_authority (stub->handle), &snapshot);
+    stub->saw_write_lease = snapshot.writer_active;
+  }
   return stub->rc;
 }
 
@@ -277,6 +285,25 @@ count_requests (sqlite3 *db)
   return scalar (db, "SELECT count(*) FROM service_domain_requests;");
 }
 
+static gint64
+count_cvk (sqlite3 *db)
+{
+  return scalar (db, "SELECT count(*) FROM service_credential_cvk;");
+}
+
+static gint64
+count_fences (sqlite3 *db)
+{
+  return scalar (db,
+      "SELECT count(*) FROM service_credential_operation_fences;");
+}
+
+static gint64
+count_audit_intentions (sqlite3 *db)
+{
+  return scalar (db, "SELECT count(*) FROM audit_intentions;");
+}
+
 static void
 test_issue_success (void)
 {
@@ -291,7 +318,7 @@ test_issue_success (void)
   gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
   WylServiceCredentialOperationRecord record =
       prepared_issue_record ("admin", request_id, expiry);
-  Stub stub = {.rc = WYRELOG_E_OK };
+  Stub stub = {.handle = handle,.rc = WYRELOG_E_OK };
   WylServiceCredentialOperationExecuteRuntime runtime = {
     .revalidate = stub_revalidate,
     .revalidate_data = &stub,
@@ -307,6 +334,7 @@ test_issue_success (void)
   g_assert_cmpstr (out.credential.tenant_id, ==, "tenant-a");
   g_assert_cmpuint (out.credential.generation, ==, 1);
   g_assert_cmpuint (stub.calls, ==, 1);
+  g_assert_true (stub.saw_write_lease);
   g_assert_cmpstr (stub.seen_actor, ==, "admin");
 
   g_assert_cmpint (count_credentials (db), ==, 1);
@@ -348,7 +376,7 @@ test_rotate_success (void)
   WylServiceCredentialOperationRecord record =
       prepared_rotate_record ("admin", rotate_request, old_id, generation,
       expiry);
-  Stub stub = {.rc = WYRELOG_E_OK };
+  Stub stub = {.handle = handle,.rc = WYRELOG_E_OK };
   wyl_service_credential_rotate_runtime_t rotate_runtime = {
     .old_credential_generation = generation,
   };
@@ -366,6 +394,7 @@ test_rotate_success (void)
   g_assert_cmpstr (out.credential.subject_id, ==, "svc:rotate:worker");
   g_assert_cmpstr (out.credential.rotated_from_id, ==, old_id);
   g_assert_cmpuint (stub.calls, ==, 1);
+  g_assert_true (stub.saw_write_lease);
   g_assert_cmpstr (stub.seen_actor, ==, "admin");
   g_assert_cmpint (scalar (db,
           "SELECT count(*) FROM service_credentials WHERE state='active';"),
@@ -433,7 +462,7 @@ test_permission_loss (void)
   gint64 expiry = g_get_real_time () + 60 * G_USEC_PER_SEC;
   WylServiceCredentialOperationRecord record =
       prepared_issue_record ("admin", request_id, expiry);
-  Stub stub = {.rc = WYRELOG_E_POLICY };
+  Stub stub = {.handle = handle,.rc = WYRELOG_E_POLICY };
   WylServiceCredentialOperationExecuteRuntime runtime = {
     .revalidate = stub_revalidate,
     .revalidate_data = &stub,
@@ -443,6 +472,9 @@ test_permission_loss (void)
   gint64 before_events = count_events (db);
   gint64 before_audits = count_audits (db);
   gint64 before_requests = count_requests (db);
+  gint64 before_cvk = count_cvk (db);
+  gint64 before_fences = count_fences (db);
+  gint64 before_audit_intentions = count_audit_intentions (db);
 
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_authorize_and_execute
@@ -450,13 +482,148 @@ test_permission_loss (void)
   g_assert_null (out.secret);
   g_assert_null (out.credential.credential_id);
   g_assert_cmpuint (stub.calls, ==, 1);
+  g_assert_true (stub.saw_write_lease);
   g_assert_cmpint (count_credentials (db), ==, before_creds);
   g_assert_cmpint (count_events (db), ==, before_events);
   g_assert_cmpint (count_audits (db), ==, before_audits);
   g_assert_cmpint (count_requests (db), ==, before_requests);
+  g_assert_cmpint (count_cvk (db), ==, before_cvk);
+  g_assert_cmpint (count_fences (db), ==, before_fences);
+  g_assert_cmpint (count_audit_intentions (db), ==, before_audit_intentions);
 
   wyl_service_credential_operation_record_clear (&record);
   g_free (stub.seen_actor);
+}
+
+typedef struct
+{
+  GMutex mutex;
+  GCond cond;
+  WylHandle *handle;
+  gboolean entered;
+  gboolean release;
+  gboolean saw_write_lease;
+} AuthorizationBarrier;
+
+static wyrelog_error_t
+barrier_revalidate (gpointer data, const gchar *actor_subject_id)
+{
+  AuthorizationBarrier *barrier = data;
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  g_assert_cmpstr (actor_subject_id, ==, "admin");
+  wyl_service_auth_authority_snapshot
+      (wyl_handle_get_service_auth_authority (barrier->handle), &snapshot);
+  g_mutex_lock (&barrier->mutex);
+  barrier->saw_write_lease = snapshot.writer_active;
+  barrier->entered = TRUE;
+  g_cond_signal (&barrier->cond);
+  while (!barrier->release)
+    g_cond_wait (&barrier->cond, &barrier->mutex);
+  g_mutex_unlock (&barrier->mutex);
+  return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  WylServiceCredentialOperationRecord *record;
+  WylServiceCredentialOperationExecuteRuntime *runtime;
+  wyrelog_error_t rc;
+  wyl_service_credential_issue_result_t result;
+} ExecuteCall;
+
+static gpointer
+execute_thread (gpointer data)
+{
+  ExecuteCall *call = data;
+  call->rc =
+      wyl_service_credential_operation_coordinator_authorize_and_execute
+      (call->handle, call->record, "admin", call->runtime, &call->result);
+  return NULL;
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyrelog_error_t rc;
+  wyl_service_principal_t principal;
+} ContendingMutation;
+
+static gpointer
+contending_mutation_thread (gpointer data)
+{
+  ContendingMutation *mutation = data;
+  mutation->rc = wyl_service_principal_create (mutation->handle,
+      "svc:execute:contender", "contender", "admin", "execute-contender",
+      &mutation->principal);
+  return NULL;
+}
+
+static void
+test_authorization_holds_write_lease_against_contender (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:execute:worker");
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (request_id);
+  WylServiceCredentialOperationRecord record = prepared_issue_record
+      ("admin", request_id, g_get_real_time () + 60 * G_USEC_PER_SEC);
+  g_free (record.subject_id);
+  record.subject_id = g_strdup ("svc:execute:worker");
+  AuthorizationBarrier barrier = {.handle = handle };
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.cond);
+  WylServiceCredentialOperationExecuteRuntime runtime = {
+    .revalidate = barrier_revalidate,
+    .revalidate_data = &barrier,
+  };
+  ExecuteCall call = {
+    .handle = handle,
+    .record = &record,
+    .runtime = &runtime,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  GThread *executor = g_thread_new ("credential-execute", execute_thread,
+      &call);
+  g_mutex_lock (&barrier.mutex);
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  while (!barrier.entered)
+    g_assert_true (g_cond_wait_until (&barrier.cond, &barrier.mutex, deadline));
+  g_mutex_unlock (&barrier.mutex);
+  g_assert_true (barrier.saw_write_lease);
+
+  ContendingMutation contender = {
+    .handle = handle,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  GThread *contending = g_thread_new ("credential-contender",
+      contending_mutation_thread, &contender);
+  for (;;) {
+    WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+    wyl_service_auth_authority_snapshot
+        (wyl_handle_get_service_auth_authority (handle), &snapshot);
+    if (snapshot.waiting_writers == 1)
+      break;
+    g_assert_cmpint (g_get_monotonic_time (), <, deadline);
+    g_thread_yield ();
+  }
+
+  g_mutex_lock (&barrier.mutex);
+  barrier.release = TRUE;
+  g_cond_signal (&barrier.cond);
+  g_mutex_unlock (&barrier.mutex);
+  g_thread_join (executor);
+  g_thread_join (contending);
+  g_assert_cmpint (call.rc, ==, WYRELOG_E_OK);
+  g_assert_nonnull (call.result.secret);
+  g_assert_cmpint (contender.rc, ==, WYRELOG_E_OK);
+  wyl_service_credential_issue_result_clear (&call.result);
+  wyl_service_principal_clear (&contender.principal);
+  wyl_service_credential_operation_record_clear (&record);
+  g_cond_clear (&barrier.cond);
+  g_mutex_clear (&barrier.mutex);
 }
 
 /* Not a threaded race: exercises the durable request-id fence when the same
@@ -744,6 +911,8 @@ main (int argc, char *argv[])
       test_actor_mismatch);
   g_test_add_func ("/service-credential-operation-execute/permission-loss",
       test_permission_loss);
+  g_test_add_func ("/service-credential-operation-execute/authorization-race",
+      test_authorization_holds_write_lease_against_contender);
   g_test_add_func ("/service-credential-operation-execute/duplicate-fence",
       test_duplicate_fence_idempotency);
   g_test_add_func ("/service-credential-operation-execute/byte-preservation",
