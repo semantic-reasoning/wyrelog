@@ -32,6 +32,32 @@ typedef enum
   WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED = 8,
 } WylServiceCredentialOperationState;
 
+/* OPERATOR_ACTION_REQUIRED preserves the exact state from which automatic
+ * progress stopped.  The source and cause are encoded in terminal_reason by
+ * the frozen oar.v1 grammar; they are never inferred from optional receipt
+ * fields during resume. */
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN = 1,
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN = 2,
+  /* Present escrow, but the exact committed tuple or binding mismatches. */
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_FOREIGN = 3,
+  /* Escrow inspection is indeterminate or authoritatively unavailable. */
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN = 4,
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED = 5,
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED = 6,
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_EXPLICIT_HOLD = 7,
+  /* Authoritative inspection found the exact committed escrow absent. */
+  WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING = 8,
+} WylServiceCredentialOperationOarCause;
+
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED = 1,
+  WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED = 2,
+  WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE = 3,
+} WylServiceCredentialOperationTerminalKind;
+
 typedef struct
 {
   guint32 version;
@@ -79,6 +105,22 @@ void wyl_service_credential_operation_record_clear
     (WylServiceCredentialOperationRecord * record);
 gboolean wyl_service_credential_operation_record_is_valid
     (const WylServiceCredentialOperationRecord * record);
+
+gboolean wyl_service_credential_operation_oar_reason_parse
+    (const gchar * reason, WylServiceCredentialOperationState * out_source,
+    WylServiceCredentialOperationOarCause * out_cause);
+gchar *wyl_service_credential_operation_oar_reason_format
+    (WylServiceCredentialOperationState source,
+    WylServiceCredentialOperationOarCause cause);
+/* Outputs are unchanged on failure. out_remediation_request_id is optional;
+ * on success it replaces any owned value and is non-NULL only for the
+ * explicit remediation terminal kind. */
+gboolean wyl_service_credential_operation_terminal_reason_parse
+    (const gchar * reason, WylServiceCredentialOperationTerminalKind * out_kind,
+    gchar ** out_remediation_request_id);
+gchar *wyl_service_credential_operation_terminal_reason_format
+    (WylServiceCredentialOperationTerminalKind kind,
+    const gchar * remediation_request_id);
 
 wyrelog_error_t
     wyl_service_credential_operation_record_encode
