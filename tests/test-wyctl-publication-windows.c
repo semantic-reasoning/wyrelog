@@ -567,6 +567,120 @@ test_stage_exact_partial_stage_is_never_overwritten (void)
   windows_fixture_teardown (&fixture);
 }
 
+typedef struct
+{
+  WyctlPublicationStageExactPoint target;
+  WyctlPublicationStageExactAction action;
+  guint hits[WYCTL_PUBLICATION_STAGE_EXACT_BEFORE_SUCCESS_RETURN + 1];
+} StageFault;
+
+static WyctlPublicationStageExactAction
+stage_fault_hook (gpointer data, WyctlPublicationStageExactPoint point)
+{
+  StageFault *fault = data;
+
+  fault->hits[point]++;
+  if (point == fault->target && fault->action !=
+      WYCTL_PUBLICATION_STAGE_EXACT_CONTINUE) {
+    WyctlPublicationStageExactAction action = fault->action;
+    fault->action = WYCTL_PUBLICATION_STAGE_EXACT_CONTINUE;
+    return action;
+  }
+  return WYCTL_PUBLICATION_STAGE_EXACT_CONTINUE;
+}
+
+static guint
+count_stage_temps (const gchar *dir, const WyctlPublicationPlan *plan)
+{
+  g_autofree gchar *prefix = g_strdup_printf (".%s.tmp-",
+      plan->stage_basename);
+  g_autoptr (GDir) entries = g_dir_open (dir, 0, NULL);
+  const gchar *name;
+  guint count = 0;
+
+  g_assert_nonnull (entries);
+  while ((name = g_dir_read_name (entries)) != NULL) {
+    if (g_str_has_prefix (name, prefix))
+      count++;
+  }
+  return count;
+}
+
+static void
+test_stage_exact_fault_barriers_recover_without_partial_stage (void)
+{
+  const WyctlPublicationStageExactPoint points[] = {
+    WYCTL_PUBLICATION_STAGE_EXACT_TEMP_CREATED,
+    WYCTL_PUBLICATION_STAGE_EXACT_DOCUMENT_WRITTEN,
+    WYCTL_PUBLICATION_STAGE_EXACT_FILE_SYNCED,
+    WYCTL_PUBLICATION_STAGE_EXACT_PUBLISHED,
+    WYCTL_PUBLICATION_STAGE_EXACT_DIRECTORY_SYNCED,
+    WYCTL_PUBLICATION_STAGE_EXACT_BEFORE_SUCCESS_RETURN,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (points); i++) {
+    WindowsFixture fixture = { 0 };
+    WyctlPublicationPlan request = { 0 };
+    WyctlPublicationPlan planned = { 0 };
+    WyctlPublicationReceipt receipt = { 0 };
+    WyctlPublicationResult result = { 0 };
+    gchar *credential_secret = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    WyctlSensitiveText secret = {.text = credential_secret,.len =
+          strlen (credential_secret)
+    };
+    StageFault fault = {.target = points[i],.action =
+          WYCTL_PUBLICATION_STAGE_EXACT_CRASH
+    };
+    g_autofree gchar *stage_path = NULL;
+    gboolean replayed = FALSE;
+
+    windows_fixture_setup (&fixture);
+    g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+            "parent-identity", &request), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend,
+            &request, &planned), ==, WYRELOG_E_OK);
+    stage_path = g_build_filename (fixture.root_dir, planned.stage_basename,
+        NULL);
+    wyctl_publication_windows_backend_set_stage_exact_hook (&fixture.backend,
+        stage_fault_hook, &fault);
+
+    g_assert_cmpint (wyctl_publication_windows_stage_exact (&fixture.backend,
+            &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &receipt,
+            &result, &replayed), ==, WYRELOG_E_IO);
+    g_assert_cmpuint (fault.hits[points[i]], ==, 1);
+    g_assert_false (wyctl_publication_receipt_is_valid (&receipt));
+    if (points[i] < WYCTL_PUBLICATION_STAGE_EXACT_PUBLISHED) {
+      g_assert_false (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+      g_assert_cmpuint (count_stage_temps (fixture.root_dir, &planned), ==, 1);
+    } else {
+      g_assert_true (g_file_test (stage_path, G_FILE_TEST_EXISTS));
+    }
+
+    wyctl_publication_windows_backend_set_stage_exact_hook (&fixture.backend,
+        NULL, NULL);
+    wyctl_publication_result_clear (&result);
+    g_assert_cmpint (wyctl_publication_windows_stage_exact (&fixture.backend,
+            &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &secret, &receipt,
+            &result, &replayed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result.kind, ==,
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
+    g_assert_cmpuint (count_stage_temps (fixture.root_dir, &planned), ==, 0);
+    g_assert_cmpint (replayed, ==,
+        points[i] >= WYCTL_PUBLICATION_STAGE_EXACT_PUBLISHED);
+
+    {
+      g_autofree wchar_t *wstage = g_utf8_to_utf16 (stage_path, -1, NULL,
+          NULL, NULL);
+      g_assert_true (DeleteFileW (wstage));
+    }
+    wyctl_publication_result_clear (&result);
+    wyctl_publication_receipt_clear (&receipt);
+    wyctl_publication_plan_clear (&planned);
+    wyctl_publication_plan_clear (&request);
+    windows_fixture_teardown (&fixture);
+  }
+}
+
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
 static void
 test_owner_only_security_descriptor_predicate (void)
@@ -605,6 +719,8 @@ main (int argc, char **argv)
   g_test_add_func
       ("/wyctl/publication/windows/stage-exact-partial-no-overwrite",
       test_stage_exact_partial_stage_is_never_overwritten);
+  g_test_add_func ("/wyctl/publication/windows/stage-exact-fault-barriers",
+      test_stage_exact_fault_barriers_recover_without_partial_stage);
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
   g_test_add_func ("/wyctl/publication/windows/owner-only-security-descriptor",
       test_owner_only_security_descriptor_predicate);

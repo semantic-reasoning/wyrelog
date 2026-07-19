@@ -10,12 +10,17 @@ G_BEGIN_DECLS;
 typedef struct
 {
   gchar *root_dir;
+  WyctlPublicationStageExactHook stage_exact_hook;
+  gpointer stage_exact_hook_data;
 } WyctlPublicationPosixBackend;
 
 void wyctl_publication_posix_backend_init
     (WyctlPublicationPosixBackend * backend, const gchar * root_dir);
 void wyctl_publication_posix_backend_clear
     (WyctlPublicationPosixBackend * backend);
+void wyctl_publication_posix_backend_set_stage_exact_hook
+    (WyctlPublicationPosixBackend * backend,
+    WyctlPublicationStageExactHook hook, gpointer data);
 
 wyrelog_error_t wyctl_publication_posix_plan
     (const WyctlPublicationPosixBackend * backend,

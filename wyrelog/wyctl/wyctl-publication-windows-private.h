@@ -10,12 +10,17 @@ G_BEGIN_DECLS;
 typedef struct
 {
   gchar *root_dir;
+  WyctlPublicationStageExactHook stage_exact_hook;
+  gpointer stage_exact_hook_data;
 } WyctlPublicationWindowsBackend;
 
 void wyctl_publication_windows_backend_init
     (WyctlPublicationWindowsBackend * backend, const gchar * root_dir);
 void wyctl_publication_windows_backend_clear
     (WyctlPublicationWindowsBackend * backend);
+void wyctl_publication_windows_backend_set_stage_exact_hook
+    (WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationStageExactHook hook, gpointer data);
 
 wyrelog_error_t wyctl_publication_windows_plan
     (const WyctlPublicationWindowsBackend * backend,
