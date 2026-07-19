@@ -71,7 +71,7 @@ void wyctl_publication_posix_receipt_target_release
     WyctlPublicationReceiptTargetLease * lease);
 wyrelog_error_t wyctl_publication_posix_commit
     (const WyctlPublicationPosixBackend * backend,
-    const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const WyctlPublicationPlan * plan, WyctlPublicationReceipt * receipt,
     const gchar * credential_id, const gchar * credential_secret,
     WyctlPublicationResult * out_result);
 wyrelog_error_t wyctl_publication_posix_inspect

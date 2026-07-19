@@ -109,7 +109,7 @@ encode_stat_identity (const struct stat *st)
     gint64 mtime_sec = (gint64) st->st_mtim.tv_sec;
     gint64 mtime_nsec = (gint64) st->st_mtim.tv_nsec;
 #endif
-    return g_strdup_printf ("%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
+    return g_strdup_printf ("v2:%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
         "%" G_GUINT64_FORMAT ":%" G_GUINT64_FORMAT ":"
         "%" G_GUINT64_FORMAT ":%" G_GINT64_FORMAT ":"
         "%" G_GINT64_FORMAT ":%" G_GINT64_FORMAT,
@@ -130,9 +130,19 @@ encode_stat_identity (const struct stat *st)
 static gboolean
 identity_matches_stat (const gchar *identity, const struct stat *st)
 {
-  g_autofree gchar *expected = encode_stat_identity (st);
-  return string_is_present (identity) && expected != NULL
-      && g_strcmp0 (identity, expected) == 0;
+  g_autofree gchar *expected = NULL;
+
+  if (!string_is_present (identity) || st == NULL)
+    return FALSE;
+  if (S_ISREG (st->st_mode)) {
+    if (g_str_has_prefix (identity, "v2:"))
+      expected = encode_stat_identity (st);
+    else
+      return FALSE;
+  } else {
+    expected = encode_stat_identity (st);
+  }
+  return expected != NULL && g_strcmp0 (identity, expected) == 0;
 }
 
 static gboolean
@@ -508,6 +518,23 @@ named_entry_matches_receipt (int dirfd, const gchar *basename,
       && fstatat (dirfd, basename, &st, AT_SYMLINK_NOFOLLOW) == 0
       && stat_is_owner_only_regular (&st, FALSE)
       && identity_matches_stat (expected_identity, &st);
+}
+
+static gboolean
+refresh_receipt_identity (int dirfd, const gchar *basename, int fd,
+    WyctlPublicationReceipt *receipt)
+{
+  struct stat st;
+  g_autofree gchar *identity = NULL;
+
+  if (dirfd < 0 || fd < 0 || receipt == NULL || fstat (fd, &st) != 0
+      || !stat_is_owner_only_regular (&st, FALSE)
+      || (identity = encode_stat_identity (&st)) == NULL
+      || !named_entry_matches_receipt (dirfd, basename, identity))
+    return FALSE;
+  g_free (receipt->stage_identity);
+  receipt->stage_identity = g_steal_pointer (&identity);
+  return TRUE;
 }
 
 static wyrelog_error_t
@@ -1177,7 +1204,7 @@ simulated_crash:
 
 static wyrelog_error_t
 commit_stage_to_destination (const WyctlPublicationPosixBackend *backend,
-    const WyctlPublicationPlan *plan, const WyctlPublicationReceipt *receipt,
+    const WyctlPublicationPlan *plan, WyctlPublicationReceipt *receipt,
     const gchar *credential_id, const gchar *credential_secret,
     WyctlPublicationResult *out_result)
 {
@@ -1218,6 +1245,16 @@ commit_stage_to_destination (const WyctlPublicationPosixBackend *backend,
 
   rc = write_credential_document_to_fd (stage_fd, credential_id,
       credential_secret);
+  if (!refresh_receipt_identity (anchor.dirfd, plan->stage_basename, stage_fd,
+          receipt)) {
+    close (stage_fd);
+    close_root_anchor (&anchor);
+    out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
+    out_result->kind = WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+    out_result->exact_identity = FALSE;
+    out_result->cleanup_required = FALSE;
+    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  }
   if (rc != WYRELOG_E_OK) {
     close (stage_fd);
     close_root_anchor (&anchor);
@@ -1260,7 +1297,7 @@ commit_stage_to_destination (const WyctlPublicationPosixBackend *backend,
 
 wyrelog_error_t
 wyctl_publication_posix_commit (const WyctlPublicationPosixBackend *backend,
-    const WyctlPublicationPlan *plan, const WyctlPublicationReceipt *receipt,
+    const WyctlPublicationPlan *plan, WyctlPublicationReceipt *receipt,
     const gchar *credential_id, const gchar *credential_secret,
     WyctlPublicationResult *out_result)
 {

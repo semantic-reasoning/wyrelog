@@ -121,8 +121,10 @@ typedef struct wyctl_publication_backend_vtable_t
       WyctlPublicationResult * out_result);
   void (*receipt_target_release) (gpointer self,
       WyctlPublicationReceiptTargetLease * lease);
+  /* commit may replace stage_identity after it durably writes the prepared
+   * object; subsequent recovery calls consume that final identity. */
     wyrelog_error_t (*commit) (gpointer self,
-      const WyctlPublicationReceipt * receipt, const gchar * credential_id,
+      WyctlPublicationReceipt * receipt, const gchar * credential_id,
       const WyctlSensitiveText * credential_secret,
       WyctlPublicationResult * out_result);
     wyrelog_error_t (*inspect) (gpointer self,
