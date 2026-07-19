@@ -4,16 +4,88 @@
 #endif
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <stddef.h>
 #ifndef G_OS_WIN32
 #include <unistd.h>
 #include <sys/stat.h>
 #else
 #include <windows.h>
+#include <winioctl.h>
+#include <wchar.h>
 #endif
 
 #include "auth/service-credential-operation-storage-private.h"
 #ifdef G_OS_WIN32
 #include "auth/service-credential-operation-storage-windows-private.h"
+
+typedef struct
+{
+  DWORD tag;
+  WORD data_length;
+  WORD reserved;
+  WORD substitute_offset;
+  WORD substitute_length;
+  WORD print_offset;
+  WORD print_length;
+  WCHAR path_buffer[1];
+} WylTestMountPointReparseData;
+
+static gboolean
+create_windows_directory_junction (const gchar *junction, const gchar *target)
+{
+  g_autofree gunichar2 *wjunction = NULL;
+  g_autofree gunichar2 *wtarget = NULL;
+  g_autofree wchar_t *substitute = NULL;
+  g_autofree WylTestMountPointReparseData *data = NULL;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  DWORD returned = 0;
+  gboolean result;
+  wjunction = g_utf8_to_utf16 (junction, -1, NULL, NULL, NULL);
+  wtarget = g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
+  if (wjunction == NULL || wtarget == NULL)
+    return FALSE;
+  substitute = g_new (wchar_t, wcslen ((wchar_t *) wtarget) + 5);
+  if (substitute == NULL
+      || swprintf (substitute, wcslen ((wchar_t *) wtarget) + 5,
+          L"\\??\\%ls", (wchar_t *) wtarget) < 0)
+    return FALSE;
+  gsize substitute_bytes = wcslen (substitute) * sizeof (wchar_t);
+  gsize target_bytes = wcslen ((wchar_t *) wtarget) * sizeof (wchar_t);
+  gsize path_bytes = substitute_bytes + sizeof (wchar_t) + target_bytes
+      + sizeof (wchar_t);
+  gsize total = offsetof (WylTestMountPointReparseData, path_buffer)
+      + path_bytes;
+  if (total > MAXIMUM_REPARSE_DATA_BUFFER_SIZE
+      || !CreateDirectoryW ((LPCWSTR) wjunction, NULL))
+    return FALSE;
+  handle = CreateFileW ((LPCWSTR) wjunction, GENERIC_WRITE, 0, NULL,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+      NULL);
+  if (handle == INVALID_HANDLE_VALUE) {
+    RemoveDirectoryW ((LPCWSTR) wjunction);
+    return FALSE;
+  }
+  data = g_malloc0 (total);
+  if (data == NULL) {
+    CloseHandle (handle);
+    RemoveDirectoryW ((LPCWSTR) wjunction);
+    return FALSE;
+  }
+  data->tag = IO_REPARSE_TAG_MOUNT_POINT;
+  data->data_length = (WORD) (total - 8);
+  data->substitute_length = (WORD) substitute_bytes;
+  data->print_offset = (WORD) (substitute_bytes + sizeof (wchar_t));
+  data->print_length = (WORD) target_bytes;
+  memcpy (data->path_buffer, substitute, substitute_bytes);
+  memcpy ((guint8 *) data->path_buffer + data->print_offset,
+      wtarget, target_bytes);
+  result = DeviceIoControl (handle, FSCTL_SET_REPARSE_POINT, data,
+      (DWORD) total, NULL, 0, &returned, NULL);
+  CloseHandle (handle);
+  if (!result)
+    RemoveDirectoryW ((LPCWSTR) wjunction);
+  return result;
+}
 #endif
 
 #ifndef G_OS_WIN32
@@ -563,6 +635,80 @@ test_windows_replace_survives_root_substitution (void)
 }
 
 static void
+test_windows_replace_survives_ancestor_junction_substitution (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf
+      ("%s\\wyrelog-ancestor-subst-test-%lu", local,
+      (gulong) GetCurrentProcessId ());
+  g_autofree gchar *ancestor = g_build_filename (base, "ancestor", NULL);
+  g_autofree gchar *root = g_build_filename (ancestor, "state", NULL);
+  g_autofree gchar *aside = g_build_filename (base, "ancestor-aside", NULL);
+  g_autofree gchar *aside_root = g_build_filename (aside, "state", NULL);
+  g_autofree gchar *decoy = g_build_filename (base, "decoy", NULL);
+  g_autofree gchar *decoy_root = g_build_filename (decoy, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_rmdir (aside_root);
+  g_rmdir (aside);
+  g_rmdir (decoy_root);
+  g_rmdir (decoy);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+
+  /* Replace an ancestor of the captured root with a junction into a decoy
+   * tree.  All path-based child operations would now resolve through decoy. */
+  g_autofree gunichar2 *wancestor = g_utf8_to_utf16 (ancestor, -1, NULL, NULL,
+      NULL);
+  g_autofree gunichar2 *waside = g_utf8_to_utf16 (aside, -1, NULL, NULL,
+      NULL);
+  g_assert_true (MoveFileExW ((LPCWSTR) wancestor, (LPCWSTR) waside, 0));
+  g_assert_cmpint (g_mkdir_with_parents (decoy_root, 0700), ==, 0);
+  g_assert_true (create_windows_directory_junction (ancestor, decoy));
+
+  wyrelog_error_t rc = wyl_win_child_replace (&storage, &anchor, &name, two);
+  g_assert_true (rc == WYRELOG_E_OK || rc == WYRELOG_E_POLICY);
+  if (rc == WYRELOG_E_OK) {
+    g_autoptr (GBytes) roundtrip = NULL;
+    gsize size = 0;
+    g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name,
+            &roundtrip), ==, WYRELOG_E_OK);
+    g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
+  }
+  /* Regardless of safe success or fail-closed, the junction target is never
+   * used for journal data. */
+  g_autofree gchar *decoy_record = g_build_filename (decoy_root, "record",
+      NULL);
+  g_assert_false (g_file_test (decoy_record, G_FILE_TEST_EXISTS));
+
+  g_assert_cmpint (g_rmdir (ancestor), ==, 0);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_autofree gchar *aside_record = g_build_filename (aside_root, "record",
+      NULL);
+  g_remove (aside_record);
+  g_rmdir (aside_root);
+  g_rmdir (aside);
+  g_rmdir (decoy_root);
+  g_rmdir (decoy);
+  g_rmdir (base);
+}
+
+static void
 test_windows_child_delete_fixture (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -706,6 +852,9 @@ main (int argc, char **argv)
       test_windows_child_replace_fixture);
   g_test_add_func ("/operation-storage/windows/replace-root-substitution",
       test_windows_replace_survives_root_substitution);
+  g_test_add_func
+      ("/operation-storage/windows/replace-ancestor-junction-substitution",
+      test_windows_replace_survives_ancestor_junction_substitution);
   g_test_add_func ("/operation-storage/windows/child-delete-fixture",
       test_windows_child_delete_fixture);
   g_test_add_func ("/operation-storage/windows/child-lock-fixture",
