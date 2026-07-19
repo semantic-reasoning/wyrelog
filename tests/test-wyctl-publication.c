@@ -10,6 +10,9 @@ typedef struct
   GPtrArray *calls;
   gchar *seen_credential_id;
   gchar *seen_secret;
+  wyrelog_error_t target_acquire_rc;
+  gboolean target_returns_foreign_with_lease;
+  guint target_release_calls;
 } FakeBackend;
 
 typedef enum
@@ -17,6 +20,7 @@ typedef enum
   FAKE_PLAN = 1,
   FAKE_PREPARE,
   FAKE_STAGE_EXACT,
+  FAKE_PREFLIGHT,
   FAKE_COMMIT,
   FAKE_INSPECT,
   FAKE_RESYNC,
@@ -82,6 +86,33 @@ fake_stage_exact (gpointer self, const WyctlPublicationPlan *plan,
         TRUE,.cleanup_required = FALSE,};
   return wyctl_publication_receipt_create (plan, "exact-stage-identity",
       out_receipt);
+}
+
+static wyrelog_error_t
+fake_target_acquire (gpointer self, const WyctlPublicationPlan *plan,
+    const WyctlPublicationReceipt *receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease **out_lease,
+    WyctlPublicationReceiptTargetKind *out_kind)
+{
+  FakeBackend *backend = self;
+  fake_backend_add_call (backend, FAKE_PREFLIGHT);
+  g_assert_true (wyctl_publication_plan_is_valid (plan));
+  g_assert_true (wyctl_publication_receipt_is_valid (receipt));
+  *out_lease = (WyctlPublicationReceiptTargetLease *) g_malloc0 (1);
+  *out_kind = backend->target_returns_foreign_with_lease ?
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN :
+      require_destination ?
+      WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION :
+      WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE;
+  return backend->target_acquire_rc;
+}
+
+static void
+fake_target_release (gpointer self, WyctlPublicationReceiptTargetLease *lease)
+{
+  FakeBackend *backend = self;
+  backend->target_release_calls++;
+  g_free (lease);
 }
 
 static wyrelog_error_t
@@ -167,12 +198,17 @@ static void
 test_plan_create_and_validate (void)
 {
   WyctlPublicationPlan plan = { 0 };
-  g_assert_cmpint (wyctl_publication_plan_create ("dest/file",
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
           "parent-identity", &plan), ==, WYRELOG_E_OK);
   g_assert_true (wyctl_publication_plan_is_valid (&plan));
   g_assert_nonnull (plan.reservation_id);
   g_assert_cmpuint (strlen (plan.reservation_id), ==, WYL_ID_STRING_LEN);
   g_assert_true (g_str_has_prefix (plan.stage_basename, "wypub-"));
+  WyctlPublicationPlan rejected = { 0 };
+  g_assert_cmpint (wyctl_publication_plan_create ("nested/credential.txt",
+          "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyctl_publication_plan_create ("CON.txt",
+          "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
 
   WyctlPublicationPlan clone = { 0 };
   g_assert_cmpint (wyctl_publication_plan_clone (&plan, &clone), ==,
@@ -192,7 +228,7 @@ test_receipt_create_and_validate (void)
 {
   WyctlPublicationPlan plan = { 0 };
   WyctlPublicationReceipt receipt = { 0 };
-  g_assert_cmpint (wyctl_publication_plan_create ("dest/file",
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
           "parent-identity", &plan), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyctl_publication_receipt_create (&plan,
           "stage-identity", &receipt), ==, WYRELOG_E_OK);
@@ -288,7 +324,7 @@ test_backend_conformance_harness (void)
 
   fake_backend_init (&backend);
   g_assert_cmpint (wyctl_publication_backend_conformance_run (&vtable,
-          &backend, "dest/file", "parent-identity",
+          &backend, "credential.txt", "parent-identity",
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", secret, &result), ==,
       WYRELOG_E_OK);
   g_assert_true (wyctl_publication_result_is_valid (&result));
@@ -313,6 +349,63 @@ test_backend_conformance_harness (void)
 
   fake_backend_clear (&backend);
   wyctl_publication_result_clear (&result);
+}
+
+static void
+test_receipt_target_acquire_contract (void)
+{
+  FakeBackend backend = { 0 };
+  WyctlPublicationBackendVTable vtable = {
+    .receipt_target_acquire = fake_target_acquire,
+    .receipt_target_release = fake_target_release,
+  };
+  WyctlPublicationPlan plan = { 0 };
+  WyctlPublicationReceipt receipt = { 0 };
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  WyctlPublicationReceiptTargetKind kind =
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+
+  fake_backend_init (&backend);
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          "parent-identity", &plan), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_receipt_create (&plan,
+          "stage-identity", &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
+          &backend, &plan, &receipt, FALSE, &lease, &kind), ==, WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
+  wyctl_publication_backend_receipt_target_release (&vtable, &backend, &lease);
+  g_assert_null (lease);
+
+  g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
+          &backend, &plan, &receipt, TRUE, &lease, &kind), ==, WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION);
+  wyctl_publication_backend_receipt_target_release (&vtable, &backend, &lease);
+  g_assert_cmpuint (backend.calls->len, ==, 2);
+  g_assert_cmpuint (backend.target_release_calls, ==, 2);
+
+  backend.target_acquire_rc = WYRELOG_E_IO;
+  g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
+          &backend, &plan, &receipt, FALSE, &lease, &kind), ==, WYRELOG_E_IO);
+  g_assert_null (lease);
+  g_assert_cmpint (kind, ==,
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
+  g_assert_cmpuint (backend.target_release_calls, ==, 3);
+
+  backend.target_acquire_rc = WYRELOG_E_OK;
+  backend.target_returns_foreign_with_lease = TRUE;
+  g_assert_cmpint (wyctl_publication_backend_receipt_target_acquire (&vtable,
+          &backend, &plan, &receipt, FALSE, &lease, &kind), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (lease);
+  g_assert_cmpint (kind, ==,
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
+  g_assert_cmpuint (backend.target_release_calls, ==, 4);
+
+  wyctl_publication_receipt_clear (&receipt);
+  wyctl_publication_plan_clear (&plan);
+  fake_backend_clear (&backend);
 }
 
 static void
@@ -366,5 +459,7 @@ main (int argc, char **argv)
       test_backend_conformance_harness);
   g_test_add_func ("/wyctl/publication/stage-exact-contract",
       test_stage_exact_contract);
+  g_test_add_func ("/wyctl/publication/receipt-target-acquire-contract",
+      test_receipt_target_acquire_contract);
   return g_test_run ();
 }

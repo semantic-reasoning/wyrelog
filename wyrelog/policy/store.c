@@ -171,6 +171,8 @@ struct wyl_policy_store_t
   wyl_policy_service_rotate_fail_stage_t service_rotate_fail_once;
   wyl_policy_store_cvk_runtime_t service_cvk_runtime;
   guint8 *service_cvk_envelope;
+  wyl_policy_store_service_handoff_unseal_gate_fn service_handoff_unseal_gate;
+  gpointer service_handoff_unseal_gate_data;
 };
 
 gboolean
@@ -10470,6 +10472,16 @@ wyrelog_error_t
       (store, &escrow_id, out) : rc;
 }
 
+void wyl_policy_store_service_handoff_set_unseal_gate_for_test
+    (wyl_policy_store_t * store,
+    wyl_policy_store_service_handoff_unseal_gate_fn gate, gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->service_handoff_unseal_gate = gate;
+  store->service_handoff_unseal_gate_data = data;
+}
+
 wyrelog_error_t
 wyl_policy_store_service_handoff_escrow_unseal (wyl_policy_store_t *store,
     const wyl_policy_service_handoff_escrow_info_t *expected,
@@ -10549,6 +10561,9 @@ wyl_policy_store_service_handoff_escrow_unseal (wyl_policy_store_t *store,
   }
   gsize written = 0;
   wyl_sealed_blob_t sealed = {.bytes = sealed_copy,.len = sealed_len };
+  if (rc == WYRELOG_E_OK && store->service_handoff_unseal_gate != NULL)
+    rc = store->service_handoff_unseal_gate
+        (store->service_handoff_unseal_gate_data);
   if (rc == WYRELOG_E_OK)
     rc = store->keyprovider.vtable.unseal (store->keyprovider.state, &sealed,
         envelope, WYL_SERVICE_HANDOFF_ENVELOPE_BYTES, &written);

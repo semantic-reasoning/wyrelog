@@ -25,6 +25,19 @@ typedef struct
   gchar *dir_path;
 } WyctlPublicationPosixAnchor;
 
+struct wyctl_publication_receipt_target_lease_t
+{
+  int dirfd;
+  int target_fd;
+  gchar *root_dir;
+  gchar *basename;
+  gchar *destination;
+  gchar *identity;
+  const WyctlPublicationPosixBackend *owner;
+  gboolean destination_target;
+  gboolean inspected_exact;
+};
+
 static gboolean
 string_is_present (const gchar *value)
 {
@@ -190,7 +203,10 @@ receipt_matches_plan_anchor (const WyctlPublicationReceipt *receipt,
     const WyctlPublicationPlan *plan, const WyctlPublicationPosixAnchor *anchor)
 {
   return receipt != NULL && plan_matches_anchor (plan, anchor)
-      && g_strcmp0 (receipt->parent_identity, plan->parent_identity) == 0;
+      && g_strcmp0 (receipt->destination, plan->destination) == 0
+      && g_strcmp0 (receipt->reservation_id, plan->reservation_id) == 0
+      && g_strcmp0 (receipt->parent_identity, plan->parent_identity) == 0
+      && g_strcmp0 (receipt->stage_basename, plan->stage_basename) == 0;
 }
 
 static gchar *
@@ -227,6 +243,16 @@ fsync_fd_checked (int fd)
   if (fsync (fd) != 0)
     return map_errno_to_error (errno);
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+receipt_target_sync (const WyctlPublicationPosixBackend *backend, int fd,
+    WyctlPublicationReceiptTargetSyncPoint point)
+{
+  if (backend->receipt_target_sync_hook != NULL)
+    return backend->receipt_target_sync_hook
+        (backend->receipt_target_sync_hook_data, point);
+  return fsync_fd_checked (fd);
 }
 
 static wyrelog_error_t
@@ -573,6 +599,8 @@ wyctl_publication_posix_backend_init (WyctlPublicationPosixBackend *backend,
   backend->root_dir = g_strdup (root_dir);
   backend->stage_exact_hook = NULL;
   backend->stage_exact_hook_data = NULL;
+  backend->receipt_target_sync_hook = NULL;
+  backend->receipt_target_sync_hook_data = NULL;
 }
 
 void
@@ -583,6 +611,8 @@ wyctl_publication_posix_backend_clear (WyctlPublicationPosixBackend *backend)
   g_clear_pointer (&backend->root_dir, g_free);
   backend->stage_exact_hook = NULL;
   backend->stage_exact_hook_data = NULL;
+  backend->receipt_target_sync_hook = NULL;
+  backend->receipt_target_sync_hook_data = NULL;
 }
 
 void wyctl_publication_posix_backend_set_stage_exact_hook
@@ -593,6 +623,16 @@ void wyctl_publication_posix_backend_set_stage_exact_hook
     return;
   backend->stage_exact_hook = hook;
   backend->stage_exact_hook_data = data;
+}
+
+void wyctl_publication_posix_backend_set_receipt_target_sync_hook
+    (WyctlPublicationPosixBackend * backend,
+    WyctlPublicationReceiptTargetSyncHook hook, gpointer data)
+{
+  if (backend == NULL)
+    return;
+  backend->receipt_target_sync_hook = hook;
+  backend->receipt_target_sync_hook_data = data;
 }
 
 wyrelog_error_t
@@ -1214,6 +1254,274 @@ wyctl_publication_posix_commit (const WyctlPublicationPosixBackend *backend,
     return WYRELOG_E_INVALID;
   return commit_stage_to_destination (backend, plan, receipt, credential_id,
       credential_secret, out_result);
+}
+
+wyrelog_error_t
+wyctl_publication_posix_receipt_target_acquire (const
+    WyctlPublicationPosixBackend *backend, const WyctlPublicationPlan *plan,
+    const WyctlPublicationReceipt *receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease **out_lease,
+    WyctlPublicationReceiptTargetKind *out_kind)
+{
+  WyctlPublicationPosixAnchor anchor = { 0 };
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  const gchar *basename = plan != NULL ? plan->destination : NULL;
+  struct stat st;
+  wyrelog_error_t rc;
+  int fd = -1;
+
+  if (out_lease == NULL || out_kind == NULL)
+    return WYRELOG_E_INVALID;
+  *out_lease = NULL;
+  *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  if (!backend_is_valid (backend) || !wyctl_publication_plan_is_valid (plan)
+      || !wyctl_publication_receipt_is_valid (receipt))
+    return WYRELOG_E_INVALID;
+
+  if (!open_root_anchor (backend, &anchor, &rc))
+    return rc;
+  if (!receipt_matches_plan_anchor (receipt, plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
+
+  fd = openat (anchor.dirfd, plan->destination, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+      | O_NOFOLLOW
+#endif
+      );
+  if (fd >= 0) {
+    gboolean owned = fstat (fd, &st) == 0
+        && identity_matches_stat (receipt->stage_identity, &st)
+        && stat_is_owner_only_regular (&st, FALSE)
+        && named_entry_matches_receipt (anchor.dirfd, plan->destination,
+        receipt->stage_identity);
+    if (!owned)
+      goto foreign;
+    goto acquired;
+  }
+  rc = map_errno_to_error (errno);
+  if (rc != WYRELOG_E_NOT_FOUND) {
+    close_root_anchor (&anchor);
+    return rc;
+  }
+  if (require_destination) {
+    goto foreign;
+  }
+
+  basename = plan->stage_basename;
+  fd = openat (anchor.dirfd, plan->stage_basename, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+      | O_NOFOLLOW
+#endif
+      );
+  if (fd >= 0) {
+    gboolean owned = fstat (fd, &st) == 0
+        && identity_matches_stat (receipt->stage_identity, &st)
+        && stat_is_owner_only_regular (&st, FALSE)
+        && named_entry_matches_receipt (anchor.dirfd, plan->stage_basename,
+        receipt->stage_identity);
+    if (!owned)
+      goto foreign;
+    goto acquired;
+  }
+  rc = map_errno_to_error (errno);
+  if (rc != WYRELOG_E_NOT_FOUND) {
+    close_root_anchor (&anchor);
+    return rc;
+  }
+
+foreign:
+  if (fd >= 0)
+    close (fd);
+  close_root_anchor (&anchor);
+  return WYRELOG_E_OK;
+
+acquired:
+  lease = g_new0 (WyctlPublicationReceiptTargetLease, 1);
+  if (lease == NULL) {
+    close (fd);
+    close_root_anchor (&anchor);
+    return WYRELOG_E_NOMEM;
+  }
+  lease->dirfd = anchor.dirfd;
+  lease->target_fd = fd;
+  lease->root_dir = g_strdup (backend->root_dir);
+  lease->basename = g_strdup (basename);
+  lease->destination = g_strdup (plan->destination);
+  lease->identity = g_strdup (receipt->stage_identity);
+  lease->owner = backend;
+  lease->destination_target = g_strcmp0 (basename, plan->destination) == 0;
+  anchor.dirfd = -1;
+  close_root_anchor (&anchor);
+  if (lease->root_dir == NULL || lease->basename == NULL
+      || lease->destination == NULL || lease->identity == NULL) {
+    wyctl_publication_posix_receipt_target_release (backend, lease);
+    return WYRELOG_E_NOMEM;
+  }
+  *out_lease = lease;
+  *out_kind = lease->destination_target ?
+      WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION :
+      WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyctl_publication_posix_receipt_target_inspect (const
+    WyctlPublicationPosixBackend *backend,
+    WyctlPublicationReceiptTargetLease *lease,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
+    WyctlPublicationResult *out_result)
+{
+  wyrelog_error_t directory_sync_rc = WYRELOG_E_OK;
+  gboolean matches = FALSE;
+  struct stat st;
+  wyrelog_error_t rc;
+  wyrelog_error_t target_sync_rc = WYRELOG_E_OK;
+
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_result_clear (out_result);
+  if (!backend_is_valid (backend) || lease == NULL || lease->owner != backend
+      || lease->dirfd < 0
+      || lease->target_fd < 0
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
+    return WYRELOG_E_INVALID;
+  if (fstat (lease->target_fd, &st) != 0
+      || !stat_is_owner_only_regular (&st, FALSE)
+      || !identity_matches_stat (lease->identity, &st)
+      || !named_entry_matches_receipt (lease->dirfd, lease->basename,
+          lease->identity))
+    goto foreign;
+  if (lseek (lease->target_fd, 0, SEEK_SET) < 0)
+    return map_errno_to_error (errno);
+  rc = document_matches_expected_fd (lease->target_fd,
+      expected_credential_id, expected_credential_secret, &matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!matches || !named_entry_matches_receipt (lease->dirfd,
+          lease->basename, lease->identity))
+    goto foreign;
+  lease->inspected_exact = TRUE;
+  if (lease->destination_target) {
+    target_sync_rc = receipt_target_sync (backend, lease->target_fd,
+        WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_FILE);
+    directory_sync_rc = receipt_target_sync (backend, lease->dirfd,
+        WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_DIRECTORY);
+    if (!named_entry_matches_receipt (lease->dirfd, lease->basename,
+            lease->identity))
+      goto foreign;
+  }
+  if (target_sync_rc != WYRELOG_E_OK || directory_sync_rc != WYRELOG_E_OK) {
+    *out_result = (WyctlPublicationResult) {
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+          WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN,.exact_identity
+          = TRUE,};
+    return WYRELOG_E_OK;
+  }
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        lease->destination_target ?
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
+        WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED,.exact_identity =
+        TRUE,.cleanup_required = !lease->destination_target,};
+  return WYRELOG_E_OK;
+
+foreign:
+  lease->inspected_exact = FALSE;
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN,};
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyctl_publication_posix_receipt_target_commit (const
+    WyctlPublicationPosixBackend *backend,
+    WyctlPublicationReceiptTargetLease *lease,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
+    WyctlPublicationResult *out_result)
+{
+  g_autofree gchar *next_basename = NULL;
+  gboolean matches = FALSE;
+  wyrelog_error_t directory_sync_rc;
+  wyrelog_error_t rc;
+  wyrelog_error_t target_sync_rc;
+
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_result_clear (out_result);
+  if (!backend_is_valid (backend) || lease == NULL || lease->owner != backend
+      || lease->dirfd < 0
+      || lease->target_fd < 0 || lease->destination_target
+      || !lease->inspected_exact
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
+    return WYRELOG_E_INVALID;
+  if (lseek (lease->target_fd, 0, SEEK_SET) < 0)
+    return map_errno_to_error (errno);
+  rc = document_matches_expected_fd (lease->target_fd,
+      expected_credential_id, expected_credential_secret, &matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!matches)
+    goto foreign;
+  if (!named_entry_matches_receipt (lease->dirfd, lease->basename,
+          lease->identity))
+    goto foreign;
+  next_basename = g_strdup (lease->destination);
+  if (next_basename == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = rename_no_replace (lease->root_dir, lease->dirfd, lease->basename,
+      lease->destination);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_free (lease->basename);
+  lease->basename = g_steal_pointer (&next_basename);
+  lease->destination_target = TRUE;
+  target_sync_rc = receipt_target_sync (backend, lease->target_fd,
+      WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_FILE);
+  directory_sync_rc = receipt_target_sync (backend, lease->dirfd,
+      WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_DIRECTORY);
+  if (!named_entry_matches_receipt (lease->dirfd, lease->basename,
+          lease->identity))
+    goto foreign;
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        target_sync_rc == WYRELOG_E_OK
+        && directory_sync_rc == WYRELOG_E_OK ?
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN,.exact_identity
+        = TRUE,};
+  return WYRELOG_E_OK;
+
+foreign:
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN,};
+  return WYRELOG_E_OK;
+}
+
+void
+wyctl_publication_posix_receipt_target_release (const
+    WyctlPublicationPosixBackend *backend,
+    WyctlPublicationReceiptTargetLease *lease)
+{
+  (void) backend;
+  if (lease == NULL)
+    return;
+  if (lease->target_fd >= 0)
+    close (lease->target_fd);
+  if (lease->dirfd >= 0)
+    close (lease->dirfd);
+  g_free (lease->root_dir);
+  g_free (lease->basename);
+  g_free (lease->destination);
+  g_free (lease->identity);
+  g_free (lease);
 }
 
 wyrelog_error_t

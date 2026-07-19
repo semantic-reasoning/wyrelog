@@ -17,6 +17,12 @@
 
 #define ROTATE_CANONICAL_ID "wlc_000000000000000000000000000"
 
+#ifdef WYL_HAS_AUDIT
+#define HANDOFF_DECISION_AUDIT_DELTA(n) (n)
+#else
+#define HANDOFF_DECISION_AUDIT_DELTA(n) 0
+#endif
+
 typedef struct
 {
   WylHandle *handle;
@@ -117,13 +123,41 @@ typedef struct
 {
   guint plan_calls;
   guint stage_calls;
+  guint preflight_calls;
   guint inspect_calls;
   guint commit_calls;
+  guint active_leases;
+  guint release_calls;
   gboolean published;
   gboolean foreign_stage;
+  gboolean foreign_receipt;
   gboolean fail_plan_once;
   gboolean fail_commit_after_publish_once;
 } HandoffPublication;
+
+typedef struct
+{
+  HandoffPublication *owner;
+  gboolean destination_target;
+} HandoffTargetLease;
+
+typedef struct
+{
+  guint calls;
+  wyrelog_error_t rc;
+  HandoffPublication *publication;
+  gboolean replace_on_call;
+} HandoffUnsealGate;
+
+static wyrelog_error_t
+handoff_unseal_gate (gpointer data)
+{
+  HandoffUnsealGate *gate = data;
+  gate->calls++;
+  if (gate->replace_on_call && gate->publication != NULL)
+    gate->publication->foreign_receipt = TRUE;
+  return gate->rc;
+}
 
 typedef struct
 {
@@ -262,16 +296,46 @@ handoff_test_stage (gpointer data, const WyctlPublicationPlan *plan,
 }
 
 static wyrelog_error_t
-handoff_test_commit (gpointer data, const WyctlPublicationReceipt *receipt,
+handoff_test_target_acquire (gpointer data, const WyctlPublicationPlan *plan,
+    const WyctlPublicationReceipt *receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease **out_lease,
+    WyctlPublicationReceiptTargetKind *out_kind)
+{
+  HandoffPublication *backend = data;
+  (void) plan;
+  (void) receipt;
+  backend->preflight_calls++;
+  if (backend->foreign_receipt || (require_destination && !backend->published)) {
+    *out_lease = NULL;
+    *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+    return WYRELOG_E_OK;
+  }
+  HandoffTargetLease *lease = g_new0 (HandoffTargetLease, 1);
+  lease->owner = backend;
+  lease->destination_target = backend->published;
+  backend->active_leases++;
+  *out_lease = (WyctlPublicationReceiptTargetLease *) lease;
+  *out_kind = backend->published ?
+      WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION :
+      WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+handoff_test_target_commit (gpointer data,
+    WyctlPublicationReceiptTargetLease *target_lease,
     const gchar *credential_id, const WyctlSensitiveText *secret,
     WyctlPublicationResult *out_result)
 {
   HandoffPublication *backend = data;
-  (void) receipt;
+  HandoffTargetLease *lease = (HandoffTargetLease *) target_lease;
+  g_assert_true (lease->owner == backend);
+  g_assert_false (lease->destination_target);
   g_assert_nonnull (credential_id);
   g_assert_cmpuint (secret->len, ==, WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
   backend->commit_calls++;
   backend->published = TRUE;
+  lease->destination_target = TRUE;
   if (backend->fail_commit_after_publish_once) {
     backend->fail_commit_after_publish_once = FALSE;
     return WYRELOG_E_IO;
@@ -283,30 +347,43 @@ handoff_test_commit (gpointer data, const WyctlPublicationReceipt *receipt,
 }
 
 static wyrelog_error_t
-handoff_test_inspect (gpointer data, const WyctlPublicationReceipt *receipt,
+handoff_test_target_inspect (gpointer data,
+    WyctlPublicationReceiptTargetLease *target_lease,
     const gchar *credential_id, const WyctlSensitiveText *secret,
     WyctlPublicationResult *out_result)
 {
   HandoffPublication *backend = data;
-  (void) receipt;
+  HandoffTargetLease *lease = (HandoffTargetLease *) target_lease;
+  g_assert_true (lease->owner == backend);
   g_assert_nonnull (credential_id);
   g_assert_cmpuint (secret->len, ==, WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN);
   backend->inspect_calls++;
+  if (backend->foreign_receipt) {
+    *out_result = (WyctlPublicationResult) {
+    .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+          WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN,};
+    return WYRELOG_E_OK;
+  }
   *out_result = (WyctlPublicationResult) {
-  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind = backend->published ?
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        lease->destination_target ?
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
         WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED,.exact_identity =
-        backend->published,};
+        TRUE,.cleanup_required = !lease->destination_target,};
   return WYRELOG_E_OK;
 }
 
-static wyrelog_error_t
-handoff_test_resync (gpointer data, const WyctlPublicationReceipt *receipt,
-    const gchar *credential_id, const WyctlSensitiveText *secret,
-    WyctlPublicationResult *out_result)
+static void
+handoff_test_target_release (gpointer data,
+    WyctlPublicationReceiptTargetLease *target_lease)
 {
-  return handoff_test_inspect (data, receipt, credential_id, secret,
-      out_result);
+  HandoffPublication *backend = data;
+  HandoffTargetLease *lease = (HandoffTargetLease *) target_lease;
+  g_assert_true (lease->owner == backend);
+  g_assert_cmpuint (backend->active_leases, >, 0);
+  backend->active_leases--;
+  backend->release_calls++;
+  g_free (lease);
 }
 
 static WylSession *
@@ -384,9 +461,10 @@ test_authenticated_handoff_issue_end_to_end (void)
   const WyctlPublicationBackendVTable vtable = {
     .plan = handoff_test_plan,
     .stage_exact = handoff_test_stage,
-    .commit = handoff_test_commit,
-    .inspect = handoff_test_inspect,
-    .resync = handoff_test_resync,
+    .receipt_target_acquire = handoff_test_target_acquire,
+    .receipt_target_inspect = handoff_test_target_inspect,
+    .receipt_target_commit = handoff_test_target_commit,
+    .receipt_target_release = handoff_test_target_release,
   };
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = session,
@@ -410,11 +488,15 @@ test_authenticated_handoff_issue_end_to_end (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED);
   g_assert_cmpuint (publication.plan_calls, ==, 1);
   g_assert_cmpuint (publication.stage_calls, ==, 1);
+  g_assert_cmpuint (publication.preflight_calls, ==, 2);
   g_assert_cmpuint (publication.commit_calls, ==, 1);
-  g_assert_cmpuint (publication.inspect_calls, ==, 2);
+  g_assert_cmpuint (publication.inspect_calls, ==, 3);
+  g_assert_cmpuint (publication.active_leases, ==, 0);
+  g_assert_cmpuint (publication.release_calls, ==, 2);
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM audit_events WHERE action="
-          "'wr.service_credential.manage';"), ==, decision_audits_before + 2);
+          "'wr.service_credential.manage';"), ==,
+      decision_audits_before + HANDOFF_DECISION_AUDIT_DELTA (2));
   wyl_policy_service_handoff_escrow_info_t deleted = { 0 };
   g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
           &escrow, &deleted), ==, WYRELOG_E_NOT_FOUND);
@@ -422,12 +504,39 @@ test_authenticated_handoff_issue_end_to_end (void)
 
   WylServiceCredentialOperationRecord duplicate =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  HandoffUnsealGate duplicate_unseal_gate = {.rc = WYRELOG_E_IO };
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
+      handoff_unseal_gate, &duplicate_unseal_gate);
+  guint plan_calls_before_duplicate = publication.plan_calls;
+  guint stage_calls_before_duplicate = publication.stage_calls;
+  guint inspect_calls_before_duplicate = publication.inspect_calls;
+  guint commit_calls_before_duplicate = publication.commit_calls;
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_execute_handoff (handle,
           &storage, &anchor, request_id, &runtime, &duplicate), ==,
-      WYRELOG_E_NOT_FOUND);
+      WYRELOG_E_OK);
+  g_assert_cmpint (duplicate.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED);
+  g_assert_cmpstr (duplicate.request_id, ==, outcome.request_id);
+  g_assert_cmpstr (duplicate.successor_credential_id, ==,
+      outcome.successor_credential_id);
+  g_assert_cmpuint (duplicate.successor_generation, ==,
+      outcome.successor_generation);
+  g_assert_cmpstr (duplicate.reservation_id, ==, outcome.reservation_id);
+  g_assert_cmpstr (duplicate.stage_identity, ==, outcome.stage_identity);
+  g_assert_cmpint (duplicate.updated_at_us, ==, outcome.updated_at_us);
   g_assert_cmpint (count_credentials (db_of (handle)), ==, 1);
-  g_assert_cmpuint (publication.stage_calls, ==, 1);
+  g_assert_cmpuint (publication.plan_calls, ==, plan_calls_before_duplicate);
+  g_assert_cmpuint (publication.stage_calls, ==, stage_calls_before_duplicate);
+  g_assert_cmpuint (publication.inspect_calls, ==,
+      inspect_calls_before_duplicate);
+  g_assert_cmpuint (publication.commit_calls, ==,
+      commit_calls_before_duplicate);
+  g_assert_cmpuint (publication.preflight_calls, ==, 2);
+  g_assert_cmpuint (duplicate_unseal_gate.calls, ==, 0);
+  g_assert_cmpuint (publication.active_leases, ==, 0);
+  g_assert_cmpuint (publication.release_calls, ==, 2);
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
 
   gchar denied_request_id[WYL_REQUEST_ID_STRING_BUF];
   fresh_request_id (denied_request_id);
@@ -461,7 +570,8 @@ test_authenticated_handoff_issue_end_to_end (void)
       WYRELOG_E_POLICY);
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM audit_events WHERE action="
-          "'wr.service_credential.manage';"), ==, denial_audits_before + 1);
+          "'wr.service_credential.manage';"), ==,
+      denial_audits_before + HANDOFF_DECISION_AUDIT_DELTA (1));
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM audit_events WHERE action="
           "'service.credential.issue' AND request_id IS NOT NULL;"), ==, 1);
@@ -526,7 +636,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   g_assert_cmpuint (publication.commit_calls, ==, 1);
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM audit_events WHERE action="
-          "'wr.service_credential.manage';"), ==, rotate_decisions_before + 2);
+          "'wr.service_credential.manage';"), ==,
+      rotate_decisions_before + HANDOFF_DECISION_AUDIT_DELTA (2));
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM audit_events WHERE action="
           "'service.credential.rotate';"), ==, 1);
@@ -610,10 +721,59 @@ test_authenticated_handoff_issue_end_to_end (void)
           &storage, &anchor, publish_crash_request_id, &runtime,
           &crash_outcome), ==, WYRELOG_E_IO);
   g_assert_true (publication.published);
+  g_assert_cmpuint (publication.active_leases, ==, 0);
+  g_assert_cmpuint (publication.release_calls, ==, 1);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
           &anchor, publish_crash_request_id, &crash_outcome), ==, WYRELOG_E_OK);
   g_assert_cmpint (crash_outcome.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED);
+  publication.foreign_receipt = TRUE;
+  HandoffUnsealGate foreign_unseal_gate = {.rc = WYRELOG_E_IO };
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
+      handoff_unseal_gate, &foreign_unseal_gate);
+  guint inspect_calls_before_foreign_receipt = publication.inspect_calls;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, publish_crash_request_id, &runtime,
+          &crash_outcome), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (publication.inspect_calls, ==,
+      inspect_calls_before_foreign_receipt);
+  g_assert_cmpuint (publication.commit_calls, ==, 1);
+  g_assert_cmpuint (foreign_unseal_gate.calls, ==, 0);
+  g_assert_cmpuint (publication.active_leases, ==, 0);
+  g_assert_cmpuint (publication.release_calls, ==, 1);
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &publish_crash_escrow, &deleted), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_escrow_info_clear (&deleted);
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
+  publication.foreign_receipt = FALSE;
+  HandoffUnsealGate pin_first_race_gate = {
+    .rc = WYRELOG_E_OK,
+    .publication = &publication,
+    .replace_on_call = TRUE,
+  };
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
+      handoff_unseal_gate, &pin_first_race_gate);
+  guint inspect_calls_before_pin_first_race = publication.inspect_calls;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, publish_crash_request_id, &runtime,
+          &crash_outcome), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (pin_first_race_gate.calls, ==, 1);
+  g_assert_cmpuint (publication.inspect_calls, ==,
+      inspect_calls_before_pin_first_race + 1);
+  g_assert_cmpuint (publication.commit_calls, ==, 1);
+  g_assert_cmpuint (publication.active_leases, ==, 0);
+  g_assert_cmpuint (publication.release_calls, ==, 2);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,
+          &anchor, publish_crash_request_id, &crash_outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (crash_outcome.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED);
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &publish_crash_escrow, &deleted), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_escrow_info_clear (&deleted);
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
+  publication.foreign_receipt = FALSE;
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_execute_handoff (handle,
           &storage, &anchor, publish_crash_request_id, &runtime,
@@ -621,6 +781,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   g_assert_cmpint (count_credentials (db_of (handle)), ==,
       credentials_before_crash + 1);
   g_assert_cmpuint (publication.commit_calls, ==, 1);
+  g_assert_cmpuint (publication.active_leases, ==, 0);
+  g_assert_cmpuint (publication.release_calls, ==, 4);
 
   gchar foreign_request_id[WYL_REQUEST_ID_STRING_BUF];
   fresh_request_id (foreign_request_id);

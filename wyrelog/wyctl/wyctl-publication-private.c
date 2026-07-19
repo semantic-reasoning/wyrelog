@@ -166,6 +166,33 @@ wyctl_publication_result_clear (WyctlPublicationResult *result)
   memset (result, 0, sizeof *result);
 }
 
+static gboolean
+destination_is_simple_leaf (const gchar *destination)
+{
+  g_autofree gchar *upper = NULL;
+  gchar *dot;
+
+  if (!string_is_present (destination)
+      || g_str_equal (destination, ".") || g_str_equal (destination, "..")
+      || strpbrk (destination, "/\\:") != NULL
+      || destination[strlen (destination) - 1] == '.'
+      || destination[strlen (destination) - 1] == ' ')
+    return FALSE;
+  upper = g_ascii_strup (destination, -1);
+  if (upper == NULL)
+    return FALSE;
+  dot = strchr (upper, '.');
+  if (dot != NULL)
+    *dot = '\0';
+  if (g_str_equal (upper, "CON") || g_str_equal (upper, "PRN")
+      || g_str_equal (upper, "AUX") || g_str_equal (upper, "NUL")
+      || g_str_equal (upper, "CLOCK$"))
+    return FALSE;
+  return !((g_str_has_prefix (upper, "COM")
+          || g_str_has_prefix (upper, "LPT")) && strlen (upper) == 4
+      && upper[3] >= '1' && upper[3] <= '9');
+}
+
 gboolean
 wyctl_publication_plan_is_valid (const WyctlPublicationPlan *plan)
 {
@@ -173,7 +200,7 @@ wyctl_publication_plan_is_valid (const WyctlPublicationPlan *plan)
 
   return plan != NULL
       && plan->version == WYCTL_PUBLICATION_PLAN_VERSION
-      && string_is_present (plan->destination)
+      && destination_is_simple_leaf (plan->destination)
       && reservation_id_is_valid (plan->reservation_id)
       && string_is_present (plan->parent_identity)
       && stage_basename_is_valid (plan->stage_basename)
@@ -189,7 +216,7 @@ wyctl_publication_receipt_is_valid (const WyctlPublicationReceipt *receipt)
 
   return receipt != NULL
       && receipt->version == WYCTL_PUBLICATION_RECEIPT_VERSION
-      && string_is_present (receipt->destination)
+      && destination_is_simple_leaf (receipt->destination)
       && reservation_id_is_valid (receipt->reservation_id)
       && string_is_present (receipt->parent_identity)
       && stage_basename_is_valid (receipt->stage_basename)
@@ -264,7 +291,7 @@ wyctl_publication_plan_create (const gchar *destination,
   gchar reservation_buf[WYL_ID_STRING_BUF];
   gchar *stage_basename = NULL;
 
-  if (out_plan == NULL || !string_is_present (destination)
+  if (out_plan == NULL || !destination_is_simple_leaf (destination)
       || !string_is_present (parent_identity))
     return WYRELOG_E_INVALID;
 
@@ -375,6 +402,110 @@ wyctl_publication_backend_stage_exact (const WyctlPublicationBackendVTable
     return WYRELOG_E_INVALID;
   }
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyctl_publication_backend_receipt_target_acquire (const
+    WyctlPublicationBackendVTable *vtable, gpointer self,
+    const WyctlPublicationPlan *plan,
+    const WyctlPublicationReceipt *receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease **out_lease,
+    WyctlPublicationReceiptTargetKind *out_kind)
+{
+  wyrelog_error_t rc;
+
+  if (out_lease == NULL || out_kind == NULL)
+    return WYRELOG_E_INVALID;
+  *out_lease = NULL;
+  *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  if (vtable == NULL || vtable->receipt_target_acquire == NULL
+      || vtable->receipt_target_release == NULL
+      || !wyctl_publication_plan_is_valid (plan)
+      || !wyctl_publication_receipt_is_valid (receipt)
+      || g_strcmp0 (receipt->destination, plan->destination) != 0
+      || g_strcmp0 (receipt->reservation_id, plan->reservation_id) != 0
+      || g_strcmp0 (receipt->parent_identity, plan->parent_identity) != 0
+      || g_strcmp0 (receipt->stage_basename, plan->stage_basename) != 0)
+    return WYRELOG_E_INVALID;
+
+  rc = vtable->receipt_target_acquire (self, plan, receipt,
+      require_destination, out_lease, out_kind);
+  if (rc != WYRELOG_E_OK) {
+    if (*out_lease != NULL)
+      vtable->receipt_target_release (self, *out_lease);
+    *out_lease = NULL;
+    *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+    return rc;
+  }
+  if ((*out_kind == WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION
+          && *out_lease == NULL)
+      || (*out_kind == WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE
+          && (require_destination || *out_lease == NULL))
+      || (*out_kind == WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN
+          && *out_lease != NULL)
+      || *out_kind < WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE
+      || *out_kind > WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN) {
+    if (*out_lease != NULL)
+      vtable->receipt_target_release (self, *out_lease);
+    *out_lease = NULL;
+    *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+    return WYRELOG_E_INVALID;
+  }
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyctl_publication_backend_receipt_target_inspect (const
+    WyctlPublicationBackendVTable *vtable, gpointer self,
+    WyctlPublicationReceiptTargetLease *lease,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
+    WyctlPublicationResult *out_result)
+{
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_result_clear (out_result);
+  if (vtable == NULL || vtable->receipt_target_inspect == NULL
+      || lease == NULL || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = vtable->receipt_target_inspect (self, lease,
+      expected_credential_id, expected_credential_secret, out_result);
+  return rc == WYRELOG_E_OK && !wyctl_publication_result_is_valid (out_result)
+      ? WYRELOG_E_INVALID : rc;
+}
+
+wyrelog_error_t
+wyctl_publication_backend_receipt_target_commit (const
+    WyctlPublicationBackendVTable *vtable, gpointer self,
+    WyctlPublicationReceiptTargetLease *lease,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
+    WyctlPublicationResult *out_result)
+{
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_result_clear (out_result);
+  if (vtable == NULL || vtable->receipt_target_commit == NULL || lease == NULL
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = vtable->receipt_target_commit (self, lease,
+      expected_credential_id, expected_credential_secret, out_result);
+  return rc == WYRELOG_E_OK && !wyctl_publication_result_is_valid (out_result)
+      ? WYRELOG_E_INVALID : rc;
+}
+
+void
+wyctl_publication_backend_receipt_target_release (const
+    WyctlPublicationBackendVTable *vtable, gpointer self,
+    WyctlPublicationReceiptTargetLease **lease)
+{
+  if (lease == NULL || *lease == NULL)
+    return;
+  if (vtable != NULL && vtable->receipt_target_release != NULL)
+    vtable->receipt_target_release (self, *lease);
+  *lease = NULL;
 }
 
 wyrelog_error_t

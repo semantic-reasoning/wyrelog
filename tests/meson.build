@@ -995,13 +995,18 @@ test_service_credential_operation_coordinator_journal = executable('test-service
   include_directories : [wyrelog_inc, include_directories('../wyrelog')])
 test('service-credential-operation-coordinator-journal', test_service_credential_operation_coordinator_journal)
 
+test_service_credential_operation_coordinator_execute_c_args = [
+  '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+]
+if get_option('enable_audit').allowed()
+  test_service_credential_operation_coordinator_execute_c_args += '-DWYL_HAS_AUDIT'
+endif
+
 test_service_credential_operation_coordinator_execute = executable('test-service-credential-operation-coordinator-execute',
   'test-service-credential-operation-coordinator-execute.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
-  c_args : [
-    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
-  ],
+  c_args : test_service_credential_operation_coordinator_execute_c_args,
 )
 
 service_credential_operation_coordinator_execute_timeout = 180

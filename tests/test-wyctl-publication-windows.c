@@ -9,6 +9,7 @@
 
 #include <windows.h>
 #include <aclapi.h>
+#include <sddl.h>
 
 static gboolean
 sid_matches_current_user (PSID sid)
@@ -112,6 +113,17 @@ windows_fixture_setup (WindowsFixture *fixture)
 {
   fixture->root_dir = g_dir_make_tmp ("wyctl-publication-windows-XXXXXX", NULL);
   g_assert_nonnull (fixture->root_dir);
+  {
+    g_autofree wchar_t *wroot = g_utf8_to_utf16 (fixture->root_dir, -1,
+        NULL, NULL, NULL);
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+    g_assert_true
+        (ConvertStringSecurityDescriptorToSecurityDescriptorW
+        (L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL));
+    g_assert_true (SetFileSecurityW (wroot, DACL_SECURITY_INFORMATION,
+            descriptor));
+    LocalFree (descriptor);
+  }
   wyctl_publication_windows_backend_init (&fixture->backend, fixture->root_dir);
 }
 
@@ -156,6 +168,10 @@ test_plan_prepare_commit_roundtrip (void)
   WyctlPublicationResult result = { 0 };
   WyctlPublicationResult inspect = { 0 };
   WyctlPublicationResult resynced = { 0 };
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  WyctlPublicationReceiptTargetKind kind =
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  gboolean replayed = FALSE;
   const gchar *credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
   const gchar *credential_secret =
       "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
@@ -168,20 +184,40 @@ test_plan_prepare_commit_roundtrip (void)
           "parent-identity", &request), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend, &request,
           &planned), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyctl_publication_windows_prepare (&fixture.backend,
-          &planned, &receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_windows_stage_exact (&fixture.backend,
+          &planned, credential_id, &expected_secret, &receipt, &result,
+          &replayed), ==, WYRELOG_E_OK);
+  wyctl_publication_result_clear (&result);
   g_assert_true (wyctl_publication_receipt_is_valid (&receipt));
   {
     g_autofree gchar *stage = g_build_filename (fixture.root_dir,
         planned.stage_basename, NULL);
     assert_path_owner_only_acl (stage);
   }
-
-  g_assert_cmpint (wyctl_publication_windows_commit (&fixture.backend, &planned,
-          &receipt, credential_id, credential_secret, &result), ==,
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_acquire
+      (&fixture.backend, &planned, &receipt, FALSE, &lease, &kind), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_inspect
+      (&fixture.backend, lease, credential_id, &expected_secret, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED);
+  g_assert_true (result.exact_identity);
+  wyctl_publication_result_clear (&result);
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_commit
+      (&fixture.backend, lease, credential_id, &expected_secret, &result), ==,
       WYRELOG_E_OK);
   g_assert_true (wyctl_publication_result_is_valid (&result));
   g_assert_true (result.exact_identity);
+  wyctl_publication_result_clear (&result);
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_inspect
+      (&fixture.backend, lease, credential_id, &expected_secret, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
+  g_assert_true (result.exact_identity);
+  wyctl_publication_windows_receipt_target_release (&fixture.backend, lease);
+  lease = NULL;
 
   g_assert_cmpint (wyctl_publication_windows_inspect (&fixture.backend,
           &planned, &receipt, credential_id, &expected_secret, &inspect), ==,
@@ -197,6 +233,77 @@ test_plan_prepare_commit_roundtrip (void)
 
   wyctl_publication_result_clear (&resynced);
   wyctl_publication_result_clear (&inspect);
+  wyctl_publication_result_clear (&result);
+  wyctl_publication_receipt_clear (&receipt);
+  wyctl_publication_plan_clear (&planned);
+  wyctl_publication_plan_clear (&request);
+  windows_fixture_teardown (&fixture);
+}
+
+static void
+test_receipt_target_lease_blocks_namespace_replacement (void)
+{
+  WindowsFixture fixture = { 0 };
+  WyctlPublicationPlan request = { 0 };
+  WyctlPublicationPlan planned = { 0 };
+  WyctlPublicationReceipt receipt = { 0 };
+  WyctlPublicationResult result = { 0 };
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  WyctlPublicationReceiptTargetKind kind =
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  const gchar *credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  const gchar *credential_secret =
+      "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  WyctlSensitiveText secret = {.text = (gchar *) credential_secret,
+    .len = strlen (credential_secret)
+  };
+  g_autofree gchar *stage = NULL;
+  g_autofree gchar *moved = NULL;
+  g_autofree wchar_t *wstage = NULL;
+  g_autofree wchar_t *wmoved = NULL;
+  gboolean replayed = FALSE;
+  DWORD error;
+
+  windows_fixture_setup (&fixture);
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          "parent-identity", &request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_windows_plan (&fixture.backend, &request,
+          &planned), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_windows_stage_exact (&fixture.backend,
+          &planned, credential_id, &secret, &receipt, &result, &replayed), ==,
+      WYRELOG_E_OK);
+  wyctl_publication_result_clear (&result);
+  stage = g_build_filename (fixture.root_dir, planned.stage_basename, NULL);
+  moved = g_build_filename (fixture.root_dir, "pinned-original", NULL);
+  wstage = g_utf8_to_utf16 (stage, -1, NULL, NULL, NULL);
+  wmoved = g_utf8_to_utf16 (moved, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wstage);
+  g_assert_nonnull (wmoved);
+
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_acquire
+      (&fixture.backend, &planned, &receipt, FALSE, &lease, &kind), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
+
+  g_assert_false (MoveFileExW (wstage, wmoved, MOVEFILE_WRITE_THROUGH));
+  error = GetLastError ();
+  g_assert_true (error == ERROR_SHARING_VIOLATION
+      || error == ERROR_ACCESS_DENIED);
+  g_assert_false (DeleteFileW (wstage));
+  error = GetLastError ();
+  g_assert_true (error == ERROR_SHARING_VIOLATION
+      || error == ERROR_ACCESS_DENIED);
+  g_assert_cmpint (wyctl_publication_windows_receipt_target_inspect
+      (&fixture.backend, lease, credential_id, &secret, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED);
+  g_assert_true (result.exact_identity);
+
+  wyctl_publication_windows_receipt_target_release (&fixture.backend, lease);
+  lease = NULL;
+  g_assert_true (MoveFileExW (wstage, wmoved, MOVEFILE_WRITE_THROUGH));
+  g_assert_true (DeleteFileW (wmoved));
   wyctl_publication_result_clear (&result);
   wyctl_publication_receipt_clear (&receipt);
   wyctl_publication_plan_clear (&planned);
@@ -703,6 +810,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/wyctl/publication/windows/roundtrip",
       test_plan_prepare_commit_roundtrip);
+  g_test_add_func ("/wyctl/publication/windows/receipt-target-pin",
+      test_receipt_target_lease_blocks_namespace_replacement);
   g_test_add_func ("/wyctl/publication/windows/rejects-existing-destination",
       test_plan_rejects_existing_destination);
   g_test_add_func ("/wyctl/publication/windows/refuses-foreign-cleanup",
