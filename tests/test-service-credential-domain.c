@@ -927,6 +927,7 @@ typedef struct
   gint64 credentials;
   gint64 events;
   gint64 cvk;
+  gint64 escrows;
   gint64 fences;
   gint64 requests;
   gint64 audits;
@@ -941,7 +942,9 @@ mutation_effects (WylHandle *handle)
   .credentials =
         scalar (db, "SELECT count(*) FROM service_credentials;"),.events =
         scalar (db, "SELECT count(*) FROM service_credential_events;"),.cvk =
-        scalar (db, "SELECT count(*) FROM service_credential_cvk;"),.fences =
+        scalar (db, "SELECT count(*) FROM service_credential_cvk;"),.escrows =
+        scalar (db,
+        "SELECT count(*) FROM service_credential_handoff_escrows;"),.fences =
         scalar (db,
         "SELECT count(*) FROM service_credential_operation_fences;"),.requests
         =
@@ -956,6 +959,7 @@ assert_mutation_effects_equal (MutationEffects actual, MutationEffects expected)
   g_assert_cmpint (actual.credentials, ==, expected.credentials);
   g_assert_cmpint (actual.events, ==, expected.events);
   g_assert_cmpint (actual.cvk, ==, expected.cvk);
+  g_assert_cmpint (actual.escrows, ==, expected.escrows);
   g_assert_cmpint (actual.fences, ==, expected.fences);
   g_assert_cmpint (actual.requests, ==, expected.requests);
   g_assert_cmpint (actual.audits, ==, expected.audits);
@@ -1028,6 +1032,214 @@ test_mutation_authorization_denial_inside_write_lease (void)
   g_assert_false (snapshot.writer_active);
   wyl_service_credential_issue_result_clear (&seed);
   wyl_service_credential_issue_result_clear (&denied);
+  g_free (probe.actor_subject_id);
+}
+
+static void
+test_handoff_issue_authorization_replay_and_no_plaintext (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:handoff:issue");
+
+  CollisionRuntime collision = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &collision,
+  };
+  AuthorizationProbe probe = {.handle = handle,.rc = WYRELOG_E_OK };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,.data = &probe,
+  };
+  wyl_service_credential_issue_runtime_t runtime = {
+    .authorization = &authorization,
+    .credential_runtime = &credential_runtime,
+  };
+  wyl_id_t escrow_id;
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  memset (target, 0x31, sizeof target);
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id,.target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  wyl_service_credential_handoff_result_t first = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          "svc:handoff:issue", "tenant-a", "admin", "handoff-issue", 0,
+          &handoff, &runtime, &first), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (probe.actor_subject_id, ==, "admin");
+  g_assert_cmpstr (first.handoff.operation, ==, "issue");
+  g_assert_cmpstr (first.handoff.request_id, ==, "handoff-issue");
+  g_assert_cmpstr (first.handoff.actor_subject_id, ==, "admin");
+  g_assert_cmpstr (first.handoff.credential_id, ==,
+      first.credential.credential_id);
+  g_assert_cmpuint (first.handoff.credential_generation, ==,
+      first.credential.generation);
+  g_assert_true (wyl_id_equal (&first.handoff.escrow_id, &escrow_id));
+  g_assert_cmpmem (first.handoff.target_digest,
+      sizeof first.handoff.target_digest, target, sizeof target);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE request_id='handoff-issue' AND actor_subject_id='admin';"),
+      ==, 1);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events "
+          "WHERE request_id='handoff-issue' AND subject_id='admin';"), ==, 1);
+
+  wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load
+      (store_of (handle), &escrow_id, &escrow), ==, WYRELOG_E_OK);
+  wyl_policy_service_handoff_secret_t *secret = NULL;
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal
+      (store_of (handle), &escrow, &secret), ==, WYRELOG_E_OK);
+  gsize secret_len = 0;
+  const guint8 *plaintext = wyl_policy_service_handoff_secret_peek (secret,
+      &secret_len);
+  g_assert_nonnull (plaintext);
+  g_assert_cmpuint (secret_len, ==, WYL_SERVICE_CREDENTIAL_SECRET_BYTES);
+  sqlite3_int64 policy_len = 0;
+  unsigned char *policy_bytes = sqlite3_serialize (db_of (handle), "main",
+      &policy_len, 0);
+  g_assert_nonnull (policy_bytes);
+  g_assert_false (contains_bytes (policy_bytes, (gsize) policy_len, plaintext,
+          secret_len));
+  sqlite3_free (policy_bytes);
+
+  MutationEffects committed = mutation_effects (handle);
+  guint ids = collision.ids;
+  guint allocs = collision.allocs;
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
+  wyl_service_credential_handoff_result_t replay = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          "svc:handoff:issue", "tenant-a", "admin", "handoff-issue", 0,
+          &handoff, &runtime, &replay), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpuint (collision.ids, ==, ids);
+  g_assert_cmpuint (collision.allocs, ==, allocs);
+  g_assert_cmpstr (replay.credential.credential_id, ==,
+      first.credential.credential_id);
+  g_assert_cmpmem (replay.handoff.binding_digest,
+      sizeof replay.handoff.binding_digest, first.handoff.binding_digest,
+      sizeof first.handoff.binding_digest);
+  assert_mutation_effects_equal (mutation_effects (handle), committed);
+
+  wyl_id_t denied_escrow_id;
+  g_assert_cmpint (wyl_id_new (&denied_escrow_id), ==, WYRELOG_E_OK);
+  handoff.escrow_id = &denied_escrow_id;
+  probe.rc = WYRELOG_E_POLICY;
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
+  wyl_service_credential_handoff_result_t denied = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          "svc:handoff:issue", "tenant-a", "admin", "handoff-denied", 0,
+          &handoff, &runtime, &denied), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_null (denied.credential.credential_id);
+  g_assert_null (denied.handoff.credential_id);
+  g_assert_cmpuint (collision.ids, ==, ids);
+  g_assert_cmpuint (collision.allocs, ==, allocs);
+  assert_mutation_effects_equal (mutation_effects (handle), committed);
+
+  wyl_service_credential_handoff_result_clear (&denied);
+  wyl_service_credential_handoff_result_clear (&replay);
+  wyl_policy_service_handoff_secret_clear (&secret);
+  wyl_policy_service_handoff_escrow_info_clear (&escrow);
+  wyl_service_credential_handoff_result_clear (&first);
+  g_free (probe.actor_subject_id);
+}
+
+static void
+test_handoff_checked_rotate_stale_rollback_and_replay (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:handoff:rotate");
+  wyl_service_credential_issue_result_t old = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (handle,
+          "svc:handoff:rotate", "tenant-a", "admin", "handoff-rotate-seed",
+          0, &old), ==, WYRELOG_E_OK);
+
+  CollisionRuntime collision = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &collision,
+  };
+  AuthorizationProbe probe = {.handle = handle,.rc = WYRELOG_E_OK };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,.data = &probe,
+  };
+  wyl_service_credential_rotate_runtime_t runtime = {
+    .credential_runtime = &credential_runtime,
+    .old_credential_generation = old.credential.generation + 1,
+    .authorization = &authorization,
+  };
+  wyl_id_t escrow_id;
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  memset (target, 0x32, sizeof target);
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id,.target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  MutationEffects before = mutation_effects (handle);
+  wyl_service_credential_handoff_result_t out = { 0 };
+  g_assert_cmpint
+      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+          old.credential.credential_id, "admin", "handoff-rotate-stale", 0,
+          &handoff, &runtime, &out), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpuint (collision.ids, ==, 0);
+  g_assert_cmpuint (collision.allocs, ==, 0);
+  g_assert_null (out.credential.credential_id);
+  assert_mutation_effects_equal (mutation_effects (handle), before);
+
+  runtime.old_credential_generation = old.credential.generation;
+  probe.calls = 0;
+  probe.saw_write_lease = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+          old.credential.credential_id, "admin", "handoff-rotate", 0,
+          &handoff, &runtime, &out), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (probe.saw_write_lease);
+  g_assert_cmpstr (out.handoff.operation, ==, "rotate");
+  g_assert_cmpstr (out.handoff.actor_subject_id, ==, "admin");
+  g_assert_cmpstr (out.credential.rotated_from_id, ==,
+      old.credential.credential_id);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_events "
+          "WHERE request_id='handoff-rotate' AND actor_subject_id='admin';"),
+      ==, 2);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM audit_events "
+          "WHERE request_id='handoff-rotate' AND subject_id='admin';"), ==, 1);
+  MutationEffects committed = mutation_effects (handle);
+  guint ids = collision.ids;
+  guint allocs = collision.allocs;
+  wyl_service_credential_handoff_result_t replay = { 0 };
+  probe.calls = 0;
+  g_assert_cmpint
+      (wyl_service_credential_rotate_handoff_checked_with_runtime (handle,
+          old.credential.credential_id, "admin", "handoff-rotate", 0,
+          &handoff, &runtime, &replay), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_cmpuint (collision.ids, ==, ids);
+  g_assert_cmpuint (collision.allocs, ==, allocs);
+  g_assert_cmpstr (replay.credential.credential_id, ==,
+      out.credential.credential_id);
+  assert_mutation_effects_equal (mutation_effects (handle), committed);
+
+  wyl_service_credential_handoff_result_clear (&replay);
+  wyl_service_credential_handoff_result_clear (&out);
+  wyl_service_credential_issue_result_clear (&old);
   g_free (probe.actor_subject_id);
 }
 
@@ -2152,6 +2364,10 @@ main (int argc, char **argv)
       test_id_collision_retry_and_wipe);
   g_test_add_func ("/auth/service-credential/mutation-authorization-denial",
       test_mutation_authorization_denial_inside_write_lease);
+  g_test_add_func ("/auth/service-credential/handoff-issue-replay-no-secret",
+      test_handoff_issue_authorization_replay_and_no_plaintext);
+  g_test_add_func ("/auth/service-credential/handoff-rotate-stale-replay",
+      test_handoff_checked_rotate_stale_rollback_and_replay);
   g_test_add_func ("/auth/service-credential/same-thread-callback-reentry",
       test_same_thread_callback_reentry_is_busy);
   g_test_add_func
