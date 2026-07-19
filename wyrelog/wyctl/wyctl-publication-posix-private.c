@@ -13,6 +13,8 @@
 #include <unistd.h>
 #include <string.h>
 
+#include <sodium.h>
+
 #include "wyrelog/wyl-common-private.h"
 
 typedef struct
@@ -69,6 +71,17 @@ stat_is_owner_only_regular (const struct stat *st, gboolean require_empty)
   return TRUE;
 }
 
+/* Recovery may act on a durable basename after a crash. POSIX has no
+ * unlink/rename operation that accepts an already-verified file descriptor,
+ * so the publication root is a trust boundary: only this service account may
+ * modify entries while a receipt is live. */
+static gboolean
+stat_is_private_root_directory (const struct stat *st)
+{
+  return st != NULL && S_ISDIR (st->st_mode) && st->st_uid == geteuid ()
+      && (st->st_mode & 0777) == 0700;
+}
+
 static gchar *
 encode_stat_identity (const struct stat *st)
 {
@@ -122,9 +135,15 @@ open_root_anchor (const WyctlPublicationPosixBackend *backend,
     return FALSE;
   }
 
-  if (fstat (dirfd, &st) != 0 || !S_ISDIR (st.st_mode)) {
+  if (fstat (dirfd, &st) != 0) {
     if (out_error != NULL)
       *out_error = WYRELOG_E_IO;
+    close (dirfd);
+    return FALSE;
+  }
+  if (!stat_is_private_root_directory (&st)) {
+    if (out_error != NULL)
+      *out_error = WYRELOG_E_POLICY;
     close (dirfd);
     return FALSE;
   }
@@ -155,6 +174,22 @@ close_root_anchor (WyctlPublicationPosixAnchor *anchor)
   anchor->dirfd = -1;
   g_clear_pointer (&anchor->dir_path, g_free);
   memset (&anchor->dir_st, 0, sizeof anchor->dir_st);
+}
+
+static gboolean
+plan_matches_anchor (const WyctlPublicationPlan *plan,
+    const WyctlPublicationPosixAnchor *anchor)
+{
+  return plan != NULL && anchor != NULL
+      && identity_matches_stat (plan->parent_identity, &anchor->dir_st);
+}
+
+static gboolean
+receipt_matches_plan_anchor (const WyctlPublicationReceipt *receipt,
+    const WyctlPublicationPlan *plan, const WyctlPublicationPosixAnchor *anchor)
+{
+  return receipt != NULL && plan_matches_anchor (plan, anchor)
+      && g_strcmp0 (receipt->parent_identity, plan->parent_identity) == 0;
 }
 
 static gchar *
@@ -208,42 +243,14 @@ rename_no_replace (const gchar *root_dir, int dirfd,
     return map_errno_to_error (errno);
   return WYRELOG_E_OK;
 #else
-  g_autofree gchar *src_path = NULL;
-  g_autofree gchar *dst_path = NULL;
-  struct stat st;
-
-  src_path = g_build_filename (root_dir, src_basename, NULL);
-  dst_path = g_build_filename (root_dir, dst_relative, NULL);
-  if (src_path == NULL || dst_path == NULL)
-    return WYRELOG_E_NOMEM;
-  if (fstatat (dirfd, dst_relative, &st, AT_SYMLINK_NOFOLLOW) == 0)
-    return WYRELOG_E_POLICY;
-  if (errno != ENOENT)
-    return map_errno_to_error (errno);
-  if (rename (src_path, dst_path) != 0)
-    return map_errno_to_error (errno);
-  return WYRELOG_E_OK;
+  return WYRELOG_E_POLICY;
 #endif
 #elif defined(__APPLE__)
   if (renameatx_np (dirfd, src_basename, dirfd, dst_relative, RENAME_EXCL) != 0)
     return map_errno_to_error (errno);
   return WYRELOG_E_OK;
 #else
-  g_autofree gchar *src_path = NULL;
-  g_autofree gchar *dst_path = NULL;
-  struct stat st;
-
-  src_path = g_build_filename (root_dir, src_basename, NULL);
-  dst_path = g_build_filename (root_dir, dst_relative, NULL);
-  if (src_path == NULL || dst_path == NULL)
-    return WYRELOG_E_NOMEM;
-  if (fstatat (dirfd, dst_relative, &st, AT_SYMLINK_NOFOLLOW) == 0)
-    return WYRELOG_E_POLICY;
-  if (errno != ENOENT)
-    return map_errno_to_error (errno);
-  if (rename (src_path, dst_path) != 0)
-    return map_errno_to_error (errno);
-  return WYRELOG_E_OK;
+  return WYRELOG_E_POLICY;
 #endif
 }
 
@@ -288,6 +295,7 @@ read_all (int fd, gchar **out_bytes, gsize *out_len)
     return WYRELOG_E_NOMEM;
 
   if (lseek (fd, 0, SEEK_SET) < 0) {
+    sodium_memzero (buf, (gsize) st.st_size + 1);
     g_free (buf);
     return map_errno_to_error (errno);
   }
@@ -297,6 +305,7 @@ read_all (int fd, gchar **out_bytes, gsize *out_len)
     if (got < 0) {
       if (errno == EINTR)
         continue;
+      sodium_memzero (buf, (gsize) st.st_size + 1);
       g_free (buf);
       return map_errno_to_error (errno);
     }
@@ -305,6 +314,7 @@ read_all (int fd, gchar **out_bytes, gsize *out_len)
     total += (gsize) got;
   }
   if (total != (gsize) st.st_size) {
+    sodium_memzero (buf, (gsize) st.st_size + 1);
     g_free (buf);
     return WYRELOG_E_IO;
   }
@@ -315,10 +325,119 @@ read_all (int fd, gchar **out_bytes, gsize *out_len)
 }
 
 static wyrelog_error_t
+document_matches_expected (const gchar *path,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
+    gboolean *out_matches, gboolean *out_empty)
+{
+  gchar *content = NULL;
+  g_autofree gchar *decoded_id = NULL;
+  WyctlSensitiveText decoded_secret = { 0 };
+  gsize content_len = 0;
+  wyrelog_error_t rc;
+  int fd;
+
+  if (out_matches == NULL || out_empty == NULL)
+    return WYRELOG_E_INVALID;
+  *out_matches = FALSE;
+  *out_empty = FALSE;
+  fd = open (path, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+      | O_NOFOLLOW
+#endif
+      );
+  if (fd < 0)
+    return map_errno_to_error (errno);
+  rc = read_all (fd, &content, &content_len);
+  close (fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (content_len == 0) {
+    *out_empty = TRUE;
+    sodium_memzero (content, content_len + 1);
+    g_free (content);
+    return WYRELOG_E_OK;
+  }
+  rc = wyctl_publication_credential_document_decode (content, content_len,
+      &decoded_id, &decoded_secret);
+  sodium_memzero (content, content_len + 1);
+  g_free (content);
+  if (rc == WYRELOG_E_OK)
+    *out_matches = wyctl_publication_credential_document_matches (decoded_id,
+        &decoded_secret, expected_credential_id, expected_credential_secret);
+  wyctl_sensitive_text_clear (&decoded_secret);
+  return rc;
+}
+
+static wyrelog_error_t
+document_matches_expected_at (int dirfd, const gchar *basename,
+    const gchar *expected_identity, const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
+    gboolean *out_matches, gboolean *out_empty)
+{
+  gchar *content = NULL;
+  g_autofree gchar *decoded_id = NULL;
+  WyctlSensitiveText decoded_secret = { 0 };
+  struct stat st;
+  gsize content_len = 0;
+  wyrelog_error_t rc;
+  int fd;
+
+  if (dirfd < 0 || !string_is_present (basename)
+      || !string_is_present (expected_identity) || out_matches == NULL
+      || out_empty == NULL)
+    return WYRELOG_E_INVALID;
+  *out_matches = FALSE;
+  *out_empty = FALSE;
+  fd = openat (dirfd, basename, O_RDONLY | O_CLOEXEC
+#ifdef O_NOFOLLOW
+      | O_NOFOLLOW
+#endif
+      );
+  if (fd < 0)
+    return map_errno_to_error (errno);
+  if (fstat (fd, &st) != 0 || !stat_is_owner_only_regular (&st, FALSE)
+      || !identity_matches_stat (expected_identity, &st)) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  rc = read_all (fd, &content, &content_len);
+  close (fd);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (content_len == 0) {
+    *out_empty = TRUE;
+  } else {
+    rc = wyctl_publication_credential_document_decode (content, content_len,
+        &decoded_id, &decoded_secret);
+    if (rc == WYRELOG_E_OK)
+      *out_matches = wyctl_publication_credential_document_matches
+          (decoded_id, &decoded_secret, expected_credential_id,
+          expected_credential_secret);
+  }
+  sodium_memzero (content, content_len + 1);
+  g_free (content);
+  wyctl_sensitive_text_clear (&decoded_secret);
+  return rc;
+}
+
+static gboolean
+named_entry_matches_receipt (int dirfd, const gchar *basename,
+    const gchar *expected_identity)
+{
+  struct stat st;
+
+  return dirfd >= 0 && string_is_present (basename)
+      && fstatat (dirfd, basename, &st, AT_SYMLINK_NOFOLLOW) == 0
+      && stat_is_owner_only_regular (&st, FALSE)
+      && identity_matches_stat (expected_identity, &st);
+}
+
+static wyrelog_error_t
 write_credential_document_to_fd (int fd, const gchar *credential_id,
     const gchar *credential_secret)
 {
-  g_autofree gchar *document = NULL;
+  gchar *document = NULL;
   wyrelog_error_t rc;
 
   rc = wyctl_publication_credential_document_encode (credential_id,
@@ -326,16 +445,20 @@ write_credential_document_to_fd (int fd, const gchar *credential_id,
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  if (lseek (fd, 0, SEEK_SET) < 0)
-    return map_errno_to_error (errno);
-  if (ftruncate (fd, 0) != 0)
-    return map_errno_to_error (errno);
+  if (lseek (fd, 0, SEEK_SET) < 0) {
+    rc = map_errno_to_error (errno);
+    goto out;
+  }
+  if (ftruncate (fd, 0) != 0) {
+    rc = map_errno_to_error (errno);
+    goto out;
+  }
   rc = write_all (fd, (const guint8 *) document, strlen (document));
   if (rc != WYRELOG_E_OK)
-    return rc;
+    goto out;
   rc = fsync_fd_checked (fd);
   if (rc != WYRELOG_E_OK)
-    return rc;
+    goto out;
 
   {
     g_autofree gchar *roundtrip = NULL;
@@ -345,22 +468,30 @@ write_credential_document_to_fd (int fd, const gchar *credential_id,
 
     rc = read_all (fd, &roundtrip, &roundtrip_len);
     if (rc != WYRELOG_E_OK)
-      return rc;
+      goto out;
     rc = wyctl_publication_credential_document_decode (roundtrip, roundtrip_len,
         &decoded_id, &decoded_secret);
-    if (rc != WYRELOG_E_OK)
-      return rc;
+    if (rc != WYRELOG_E_OK) {
+      sodium_memzero (roundtrip, roundtrip_len + 1);
+      goto out;
+    }
     if (g_strcmp0 (decoded_id, credential_id) != 0
         || decoded_secret.len != strlen (credential_secret)
         || memcmp (decoded_secret.text, credential_secret,
             decoded_secret.len) != 0) {
       wyctl_sensitive_text_clear (&decoded_secret);
-      return WYRELOG_E_IO;
+      sodium_memzero (roundtrip, roundtrip_len + 1);
+      rc = WYRELOG_E_IO;
+      goto out;
     }
     wyctl_sensitive_text_clear (&decoded_secret);
+    sodium_memzero (roundtrip, roundtrip_len + 1);
   }
 
-  return WYRELOG_E_OK;
+out:
+  sodium_memzero (document, strlen (document));
+  g_free (document);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -399,8 +530,10 @@ wyrelog_error_t
 wyctl_publication_posix_plan (const WyctlPublicationPosixBackend *backend,
     const WyctlPublicationPlan *request, WyctlPublicationPlan *out_plan)
 {
+  WyctlPublicationPosixAnchor anchor = { 0 };
   g_autofree gchar *destination_path = NULL;
   struct stat st;
+  wyrelog_error_t rc;
 
   if (out_plan == NULL)
     return WYRELOG_E_INVALID;
@@ -408,15 +541,34 @@ wyctl_publication_posix_plan (const WyctlPublicationPosixBackend *backend,
   if (!backend_is_valid (backend) || !wyctl_publication_plan_is_valid (request))
     return WYRELOG_E_INVALID;
 
-  destination_path = destination_path_for_plan (backend, request);
-  if (destination_path == NULL)
-    return WYRELOG_E_NOMEM;
-  if (lstat (destination_path, &st) == 0)
-    return WYRELOG_E_POLICY;
-  if (errno != ENOENT)
-    return map_errno_to_error (errno);
+  if (!open_root_anchor (backend, &anchor, &rc))
+    return rc;
 
-  return wyctl_publication_plan_clone (request, out_plan);
+  destination_path = destination_path_for_plan (backend, request);
+  if (destination_path == NULL) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_NOMEM;
+  }
+  if (lstat (destination_path, &st) == 0) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
+  if (errno != ENOENT) {
+    close_root_anchor (&anchor);
+    return map_errno_to_error (errno);
+  }
+
+  rc = wyctl_publication_plan_clone (request, out_plan);
+  if (rc == WYRELOG_E_OK) {
+    g_free (out_plan->parent_identity);
+    out_plan->parent_identity = encode_stat_identity (&anchor.dir_st);
+    if (out_plan->parent_identity == NULL) {
+      wyctl_publication_plan_clear (out_plan);
+      rc = WYRELOG_E_NOMEM;
+    }
+  }
+  close_root_anchor (&anchor);
+  return rc;
 }
 
 wyrelog_error_t
@@ -442,6 +594,10 @@ wyctl_publication_posix_prepare (const WyctlPublicationPosixBackend *backend,
 
   if (!open_root_anchor (backend, &anchor, &rc))
     return rc;
+  if (!plan_matches_anchor (plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
 
   stage_fd = openat (anchor.dirfd, plan->stage_basename,
       O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC
@@ -505,6 +661,10 @@ commit_stage_to_destination (const WyctlPublicationPosixBackend *backend,
 
   if (!open_root_anchor (backend, &anchor, &rc))
     return rc;
+  if (!receipt_matches_plan_anchor (receipt, plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
 
   stage_fd = openat (anchor.dirfd, plan->stage_basename, O_RDWR | O_CLOEXEC
 #ifdef O_NOFOLLOW
@@ -586,8 +746,11 @@ wyctl_publication_posix_commit (const WyctlPublicationPosixBackend *backend,
 wyrelog_error_t
 wyctl_publication_posix_inspect (const WyctlPublicationPosixBackend *backend,
     const WyctlPublicationPlan *plan, const WyctlPublicationReceipt *receipt,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
     WyctlPublicationResult *out_result)
 {
+  WyctlPublicationPosixAnchor anchor = { 0 };
   g_autofree gchar *stage_path = NULL;
   g_autofree gchar *destination_path = NULL;
   struct stat stage_st;
@@ -598,42 +761,36 @@ wyctl_publication_posix_inspect (const WyctlPublicationPosixBackend *backend,
     return WYRELOG_E_INVALID;
   wyctl_publication_result_clear (out_result);
   if (!backend_is_valid (backend) || !wyctl_publication_plan_is_valid (plan)
-      || !wyctl_publication_receipt_is_valid (receipt))
+      || !wyctl_publication_receipt_is_valid (receipt)
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
     return WYRELOG_E_INVALID;
 
   stage_path = stage_path_for_plan (backend, plan);
   destination_path = destination_path_for_plan (backend, plan);
   if (stage_path == NULL || destination_path == NULL)
     return WYRELOG_E_NOMEM;
+  if (!open_root_anchor (backend, &anchor, &rc))
+    return rc;
+  if (!receipt_matches_plan_anchor (receipt, plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
+  close_root_anchor (&anchor);
 
   rc = stat_path_identity (destination_path, &destination_st, TRUE);
   if (rc == WYRELOG_E_OK && identity_matches_stat (receipt->stage_identity,
           &destination_st)) {
-    g_autofree gchar *content = NULL;
-    g_autofree gchar *decoded_id = NULL;
-    WyctlSensitiveText decoded_secret = { 0 };
-    gsize content_len = 0;
-    int fd = open (destination_path, O_RDONLY | O_CLOEXEC
-#ifdef O_NOFOLLOW
-        | O_NOFOLLOW
-#endif
-        );
-    if (fd < 0)
-      return map_errno_to_error (errno);
-    rc = read_all (fd, &content, &content_len);
-    close (fd);
-    if (rc != WYRELOG_E_OK)
-      return rc;
-    rc = wyctl_publication_credential_document_decode (content, content_len,
-        &decoded_id, &decoded_secret);
-    wyctl_sensitive_text_clear (&decoded_secret);
-    if (rc == WYRELOG_E_OK)
+    gboolean matches = FALSE;
+    gboolean empty = FALSE;
+    rc = document_matches_expected (destination_path, expected_credential_id,
+        expected_credential_secret, &matches, &empty);
+    if (rc == WYRELOG_E_OK && matches)
       out_result->kind = WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE;
     else
-      out_result->kind =
-          WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN;
+      out_result->kind = WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
     out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
-    out_result->exact_identity = TRUE;
+    out_result->exact_identity = matches;
     out_result->cleanup_required = FALSE;
     return WYRELOG_E_OK;
   }
@@ -641,10 +798,17 @@ wyctl_publication_posix_inspect (const WyctlPublicationPosixBackend *backend,
   rc = stat_path_identity (stage_path, &stage_st, TRUE);
   if (rc == WYRELOG_E_OK && identity_matches_stat (receipt->stage_identity,
           &stage_st)) {
+    gboolean matches = FALSE;
+    gboolean empty = FALSE;
+    rc = document_matches_expected (stage_path, expected_credential_id,
+        expected_credential_secret, &matches, &empty);
     out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
-    out_result->kind = WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED;
-    out_result->exact_identity = TRUE;
-    out_result->cleanup_required = TRUE;
+    out_result->kind = rc == WYRELOG_E_OK && matches ?
+        WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED :
+        rc == WYRELOG_E_OK && empty ? WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED
+        : WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+    out_result->exact_identity = matches || empty;
+    out_result->cleanup_required = matches || empty;
     return WYRELOG_E_OK;
   }
   if (rc != WYRELOG_E_NOT_FOUND && rc != WYRELOG_E_OK)
@@ -660,6 +824,8 @@ wyctl_publication_posix_inspect (const WyctlPublicationPosixBackend *backend,
 wyrelog_error_t
 wyctl_publication_posix_resync (const WyctlPublicationPosixBackend *backend,
     const WyctlPublicationPlan *plan, const WyctlPublicationReceipt *receipt,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
     WyctlPublicationResult *out_result)
 {
   WyctlPublicationPosixAnchor anchor = { 0 };
@@ -672,7 +838,9 @@ wyctl_publication_posix_resync (const WyctlPublicationPosixBackend *backend,
     return WYRELOG_E_INVALID;
   wyctl_publication_result_clear (out_result);
   if (!backend_is_valid (backend) || !wyctl_publication_plan_is_valid (plan)
-      || !wyctl_publication_receipt_is_valid (receipt))
+      || !wyctl_publication_receipt_is_valid (receipt)
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
     return WYRELOG_E_INVALID;
 
   stage_path = stage_path_for_plan (backend, plan);
@@ -682,14 +850,24 @@ wyctl_publication_posix_resync (const WyctlPublicationPosixBackend *backend,
 
   if (!open_root_anchor (backend, &anchor, &rc))
     return rc;
+  if (!receipt_matches_plan_anchor (receipt, plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
 
   rc = stat_path_identity (destination_path, &stage_st, TRUE);
   if (rc == WYRELOG_E_OK && identity_matches_stat (receipt->stage_identity,
           &stage_st)) {
+    gboolean matches = FALSE;
+    gboolean empty = FALSE;
+    rc = document_matches_expected (destination_path, expected_credential_id,
+        expected_credential_secret, &matches, &empty);
     close_root_anchor (&anchor);
     out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
-    out_result->kind = WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE;
-    out_result->exact_identity = TRUE;
+    out_result->kind = rc == WYRELOG_E_OK && matches ?
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+    out_result->exact_identity = matches;
     out_result->cleanup_required = FALSE;
     return WYRELOG_E_OK;
   }
@@ -716,43 +894,27 @@ wyctl_publication_posix_resync (const WyctlPublicationPosixBackend *backend,
   }
 
   {
-    g_autofree gchar *content = NULL;
-    g_autofree gchar *decoded_id = NULL;
-    WyctlSensitiveText decoded_secret = { 0 };
-    gsize content_len = 0;
-    int fd = open (stage_path, O_RDONLY | O_CLOEXEC
-#ifdef O_NOFOLLOW
-        | O_NOFOLLOW
-#endif
-        );
-    if (fd < 0) {
-      close_root_anchor (&anchor);
-      return map_errno_to_error (errno);
-    }
-    rc = read_all (fd, &content, &content_len);
-    close (fd);
-    if (rc != WYRELOG_E_OK) {
-      close_root_anchor (&anchor);
-      return rc;
-    }
-    if (content_len == 0) {
+    gboolean matches = FALSE;
+    gboolean empty = FALSE;
+    rc = document_matches_expected_at (anchor.dirfd, plan->stage_basename,
+        receipt->stage_identity, expected_credential_id,
+        expected_credential_secret, &matches, &empty);
+    if (rc != WYRELOG_E_OK || !matches) {
       close_root_anchor (&anchor);
       out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
-      out_result->kind = WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED;
-      out_result->exact_identity = TRUE;
-      out_result->cleanup_required = TRUE;
+      out_result->kind = empty ? WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED :
+          WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+      out_result->exact_identity = empty;
+      out_result->cleanup_required = empty;
       return WYRELOG_E_OK;
     }
-    rc = wyctl_publication_credential_document_decode (content, content_len,
-        &decoded_id, &decoded_secret);
-    wyctl_sensitive_text_clear (&decoded_secret);
-    if (rc != WYRELOG_E_OK) {
+    if (!named_entry_matches_receipt (anchor.dirfd, plan->stage_basename,
+            receipt->stage_identity)) {
       close_root_anchor (&anchor);
       out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
-      out_result->kind =
-          WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN;
-      out_result->exact_identity = TRUE;
-      out_result->cleanup_required = TRUE;
+      out_result->kind = WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+      out_result->exact_identity = FALSE;
+      out_result->cleanup_required = FALSE;
       return WYRELOG_E_OK;
     }
     rc = rename_no_replace (backend->root_dir, anchor.dirfd,
@@ -781,6 +943,8 @@ wyctl_publication_posix_resync (const WyctlPublicationPosixBackend *backend,
 wyrelog_error_t
 wyctl_publication_posix_cleanup (const WyctlPublicationPosixBackend *backend,
     const WyctlPublicationPlan *plan, const WyctlPublicationReceipt *receipt,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
     WyctlPublicationResult *out_result)
 {
   WyctlPublicationPosixAnchor anchor = { 0 };
@@ -793,7 +957,9 @@ wyctl_publication_posix_cleanup (const WyctlPublicationPosixBackend *backend,
     return WYRELOG_E_INVALID;
   wyctl_publication_result_clear (out_result);
   if (!backend_is_valid (backend) || !wyctl_publication_plan_is_valid (plan)
-      || !wyctl_publication_receipt_is_valid (receipt))
+      || !wyctl_publication_receipt_is_valid (receipt)
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
     return WYRELOG_E_INVALID;
 
   stage_path = stage_path_for_plan (backend, plan);
@@ -803,10 +969,36 @@ wyctl_publication_posix_cleanup (const WyctlPublicationPosixBackend *backend,
 
   if (!open_root_anchor (backend, &anchor, &rc))
     return rc;
+  if (!receipt_matches_plan_anchor (receipt, plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
 
   rc = stat_path_identity (stage_path, &st, TRUE);
   if (rc == WYRELOG_E_OK && identity_matches_stat (receipt->stage_identity,
           &st)) {
+    gboolean matches = FALSE;
+    gboolean empty = FALSE;
+    rc = document_matches_expected_at (anchor.dirfd, plan->stage_basename,
+        receipt->stage_identity, expected_credential_id,
+        expected_credential_secret, &matches, &empty);
+    if (rc != WYRELOG_E_OK || (!matches && !empty)) {
+      close_root_anchor (&anchor);
+      out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
+      out_result->kind = WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+      out_result->exact_identity = FALSE;
+      out_result->cleanup_required = FALSE;
+      return WYRELOG_E_OK;
+    }
+    if (!named_entry_matches_receipt (anchor.dirfd, plan->stage_basename,
+            receipt->stage_identity)) {
+      close_root_anchor (&anchor);
+      out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
+      out_result->kind = WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+      out_result->exact_identity = FALSE;
+      out_result->cleanup_required = FALSE;
+      return WYRELOG_E_OK;
+    }
     if (unlinkat (anchor.dirfd, plan->stage_basename, 0) != 0) {
       close_root_anchor (&anchor);
       return map_errno_to_error (errno);
@@ -825,7 +1017,18 @@ wyctl_publication_posix_cleanup (const WyctlPublicationPosixBackend *backend,
   rc = stat_path_identity (destination_path, &st, TRUE);
   if (rc == WYRELOG_E_OK && identity_matches_stat (receipt->stage_identity,
           &st)) {
+    gboolean matches = FALSE;
+    gboolean empty = FALSE;
+    rc = document_matches_expected (destination_path, expected_credential_id,
+        expected_credential_secret, &matches, &empty);
     close_root_anchor (&anchor);
+    if (rc != WYRELOG_E_OK || !matches) {
+      out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
+      out_result->kind = WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN;
+      out_result->exact_identity = FALSE;
+      out_result->cleanup_required = FALSE;
+      return WYRELOG_E_OK;
+    }
     out_result->version = WYCTL_PUBLICATION_RESULT_VERSION;
     out_result->kind = WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE;
     out_result->exact_identity = TRUE;

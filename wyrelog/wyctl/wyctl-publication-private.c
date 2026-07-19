@@ -49,6 +49,50 @@ credential_secret_is_valid (const gchar *value)
   return strspn (value, allowed) == WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN;
 }
 
+static gboolean
+credential_secret_text_is_valid (const gchar *value, gsize value_len)
+{
+  static const gchar *allowed =
+      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  gsize i;
+
+  if (value == NULL || value_len != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN)
+    return FALSE;
+  for (i = 0; i < value_len; i++) {
+    if (strchr (allowed, value[i]) == NULL)
+      return FALSE;
+  }
+  return TRUE;
+}
+
+gboolean
+wyctl_publication_expected_credential_is_valid (const gchar *credential_id,
+    const WyctlSensitiveText *credential_secret)
+{
+  return string_is_present (credential_id)
+      && wyl_service_credential_id_is_canonical (credential_id,
+      strlen (credential_id))
+      && credential_secret != NULL && credential_secret->text != NULL
+      && credential_secret_text_is_valid (credential_secret->text,
+      credential_secret->len);
+}
+
+gboolean
+wyctl_publication_credential_document_matches (const gchar *credential_id,
+    const WyctlSensitiveText *credential_secret,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret)
+{
+  return wyctl_publication_expected_credential_is_valid (credential_id,
+      credential_secret)
+      && wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret)
+      && g_strcmp0 (credential_id, expected_credential_id) == 0
+      && sodium_memcmp (credential_secret->text,
+      expected_credential_secret->text,
+      WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN) == 0;
+}
+
 static gchar *
 publication_stage_basename (const gchar *destination,
     const gchar *reservation_id)
@@ -483,7 +527,8 @@ wyrelog_error_t
 
   if (vtable->inspect != NULL) {
     WyctlPublicationResult inspect_result = { 0 };
-    rc = vtable->inspect (self, &receipt, &inspect_result);
+    rc = vtable->inspect (self, &receipt, credential_id, sensitive,
+        &inspect_result);
     if (rc != WYRELOG_E_OK
         || !wyctl_publication_result_is_valid (&inspect_result)) {
       wyctl_publication_plan_clear (&plan);
@@ -495,7 +540,8 @@ wyrelog_error_t
   }
   if (vtable->resync != NULL) {
     WyctlPublicationResult resync_result = { 0 };
-    rc = vtable->resync (self, &receipt, &resync_result);
+    rc = vtable->resync (self, &receipt, credential_id, sensitive,
+        &resync_result);
     if (rc != WYRELOG_E_OK
         || !wyctl_publication_result_is_valid (&resync_result)) {
       wyctl_publication_plan_clear (&plan);
@@ -507,7 +553,8 @@ wyrelog_error_t
   }
   if (vtable->cleanup != NULL) {
     WyctlPublicationResult cleanup_result = { 0 };
-    rc = vtable->cleanup (self, &receipt, &cleanup_result);
+    rc = vtable->cleanup (self, &receipt, credential_id, sensitive,
+        &cleanup_result);
     if (rc != WYRELOG_E_OK
         || !wyctl_publication_result_is_valid (&cleanup_result)) {
       wyctl_publication_plan_clear (&plan);

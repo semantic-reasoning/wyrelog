@@ -86,11 +86,16 @@ fake_commit (gpointer self, const WyctlPublicationReceipt *receipt,
 
 static wyrelog_error_t
 fake_inspect (gpointer self, const WyctlPublicationReceipt *receipt,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
     WyctlPublicationResult *out_result)
 {
   FakeBackend *backend = self;
   fake_backend_add_call (backend, FAKE_INSPECT);
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
+  g_assert_true (wyl_service_credential_id_is_canonical
+      (expected_credential_id, strlen (expected_credential_id)));
+  g_assert_nonnull (expected_credential_secret);
   *out_result = (WyctlPublicationResult) {
   .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN,.exact_identity =
@@ -100,11 +105,16 @@ fake_inspect (gpointer self, const WyctlPublicationReceipt *receipt,
 
 static wyrelog_error_t
 fake_resync (gpointer self, const WyctlPublicationReceipt *receipt,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
     WyctlPublicationResult *out_result)
 {
   FakeBackend *backend = self;
   fake_backend_add_call (backend, FAKE_RESYNC);
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
+  g_assert_true (wyl_service_credential_id_is_canonical
+      (expected_credential_id, strlen (expected_credential_id)));
+  g_assert_nonnull (expected_credential_secret);
   *out_result = (WyctlPublicationResult) {
   .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN,.exact_identity
@@ -114,11 +124,16 @@ fake_resync (gpointer self, const WyctlPublicationReceipt *receipt,
 
 static wyrelog_error_t
 fake_cleanup (gpointer self, const WyctlPublicationReceipt *receipt,
+    const gchar *expected_credential_id,
+    const WyctlSensitiveText *expected_credential_secret,
     WyctlPublicationResult *out_result)
 {
   FakeBackend *backend = self;
   fake_backend_add_call (backend, FAKE_CLEANUP);
   g_assert_true (wyctl_publication_receipt_is_valid (receipt));
+  g_assert_true (wyl_service_credential_id_is_canonical
+      (expected_credential_id, strlen (expected_credential_id)));
+  g_assert_nonnull (expected_credential_secret);
   *out_result = (WyctlPublicationResult) {
   .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
         WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN,.exact_identity

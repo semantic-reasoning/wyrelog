@@ -31,14 +31,20 @@ wyrelog_error_t wyctl_publication_windows_commit
 wyrelog_error_t wyctl_publication_windows_inspect
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
     WyctlPublicationResult * out_result);
 wyrelog_error_t wyctl_publication_windows_resync
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
     WyctlPublicationResult * out_result);
 wyrelog_error_t wyctl_publication_windows_cleanup
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
     WyctlPublicationResult * out_result);
 
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
