@@ -600,15 +600,22 @@ wyrelog_error_t
   captured.identity_a = (guint64) info.st_dev;
   captured.identity_b = (guint64) info.st_ino;
 #else
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
   if (storage->root_handle == INVALID_HANDLE_VALUE
       || storage->root_handle == NULL
       || storage->root_volume_serial == 0
       || (storage->root_file_index_high == 0
-          && storage->root_file_index_low == 0))
+          && storage->root_file_index_low == 0)
+      || !GetFileInformationByHandle (storage->root_handle, &info)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+      || info.dwVolumeSerialNumber != storage->root_volume_serial
+      || info.nFileIndexHigh != storage->root_file_index_high
+      || info.nFileIndexLow != storage->root_file_index_low)
     return WYRELOG_E_POLICY;
-  captured.identity_a = storage->root_volume_serial;
-  captured.identity_b = ((guint64) storage->root_file_index_high << 32)
-      | storage->root_file_index_low;
+  captured.identity_a = info.dwVolumeSerialNumber;
+  captured.identity_b = ((guint64) info.nFileIndexHigh << 32)
+      | info.nFileIndexLow;
 #endif
   captured.initialized = TRUE;
   *out_anchor = captured;

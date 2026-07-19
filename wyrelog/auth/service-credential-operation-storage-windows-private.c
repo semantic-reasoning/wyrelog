@@ -78,7 +78,6 @@ wyl_win_directory_flush_error (DWORD error)
       /* A valid writable directory handle can still be rejected when the API
        * or backing file system does not implement directory flushing. */
     case ERROR_INVALID_FUNCTION:
-    case ERROR_INVALID_HANDLE:
     case ERROR_NOT_SUPPORTED:
       return WYRELOG_E_OK;
     default:
@@ -522,6 +521,9 @@ wyl_win_child_lock (const WylServiceCredentialOperationStorage *storage,
   }
   if (!GetFileInformationByHandle (handle, &info)
       || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      || info.dwVolumeSerialNumber != identity.volume_serial
+      || info.nFileIndexHigh != identity.file_index_high
+      || info.nFileIndexLow != identity.file_index_low
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
           anchor)) {
     CloseHandle (handle);
