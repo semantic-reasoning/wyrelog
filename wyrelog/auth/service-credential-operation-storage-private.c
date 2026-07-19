@@ -916,25 +916,14 @@ void wyl_service_credential_operation_child_unlock
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, gint fd)
 {
+  (void) storage;
+  (void) anchor;
+  (void) name;
   if (fd >= 0) {
-    struct stat held = { 0 };
-    struct stat current = { 0 };
-    g_autofree gchar *digest = NULL;
-    g_autofree gchar *lock_name = NULL;
+    /* Keep the zero-length lock file as a stable namespace object.  Removing
+     * it after unlocking would let a waiter retain this inode while a third
+     * contender creates and locks a replacement inode. */
     flock (fd, LOCK_UN);
-    if (storage != NULL && anchor != NULL && name != NULL
-        && name->component != NULL
-        && wyl_service_credential_operation_storage_anchor_matches (storage,
-            anchor)
-        && fstat (fd, &held) == 0) {
-      digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
-          name->component, -1);
-      lock_name = g_strdup_printf (".lock-%s", digest);
-      if (fstatat (storage->root_fd, lock_name, &current,
-              AT_SYMLINK_NOFOLLOW) == 0
-          && held.st_dev == current.st_dev && held.st_ino == current.st_ino)
-        unlinkat (storage->root_fd, lock_name, 0);
-    }
     close (fd);
   }
 }

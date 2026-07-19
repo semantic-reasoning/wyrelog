@@ -6,6 +6,7 @@
 #include <glib/gstdio.h>
 #include <stddef.h>
 #ifndef G_OS_WIN32
+#include <sys/file.h>
 #include <unistd.h>
 #include <sys/stat.h>
 #else
@@ -164,6 +165,50 @@ assert_child_contents (WylServiceCredentialOperationStorage *storage,
   g_assert_true (memcmp (data, expected, length) == 0);
 }
 
+typedef struct
+{
+  WylServiceCredentialOperationStorage *storage;
+  const WylServiceCredentialOperationRootAnchor *anchor;
+  const WylServiceCredentialOperationChildName *name;
+  GMutex mutex;
+  GCond cond;
+  gboolean ready;
+  gboolean start;
+  gboolean acquired;
+  gboolean release;
+  wyrelog_error_t rc;
+  gint fd;
+  struct stat identity;
+} PosixLockReleaseRace;
+
+static gpointer
+posix_lock_release_race_thread (gpointer data)
+{
+  PosixLockReleaseRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->ready = TRUE;
+  g_cond_broadcast (&race->cond);
+  while (!race->start)
+    g_cond_wait (&race->cond, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+
+  race->rc = wyl_service_credential_operation_child_lock (race->storage,
+      race->anchor, race->name, &race->fd);
+  if (race->rc == WYRELOG_E_OK)
+    g_assert_cmpint (fstat (race->fd, &race->identity), ==, 0);
+
+  g_mutex_lock (&race->mutex);
+  race->acquired = TRUE;
+  g_cond_broadcast (&race->cond);
+  while (!race->release)
+    g_cond_wait (&race->cond, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+  if (race->rc == WYRELOG_E_OK)
+    wyl_service_credential_operation_child_unlock (race->storage,
+        race->anchor, race->name, race->fd);
+  return NULL;
+}
+
 static void
 test_posix_child_backend (void)
 {
@@ -236,6 +281,51 @@ test_posix_child_backend (void)
           &anchor, &name, &second_lock_fd), ==, WYRELOG_E_OK);
   wyl_service_credential_operation_child_unlock (&storage, &anchor, &name,
       second_lock_fd);
+  second_lock_fd = -1;
+
+  /* Reproduce the historical unlock window deterministically.  The first
+   * open description drops its OS lock, a barrier lets the waiter own that
+   * same inode, and then the normal release closes the first description.
+   * A third acquisition must still see BUSY; unlink-at-release would instead
+   * create and lock a different inode. */
+  struct stat first_identity = { 0 };
+  g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
+          &anchor, &name, &lock_fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fstat (lock_fd, &first_identity), ==, 0);
+  PosixLockReleaseRace race = {
+    .storage = &storage,
+    .anchor = &anchor,
+    .name = &name,
+    .fd = -1,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.cond);
+  g_autoptr (GThread) waiter = g_thread_new ("lock-release-race",
+      posix_lock_release_race_thread, &race);
+  g_mutex_lock (&race.mutex);
+  while (!race.ready)
+    g_cond_wait (&race.cond, &race.mutex);
+  g_assert_cmpint (flock (lock_fd, LOCK_UN), ==, 0);
+  race.start = TRUE;
+  g_cond_broadcast (&race.cond);
+  while (!race.acquired)
+    g_cond_wait (&race.cond, &race.mutex);
+  g_mutex_unlock (&race.mutex);
+  g_assert_cmpint (race.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpuint (race.identity.st_dev, ==, first_identity.st_dev);
+  g_assert_cmpuint (race.identity.st_ino, ==, first_identity.st_ino);
+  wyl_service_credential_operation_child_unlock (&storage, &anchor, &name,
+      lock_fd);
+  lock_fd = -1;
+  g_assert_cmpint (wyl_service_credential_operation_child_lock (&storage,
+          &anchor, &name, &second_lock_fd), ==, WYRELOG_E_BUSY);
+  g_mutex_lock (&race.mutex);
+  race.release = TRUE;
+  g_cond_broadcast (&race.cond);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&waiter));
+  g_cond_clear (&race.cond);
+  g_mutex_clear (&race.mutex);
   g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
           &anchor, &name, one), ==, WYRELOG_E_OK);
 
@@ -1131,6 +1221,8 @@ test_windows_child_lock_fixture (void)
   HANDLE first = INVALID_HANDLE_VALUE;
   HANDLE second = INVALID_HANDLE_VALUE;
   HANDLE third = INVALID_HANDLE_VALUE;
+  BY_HANDLE_FILE_INFORMATION first_identity;
+  BY_HANDLE_FILE_INFORMATION second_identity;
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
           &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
@@ -1139,6 +1231,7 @@ test_windows_child_lock_fixture (void)
       ("record", &name), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &first), ==,
       WYRELOG_E_OK);
+  g_assert_true (GetFileInformationByHandle (first, &first_identity));
   /* A second lock while the first is held conflicts deterministically. */
   g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &second), ==,
       WYRELOG_E_BUSY);
@@ -1146,20 +1239,40 @@ test_windows_child_lock_fixture (void)
   /* After unlock the lock is re-acquirable. */
   g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &second), ==,
       WYRELOG_E_OK);
+  g_assert_true (GetFileInformationByHandle (second, &second_identity));
+  g_assert_cmpuint (second_identity.dwVolumeSerialNumber, ==,
+      first_identity.dwVolumeSerialNumber);
+  g_assert_cmpuint (second_identity.nFileIndexHigh, ==,
+      first_identity.nFileIndexHigh);
+  g_assert_cmpuint (second_identity.nFileIndexLow, ==,
+      first_identity.nFileIndexLow);
   wyl_win_child_unlock (&storage, &anchor, &name, second);
   /* Anchor mismatch fails closed without creating a lock file. */
   WylServiceCredentialOperationRootAnchor mismatch = anchor;
   mismatch.identity_a++;
   g_assert_cmpint (wyl_win_child_lock (&storage, &mismatch, &name, &third), ==,
       WYRELOG_E_POLICY);
-  /* The lock file leaves no residue. */
+  /* The stable, zero-length lock file prevents namespace split brain. */
   g_autoptr (GDir) entries = g_dir_open (storage.root_path, 0, NULL);
   const gchar *entry;
-  while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
-    g_assert_false (g_str_has_prefix (entry, ".lock-"));
+  guint lock_files = 0;
+  g_autofree gchar *lock_path = NULL;
+  while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL) {
+    if (g_str_has_prefix (entry, ".lock-")) {
+      lock_files++;
+      lock_path = g_build_filename (storage.root_path, entry, NULL);
+    }
+  }
+  g_assert_cmpuint (lock_files, ==, 1);
+  GStatBuf lock_stat;
+  g_assert_cmpint (g_stat (lock_path, &lock_stat), ==, 0);
+  g_assert_cmpint (lock_stat.st_size, ==, 0);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_remove (lock_path), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
 }
 
 static void

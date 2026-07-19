@@ -43,6 +43,7 @@ wyrelog_error_t wyl_win_child_delete
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name);
+/* Uses the same permanent zero-length lock namespace contract as POSIX. */
 wyrelog_error_t wyl_win_child_lock
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
