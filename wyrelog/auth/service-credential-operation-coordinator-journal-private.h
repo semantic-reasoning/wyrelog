@@ -54,10 +54,17 @@ wyl_service_credential_operation_coordinator_build_cleanup_required (const
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_operator_action_required
-    (const WylServiceCredentialOperationRecord * existing, const gchar * reason,
+    (const WylServiceCredentialOperationRecord * existing,
+    WylServiceCredentialOperationOarCause cause,
     gint64 now_us, WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
-wyl_service_credential_operation_coordinator_build_terminal (const
-    WylServiceCredentialOperationRecord * existing, const gchar * reason,
+    wyl_service_credential_operation_coordinator_build_operator_resume
+    (const WylServiceCredentialOperationRecord * existing, gint64 now_us,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_terminal
+    (const WylServiceCredentialOperationRecord * existing,
+    WylServiceCredentialOperationTerminalKind kind,
+    const gchar * remediation_request_id,
     gint64 now_us, WylServiceCredentialOperationRecord * out_record);
 G_END_DECLS

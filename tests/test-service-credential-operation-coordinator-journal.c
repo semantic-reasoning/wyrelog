@@ -1123,6 +1123,38 @@ test_load_fails_closed_and_preserves_output (JournalFixture *fixture,
 }
 
 static void
+assert_handoff_tuple_preserved (const WylServiceCredentialOperationRecord *a,
+    const WylServiceCredentialOperationRecord *b)
+{
+  g_assert_cmpuint (a->version, ==, b->version);
+  g_assert_cmpint (a->kind, ==, b->kind);
+  g_assert_cmpstr (a->operation_id, ==, b->operation_id);
+  g_assert_cmpstr (a->request_id, ==, b->request_id);
+  g_assert_cmpstr (a->subject_id, ==, b->subject_id);
+  g_assert_cmpstr (a->tenant_id, ==, b->tenant_id);
+  g_assert_cmpstr (a->destination, ==, b->destination);
+  g_assert_cmpstr (a->parent_identity, ==, b->parent_identity);
+  g_assert_cmpstr (a->actor_subject_id, ==, b->actor_subject_id);
+  g_assert_cmpstr (a->old_credential_id, ==, b->old_credential_id);
+  g_assert_cmpstr (a->successor_credential_id, ==, b->successor_credential_id);
+  g_assert_cmpuint (a->successor_generation, ==, b->successor_generation);
+  g_assert_cmpstr (a->escrow_id, ==, b->escrow_id);
+  g_assert_cmpmem (a->escrow_binding_digest,
+      sizeof a->escrow_binding_digest, b->escrow_binding_digest,
+      sizeof b->escrow_binding_digest);
+  g_assert_cmpuint (a->publication_receipt_version, ==,
+      b->publication_receipt_version);
+  g_assert_cmpstr (a->reservation_id, ==, b->reservation_id);
+  g_assert_cmpstr (a->stage_basename, ==, b->stage_basename);
+  g_assert_cmpstr (a->stage_identity, ==, b->stage_identity);
+  g_assert_cmpstr (a->publication_receipt_id, ==, b->publication_receipt_id);
+  g_assert_cmpuint (a->expected_generation, ==, b->expected_generation);
+  g_assert_cmpint (a->expires_at_us, ==, b->expires_at_us);
+  g_assert_cmpint (a->created_at_us, ==, b->created_at_us);
+  g_assert_cmpuint (a->attempts, ==, b->attempts);
+}
+
+static void
 test_v5_handoff_lifecycle_builders (void)
 {
   const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
@@ -1140,6 +1172,10 @@ test_v5_handoff_lifecycle_builders (void)
   WylServiceCredentialOperationRecord cleanup =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecord oar =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord resumed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord terminal =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
       (&request_value, request_value.request_id, 10, &prepared), ==,
@@ -1199,21 +1235,238 @@ test_v5_handoff_lifecycle_builders (void)
       (&published, 15, &cleanup), ==, WYRELOG_E_OK);
   g_assert_cmpint (cleanup.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+
+  const WylServiceCredentialOperationRecord *source_records[] = {
+    &committed, &planned, &publication, &published, &cleanup,
+  };
+  const WylServiceCredentialOperationState source_states[] = {
+    WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (source_records); i++) {
+    WylServiceCredentialOperationRecord probe_oar =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    WylServiceCredentialOperationRecord probe_resume =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_build_operator_action_required
+        (source_records[i], WYL_SERVICE_CREDENTIAL_OPERATION_OAR_EXPLICIT_HOLD,
+            16, &probe_oar), ==, WYRELOG_E_OK);
+    WylServiceCredentialOperationState probe_source = 0;
+    WylServiceCredentialOperationOarCause probe_cause = 0;
+    g_assert_true (wyl_service_credential_operation_oar_reason_parse
+        (probe_oar.terminal_reason, &probe_source, &probe_cause));
+    g_assert_cmpint (probe_source, ==, source_states[i]);
+    g_assert_cmpint (probe_cause, ==,
+        WYL_SERVICE_CREDENTIAL_OPERATION_OAR_EXPLICIT_HOLD);
+    assert_handoff_tuple_preserved (source_records[i], &probe_oar);
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_build_operator_resume
+        (&probe_oar, 17, &probe_resume), ==, WYRELOG_E_OK);
+    g_assert_cmpint (probe_resume.state, ==, source_states[i]);
+    assert_handoff_tuple_preserved (&probe_oar, &probe_resume);
+    wyl_service_credential_operation_record_clear (&probe_resume);
+    wyl_service_credential_operation_record_clear (&probe_oar);
+  }
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_operator_action_required
-      (&cleanup, "receipt-uncertain", 16, &oar), ==, WYRELOG_E_OK);
+      (&cleanup, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 16,
+          &oar), ==, WYRELOG_E_OK);
   g_assert_cmpint (oar.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
+  g_assert_cmpstr (oar.terminal_reason, ==,
+      "oar.v1:cleanup-required:receipt-uncertain");
+  WylServiceCredentialOperationState source = 0;
+  WylServiceCredentialOperationOarCause cause = 0;
+  g_assert_true (wyl_service_credential_operation_oar_reason_parse
+      (oar.terminal_reason, &source, &cause));
+  g_assert_cmpint (source, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+  g_assert_cmpint (cause, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN);
   g_assert_cmpstr (oar.escrow_id, ==, prepared.escrow_id);
   g_assert_cmpmem (oar.escrow_binding_digest,
       sizeof oar.escrow_binding_digest, prepared.escrow_binding_digest,
       sizeof prepared.escrow_binding_digest);
   g_assert_cmpstr (oar.successor_credential_id, ==, successor);
+  assert_handoff_tuple_preserved (&cleanup, &oar);
+
+  g_autoptr (GBytes) oar_bytes = NULL;
+  g_autoptr (GBytes) oar_replay_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&oar,
+          &oar_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&oar, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 99,
+          &resumed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&resumed,
+          &oar_replay_bytes), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (oar_bytes, oar_replay_bytes));
+  wyl_service_credential_operation_record_clear (&resumed);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&oar, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN, 99,
+          &resumed), ==, WYRELOG_E_POLICY);
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_resume
+      (&oar, 17, &resumed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (resumed.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+  g_assert_null (resumed.terminal_reason);
+  assert_handoff_tuple_preserved (&oar, &resumed);
+  g_autoptr (GBytes) before_time_rollback = NULL;
+  g_autoptr (GBytes) after_time_rollback = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&resumed,
+          &before_time_rollback), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&committed, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED, 10,
+          &resumed), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&resumed,
+          &after_time_rollback), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (before_time_rollback, after_time_rollback));
+
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_terminal
-      (&prepared, "cancelled-before-commit", 17, &cleanup), ==, WYRELOG_E_OK);
-  g_assert_cmpint (cleanup.state, ==,
+      (&resumed, WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED,
+          NULL, 18, &terminal), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (terminal.terminal_reason, ==, "terminal.v1:file-published");
+  assert_handoff_tuple_preserved (&resumed, &terminal);
+  g_autoptr (GBytes) terminal_bytes = NULL;
+  g_autoptr (GBytes) terminal_replay_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &terminal_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&terminal, WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED,
+          NULL, 99, &resumed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&resumed,
+          &terminal_replay_bytes), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (terminal_bytes, terminal_replay_bytes));
+  wyl_service_credential_operation_record_clear (&resumed);
+  wyl_service_credential_operation_record_clear (&terminal);
+
+  gchar remediation_request[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (remediation_request,
+          sizeof remediation_request), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&oar,
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+          remediation_request, 18, &terminal), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationTerminalKind terminal_kind = 0;
+  g_autofree gchar *parsed_remediation = NULL;
+  g_assert_true (wyl_service_credential_operation_terminal_reason_parse
+      (terminal.terminal_reason, &terminal_kind, &parsed_remediation));
+  g_assert_cmpint (terminal_kind, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE);
+  g_assert_cmpstr (parsed_remediation, ==, remediation_request);
+  assert_handoff_tuple_preserved (&oar, &terminal);
+  g_free (terminal.terminal_reason);
+  terminal.terminal_reason = g_strdup_printf
+      ("terminal.v1:operator-revoke-and-wipe:%s", terminal.request_id);
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&terminal));
+  wyl_service_credential_operation_record_clear (&terminal);
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&prepared, WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED,
+          NULL, 17, &terminal), ==, WYRELOG_E_OK);
+  g_assert_cmpint (terminal.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  g_assert_cmpstr (terminal.terminal_reason, ==, "terminal.v1:not-committed");
+  g_assert_true (terminal.successor_credential_id == NULL
+      || terminal.successor_credential_id[0] == '\0');
+  g_assert_cmpuint (terminal.successor_generation, ==, 0);
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&committed, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 19,
+          &resumed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&committed, (WylServiceCredentialOperationOarCause) 99, 19,
+          &resumed), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&oar,
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+          oar.request_id, 19, &resumed), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&oar,
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+          "not-canonical", 19, &resumed), ==, WYRELOG_E_INVALID);
+
+  g_free (oar.terminal_reason);
+  oar.terminal_reason = g_strdup ("receipt-uncertain");
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&oar));
+  g_free (oar.terminal_reason);
+  oar.terminal_reason = g_strdup ("oar.v1:cleanup-required:receipt-uncertain");
+
+  WylServiceCredentialOperationRecord missing_oar =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&committed, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING, 19,
+          &missing_oar), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_credential_operation_oar_reason_parse
+      (missing_oar.terminal_reason, &source, &cause));
+  g_assert_cmpint (source, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpint (cause, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING);
+  g_assert_cmpstr (missing_oar.terminal_reason, ==,
+      "oar.v1:server-committed:escrow-missing");
+  g_autoptr (GBytes) missing_oar_bytes = NULL;
+  g_autoptr (GBytes) missing_oar_replay_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&missing_oar, &missing_oar_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&missing_oar, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING, 99,
+          &resumed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&resumed,
+          &missing_oar_replay_bytes), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (missing_oar_bytes, missing_oar_replay_bytes));
+  wyl_service_credential_operation_record_clear (&resumed);
+  g_autoptr (GBytes) missing_preserved_output = NULL;
+  g_autoptr (GBytes) after_missing_denied_resume = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &missing_preserved_output), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_resume
+      (&missing_oar, 20, &terminal), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &after_missing_denied_resume), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (missing_preserved_output,
+          after_missing_denied_resume));
+  wyl_service_credential_operation_record_clear (&missing_oar);
+
+  WylServiceCredentialOperationRecord inactive_oar =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&committed, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED, 19,
+          &inactive_oar), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) preserved_output = NULL;
+  g_autoptr (GBytes) after_denied_resume = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &preserved_output), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_resume
+      (&inactive_oar, 20, &terminal), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &after_denied_resume), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (preserved_output, after_denied_resume));
+  wyl_service_credential_operation_record_clear (&inactive_oar);
+
+  wyl_service_credential_operation_record_clear (&terminal);
+  wyl_service_credential_operation_record_clear (&resumed);
   wyl_service_credential_operation_record_clear (&oar);
   wyl_service_credential_operation_record_clear (&cleanup);
   wyl_service_credential_operation_record_clear (&published);

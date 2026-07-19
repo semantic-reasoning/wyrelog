@@ -333,6 +333,7 @@ build_reason_transition (const WylServiceCredentialOperationRecord *existing,
     goto out;
   }
   next.state = state;
+  g_clear_pointer (&next.terminal_reason, g_free);
   next.terminal_reason = g_strdup (reason);
   if (next.terminal_reason == NULL)
     rc = WYRELOG_E_NOMEM;
@@ -346,18 +347,44 @@ out:
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_operator_action_required
     (const WylServiceCredentialOperationRecord * existing,
-    const gchar * reason, gint64 now_us,
+    WylServiceCredentialOperationOarCause cause, gint64 now_us,
     WylServiceCredentialOperationRecord * out_record)
 {
-  if (existing == NULL || (existing->state
-          != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
-          && existing->state !=
-          WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
-          && existing->state !=
-          WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
-          && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
-          && existing->state !=
-          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED))
+  if (existing == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  if (cause < WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN
+      || cause > WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING)
+    return WYRELOG_E_INVALID;
+  if (existing->state ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
+    WylServiceCredentialOperationState source = 0;
+    WylServiceCredentialOperationOarCause existing_cause = 0;
+    WylServiceCredentialOperationRecord replay =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    if (!wyl_service_credential_operation_oar_reason_parse
+        (existing->terminal_reason, &source, &existing_cause)
+        || existing_cause != cause)
+      return WYRELOG_E_POLICY;
+    wyrelog_error_t rc = clone_for_transition (existing, now_us, &replay);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    replay.updated_at_us = existing->updated_at_us;
+    rc = finish_transition (&replay, out_record);
+    wyl_service_credential_operation_record_clear (&replay);
+    return rc;
+  }
+  if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
+      && existing->state !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+      && existing->state !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+      && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+      && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *reason =
+      wyl_service_credential_operation_oar_reason_format (existing->state,
+      cause);
+  if (reason == NULL)
     return WYRELOG_E_POLICY;
   return build_reason_transition (existing,
       WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED, reason,
@@ -365,16 +392,81 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_build_terminal
-    (const WylServiceCredentialOperationRecord * existing,
-    const gchar * reason, gint64 now_us,
+    wyl_service_credential_operation_coordinator_build_operator_resume
+    (const WylServiceCredentialOperationRecord * existing, gint64 now_us,
     WylServiceCredentialOperationRecord * out_record)
 {
-  if (existing == NULL || (existing->state
-          != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
-          && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationState source = 0;
+  WylServiceCredentialOperationOarCause cause = 0;
+  if (existing == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  if (existing->state !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED
+      || !wyl_service_credential_operation_oar_reason_parse
+      (existing->terminal_reason, &source, &cause))
+    return WYRELOG_E_POLICY;
+  if (cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED
+      || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED
+      || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  next.state = source;
+  g_clear_pointer (&next.terminal_reason, g_free);
+  rc = finish_transition (&next, out_record);
+out:
+  wyl_service_credential_operation_record_clear (&next);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_terminal
+    (const WylServiceCredentialOperationRecord * existing,
+    WylServiceCredentialOperationTerminalKind kind,
+    const gchar * remediation_request_id, gint64 now_us,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  if (existing == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *reason =
+      wyl_service_credential_operation_terminal_reason_format (kind,
+      remediation_request_id);
+  if (reason == NULL)
+    return WYRELOG_E_INVALID;
+  if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL) {
+    WylServiceCredentialOperationTerminalKind existing_kind = 0;
+    g_autofree gchar *existing_request = NULL;
+    WylServiceCredentialOperationRecord replay =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    if (!wyl_service_credential_operation_terminal_reason_parse
+        (existing->terminal_reason, &existing_kind, &existing_request)
+        || existing_kind != kind
+        || g_strcmp0 (existing_request, remediation_request_id) != 0)
+      return WYRELOG_E_POLICY;
+    wyrelog_error_t rc = clone_for_transition (existing, now_us, &replay);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    replay.updated_at_us = existing->updated_at_us;
+    rc = finish_transition (&replay, out_record);
+    wyl_service_credential_operation_record_clear (&replay);
+    return rc;
+  }
+  if ((kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED
+          && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
+      || (kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED
           && existing->state !=
-          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED))
+          WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+          && existing->state !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)
+      || (kind ==
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
+          && (existing->state !=
+              WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED
+              || g_strcmp0 (remediation_request_id,
+                  existing->request_id) == 0)))
     return WYRELOG_E_POLICY;
   return build_reason_transition (existing,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL, reason, now_us, out_record);
