@@ -999,6 +999,9 @@ test_service_credential_operation_coordinator_execute = executable('test-service
   'test-service-credential-operation-coordinator-execute.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
 )
 
 service_credential_operation_coordinator_execute_timeout = 180
