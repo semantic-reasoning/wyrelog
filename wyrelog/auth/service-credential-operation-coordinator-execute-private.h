@@ -1,12 +1,18 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #pragma once
 
+#include <gio/gio.h>
+
 #include "wyrelog/handle.h"
 #include "wyrelog/error.h"
+#include "wyrelog/session.h"
 #include "wyrelog/auth/service-credential-domain-private.h"
 #include "wyrelog/auth/service-credential-operation-journal-private.h"
+#include "wyrelog/auth/service-credential-operation-storage-private.h"
 
 G_BEGIN_DECLS
+    typedef struct wyctl_publication_backend_vtable_t
+    WyctlPublicationBackendVTable;
 /* Injected authority revalidation. Returns WYRELOG_E_OK to permit the bound
  * actor to proceed, or a denial code that the boundary propagates verbatim.
  * The actor_subject_id argument is always the durable record's bound actor. */
@@ -66,5 +72,43 @@ wyrelog_error_t
     const gchar * authenticated_actor_subject_id,
     const WylServiceCredentialOperationExecuteRuntime * runtime,
     wyl_service_credential_issue_result_t * out);
+
+/* Borrowed runtime for one authenticated escrow-backed invocation.  The
+ * executor derives the authorization resource from session; callers cannot
+ * substitute a resource or policy scope. */
+typedef struct
+{
+  WylSession *session;
+  const gchar *authenticated_actor_subject_id;
+  gint64 guard_timestamp;
+  const gchar *guard_loc_class;
+  gint64 guard_risk;
+  const gchar *decision_request_id;
+  const WyctlPublicationBackendVTable *publication;
+  gpointer publication_data;
+  const wyl_service_credential_rotate_runtime_t *rotate_runtime;
+    gint64 (*now_us) (gpointer data);
+  gpointer clock_data;
+  GCancellable *cancellable;
+  /* Deterministic private test checkpoint immediately after an ALLOW while
+   * the current service-auth WRITE lease is still held.  Non-reentrant. */
+  void (*after_authorization) (gpointer data);
+  gpointer authorization_checkpoint_data;
+} WylServiceCredentialOperationHandoffExecuteRuntime;
+
+/* Execute or resume one v5 journal operation without returning credential
+ * material.  The request lifecycle lock is held from the initial load through
+ * the final checkpoint/delete attempt.  Each invocation performs a fresh
+ * authoritative wr.service_credential.manage decision for every service
+ * mutation lease it enters.  out_record is caller-owned and contains durable,
+ * non-secret state only; it is unchanged on failure. */
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_execute_handoff
+    (WylHandle * handle,
+    const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    const WylServiceCredentialOperationHandoffExecuteRuntime * runtime,
+    WylServiceCredentialOperationRecord * out_record);
 
 G_END_DECLS
