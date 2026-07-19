@@ -34,6 +34,27 @@ wyrelog_error_t wyctl_publication_windows_stage_exact
     const WyctlSensitiveText * credential_secret,
     WyctlPublicationReceipt * out_receipt,
     WyctlPublicationResult * out_result, gboolean * out_replayed);
+wyrelog_error_t wyctl_publication_windows_receipt_target_acquire
+    (const WyctlPublicationWindowsBackend * backend,
+    const WyctlPublicationPlan * plan,
+    const WyctlPublicationReceipt * receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease ** out_lease,
+    WyctlPublicationReceiptTargetKind * out_kind);
+wyrelog_error_t wyctl_publication_windows_receipt_target_inspect
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result);
+wyrelog_error_t wyctl_publication_windows_receipt_target_commit
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result);
+void wyctl_publication_windows_receipt_target_release
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease);
 wyrelog_error_t wyctl_publication_windows_commit
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,

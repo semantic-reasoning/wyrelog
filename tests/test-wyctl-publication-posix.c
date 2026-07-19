@@ -68,6 +68,21 @@ write_malformed_document_for_test (const gchar *path)
           NULL));
 }
 
+typedef struct
+{
+  WyctlPublicationReceiptTargetSyncPoint fail_point;
+  guint hits[WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_DIRECTORY + 1];
+} ReceiptTargetSyncFault;
+
+static wyrelog_error_t
+receipt_target_sync_fault (gpointer data,
+    WyctlPublicationReceiptTargetSyncPoint point)
+{
+  ReceiptTargetSyncFault *fault = data;
+  fault->hits[point]++;
+  return point == fault->fail_point ? WYRELOG_E_IO : WYRELOG_E_OK;
+}
+
 static void
 test_plan_and_prepare (void)
 {
@@ -104,6 +119,179 @@ test_plan_and_prepare (void)
   g_autofree gchar *expected_identity = encode_identity_for_test (&st);
   g_assert_cmpstr (receipt.stage_identity, ==, expected_identity);
 
+  wyctl_publication_receipt_clear (&receipt);
+  wyctl_publication_plan_clear (&planned);
+  wyctl_publication_plan_clear (&request);
+}
+
+static void
+test_receipt_target_lease_roundtrip_and_foreign_identity (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WyctlPublicationPlan request = { 0 };
+  WyctlPublicationPlan planned = { 0 };
+  WyctlPublicationReceipt receipt = { 0 };
+  WyctlPublicationResult result = { 0 };
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  WyctlPublicationReceiptTargetKind kind =
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  g_autofree gchar *destination_path = NULL;
+  g_autofree gchar *secret = g_strnfill
+      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText sensitive = {.text = secret,.len = strlen (secret) };
+  gboolean replayed = FALSE;
+  ReceiptTargetSyncFault sync_fault = {
+    .fail_point = WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_FILE,
+  };
+
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          fixture.dir, &request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_plan (&fixture.backend, &request,
+          &planned), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &sensitive, &receipt,
+          &result, &replayed), ==, WYRELOG_E_OK);
+  wyctl_publication_result_clear (&result);
+  destination_path = g_build_filename (fixture.dir, planned.destination, NULL);
+
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_acquire
+      (&fixture.backend, &planned, &receipt, FALSE, &lease, &kind), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_inspect
+      (&fixture.backend, lease, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          &sensitive, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED);
+  g_assert_true (result.exact_identity);
+  wyctl_publication_result_clear (&result);
+  wyctl_publication_posix_backend_set_receipt_target_sync_hook
+      (&fixture.backend, receipt_target_sync_fault, &sync_fault);
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_commit
+      (&fixture.backend, lease, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          &sensitive, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==,
+      WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN);
+  g_assert_cmpuint
+      (sync_fault.hits[WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_FILE], ==, 1);
+  g_assert_cmpuint
+      (sync_fault.hits[WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_DIRECTORY], ==, 1);
+  wyctl_publication_posix_backend_set_receipt_target_sync_hook
+      (&fixture.backend, NULL, NULL);
+  wyctl_publication_result_clear (&result);
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_inspect
+      (&fixture.backend, lease, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          &sensitive, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==, WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE);
+  g_assert_true (result.exact_identity);
+  wyctl_publication_result_clear (&result);
+
+  memset (&sync_fault, 0, sizeof sync_fault);
+  sync_fault.fail_point = WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_DIRECTORY;
+  wyctl_publication_posix_backend_set_receipt_target_sync_hook
+      (&fixture.backend, receipt_target_sync_fault, &sync_fault);
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_inspect
+      (&fixture.backend, lease, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          &sensitive, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==,
+      WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN);
+  g_assert_true (result.exact_identity);
+  g_assert_cmpuint
+      (sync_fault.hits[WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_FILE], ==, 1);
+  g_assert_cmpuint
+      (sync_fault.hits[WYCTL_PUBLICATION_RECEIPT_TARGET_SYNC_DIRECTORY], ==, 1);
+  wyctl_publication_posix_backend_set_receipt_target_sync_hook
+      (&fixture.backend, NULL, NULL);
+  wyctl_publication_posix_receipt_target_release (&fixture.backend, lease);
+  lease = NULL;
+
+  g_assert_cmpint (g_remove (destination_path), ==, 0);
+  g_assert_true (g_file_set_contents (destination_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (destination_path, 0600), ==, 0);
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_acquire
+      (&fixture.backend, &planned, &receipt, TRUE, &lease, &kind), ==,
+      WYRELOG_E_OK);
+  g_assert_null (lease);
+  g_assert_cmpint (kind, ==,
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
+
+  g_assert_cmpint (g_remove (destination_path), ==, 0);
+  wyctl_publication_result_clear (&result);
+  wyctl_publication_receipt_clear (&receipt);
+  wyctl_publication_plan_clear (&planned);
+  wyctl_publication_plan_clear (&request);
+}
+
+static void
+test_receipt_target_pin_rejects_namespace_replacement (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WyctlPublicationPlan request = { 0 };
+  WyctlPublicationPlan planned = { 0 };
+  WyctlPublicationReceipt receipt = { 0 };
+  WyctlPublicationResult result = { 0 };
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  WyctlPublicationReceiptTargetKind kind =
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  g_autofree gchar *secret = g_strnfill
+      (WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN, 'A');
+  WyctlSensitiveText sensitive = {.text = secret,.len = strlen (secret) };
+  g_autofree gchar *stage_path = NULL;
+  g_autofree gchar *moved_path = NULL;
+  g_autofree gchar *destination_path = NULL;
+  g_autofree gchar *foreign_contents = NULL;
+  gboolean replayed = FALSE;
+
+  g_assert_cmpint (wyctl_publication_plan_create ("credential.txt",
+          fixture.dir, &request), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_plan (&fixture.backend, &request,
+          &planned), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyctl_publication_posix_stage_exact (&fixture.backend,
+          &planned, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", &sensitive, &receipt,
+          &result, &replayed), ==, WYRELOG_E_OK);
+  wyctl_publication_result_clear (&result);
+  stage_path = g_build_filename (fixture.dir, planned.stage_basename, NULL);
+  moved_path = g_build_filename (fixture.dir, "pinned-original", NULL);
+  destination_path = g_build_filename (fixture.dir, planned.destination, NULL);
+
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_acquire
+      (&fixture.backend, &planned, &receipt, FALSE, &lease, &kind), ==,
+      WYRELOG_E_OK);
+  g_assert_nonnull (lease);
+  g_assert_cmpint (kind, ==, WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE);
+
+  /* Pin-first barrier: replace the basename only after the exact inode is
+   * retained by the lease.  Inspect reads the pinned inode, then rejects the
+   * changed namespace binding without mutating either file. */
+  g_assert_cmpint (g_rename (stage_path, moved_path), ==, 0);
+  g_assert_true (g_file_set_contents (stage_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (stage_path, 0600), ==, 0);
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_inspect
+      (&fixture.backend, lease, "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+          &sensitive, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.kind, ==,
+      WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN);
+  g_assert_false (g_file_test (destination_path, G_FILE_TEST_EXISTS));
+  g_assert_true (g_file_get_contents (stage_path, &foreign_contents, NULL,
+          NULL));
+  g_assert_cmpstr (foreign_contents, ==, "foreign");
+  wyctl_publication_posix_receipt_target_release (&fixture.backend, lease);
+  lease = NULL;
+
+  /* Replacement-first barrier: the same foreign basename is rejected before
+   * any lease can be returned. */
+  g_assert_cmpint (wyctl_publication_posix_receipt_target_acquire
+      (&fixture.backend, &planned, &receipt, FALSE, &lease, &kind), ==,
+      WYRELOG_E_OK);
+  g_assert_null (lease);
+  g_assert_cmpint (kind, ==,
+      WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN);
+
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+  g_assert_cmpint (g_remove (moved_path), ==, 0);
+  wyctl_publication_result_clear (&result);
   wyctl_publication_receipt_clear (&receipt);
   wyctl_publication_plan_clear (&planned);
   wyctl_publication_plan_clear (&request);
@@ -833,6 +1021,10 @@ main (int argc, char **argv)
       test_plan_and_prepare);
   g_test_add_func ("/wyctl/publication/posix/roundtrip",
       test_commit_inspect_cleanup_roundtrip);
+  g_test_add_func ("/wyctl/publication/posix/receipt-target-lease",
+      test_receipt_target_lease_roundtrip_and_foreign_identity);
+  g_test_add_func ("/wyctl/publication/posix/receipt-target-replacement-race",
+      test_receipt_target_pin_rejects_namespace_replacement);
   g_test_add_func ("/wyctl/publication/posix/rejects-existing-destination",
       test_commit_rejects_existing_destination);
   g_test_add_func ("/wyctl/publication/posix/resyncs-exact-stage",

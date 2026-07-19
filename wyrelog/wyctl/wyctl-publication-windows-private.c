@@ -25,6 +25,20 @@ typedef struct
   gchar *root_dir;
 } WyctlPublicationWindowsAnchor;
 
+struct wyctl_publication_receipt_target_lease_t
+{
+  HANDLE root_handle;
+  HANDLE target_handle;
+  wchar_t *canonical_root;
+  gchar *basename;
+  gchar *destination;
+  gchar *identity;
+  gchar *parent_identity;
+  const WyctlPublicationWindowsBackend *owner;
+  gboolean destination_target;
+  gboolean inspected_exact;
+};
+
 static gboolean
 backend_is_valid (const WyctlPublicationWindowsBackend *backend)
 {
@@ -94,6 +108,52 @@ utf8_to_wide (const gchar *path)
   return (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
 }
 
+static wchar_t *
+canonical_root_path_from_handle (HANDLE root_handle)
+{
+  DWORD len;
+  wchar_t *path;
+
+  if (root_handle == INVALID_HANDLE_VALUE || root_handle == NULL)
+    return NULL;
+  len = GetFinalPathNameByHandleW (root_handle, NULL, 0,
+      FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+  if (len == 0)
+    return NULL;
+  path = g_new0 (wchar_t, (gsize) len + 1);
+  if (path == NULL)
+    return NULL;
+  if (GetFinalPathNameByHandleW (root_handle, path, len,
+          FILE_NAME_NORMALIZED | VOLUME_NAME_GUID) == 0) {
+    g_free (path);
+    return NULL;
+  }
+  return path;
+}
+
+static wchar_t *
+wide_child_path (const wchar_t *canonical_root, const gchar *basename)
+{
+  g_autofree wchar_t *wbasename = utf8_to_wide (basename);
+  wchar_t *path;
+  gsize root_len;
+  gsize basename_len;
+
+  if (canonical_root == NULL || wbasename == NULL || wbasename[0] == L'\0'
+      || wcspbrk (wbasename, L"\\/:") != NULL)
+    return NULL;
+  root_len = wcslen (canonical_root);
+  basename_len = wcslen (wbasename);
+  path = g_new0 (wchar_t, root_len + 1 + basename_len + 1);
+  if (path == NULL)
+    return NULL;
+  wcscpy (path, canonical_root);
+  if (root_len == 0 || path[root_len - 1] != L'\\')
+    wcscat (path, L"\\");
+  wcscat (path, wbasename);
+  return path;
+}
+
 static gboolean
 wide_path_exists (const gchar *path, DWORD *out_attrs, DWORD *out_error)
 {
@@ -111,6 +171,8 @@ wide_path_exists (const gchar *path, DWORD *out_attrs, DWORD *out_error)
 }
 
 static gboolean info_is_reparse_point (const BY_HANDLE_FILE_INFORMATION * info);
+static gboolean handle_is_owner_only_directory (HANDLE handle,
+    const BY_HANDLE_FILE_INFORMATION * info);
 
 static wyrelog_error_t
 open_root_anchor (const WyctlPublicationWindowsBackend *backend,
@@ -126,8 +188,9 @@ open_root_anchor (const WyctlPublicationWindowsBackend *backend,
   wroot = utf8_to_wide (backend->root_dir);
   if (wroot == NULL)
     return WYRELOG_E_NOMEM;
-  handle = CreateFileW (wroot, FILE_LIST_DIRECTORY | FILE_ADD_FILE
-      | FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES | SYNCHRONIZE,
+  handle = CreateFileW (wroot, GENERIC_READ | GENERIC_WRITE
+      | FILE_LIST_DIRECTORY | FILE_ADD_FILE | FILE_READ_ATTRIBUTES
+      | FILE_WRITE_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE,
       FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
       NULL);
@@ -139,7 +202,7 @@ open_root_anchor (const WyctlPublicationWindowsBackend *backend,
     CloseHandle (handle);
     return rc;
   }
-  if (info_is_reparse_point (&info)) {
+  if (!handle_is_owner_only_directory (handle, &info)) {
     CloseHandle (handle);
     return WYRELOG_E_POLICY;
   }
@@ -218,7 +281,10 @@ receipt_matches_plan_anchor (const WyctlPublicationReceipt *receipt,
     const WyctlPublicationWindowsAnchor *anchor)
 {
   return receipt != NULL && plan_matches_anchor (plan, anchor)
-      && g_strcmp0 (receipt->parent_identity, plan->parent_identity) == 0;
+      && g_strcmp0 (receipt->destination, plan->destination) == 0
+      && g_strcmp0 (receipt->reservation_id, plan->reservation_id) == 0
+      && g_strcmp0 (receipt->parent_identity, plan->parent_identity) == 0
+      && g_strcmp0 (receipt->stage_basename, plan->stage_basename) == 0;
 }
 
 static gboolean
@@ -304,6 +370,32 @@ handle_is_owner_only_regular (HANDLE handle,
       || (info->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0
       || info->nNumberOfLinks != 1 || !GetFileSizeEx (handle, &size)
       || size.QuadPart < 0 || (require_empty && size.QuadPart != 0))
+    return FALSE;
+  if (!GetKernelObjectSecurity (handle,
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0,
+          &sec_len) && GetLastError () != ERROR_INSUFFICIENT_BUFFER)
+    return FALSE;
+  sec = g_malloc0 (sec_len);
+  if (sec == NULL)
+    return FALSE;
+  valid = GetKernelObjectSecurity (handle,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, sec, sec_len,
+      &sec_len) && security_descriptor_is_owner_only (sec);
+  g_free (sec);
+  return valid;
+}
+
+static gboolean
+handle_is_owner_only_directory (HANDLE handle,
+    const BY_HANDLE_FILE_INFORMATION *info)
+{
+  DWORD sec_len = 0;
+  PSECURITY_DESCRIPTOR sec = NULL;
+  gboolean valid = FALSE;
+
+  if (handle == INVALID_HANDLE_VALUE || handle == NULL || info == NULL
+      || info_is_reparse_point (info)
+      || (info->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
     return FALSE;
   if (!GetKernelObjectSecurity (handle,
           OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, NULL, 0,
@@ -1002,7 +1094,10 @@ rename_handle_to_destination (HANDLE stage_handle, HANDLE root_handle,
     const gchar *destination)
 {
   wchar_t *wdestination = utf8_to_wide (destination);
+  wchar_t *wroot = NULL;
+  wchar_t *wabsolute = NULL;
   FILE_RENAME_INFO *rename_info;
+  DWORD root_len;
   gsize name_bytes;
   gsize info_size;
   gboolean renamed;
@@ -1012,22 +1107,67 @@ rename_handle_to_destination (HANDLE stage_handle, HANDLE root_handle,
     g_free (wdestination);
     return WYRELOG_E_INVALID;
   }
-  if (wdestination == NULL)
+  if (wdestination == NULL || wdestination[0] == L'\0'
+      || wcspbrk (wdestination, L"\\/:") != NULL
+      || wcscmp (wdestination, L".") == 0
+      || wcscmp (wdestination, L"..") == 0) {
+    g_free (wdestination);
+    return WYRELOG_E_POLICY;
+  }
+  root_len = GetFinalPathNameByHandleW (root_handle, NULL, 0,
+      FILE_NAME_NORMALIZED | VOLUME_NAME_GUID);
+  if (root_len == 0) {
+    g_free (wdestination);
+    return map_win32_error (GetLastError ());
+  }
+  wroot = g_new0 (wchar_t, (gsize) root_len + 1);
+  if (wroot == NULL) {
+    g_free (wdestination);
     return WYRELOG_E_NOMEM;
-  name_bytes = wcslen (wdestination) * sizeof *wdestination;
-  info_size = offsetof (FILE_RENAME_INFO, FileName) + name_bytes;
+  }
+  if (GetFinalPathNameByHandleW (root_handle, wroot, root_len,
+          FILE_NAME_NORMALIZED | VOLUME_NAME_GUID) == 0) {
+    g_free (wroot);
+    g_free (wdestination);
+    return map_win32_error (GetLastError ());
+  }
+  wabsolute = g_new0 (wchar_t, wcslen (wroot) + 1 + wcslen (wdestination) + 1);
+  if (wabsolute == NULL) {
+    g_free (wroot);
+    g_free (wdestination);
+    return WYRELOG_E_NOMEM;
+  }
+  wcscpy (wabsolute, wroot);
+  if (wabsolute[wcslen (wabsolute) - 1] != L'\\')
+    wcscat (wabsolute, L"\\");
+  wcscat (wabsolute, wdestination);
+  name_bytes = wcslen (wabsolute) * sizeof *wabsolute;
+  if (name_bytes > MAXDWORD
+      || name_bytes > G_MAXSIZE - offsetof (FILE_RENAME_INFO, FileName)
+      - sizeof *wabsolute) {
+    g_free (wabsolute);
+    g_free (wroot);
+    g_free (wdestination);
+    return WYRELOG_E_INVALID;
+  }
+  info_size = offsetof (FILE_RENAME_INFO, FileName) + name_bytes
+      + sizeof *wabsolute;
   rename_info = g_malloc0 (info_size);
   if (rename_info == NULL) {
+    g_free (wabsolute);
+    g_free (wroot);
     g_free (wdestination);
     return WYRELOG_E_NOMEM;
   }
   rename_info->ReplaceIfExists = FALSE;
-  rename_info->RootDirectory = root_handle;
+  rename_info->RootDirectory = NULL;
   rename_info->FileNameLength = (DWORD) name_bytes;
-  memcpy (rename_info->FileName, wdestination, name_bytes);
+  memcpy (rename_info->FileName, wabsolute, name_bytes);
   renamed = SetFileInformationByHandle (stage_handle, FileRenameInfo,
       rename_info, (DWORD) info_size);
   g_free (rename_info);
+  g_free (wabsolute);
+  g_free (wroot);
   g_free (wdestination);
   if (!renamed)
     return map_win32_error (GetLastError ());
@@ -1314,6 +1454,298 @@ wyrelog_error_t
 {
   return commit_stage_to_destination (backend, plan, receipt, credential_id,
       credential_secret, out_result);
+}
+
+static gboolean
+windows_receipt_target_name_matches (const
+    WyctlPublicationWindowsBackend *backend,
+    const WyctlPublicationReceiptTargetLease *lease)
+{
+  g_autofree wchar_t *path = NULL;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  BY_HANDLE_FILE_INFORMATION root_info = { 0 };
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+  gboolean matches = FALSE;
+
+  if (!backend_is_valid (backend) || lease == NULL || lease->owner != backend
+      || !GetFileInformationByHandle (lease->root_handle, &root_info)
+      || !identity_matches_info (lease->parent_identity, &root_info))
+    return FALSE;
+  path = wide_child_path (lease->canonical_root, lease->basename);
+  if (path == NULL)
+    return FALSE;
+  handle = CreateFileW (path, 0,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+      NULL);
+  if (handle != INVALID_HANDLE_VALUE
+      && GetFileInformationByHandle (handle, &info))
+    matches = identity_matches_info (lease->identity, &info)
+        && !info_is_reparse_point (&info)
+        && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0;
+
+  if (handle != INVALID_HANDLE_VALUE)
+    CloseHandle (handle);
+  return matches;
+}
+
+wyrelog_error_t
+    wyctl_publication_windows_receipt_target_acquire
+    (const WyctlPublicationWindowsBackend * backend,
+    const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    gboolean require_destination,
+    WyctlPublicationReceiptTargetLease ** out_lease,
+    WyctlPublicationReceiptTargetKind * out_kind)
+{
+  WyctlPublicationWindowsAnchor anchor = { 0 };
+  g_autofree wchar_t *canonical_root = NULL;
+  g_autofree wchar_t *stage_path = NULL;
+  g_autofree wchar_t *destination_path = NULL;
+  WyctlPublicationReceiptTargetLease *lease = NULL;
+  const gchar *basename = plan != NULL ? plan->destination : NULL;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+  wyrelog_error_t rc;
+
+  if (out_lease == NULL || out_kind == NULL)
+    return WYRELOG_E_INVALID;
+  *out_lease = NULL;
+  *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+  if (!backend_is_valid (backend) || !wyctl_publication_plan_is_valid (plan)
+      || !wyctl_publication_receipt_is_valid (receipt))
+    return WYRELOG_E_INVALID;
+
+  rc = open_root_anchor (backend, &anchor);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!receipt_matches_plan_anchor (receipt, plan, &anchor)) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_POLICY;
+  }
+  canonical_root = canonical_root_path_from_handle (anchor.dir_handle);
+  stage_path = wide_child_path (canonical_root, plan->stage_basename);
+  destination_path = wide_child_path (canonical_root, plan->destination);
+  if (canonical_root == NULL || stage_path == NULL || destination_path == NULL) {
+    close_root_anchor (&anchor);
+    return WYRELOG_E_NOMEM;
+  }
+
+  handle = CreateFileW (destination_path, GENERIC_READ | GENERIC_WRITE
+      | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE,
+      FILE_SHARE_READ, NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (handle != INVALID_HANDLE_VALUE
+      && GetFileInformationByHandle (handle, &info)) {
+    gboolean owned = identity_matches_info (receipt->stage_identity, &info)
+        && handle_is_owner_only_regular (handle, &info, FALSE);
+    if (!owned)
+      goto foreign;
+    goto acquired;
+  }
+  rc = map_win32_error (GetLastError ());
+  if (handle != INVALID_HANDLE_VALUE) {
+    CloseHandle (handle);
+    handle = INVALID_HANDLE_VALUE;
+  }
+  if (rc != WYRELOG_E_NOT_FOUND) {
+    close_root_anchor (&anchor);
+    return rc;
+  }
+  if (require_destination) {
+    goto foreign;
+  }
+
+  basename = plan->stage_basename;
+  handle = CreateFileW (stage_path, GENERIC_READ | GENERIC_WRITE
+      | FILE_READ_ATTRIBUTES | READ_CONTROL | DELETE | SYNCHRONIZE,
+      FILE_SHARE_READ, NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (handle != INVALID_HANDLE_VALUE
+      && GetFileInformationByHandle (handle, &info)) {
+    gboolean owned = identity_matches_info (receipt->stage_identity, &info)
+        && handle_is_owner_only_regular (handle, &info, FALSE);
+    if (!owned)
+      goto foreign;
+    goto acquired;
+  }
+  rc = map_win32_error (GetLastError ());
+  if (handle != INVALID_HANDLE_VALUE) {
+    CloseHandle (handle);
+    handle = INVALID_HANDLE_VALUE;
+  }
+  if (rc != WYRELOG_E_NOT_FOUND) {
+    close_root_anchor (&anchor);
+    return rc;
+  }
+
+foreign:
+  if (handle != INVALID_HANDLE_VALUE)
+    CloseHandle (handle);
+  close_root_anchor (&anchor);
+  return WYRELOG_E_OK;
+
+acquired:
+  lease = g_new0 (WyctlPublicationReceiptTargetLease, 1);
+  if (lease == NULL) {
+    CloseHandle (handle);
+    close_root_anchor (&anchor);
+    return WYRELOG_E_NOMEM;
+  }
+  lease->root_handle = anchor.dir_handle;
+  lease->target_handle = handle;
+  lease->canonical_root = g_steal_pointer (&canonical_root);
+  lease->basename = g_strdup (basename);
+  lease->destination = g_strdup (plan->destination);
+  lease->identity = g_strdup (receipt->stage_identity);
+  lease->parent_identity = g_strdup (plan->parent_identity);
+  lease->owner = backend;
+  lease->destination_target = g_strcmp0 (basename, plan->destination) == 0;
+  anchor.dir_handle = INVALID_HANDLE_VALUE;
+  close_root_anchor (&anchor);
+  if (lease->canonical_root == NULL || lease->basename == NULL
+      || lease->destination == NULL || lease->identity == NULL
+      || lease->parent_identity == NULL) {
+    wyctl_publication_windows_receipt_target_release (backend, lease);
+    return WYRELOG_E_NOMEM;
+  }
+  *out_lease = lease;
+  *out_kind = lease->destination_target ?
+      WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION :
+      WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyctl_publication_windows_receipt_target_inspect
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result)
+{
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+  gboolean directory_synced = TRUE;
+  gboolean empty = FALSE;
+  gboolean matches = FALSE;
+  gboolean target_synced;
+  wyrelog_error_t rc;
+
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_result_clear (out_result);
+  if (!backend_is_valid (backend) || lease == NULL || lease->owner != backend
+      || lease->root_handle == INVALID_HANDLE_VALUE
+      || lease->target_handle == INVALID_HANDLE_VALUE
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
+    return WYRELOG_E_INVALID;
+  if (!GetFileInformationByHandle (lease->target_handle, &info)
+      || !identity_matches_info (lease->identity, &info)
+      || !handle_is_owner_only_regular (lease->target_handle, &info, FALSE)
+      || !windows_receipt_target_name_matches (backend, lease))
+    goto foreign;
+  rc = credential_document_matches_handle (lease->target_handle,
+      expected_credential_id, expected_credential_secret, &empty, &matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (empty || !matches
+      || !windows_receipt_target_name_matches (backend, lease))
+    goto foreign;
+  lease->inspected_exact = TRUE;
+  target_synced = FlushFileBuffers (lease->target_handle);
+  if (lease->destination_target)
+    directory_synced = directory_flush (lease->root_handle) == WYRELOG_E_OK;
+  if (!windows_receipt_target_name_matches (backend, lease))
+    goto foreign;
+  if (!target_synced || !directory_synced)
+    return windows_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN, TRUE, FALSE);
+  return windows_result_fill (out_result, lease->destination_target ?
+      WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
+      WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED, TRUE,
+      !lease->destination_target);
+
+foreign:
+  lease->inspected_exact = FALSE;
+  return windows_result_fill (out_result,
+      WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+}
+
+wyrelog_error_t
+    wyctl_publication_windows_receipt_target_commit
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result)
+{
+  g_autofree gchar *next_basename = NULL;
+  gboolean directory_synced;
+  gboolean empty = FALSE;
+  gboolean matches = FALSE;
+  gboolean target_synced;
+  wyrelog_error_t rc;
+
+  if (out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyctl_publication_result_clear (out_result);
+  if (!backend_is_valid (backend) || lease == NULL || lease->owner != backend
+      || lease->root_handle == INVALID_HANDLE_VALUE
+      || lease->target_handle == INVALID_HANDLE_VALUE
+      || lease->destination_target || !lease->inspected_exact
+      || !wyctl_publication_expected_credential_is_valid
+      (expected_credential_id, expected_credential_secret))
+    return WYRELOG_E_INVALID;
+  rc = credential_document_matches_handle (lease->target_handle,
+      expected_credential_id, expected_credential_secret, &empty, &matches);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (empty || !matches || !windows_receipt_target_name_matches (backend,
+          lease))
+    return windows_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+  next_basename = g_strdup (lease->destination);
+  if (next_basename == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = rename_handle_to_destination (lease->target_handle,
+      lease->root_handle, lease->destination);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_free (lease->basename);
+  lease->basename = g_steal_pointer (&next_basename);
+  lease->destination_target = TRUE;
+  if (!windows_receipt_target_name_matches (backend, lease))
+    return windows_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+  target_synced = FlushFileBuffers (lease->target_handle);
+  directory_synced = directory_flush (lease->root_handle) == WYRELOG_E_OK;
+  if (!windows_receipt_target_name_matches (backend, lease))
+    return windows_result_fill (out_result,
+        WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN, FALSE, FALSE);
+  return windows_result_fill (out_result,
+      target_synced && directory_synced ?
+      WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
+      WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN, TRUE, FALSE);
+}
+
+void wyctl_publication_windows_receipt_target_release
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease)
+{
+  (void) backend;
+  if (lease == NULL)
+    return;
+  if (lease->target_handle != INVALID_HANDLE_VALUE
+      && lease->target_handle != NULL)
+    CloseHandle (lease->target_handle);
+  if (lease->root_handle != INVALID_HANDLE_VALUE && lease->root_handle != NULL)
+    CloseHandle (lease->root_handle);
+  g_free (lease->canonical_root);
+  g_free (lease->basename);
+  g_free (lease->destination);
+  g_free (lease->identity);
+  g_free (lease->parent_identity);
+  g_free (lease);
 }
 
 wyrelog_error_t
@@ -1696,6 +2128,63 @@ wyctl_publication_windows_stage_exact (const WyctlPublicationWindowsBackend
   (void) out_result;
   (void) out_replayed;
   return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+    wyctl_publication_windows_receipt_target_acquire
+    (const WyctlPublicationWindowsBackend * backend,
+    const WyctlPublicationPlan * plan, const WyctlPublicationReceipt * receipt,
+    gboolean require_destination,
+    WyctlPublicationReceiptTargetLease ** out_lease,
+    WyctlPublicationReceiptTargetKind * out_kind)
+{
+  (void) backend;
+  (void) plan;
+  (void) receipt;
+  (void) require_destination;
+  (void) out_lease;
+  (void) out_kind;
+  return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+    wyctl_publication_windows_receipt_target_inspect
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result)
+{
+  (void) backend;
+  (void) lease;
+  (void) expected_credential_id;
+  (void) expected_credential_secret;
+  (void) out_result;
+  return WYRELOG_E_INVALID;
+}
+
+wyrelog_error_t
+    wyctl_publication_windows_receipt_target_commit
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result)
+{
+  (void) backend;
+  (void) lease;
+  (void) expected_credential_id;
+  (void) expected_credential_secret;
+  (void) out_result;
+  return WYRELOG_E_INVALID;
+}
+
+void wyctl_publication_windows_receipt_target_release
+    (const WyctlPublicationWindowsBackend * backend,
+    WyctlPublicationReceiptTargetLease * lease)
+{
+  (void) backend;
+  (void) lease;
 }
 
 wyrelog_error_t

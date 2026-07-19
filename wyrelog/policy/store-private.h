@@ -1034,6 +1034,12 @@ wyrelog_error_t wyl_policy_store_service_handoff_escrow_load
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_load_by_request
     (wyl_policy_store_t * store, const gchar * request_id,
     wyl_policy_service_handoff_escrow_info_t * out_info);
+typedef wyrelog_error_t (*wyl_policy_store_service_handoff_unseal_gate_fn)
+  (gpointer data);
+/* Test-only gate immediately before the escrow KeyProvider unseal call. */
+void wyl_policy_store_service_handoff_set_unseal_gate_for_test
+    (wyl_policy_store_t * store,
+    wyl_policy_store_service_handoff_unseal_gate_fn gate, gpointer data);
 wyrelog_error_t wyl_policy_store_service_handoff_escrow_unseal
     (wyl_policy_store_t * store,
     const wyl_policy_service_handoff_escrow_info_t * expected,

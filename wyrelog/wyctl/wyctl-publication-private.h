@@ -55,6 +55,16 @@ typedef struct wyctl_publication_result_t
   gboolean cleanup_required;
 } WyctlPublicationResult;
 
+typedef struct wyctl_publication_receipt_target_lease_t
+    WyctlPublicationReceiptTargetLease;
+
+typedef enum
+{
+  WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE = 0,
+  WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION,
+  WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN,
+} WyctlPublicationReceiptTargetKind;
+
 typedef enum
 {
   WYCTL_PUBLICATION_STAGE_EXACT_TEMP_CREATED = 0,
@@ -92,21 +102,40 @@ typedef struct wyctl_publication_backend_vtable_t
       const WyctlSensitiveText * credential_secret,
       WyctlPublicationReceipt * out_receipt,
       WyctlPublicationResult * out_result, gboolean * out_replayed);
-  wyrelog_error_t (*commit) (gpointer self,
+  /* Acquire and retain the exact anchored receipt target.  The lease keeps
+   * the verified fd/HANDLE alive through secret recovery and inspection. */
+  wyrelog_error_t (*receipt_target_acquire) (gpointer self,
+      const WyctlPublicationPlan * plan,
+      const WyctlPublicationReceipt * receipt, gboolean require_destination,
+      WyctlPublicationReceiptTargetLease ** out_lease,
+      WyctlPublicationReceiptTargetKind * out_kind);
+  wyrelog_error_t (*receipt_target_inspect) (gpointer self,
+      WyctlPublicationReceiptTargetLease * lease,
+      const gchar * expected_credential_id,
+      const WyctlSensitiveText * expected_credential_secret,
+      WyctlPublicationResult * out_result);
+  wyrelog_error_t (*receipt_target_commit) (gpointer self,
+      WyctlPublicationReceiptTargetLease * lease,
+      const gchar * expected_credential_id,
+      const WyctlSensitiveText * expected_credential_secret,
+      WyctlPublicationResult * out_result);
+  void (*receipt_target_release) (gpointer self,
+      WyctlPublicationReceiptTargetLease * lease);
+    wyrelog_error_t (*commit) (gpointer self,
       const WyctlPublicationReceipt * receipt, const gchar * credential_id,
       const WyctlSensitiveText * credential_secret,
       WyctlPublicationResult * out_result);
-  wyrelog_error_t (*inspect) (gpointer self,
+    wyrelog_error_t (*inspect) (gpointer self,
       const WyctlPublicationReceipt * receipt,
       const gchar * expected_credential_id,
       const WyctlSensitiveText * expected_credential_secret,
       WyctlPublicationResult * out_result);
-  wyrelog_error_t (*resync) (gpointer self,
+    wyrelog_error_t (*resync) (gpointer self,
       const WyctlPublicationReceipt * receipt,
       const gchar * expected_credential_id,
       const WyctlSensitiveText * expected_credential_secret,
       WyctlPublicationResult * out_result);
-  wyrelog_error_t (*cleanup) (gpointer self,
+    wyrelog_error_t (*cleanup) (gpointer self,
       const WyctlPublicationReceipt * receipt,
       const gchar * expected_credential_id,
       const WyctlSensitiveText * expected_credential_secret,
@@ -147,6 +176,27 @@ wyrelog_error_t wyctl_publication_backend_stage_exact
     const WyctlSensitiveText * credential_secret,
     WyctlPublicationReceipt * out_receipt,
     WyctlPublicationResult * out_result, gboolean * out_replayed);
+wyrelog_error_t wyctl_publication_backend_receipt_target_acquire
+    (const WyctlPublicationBackendVTable * vtable, gpointer self,
+    const WyctlPublicationPlan * plan,
+    const WyctlPublicationReceipt * receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease ** out_lease,
+    WyctlPublicationReceiptTargetKind * out_kind);
+wyrelog_error_t wyctl_publication_backend_receipt_target_inspect
+    (const WyctlPublicationBackendVTable * vtable, gpointer self,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result);
+wyrelog_error_t wyctl_publication_backend_receipt_target_commit
+    (const WyctlPublicationBackendVTable * vtable, gpointer self,
+    WyctlPublicationReceiptTargetLease * lease,
+    const gchar * expected_credential_id,
+    const WyctlSensitiveText * expected_credential_secret,
+    WyctlPublicationResult * out_result);
+void wyctl_publication_backend_receipt_target_release
+    (const WyctlPublicationBackendVTable * vtable, gpointer self,
+    WyctlPublicationReceiptTargetLease ** lease);
 
 wyrelog_error_t wyctl_publication_credential_document_encode
     (const gchar * credential_id, const gchar * credential_secret,
