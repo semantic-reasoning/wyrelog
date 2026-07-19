@@ -538,6 +538,9 @@ test_precheck_with_committed (void)
   request.destination = "credential";
   request.parent_identity = "parent";
   request.actor_subject_id = "admin";
+  request.escrow_id = "01890f47-3c4b-7cc2-b8c4-dc0c0c073991";
+  memset (request.escrow_binding_digest, 0x31,
+      sizeof request.escrow_binding_digest);
   request.expires_at_us = 1;
   WylServiceCredentialOperationRecord prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
@@ -750,6 +753,9 @@ test_precheck_with_committed (void)
   rotate_request.destination = "rotated-credential";
   rotate_request.parent_identity = "parent";
   rotate_request.actor_subject_id = "admin";
+  rotate_request.escrow_id = "01890f47-3c4b-7cc2-b8c4-dc0c0c073992";
+  memset (rotate_request.escrow_binding_digest, 0x32,
+      sizeof rotate_request.escrow_binding_digest);
   rotate_request.old_credential_id = issued_id;
   rotate_request.expected_generation = issued_generation;
   rotate_request.expires_at_us = 1;

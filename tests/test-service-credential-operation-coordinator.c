@@ -15,6 +15,9 @@ test_request (void)
   r.destination = g_strdup ("record");
   r.parent_identity = g_strdup ("parent");
   r.actor_subject_id = g_strdup ("admin");
+  r.escrow_id = g_strdup ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991");
+  for (guint i = 0; i < sizeof r.escrow_binding_digest; i++)
+    r.escrow_binding_digest[i] = (guint8) (i + 1);
   r.expires_at_us = 1;
   r.expires_at_us = 1;
   r.parent_identity = g_strdup ("parent");

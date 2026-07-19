@@ -28,6 +28,7 @@ record_new (gchar request_id[WYL_REQUEST_ID_STRING_BUF],
     .stage_identity = g_strdup (""),
     .old_credential_id = g_strdup (""),
     .successor_credential_id = g_strdup (credential_id),
+    .escrow_id = g_strdup ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991"),
     .publication_receipt_id = g_strdup (""),
     .expected_generation = 0,
     .successor_generation = 1,
@@ -36,6 +37,8 @@ record_new (gchar request_id[WYL_REQUEST_ID_STRING_BUF],
     .updated_at_us = 100,
     .attempts = 0,
   };
+  for (guint i = 0; i < sizeof record.escrow_binding_digest; i++)
+    record.escrow_binding_digest[i] = (guint8) (i + 1);
   return record;
 }
 
@@ -117,6 +120,16 @@ test_rejects_trailing_and_unknown (void)
   g_assert_cmpint (wyl_service_credential_operation_record_decode (v3,
           &output), ==, WYRELOG_E_POLICY);
   g_assert_null (output.request_id);
+  prior_version = g_memdup2 (data, len);
+  prior_version[8] = 0;
+  prior_version[9] = 0;
+  prior_version[10] = 0;
+  prior_version[11] = 4;
+  GBytes *v4 = g_bytes_new_take (prior_version, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (v4,
+          &output), ==, WYRELOG_E_POLICY);
+  g_assert_null (output.request_id);
+  g_bytes_unref (v4);
   g_bytes_unref (v3);
   g_bytes_unref (v2);
   g_bytes_unref (prior);

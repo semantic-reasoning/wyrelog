@@ -25,6 +25,9 @@ request (void)
   r.destination = g_strdup ("record");
   r.parent_identity = g_strdup ("parent");
   r.actor_subject_id = g_strdup ("admin");
+  r.escrow_id = g_strdup ("01890f47-3c4b-7cc2-b8c4-dc0c0c073991");
+  for (guint i = 0; i < sizeof r.escrow_binding_digest; i++)
+    r.escrow_binding_digest[i] = (guint8) (i + 1);
   r.expires_at_us = 1;
   return r;
 }
@@ -592,6 +595,12 @@ test_begin_or_replay_conflict (JournalFixture *fixture, gconstpointer unused)
   wyl_service_credential_operation_child_name_clear (&name);
   g_clear_pointer (&r.destination, g_free);
   r.destination = g_strdup ("record");
+  r.escrow_binding_digest[0] ^= 0xff;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, 3, &replayed, &out), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpstr (out.operation_id, ==, saved_operation);
+  r.escrow_binding_digest[0] ^= 0xff;
   r.expires_at_us++;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
       (&fixture->storage, &fixture->anchor, &r, 3, &replayed, &out), ==,
@@ -1054,6 +1063,73 @@ test_load_fails_closed_and_preserves_output (JournalFixture *fixture,
   wyl_service_credential_operation_coordinator_request_clear (&r);
 }
 
+static void
+test_v5_handoff_lifecycle_builders (void)
+{
+  const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  WylServiceCredentialOperationCoordinatorRequest request_value = request ();
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord publication =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord cleanup =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord oar =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (&request_value, request_value.request_id, 10, &prepared), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_server_committed
+      (&prepared, successor, 1, 11, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_prepared
+      (&committed, "reservation", "stage", "stage-id", "receipt", 12,
+          &publication), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_file_published
+      (&publication, "reservation", "stage", "wrong", "receipt", 13,
+          &published), ==, WYRELOG_E_POLICY);
+  g_assert_null (published.operation_id);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_file_published
+      (&publication, "reservation", "stage", "stage-id", "receipt", 13,
+          &published), ==, WYRELOG_E_OK);
+  g_assert_cmpint (published.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_cleanup_required
+      (&published, 14, &cleanup), ==, WYRELOG_E_OK);
+  g_assert_cmpint (cleanup.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&cleanup, "receipt-uncertain", 15, &oar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (oar.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
+  g_assert_cmpstr (oar.escrow_id, ==, prepared.escrow_id);
+  g_assert_cmpmem (oar.escrow_binding_digest,
+      sizeof oar.escrow_binding_digest, prepared.escrow_binding_digest,
+      sizeof prepared.escrow_binding_digest);
+  g_assert_cmpstr (oar.successor_credential_id, ==, successor);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&prepared, "cancelled-before-commit", 16, &cleanup), ==, WYRELOG_E_OK);
+  g_assert_cmpint (cleanup.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  wyl_service_credential_operation_record_clear (&oar);
+  wyl_service_credential_operation_record_clear (&cleanup);
+  wyl_service_credential_operation_record_clear (&published);
+  wyl_service_credential_operation_record_clear (&publication);
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&prepared);
+  wyl_service_credential_operation_coordinator_request_clear (&request_value);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1096,5 +1172,7 @@ main (int argc, char **argv)
   g_test_add ("/coordinator/journal/load-fails-closed", JournalFixture, NULL,
       journal_fixture_set_up, test_load_fails_closed_and_preserves_output,
       journal_fixture_tear_down);
+  g_test_add_func ("/coordinator/journal/v5-handoff-lifecycle",
+      test_v5_handoff_lifecycle_builders);
   return g_test_run ();
 }

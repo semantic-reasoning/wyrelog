@@ -2,7 +2,9 @@
 #include "auth/service-credential-operation-coordinator-private.h"
 #include "auth/service-credential-private.h"
 #include "policy/store-private.h"
+#include "wyl-id-private.h"
 #include <chronoid/ksuid.h>
+#include <sodium.h>
 #include <string.h>
 
 static gboolean
@@ -47,6 +49,21 @@ destination_ok (const gchar *s)
   return TRUE;
 }
 
+static gboolean
+escrow_identity_ok (const WylServiceCredentialOperationCoordinatorRequest *r)
+{
+  static const guint8
+      zero[WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES] =
+      { 0 };
+  wyl_id_t parsed;
+  gchar canonical[WYL_ID_STRING_BUF];
+  return r->escrow_id != NULL
+      && wyl_id_parse (r->escrow_id, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+      && g_str_equal (r->escrow_id, canonical)
+      && sodium_memcmp (r->escrow_binding_digest, zero, sizeof zero) != 0;
+}
+
 void wyl_service_credential_operation_coordinator_request_clear
     (WylServiceCredentialOperationCoordinatorRequest * r)
 {
@@ -59,6 +76,7 @@ void wyl_service_credential_operation_coordinator_request_clear
   g_clear_pointer (&r->parent_identity, g_free);
   g_clear_pointer (&r->actor_subject_id, g_free);
   g_clear_pointer (&r->old_credential_id, g_free);
+  g_clear_pointer (&r->escrow_id, g_free);
   memset (r, 0, sizeof *r);
 }
 
@@ -76,6 +94,7 @@ wyl_service_credential_operation_coordinator_request_is_valid (const
       || !destination_ok (r->destination)
       || !text_ok (r->parent_identity, TRUE)
       || !wyl_policy_service_actor_subject_is_valid (r->actor_subject_id)
+      || !escrow_identity_ok (r)
       || r->expires_at_us <= 0 || r->expected_generation > G_MAXINT64)
     return FALSE;
   if (r->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
