@@ -209,6 +209,13 @@ test_plan_create_and_validate (void)
           "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyctl_publication_plan_create ("CON.txt",
           "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
+  g_autofree gchar *max_leaf = g_strnfill (255, 'a');
+  g_autofree gchar *too_long = g_strnfill (256, 'a');
+  g_assert_cmpint (wyctl_publication_plan_create (max_leaf,
+          "parent-identity", &rejected), ==, WYRELOG_E_OK);
+  wyctl_publication_plan_clear (&rejected);
+  g_assert_cmpint (wyctl_publication_plan_create (too_long,
+          "parent-identity", &rejected), ==, WYRELOG_E_INVALID);
 
   WyctlPublicationPlan clone = { 0 };
   g_assert_cmpint (wyctl_publication_plan_clone (&plan, &clone), ==,

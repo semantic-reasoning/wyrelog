@@ -1,6 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyctl-publication-private.h"
 
+#include "auth/service-credential-operation-destination-private.h"
+
 #include <sodium.h>
 #include <string.h>
 
@@ -166,33 +168,6 @@ wyctl_publication_result_clear (WyctlPublicationResult *result)
   memset (result, 0, sizeof *result);
 }
 
-static gboolean
-destination_is_simple_leaf (const gchar *destination)
-{
-  g_autofree gchar *upper = NULL;
-  gchar *dot;
-
-  if (!string_is_present (destination)
-      || g_str_equal (destination, ".") || g_str_equal (destination, "..")
-      || strpbrk (destination, "/\\:") != NULL
-      || destination[strlen (destination) - 1] == '.'
-      || destination[strlen (destination) - 1] == ' ')
-    return FALSE;
-  upper = g_ascii_strup (destination, -1);
-  if (upper == NULL)
-    return FALSE;
-  dot = strchr (upper, '.');
-  if (dot != NULL)
-    *dot = '\0';
-  if (g_str_equal (upper, "CON") || g_str_equal (upper, "PRN")
-      || g_str_equal (upper, "AUX") || g_str_equal (upper, "NUL")
-      || g_str_equal (upper, "CLOCK$"))
-    return FALSE;
-  return !((g_str_has_prefix (upper, "COM")
-          || g_str_has_prefix (upper, "LPT")) && strlen (upper) == 4
-      && upper[3] >= '1' && upper[3] <= '9');
-}
-
 gboolean
 wyctl_publication_plan_is_valid (const WyctlPublicationPlan *plan)
 {
@@ -200,7 +175,8 @@ wyctl_publication_plan_is_valid (const WyctlPublicationPlan *plan)
 
   return plan != NULL
       && plan->version == WYCTL_PUBLICATION_PLAN_VERSION
-      && destination_is_simple_leaf (plan->destination)
+      && wyl_service_credential_operation_destination_is_valid
+      (plan->destination)
       && reservation_id_is_valid (plan->reservation_id)
       && string_is_present (plan->parent_identity)
       && stage_basename_is_valid (plan->stage_basename)
@@ -216,7 +192,8 @@ wyctl_publication_receipt_is_valid (const WyctlPublicationReceipt *receipt)
 
   return receipt != NULL
       && receipt->version == WYCTL_PUBLICATION_RECEIPT_VERSION
-      && destination_is_simple_leaf (receipt->destination)
+      && wyl_service_credential_operation_destination_is_valid
+      (receipt->destination)
       && reservation_id_is_valid (receipt->reservation_id)
       && string_is_present (receipt->parent_identity)
       && stage_basename_is_valid (receipt->stage_basename)
@@ -291,7 +268,8 @@ wyctl_publication_plan_create (const gchar *destination,
   gchar reservation_buf[WYL_ID_STRING_BUF];
   gchar *stage_basename = NULL;
 
-  if (out_plan == NULL || !destination_is_simple_leaf (destination)
+  if (out_plan == NULL
+      || !wyl_service_credential_operation_destination_is_valid (destination)
       || !string_is_present (parent_identity))
     return WYRELOG_E_INVALID;
 

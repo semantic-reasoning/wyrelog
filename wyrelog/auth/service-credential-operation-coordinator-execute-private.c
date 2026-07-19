@@ -2,6 +2,7 @@
 #include "auth/service-credential-operation-coordinator-execute-private.h"
 #include "../wyctl/wyctl-publication-private.h"
 #include "auth/service-auth-coordination-private.h"
+#include "auth/service-credential-operation-destination-private.h"
 #include "auth/service-credential-operation-coordinator-recovery-private.h"
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 #include "policy/store-private.h"
@@ -79,39 +80,13 @@ handoff_stage_basename (const gchar *destination, const gchar *reservation_id)
 }
 
 static gboolean
-handoff_destination_is_simple_leaf (const gchar *destination)
-{
-  g_autofree gchar *upper = NULL;
-  gchar *dot;
-
-  if (destination == NULL || destination[0] == '\0'
-      || g_str_equal (destination, ".") || g_str_equal (destination, "..")
-      || strpbrk (destination, "/\\:") != NULL
-      || destination[strlen (destination) - 1] == '.'
-      || destination[strlen (destination) - 1] == ' ')
-    return FALSE;
-  upper = g_ascii_strup (destination, -1);
-  if (upper == NULL)
-    return FALSE;
-  dot = strchr (upper, '.');
-  if (dot != NULL)
-    *dot = '\0';
-  if (g_str_equal (upper, "CON") || g_str_equal (upper, "PRN")
-      || g_str_equal (upper, "AUX") || g_str_equal (upper, "NUL")
-      || g_str_equal (upper, "CLOCK$"))
-    return FALSE;
-  return !((g_str_has_prefix (upper, "COM")
-          || g_str_has_prefix (upper, "LPT")) && strlen (upper) == 4
-      && upper[3] >= '1' && upper[3] <= '9');
-}
-
-static gboolean
 handoff_plan_is_valid (const WyctlPublicationPlan *plan)
 {
   wyl_id_t reservation;
   g_autofree gchar *stage_basename = NULL;
   return plan != NULL && plan->version == WYCTL_PUBLICATION_PLAN_VERSION
-      && handoff_destination_is_simple_leaf (plan->destination)
+      && wyl_service_credential_operation_destination_is_valid
+      (plan->destination)
       && plan->parent_identity != NULL && plan->parent_identity[0] != '\0'
       && plan->reservation_id != NULL
       && wyl_id_parse (plan->reservation_id, &reservation) == WYRELOG_E_OK

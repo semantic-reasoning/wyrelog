@@ -227,6 +227,106 @@ test_rejects_invalid_record (void)
   g_assert_false (wyl_service_credential_operation_record_is_valid (&record));
 }
 
+static void
+test_decode_rejects_malformed_destination (void)
+{
+  static const gchar valid[] = "credentials.json";
+  static const gchar invalid[] = "nested/file.json";
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  WylServiceCredentialOperationRecord input = record_new (request_id,
+      credential_id);
+  WylServiceCredentialOperationRecord output =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_autoptr (GBytes) encoded = NULL;
+  g_autoptr (GBytes) malformed = NULL;
+  gsize len;
+  const guint8 *data;
+  guint8 *copy;
+  gboolean replaced = FALSE;
+
+  G_STATIC_ASSERT (sizeof valid == sizeof invalid);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&input,
+          &encoded), ==, WYRELOG_E_OK);
+  data = g_bytes_get_data (encoded, &len);
+  copy = g_memdup2 (data, len);
+  for (gsize i = 0; i + sizeof valid - 1 <= len; i++) {
+    if (memcmp (copy + i, valid, sizeof valid - 1) == 0) {
+      memcpy (copy + i, invalid, sizeof invalid - 1);
+      replaced = TRUE;
+      break;
+    }
+  }
+  g_assert_true (replaced);
+  malformed = g_bytes_new_take (copy, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (malformed,
+          &output), ==, WYRELOG_E_POLICY);
+  g_assert_null (output.request_id);
+  g_assert_null (output.destination);
+
+  wyl_service_credential_operation_record_clear (&output);
+  wyl_service_credential_operation_record_clear (&input);
+}
+
+static guint32
+test_get_u32 (const guint8 *value)
+{
+  return ((guint32) value[0] << 24) | ((guint32) value[1] << 16)
+      | ((guint32) value[2] << 8) | value[3];
+}
+
+static void
+test_decode_accepts_255_and_rejects_256_byte_destination (void)
+{
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  WylServiceCredentialOperationRecord input = record_new (request_id,
+      credential_id);
+  WylServiceCredentialOperationRecord output =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_autofree gchar *max_leaf = g_strnfill (255, 'a');
+  g_autoptr (GBytes) encoded = NULL;
+  g_autoptr (GBytes) oversized = NULL;
+  g_autoptr (GByteArray) bytes = g_byte_array_new ();
+  const guint8 *data;
+  gsize destination_length_offset;
+  gsize len;
+  gsize offset = 24;
+
+  g_free (input.destination);
+  input.destination = g_strdup (max_leaf);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&input,
+          &encoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (encoded,
+          &output), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (output.destination, ==, max_leaf);
+  wyl_service_credential_operation_record_clear (&output);
+
+  data = g_bytes_get_data (encoded, &len);
+  for (guint field = 0; field < 4; field++) {
+    guint32 field_len = test_get_u32 (data + offset);
+    offset += 4 + field_len;
+  }
+  destination_length_offset = offset;
+  g_assert_cmpuint (test_get_u32 (data + destination_length_offset), ==, 255);
+  g_byte_array_append (bytes, data, destination_length_offset);
+  {
+    const guint8 length_256[4] = { 0, 0, 1, 0 };
+    g_byte_array_append (bytes, length_256, sizeof length_256);
+  }
+  g_byte_array_append (bytes, data + destination_length_offset + 4, 255);
+  g_byte_array_append (bytes, (const guint8 *) "a", 1);
+  g_byte_array_append (bytes, data + destination_length_offset + 4 + 255,
+      len - destination_length_offset - 4 - 255);
+  oversized = g_byte_array_free_to_bytes (g_steal_pointer (&bytes));
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (oversized,
+          &output), ==, WYRELOG_E_POLICY);
+  g_assert_null (output.destination);
+
+  wyl_service_credential_operation_record_clear (&output);
+  wyl_service_credential_operation_record_clear (&input);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -238,5 +338,9 @@ main (int argc, char **argv)
       test_rejects_trailing_and_unknown);
   g_test_add_func ("/operation-journal/rejects-invalid",
       test_rejects_invalid_record);
+  g_test_add_func ("/operation-journal/rejects-malformed-destination-decode",
+      test_decode_rejects_malformed_destination);
+  g_test_add_func ("/operation-journal/destination-length-boundary",
+      test_decode_accepts_255_and_rejects_256_byte_destination);
   return g_test_run ();
 }

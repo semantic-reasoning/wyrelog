@@ -4,6 +4,7 @@
 #include <glib.h>
 
 #include "wyrelog/error.h"
+#include "auth/service-credential-operation-destination-private.h"
 
 G_BEGIN_DECLS;
 

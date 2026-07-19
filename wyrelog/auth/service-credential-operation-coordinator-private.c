@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "auth/service-credential-operation-coordinator-private.h"
+#include "auth/service-credential-operation-destination-private.h"
 #include "auth/service-credential-private.h"
 #include "policy/store-private.h"
 #include "wyl-id-private.h"
@@ -30,23 +31,6 @@ wyl_service_credential_operation_coordinator_request_id_is_valid (const gchar
   chronoid_ksuid_format (&parsed, canonical);
   canonical[27] = '\0';
   return memcmp (canonical, s, 27) == 0;
-}
-
-static gboolean
-destination_ok (const gchar *s)
-{
-  if (!text_ok (s, TRUE) || s[0] == '/' || s[0] == '\\'
-      || strchr (s, '\\') != NULL || strchr (s, ':'))
-    return FALSE;
-  const gchar *p = s;
-  while (*p) {
-    const gchar *q = strchr (p, '/');
-    gsize n = q ? (gsize) (q - p) : strlen (p);
-    if (!n || (n == 1 && p[0] == '.') || (n == 2 && p[0] == '.' && p[1] == '.'))
-      return FALSE;
-    p = q ? q + 1 : p + n;
-  }
-  return TRUE;
 }
 
 static gboolean
@@ -87,7 +71,7 @@ wyl_service_credential_operation_coordinator_request_is_valid (const
       (r->request_id)
       || !text_ok (r->subject_id,
           r->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
-      || !destination_ok (r->destination)
+      || !wyl_service_credential_operation_destination_is_valid (r->destination)
       || !text_ok (r->parent_identity, TRUE)
       || !wyl_policy_service_actor_subject_is_valid (r->actor_subject_id)
       || !escrow_identity_ok (r)
