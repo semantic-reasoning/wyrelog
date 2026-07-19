@@ -18,6 +18,12 @@ typedef struct
   gchar *parent_identity;
   gchar *actor_subject_id;
   gchar *old_credential_id;
+  /* Minted before journal creation.  It is immutable request identity, not
+   * ciphertext and never carries credential material. */
+  gchar *escrow_id;
+    guint8
+      escrow_binding_digest
+      [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES];
   gint64 expires_at_us;
   guint64 expected_generation;
 } WylServiceCredentialOperationCoordinatorRequest;

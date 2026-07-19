@@ -2,14 +2,16 @@
 #include "auth/service-credential-operation-journal-private.h"
 
 #include <chronoid/ksuid.h>
+#include <sodium.h>
 #include <string.h>
 
 #include "auth/service-credential-private.h"
 #include "policy/store-private.h"
+#include "wyl-id-private.h"
 
 #define JOURNAL_MAGIC "WYLJNL01"
 #define JOURNAL_MAGIC_LEN 8u
-#define JOURNAL_FIELD_COUNT 14u
+#define JOURNAL_FIELD_COUNT 17u
 
 static void
 put_u32 (guint8 out[4], guint32 value)
@@ -83,6 +85,26 @@ state_is_valid (WylServiceCredentialOperationState state)
 }
 
 static gboolean
+escrow_id_is_canonical (const gchar *value)
+{
+  wyl_id_t parsed;
+  gchar canonical[WYL_ID_STRING_BUF];
+  return value != NULL && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+      && g_str_equal (value, canonical);
+}
+
+static gboolean
+digest_is_zero (const guint8
+    digest[WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES])
+{
+  static const guint8
+      zero[WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES] =
+      { 0 };
+  return sodium_memcmp (digest, zero, sizeof zero) == 0;
+}
+
+static gboolean
 destination_is_safe_relative_path (const gchar *value)
 {
   if (value == NULL || value[0] == '\0' || value[0] == '/'
@@ -145,6 +167,15 @@ gboolean
           || !text_is_valid (record->stage_identity, TRUE)
           || !text_is_valid (record->publication_receipt_id, TRUE)))
     return FALSE;
+  if ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
+          || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED)
+      && record->publication_receipt_version != 0)
+    return FALSE;
+  if ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+          || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+          || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)
+      && record->publication_receipt_version != 1)
+    return FALSE;
   if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
       && !wyl_service_credential_id_is_canonical (record->old_credential_id,
           strlen (record->old_credential_id)))
@@ -167,14 +198,27 @@ gboolean
       || (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE
           && record->expected_generation == 0))
     return FALSE;
+  if (!escrow_id_is_canonical (record->escrow_id)
+      || digest_is_zero (record->escrow_binding_digest))
+    return FALSE;
   if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
+    return (record->successor_credential_id == NULL
+        || record->successor_credential_id[0] == '\0')
+        && record->successor_generation == 0
+        && !text_is_valid (record->terminal_reason, TRUE);
+  if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
+      && text_is_valid (record->terminal_reason, TRUE))
     return (record->successor_credential_id == NULL
         || record->successor_credential_id[0] == '\0')
         && record->successor_generation == 0;
   if (record->state >= WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED)
     return record->successor_credential_id != NULL
         && record->successor_credential_id[0] != '\0'
-        && record->successor_generation > 0;
+        && record->successor_generation > 0
+        && ((record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
+            || record->state
+            == WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED)
+        == text_is_valid (record->terminal_reason, TRUE));
   return TRUE;
 }
 
@@ -195,7 +239,9 @@ void wyl_service_credential_operation_record_clear
   g_clear_pointer (&record->stage_identity, g_free);
   g_clear_pointer (&record->old_credential_id, g_free);
   g_clear_pointer (&record->successor_credential_id, g_free);
+  g_clear_pointer (&record->escrow_id, g_free);
   g_clear_pointer (&record->publication_receipt_id, g_free);
+  g_clear_pointer (&record->terminal_reason, g_free);
   memset (record, 0, sizeof *record);
 }
 
@@ -222,6 +268,12 @@ append_text (GByteArray *bytes, const gchar *value)
   append_u32 (bytes, len);
   if (len != 0)
     g_byte_array_append (bytes, (const guint8 *) value, len);
+}
+
+static void
+append_fixed (GByteArray *bytes, const guint8 *value, gsize len)
+{
+  g_byte_array_append (bytes, value, len);
 }
 
 wyrelog_error_t
@@ -253,7 +305,11 @@ wyrelog_error_t
   append_text (bytes, record->stage_identity);
   append_text (bytes, record->old_credential_id);
   append_text (bytes, record->successor_credential_id);
+  append_text (bytes, record->escrow_id);
+  append_fixed (bytes, record->escrow_binding_digest,
+      sizeof record->escrow_binding_digest);
   append_text (bytes, record->publication_receipt_id);
+  append_text (bytes, record->terminal_reason);
   append_u64 (bytes, record->expected_generation);
   append_u64 (bytes, record->successor_generation);
   append_u64 (bytes, (guint64) record->expires_at_us);
@@ -324,7 +380,14 @@ wyrelog_error_t
       || !read_text (data, len, &offset, &decoded.stage_identity)
       || !read_text (data, len, &offset, &decoded.old_credential_id)
       || !read_text (data, len, &offset, &decoded.successor_credential_id)
-      || !read_text (data, len, &offset, &decoded.publication_receipt_id)
+      || !read_text (data, len, &offset, &decoded.escrow_id)
+      || len - offset < sizeof decoded.escrow_binding_digest)
+    goto invalid;
+  memcpy (decoded.escrow_binding_digest, data + offset,
+      sizeof decoded.escrow_binding_digest);
+  offset += sizeof decoded.escrow_binding_digest;
+  if (!read_text (data, len, &offset, &decoded.publication_receipt_id)
+      || !read_text (data, len, &offset, &decoded.terminal_reason)
       || len - offset < 44)
     goto invalid;
   decoded.expected_generation = get_u64 (data + offset);

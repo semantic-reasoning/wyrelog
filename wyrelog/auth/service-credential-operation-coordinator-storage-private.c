@@ -2,6 +2,7 @@
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 
 #include "auth/service-credential-operation-coordinator-journal-private.h"
+#include <sodium.h>
 #ifdef G_OS_WIN32
 #include "auth/service-credential-operation-storage-windows-private.h"
 #endif
@@ -47,6 +48,10 @@ same_immutable_identity (const WylServiceCredentialOperationRecord *existing,
       prepared->actor_subject_id)
       && same_nullable_text (existing->old_credential_id,
       prepared->old_credential_id)
+      && same_nullable_text (existing->escrow_id, prepared->escrow_id)
+      && sodium_memcmp (existing->escrow_binding_digest,
+      prepared->escrow_binding_digest,
+      sizeof existing->escrow_binding_digest) == 0
       && existing->expected_generation == prepared->expected_generation
       && existing->expires_at_us == prepared->expires_at_us;
 }

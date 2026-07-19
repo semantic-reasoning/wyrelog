@@ -7,9 +7,10 @@
 
 G_BEGIN_DECLS;
 
-#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 4u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 5u
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES (64u * 1024u)
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_TEXT 4096u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES 32u
 
 typedef enum
 {
@@ -24,7 +25,8 @@ typedef enum
   WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED = 3,
   WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED = 4,
   WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED = 5,
-  WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL = 6,
+  WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED = 6,
+  WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL = 7,
 } WylServiceCredentialOperationState;
 
 typedef struct
@@ -46,7 +48,14 @@ typedef struct
   gchar *stage_identity;
   gchar *old_credential_id;
   gchar *successor_credential_id;
+  /* Opaque provider-sealed escrow identity; journal bytes never carry its
+   * ciphertext or the credential secret. */
+  gchar *escrow_id;
+    guint8
+      escrow_binding_digest
+      [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES];
   gchar *publication_receipt_id;
+  gchar *terminal_reason;
   /* Immutable request intent.  It never describes the successor. */
   guint64 expected_generation;
   /* Actual committed successor generation; zero before server commit. */
