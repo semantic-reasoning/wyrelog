@@ -630,6 +630,68 @@ test_windows_child_replace_fixture (void)
 }
 
 static void
+test_windows_replace_ignores_stale_temp_after_reopen (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-stale-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationChildName stale =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_autoptr (GBytes) residue = g_bytes_new_static ("stale", 5);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      name.component, -1);
+  g_autofree gchar *stale_component = g_strdup_printf (".replace-%s",
+      digest);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      (stale_component, &stale), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &stale, residue),
+      ==, WYRELOG_E_OK);
+
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name, two), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GBytes) roundtrip = NULL;
+  gsize size = 0;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &roundtrip),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpmem (g_bytes_get_data (roundtrip, &size), size, "two", 3);
+  g_assert_cmpint (wyl_win_child_delete (&storage, &anchor, &stale), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_delete (&storage, &anchor, &name), ==,
+      WYRELOG_E_OK);
+
+  wyl_service_credential_operation_child_name_clear (&stale);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+
+static void
 test_windows_replace_survives_root_substitution (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -915,6 +977,8 @@ main (int argc, char **argv)
       test_windows_directory_flush_failures);
   g_test_add_func ("/operation-storage/windows/child-replace-fixture",
       test_windows_child_replace_fixture);
+  g_test_add_func ("/operation-storage/windows/replace-stale-temp-reopen",
+      test_windows_replace_ignores_stale_temp_after_reopen);
   g_test_add_func ("/operation-storage/windows/replace-root-substitution",
       test_windows_replace_survives_root_substitution);
   g_test_add_func

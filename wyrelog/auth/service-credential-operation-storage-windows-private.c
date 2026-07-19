@@ -376,6 +376,7 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
   gsize size = 0;
   const guint8 *data;
   g_autofree gchar *digest = NULL;
+  g_autofree gchar *nonce = NULL;
   gboolean renamed = FALSE;
   WylServiceCredentialOperationChildName temporary =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
@@ -390,7 +391,9 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
     return WYRELOG_E_POLICY;
   digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
       name->component, -1);
-  temporary.component = g_strdup_printf (".replace-%s", digest);
+  nonce = g_uuid_string_random ();
+  temporary.component = digest != NULL && nonce != NULL
+      ? g_strdup_printf (".replace-%s-%s", digest, nonce) : NULL;
   if (temporary.component == NULL)
     return WYRELOG_E_NOMEM;
   if (!wyl_win_nt_create_relative (storage->root_handle, &temporary,
