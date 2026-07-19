@@ -170,9 +170,11 @@ wyl_win_rename_relative (HANDLE handle, HANDLE root,
   memcpy (info->FileName, wide, name_bytes);
   status = nt_set (handle, &iosb, info, (ULONG) total,
       WYL_NT_FILE_RENAME_INFO_CLASS);
-  if (status < 0)
-    return status == (NTSTATUS) 0xC0000022L || status == (NTSTATUS) 0xC0000035L
-        || status == (NTSTATUS) 0xC00000D4L ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  if (status < 0) {
+    if (status == (NTSTATUS) 0xC00000D4L)       /* STATUS_NOT_SAME_DEVICE */
+      return WYRELOG_E_POLICY;
+    return wyl_win_nt_create_error (status);
+  }
   return WYRELOG_E_OK;
 }
 
@@ -406,7 +408,9 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationChildName *name, GBytes *bytes)
 {
   HANDLE handle = INVALID_HANDLE_VALUE;
+  HANDLE destination = INVALID_HANDLE_VALUE;
   WylWinChildIdentity identity = { 0 };
+  WylWinChildIdentity destination_identity = { 0 };
   wyrelog_error_t error = WYRELOG_E_INVALID;
   wyrelog_error_t rc = WYRELOG_E_OK;
   gsize size = 0;
@@ -417,6 +421,7 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
   WylServiceCredentialOperationChildName temporary =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
   BY_HANDLE_FILE_INFORMATION info;
+  BY_HANDLE_FILE_INFORMATION destination_info;
   if (storage == NULL || anchor == NULL || name == NULL || bytes == NULL
       || name->component == NULL
       || !wyl_service_credential_operation_storage_anchor_matches (storage,
@@ -460,11 +465,39 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
           || !wyl_service_credential_operation_storage_anchor_matches (storage,
               anchor)))
     rc = WYRELOG_E_POLICY;
+  /* Reject an existing final reparse point through the same handle-relative
+   * opener used by read/delete/lock.  Keep a validated ordinary destination
+   * pinned until the atomic rename completes.  A missing destination is the
+   * normal first-write case. */
+  if (rc == WYRELOG_E_OK
+      && !wyl_win_nt_create_relative (storage->root_handle, name,
+          FILE_READ_ATTRIBUTES, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ
+          | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &destination,
+          &destination_identity, &error)
+      && error != WYRELOG_E_NOT_FOUND)
+    rc = error;
+  if (rc == WYRELOG_E_OK && destination != INVALID_HANDLE_VALUE
+      && (!GetFileInformationByHandle (destination, &destination_info)
+          || (destination_info.dwFileAttributes
+              & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+          || destination_info.dwVolumeSerialNumber
+              != destination_identity.volume_serial
+          || destination_info.nFileIndexHigh
+              != destination_identity.file_index_high
+          || destination_info.nFileIndexLow
+              != destination_identity.file_index_low))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
     rc = wyl_win_rename_relative (handle, storage->root_handle, name);
     if (rc == WYRELOG_E_OK)
       renamed = TRUE;
   }
+  if (destination != INVALID_HANDLE_VALUE)
+    CloseHandle (destination);
   if (renamed) {
     rc = wyl_win_flush_directory (storage->root_handle);
     if (!wyl_service_credential_operation_storage_anchor_matches (storage,

@@ -915,6 +915,7 @@ test_windows_final_reparse_is_policy (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) replacement = g_bytes_new_static ("replacement", 11);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
           &storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
@@ -939,6 +940,16 @@ test_windows_final_reparse_is_policy (void)
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_win_child_delete (&storage, &anchor, &name), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name,
+          replacement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_win_child_replace (&storage, &anchor, &name,
+          replacement), ==, WYRELOG_E_POLICY);
+  {
+    g_autoptr (GDir) entries = g_dir_open (root, 0, NULL);
+    const gchar *entry;
+    while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
+      g_assert_false (g_str_has_prefix (entry, ".replace-"));
+  }
   g_assert_cmpint (g_rmdir (record), ==, 0);
 
   g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
