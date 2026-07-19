@@ -125,7 +125,7 @@ wyl_win_rename_relative (HANDLE handle, HANDLE root,
   if (wide == NULL || units <= 0
       || (gsize) units > G_MAXUSHORT / sizeof (gunichar2))
     return WYRELOG_E_POLICY;
-  name_bytes = (gsize) units *sizeof (gunichar2);
+  name_bytes = (gsize) units * sizeof (gunichar2);
   total = offsetof (WylFileRenameInfo, FileName) + name_bytes;
   info = g_malloc0 (total);
   if (info == NULL)
