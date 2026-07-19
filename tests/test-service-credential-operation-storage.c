@@ -877,6 +877,73 @@ test_windows_replace_survives_ancestor_junction_substitution (void)
 }
 
 static void
+test_windows_final_reparse_is_policy (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-reparse-test-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  g_autofree gchar *decoy = g_build_filename (base, "decoy", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  if (!require_windows_junction_capability (base)) {
+    wyl_service_credential_operation_root_anchor_clear (&anchor);
+    wyl_service_credential_operation_storage_clear (&storage);
+    g_assert_cmpint (g_rmdir (root), ==, 0);
+    g_assert_cmpint (g_rmdir (base), ==, 0);
+    return;
+  }
+  g_assert_cmpint (g_mkdir (decoy, 0700), ==, 0);
+  g_autofree gchar *marker = g_build_filename (decoy, "marker", NULL);
+  g_assert_true (g_file_set_contents (marker, "safe", 4, NULL));
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (root, "record", NULL);
+  g_assert_cmpint (create_windows_directory_junction (record, decoy), ==,
+      WYL_TEST_JUNCTION_CREATED);
+  g_autoptr (GBytes) bytes = NULL;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &bytes), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_win_child_delete (&storage, &anchor, &name), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (record), ==, 0);
+
+  g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      name.component, -1);
+  g_autofree gchar *lock_component = g_strdup_printf (".lock-%s", digest);
+  g_autofree gchar *lock_path = g_build_filename (root, lock_component, NULL);
+  g_assert_cmpint (create_windows_directory_junction (lock_path, decoy), ==,
+      WYL_TEST_JUNCTION_CREATED);
+  HANDLE lock = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_win_child_lock (&storage, &anchor, &name, &lock), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (lock == INVALID_HANDLE_VALUE);
+  g_assert_cmpint (g_rmdir (lock_path), ==, 0);
+
+  g_autofree gchar *marker_contents = NULL;
+  gsize marker_size = 0;
+  g_assert_true (g_file_get_contents (marker, &marker_contents, &marker_size,
+          NULL));
+  g_assert_cmpmem (marker_contents, marker_size, "safe", 4);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_remove (marker), ==, 0);
+  g_assert_cmpint (g_rmdir (decoy), ==, 0);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+
+static void
 test_windows_child_delete_fixture (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -1027,6 +1094,8 @@ main (int argc, char **argv)
   g_test_add_func
       ("/operation-storage/windows/replace-ancestor-junction-substitution",
       test_windows_replace_survives_ancestor_junction_substitution);
+  g_test_add_func ("/operation-storage/windows/final-reparse-policy",
+      test_windows_final_reparse_is_policy);
   g_test_add_func ("/operation-storage/windows/child-delete-fixture",
       test_windows_child_delete_fixture);
   g_test_add_func ("/operation-storage/windows/child-lock-fixture",
