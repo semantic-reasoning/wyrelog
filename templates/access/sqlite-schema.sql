@@ -806,6 +806,105 @@ CREATE TABLE IF NOT EXISTS service_credential_operation_fences (
     created_at_us         INTEGER NOT NULL CHECK (created_at_us > 0)
 );
 
+CREATE TABLE IF NOT EXISTS service_credential_handoff_dispositions (
+    disposition_id TEXT NOT NULL PRIMARY KEY CHECK (typeof(disposition_id) = 'text'
+        AND length(disposition_id) = 36 AND instr(disposition_id, char(0)) = 0),
+    semantic_key BLOB NOT NULL UNIQUE CHECK (typeof(semantic_key) = 'blob'
+        AND length(semantic_key) = 32),
+    original_request_id TEXT NOT NULL CHECK (typeof(original_request_id) = 'text'
+        AND length(original_request_id) = 27 AND instr(original_request_id, char(0)) = 0),
+    escrow_id TEXT NOT NULL CHECK (typeof(escrow_id) = 'text'
+        AND length(escrow_id) = 36 AND instr(escrow_id, char(0)) = 0),
+    binding_digest BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob'
+        AND length(binding_digest) = 32),
+    successor_credential_id TEXT CHECK (successor_credential_id IS NULL OR
+        (typeof(successor_credential_id) = 'text'
+        AND length(successor_credential_id) = 31
+        AND substr(successor_credential_id, 1, 4) = 'wlc_'
+        AND instr(successor_credential_id, char(0)) = 0)),
+    successor_issuance_generation INTEGER CHECK (successor_issuance_generation IS NULL
+        OR successor_issuance_generation >= 1),
+    actor_subject_id TEXT NOT NULL CHECK (typeof(actor_subject_id) = 'text'
+        AND length(actor_subject_id) BETWEEN 1 AND 128
+        AND instr(actor_subject_id, char(0)) = 0),
+    reason TEXT NOT NULL CHECK (reason IN ('not_committed', 'operation_expired',
+        'operation_cancelled', 'successor_expired', 'successor_revoked', 'delivered')),
+    outcome TEXT NOT NULL CHECK (outcome IN ('terminal_not_committed', 'attention_required',
+        'operator_action_required', 'escrow_deleted')),
+    audit_id TEXT NOT NULL UNIQUE CHECK (typeof(audit_id) = 'text'
+        AND length(audit_id) = 36 AND instr(audit_id, char(0)) = 0),
+    created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),
+    CHECK ((reason = 'not_committed' AND outcome = 'terminal_not_committed'
+            AND successor_credential_id IS NULL
+            AND successor_issuance_generation IS NULL)
+        OR (reason <> 'not_committed' AND binding_digest <> zeroblob(32)
+            AND successor_credential_id IS NOT NULL
+            AND successor_issuance_generation IS NOT NULL AND (
+        (reason IN ('operation_expired', 'operation_cancelled')
+            AND outcome = 'attention_required')
+        OR (reason IN ('successor_expired', 'successor_revoked')
+            AND outcome = 'operator_action_required')
+        OR (reason = 'delivered' AND outcome = 'escrow_deleted'))))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_disposition_exact
+    ON service_credential_handoff_dispositions (
+        original_request_id, reason, outcome, escrow_id, binding_digest,
+        coalesce(successor_credential_id, ''),
+        coalesce(successor_issuance_generation, 0));
+
+CREATE TABLE IF NOT EXISTS service_credential_handoff_remediation_actions (
+    remediation_request_id TEXT NOT NULL PRIMARY KEY CHECK (
+        typeof(remediation_request_id) = 'text' AND length(remediation_request_id) = 27
+        AND instr(remediation_request_id, char(0)) = 0),
+    request_fingerprint BLOB NOT NULL CHECK (typeof(request_fingerprint) = 'blob'
+        AND length(request_fingerprint) = 32),
+    decision_request_id TEXT NOT NULL UNIQUE CHECK (typeof(decision_request_id) = 'text'
+        AND length(decision_request_id) = 27
+        AND instr(decision_request_id, char(0)) = 0),
+    original_request_id TEXT NOT NULL CHECK (typeof(original_request_id) = 'text'
+        AND length(original_request_id) = 27 AND instr(original_request_id, char(0)) = 0),
+    original_actor_subject_id TEXT NOT NULL CHECK (typeof(original_actor_subject_id) = 'text'
+        AND length(original_actor_subject_id) BETWEEN 1 AND 128
+        AND instr(original_actor_subject_id, char(0)) = 0),
+    current_actor_subject_id TEXT NOT NULL CHECK (typeof(current_actor_subject_id) = 'text'
+        AND length(current_actor_subject_id) BETWEEN 1 AND 128
+        AND instr(current_actor_subject_id, char(0)) = 0),
+    escrow_id TEXT NOT NULL CHECK (typeof(escrow_id) = 'text'
+        AND length(escrow_id) = 36 AND instr(escrow_id, char(0)) = 0),
+    binding_digest BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob'
+        AND length(binding_digest) = 32 AND binding_digest <> zeroblob(32)),
+    successor_credential_id TEXT NOT NULL CHECK (typeof(successor_credential_id) = 'text'
+        AND length(successor_credential_id) = 31
+        AND substr(successor_credential_id, 1, 4) = 'wlc_'
+        AND instr(successor_credential_id, char(0)) = 0),
+    successor_issuance_generation INTEGER NOT NULL CHECK (successor_issuance_generation >= 1),
+    action TEXT NOT NULL CHECK (action IN ('resume', 'revoke_and_wipe')),
+    confirmation_version INTEGER NOT NULL CHECK (confirmation_version IN (0, 1)),
+    confirmed INTEGER NOT NULL CHECK (confirmed IN (0, 1)
+        AND typeof(confirmed) = 'integer'),
+    outcome TEXT NOT NULL CHECK (outcome IN ('recorded', 'revoked_and_wiped',
+        'expired_and_wiped', 'already_revoked_and_wiped')),
+    audit_id TEXT NOT NULL UNIQUE CHECK (typeof(audit_id) = 'text'
+        AND length(audit_id) = 36 AND instr(audit_id, char(0)) = 0),
+    created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),
+    CHECK (original_request_id <> remediation_request_id
+        AND original_request_id <> decision_request_id
+        AND remediation_request_id <> decision_request_id),
+    CHECK (original_actor_subject_id <> current_actor_subject_id),
+    CHECK ((action = 'resume' AND confirmation_version = 0 AND confirmed = 0
+            AND outcome = 'recorded')
+        OR (action = 'revoke_and_wipe' AND confirmation_version = 1 AND confirmed = 1
+            AND outcome IN ('revoked_and_wiped',
+            'expired_and_wiped', 'already_revoked_and_wiped')))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_completed_revoke
+    ON service_credential_handoff_remediation_actions (
+        original_request_id, escrow_id, binding_digest, successor_credential_id,
+        successor_issuance_generation, action)
+    WHERE action = 'revoke_and_wipe';
+
 CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_update
 BEFORE UPDATE ON service_exchange_audit_intentions
 BEGIN
@@ -890,6 +989,50 @@ CREATE TRIGGER IF NOT EXISTS trg_service_credential_operation_fences_no_delete
 BEFORE DELETE ON service_credential_operation_fences
 BEGIN
     SELECT RAISE(ABORT, 'service credential operation fences are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_dispositions_no_update
+BEFORE UPDATE ON service_credential_handoff_dispositions
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff dispositions are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_dispositions_no_delete
+BEFORE DELETE ON service_credential_handoff_dispositions
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff dispositions are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_remediation_no_update
+BEFORE UPDATE ON service_credential_handoff_remediation_actions
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff remediation actions are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_remediation_no_delete
+BEFORE DELETE ON service_credential_handoff_remediation_actions
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff remediation actions are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_remediation_no_legacy_collision
+BEFORE INSERT ON service_credential_handoff_remediation_actions
+WHEN EXISTS (
+    SELECT 1 FROM service_domain_requests
+    WHERE request_id = NEW.remediation_request_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff remediation request collides with service domain request');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_remediation_collision
+BEFORE INSERT ON service_domain_requests
+WHEN EXISTS (
+    SELECT 1 FROM service_credential_handoff_remediation_actions
+    WHERE remediation_request_id = NEW.request_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'service domain request collides with service handoff remediation request');
 END;
 
 -- ---------------------------------------------------------------------------

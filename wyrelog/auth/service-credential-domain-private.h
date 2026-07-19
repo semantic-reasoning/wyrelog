@@ -126,6 +126,109 @@ typedef struct
   gpointer invalidation_data;
 } wyl_service_credential_revoke_runtime_t;
 
+typedef struct
+{
+  const gchar *original_request_id;
+  const wyl_id_t *escrow_id;
+  guint8 binding_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  const gchar *successor_credential_id;
+  guint64 successor_issuance_generation;
+  const gchar *original_actor_subject_id;
+} wyl_service_credential_handoff_exact_tuple_t;
+
+typedef enum
+{
+  WYL_SERVICE_HANDOFF_FENCE_ISSUE = 1,
+  WYL_SERVICE_HANDOFF_FENCE_ROTATE = 2,
+} wyl_service_credential_handoff_fence_operation_t;
+
+typedef struct
+{
+  wyl_service_credential_handoff_fence_operation_t operation;
+  const gchar *target_a;
+  const gchar *target_b;
+} wyl_service_credential_handoff_no_commit_evidence_t;
+
+typedef enum
+{
+  WYL_SERVICE_HANDOFF_DISPOSITION_NOT_COMMITTED = 1,
+  WYL_SERVICE_HANDOFF_DISPOSITION_OPERATION_EXPIRED = 2,
+  WYL_SERVICE_HANDOFF_DISPOSITION_OPERATION_CANCELLED = 3,
+  WYL_SERVICE_HANDOFF_DISPOSITION_SUCCESSOR_EXPIRED = 4,
+  WYL_SERVICE_HANDOFF_DISPOSITION_SUCCESSOR_REVOKED = 5,
+  WYL_SERVICE_HANDOFF_DISPOSITION_DELIVERED = 6,
+} wyl_service_credential_handoff_disposition_reason_t;
+
+typedef enum
+{
+  WYL_SERVICE_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED = 1,
+  WYL_SERVICE_HANDOFF_OUTCOME_ATTENTION_REQUIRED = 2,
+  WYL_SERVICE_HANDOFF_OUTCOME_OPERATOR_ACTION_REQUIRED = 3,
+  WYL_SERVICE_HANDOFF_OUTCOME_ESCROW_DELETED = 4,
+} wyl_service_credential_handoff_disposition_outcome_t;
+
+typedef struct
+{
+  const gchar *disposition_id;
+  const gchar *audit_id;
+  wyl_service_credential_handoff_exact_tuple_t tuple;
+  const gchar *actor_subject_id;
+  wyl_service_credential_handoff_disposition_reason_t reason;
+  wyl_service_credential_handoff_disposition_outcome_t outcome;
+  const wyl_service_credential_handoff_no_commit_evidence_t
+      * no_commit_evidence;
+} wyl_service_credential_handoff_disposition_input_t;
+
+typedef struct
+{
+  gboolean replayed;
+  gchar *disposition_id;
+  gchar *audit_id;
+} wyl_service_credential_handoff_disposition_result_t;
+
+typedef enum
+{
+  WYL_SERVICE_HANDOFF_REMEDIATION_RESUME = 1,
+  WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE = 2,
+} wyl_service_credential_handoff_remediation_action_t;
+
+typedef enum
+{
+  WYL_SERVICE_HANDOFF_REMEDIATION_RECORDED = 1,
+  WYL_SERVICE_HANDOFF_REMEDIATION_REVOKED_AND_WIPED = 2,
+  WYL_SERVICE_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED = 3,
+  WYL_SERVICE_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED = 4,
+} wyl_service_credential_handoff_remediation_outcome_t;
+
+typedef struct
+{
+  const gchar *remediation_request_id;
+  const gchar *decision_request_id;
+  const gchar *current_actor_subject_id;
+  const gchar *audit_id;
+  wyl_service_credential_handoff_exact_tuple_t tuple;
+  wyl_service_credential_handoff_remediation_action_t action;
+  guint32 confirmation_version;
+  gboolean confirmed;
+} wyl_service_credential_handoff_remediation_input_t;
+
+typedef struct
+{
+  gboolean replayed;
+  gboolean revoked_now;
+  wyl_service_credential_handoff_remediation_outcome_t outcome;
+  guint64 invalidation_generation;
+  gchar *audit_id;
+} wyl_service_credential_handoff_remediation_result_t;
+
+typedef struct
+{
+  const wyl_service_credential_mutation_authorization_t *authorization;
+    wyrelog_error_t (*invalidate_credential) (gpointer data,
+      const gchar * credential_id, guint64 generation);
+  gpointer invalidation_data;
+} wyl_service_credential_handoff_remediation_runtime_t;
+
 typedef wyrelog_error_t (*wyl_service_principal_cb) (const
     wyl_service_principal_t * principal, gpointer user_data);
 typedef wyrelog_error_t (*wyl_service_credential_cb) (const
@@ -222,6 +325,23 @@ wyrelog_error_t wyl_service_credential_revoke_with_runtime
     const gchar * actor_subject_id, const gchar * request_id,
     const wyl_service_credential_revoke_runtime_t * runtime,
     wyl_service_credential_t * out);
+void wyl_service_credential_handoff_disposition_result_clear
+    (wyl_service_credential_handoff_disposition_result_t * result);
+void wyl_service_credential_handoff_remediation_result_clear
+    (wyl_service_credential_handoff_remediation_result_t * result);
+wyrelog_error_t wyl_service_credential_handoff_record_disposition
+    (WylHandle * handle,
+    const wyl_service_credential_handoff_disposition_input_t * input,
+    wyl_service_credential_handoff_disposition_result_t * out_result);
+wyrelog_error_t wyl_service_credential_handoff_record_not_committed
+    (WylHandle * handle,
+    const wyl_service_credential_handoff_disposition_input_t * input,
+    wyl_service_credential_handoff_disposition_result_t * out_result);
+wyrelog_error_t wyl_service_credential_handoff_remediate_exact
+    (WylHandle * handle,
+    const wyl_service_credential_handoff_remediation_input_t * input,
+    const wyl_service_credential_handoff_remediation_runtime_t * runtime,
+    wyl_service_credential_handoff_remediation_result_t * out_result);
 /* Rotation derives subject and tenant from old_credential_id and returns the
  * successor secret exactly once, only after the local savepoint is released.
  *

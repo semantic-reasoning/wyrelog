@@ -638,6 +638,194 @@ wyl_service_credential_revoke (WylHandle *handle, const gchar *credential_id,
       actor_subject_id, request_id, NULL, out);
 }
 
+void wyl_service_credential_handoff_disposition_result_clear
+    (wyl_service_credential_handoff_disposition_result_t * result)
+{
+  if (result == NULL)
+    return;
+  g_clear_pointer (&result->disposition_id, g_free);
+  g_clear_pointer (&result->audit_id, g_free);
+  memset (result, 0, sizeof *result);
+}
+
+void wyl_service_credential_handoff_remediation_result_clear
+    (wyl_service_credential_handoff_remediation_result_t * result)
+{
+  if (result == NULL)
+    return;
+  g_clear_pointer (&result->audit_id, g_free);
+  memset (result, 0, sizeof *result);
+}
+
+static void
+    service_handoff_translate_exact_tuple
+    (const wyl_service_credential_handoff_exact_tuple_t * source,
+    WylPolicyServiceHandoffExactTuple * target)
+{
+  memset (target, 0, sizeof *target);
+  target->original_request_id = source->original_request_id;
+  target->escrow_id = source->escrow_id;
+  memcpy (target->binding_digest, source->binding_digest,
+      sizeof target->binding_digest);
+  target->successor_credential_id = source->successor_credential_id;
+  target->successor_issuance_generation = source->successor_issuance_generation;
+  target->original_actor_subject_id = source->original_actor_subject_id;
+}
+
+static void
+    service_handoff_translate_disposition
+    (const wyl_service_credential_handoff_disposition_input_t * source,
+    WylPolicyServiceHandoffDispositionInput * target)
+{
+  memset (target, 0, sizeof *target);
+  target->disposition_id = source->disposition_id;
+  target->audit_id = source->audit_id;
+  service_handoff_translate_exact_tuple (&source->tuple, &target->tuple);
+  target->actor_subject_id = source->actor_subject_id;
+  target->reason = (WylPolicyServiceHandoffDispositionReason) source->reason;
+  target->outcome = (WylPolicyServiceHandoffDispositionOutcome) source->outcome;
+}
+
+static wyrelog_error_t
+service_handoff_run_disposition (WylHandle *handle,
+    const wyl_service_credential_handoff_disposition_input_t *input,
+    wyl_service_credential_handoff_disposition_result_t *out_result)
+{
+  if (out_result != NULL)
+    wyl_service_credential_handoff_disposition_result_clear (out_result);
+  if (handle == NULL || input == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  WylPolicyServiceHandoffDispositionInput stored_input;
+  WylPolicyServiceHandoffNoCommitEvidence no_commit_evidence = { 0 };
+  WylPolicyServiceHandoffDispositionResult stored = { 0 };
+  service_handoff_translate_disposition (input, &stored_input);
+  if (input->no_commit_evidence != NULL) {
+    no_commit_evidence.operation = (WylPolicyServiceHandoffFenceOperation)
+        input->no_commit_evidence->operation;
+    no_commit_evidence.target_a = input->no_commit_evidence->target_a;
+    no_commit_evidence.target_b = input->no_commit_evidence->target_b;
+    stored_input.no_commit_evidence = &no_commit_evidence;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_record_service_handoff_disposition_core
+        (mutation.transaction, mutation.store, &stored_input, &stored);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK) {
+    out_result->replayed = stored.replayed;
+    out_result->disposition_id = g_steal_pointer (&stored.disposition_id);
+    out_result->audit_id = g_steal_pointer (&stored.audit_id);
+  }
+  wyl_policy_service_handoff_disposition_result_clear (&stored);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_handoff_record_disposition (WylHandle *handle,
+    const wyl_service_credential_handoff_disposition_input_t *input,
+    wyl_service_credential_handoff_disposition_result_t *out_result)
+{
+  return service_handoff_run_disposition (handle, input, out_result);
+}
+
+wyrelog_error_t
+wyl_service_credential_handoff_record_not_committed (WylHandle *handle,
+    const wyl_service_credential_handoff_disposition_input_t *input,
+    wyl_service_credential_handoff_disposition_result_t *out_result)
+{
+  if (out_result != NULL)
+    wyl_service_credential_handoff_disposition_result_clear (out_result);
+  if (handle == NULL || input == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_service_credential_handoff_disposition_input_t exact = *input;
+  exact.reason = WYL_SERVICE_HANDOFF_DISPOSITION_NOT_COMMITTED;
+  exact.outcome = WYL_SERVICE_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  WylPolicyServiceHandoffDispositionInput stored_input;
+  WylPolicyServiceHandoffNoCommitEvidence evidence = { 0 };
+  WylPolicyServiceHandoffDispositionResult stored = { 0 };
+  service_handoff_translate_disposition (&exact, &stored_input);
+  if (exact.no_commit_evidence != NULL) {
+    evidence.operation = (WylPolicyServiceHandoffFenceOperation)
+        exact.no_commit_evidence->operation;
+    evidence.target_a = exact.no_commit_evidence->target_a;
+    evidence.target_b = exact.no_commit_evidence->target_b;
+    stored_input.no_commit_evidence = &evidence;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_record_service_handoff_not_committed_core
+        (mutation.transaction, mutation.store, &stored_input, &stored);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK) {
+    out_result->replayed = stored.replayed;
+    out_result->disposition_id = g_steal_pointer (&stored.disposition_id);
+    out_result->audit_id = g_steal_pointer (&stored.audit_id);
+  }
+  wyl_policy_service_handoff_disposition_result_clear (&stored);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_handoff_remediate_exact (WylHandle *handle,
+    const wyl_service_credential_handoff_remediation_input_t *input,
+    const wyl_service_credential_handoff_remediation_runtime_t *runtime,
+    wyl_service_credential_handoff_remediation_result_t *out_result)
+{
+  if (out_result != NULL)
+    wyl_service_credential_handoff_remediation_result_clear (out_result);
+  if (handle == NULL || input == NULL || runtime == NULL
+      || runtime->authorization == NULL
+      || runtime->authorization->authorize == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (rc == WYRELOG_E_OK) {
+    mutation.invalidate_credential = runtime->invalidate_credential;
+    mutation.invalidation_data = runtime->invalidation_data;
+  }
+  WylPolicyServiceHandoffRemediationInput stored_input = {
+    .remediation_request_id = input->remediation_request_id,
+    .decision_request_id = input->decision_request_id,
+    .current_actor_subject_id = input->current_actor_subject_id,
+    .audit_id = input->audit_id,
+    .action = (WylPolicyServiceHandoffRemediationAction) input->action,
+    .confirmation_version = input->confirmation_version,
+    .confirmed = input->confirmed,
+  };
+  service_handoff_translate_exact_tuple (&input->tuple, &stored_input.tuple);
+  WylPolicyServiceHandoffRemediationResult stored = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation, runtime->authorization,
+        input->current_actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_remediate_service_handoff_exact_core
+        (mutation.transaction, mutation.store, &stored_input, &stored);
+  if (rc == WYRELOG_E_OK && mutation.invalidate_credential != NULL
+      && stored.invalidation_generation > 0) {
+    mutation.invalidation_credential_id = input->tuple.successor_credential_id;
+    mutation.invalidation_generation = stored.invalidation_generation;
+  }
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK) {
+    out_result->replayed = stored.replayed;
+    out_result->revoked_now = stored.revoked_now;
+    out_result->outcome =
+        (wyl_service_credential_handoff_remediation_outcome_t) stored.outcome;
+    out_result->invalidation_generation = stored.invalidation_generation;
+    out_result->audit_id = g_steal_pointer (&stored.audit_id);
+  }
+  wyl_policy_service_handoff_remediation_result_clear (&stored);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     const gchar *old_credential_id, const gchar *actor_subject_id,
