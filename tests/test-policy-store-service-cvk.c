@@ -43,6 +43,7 @@ typedef struct
   gboolean fail_probe;
   gboolean fail_seal;
   gboolean fail_unseal;
+  guint fail_unseal_at;
   gssize unseal_written_override;
   SharedTrace *trace;
 } TestProvider;
@@ -112,7 +113,8 @@ provider_unseal (gpointer data, const wyl_sealed_blob_t *blob, guint8 *out,
 {
   TestProvider *p = data;
   p->unseals++;
-  if (p->fail_unseal)
+  if (p->fail_unseal || (p->fail_unseal_at != 0
+          && p->unseals == p->fail_unseal_at))
     return WYRELOG_E_CRYPTO;
   if (capacity < blob->len)
     return WYRELOG_E_INVALID;
@@ -1188,6 +1190,134 @@ create_golden_store (const gchar *path, guint8 salt[16], guint8 verifier[32],
 }
 
 static void
+insert_golden_handoff_escrow (const gchar *path, wyl_id_t *out_escrow_id,
+    guint8 out_target[32], guint8 out_binding[32], guint8 out_secret[32])
+{
+  TestProvider provider = { 0 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &provider, &runtime, &store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (out_escrow_id), ==, WYRELOG_E_OK);
+  for (guint i = 0; i < 32; i++) {
+    out_target[i] = (guint8) (0x30 + i);
+    out_secret[i] = (guint8) (0x70 + i);
+  }
+  handoff_binding (out_escrow_id, out_target, out_binding);
+  wyl_policy_service_handoff_escrow_input_t input = {
+    .escrow_id = out_escrow_id,.operation = "issue",.request_id =
+        "escrow-request-1",
+    .actor_subject_id = "operator",.target_digest = out_target,
+    .credential_id = FIXTURE_ID,.credential_generation = 1,
+    .deadline_at_us = 999999999,.binding_digest = out_binding,
+    .secret = out_secret,.secret_len = 32,
+  };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_insert (store,
+          &input), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (store);
+}
+
+static void
+test_rotation_rewraps_handoff_escrows (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-escrow-rewrap-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  guint8 salt[16], verifier[32], cvk[32], target[32], binding[32], secret[32];
+  wyl_id_t escrow_id;
+  create_golden_store (path, salt, verifier, cvk);
+  insert_golden_handoff_escrow (path, &escrow_id, target, binding, secret);
+
+  TestProvider old_provider = { 0 };
+  TestProvider new_provider = {.seed = 0x20 };
+  TestRuntime runtime = { 0 };
+  g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
+          NULL), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (runtime.allocs, ==, runtime.frees);
+  g_assert_cmpuint (runtime.locks, ==, runtime.unlocks);
+  g_assert_cmpuint (runtime.wipes, >=, runtime.frees);
+
+  TestProvider reopened = {.seed = 0x20 };
+  TestRuntime reopened_runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
+      WYRELOG_E_OK);
+  wyl_policy_service_handoff_escrow_info_t info = { 0 };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &escrow_id, &info), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (info.operation, ==, "issue");
+  g_assert_cmpstr (info.request_id, ==, "escrow-request-1");
+  g_assert_cmpmem (info.target_digest, sizeof info.target_digest, target,
+      sizeof target);
+  g_assert_cmpmem (info.binding_digest, sizeof info.binding_digest, binding,
+      sizeof binding);
+  wyl_policy_service_handoff_secret_t *opened = NULL;
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
+          &info, &opened), ==, WYRELOG_E_OK);
+  gsize opened_len = 0;
+  g_assert_cmpmem (wyl_policy_service_handoff_secret_peek (opened, &opened_len),
+      opened_len, secret, sizeof secret);
+  wyl_policy_service_handoff_secret_clear (&opened);
+  wyl_policy_service_handoff_escrow_info_clear (&info);
+  wyl_policy_store_close (store);
+  sodium_memzero (secret, sizeof secret);
+  g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_rotation_rewrap_failure_preserves_old (void)
+{
+  for (guint scenario = 0; scenario < 2; scenario++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-escrow-rewrap-fail-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32], target[32], binding[32], secret[32];
+    wyl_id_t escrow_id;
+    create_golden_store (path, salt, verifier, cvk);
+    insert_golden_handoff_escrow (path, &escrow_id, target, binding, secret);
+    g_autofree gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+
+    TestProvider old_provider = {.fail_unseal_at = scenario == 0 ? 2 : 0 };
+    TestProvider new_provider = {.seed = 0x20,.fail_seal = scenario == 1 };
+    TestRuntime runtime = { 0 };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &runtime, NULL), ==, WYRELOG_E_CRYPTO);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+
+    TestProvider reopened = { 0 };
+    TestRuntime reopened_runtime = { 0 };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store),
+        ==, WYRELOG_E_OK);
+    wyl_policy_service_handoff_escrow_info_t info = { 0 };
+    g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+            &escrow_id, &info), ==, WYRELOG_E_OK);
+    wyl_policy_service_handoff_secret_t *opened = NULL;
+    g_assert_cmpint (wyl_policy_store_service_handoff_escrow_unseal (store,
+            &info, &opened), ==, WYRELOG_E_OK);
+    wyl_policy_service_handoff_secret_clear (&opened);
+    wyl_policy_service_handoff_escrow_info_clear (&info);
+    wyl_policy_store_close (store);
+    sodium_memzero (secret, sizeof secret);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+}
+
+static void
 test_rotation_preserves_golden_credential (void)
 {
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-XXXXXX", NULL);
@@ -2037,6 +2167,10 @@ main (int argc, char **argv)
       test_binding_and_unseal_boundaries);
   g_test_add_func ("/policy-store-service-cvk/rotation-golden",
       test_rotation_preserves_golden_credential);
+  g_test_add_func ("/policy-store-service-cvk/rotation-rewrap-handoff-escrows",
+      test_rotation_rewraps_handoff_escrows);
+  g_test_add_func ("/policy-store-service-cvk/rotation-rewrap-failure",
+      test_rotation_rewrap_failure_preserves_old);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-codec",
       test_rotation_intent_codec);
   g_test_add_func ("/policy-store-service-cvk/rotation-intent-auth-key",
