@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Related issues: #475, #506, #508
+Related issues: #475, #506, #508, #515
 
 ## Context
 
@@ -74,7 +74,8 @@ escrow reference and operation binding; it does not regenerate a credential.
 | Durable state | Meaning | Allowed next action |
 | --- | --- | --- |
 | `PREPARED` | Request intent is durable; no credential or escrow exists. | Expiry/cancel blocks only authoritative admission; no-commit evidence may terminalize without escrow. |
-| `SERVER_COMMITTED` | Credential, fence, event, audit intention, and escrow are durable. | Remains retryable regardless of expiry/cancel; prepare or inspect publication. |
+| `SERVER_COMMITTED` | Credential, fence, event, audit intention, and escrow are durable. | Remains retryable regardless of expiry/cancel; durably reserve the publication plan before any staging side effect. |
+| `PUBLICATION_PLANNED` | The exact destination, parent identity, reservation id, stage basename, and receipt correlation are durable; no receipt is durable yet. | Create or verify only the exact owner-only stage named by this plan, then checkpoint its identity in `PUBLICATION_PREPARED`. |
 | `PUBLICATION_PREPARED` | A destination-specific receipt is durable. | Exact final credential id+secret checkpoints `FILE_PUBLISHED`; exact owned nonfinal stage with absent destination may clean that stage only, then a durable cleanup resets receipt and checkpoints `SERVER_COMMITTED`. |
 | `FILE_PUBLISHED` | Exact receipt confirms the final owner-only document. | Delete escrow only after this checkpoint. |
 | `CLEANUP_REQUIRED` | Escrow deletion failed after `FILE_PUBLISHED` was durable. | Retry escrow deletion without changing credential or publication. |
@@ -102,10 +103,11 @@ with no destructive write. Invalid direct transitions fail closed.
 | --- | --- | --- | --- |
 | 1 | Authoritative transaction writes credential, fence, event, audit intention, and sealed escrow. | Nothing commits, or all commit. | Retry authoritative execution only when no committed fence exists. |
 | 2 | Journal checkpoints `SERVER_COMMITTED` with escrow reference/digest. | Escrow may exist before the journal checkpoint. | Reconcile durable policy evidence; never reissue. |
-| 3 | Publication prepare persists an exact destination receipt. | Staging may exist without final file. | Inspect or clean up by receipt. |
-| 4 | Publication commit creates the owner-only final file. | Final file may exist without a durable completion checkpoint. | Inspect/resync exact receipt; do not blindly overwrite. |
-| 5 | Exact inspection checkpoints `FILE_PUBLISHED`. | Delivery may be complete but journal stale. | At-least-once inspection/resync, then checkpoint. |
-| 6 | Delete escrow only after `FILE_PUBLISHED` is durable. | Escrow delete may fail after delivery is durable. | Enter `CLEANUP_REQUIRED` and retry deletion only. |
+| 3 | Journal checkpoints `PUBLICATION_PLANNED` with the destination, parent identity, reservation id, stage basename, and receipt correlation. | The plan is durable before any stage exists. | Retry only this byte-identical plan; never choose a new stage name. |
+| 4 | The backend durably creates or verifies the exact owner-only stage, then the journal checkpoints its receipt and identity in `PUBLICATION_PREPARED`. | The exact stage may exist while the journal still says `PUBLICATION_PLANNED`. | Retry `stage_exact` with the same plan and content; accept an identical owned stage only, and never overwrite or clean foreign evidence. |
+| 5 | Publication commit creates the owner-only final file. | Final file may exist without a durable completion checkpoint. | Inspect/resync the exact pinned receipt target; do not blindly overwrite. |
+| 6 | Exact inspection checkpoints `FILE_PUBLISHED`. | Delivery may be complete but journal stale. | At-least-once inspection/resync, then checkpoint. |
+| 7 | Delete escrow only after `FILE_PUBLISHED` is durable. | Escrow delete may fail after delivery is durable. | Enter `CLEANUP_REQUIRED` and retry deletion only. |
 
 Expiry, cancellation before the authoritative transaction, or terminal
 authorization failure produces no credential or escrow. A `PREPARED` record
