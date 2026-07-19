@@ -20,6 +20,8 @@ typedef struct
   DWORD file_index_low;
 } WylWinChildIdentity;
 
+typedef void (*WylWinChildBeforeRenameHookForTest) (gpointer user_data);
+
 BOOL wyl_win_nt_create_relative
     (HANDLE root, const WylServiceCredentialOperationChildName * name,
     ACCESS_MASK access, WylWinChildDisposition disposition, ULONG share_mode,
@@ -50,6 +52,8 @@ void wyl_win_child_unlock
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name, HANDLE handle);
 void wyl_win_child_fail_next_directory_flush_for_test (DWORD error);
+void wyl_win_child_set_before_rename_hook_for_test
+    (WylWinChildBeforeRenameHookForTest hook, gpointer user_data);
 wyrelog_error_t wyl_win_child_classify_nt_create_status_for_test (LONG status);
 
 G_END_DECLS

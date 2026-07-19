@@ -120,6 +120,32 @@ require_windows_junction_capability (const gchar *base)
   g_assert_cmpint (result, ==, WYL_TEST_JUNCTION_CREATED);
   return TRUE;
 }
+
+typedef struct
+{
+  const gchar *record;
+  const gchar *aside;
+  const gchar *decoy;
+  gboolean moved;
+  DWORD move_error;
+  WylTestJunctionResult junction_result;
+} WylTestReplaceReparseRace;
+
+static void
+replace_destination_with_junction_for_test (gpointer user_data)
+{
+  WylTestReplaceReparseRace *race = user_data;
+  g_autofree gunichar2 *record = g_utf8_to_utf16 (race->record, -1, NULL,
+      NULL, NULL);
+  g_autofree gunichar2 *aside = g_utf8_to_utf16 (race->aside, -1, NULL, NULL,
+      NULL);
+  race->moved = record != NULL && aside != NULL
+      && MoveFileExW ((LPCWSTR) record, (LPCWSTR) aside, 0);
+  race->move_error = race->moved ? ERROR_SUCCESS : GetLastError ();
+  race->junction_result = race->moved
+      ? create_windows_directory_junction (race->record, race->decoy)
+      : WYL_TEST_JUNCTION_FAILED;
+}
 #endif
 
 #ifndef G_OS_WIN32
@@ -915,6 +941,7 @@ test_windows_final_reparse_is_policy (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   WylServiceCredentialOperationChildName name =
       WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) original = g_bytes_new_static ("original", 8);
   g_autoptr (GBytes) replacement = g_bytes_new_static ("replacement", 11);
   g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
           &storage), ==, WYRELOG_E_OK);
@@ -951,6 +978,41 @@ test_windows_final_reparse_is_policy (void)
       g_assert_false (g_str_has_prefix (entry, ".replace-"));
   }
   g_assert_cmpint (g_rmdir (record), ==, 0);
+
+  /* Exercise the actual rename linearization point: validate an ordinary
+   * destination, then substitute a junction immediately before NtSetInformationFile. */
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, original),
+      ==, WYRELOG_E_OK);
+  g_autofree gchar *aside_record = g_build_filename (root, "record-aside",
+      NULL);
+  WylTestReplaceReparseRace race = {
+    .record = record,
+    .aside = aside_record,
+    .decoy = decoy,
+    .junction_result = WYL_TEST_JUNCTION_FAILED
+  };
+  wyl_win_child_set_before_rename_hook_for_test
+      (replace_destination_with_junction_for_test, &race);
+  wyrelog_error_t replace_rc = wyl_win_child_replace (&storage, &anchor,
+      &name, replacement);
+  wyl_win_child_set_before_rename_hook_for_test (NULL, NULL);
+  g_assert_true (race.moved);
+  g_assert_cmpuint (race.move_error, ==, ERROR_SUCCESS);
+  g_assert_cmpint (race.junction_result, ==, WYL_TEST_JUNCTION_CREATED);
+  g_assert_cmpint (replace_rc, ==, WYRELOG_E_POLICY);
+  {
+    g_autoptr (GDir) entries = g_dir_open (root, 0, NULL);
+    const gchar *entry;
+    while (entries != NULL && (entry = g_dir_read_name (entries)) != NULL)
+      g_assert_false (g_str_has_prefix (entry, ".replace-"));
+  }
+  g_assert_cmpint (g_rmdir (record), ==, 0);
+  g_autofree gchar *aside_contents = NULL;
+  gsize aside_size = 0;
+  g_assert_true (g_file_get_contents (aside_record, &aside_contents,
+          &aside_size, NULL));
+  g_assert_cmpmem (aside_contents, aside_size, "original", 8);
+  g_assert_cmpint (g_remove (aside_record), ==, 0);
 
   g_autofree gchar *digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
       name.component, -1);

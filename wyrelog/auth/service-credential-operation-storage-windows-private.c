@@ -99,11 +99,31 @@ wyl_win_set_delete_disposition (HANDLE handle)
 }
 
 static volatile LONG wyl_win_next_directory_flush_error = ERROR_SUCCESS;
+static WylWinChildBeforeRenameHookForTest wyl_win_before_rename_hook;
+static gpointer wyl_win_before_rename_hook_data;
 
 void
 wyl_win_child_fail_next_directory_flush_for_test (DWORD error)
 {
   InterlockedExchange (&wyl_win_next_directory_flush_error, (LONG) error);
+}
+
+void wyl_win_child_set_before_rename_hook_for_test
+    (WylWinChildBeforeRenameHookForTest hook, gpointer user_data)
+{
+  wyl_win_before_rename_hook = hook;
+  wyl_win_before_rename_hook_data = user_data;
+}
+
+static void
+wyl_win_child_run_before_rename_hook_for_test (void)
+{
+  WylWinChildBeforeRenameHookForTest hook = wyl_win_before_rename_hook;
+  gpointer user_data = wyl_win_before_rename_hook_data;
+  wyl_win_before_rename_hook = NULL;
+  wyl_win_before_rename_hook_data = NULL;
+  if (hook != NULL)
+    hook (user_data);
 }
 
 static wyrelog_error_t
@@ -481,16 +501,22 @@ wyl_win_child_replace (const WylServiceCredentialOperationStorage *storage,
           || (destination_info.dwFileAttributes
               & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
           || destination_info.dwVolumeSerialNumber
-              != destination_identity.volume_serial
+          != destination_identity.volume_serial
           || destination_info.nFileIndexHigh
-              != destination_identity.file_index_high
+          != destination_identity.file_index_high
           || destination_info.nFileIndexLow
-              != destination_identity.file_index_low))
+          != destination_identity.file_index_low))
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK
       && !wyl_service_credential_operation_storage_anchor_matches (storage,
           anchor))
     rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    wyl_win_child_run_before_rename_hook_for_test ();
+    if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+            anchor))
+      rc = WYRELOG_E_POLICY;
+  }
   if (rc == WYRELOG_E_OK) {
     rc = wyl_win_rename_relative (handle, storage->root_handle, name);
     if (rc == WYRELOG_E_OK)
