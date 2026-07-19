@@ -399,6 +399,28 @@ handoff_human_session_new (const gchar *username, const gchar *tenant)
 }
 
 static void
+replace_journal_destination_for_test (const gchar *path,
+    const gchar *expected, const gchar *replacement)
+{
+  g_autofree gchar *contents = NULL;
+  gsize len = 0;
+  gsize text_len = strlen (expected);
+  gboolean replaced = FALSE;
+
+  g_assert_cmpuint (text_len, ==, strlen (replacement));
+  g_assert_true (g_file_get_contents (path, &contents, &len, NULL));
+  for (gsize i = 0; i + text_len <= len; i++) {
+    if (memcmp (contents + i, expected, text_len) == 0) {
+      memcpy (contents + i, replacement, text_len);
+      replaced = TRUE;
+      break;
+    }
+  }
+  g_assert_true (replaced);
+  g_assert_true (g_file_set_contents (path, contents, len, NULL));
+}
+
+static void
 test_authenticated_handoff_issue_end_to_end (void)
 {
   g_auto (Fixture) fixture = { 0 };
@@ -478,6 +500,64 @@ test_authenticated_handoff_issue_end_to_end (void)
   };
   WylServiceCredentialOperationRecord outcome =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+
+  /* A corrupted legacy/adversarial PREPARED record must fail in decode,
+   * before credential RNG/domain mutation, escrow creation, unseal, or any
+   * publication callback. */
+  gchar malformed_request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (malformed_request_id);
+  wyl_id_t malformed_escrow;
+  gchar malformed_escrow_id[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_new (&malformed_escrow), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&malformed_escrow, malformed_escrow_id,
+          sizeof malformed_escrow_id), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest malformed_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  malformed_request.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE;
+  malformed_request.request_id = g_strdup (malformed_request_id);
+  malformed_request.subject_id = g_strdup ("svc:handoff:executor");
+  malformed_request.tenant_id = g_strdup ("tenant-a");
+  malformed_request.destination = g_strdup ("credentials.json");
+  malformed_request.parent_identity = g_strdup ("test-parent-identity");
+  malformed_request.actor_subject_id = g_strdup ("admin");
+  malformed_request.escrow_id = g_strdup (malformed_escrow_id);
+  malformed_request.expires_at_us = now + G_TIME_SPAN_HOUR;
+  WylServiceCredentialOperationRecord malformed_prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
+          &anchor, &malformed_request, now, &replayed, &malformed_prepared), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *malformed_journal = g_strdup_printf ("%s/op-%s",
+      operation_root, malformed_request_id);
+  replace_journal_destination_for_test (malformed_journal,
+      "credentials.json", "nested/file.json");
+  HandoffUnsealGate malformed_unseal_gate = {.rc = WYRELOG_E_IO };
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
+      handoff_unseal_gate, &malformed_unseal_gate);
+  runtime.decision_request_id = malformed_request_id;
+  gint64 credentials_before_malformed = count_credentials (db_of (handle));
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, malformed_request_id, &runtime, &outcome), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (count_credentials (db_of (handle)), ==,
+      credentials_before_malformed);
+  g_assert_cmpuint (publication.plan_calls, ==, 0);
+  g_assert_cmpuint (publication.stage_calls, ==, 0);
+  g_assert_cmpuint (publication.preflight_calls, ==, 0);
+  g_assert_cmpuint (publication.inspect_calls, ==, 0);
+  g_assert_cmpuint (publication.commit_calls, ==, 0);
+  g_assert_cmpuint (malformed_unseal_gate.calls, ==, 0);
+  wyl_policy_service_handoff_escrow_info_t absent = { 0 };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &malformed_escrow, &absent), ==, WYRELOG_E_NOT_FOUND);
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
+  runtime.decision_request_id = request_id;
+  wyl_service_credential_operation_record_clear (&malformed_prepared);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&malformed_request);
+
   gint64 decision_audits_before = scalar (db_of (handle),
       "SELECT count(*) FROM audit_events WHERE action="
       "'wr.service_credential.manage';");
@@ -1007,6 +1087,10 @@ test_authenticated_handoff_issue_end_to_end (void)
       operation_root, request_id);
   g_autofree gchar *lifecycle = g_strdup_printf ("%s/lifecycle-%s.lock",
       operation_root, request_id);
+  g_autofree gchar *malformed_journal_lock = g_strdup_printf ("%s/op-%s.lock",
+      operation_root, malformed_request_id);
+  g_autofree gchar *malformed_lifecycle = g_strdup_printf
+      ("%s/lifecycle-%s.lock", operation_root, malformed_request_id);
   g_autofree gchar *denied_journal = g_strdup_printf ("%s/op-%s",
       operation_root, denied_request_id);
   g_autofree gchar *denied_journal_lock = g_strdup_printf ("%s/op-%s.lock",
@@ -1052,6 +1136,9 @@ test_authenticated_handoff_issue_end_to_end (void)
   (void) g_remove (journal);
   (void) g_remove (journal_lock);
   (void) g_remove (lifecycle);
+  (void) g_remove (malformed_journal);
+  (void) g_remove (malformed_journal_lock);
+  (void) g_remove (malformed_lifecycle);
   (void) g_remove (denied_journal);
   (void) g_remove (denied_journal_lock);
   (void) g_remove (denied_lifecycle);

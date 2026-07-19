@@ -573,6 +573,48 @@ test_begin_or_replay (JournalFixture *fixture, gconstpointer unused)
 }
 
 static void
+test_begin_rejects_oversized_destination_before_write (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest r = request ();
+  WylServiceCredentialOperationRecord out =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean replayed = TRUE;
+  g_autofree gchar *max_leaf = g_strnfill (255, 'a');
+  g_autofree gchar *too_long = g_strnfill (256, 'a');
+  const gchar *invalid[] = { "nested/file", "CON.txt", too_long };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
+    g_free (r.destination);
+    r.destination = g_strdup (invalid[i]);
+    replayed = TRUE;
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_begin_or_replay
+        (&fixture->storage, &fixture->anchor, &r, 1, &replayed, &out), ==,
+        WYRELOG_E_INVALID);
+    g_assert_false (replayed);
+    g_assert_null (out.request_id);
+  }
+  {
+    g_autoptr (GDir) directory = g_dir_open (fixture->root, 0, NULL);
+    g_assert_nonnull (directory);
+    g_assert_null (g_dir_read_name (directory));
+  }
+
+  g_free (r.destination);
+  r.destination = g_strdup (max_leaf);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &r, 1, &replayed, &out), ==,
+      WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpstr (out.destination, ==, max_leaf);
+
+  wyl_service_credential_operation_record_clear (&out);
+  wyl_service_credential_operation_coordinator_request_clear (&r);
+}
+
+static void
 test_begin_or_replay_conflict (JournalFixture *fixture, gconstpointer unused)
 {
   (void) unused;
@@ -1309,6 +1351,10 @@ main (int argc, char **argv)
       test_fence_classification);
   g_test_add ("/coordinator/journal/begin-or-replay", JournalFixture, NULL,
       journal_fixture_set_up, test_begin_or_replay, journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/begin-rejects-oversized-destination",
+      JournalFixture, NULL, journal_fixture_set_up,
+      test_begin_rejects_oversized_destination_before_write,
+      journal_fixture_tear_down);
   g_test_add ("/coordinator/journal/begin-or-replay-conflict", JournalFixture,
       NULL, journal_fixture_set_up, test_begin_or_replay_conflict,
       journal_fixture_tear_down);

@@ -1,6 +1,41 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include "wyrelog/auth/service-credential-operation-destination-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-private.h"
+
+static void
+test_destination_validator (void)
+{
+  static const gchar *invalid[] = {
+    "", ".", "..", "nested/file", "../file", "/absolute", "\\absolute",
+    "bad\\path", "C:relative", "CON", "con.json", "PRN", "aux.log",
+    "NUL", "COM1", "com9.json", "LPT1", "lpt9.txt", "trailing.",
+    "trailing ", "bad<name", "bad>name", "bad\"name", "bad|name",
+    "bad?name", "bad*name", "bad\037name",
+  };
+  static const gchar *valid[] = {
+    "credentials.json", "COM0", "COM10", "LPT0.txt", "LPT10.txt",
+    "console.txt", "자격증명.json",
+  };
+  gchar malformed[] = { 'b', 'a', 'd', (gchar) 0xff, '\0' };
+  g_autofree gchar *max_leaf = g_strnfill (255, 'a');
+  g_autofree gchar *too_long = g_strnfill (256, 'a');
+
+  g_assert_false (wyl_service_credential_operation_destination_is_valid (NULL));
+  g_assert_false
+      (wyl_service_credential_operation_destination_is_valid (malformed));
+  g_assert_true
+      (wyl_service_credential_operation_destination_is_valid (max_leaf));
+  g_assert_false
+      (wyl_service_credential_operation_destination_is_valid (too_long));
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
+    g_assert_false
+        (wyl_service_credential_operation_destination_is_valid (invalid[i]));
+  for (gsize i = 0; i < G_N_ELEMENTS (valid); i++)
+    g_assert_true
+        (wyl_service_credential_operation_destination_is_valid (valid[i]));
+}
+
 static void
 test_request (void)
 {
@@ -89,6 +124,8 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func ("/coordinator/destination-validator",
+      test_destination_validator);
   g_test_add_func ("/coordinator/request", test_request);
   return g_test_run ();
 }

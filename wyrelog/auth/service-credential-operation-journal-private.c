@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "auth/service-credential-operation-journal-private.h"
+#include "auth/service-credential-operation-destination-private.h"
 
 #include <chronoid/ksuid.h>
 #include <sodium.h>
@@ -115,26 +116,6 @@ digest_is_zero (const guint8
   return sodium_memcmp (digest, zero, sizeof zero) == 0;
 }
 
-static gboolean
-destination_is_safe_relative_path (const gchar *value)
-{
-  if (value == NULL || value[0] == '\0' || value[0] == '/'
-      || value[0] == '\\' || strchr (value, '\\') != NULL
-      || strchr (value, ':') != NULL)
-    return FALSE;
-  const gchar *cursor = value;
-  while (*cursor != '\0') {
-    const gchar *slash = strchr (cursor, '/');
-    gsize component_len = slash == NULL ? strlen (cursor)
-        : (gsize) (slash - cursor);
-    if (component_len == 0 || (component_len == 1 && cursor[0] == '.')
-        || (component_len == 2 && cursor[0] == '.' && cursor[1] == '.'))
-      return FALSE;
-    cursor = slash == NULL ? cursor + component_len : slash + 1;
-  }
-  return TRUE;
-}
-
 gboolean
     wyl_service_credential_operation_record_is_valid
     (const WylServiceCredentialOperationRecord * record)
@@ -148,7 +129,8 @@ gboolean
       || !text_is_valid (record->tenant_id,
           record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE)
       || !text_is_valid (record->destination, TRUE)
-      || !destination_is_safe_relative_path (record->destination)
+      || !wyl_service_credential_operation_destination_is_valid
+      (record->destination)
       || !text_is_valid (record->parent_identity, TRUE)
       || !wyl_policy_service_actor_subject_is_valid (record->actor_subject_id)
       || record->publication_receipt_version > 1
