@@ -586,6 +586,14 @@ test('policy-graph-authority', test_policy_graph_authority,
   timeout : 90,
 )
 
+test_fact_graph_locator = executable('test-fact-graph-locator',
+  'test-fact-graph-locator.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+
+test('fact-graph-locator', test_fact_graph_locator)
+
 test_policy_store_service_schema = executable('test-policy-store-service-schema',
   'test-policy-store-service-schema.c',
   c_args : [
