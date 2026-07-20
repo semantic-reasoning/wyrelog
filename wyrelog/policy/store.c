@@ -310,6 +310,41 @@ static gboolean service_handoff_exact_tuple_is_valid
 static wyrelog_error_t service_handoff_validate_exact_escrow
     (wyl_policy_store_t * store,
     const WylPolicyServiceHandoffExactTuple * tuple);
+typedef enum
+{
+  SERVICE_HANDOFF_MAINTENANCE_ESCROW_EXACT,
+  SERVICE_HANDOFF_MAINTENANCE_ESCROW_MISSING,
+  SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN,
+} ServiceHandoffMaintenanceEscrowState;
+static wyrelog_error_t
+    service_handoff_maintenance_classify_escrow
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    const gchar * successor_credential_id, guint64 successor_generation,
+    const guint8 * binding_digest,
+    ServiceHandoffMaintenanceEscrowState * out_state,
+    wyl_policy_service_handoff_escrow_info_t * out_escrow);
+static wyrelog_error_t
+    service_handoff_maintenance_proof_digest
+    (const WylPolicyServiceHandoffMaintenanceProof * proof,
+    guint8 out[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES]);
+static wyrelog_error_t
+    service_handoff_maintenance_no_commit_evidence
+    (const WylPolicyServiceHandoffMaintenanceProof * proof,
+    WylPolicyServiceHandoffNoCommitEvidence * out_evidence);
+static wyrelog_error_t
+    service_handoff_maintenance_validate_no_commit
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    const gchar * disposition_id, const gchar * audit_id,
+    const gchar * actor_subject_id);
+static wyrelog_error_t
+    service_authority_transaction_validate_active
+    (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * store);
+static wyrelog_error_t
+    service_handoff_cancellation_validate_committed
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffCancellationInput * input);
 static gchar *service_handoff_try_strdup (const gchar * value);
 static wyrelog_error_t
     service_credential_operation_fence_committed_lookup_db
@@ -873,16 +908,20 @@ static const gchar service_schema_ddl[] =
     "   CHECK (typeof(current_actor_subject_id)='text'"
     "   AND length(current_actor_subject_id) BETWEEN 1 AND 128"
     "   AND instr(current_actor_subject_id,char(0))=0),"
+    " resolution TEXT NOT NULL CHECK (resolution IN"
+    "   ('committed_attention','terminal_not_committed')) ,"
     " escrow_id TEXT NOT NULL CHECK (typeof(escrow_id)='text'"
     "   AND length(escrow_id)=36 AND instr(escrow_id,char(0))=0),"
     " binding_digest BLOB NOT NULL CHECK (typeof(binding_digest)='blob'"
-    "   AND length(binding_digest)=32 AND binding_digest<>zeroblob(32)),"
-    " successor_credential_id TEXT NOT NULL CHECK (typeof(successor_credential_id)='text'"
+    "   AND length(binding_digest)=32),"
+    " successor_credential_id TEXT CHECK (successor_credential_id IS NULL OR"
+    "   (typeof(successor_credential_id)='text'"
     "   AND length(successor_credential_id)=31"
     "   AND substr(successor_credential_id,1,4)='wlc_'"
-    "   AND instr(successor_credential_id,char(0))=0),"
-    " successor_issuance_generation INTEGER NOT NULL"
-    "   CHECK (successor_issuance_generation>=1),"
+    "   AND instr(successor_credential_id,char(0))=0)),"
+    " successor_issuance_generation INTEGER"
+    "   CHECK (successor_issuance_generation IS NULL"
+    "   OR successor_issuance_generation>=1),"
     " operation TEXT NOT NULL CHECK (operation IN ('issue','rotate')) ,"
     " target_a TEXT NOT NULL CHECK (typeof(target_a)='text'"
     "   AND length(target_a) BETWEEN 1 AND 128 AND instr(target_a,char(0))=0),"
@@ -890,6 +929,10 @@ static const gchar service_schema_ddl[] =
     "   AND length(target_b) BETWEEN 1 AND 128 AND instr(target_b,char(0))=0)),"
     " target_digest BLOB NOT NULL CHECK (typeof(target_digest)='blob'"
     "   AND length(target_digest)=32 AND target_digest<>zeroblob(32)),"
+    " maintenance_proof_digest BLOB NOT NULL"
+    "   CHECK (typeof(maintenance_proof_digest)='blob'"
+    "   AND length(maintenance_proof_digest)=32"
+    "   AND maintenance_proof_digest<>zeroblob(32)),"
     " deadline_at_us INTEGER NOT NULL CHECK (deadline_at_us>0),"
     " disposition_id TEXT NOT NULL UNIQUE CHECK (typeof(disposition_id)='text'"
     "   AND length(disposition_id)=36 AND instr(disposition_id,char(0))=0),"
@@ -901,7 +944,15 @@ static const gchar service_schema_ddl[] =
     "   AND cancellation_request_id<>decision_request_id),"
     " CHECK (original_actor_subject_id<>current_actor_subject_id),"
     " CHECK ((operation='issue' AND target_b IS NOT NULL)"
-    "   OR (operation='rotate' AND target_b IS NULL))"
+    "   OR (operation='rotate' AND target_b IS NULL)),"
+    " CHECK ((resolution='committed_attention'"
+    "     AND binding_digest<>zeroblob(32)"
+    "     AND successor_credential_id IS NOT NULL"
+    "     AND successor_issuance_generation IS NOT NULL)"
+    "   OR (resolution='terminal_not_committed'"
+    "     AND binding_digest=zeroblob(32)"
+    "     AND successor_credential_id IS NULL"
+    "     AND successor_issuance_generation IS NULL))"
     ");"
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_cancellation_exact"
     " ON service_credential_handoff_cancellation_claims"
@@ -1293,14 +1344,16 @@ static const gchar *const service_handoff_cancellation_needles[] = {
   "check(typeof(original_request_id)='text'andlength(original_request_id)=27andinstr(original_request_id,char(0))=0)",
   "check(typeof(original_actor_subject_id)='text'andlength(original_actor_subject_id)between1and128andinstr(original_actor_subject_id,char(0))=0)",
   "check(typeof(current_actor_subject_id)='text'andlength(current_actor_subject_id)between1and128andinstr(current_actor_subject_id,char(0))=0)",
+  "check(resolutionin('committed_attention','terminal_not_committed'))",
   "check(typeof(escrow_id)='text'andlength(escrow_id)=36andinstr(escrow_id,char(0))=0)",
-  "check(typeof(binding_digest)='blob'andlength(binding_digest)=32andbinding_digest<>zeroblob(32))",
-  "check(typeof(successor_credential_id)='text'andlength(successor_credential_id)=31andsubstr(successor_credential_id,1,4)='wlc_'andinstr(successor_credential_id,char(0))=0)",
-  "check(successor_issuance_generation>=1)",
+  "check(typeof(binding_digest)='blob'andlength(binding_digest)=32)",
+  "check(successor_credential_idisnullor(typeof(successor_credential_id)='text'andlength(successor_credential_id)=31andsubstr(successor_credential_id,1,4)='wlc_'andinstr(successor_credential_id,char(0))=0))",
+  "check(successor_issuance_generationisnullorsuccessor_issuance_generation>=1)",
   "check(operationin('issue','rotate'))",
   "check(typeof(target_a)='text'andlength(target_a)between1and128andinstr(target_a,char(0))=0)",
   "check(target_bisnullor(typeof(target_b)='text'andlength(target_b)between1and128andinstr(target_b,char(0))=0))",
   "check(typeof(target_digest)='blob'andlength(target_digest)=32andtarget_digest<>zeroblob(32))",
+  "check(typeof(maintenance_proof_digest)='blob'andlength(maintenance_proof_digest)=32andmaintenance_proof_digest<>zeroblob(32))",
   "check(deadline_at_us>0)",
   "check(typeof(disposition_id)='text'andlength(disposition_id)=36andinstr(disposition_id,char(0))=0)",
   "check(typeof(audit_id)='text'andlength(audit_id)=36andinstr(audit_id,char(0))=0)",
@@ -1308,6 +1361,7 @@ static const gchar *const service_handoff_cancellation_needles[] = {
   "check(original_request_id<>cancellation_request_idandoriginal_request_id<>decision_request_idandcancellation_request_id<>decision_request_id)",
   "check(original_actor_subject_id<>current_actor_subject_id)",
   "check((operation='issue'andtarget_bisnotnull)or(operation='rotate'andtarget_bisnull))",
+  "check((resolution='committed_attention'andbinding_digest<>zeroblob(32)andsuccessor_credential_idisnotnullandsuccessor_issuance_generationisnotnull)or(resolution='terminal_not_committed'andbinding_digest=zeroblob(32)andsuccessor_credential_idisnullandsuccessor_issuance_generationisnull))",
   NULL,
 };
 
@@ -1396,9 +1450,9 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         service_handoff_disposition_needles, 13, "",
       "idx_service_handoff_disposition_exact:1:c:0:0:2:original_request_id:0:BINARY:1,1:8:reason:0:BINARY:1,2:9:outcome:0:BINARY:1,3:3:escrow_id:0:BINARY:1,4:4:binding_digest:0:BINARY:1,5:-2::0:BINARY:1,6:-2::0:BINARY:1,7:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_dispositions_1:1:pk:0:0:0:disposition_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_dispositions_2:1:u:0:0:1:semantic_key:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_dispositions_3:1:u:0:0:10:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_credential_handoff_cancellation_claims",
-        "cancellation_request_id:TEXT:1::1,request_fingerprint:BLOB:1::0,decision_request_id:TEXT:1::0,original_request_id:TEXT:1::0,original_actor_subject_id:TEXT:1::0,current_actor_subject_id:TEXT:1::0,escrow_id:TEXT:1::0,binding_digest:BLOB:1::0,successor_credential_id:TEXT:1::0,successor_issuance_generation:INTEGER:1::0,operation:TEXT:1::0,target_a:TEXT:1::0,target_b:TEXT:0::0,target_digest:BLOB:1::0,deadline_at_us:INTEGER:1::0,disposition_id:TEXT:1::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
-        service_handoff_cancellation_needles, 21, "",
-      "idx_service_handoff_cancellation_exact:1:c:0:0:3:original_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_1:1:pk:0:0:0:cancellation_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_2:1:u:0:0:2:decision_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_3:1:u:0:0:15:disposition_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_4:1:u:0:0:16:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
+        "cancellation_request_id:TEXT:1::1,request_fingerprint:BLOB:1::0,decision_request_id:TEXT:1::0,original_request_id:TEXT:1::0,original_actor_subject_id:TEXT:1::0,current_actor_subject_id:TEXT:1::0,resolution:TEXT:1::0,escrow_id:TEXT:1::0,binding_digest:BLOB:1::0,successor_credential_id:TEXT:0::0,successor_issuance_generation:INTEGER:0::0,operation:TEXT:1::0,target_a:TEXT:1::0,target_b:TEXT:0::0,target_digest:BLOB:1::0,maintenance_proof_digest:BLOB:1::0,deadline_at_us:INTEGER:1::0,disposition_id:TEXT:1::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
+        service_handoff_cancellation_needles, 24, "",
+      "idx_service_handoff_cancellation_exact:1:c:0:0:3:original_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_1:1:pk:0:0:0:cancellation_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_2:1:u:0:0:2:decision_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_3:1:u:0:0:17:disposition_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_cancellation_claims_4:1:u:0:0:18:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
   {"service_credential_handoff_remediation_actions",
         "remediation_request_id:TEXT:1::1,request_fingerprint:BLOB:1::0,decision_request_id:TEXT:1::0,original_request_id:TEXT:1::0,original_actor_subject_id:TEXT:1::0,current_actor_subject_id:TEXT:1::0,escrow_id:TEXT:1::0,binding_digest:BLOB:1::0,successor_credential_id:TEXT:1::0,successor_issuance_generation:INTEGER:1::0,action:TEXT:1::0,confirmation_version:INTEGER:1::0,confirmed:INTEGER:1::0,outcome:TEXT:1::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
         service_handoff_remediation_needles, 19, "",
@@ -3688,7 +3742,6 @@ static gboolean
       || !service_handoff_uuid_is_canonical (input->disposition_id)
       || !service_handoff_uuid_is_canonical (input->audit_id)
       || !service_handoff_exact_tuple_is_valid (&input->tuple)
-      || input->tuple.successor_credential_id == NULL
       || !wyl_policy_service_actor_subject_is_valid
       (input->current_actor_subject_id)
       || g_strcmp0 (input->tuple.original_actor_subject_id,
@@ -3701,6 +3754,20 @@ static gboolean
           input->decision_request_id) == 0 || input->deadline_at_us <= 0
       || sodium_is_zero (input->target_digest, sizeof input->target_digest))
     return FALSE;
+  gboolean committed =
+      input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED;
+  gboolean unresolved =
+      input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED
+      || input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED;
+  if ((!committed && !unresolved)
+      || (committed && input->tuple.successor_credential_id == NULL)
+      || (unresolved && (input->tuple.successor_credential_id != NULL
+              || !sodium_is_zero (input->tuple.binding_digest,
+                  sizeof input->tuple.binding_digest))))
+    return FALSE;
   return (input->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE
       && input->target_a != NULL
       && wyl_policy_service_subject_is_valid (input->target_a,
@@ -3712,9 +3779,14 @@ static gboolean
           strlen (input->target_a)));
 }
 
+static const gchar *service_handoff_cancellation_resolution_name
+    (WylPolicyServiceHandoffCancellationOutcome outcome);
+
 static wyrelog_error_t
     service_handoff_cancellation_fingerprint
     (const WylPolicyServiceHandoffCancellationInput * input,
+    WylPolicyServiceHandoffCancellationOutcome resolution,
+    const WylPolicyServiceHandoffExactTuple * resolved_tuple,
     guint8 out[crypto_generichash_BYTES])
 {
   gchar escrow[WYL_ID_STRING_BUF];
@@ -3722,37 +3794,55 @@ static wyrelog_error_t
   gchar deadline[32];
   gchar binding[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES * 2 + 1];
   gchar target_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES * 2 + 1];
-  if (wyl_id_format (input->tuple.escrow_id, escrow, sizeof escrow)
-      != WYRELOG_E_OK)
+  const gchar *resolution_name =
+      service_handoff_cancellation_resolution_name (resolution);
+  if (resolved_tuple == NULL || resolution_name == NULL
+      || wyl_id_format (resolved_tuple->escrow_id, escrow, sizeof escrow)
+      != WYRELOG_E_OK
+      || ((resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION)
+          != (resolved_tuple->successor_credential_id != NULL)))
     return WYRELOG_E_INVALID;
   g_snprintf (generation, sizeof generation, "%" G_GUINT64_FORMAT,
-      input->tuple.successor_issuance_generation);
+      resolved_tuple->successor_issuance_generation);
   g_snprintf (deadline, sizeof deadline, "%" G_GINT64_FORMAT,
       input->deadline_at_us);
-  sodium_bin2hex (binding, sizeof binding, input->tuple.binding_digest,
-      sizeof input->tuple.binding_digest);
+  sodium_bin2hex (binding, sizeof binding, resolved_tuple->binding_digest,
+      sizeof resolved_tuple->binding_digest);
   sodium_bin2hex (target_digest, sizeof target_digest, input->target_digest,
       sizeof input->target_digest);
   const gchar *fields[] = {
     input->cancellation_request_id, input->decision_request_id,
     input->tuple.original_request_id,
     input->tuple.original_actor_subject_id, input->current_actor_subject_id,
-    escrow, binding, input->tuple.successor_credential_id, generation,
-    service_handoff_cancellation_operation_name (input->operation),
+    resolution_name, escrow, binding,
+    resolved_tuple->successor_credential_id != NULL ?
+        resolved_tuple->successor_credential_id : "",
+    generation, service_handoff_cancellation_operation_name (input->operation),
     input->target_a, input->target_b != NULL ? input->target_b : "",
     target_digest, deadline, input->disposition_id, input->audit_id,
   };
   return service_handoff_hash_fields
-      ("wyrelog.service-handoff-cancellation.v1", fields,
+      ("wyrelog.service-handoff-cancellation.v2", fields,
       G_N_ELEMENTS (fields), out);
 }
 
 static wyrelog_error_t
-service_handoff_fill_cancellation_result (const gchar *disposition_id,
-    const gchar *audit_id, gint64 created_at_us, gboolean replayed,
-    WylPolicyServiceHandoffCancellationResult *out)
+    service_handoff_fill_cancellation_result
+    (WylPolicyServiceHandoffCancellationOutcome outcome,
+    const gchar * successor_credential_id, guint64 successor_generation,
+    const guint8 binding_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES],
+    const gchar * disposition_id, const gchar * audit_id,
+    gint64 created_at_us, gboolean replayed,
+    WylPolicyServiceHandoffCancellationResult * out)
 {
-  if (created_at_us <= 0)
+  if (created_at_us <= 0
+      || (outcome == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION
+          && (successor_credential_id == NULL || successor_generation == 0
+              || binding_digest == NULL
+              || sodium_is_zero (binding_digest,
+                  WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES)))
+      || (outcome == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED
+          && (successor_credential_id != NULL || successor_generation != 0)))
     return WYRELOG_E_POLICY;
   out->disposition_id = service_handoff_try_strdup (disposition_id);
   out->audit_id = service_handoff_try_strdup (audit_id);
@@ -3762,27 +3852,94 @@ service_handoff_fill_cancellation_result (const gchar *disposition_id,
   }
   out->created_at_us = created_at_us;
   out->replayed = replayed;
+  out->outcome = outcome;
+  if (successor_credential_id != NULL) {
+    g_strlcpy (out->successor_credential_id, successor_credential_id,
+        sizeof out->successor_credential_id);
+    out->successor_issuance_generation = successor_generation;
+    memcpy (out->binding_digest, binding_digest, sizeof out->binding_digest);
+  }
   return WYRELOG_E_OK;
+}
+
+static void
+    service_handoff_cancellation_proof
+    (const WylPolicyServiceHandoffCancellationInput * input,
+    WylPolicyServiceHandoffMaintenanceProof * proof)
+{
+  *proof = (WylPolicyServiceHandoffMaintenanceProof) {
+  .tuple = input->tuple,.operation =
+        input->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE ?
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE :
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE,.subject_id =
+        input->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE ?
+        input->target_a : NULL,.tenant_id =
+        input->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE ?
+        input->target_b : NULL,.old_credential_id =
+        input->operation == WYL_POLICY_HANDOFF_FENCE_ROTATE ?
+        input->target_a : NULL,.deadline_at_us = input->deadline_at_us,};
+  proof->tuple.successor_credential_id = NULL;
+  proof->tuple.successor_issuance_generation = 0;
+  sodium_memzero (proof->tuple.binding_digest,
+      sizeof proof->tuple.binding_digest);
+  memcpy (proof->target_digest, input->target_digest,
+      sizeof proof->target_digest);
+}
+
+static const gchar *service_handoff_cancellation_resolution_name
+    (WylPolicyServiceHandoffCancellationOutcome outcome)
+{
+  return outcome == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION ?
+      "committed_attention" :
+      (outcome == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED ?
+      "terminal_not_committed" : NULL);
+}
+
+static WylPolicyServiceHandoffCancellationOutcome
+service_handoff_cancellation_resolution_parse (const gchar *resolution)
+{
+  if (g_strcmp0 (resolution, "committed_attention") == 0)
+    return WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION;
+  if (g_strcmp0 (resolution, "terminal_not_committed") == 0)
+    return WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED;
+  return 0;
 }
 
 static wyrelog_error_t
 service_handoff_validate_cancellation_disposition (wyl_policy_store_t *store,
-    const WylPolicyServiceHandoffCancellationInput *input, gint64 created_at_us)
+    const WylPolicyServiceHandoffCancellationInput *input,
+    WylPolicyServiceHandoffCancellationOutcome resolution,
+    const WylPolicyServiceHandoffExactTuple *resolved_tuple,
+    gint64 created_at_us, gboolean strict_cardinality)
 {
+  WylPolicyServiceHandoffMaintenanceProof proof = { 0 };
+  service_handoff_cancellation_proof (input, &proof);
+  WylPolicyServiceHandoffNoCommitEvidence evidence = { 0 };
   WylPolicyServiceHandoffDispositionInput disposition = {
     .disposition_id = input->disposition_id,
     .audit_id = input->audit_id,
-    .tuple = input->tuple,
+    .tuple = *resolved_tuple,
     .actor_subject_id = input->current_actor_subject_id,
-    .reason = WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_CANCELLED,
-    .outcome = WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED,
+    .reason = resolution ==
+        WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION ?
+        WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_CANCELLED :
+        WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED,
+    .outcome = resolution ==
+        WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION ?
+        WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED :
+        WYL_POLICY_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED,
   };
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (resolution == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED) {
+    rc = service_handoff_maintenance_no_commit_evidence (&proof, &evidence);
+    disposition.no_commit_evidence = &evidence;
+  }
   guint8 semantic_key[crypto_generichash_BYTES] = { 0 };
-  wyrelog_error_t rc = service_handoff_disposition_semantic_key (&disposition,
-      semantic_key);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_disposition_semantic_key (&disposition, semantic_key);
   gchar escrow[WYL_ID_STRING_BUF];
   if (rc == WYRELOG_E_OK
-      && wyl_id_format (input->tuple.escrow_id, escrow, sizeof escrow)
+      && wyl_id_format (resolved_tuple->escrow_id, escrow, sizeof escrow)
       != WYRELOG_E_OK)
     rc = WYRELOG_E_INVALID;
   sqlite3_stmt *stmt = NULL;
@@ -3802,22 +3959,26 @@ service_handoff_validate_cancellation_disposition (wyl_policy_store_t *store,
         && sodium_memcmp (sqlite3_column_blob (stmt, 0), semantic_key,
         sizeof semantic_key) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
-        input->tuple.original_request_id) == 0
+        resolved_tuple->original_request_id) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
         escrow) == 0 && sqlite3_column_type (stmt, 3) == SQLITE_BLOB
         && sqlite3_column_bytes (stmt, 3) == 32
         && sodium_memcmp (sqlite3_column_blob (stmt, 3),
-        input->tuple.binding_digest, 32) == 0
+        resolved_tuple->binding_digest, 32) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
-        input->tuple.successor_credential_id) == 0
-        && (guint64) sqlite3_column_int64 (stmt,
-        5) == input->tuple.successor_issuance_generation
+        resolved_tuple->successor_credential_id) == 0
+        && ((resolved_tuple->successor_issuance_generation == 0
+            && sqlite3_column_type (stmt, 5) == SQLITE_NULL)
+        || (resolved_tuple->successor_issuance_generation != 0
+            && sqlite3_column_type (stmt, 5) == SQLITE_INTEGER
+            && (guint64) sqlite3_column_int64 (stmt, 5) ==
+            resolved_tuple->successor_issuance_generation))
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 6),
         input->current_actor_subject_id) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 7),
-        "operation_cancelled") == 0
+        service_handoff_reason_name (disposition.reason)) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 8),
-        "attention_required") == 0
+        service_handoff_outcome_name (disposition.outcome)) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 9),
         input->audit_id) == 0
         && sqlite3_column_type (stmt, 10) == SQLITE_INTEGER
@@ -3835,41 +3996,133 @@ service_handoff_validate_cancellation_disposition (wyl_policy_store_t *store,
     rc = service_handoff_validate_exact_audit_pair (store, input->audit_id,
         created_at_us, input->current_actor_subject_id,
         "service.credential.handoff.cancel",
-        input->tuple.successor_credential_id, input->cancellation_request_id);
+        resolved_tuple->successor_credential_id != NULL ?
+        resolved_tuple->successor_credential_id :
+        resolved_tuple->original_request_id, input->cancellation_request_id);
+  if (rc == WYRELOG_E_OK
+      && resolution == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED)
+    rc = service_handoff_maintenance_validate_no_commit (store, &proof,
+        input->disposition_id, input->audit_id,
+        input->current_actor_subject_id);
+  stmt = NULL;
+  static const gchar *cardinality_sql =
+      "SELECT count(*),"
+      " sum(CASE WHEN disposition_id=? THEN 1 ELSE 0 END),"
+      " sum(CASE WHEN disposition_id<>?"
+      "  AND reason NOT IN ('successor_expired','successor_revoked')"
+      "  THEN 1 ELSE 0 END)"
+      " FROM service_credential_handoff_dispositions"
+      " WHERE original_request_id=?;";
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, cardinality_sql, &stmt);
+  if (rc == WYRELOG_E_OK
+      && ((rc = bind_text (stmt, 1, input->disposition_id)) != WYRELOG_E_OK
+          || (rc = bind_text (stmt, 2, input->disposition_id)) != WYRELOG_E_OK
+          || (rc = bind_text (stmt, 3,
+                  resolved_tuple->original_request_id)) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    gint64 total = sqlite3_column_int64 (stmt, 0);
+    gint64 linked = sqlite3_column_int64 (stmt, 1);
+    gint64 foreign_non_precedence = sqlite3_column_int64 (stmt, 2);
+    rc = linked == 1 && foreign_non_precedence == 0
+        && (!strict_cardinality || total == 1)
+        && sqlite3_step (stmt) == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = service_handoff_sqlite_error (store->db, step);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
   return service_handoff_map_sqlite_io (store->db, rc);
 }
 
 static wyrelog_error_t
-service_handoff_cancellation_lookup (wyl_policy_store_t *store,
-    const WylPolicyServiceHandoffCancellationInput *input,
-    const guint8 fingerprint[crypto_generichash_BYTES], gboolean *out_found,
-    WylPolicyServiceHandoffCancellationResult *out)
+    service_handoff_cancellation_lookup
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffCancellationInput * input,
+    gboolean validate_authority, gboolean strict_cardinality,
+    gboolean * out_found, WylPolicyServiceHandoffCancellationResult * out)
 {
   *out_found = FALSE;
   gchar escrow[WYL_ID_STRING_BUF];
   wyl_id_format (input->tuple.escrow_id, escrow, sizeof escrow);
+  WylPolicyServiceHandoffMaintenanceProof proof = { 0 };
+  service_handoff_cancellation_proof (input, &proof);
+  guint8 proof_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
+  wyrelog_error_t rc = service_handoff_maintenance_proof_digest (&proof,
+      proof_digest);
   sqlite3_stmt *stmt = NULL;
   static const gchar *sql =
       "SELECT request_fingerprint,decision_request_id,original_request_id,"
-      "original_actor_subject_id,current_actor_subject_id,escrow_id,"
+      "original_actor_subject_id,current_actor_subject_id,resolution,escrow_id,"
       "binding_digest,successor_credential_id,successor_issuance_generation,"
-      "operation,target_a,target_b,target_digest,deadline_at_us,"
+      "operation,target_a,target_b,target_digest,maintenance_proof_digest,"
+      "deadline_at_us,"
       "disposition_id,audit_id,created_at_us FROM"
       " service_credential_handoff_cancellation_claims"
       " WHERE cancellation_request_id=?;";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, sql, &stmt);
   if (rc == WYRELOG_E_OK)
     rc = bind_text (stmt, 1, input->cancellation_request_id);
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
   if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
     *out_found = TRUE;
-    const gchar *disposition = (const gchar *) sqlite3_column_text (stmt, 14);
-    const gchar *audit = (const gchar *) sqlite3_column_text (stmt, 15);
-    gint64 created_at_us = sqlite3_column_int64 (stmt, 16);
+    WylPolicyServiceHandoffCancellationOutcome resolution =
+        service_handoff_cancellation_resolution_parse
+        ((const gchar *) sqlite3_column_text (stmt, 5));
+    const gchar *successor = (const gchar *) sqlite3_column_text (stmt, 8);
+    guint64 generation = sqlite3_column_type (stmt, 9) == SQLITE_INTEGER ?
+        (guint64) sqlite3_column_int64 (stmt, 9) : 0;
+    g_autofree gchar *resolved_successor =
+        successor != NULL ? service_handoff_try_strdup (successor) : NULL;
+    g_autofree gchar *disposition = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 16));
+    g_autofree gchar *audit = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 17));
+    gint64 created_at_us = sqlite3_column_int64 (stmt, 18);
+    WylPolicyServiceHandoffExactTuple resolved = input->tuple;
+    resolved.successor_credential_id = resolved_successor;
+    resolved.successor_issuance_generation = generation;
+    if (sqlite3_column_type (stmt, 7) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 7) ==
+        WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES)
+      memcpy (resolved.binding_digest, sqlite3_column_blob (stmt, 7),
+          sizeof resolved.binding_digest);
+    gboolean resolution_shape =
+        (resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION
+        && resolved_successor != NULL && generation > 0
+        && !sodium_is_zero (resolved.binding_digest,
+            sizeof resolved.binding_digest))
+        || (resolution ==
+        WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED
+        && resolved_successor == NULL && generation == 0
+        && sodium_is_zero (resolved.binding_digest,
+            sizeof resolved.binding_digest));
+    gboolean observation_exact =
+        (input->observation ==
+        WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED)
+        || (input->observation ==
+        WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED
+        && resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION
+        && g_strcmp0 (input->tuple.successor_credential_id,
+            resolved_successor) == 0
+        && input->tuple.successor_issuance_generation == generation
+        && sodium_memcmp (input->tuple.binding_digest,
+            resolved.binding_digest, sizeof resolved.binding_digest) == 0)
+        || (input->observation ==
+        WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED
+        && resolution ==
+        WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED);
+    guint8 expected_fingerprint[crypto_generichash_BYTES] = { 0 };
+    if (resolution_shape)
+      rc = service_handoff_cancellation_fingerprint (input, resolution,
+          &resolved, expected_fingerprint);
     gboolean exact = sqlite3_column_type (stmt, 0) == SQLITE_BLOB
         && sqlite3_column_bytes (stmt, 0) == 32
-        && sodium_memcmp (sqlite3_column_blob (stmt, 0), fingerprint, 32) == 0
-        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
+        && sodium_memcmp (sqlite3_column_blob (stmt, 0), expected_fingerprint,
+        32) == 0 && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 1),
         input->decision_request_id) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 2),
         input->tuple.original_request_id) == 0
@@ -3877,42 +4130,59 @@ service_handoff_cancellation_lookup (wyl_policy_store_t *store,
         input->tuple.original_actor_subject_id) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 4),
         input->current_actor_subject_id) == 0
-        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 5),
-        escrow) == 0 && sqlite3_column_type (stmt, 6) == SQLITE_BLOB
-        && sqlite3_column_bytes (stmt, 6) == 32
-        && sodium_memcmp (sqlite3_column_blob (stmt, 6),
-        input->tuple.binding_digest, 32) == 0
-        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 7),
-        input->tuple.successor_credential_id) == 0
-        && (guint64) sqlite3_column_int64 (stmt,
-        8) == input->tuple.successor_issuance_generation
-        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 9),
-        service_handoff_cancellation_operation_name (input->operation)) == 0
+        && resolution_shape && observation_exact
+        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 6),
+        escrow) == 0 && sqlite3_column_type (stmt, 7) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 7) == 32
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 10),
-        input->target_a) == 0
+        service_handoff_cancellation_operation_name (input->operation)) == 0
         && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 11),
-        input->target_b) == 0 && sqlite3_column_type (stmt, 12) == SQLITE_BLOB
-        && sqlite3_column_bytes (stmt, 12) == 32
-        && sodium_memcmp (sqlite3_column_blob (stmt, 12),
+        input->target_a) == 0
+        && g_strcmp0 ((const gchar *) sqlite3_column_text (stmt, 12),
+        input->target_b) == 0 && sqlite3_column_type (stmt, 13) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 13) == 32
+        && sodium_memcmp (sqlite3_column_blob (stmt, 13),
         input->target_digest, 32) == 0
-        && sqlite3_column_int64 (stmt, 13) == input->deadline_at_us
+        && sqlite3_column_type (stmt, 14) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 14) == 32
+        && sodium_memcmp (sqlite3_column_blob (stmt, 14), proof_digest, 32) == 0
+        && sqlite3_column_int64 (stmt, 15) == input->deadline_at_us
         && g_strcmp0 (disposition, input->disposition_id) == 0
         && g_strcmp0 (audit, input->audit_id) == 0
-        && sqlite3_column_type (stmt, 16) == SQLITE_INTEGER
+        && sqlite3_column_type (stmt, 18) == SQLITE_INTEGER
         && created_at_us > 0;
-    rc = exact
-        && sqlite3_step (stmt) == SQLITE_DONE ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK) {
+      /* Preserve the normalized fingerprint error. */
+    } else if ((successor != NULL && resolved_successor == NULL)
+        || disposition == NULL || audit == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else
+      rc = exact && sqlite3_step (stmt) == SQLITE_DONE ? WYRELOG_E_OK :
+          WYRELOG_E_POLICY;
+    sodium_memzero (expected_fingerprint, sizeof expected_fingerprint);
     if (rc == WYRELOG_E_OK)
       rc = service_handoff_validate_cancellation_disposition (store, input,
-          created_at_us);
+          resolution, &resolved, created_at_us, strict_cardinality);
+    if (rc == WYRELOG_E_OK
+        && validate_authority
+        && resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION) {
+      WylPolicyServiceHandoffCancellationInput resolved_input = *input;
+      resolved_input.tuple = resolved;
+      resolved_input.observation =
+          WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED;
+      rc = service_handoff_cancellation_validate_committed (store,
+          &resolved_input);
+    }
     if (rc == WYRELOG_E_OK)
-      rc = service_handoff_fill_cancellation_result (disposition, audit,
-          created_at_us, TRUE, out);
+      rc = service_handoff_fill_cancellation_result (resolution,
+          resolved_successor, generation, resolved.binding_digest,
+          disposition, audit, created_at_us, TRUE, out);
   } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
     rc = service_handoff_sqlite_error (store->db, step);
   }
   if (stmt != NULL)
     sqlite3_finalize (stmt);
+  sodium_memzero (proof_digest, sizeof proof_digest);
   return service_handoff_map_sqlite_io (store->db, rc);
 }
 
@@ -3995,8 +4265,7 @@ static wyrelog_error_t
       " (SELECT count(*) FROM service_credential_handoff_cancellation_claims"
       "  WHERE original_request_id=?),"
       " (SELECT count(*) FROM service_credential_handoff_dispositions"
-      "  WHERE original_request_id=?"
-      "  AND reason IN ('operation_expired','operation_cancelled','delivered'));";
+      "  WHERE original_request_id=?);";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc == WYRELOG_E_OK
       && ((rc = bind_text (stmt, 1, input->tuple.original_request_id))
@@ -4030,19 +4299,23 @@ service_handoff_cancellation_now (wyl_policy_store_t *store, gint64 *out_now_us)
 static wyrelog_error_t
 service_handoff_cancellation_insert (wyl_policy_store_t *store,
     const WylPolicyServiceHandoffCancellationInput *input,
-    const guint8 fingerprint[crypto_generichash_BYTES], gint64 now_us)
+    WylPolicyServiceHandoffCancellationOutcome resolution,
+    const WylPolicyServiceHandoffExactTuple *resolved_tuple,
+    const guint8 fingerprint[crypto_generichash_BYTES],
+    const guint8 proof_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES],
+    gint64 now_us)
 {
   gchar escrow[WYL_ID_STRING_BUF];
-  wyl_id_format (input->tuple.escrow_id, escrow, sizeof escrow);
+  wyl_id_format (resolved_tuple->escrow_id, escrow, sizeof escrow);
   sqlite3_stmt *stmt = NULL;
   static const gchar *sql =
       "INSERT INTO service_credential_handoff_cancellation_claims("
       "cancellation_request_id,request_fingerprint,decision_request_id,"
       "original_request_id,original_actor_subject_id,current_actor_subject_id,"
-      "escrow_id,binding_digest,successor_credential_id,"
+      "resolution,escrow_id,binding_digest,successor_credential_id,"
       "successor_issuance_generation,operation,target_a,target_b,target_digest,"
-      "deadline_at_us,disposition_id,audit_id,created_at_us)"
-      " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+      "maintenance_proof_digest,deadline_at_us,disposition_id,audit_id,"
+      "created_at_us)" " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc == WYRELOG_E_OK
       && ((rc = bind_text (stmt, 1, input->cancellation_request_id))
@@ -4053,26 +4326,34 @@ service_handoff_cancellation_insert (wyl_policy_store_t *store,
           != WYRELOG_E_OK || (rc = bind_text (stmt, 5,
                   input->tuple.original_actor_subject_id)) != WYRELOG_E_OK
           || (rc = bind_text (stmt, 6, input->current_actor_subject_id))
-          != WYRELOG_E_OK || (rc = bind_text (stmt, 7, escrow))
-          != WYRELOG_E_OK || sqlite3_bind_blob (stmt, 8,
-              input->tuple.binding_digest, 32, SQLITE_TRANSIENT) != SQLITE_OK
-          || (rc = bind_text (stmt, 9,
-                  input->tuple.successor_credential_id)) != WYRELOG_E_OK
-          || sqlite3_bind_int64 (stmt, 10, (sqlite3_int64)
-              input->tuple.successor_issuance_generation) != SQLITE_OK
-          || (rc = bind_text (stmt, 11,
+          != WYRELOG_E_OK || (rc = bind_text (stmt, 7,
+                  service_handoff_cancellation_resolution_name (resolution)))
+          != WYRELOG_E_OK || (rc = bind_text (stmt, 8, escrow))
+          != WYRELOG_E_OK || sqlite3_bind_blob (stmt, 9,
+              resolved_tuple->binding_digest, 32, SQLITE_TRANSIENT) != SQLITE_OK
+          || (resolved_tuple->successor_credential_id == NULL ?
+              sqlite3_bind_null (stmt, 10) : sqlite3_bind_text (stmt, 10,
+                  resolved_tuple->successor_credential_id, -1,
+                  SQLITE_TRANSIENT)) != SQLITE_OK
+          || (resolved_tuple->successor_issuance_generation == 0 ?
+              sqlite3_bind_null (stmt, 11) : sqlite3_bind_int64 (stmt, 11,
+                  (sqlite3_int64)
+                  resolved_tuple->successor_issuance_generation)) != SQLITE_OK
+          || (rc = bind_text (stmt, 12,
                   service_handoff_cancellation_operation_name
                   (input->operation))) != WYRELOG_E_OK
-          || (rc = bind_text (stmt, 12, input->target_a)) != WYRELOG_E_OK
-          || (input->target_b == NULL ? sqlite3_bind_null (stmt, 13) :
-              sqlite3_bind_text (stmt, 13, input->target_b, -1,
+          || (rc = bind_text (stmt, 13, input->target_a)) != WYRELOG_E_OK
+          || (input->target_b == NULL ? sqlite3_bind_null (stmt, 14) :
+              sqlite3_bind_text (stmt, 14, input->target_b, -1,
                   SQLITE_TRANSIENT)) != SQLITE_OK
-          || sqlite3_bind_blob (stmt, 14, input->target_digest, 32,
+          || sqlite3_bind_blob (stmt, 15, input->target_digest, 32,
               SQLITE_TRANSIENT) != SQLITE_OK
-          || sqlite3_bind_int64 (stmt, 15, input->deadline_at_us) != SQLITE_OK
-          || (rc = bind_text (stmt, 16, input->disposition_id))
-          != WYRELOG_E_OK || (rc = bind_text (stmt, 17, input->audit_id))
-          != WYRELOG_E_OK || sqlite3_bind_int64 (stmt, 18, now_us)
+          || sqlite3_bind_blob (stmt, 16, proof_digest, 32,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 17, input->deadline_at_us) != SQLITE_OK
+          || (rc = bind_text (stmt, 18, input->disposition_id))
+          != WYRELOG_E_OK || (rc = bind_text (stmt, 19, input->audit_id))
+          != WYRELOG_E_OK || sqlite3_bind_int64 (stmt, 20, now_us)
           != SQLITE_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
@@ -4094,19 +4375,27 @@ wyrelog_error_t
   if (store == NULL || out_result == NULL
       || !service_handoff_cancellation_shape_valid (input))
     return WYRELOG_E_INVALID;
-  wyrelog_error_t rc =
-      wyl_policy_store_service_authority_transaction_enter_participant
+  /* A PREPARED cancellation must let fence reconciliation acquire the first
+   * write intent.  Exact-claim recovery is read before both that acquisition
+   * and the mutable trusted clock. */
+  wyrelog_error_t rc = service_authority_transaction_validate_active
       (transaction, store);
   guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
-  if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_fingerprint (input, fingerprint);
   gboolean found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_lookup (store, input, fingerprint,
+    rc = service_handoff_cancellation_lookup (store, input, TRUE, TRUE,
         &found, out_result);
   if (rc != WYRELOG_E_OK || found) {
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_transaction_enter_participant
+          (transaction, store);
     sodium_memzero (fingerprint, sizeof fingerprint);
     return rc;
+  }
+  if (input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED) {
+    sodium_memzero (fingerprint, sizeof fingerprint);
+    return WYRELOG_E_POLICY;
   }
   gint64 trusted_now = 0;
   rc = service_handoff_cancellation_now (store, &trusted_now);
@@ -4116,19 +4405,93 @@ wyrelog_error_t
     rc = service_handoff_reject_legacy_request_collision (store,
         input->cancellation_request_id);
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_validate_committed (store, input);
-  WylPolicyServiceSuccessorExactClassification classification = { 0 };
+    rc = service_handoff_cancellation_reject_existing_artifacts (store, input);
+
+  WylPolicyServiceHandoffMaintenanceProof proof = { 0 };
+  service_handoff_cancellation_proof (input, &proof);
+  guint8 proof_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
   if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_classify_service_credential_successor_exact_core
-        (transaction, store, &input->tuple, trusted_now, &classification);
+    rc = service_handoff_maintenance_proof_digest (&proof, proof_digest);
+  WylPolicyServiceHandoffCancellationOutcome resolution = 0;
+  WylPolicyServiceHandoffExactTuple resolved = input->tuple;
+  WylServiceCredentialFenceResult fence = { 0 };
+  wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
+
+  if (rc == WYRELOG_E_OK && input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED)
+    rc = wyl_policy_store_reconcile_service_credential_operation_fence
+        (transaction, store, NULL, proof.operation,
+        proof.tuple.original_request_id, proof.subject_id, proof.tenant_id,
+        proof.old_credential_id, &fence);
+  if (rc == WYRELOG_E_OK && input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED
+      && fence.state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED
+      && fence.state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED) {
+    ServiceHandoffMaintenanceEscrowState escrow_state = 0;
+    rc = service_handoff_maintenance_classify_escrow (store, &proof,
+        fence.successor_credential_id, fence.successor_generation, NULL,
+        &escrow_state, &escrow);
+    if (rc == WYRELOG_E_OK
+        && escrow_state != SERVICE_HANDOFF_MAINTENANCE_ESCROW_EXACT)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      resolution = WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION;
+      resolved.successor_credential_id = fence.successor_credential_id;
+      resolved.successor_issuance_generation = fence.successor_generation;
+      memcpy (resolved.binding_digest, escrow.binding_digest,
+          sizeof resolved.binding_digest);
+    }
+  } else if (rc == WYRELOG_E_OK && input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED
+      && fence.state ==
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL) {
+    resolution = WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED;
+  } else if (rc == WYRELOG_E_OK && input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED) {
+    rc = WYRELOG_E_POLICY;
+  }
+
+  if (rc == WYRELOG_E_OK && input->observation ==
+      WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED) {
+    rc = wyl_policy_store_service_authority_transaction_enter_participant
+        (transaction, store);
+    if (rc == WYRELOG_E_OK)
+      resolution = WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION;
+  }
+
   if (rc == WYRELOG_E_OK
+      && resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION) {
+    WylPolicyServiceHandoffCancellationInput resolved_input = *input;
+    resolved_input.tuple = resolved;
+    memcpy (resolved_input.target_digest, input->target_digest,
+        sizeof resolved_input.target_digest);
+    rc = service_handoff_cancellation_validate_committed (store,
+        &resolved_input);
+  }
+  if (rc == WYRELOG_E_OK
+      && resolution == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED)
+    rc = service_handoff_maintenance_validate_no_commit (store, &proof,
+        input->disposition_id, input->audit_id,
+        input->current_actor_subject_id);
+
+  WylPolicyServiceSuccessorExactClassification classification = { 0 };
+  if (rc == WYRELOG_E_OK
+      && resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION)
+    rc = wyl_policy_store_classify_service_credential_successor_exact_core
+        (transaction, store, &resolved, trusted_now, &classification);
+  if (rc == WYRELOG_E_OK
+      && resolution == WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION
       && classification.disposition != WYL_POLICY_SERVICE_SUCCESSOR_ACTIVE)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_reject_existing_artifacts (store, input);
+    rc = service_handoff_cancellation_fingerprint (input, resolution,
+        &resolved, fingerprint);
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_insert (store, input, fingerprint,
-        trusted_now);
+    rc = service_handoff_cancellation_insert (store, input, resolution,
+        &resolved, fingerprint, proof_digest, trusted_now);
   if (rc == WYRELOG_E_OK && service_handoff_should_fail (store,
           WYL_POLICY_HANDOFF_FAIL_AFTER_REQUEST_CLAIM))
     rc = WYRELOG_E_IO;
@@ -4136,18 +4499,32 @@ wyrelog_error_t
     rc = service_handoff_append_audit_strict (store, input->audit_id,
         trusted_now, input->current_actor_subject_id,
         "service.credential.handoff.cancel",
-        input->tuple.successor_credential_id, input->cancellation_request_id);
+        resolved.successor_credential_id != NULL ?
+        resolved.successor_credential_id : resolved.original_request_id,
+        input->cancellation_request_id);
   if (rc == WYRELOG_E_OK && service_handoff_should_fail (store,
           WYL_POLICY_HANDOFF_FAIL_AFTER_AUDIT))
     rc = WYRELOG_E_IO;
   WylPolicyServiceHandoffDispositionInput disposition = {
     .disposition_id = input->disposition_id,
     .audit_id = input->audit_id,
-    .tuple = input->tuple,
+    .tuple = resolved,
     .actor_subject_id = input->current_actor_subject_id,
-    .reason = WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_CANCELLED,
-    .outcome = WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED,
+    .reason = resolution ==
+        WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION ?
+        WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_CANCELLED :
+        WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED,
+    .outcome = resolution ==
+        WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION ?
+        WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED :
+        WYL_POLICY_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED,
   };
+  WylPolicyServiceHandoffNoCommitEvidence evidence = { 0 };
+  if (rc == WYRELOG_E_OK
+      && resolution == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED) {
+    rc = service_handoff_maintenance_no_commit_evidence (&proof, &evidence);
+    disposition.no_commit_evidence = &evidence;
+  }
   guint8 semantic_key[crypto_generichash_BYTES] = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_disposition_semantic_key (&disposition, semantic_key);
@@ -4158,11 +4535,16 @@ wyrelog_error_t
           WYL_POLICY_HANDOFF_FAIL_AFTER_PROVENANCE))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_fill_cancellation_result (input->disposition_id,
-        input->audit_id, trusted_now, FALSE, out_result);
+    rc = service_handoff_fill_cancellation_result (resolution,
+        resolved.successor_credential_id,
+        resolved.successor_issuance_generation, resolved.binding_digest,
+        input->disposition_id, input->audit_id, trusted_now, FALSE, out_result);
   sodium_memzero (semantic_key, sizeof semantic_key);
   sodium_memzero (fingerprint, sizeof fingerprint);
+  sodium_memzero (proof_digest, sizeof proof_digest);
   wyl_policy_service_successor_exact_classification_clear (&classification);
+  wyl_policy_service_handoff_escrow_info_clear (&escrow);
+  sodium_memzero (&fence, sizeof fence);
   return rc;
 }
 
@@ -13533,13 +13915,6 @@ wyrelog_error_t
 #define SERVICE_HANDOFF_MAINTENANCE_ACTOR \
   "system:service-handoff-maintenance"
 
-typedef enum
-{
-  SERVICE_HANDOFF_MAINTENANCE_ESCROW_EXACT,
-  SERVICE_HANDOFF_MAINTENANCE_ESCROW_MISSING,
-  SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN,
-} ServiceHandoffMaintenanceEscrowState;
-
 void wyl_policy_service_handoff_prepared_maintenance_result_clear
     (WylPolicyServiceHandoffPreparedMaintenanceResult * result)
 {
@@ -13895,6 +14270,29 @@ service_handoff_maintenance_lookup_not_committed (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
+    service_handoff_maintenance_reject_orphan_cancellation
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT 1 FROM service_credential_handoff_dispositions"
+      " WHERE original_request_id=? AND reason='operation_cancelled'"
+      " AND outcome='attention_required' LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, proof->tuple.original_request_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = WYRELOG_E_POLICY;
+  else if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = service_handoff_sqlite_error (store->db, step);
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+static wyrelog_error_t
     service_handoff_maintenance_mint_not_committed
     (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const WylPolicyServiceHandoffMaintenanceProof * proof, gint64 now_us,
@@ -13923,6 +14321,110 @@ static wyrelog_error_t
   return rc;
 }
 
+static wyrelog_error_t
+    service_handoff_maintenance_recover_prepared_cancellation
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    gboolean * out_found,
+    WylPolicyServiceHandoffPreparedMaintenanceResult * out_result)
+{
+  *out_found = FALSE;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT cancellation_request_id,decision_request_id,"
+      "current_actor_subject_id,disposition_id,audit_id FROM"
+      " service_credential_handoff_cancellation_claims"
+      " WHERE original_request_id=? LIMIT 2;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, proof->tuple.original_request_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  g_autofree gchar *cancellation_request_id = NULL;
+  g_autofree gchar *decision_request_id = NULL;
+  g_autofree gchar *current_actor = NULL;
+  g_autofree gchar *disposition_id = NULL;
+  g_autofree gchar *audit_id = NULL;
+  gboolean row_found = step == SQLITE_ROW;
+  if (rc == WYRELOG_E_OK && row_found) {
+    cancellation_request_id = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 0));
+    decision_request_id = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 1));
+    current_actor = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 2));
+    disposition_id = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 3));
+    audit_id = service_handoff_try_strdup
+        ((const gchar *) sqlite3_column_text (stmt, 4));
+    if (cancellation_request_id == NULL || decision_request_id == NULL
+        || current_actor == NULL || disposition_id == NULL || audit_id == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else if (sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_POLICY;
+  } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
+    rc = service_handoff_sqlite_error (store->db, step);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK || !row_found)
+    return rc;
+
+  WylPolicyServiceHandoffCancellationInput input = {
+    .cancellation_request_id = cancellation_request_id,
+    .decision_request_id = decision_request_id,
+    .current_actor_subject_id = current_actor,
+    .disposition_id = disposition_id,
+    .audit_id = audit_id,
+    .tuple = proof->tuple,
+    .observation = WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED,
+    .operation = proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
+        WYL_POLICY_HANDOFF_FENCE_ISSUE : WYL_POLICY_HANDOFF_FENCE_ROTATE,
+    .target_a = proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
+        proof->subject_id : proof->old_credential_id,
+    .target_b = proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
+        proof->tenant_id : NULL,
+    .deadline_at_us = proof->deadline_at_us,
+  };
+  memcpy (input.target_digest, proof->target_digest,
+      sizeof input.target_digest);
+  WylPolicyServiceHandoffCancellationResult cancellation = { 0 };
+  if (!service_handoff_cancellation_shape_valid (&input))
+    rc = WYRELOG_E_POLICY;
+  gboolean exact_found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_cancellation_lookup (store, &input, TRUE, TRUE,
+        &exact_found, &cancellation);
+  if (rc == WYRELOG_E_OK && !exact_found)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && cancellation.outcome ==
+      WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION) {
+    out_result->outcome = WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_COMMITTED;
+    out_result->created_at_us = cancellation.created_at_us;
+    g_strlcpy (out_result->successor_credential_id,
+        cancellation.successor_credential_id,
+        sizeof out_result->successor_credential_id);
+    out_result->successor_generation =
+        cancellation.successor_issuance_generation;
+    memcpy (out_result->binding_digest, cancellation.binding_digest,
+        sizeof out_result->binding_digest);
+  } else if (rc == WYRELOG_E_OK
+      && cancellation.outcome ==
+      WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED) {
+    out_result->outcome = WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_NOT_COMMITTED;
+    out_result->created_at_us = cancellation.created_at_us;
+    rc = service_handoff_fill_disposition_result
+        (cancellation.disposition_id, cancellation.audit_id,
+        cancellation.created_at_us, TRUE, &out_result->disposition);
+  } else if (rc == WYRELOG_E_OK) {
+    rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    *out_found = TRUE;
+  wyl_policy_service_handoff_cancellation_result_clear (&cancellation);
+  return rc;
+}
+
 wyrelog_error_t
     wyl_policy_store_handoff_maintain_prepared_core
     (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
@@ -13942,9 +14444,19 @@ wyrelog_error_t
    * acquisition fail closed. */
   wyrelog_error_t rc = service_authority_transaction_validate_active
       (transaction, store);
-  gint64 now_us = 0;
+  gboolean cancellation_found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_maintenance_now (store, &now_us);
+    rc = service_handoff_maintenance_recover_prepared_cancellation
+        (store, proof, &cancellation_found, out_result);
+  if (rc == WYRELOG_E_OK && cancellation_found) {
+    rc = wyl_policy_store_service_authority_transaction_enter_participant
+        (transaction, store);
+    if (rc != WYRELOG_E_OK)
+      wyl_policy_service_handoff_prepared_maintenance_result_clear (out_result);
+    return rc;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_reject_orphan_cancellation (store, proof);
   WylPolicyServiceHandoffDispositionResult disposition = { 0 };
   gboolean found = FALSE;
   if (rc == WYRELOG_E_OK)
@@ -13961,6 +14473,9 @@ wyrelog_error_t
     memset (&disposition, 0, sizeof disposition);
     return WYRELOG_E_OK;
   }
+  gint64 now_us = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_now (store, &now_us);
   if (rc == WYRELOG_E_OK && now_us < proof->deadline_at_us) {
     rc = wyl_policy_store_service_authority_transaction_enter_participant
         (transaction, store);
@@ -14024,6 +14539,7 @@ static wyrelog_error_t
     service_handoff_maintenance_lookup_claimed_cancellation
     (wyl_policy_store_t * store,
     const WylPolicyServiceHandoffMaintenanceProof * proof,
+    gboolean validate_authority, gboolean strict_cardinality,
     gboolean * out_found, WylPolicyServiceHandoffDispositionResult * out)
 {
   *out_found = FALSE;
@@ -14098,6 +14614,7 @@ static wyrelog_error_t
     .disposition_id = disposition_id,
     .audit_id = audit_id,
     .tuple = proof->tuple,
+    .observation = WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED,
     .operation = proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
         WYL_POLICY_HANDOFF_FENCE_ISSUE : WYL_POLICY_HANDOFF_FENCE_ROTATE,
     .target_a = proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
@@ -14108,16 +14625,13 @@ static wyrelog_error_t
   };
   memcpy (input.target_digest, proof->target_digest,
       sizeof input.target_digest);
-  guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
   WylPolicyServiceHandoffCancellationResult cancellation = { 0 };
   if (!service_handoff_cancellation_shape_valid (&input))
     rc = WYRELOG_E_POLICY;
-  if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_fingerprint (&input, fingerprint);
   gboolean exact_found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_lookup (store, &input, fingerprint,
-        &exact_found, &cancellation);
+    rc = service_handoff_cancellation_lookup (store, &input,
+        validate_authority, strict_cardinality, &exact_found, &cancellation);
   if (rc == WYRELOG_E_OK && !exact_found)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
@@ -14126,15 +14640,15 @@ static wyrelog_error_t
   if (rc == WYRELOG_E_OK)
     *out_found = TRUE;
   wyl_policy_service_handoff_cancellation_result_clear (&cancellation);
-  sodium_memzero (fingerprint, sizeof fingerprint);
   return rc;
 }
 
 static wyrelog_error_t
-service_handoff_maintenance_lookup_attention (wyl_policy_store_t *store,
-    const WylPolicyServiceHandoffMaintenanceProof *proof, gboolean *out_found,
-    WylPolicyServiceHandoffCommittedMaintenanceOutcome *out_outcome,
-    WylPolicyServiceHandoffDispositionResult *out_disposition)
+    service_handoff_maintenance_lookup_attention
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof, gboolean * out_found,
+    WylPolicyServiceHandoffCommittedMaintenanceOutcome * out_outcome,
+    WylPolicyServiceHandoffDispositionResult * out_disposition)
 {
   gboolean expired_found = FALSE;
   gboolean cancelled_found = FALSE;
@@ -14145,7 +14659,7 @@ service_handoff_maintenance_lookup_attention (wyl_policy_store_t *store,
       WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED, &expired_found, &expired);
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_maintenance_lookup_claimed_cancellation (store,
-        proof, &cancelled_found, &cancelled);
+        proof, TRUE, TRUE, &cancelled_found, &cancelled);
   if (rc == WYRELOG_E_OK && expired_found && cancelled_found)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK && expired_found) {
@@ -14186,7 +14700,8 @@ wyrelog_error_t
   WylPolicyServiceHandoffDispositionResult cancellation_artifact = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_maintenance_lookup_claimed_cancellation (store,
-        proof, &cancellation_artifact_found, &cancellation_artifact);
+        proof, FALSE, FALSE, &cancellation_artifact_found,
+        &cancellation_artifact);
   wyl_policy_service_handoff_disposition_result_clear (&cancellation_artifact);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -14233,8 +14748,8 @@ wyrelog_error_t
 
   gboolean found = FALSE;
   WylPolicyServiceHandoffCommittedMaintenanceOutcome attention = 0;
-  rc = service_handoff_maintenance_lookup_attention (store, proof,
-      &found, &attention, &disposition);
+  rc = service_handoff_maintenance_lookup_attention (store, proof, &found,
+      &attention, &disposition);
   if (rc != WYRELOG_E_OK)
     goto out;
   if (found) {

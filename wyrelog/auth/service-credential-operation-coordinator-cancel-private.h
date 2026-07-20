@@ -37,14 +37,20 @@ typedef struct
 } WylServiceCredentialOperationHandoffCancelRequest;
 
 /* Append or exactly replay an authenticated cancellation claim for a v5
- * handoff in SERVER_COMMITTED, PUBLICATION_PLANNED, or
- * PUBLICATION_PREPARED. FILE_PUBLISHED and CLEANUP_REQUIRED are deliberately
- * ineligible: cancellation cannot suppress delivery proof or cleanup. The
+ * handoff in PREPARED, SERVER_COMMITTED, PUBLICATION_PLANNED, or
+ * PUBLICATION_PREPARED. A PREPARED operation is reconciled against the
+ * authority fence and checkpointed to either SERVER_COMMITTED or terminal
+ * NOT_COMMITTED after the claim transaction commits. An already terminal
+ * NOT_COMMITTED operation permits only exact claim replay. FILE_PUBLISHED and
+ * CLEANUP_REQUIRED are deliberately ineligible: cancellation cannot suppress
+ * delivery proof or cleanup. The
  * per-operation lifecycle lock spans journal loading, tenant binding, fresh
  * wr.service_credential.manage authorization, and the atomic authority write.
- * This API never checkpoints or otherwise mutates the journal; subsequent
- * execution observes the ATTENTION disposition through the maintenance gate
- * before any publication or unseal callback.
+ * For committed input the journal remains unchanged and subsequent execution
+ * observes ATTENTION through the maintenance gate before any publication or
+ * unseal callback. The lifecycle lock remains held through any journal
+ * checkpoint, with the authority transaction committed first so a retry
+ * converges after ambiguous checkpoint failure.
  *
  * cancellation_request_id and decision_request_id are distinct canonical
  * KSUIDs, each distinct from original_request_id.  disposition_id and

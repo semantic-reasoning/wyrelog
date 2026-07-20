@@ -869,15 +869,18 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_cancellation_claims (
     current_actor_subject_id TEXT NOT NULL CHECK (typeof(current_actor_subject_id) = 'text'
         AND length(current_actor_subject_id) BETWEEN 1 AND 128
         AND instr(current_actor_subject_id, char(0)) = 0),
+    resolution TEXT NOT NULL CHECK (
+        resolution IN ('committed_attention', 'terminal_not_committed')),
     escrow_id TEXT NOT NULL CHECK (typeof(escrow_id) = 'text'
         AND length(escrow_id) = 36 AND instr(escrow_id, char(0)) = 0),
     binding_digest BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob'
-        AND length(binding_digest) = 32 AND binding_digest <> zeroblob(32)),
-    successor_credential_id TEXT NOT NULL CHECK (typeof(successor_credential_id) = 'text'
-        AND length(successor_credential_id) = 31
+        AND length(binding_digest) = 32),
+    successor_credential_id TEXT CHECK (successor_credential_id IS NULL OR (
+        typeof(successor_credential_id) = 'text' AND length(successor_credential_id) = 31
         AND substr(successor_credential_id, 1, 4) = 'wlc_'
-        AND instr(successor_credential_id, char(0)) = 0),
-    successor_issuance_generation INTEGER NOT NULL CHECK (successor_issuance_generation >= 1),
+        AND instr(successor_credential_id, char(0)) = 0)),
+    successor_issuance_generation INTEGER CHECK (
+        successor_issuance_generation IS NULL OR successor_issuance_generation >= 1),
     operation TEXT NOT NULL CHECK (operation IN ('issue', 'rotate')),
     target_a TEXT NOT NULL CHECK (typeof(target_a) = 'text'
         AND length(target_a) BETWEEN 1 AND 128 AND instr(target_a, char(0)) = 0),
@@ -885,6 +888,9 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_cancellation_claims (
         AND length(target_b) BETWEEN 1 AND 128 AND instr(target_b, char(0)) = 0)),
     target_digest BLOB NOT NULL CHECK (typeof(target_digest) = 'blob'
         AND length(target_digest) = 32 AND target_digest <> zeroblob(32)),
+    maintenance_proof_digest BLOB NOT NULL CHECK (
+        typeof(maintenance_proof_digest) = 'blob' AND length(maintenance_proof_digest) = 32
+        AND maintenance_proof_digest <> zeroblob(32)),
     deadline_at_us INTEGER NOT NULL CHECK (deadline_at_us > 0),
     disposition_id TEXT NOT NULL UNIQUE CHECK (typeof(disposition_id) = 'text'
         AND length(disposition_id) = 36 AND instr(disposition_id, char(0)) = 0),
@@ -896,7 +902,13 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_cancellation_claims (
         AND cancellation_request_id <> decision_request_id),
     CHECK (original_actor_subject_id <> current_actor_subject_id),
     CHECK ((operation = 'issue' AND target_b IS NOT NULL)
-        OR (operation = 'rotate' AND target_b IS NULL))
+        OR (operation = 'rotate' AND target_b IS NULL)),
+    CHECK ((resolution = 'committed_attention' AND binding_digest <> zeroblob(32)
+            AND successor_credential_id IS NOT NULL
+            AND successor_issuance_generation IS NOT NULL)
+        OR (resolution = 'terminal_not_committed' AND binding_digest = zeroblob(32)
+            AND successor_credential_id IS NULL
+            AND successor_issuance_generation IS NULL))
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_cancellation_exact

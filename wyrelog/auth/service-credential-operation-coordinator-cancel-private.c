@@ -135,6 +135,31 @@ handoff_cancel_state_is_committed (WylServiceCredentialOperationState state)
       || state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED;
 }
 
+static gboolean
+handoff_cancel_state_observation (const WylServiceCredentialOperationRecord
+    *record, wyl_service_credential_handoff_cancellation_observation_t *out)
+{
+  WylServiceCredentialOperationTerminalKind terminal_kind = 0;
+
+  if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED) {
+    *out = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED;
+    return TRUE;
+  }
+  if (handoff_cancel_state_is_committed (record->state)) {
+    *out = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED;
+    return TRUE;
+  }
+  if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
+      && wyl_service_credential_operation_terminal_reason_parse
+      (record->terminal_reason, &terminal_kind, NULL)
+      && terminal_kind ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED) {
+    *out = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED;
+    return TRUE;
+  }
+  return FALSE;
+}
+
 static wyrelog_error_t
 handoff_cancel_input_from_record (const WylServiceCredentialOperationRecord
     *record,
@@ -143,11 +168,15 @@ handoff_cancel_input_from_record (const WylServiceCredentialOperationRecord
     wyl_id_t *escrow_id,
     wyl_service_credential_handoff_cancellation_input_t *out)
 {
-  if (!handoff_cancel_state_is_committed (record->state)
+  wyl_service_credential_handoff_cancellation_observation_t observation = 0;
+
+  if (!handoff_cancel_state_observation (record, &observation)
       || record->version != WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
-      || record->successor_credential_id == NULL
-      || record->successor_generation == 0
       || g_strcmp0 (record->actor_subject_id, current_actor_subject_id) == 0)
+    return WYRELOG_E_POLICY;
+  if (observation == WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED
+      && (record->successor_credential_id == NULL
+          || record->successor_generation == 0))
     return WYRELOG_E_POLICY;
   wyrelog_error_t rc = wyl_id_parse (record->escrow_id, escrow_id);
   if (rc != WYRELOG_E_OK)
@@ -161,10 +190,15 @@ handoff_cancel_input_from_record (const WylServiceCredentialOperationRecord
         request->disposition_id,.audit_id = request->audit_id,.tuple = {
       .original_request_id = record->request_id,
       .escrow_id = escrow_id,
-      .successor_credential_id = record->successor_credential_id,
-      .successor_issuance_generation = record->successor_generation,
+      .successor_credential_id =
+          observation == WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED
+          ? record->successor_credential_id : NULL,
+      .successor_issuance_generation =
+          observation == WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED
+          ? record->successor_generation : 0,
       .original_actor_subject_id = record->actor_subject_id,
-  },.operation = record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE ?
+  },.observation = observation,.operation =
+        record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE ?
         WYL_SERVICE_HANDOFF_FENCE_ISSUE :
         WYL_SERVICE_HANDOFF_FENCE_ROTATE,.target_a =
         record->kind ==
@@ -173,8 +207,9 @@ handoff_cancel_input_from_record (const WylServiceCredentialOperationRecord
         record->kind ==
         WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE ? record->
         tenant_id : NULL,.deadline_at_us = record->expires_at_us,};
-  memcpy (out->tuple.binding_digest, record->escrow_binding_digest,
-      sizeof out->tuple.binding_digest);
+  if (observation == WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED)
+    memcpy (out->tuple.binding_digest, record->escrow_binding_digest,
+        sizeof out->tuple.binding_digest);
   return wyl_service_credential_operation_handoff_target_digest (record,
       out->target_digest);
 }
@@ -193,6 +228,8 @@ wyrelog_error_t
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
   WylServiceCredentialOperationRecord record =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord checkpointed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   wyl_service_credential_t old_credential = { 0 };
   wyl_service_credential_handoff_cancellation_input_t input = { 0 };
   g_autofree gchar *session_actor = NULL;
@@ -200,6 +237,7 @@ wyrelog_error_t
   g_autofree gchar *session_resource_id = NULL;
   wyl_id_t escrow_id;
   gboolean locked = FALSE;
+  gboolean checkpoint_replayed = FALSE;
   wyrelog_error_t rc;
 
   if (out_result != NULL)
@@ -246,7 +284,8 @@ wyrelog_error_t
       original_request_id, &record);
   if (rc != WYRELOG_E_OK)
     goto out;
-  if (!handoff_cancel_state_is_committed (record.state)) {
+  wyl_service_credential_handoff_cancellation_observation_t observation = 0;
+  if (!handoff_cancel_state_observation (&record, &observation)) {
     rc = WYRELOG_E_POLICY;
     goto out;
   }
@@ -290,11 +329,45 @@ wyrelog_error_t
   };
   rc = wyl_service_credential_handoff_claim_cancellation (handle, &input,
       &cancel_runtime, out_result);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+
+  if (observation == WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED) {
+    if (out_result->outcome !=
+        WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION)
+      rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  if (observation ==
+      WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED) {
+    if (out_result->outcome !=
+        WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed (storage, anchor, original_request_id, MAX (record.updated_at_us, out_result->created_at_us), &checkpoint_replayed, &checkpointed);
+    goto out;
+  }
+  if (observation != WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  if (out_result->outcome ==
+      WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION)
+    rc = wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound (storage, anchor, original_request_id, out_result->successor_credential_id, out_result->successor_issuance_generation, out_result->binding_digest, MAX (record.updated_at_us, out_result->created_at_us), &checkpoint_replayed, &checkpointed);
+  else if (out_result->outcome ==
+      WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED)
+    rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed (storage, anchor, original_request_id, MAX (record.updated_at_us, out_result->created_at_us), &checkpoint_replayed, &checkpointed);
+  else
+    rc = WYRELOG_E_POLICY;
 
 out:
+  if (rc != WYRELOG_E_OK && out_result != NULL)
+    wyl_service_credential_handoff_cancellation_result_clear (out_result);
   sodium_memzero (&escrow_id, sizeof escrow_id);
   sodium_memzero (&input, sizeof input);
   wyl_service_credential_clear (&old_credential);
+  wyl_service_credential_operation_record_clear (&checkpointed);
   wyl_service_credential_operation_record_clear (&record);
   if (locked)
     wyl_service_credential_operation_coordinator_lock_release (storage,

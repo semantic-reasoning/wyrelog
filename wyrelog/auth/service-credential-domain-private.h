@@ -138,6 +138,19 @@ typedef struct
 
 typedef enum
 {
+  WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED = 1,
+  WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED = 2,
+  WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED = 3,
+} wyl_service_credential_handoff_cancellation_observation_t;
+
+typedef enum
+{
+  WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION = 1,
+  WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED = 2,
+} wyl_service_credential_handoff_cancellation_outcome_t;
+
+typedef enum
+{
   WYL_SERVICE_HANDOFF_FENCE_ISSUE = 1,
   WYL_SERVICE_HANDOFF_FENCE_ROTATE = 2,
 } wyl_service_credential_handoff_fence_operation_t;
@@ -194,6 +207,7 @@ typedef struct
   const gchar *disposition_id;
   const gchar *audit_id;
   wyl_service_credential_handoff_exact_tuple_t tuple;
+  wyl_service_credential_handoff_cancellation_observation_t observation;
   wyl_service_credential_handoff_fence_operation_t operation;
   const gchar *target_a;
   const gchar *target_b;
@@ -204,9 +218,13 @@ typedef struct
 typedef struct
 {
   gboolean replayed;
+  wyl_service_credential_handoff_cancellation_outcome_t outcome;
   gchar *disposition_id;
   gchar *audit_id;
   gint64 created_at_us;
+  gchar successor_credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  guint64 successor_issuance_generation;
+  guint8 binding_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
 } wyl_service_credential_handoff_cancellation_result_t;
 
 typedef struct

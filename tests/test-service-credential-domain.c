@@ -3500,6 +3500,20 @@ test_handoff_remediation_fresh_authorization_and_replay (void)
 }
 
 #ifdef WYL_TEST_HAS_HANDOFF_CANCELLATION
+typedef struct
+{
+  gint64 now_us;
+  guint calls;
+} CancellationClock;
+
+static gint64
+cancellation_counting_now (gpointer data)
+{
+  CancellationClock *clock = data;
+  clock->calls++;
+  return clock->now_us;
+}
+
 static void
 test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
 {
@@ -3559,11 +3573,10 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
     .current_actor_subject_id = "operator",
     .disposition_id = disposition_id,
     .audit_id = audit_id,
+    .observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED,
     .tuple = {
           .original_request_id = original_request_id,
           .escrow_id = &escrow_id,
-          .successor_credential_id = issued.credential.credential_id,
-          .successor_issuance_generation = issued.credential.generation,
           .original_actor_subject_id = "admin",
         },
     .operation = WYL_SERVICE_HANDOFF_FENCE_ISSUE,
@@ -3571,8 +3584,6 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
     .target_b = "tenant-a",
     .deadline_at_us = deadline_at_us,
   };
-  memcpy (input.tuple.binding_digest, issued.handoff.binding_digest,
-      sizeof input.tuple.binding_digest);
   memcpy (input.target_digest, target, sizeof input.target_digest);
   AuthorizationProbe probe = {.handle = handle,.rc = WYRELOG_E_POLICY };
   wyl_service_credential_mutation_authorization_t authorization = {
@@ -3600,6 +3611,14 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
   g_assert_cmpstr (result.audit_id, ==, audit_id);
   g_assert_cmpint (result.created_at_us, >, 0);
   g_assert_cmpint (result.created_at_us, <, deadline_at_us);
+  g_assert_cmpint (result.outcome, ==,
+      WYL_SERVICE_HANDOFF_CANCELLATION_COMMITTED_ATTENTION);
+  g_assert_cmpstr (result.successor_credential_id, ==,
+      issued.credential.credential_id);
+  g_assert_cmpuint (result.successor_issuance_generation, ==,
+      issued.credential.generation);
+  g_assert_cmpint (sodium_memcmp (result.binding_digest,
+          issued.handoff.binding_digest, sizeof result.binding_digest), ==, 0);
   MutationEffects after = mutation_effects (handle);
   g_assert_cmpint (after.credentials, ==, before.credentials);
   g_assert_cmpint (after.events, ==, before.events);
@@ -3624,6 +3643,15 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
           " AND e.request_id=c.cancellation_request_id"
           " AND i.request_id=c.cancellation_request_id;"), ==, 1);
   wyl_service_credential_handoff_cancellation_result_clear (&result);
+
+  /* The journal checkpoint changes only the observation.  Exact replay binds
+   * the separately stored resolution tuple without changing the stable
+   * request fingerprint. */
+  input.observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED;
+  input.tuple.successor_credential_id = issued.credential.credential_id;
+  input.tuple.successor_issuance_generation = issued.credential.generation;
+  memcpy (input.tuple.binding_digest, issued.handoff.binding_digest,
+      sizeof input.tuple.binding_digest);
 
   probe.calls = 0;
   before = mutation_effects (handle);
@@ -3669,6 +3697,44 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
   g_assert_cmpint (wyl_service_credential_revoke (handle,
           issued.credential.credential_id, "operator-2",
           "cancellation-precedence-revoke", &revoked), ==, WYRELOG_E_OK);
+  probe.calls = 0;
+  before = mutation_effects (handle);
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &input, &runtime, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_true (result.replayed);
+  assert_mutation_effects_equal (mutation_effects (handle), before);
+  wyl_service_credential_handoff_cancellation_result_clear (&result);
+  WylPolicyServiceHandoffMaintenanceProof prepared_recovery_proof =
+      precedence_proof;
+  prepared_recovery_proof.tuple.successor_credential_id = NULL;
+  prepared_recovery_proof.tuple.successor_issuance_generation = 0;
+  sodium_memzero (prepared_recovery_proof.tuple.binding_digest,
+      sizeof prepared_recovery_proof.tuple.binding_digest);
+  CancellationClock prepared_recovery_clock = {
+    .now_us = deadline_at_us - 1,
+  };
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
+      cancellation_counting_now, &prepared_recovery_clock);
+  Txn prepared_recovery_transaction = { 0 };
+  WylPolicyServiceHandoffPreparedMaintenanceResult prepared_recovery = { 0 };
+  classifier_transaction_begin (handle, &prepared_recovery_transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_maintain_prepared_core
+      (prepared_recovery_transaction.txn, store_of (handle),
+          &prepared_recovery_proof, &prepared_recovery), ==, WYRELOG_E_OK);
+  classifier_transaction_end (&prepared_recovery_transaction);
+  g_assert_cmpuint (prepared_recovery_clock.calls, ==, 0);
+  g_assert_cmpint (prepared_recovery.outcome, ==,
+      WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_COMMITTED);
+  g_assert_cmpstr (prepared_recovery.successor_credential_id, ==,
+      issued.credential.credential_id);
+  g_assert_cmpuint (prepared_recovery.successor_generation, ==,
+      issued.credential.generation);
+  g_assert_cmpint (sodium_memcmp (prepared_recovery.binding_digest,
+          issued.handoff.binding_digest,
+          sizeof prepared_recovery.binding_digest), ==, 0);
+  wyl_policy_service_handoff_prepared_maintenance_result_clear
+      (&prepared_recovery);
   gint64 precedence_now = deadline_at_us - 1;
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
       maintenance_fixed_now, &precedence_now);
@@ -3866,6 +3932,7 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
       .current_actor_subject_id = "operator",
       .disposition_id = fault_disposition_id,
       .audit_id = fault_audit_id,
+      .observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED,
       .tuple = {
             .original_request_id = fault_original_request_id,
             .escrow_id = &fault_escrow_id,
@@ -3912,6 +3979,7 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
       .current_actor_subject_id = "operator",
       .disposition_id = boundary_disposition_id,
       .audit_id = boundary_audit_id,
+      .observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED,
       .tuple = {
             .original_request_id = fault_original_request_id,
             .escrow_id = &fault_escrow_id,
@@ -3956,6 +4024,7 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
     .current_actor_subject_id = "operator",
     .disposition_id = winning_disposition_id,
     .audit_id = winning_audit_id,
+    .observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED,
     .tuple = {
           .original_request_id = fault_original_request_id,
           .escrow_id = &fault_escrow_id,
@@ -4014,6 +4083,319 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
   wyl_service_credential_handoff_result_clear (&issued);
   g_free (probe.actor_subject_id);
   g_free (issue_probe.actor_subject_id);
+}
+
+static void
+test_handoff_cancellation_prepared_terminal_boundary_rollback (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  const gchar *subject_id = "svc:handoff:cancel-prepared-terminal";
+  prepare_authority (handle, subject_id);
+  wyl_policy_store_t *store = store_of (handle);
+
+  gchar original_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar cancellation_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar decision_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar disposition_id[WYL_ID_STRING_BUF];
+  gchar audit_id[WYL_ID_STRING_BUF];
+  wyl_id_t escrow_id;
+  g_assert_cmpint (wyl_request_id_new (original_request_id,
+          sizeof original_request_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (cancellation_request_id,
+          sizeof cancellation_request_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (decision_request_id,
+          sizeof decision_request_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  new_uuid_string (disposition_id);
+  new_uuid_string (audit_id);
+  CancellationClock clock = {
+    .now_us = g_get_real_time () + G_TIME_SPAN_MINUTE,
+  };
+  gint64 deadline_at_us = clock.now_us + G_TIME_SPAN_HOUR;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
+      cancellation_counting_now, &clock);
+
+  wyl_service_credential_handoff_cancellation_input_t input = {
+    .cancellation_request_id = cancellation_request_id,
+    .decision_request_id = decision_request_id,
+    .current_actor_subject_id = "operator",
+    .disposition_id = disposition_id,
+    .audit_id = audit_id,
+    .observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED,
+    .tuple = {
+          .original_request_id = original_request_id,
+          .escrow_id = &escrow_id,
+          .original_actor_subject_id = "admin",
+        },
+    .operation = WYL_SERVICE_HANDOFF_FENCE_ISSUE,
+    .target_a = subject_id,
+    .target_b = "tenant-a",
+    .deadline_at_us = deadline_at_us,
+  };
+  memset (input.target_digest, 0x81, sizeof input.target_digest);
+  AuthorizationProbe probe = {.handle = handle,.rc = WYRELOG_E_OK };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,.data = &probe,
+  };
+  wyl_service_credential_handoff_cancellation_runtime_t runtime = {
+    .authorization = &authorization,
+  };
+  wyl_service_credential_handoff_cancellation_result_t result = { 0 };
+  MutationEffects before = mutation_effects (handle);
+  gint64 fences_before = scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_operation_fences;");
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &input, &runtime, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (clock.calls, ==, 1);
+  g_assert_false (result.replayed);
+  g_assert_cmpint (result.outcome, ==,
+      WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED);
+  g_assert_cmpstr (result.successor_credential_id, ==, "");
+  g_assert_cmpuint (result.successor_issuance_generation, ==, 0);
+  g_assert_true (sodium_is_zero (result.binding_digest,
+          sizeof result.binding_digest));
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_operation_fences"
+          " WHERE terminal_state='not_committed';"), ==, fences_before + 1);
+  MutationEffects claimed = mutation_effects (handle);
+  g_assert_cmpint (claimed.handoff_cancellations, ==,
+      before.handoff_cancellations + 1);
+  g_assert_cmpint (claimed.handoff_dispositions, ==,
+      before.handoff_dispositions + 1);
+  wyl_service_credential_handoff_cancellation_result_clear (&result);
+
+  WylPolicyServiceHandoffMaintenanceProof recovery_proof = {
+    .tuple = {
+          .original_request_id = original_request_id,
+          .escrow_id = &escrow_id,
+          .original_actor_subject_id = "admin",
+        },
+    .operation = WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+    .subject_id = subject_id,
+    .tenant_id = "tenant-a",
+    .deadline_at_us = deadline_at_us,
+  };
+  memcpy (recovery_proof.target_digest, input.target_digest,
+      sizeof recovery_proof.target_digest);
+  WylPolicyServiceHandoffPreparedMaintenanceResult recovery = { 0 };
+  Txn recovery_transaction = { 0 };
+  clock.calls = 0;
+  classifier_transaction_begin (handle, &recovery_transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_maintain_prepared_core
+      (recovery_transaction.txn, store, &recovery_proof, &recovery), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (clock.calls, ==, 0);
+  g_assert_cmpint (recovery.outcome, ==,
+      WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_NOT_COMMITTED);
+  g_assert_true (recovery.disposition.replayed);
+  g_assert_cmpstr (recovery.disposition.disposition_id, ==, disposition_id);
+  classifier_transaction_end (&recovery_transaction);
+  wyl_policy_service_handoff_prepared_maintenance_result_clear (&recovery);
+
+  input.observation =
+      WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED;
+  clock.now_us = deadline_at_us + 1;
+  clock.calls = 0;
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &input, &runtime, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (clock.calls, ==, 0);
+  g_assert_true (result.replayed);
+  g_assert_cmpint (result.outcome, ==,
+      WYL_SERVICE_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED);
+  assert_mutation_effects_equal (mutation_effects (handle), claimed);
+  wyl_service_credential_handoff_cancellation_result_clear (&result);
+
+  gchar boundary_original[WYL_REQUEST_ID_STRING_BUF];
+  gchar boundary_cancel[WYL_REQUEST_ID_STRING_BUF];
+  gchar boundary_decision[WYL_REQUEST_ID_STRING_BUF];
+  gchar boundary_disposition[WYL_ID_STRING_BUF];
+  gchar boundary_audit[WYL_ID_STRING_BUF];
+  wyl_id_t boundary_escrow;
+  g_assert_cmpint (wyl_request_id_new (boundary_original,
+          sizeof boundary_original), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (boundary_cancel,
+          sizeof boundary_cancel), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (boundary_decision,
+          sizeof boundary_decision), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (&boundary_escrow), ==, WYRELOG_E_OK);
+  new_uuid_string (boundary_disposition);
+  new_uuid_string (boundary_audit);
+  wyl_service_credential_handoff_cancellation_input_t boundary = input;
+  boundary.cancellation_request_id = boundary_cancel;
+  boundary.decision_request_id = boundary_decision;
+  boundary.disposition_id = boundary_disposition;
+  boundary.audit_id = boundary_audit;
+  boundary.observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED;
+  boundary.tuple.original_request_id = boundary_original;
+  boundary.tuple.escrow_id = &boundary_escrow;
+  boundary.deadline_at_us = deadline_at_us + G_TIME_SPAN_HOUR;
+  memset (boundary.target_digest, 0x82, sizeof boundary.target_digest);
+  clock.now_us = boundary.deadline_at_us;
+  clock.calls = 0;
+  gint64 fences_at_boundary = scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_operation_fences;");
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &boundary, &runtime, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (clock.calls, ==, 1);
+  g_assert_null (result.disposition_id);
+  assert_mutation_effects_equal (mutation_effects (handle), claimed);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_operation_fences;"), ==,
+      fences_at_boundary);
+
+  gchar rollback_original[WYL_REQUEST_ID_STRING_BUF];
+  gchar rollback_cancel[WYL_REQUEST_ID_STRING_BUF];
+  gchar rollback_decision[WYL_REQUEST_ID_STRING_BUF];
+  gchar rollback_disposition[WYL_ID_STRING_BUF];
+  gchar rollback_audit[WYL_ID_STRING_BUF];
+  wyl_id_t rollback_escrow;
+  g_assert_cmpint (wyl_request_id_new (rollback_original,
+          sizeof rollback_original), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (rollback_cancel,
+          sizeof rollback_cancel), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (rollback_decision,
+          sizeof rollback_decision), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (&rollback_escrow), ==, WYRELOG_E_OK);
+  new_uuid_string (rollback_disposition);
+  new_uuid_string (rollback_audit);
+  wyl_service_credential_handoff_cancellation_input_t rollback = boundary;
+  rollback.cancellation_request_id = rollback_cancel;
+  rollback.decision_request_id = rollback_decision;
+  rollback.disposition_id = rollback_disposition;
+  rollback.audit_id = rollback_audit;
+  rollback.tuple.original_request_id = rollback_original;
+  rollback.tuple.escrow_id = &rollback_escrow;
+  memset (rollback.target_digest, 0x83, sizeof rollback.target_digest);
+  clock.now_us = rollback.deadline_at_us - 1;
+  clock.calls = 0;
+  wyl_policy_store_service_handoff_fail_once (store,
+      WYL_POLICY_HANDOFF_FAIL_AFTER_REQUEST_CLAIM);
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &rollback, &runtime, &result), ==, WYRELOG_E_IO);
+  g_assert_cmpuint (clock.calls, ==, 1);
+  g_assert_null (result.disposition_id);
+  assert_mutation_effects_equal (mutation_effects (handle), claimed);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_operation_fences;"), ==,
+      fences_at_boundary);
+
+  gchar extra_disposition[WYL_ID_STRING_BUF];
+  gchar extra_audit[WYL_ID_STRING_BUF];
+  gchar formatted_escrow[WYL_ID_STRING_BUF];
+  new_uuid_string (extra_disposition);
+  new_uuid_string (extra_audit);
+  g_assert_cmpint (wyl_id_format (&escrow_id, formatted_escrow,
+          sizeof formatted_escrow), ==, WYRELOG_E_OK);
+  g_autofree gchar *insert_extra = g_strdup_printf
+      ("INSERT INTO service_credential_handoff_dispositions"
+      " (disposition_id,semantic_key,original_request_id,escrow_id,"
+      " binding_digest,successor_credential_id,"
+      " successor_issuance_generation,actor_subject_id,reason,outcome,"
+      " audit_id,created_at_us) VALUES"
+      " ('%s',randomblob(32),'%s','%s',"
+      " x'0101010101010101010101010101010101010101010101010101010101010101',"
+      " 'wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv',1,'operator',"
+      " 'successor_revoked','operator_action_required','%s',1);",
+      extra_disposition, original_request_id, formatted_escrow, extra_audit);
+  exec_ok (db_of (handle), insert_extra);
+  MutationEffects with_extra = mutation_effects (handle);
+  clock.calls = 0;
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &input, &runtime, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (clock.calls, ==, 0);
+  g_assert_null (result.disposition_id);
+  assert_mutation_effects_equal (mutation_effects (handle), with_extra);
+
+  gchar orphan_original[WYL_REQUEST_ID_STRING_BUF];
+  gchar orphan_cancel[WYL_REQUEST_ID_STRING_BUF];
+  gchar orphan_decision[WYL_REQUEST_ID_STRING_BUF];
+  gchar orphan_disposition[WYL_ID_STRING_BUF];
+  gchar orphan_audit[WYL_ID_STRING_BUF];
+  wyl_id_t orphan_escrow;
+  g_assert_cmpint (wyl_request_id_new (orphan_original,
+          sizeof orphan_original), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (orphan_cancel, sizeof orphan_cancel),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (orphan_decision,
+          sizeof orphan_decision), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_new (&orphan_escrow), ==, WYRELOG_E_OK);
+  WylPolicyServiceHandoffExactTuple orphan_artifact = {
+    .original_request_id = orphan_original,
+    .escrow_id = &orphan_escrow,
+    .successor_credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+    .successor_issuance_generation = 1,
+    .original_actor_subject_id = "admin",
+  };
+  memset (orphan_artifact.binding_digest, 0x91,
+      sizeof orphan_artifact.binding_digest);
+  maintenance_insert_cancelled_attention (handle, &orphan_artifact,
+      clock.now_us, orphan_disposition, orphan_audit);
+  MutationEffects with_orphan = mutation_effects (handle);
+  gint64 orphan_fences = scalar (db_of (handle),
+      "SELECT count(*) FROM service_credential_operation_fences;");
+
+  new_uuid_string (orphan_disposition);
+  new_uuid_string (orphan_audit);
+  wyl_service_credential_handoff_cancellation_input_t orphan_input = {
+    .cancellation_request_id = orphan_cancel,
+    .decision_request_id = orphan_decision,
+    .current_actor_subject_id = "operator",
+    .disposition_id = orphan_disposition,
+    .audit_id = orphan_audit,
+    .observation = WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED,
+    .tuple = {
+          .original_request_id = orphan_original,
+          .escrow_id = &orphan_escrow,
+          .original_actor_subject_id = "admin",
+        },
+    .operation = WYL_SERVICE_HANDOFF_FENCE_ISSUE,
+    .target_a = subject_id,
+    .target_b = "tenant-a",
+    .deadline_at_us = clock.now_us + G_TIME_SPAN_HOUR,
+  };
+  memset (orphan_input.target_digest, 0x92, sizeof orphan_input.target_digest);
+  clock.calls = 0;
+  g_assert_cmpint (wyl_service_credential_handoff_claim_cancellation (handle,
+          &orphan_input, &runtime, &result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpuint (clock.calls, ==, 1);
+  g_assert_null (result.disposition_id);
+  assert_mutation_effects_equal (mutation_effects (handle), with_orphan);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_operation_fences;"), ==,
+      orphan_fences);
+
+  WylPolicyServiceHandoffMaintenanceProof orphan_proof = {
+    .tuple = {
+          .original_request_id = orphan_original,
+          .escrow_id = &orphan_escrow,
+          .original_actor_subject_id = "admin",
+        },
+    .operation = WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE,
+    .subject_id = subject_id,
+    .tenant_id = "tenant-a",
+    .deadline_at_us = orphan_input.deadline_at_us,
+  };
+  memcpy (orphan_proof.target_digest, orphan_input.target_digest,
+      sizeof orphan_proof.target_digest);
+  Txn orphan_transaction = { 0 };
+  WylPolicyServiceHandoffPreparedMaintenanceResult orphan_result = { 0 };
+  clock.calls = 0;
+  classifier_transaction_begin (handle, &orphan_transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_maintain_prepared_core
+      (orphan_transaction.txn, store, &orphan_proof, &orphan_result), ==,
+      WYRELOG_E_POLICY);
+  classifier_transaction_end (&orphan_transaction);
+  g_assert_cmpuint (clock.calls, ==, 0);
+  assert_mutation_effects_equal (mutation_effects (handle), with_orphan);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_operation_fences;"), ==,
+      orphan_fences);
+  wyl_policy_service_handoff_prepared_maintenance_result_clear (&orphan_result);
+
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  g_free (probe.actor_subject_id);
 }
 #endif
 
@@ -4972,6 +5354,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/auth/service-credential/handoff-cancellation-fresh-auth-replay",
       test_handoff_cancellation_claim_fresh_authorization_and_replay);
+  g_test_add_func
+      ("/auth/service-credential/handoff-cancellation-prepared-terminal-boundary-rollback",
+      test_handoff_cancellation_prepared_terminal_boundary_rollback);
 #endif
   g_test_add_func
       ("/auth/service-credential/handoff-not-committed-exact-fence",

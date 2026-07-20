@@ -801,6 +801,8 @@ wyl_service_credential_handoff_claim_cancellation (WylHandle *handle,
     .current_actor_subject_id = input->current_actor_subject_id,
     .disposition_id = input->disposition_id,
     .audit_id = input->audit_id,
+    .observation =
+        (WylPolicyServiceHandoffCancellationObservation) input->observation,
     .operation = (WylPolicyServiceHandoffFenceOperation) input->operation,
     .target_a = input->target_a,
     .target_b = input->target_b,
@@ -810,20 +812,37 @@ wyl_service_credential_handoff_claim_cancellation (WylHandle *handle,
   memcpy (stored_input.target_digest, input->target_digest,
       sizeof stored_input.target_digest);
   WylPolicyServiceHandoffCancellationResult stored = { 0 };
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_authorize (&mutation, runtime->authorization,
         input->current_actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK
+      && input->observation ==
+      WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_PREPARED)
+    rc = wyl_policy_store_service_authority_prepare_commit_evidence
+        (mutation.transaction, mutation.store, &evidence);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_handoff_claim_cancellation_core
         (mutation.transaction, mutation.store, &stored_input, &stored);
   rc = service_mutation_finish (&mutation, rc);
+  wyl_policy_store_service_authority_commit_evidence_unref (evidence);
   if (rc == WYRELOG_E_OK) {
     out_result->replayed = stored.replayed;
+    out_result->outcome =
+        (wyl_service_credential_handoff_cancellation_outcome_t)
+        stored.outcome;
     out_result->disposition_id = g_steal_pointer (&stored.disposition_id);
     out_result->audit_id = g_steal_pointer (&stored.audit_id);
     out_result->created_at_us = stored.created_at_us;
+    g_strlcpy (out_result->successor_credential_id,
+        stored.successor_credential_id,
+        sizeof out_result->successor_credential_id);
+    out_result->successor_issuance_generation =
+        stored.successor_issuance_generation;
+    memcpy (out_result->binding_digest, stored.binding_digest,
+        sizeof out_result->binding_digest);
   }
   wyl_policy_service_handoff_cancellation_result_clear (&stored);
   return rc;
