@@ -9795,6 +9795,364 @@ wyl_policy_store_fact_graph_is_active (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
+static gboolean
+tenant_lifecycle_state_parse (const gchar *value,
+    WylPolicyTenantLifecycleState *out_state)
+{
+  static const struct
+  {
+    const gchar *name;
+    WylPolicyTenantLifecycleState state;
+  } values[] = {
+    {"legacy_unclassified", WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED},
+    {"active", WYL_POLICY_TENANT_LIFECYCLE_ACTIVE},
+    {"sealing", WYL_POLICY_TENANT_LIFECYCLE_SEALING},
+    {"sealed", WYL_POLICY_TENANT_LIFECYCLE_SEALED},
+    {"unsealing", WYL_POLICY_TENANT_LIFECYCLE_UNSEALING},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (values); i++) {
+    if (g_strcmp0 (value, values[i].name) == 0) {
+      *out_state = values[i].state;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean
+graph_lifecycle_state_parse (const gchar *value,
+    WylPolicyGraphLifecycleState *out_state)
+{
+  static const struct
+  {
+    const gchar *name;
+    WylPolicyGraphLifecycleState state;
+  } values[] = {
+    {"legacy_unclassified", WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED},
+    {"provisioning", WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING},
+    {"active", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE},
+    {"sealed", WYL_POLICY_GRAPH_LIFECYCLE_SEALED},
+    {"degraded", WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (values); i++) {
+    if (g_strcmp0 (value, values[i].name) == 0) {
+      *out_state = values[i].state;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean
+graph_error_class_parse (const gchar *value,
+    WylPolicyGraphErrorClass *out_error_class)
+{
+  static const struct
+  {
+    const gchar *name;
+    WylPolicyGraphErrorClass error_class;
+  } values[] = {
+    {"none", WYL_POLICY_GRAPH_ERROR_NONE},
+    {"path", WYL_POLICY_GRAPH_ERROR_PATH},
+    {"identity", WYL_POLICY_GRAPH_ERROR_IDENTITY},
+    {"format", WYL_POLICY_GRAPH_ERROR_FORMAT},
+    {"schema", WYL_POLICY_GRAPH_ERROR_SCHEMA},
+    {"open", WYL_POLICY_GRAPH_ERROR_OPEN},
+    {"replay", WYL_POLICY_GRAPH_ERROR_REPLAY},
+    {"recovery", WYL_POLICY_GRAPH_ERROR_RECOVERY},
+    {"internal", WYL_POLICY_GRAPH_ERROR_INTERNAL},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (values); i++) {
+    if (g_strcmp0 (value, values[i].name) == 0) {
+      *out_error_class = values[i].error_class;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean
+graph_store_uuid_is_canonical (const gchar *value)
+{
+  if (value == NULL || strlen (value) != 36 || value[8] != '-'
+      || value[13] != '-' || value[18] != '-' || value[23] != '-')
+    return FALSE;
+  for (gsize i = 0; i < 36; i++) {
+    if (i == 8 || i == 13 || i == 18 || i == 23)
+      continue;
+    if (!g_ascii_isdigit (value[i])
+        && !(value[i] >= 'a' && value[i] <= 'f'))
+      return FALSE;
+  }
+  return TRUE;
+}
+
+void
+wyl_policy_tenant_authority_record_free (WylPolicyTenantAuthorityRecord *record)
+{
+  if (record == NULL)
+    return;
+  g_free (record->tenant_id);
+  g_free (record);
+}
+
+void
+wyl_policy_graph_authority_record_free (WylPolicyGraphAuthorityRecord *record)
+{
+  if (record == NULL)
+    return;
+  g_free (record->tenant_id);
+  g_free (record->graph_id);
+  g_free (record->store_uuid);
+  g_free (record);
+}
+
+static wyrelog_error_t
+tenant_authority_record_from_row (sqlite3_stmt *stmt,
+    WylPolicyTenantAuthorityRecord **out_record)
+{
+  *out_record = NULL;
+  if (sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 1) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 3) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER)
+    return WYRELOG_E_POLICY;
+  gint64 lifecycle_generation = sqlite3_column_int64 (stmt, 3);
+  gint64 reconciliation_generation = sqlite3_column_int64 (stmt, 4);
+  gint sealed = sqlite3_column_int (stmt, 1);
+  const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 0);
+  const gchar *state_name = (const gchar *) sqlite3_column_text (stmt, 2);
+  WylPolicyTenantLifecycleState state;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || lifecycle_generation < 0 || reconciliation_generation < 0
+      || (sealed != 0 && sealed != 1)
+      || !tenant_lifecycle_state_parse (state_name, &state)
+      || (state != WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED
+          && ((state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+                  || state == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
+              != (sealed == 0))))
+    return WYRELOG_E_POLICY;
+  WylPolicyTenantAuthorityRecord *record =
+      g_new0 (WylPolicyTenantAuthorityRecord, 1);
+  record->tenant_id = g_strdup (tenant_id);
+  record->lifecycle_state = state;
+  record->lifecycle_generation = (guint64) lifecycle_generation;
+  record->reconciliation_generation = (guint64) reconciliation_generation;
+  record->sealed_compatibility = sealed != 0;
+  *out_record = record;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_authority_record_from_row (sqlite3_stmt *stmt,
+    WylPolicyGraphAuthorityRecord **out_record)
+{
+  *out_record = NULL;
+  const int required_types[] = {
+    SQLITE_TEXT, SQLITE_TEXT, SQLITE_INTEGER, SQLITE_TEXT,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (required_types); i++) {
+    if (sqlite3_column_type (stmt, (int) i) != required_types[i])
+      return WYRELOG_E_POLICY;
+  }
+  if (sqlite3_column_type (stmt, 7) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 8) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 9) != SQLITE_TEXT)
+    return WYRELOG_E_POLICY;
+  gboolean has_identity = sqlite3_column_type (stmt, 4) != SQLITE_NULL;
+  if (has_identity != (sqlite3_column_type (stmt, 5) != SQLITE_NULL)
+      || has_identity != (sqlite3_column_type (stmt, 6) != SQLITE_NULL))
+    return WYRELOG_E_POLICY;
+  if (has_identity
+      && (sqlite3_column_type (stmt, 4) != SQLITE_TEXT
+          || sqlite3_column_type (stmt, 5) != SQLITE_INTEGER
+          || sqlite3_column_type (stmt, 6) != SQLITE_INTEGER))
+    return WYRELOG_E_POLICY;
+
+  const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 0);
+  const gchar *graph_id = (const gchar *) sqlite3_column_text (stmt, 1);
+  gint sealed = sqlite3_column_int (stmt, 2);
+  const gchar *state_name = (const gchar *) sqlite3_column_text (stmt, 3);
+  const gchar *store_uuid = has_identity ?
+      (const gchar *) sqlite3_column_text (stmt, 4) : NULL;
+  const gchar *error_name = (const gchar *) sqlite3_column_text (stmt, 9);
+  gint64 format_version = has_identity ? sqlite3_column_int64 (stmt, 5) : 0;
+  gint64 path_encoding_version =
+      has_identity ? sqlite3_column_int64 (stmt, 6) : 0;
+  gint64 lifecycle_generation = sqlite3_column_int64 (stmt, 7);
+  gint64 reconciliation_generation = sqlite3_column_int64 (stmt, 8);
+  WylPolicyGraphLifecycleState state;
+  WylPolicyGraphErrorClass error_class;
+  if (!wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || (sealed != 0 && sealed != 1) || format_version < 0
+      || path_encoding_version < 0 || lifecycle_generation < 0
+      || reconciliation_generation < 0
+      || !graph_lifecycle_state_parse (state_name, &state)
+      || !graph_error_class_parse (error_name, &error_class)
+      || (has_identity
+          != (state != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED))
+      || (has_identity && !graph_store_uuid_is_canonical (store_uuid))
+      || (has_identity && (format_version == 0 || path_encoding_version == 0))
+      || (state == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED
+          ? error_class == WYL_POLICY_GRAPH_ERROR_NONE
+          : error_class != WYL_POLICY_GRAPH_ERROR_NONE)
+      || (state != WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED
+          && ((state == WYL_POLICY_GRAPH_LIFECYCLE_SEALED) != (sealed != 0))))
+    return WYRELOG_E_POLICY;
+
+  WylPolicyGraphAuthorityRecord *record =
+      g_new0 (WylPolicyGraphAuthorityRecord, 1);
+  record->tenant_id = g_strdup (tenant_id);
+  record->graph_id = g_strdup (graph_id);
+  record->lifecycle_state = state;
+  record->store_uuid = has_identity ? g_strdup (store_uuid) : NULL;
+  record->format_version = (guint64) format_version;
+  record->path_encoding_version = (guint64) path_encoding_version;
+  record->lifecycle_generation = (guint64) lifecycle_generation;
+  record->reconciliation_generation = (guint64) reconciliation_generation;
+  record->last_error_class = error_class;
+  record->has_store_identity = has_identity;
+  record->sealed_compatibility = sealed != 0;
+  *out_record = record;
+  return WYRELOG_E_OK;
+}
+
+#define TENANT_AUTHORITY_SELECT_COLUMNS                                      \
+  "tenant_id,sealed,lifecycle_state,lifecycle_generation,"                  \
+  "reconciliation_generation"
+#define GRAPH_AUTHORITY_SELECT_COLUMNS                                       \
+  "tenant_id,graph_id,sealed,lifecycle_state,store_uuid,format_version,"    \
+  "path_encoding_version,lifecycle_generation,reconciliation_generation,"  \
+  "last_error_class"
+
+wyrelog_error_t
+wyl_policy_store_read_tenant_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyTenantAuthorityRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || store->db == NULL || out_record == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT " TENANT_AUTHORITY_SELECT_COLUMNS
+      " FROM tenants WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = tenant_authority_record_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_list_tenant_authorities (wyl_policy_store_t *store,
+    GPtrArray **out_records)
+{
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (store == NULL || store->db == NULL || out_records == NULL)
+    return WYRELOG_E_INVALID;
+  GPtrArray *records = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) wyl_policy_tenant_authority_record_free);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT " TENANT_AUTHORITY_SELECT_COLUMNS
+      " FROM tenants ORDER BY tenant_id;", &stmt);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylPolicyTenantAuthorityRecord *record = NULL;
+    rc = tenant_authority_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (records, record);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (records);
+    return rc;
+  }
+  *out_records = records;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_read_graph_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphAuthorityRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || store->db == NULL || out_record == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id))
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT " GRAPH_AUTHORITY_SELECT_COLUMNS
+      " FROM fact_graphs WHERE tenant_id=? AND graph_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = graph_authority_record_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_list_graph_authorities (wyl_policy_store_t *store,
+    const gchar *tenant_id, GPtrArray **out_records)
+{
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (store == NULL || store->db == NULL || out_records == NULL
+      || (tenant_id != NULL
+          && !wyl_policy_store_tenant_id_is_valid (tenant_id)))
+    return WYRELOG_E_INVALID;
+  GPtrArray *records = g_ptr_array_new_with_free_func (
+      (GDestroyNotify) wyl_policy_graph_authority_record_free);
+  sqlite3_stmt *stmt = NULL;
+  const gchar *sql = tenant_id == NULL ?
+      "SELECT " GRAPH_AUTHORITY_SELECT_COLUMNS
+      " FROM fact_graphs ORDER BY tenant_id,graph_id;" :
+      "SELECT " GRAPH_AUTHORITY_SELECT_COLUMNS
+      " FROM fact_graphs WHERE tenant_id=? ORDER BY graph_id;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK && tenant_id != NULL)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylPolicyGraphAuthorityRecord *record = NULL;
+    rc = graph_authority_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (records, record);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK) {
+    g_ptr_array_unref (records);
+    return rc;
+  }
+  *out_records = records;
+  return WYRELOG_E_OK;
+}
+
+#undef TENANT_AUTHORITY_SELECT_COLUMNS
+#undef GRAPH_AUTHORITY_SELECT_COLUMNS
+
 void wyl_policy_fact_relation_schema_columns_free
     (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns)
 {
