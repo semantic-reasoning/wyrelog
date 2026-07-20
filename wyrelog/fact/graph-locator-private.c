@@ -669,17 +669,23 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
     return errno_to_resolver_error (errno);
   struct stat opened;
   struct stat after;
-  if (fstat (fd, &opened) != 0 || !S_ISREG (opened.st_mode)
-      || opened.st_uid != geteuid () || opened.st_dev != before.st_dev
-      || opened.st_ino != before.st_ino || fchmod (fd, 0600) != 0
-      || fsync (fd) != 0
-      || fstatat (directory->graph_fd, basename, &after,
-          AT_SYMLINK_NOFOLLOW) != 0 || after.st_dev != opened.st_dev
-      || after.st_ino != opened.st_ino)
+  if (fstat (fd, &opened) != 0)
+    rc = WYRELOG_E_IO;
+  else if (!S_ISREG (opened.st_mode) || opened.st_uid != geteuid ()
+      || opened.st_dev != before.st_dev || opened.st_ino != before.st_ino)
+    rc = WYRELOG_E_POLICY;
+  else if (fchmod (fd, 0600) != 0 || fsync (fd) != 0)
+    rc = WYRELOG_E_IO;
+  else if (fstatat (directory->graph_fd, basename, &after,
+          AT_SYMLINK_NOFOLLOW) != 0)
+    rc = errno == ENOENT ? WYRELOG_E_POLICY : errno_to_resolver_error (errno);
+  else if (after.st_dev != opened.st_dev || after.st_ino != opened.st_ino)
     rc = WYRELOG_E_POLICY;
   else
     rc = validate_fd (fd, FALSE, 0600, NULL, NULL);
   close (fd);
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   return rc;
@@ -810,8 +816,15 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
       rc = errno_to_resolver_error (errno);
     else if (directory->checkpoint != NULL)
       rc = directory->checkpoint ("stage-linked", directory->checkpoint_data);
-    final_exact = rc == WYRELOG_E_OK;
   }
+  if (rc == WYRELOG_E_OK) {
+    rc = named_stage_state (directory, stage->final_basename, stage,
+        &final_present, &final_exact);
+    if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK && stage_exact) {
     if (unlinkat (directory->graph_fd, stage->stage_basename, 0) != 0)
       rc = WYRELOG_E_IO;
