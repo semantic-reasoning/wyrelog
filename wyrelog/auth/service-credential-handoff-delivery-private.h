@@ -42,6 +42,17 @@ typedef enum
   WYL_SERVICE_HANDOFF_DELIVERY_SUCCESSOR_REVOKED = 5,
 } WylServiceCredentialHandoffDeliveryOutcome;
 
+/* Validate and hash the complete journal-derived proof, then look up only the
+ * exact durable delivery tombstone.  This never inspects escrow, classifies a
+ * successor, or performs legacy backfill. */
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_handoff_lookup_delivery_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylServiceCredentialHandoffDeliveryProof * proof,
+    gboolean * out_found,
+    WylPolicyServiceHandoffDispositionResult * out_disposition);
+
 G_GNUC_INTERNAL wyrelog_error_t
     wyl_service_credential_handoff_prepare_delivery_core
     (WylServiceAuthorityTransaction * transaction,

@@ -583,6 +583,9 @@ typedef struct
   WylPolicyServiceHandoffFenceOperation operation;
   const gchar *target_a;
   const gchar *target_b;
+  /* Optional full automatic-maintenance proof identity.  All-zero preserves
+   * the legacy/generic fence-only semantic key. */
+  guint8 maintenance_proof_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
 } WylPolicyServiceHandoffNoCommitEvidence;
 
 typedef struct
@@ -601,6 +604,8 @@ typedef struct
   gboolean replayed;
   gchar *disposition_id;
   gchar *audit_id;
+  /* Authoritative store timestamp. Stable across exact replay. */
+  gint64 created_at_us;
 } WylPolicyServiceHandoffDispositionResult;
 
 typedef enum

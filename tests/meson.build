@@ -963,10 +963,37 @@ test('service-principal-domain', test_service_principal_domain,
   is_parallel : host_machine.system() != 'windows',
 )
 
+test_service_credential_domain_c_args = []
+test_service_credential_domain_deps = [wyrelog_dep, sodium_dep, sqlite_dep]
+test_service_credential_domain_link_with = []
+
+if get_option('enable_audit').allowed()
+  # Non-installed companion for focused tests of hidden policy authority
+  # cores.  Reuse the one service-exchange private compilation context for
+  # store.c's hidden audit helpers; the startup boundary forbids compiling
+  # service-exchange-audit-private.c in another companion.
+  test_policy_store_private_companion = static_library(
+    'test-policy-store-private-companion',
+    '../wyrelog/policy/store.c',
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : wyrelog_deps,
+    c_args : wyrelog_c_args,
+    install : false,
+    build_by_default : false,
+  )
+  test_service_credential_domain_c_args += \
+    '-DWYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE'
+  test_service_credential_domain_deps += service_exchange_private_dep
+  test_service_credential_domain_link_with += \
+    test_policy_store_private_companion
+endif
+
 test_service_credential_domain = executable('test-service-credential-domain',
   'test-service-credential-domain.c',
+  c_args : test_service_credential_domain_c_args,
+  link_with : test_service_credential_domain_link_with,
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+  dependencies : test_service_credential_domain_deps,
 )
 
 service_credential_domain_timeout = 180

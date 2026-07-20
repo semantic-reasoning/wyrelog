@@ -598,21 +598,21 @@ test_precheck_with_committed (void)
           &begun_bytes), ==, WYRELOG_E_OK);
   WylServiceCredentialOperationRecord preserved =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
-      (&pending_request, pending_request_id, 1, &preserved), ==, WYRELOG_E_OK);
-  g_autoptr (GBytes) preserved_bytes = NULL;
-  g_assert_cmpint (wyl_service_credential_operation_record_encode (&preserved,
-          &preserved_bytes), ==, WYRELOG_E_OK);
   recovery = 99;
   total_changes = sqlite3_total_changes (db);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
       (&storage, &anchor, store, NULL, expired_request_id, 2, &recovery,
-          &preserved), ==, WYRELOG_E_POLICY);
-  g_assert_cmpint (recovery, ==, 99);
+          &preserved), ==, WYRELOG_E_OK);
+  g_assert_cmpint (recovery, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING);
+  g_assert_cmpint (preserved.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED);
   g_autoptr (GBytes) preserved_after = NULL;
   g_assert_cmpint (wyl_service_credential_operation_record_encode (&preserved,
           &preserved_after), ==, WYRELOG_E_OK);
-  g_assert_true (g_bytes_equal (preserved_bytes, preserved_after));
+  /* Recovery no longer treats the caller's clock as authoritative expiry.
+   * The durable PREPARED bytes therefore remain the recovered snapshot. */
+  g_assert_true (g_bytes_equal (begun_bytes, preserved_after));
   WylServiceCredentialOperationRecord loaded_expired =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint (wyl_service_credential_operation_coordinator_load (&storage,

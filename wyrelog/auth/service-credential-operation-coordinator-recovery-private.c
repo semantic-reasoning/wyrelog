@@ -29,7 +29,6 @@ wyrelog_error_t
   WylServiceCredentialOperationFenceClassification classification;
   WylServiceCredentialOperationRecoveryOutcome outcome;
   gboolean replayed = FALSE;
-  gboolean precheck_missing;
   wyrelog_error_t rc;
   if (storage == NULL || anchor == NULL || policy_store == NULL
       || out_outcome == NULL || out_record == NULL || now_us <= 0
@@ -58,18 +57,12 @@ wyrelog_error_t
     rc = WYRELOG_E_POLICY;
     goto out;
   }
-  precheck_missing = rc == WYRELOG_E_NOT_FOUND;
   rc = wyl_service_credential_operation_coordinator_classify_fence (&loaded, rc,
       &fence, &classification);
   if (rc != WYRELOG_E_OK)
     goto out;
   switch (classification) {
     case WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_PENDING:
-      if (loaded.state == WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
-          && precheck_missing && now_us >= loaded.expires_at_us) {
-        rc = WYRELOG_E_POLICY;
-        goto out;
-      }
       outcome = WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING;
       break;
     case WYL_SERVICE_CREDENTIAL_OPERATION_FENCE_TERMINAL_NO_COMMIT:

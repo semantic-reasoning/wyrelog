@@ -253,6 +253,32 @@ delivery_preflight_new (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+    wyl_service_credential_handoff_lookup_delivery_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylServiceCredentialHandoffDeliveryProof * proof,
+    gboolean * out_found,
+    WylPolicyServiceHandoffDispositionResult * out_disposition)
+{
+  guint8 digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
+  wyrelog_error_t rc;
+
+  if (out_found != NULL)
+    *out_found = FALSE;
+  if (out_disposition != NULL)
+    wyl_policy_service_handoff_disposition_result_clear (out_disposition);
+  if (store == NULL || out_found == NULL || out_disposition == NULL
+      || !delivery_proof_is_valid (proof))
+    return WYRELOG_E_INVALID;
+  rc = delivery_proof_digest (proof, digest);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_handoff_lookup_delivered_core (transaction, store,
+        &proof->tuple, proof->actor_subject_id, digest, out_found,
+        out_disposition);
+  sodium_memzero (digest, sizeof digest);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_service_credential_handoff_prepare_delivery_core
     (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const WylServiceCredentialHandoffDeliveryProof * proof,
