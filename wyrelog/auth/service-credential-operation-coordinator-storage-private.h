@@ -65,6 +65,19 @@ typedef struct
   { .native_handle = NULL, \
     .child_name = WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT }
 
+typedef struct
+{
+  const gchar *request_id;
+  guint32 expected_journal_version;
+  WylServiceCredentialOperationTerminalKind terminal_kind;
+  /* Exact revoke ID for OPERATOR_REVOKE_AND_WIPE; optional prior RESUME ID
+   * for FILE_PUBLISHED, and NULL only when no remediation marker exists. */
+  const gchar *remediation_request_id;
+  guint8 raw_snapshot_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+} WylServiceCredentialOperationExactDeleteExpectation;
+
+#define WYL_SERVICE_CREDENTIAL_OPERATION_EXACT_DELETE_EXPECTATION_INIT { 0 }
+
 wyrelog_error_t wyl_service_credential_operation_coordinator_lock_acquire
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
@@ -74,6 +87,18 @@ void wyl_service_credential_operation_coordinator_lock_release
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     WylServiceCredentialOperationCoordinatorLock * lock);
+
+/* Requires the matching lifecycle lock from lock_acquire().  The coordinator
+ * takes the shorter operation lock only after validating that outer lock,
+ * enforcing lifecycle -> operation ordering.  Missing remains NOT_FOUND;
+ * only the higher-level purge coordinator may normalize a permanent-receipt
+ * replay to success. */
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
+    const WylServiceCredentialOperationExactDeleteExpectation * expectation);
 
 /* Persist or replay the journal entry selected solely by request_id. The
  * persisted operation_id is the canonical request_id; callers cannot supply

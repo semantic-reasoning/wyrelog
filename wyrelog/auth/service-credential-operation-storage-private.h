@@ -88,6 +88,9 @@ gboolean wyl_service_credential_operation_storage_anchor_matches
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor);
 
+typedef void (*WylServiceCredentialOperationBeforeExactDeleteHookForTest)
+  (gpointer user_data);
+
 #ifndef G_OS_WIN32
 wyrelog_error_t wyl_service_credential_operation_child_read
     (const WylServiceCredentialOperationStorage * storage,
@@ -105,6 +108,27 @@ wyrelog_error_t wyl_service_credential_operation_child_delete
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationChildName * name);
+/* Delete only when the same opened regular file still has exactly these
+ * bytes and is still the one child bound under the pinned root.  Missing is
+ * deliberately distinct from replay success, but still syncs the root
+ * directory before returning WYRELOG_E_NOT_FOUND. */
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_child_delete_exact
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name,
+    GBytes * expected_bytes);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_child_confirm_absent
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name);
+G_GNUC_INTERNAL void
+    wyl_service_credential_operation_child_set_before_exact_delete_hook_for_test
+    (WylServiceCredentialOperationBeforeExactDeleteHookForTest hook,
+    gpointer user_data);
+G_GNUC_INTERNAL void
+wyl_service_credential_operation_child_fail_next_root_sync_for_test (void);
 /* Lock namespace files are permanent, zero-length objects.  Unlock releases
  * only the OS lock and native handle so all contenders always resolve the same
  * underlying object. */

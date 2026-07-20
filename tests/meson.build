@@ -1061,6 +1061,8 @@ test_service_credential_operation_coordinator_journal = executable('test-service
     'test-service-credential-operation-coordinator-journal.c',
     '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
     '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
   ],
   dependencies : [wyrelog_dep, sodium_dep],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')])
@@ -1120,6 +1122,8 @@ if get_option('enable_audit').allowed()
     '../wyrelog/auth/service-credential-operation-coordinator-remediate-private.c',
     '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
     '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
     link_with : test_policy_store_private_companion,
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_service_credential_domain_deps,
@@ -1134,7 +1138,11 @@ if get_option('enable_audit').allowed()
 endif
 
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
-  'test-service-credential-operation-storage.c',
+  [
+    'test-service-credential-operation-storage.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )

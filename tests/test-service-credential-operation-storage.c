@@ -132,6 +132,51 @@ typedef struct
   WylTestJunctionResult junction_result;
 } WylTestReplaceReparseRace;
 
+typedef struct
+{
+  const gchar *record;
+  const gchar *aside;
+  gboolean changed;
+  DWORD error;
+} WylTestExactDeleteRace;
+
+static void
+mutate_exact_delete_child_for_test (gpointer user_data)
+{
+  WylTestExactDeleteRace *race = user_data;
+  g_autofree gunichar2 *record = g_utf8_to_utf16 (race->record, -1, NULL,
+      NULL, NULL);
+  HANDLE handle = record != NULL ? CreateFileW ((LPCWSTR) record,
+      GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL) : INVALID_HANDLE_VALUE;
+  DWORD written = 0;
+  if (handle == INVALID_HANDLE_VALUE) {
+    race->error = record != NULL ? GetLastError () : ERROR_INVALID_NAME;
+    return;
+  }
+  race->changed = handle != INVALID_HANDLE_VALUE
+      && WriteFile (handle, "foreign", 7, &written, NULL) && written == 7
+      && SetEndOfFile (handle) && FlushFileBuffers (handle);
+  race->error = race->changed ? ERROR_SUCCESS : GetLastError ();
+  if (handle != INVALID_HANDLE_VALUE)
+    CloseHandle (handle);
+}
+
+static void
+rebind_exact_delete_child_for_test (gpointer user_data)
+{
+  WylTestExactDeleteRace *race = user_data;
+  g_autofree gunichar2 *record = g_utf8_to_utf16 (race->record, -1, NULL,
+      NULL, NULL);
+  g_autofree gunichar2 *aside = g_utf8_to_utf16 (race->aside, -1, NULL, NULL,
+      NULL);
+  gboolean moved = record != NULL && aside != NULL
+      && MoveFileExW ((LPCWSTR) record, (LPCWSTR) aside, 0);
+  race->error = moved ? ERROR_SUCCESS
+      : record != NULL && aside != NULL ? GetLastError () : ERROR_INVALID_NAME;
+  race->changed = moved && g_file_set_contents (race->record, "decoy", 5, NULL);
+}
+
 static void
 replace_destination_with_junction_for_test (gpointer user_data)
 {
@@ -180,6 +225,24 @@ typedef struct
   gint fd;
   struct stat identity;
 } PosixLockReleaseRace;
+
+typedef struct
+{
+  const gchar *record;
+  const gchar *aside;
+  gboolean moved;
+} PosixExactDeleteRace;
+
+static void
+replace_exact_delete_child_for_test (gpointer user_data)
+{
+  PosixExactDeleteRace *race = user_data;
+  race->moved = g_rename (race->record, race->aside) == 0;
+  if (race->moved) {
+    g_assert_true (g_file_set_contents (race->record, "decoy", 5, NULL));
+    g_assert_cmpint (g_chmod (race->record, 0600), ==, 0);
+  }
+}
 
 static gpointer
 posix_lock_release_race_thread (gpointer data)
@@ -367,6 +430,130 @@ test_posix_child_backend (void)
   wyl_service_credential_operation_child_name_clear (&directory_name);
   wyl_service_credential_operation_child_name_clear (&link_name);
   wyl_service_credential_operation_child_name_clear (&long_name);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+
+static void
+test_posix_exact_delete_backend (void)
+{
+  g_autofree gchar *base = g_dir_make_tmp ("wyl-exact-delete-XXXXXX", NULL);
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_assert_nonnull (base);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (root, "record", NULL);
+  g_autofree gchar *aside = g_build_filename (root, "record-aside", NULL);
+  g_autofree gchar *hardlink = g_build_filename (root, "record-hardlink",
+      NULL);
+
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, one), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, two), ==, WYRELOG_E_POLICY);
+  assert_child_contents (&storage, &anchor, &name, "one");
+
+  g_assert_cmpint (g_chmod (record, 0644), ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_chmod (record, 0600), ==, 0);
+  g_assert_cmpint (link (record, hardlink), ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (hardlink), ==, 0);
+
+  PosixExactDeleteRace race = {.record = record,.aside = aside };
+  wyl_service_credential_operation_child_set_before_exact_delete_hook_for_test
+      (replace_exact_delete_child_for_test, &race);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_POLICY);
+  g_assert_true (race.moved);
+  g_autofree gchar *decoy = NULL;
+  gsize decoy_size = 0;
+  g_assert_true (g_file_get_contents (record, &decoy, &decoy_size, NULL));
+  g_assert_cmpmem (decoy, decoy_size, "decoy", 5);
+  g_assert_cmpint (g_remove (record), ==, 0);
+  g_assert_cmpint (g_rename (aside, record), ==, 0);
+
+  wyl_service_credential_operation_child_fail_next_root_sync_for_test ();
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_IO);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, one), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &name, one), ==, WYRELOG_E_OK);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+  g_autoptr (GBytes) empty = g_bytes_new_static ("", 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_create (&storage,
+          &anchor, &name, empty), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_confirm_absent
+      (&storage, &anchor, &name), ==, WYRELOG_E_POLICY);
+  g_assert_true (g_file_test (record, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (g_remove (record), ==, 0);
+  wyl_service_credential_operation_child_fail_next_root_sync_for_test ();
+  g_assert_cmpint (wyl_service_credential_operation_child_confirm_absent
+      (&storage, &anchor, &name), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_service_credential_operation_child_confirm_absent
+      (&storage, &anchor, &name), ==, WYRELOG_E_NOT_FOUND);
+
+  g_autofree gchar *link_path = g_build_filename (root, "link", NULL);
+  g_assert_cmpint (symlink ("missing", link_path), ==, 0);
+  WylServiceCredentialOperationChildName link_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("link", &link_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &link_name, one), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (link_path), ==, 0);
+
+  g_autofree gchar *directory = g_build_filename (root, "directory", NULL);
+  WylServiceCredentialOperationChildName directory_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (g_mkdir (directory, 0700), ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("directory", &directory_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &directory_name, one), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_rmdir (directory), ==, 0);
+
+  g_autofree gchar *fifo = g_build_filename (root, "fifo", NULL);
+  WylServiceCredentialOperationChildName fifo_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_assert_cmpint (mkfifo (fifo, 0600), ==, 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("fifo", &fifo_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &anchor, &fifo_name, one), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (fifo), ==, 0);
+
+  WylServiceCredentialOperationRootAnchor mismatch = anchor;
+  mismatch.identity_a++;
+  g_assert_cmpint (wyl_service_credential_operation_child_delete_exact
+      (&storage, &mismatch, &name, one), ==, WYRELOG_E_POLICY);
+
+  wyl_service_credential_operation_child_name_clear (&fifo_name);
+  wyl_service_credential_operation_child_name_clear (&directory_name);
+  wyl_service_credential_operation_child_name_clear (&link_name);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
@@ -1205,6 +1392,108 @@ test_windows_child_delete_fixture (void)
 }
 
 static void
+test_windows_child_exact_delete_fixture (void)
+{
+  const gchar *local = g_getenv ("LOCALAPPDATA");
+  g_assert_nonnull (local);
+  g_autofree gchar *base = g_strdup_printf ("%s\\wyrelog-exact-delete-%lu",
+      local, (gulong) GetCurrentProcessId ());
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) one = g_bytes_new_static ("one", 3);
+  g_autoptr (GBytes) two = g_bytes_new_static ("two", 3);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("record", &name), ==, WYRELOG_E_OK);
+  g_autofree gchar *record = g_build_filename (root, "record", NULL);
+  g_autofree gchar *hardlink = g_build_filename (root, "record-hardlink",
+      NULL);
+  g_remove (record);
+  g_remove (hardlink);
+  g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
+      ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, two),
+      ==, WYRELOG_E_POLICY);
+  g_autoptr (GBytes) retained = NULL;
+  g_assert_cmpint (wyl_win_child_read (&storage, &anchor, &name, &retained),
+      ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (one, retained));
+
+  WylTestExactDeleteRace mutation = {.record = record };
+  wyl_win_child_set_before_exact_delete_hook_for_test
+      (mutate_exact_delete_child_for_test, &mutation);
+  g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
+      ==, WYRELOG_E_OK);
+  g_assert_false (mutation.changed);
+  g_assert_true (mutation.error == ERROR_SHARING_VIOLATION
+      || mutation.error == ERROR_LOCK_VIOLATION
+      || mutation.error == ERROR_ACCESS_DENIED);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *aside = g_build_filename (root, "record-aside", NULL);
+  WylTestExactDeleteRace rebind = {.record = record,.aside = aside };
+  wyl_win_child_set_before_exact_delete_hook_for_test
+      (rebind_exact_delete_child_for_test, &rebind);
+  g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
+      ==, WYRELOG_E_OK);
+  g_assert_false (rebind.changed);
+  g_assert_true (rebind.error == ERROR_SHARING_VIOLATION
+      || rebind.error == ERROR_LOCK_VIOLATION
+      || rebind.error == ERROR_ACCESS_DENIED);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+  g_assert_false (g_file_test (aside, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gunichar2 *wrecord = g_utf8_to_utf16 (record, -1, NULL, NULL,
+      NULL);
+  g_autofree gunichar2 *whardlink = g_utf8_to_utf16 (hardlink, -1, NULL, NULL,
+      NULL);
+  g_assert_nonnull (wrecord);
+  g_assert_nonnull (whardlink);
+  if (CreateHardLinkW ((LPCWSTR) whardlink, (LPCWSTR) wrecord, NULL)) {
+    g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name,
+            one), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint (g_remove (hardlink), ==, 0);
+  } else {
+    DWORD error = GetLastError ();
+    g_assert_true (error == ERROR_NOT_SUPPORTED
+        || error == ERROR_INVALID_FUNCTION);
+    g_test_message ("hard links unsupported on this Windows volume");
+  }
+  g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
+      ==, WYRELOG_E_OK);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+
+  g_assert_cmpint (wyl_win_child_create (&storage, &anchor, &name, one), ==,
+      WYRELOG_E_OK);
+  wyl_win_child_fail_next_directory_flush_for_test (ERROR_WRITE_FAULT);
+  g_assert_cmpint (wyl_win_child_delete_exact (&storage, &anchor, &name, one),
+      ==, WYRELOG_E_IO);
+  g_assert_false (g_file_test (record, G_FILE_TEST_EXISTS));
+  g_assert_cmpint (wyl_win_child_confirm_absent (&storage, &anchor, &name), ==,
+      WYRELOG_E_NOT_FOUND);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+  g_assert_cmpint (g_rmdir (root), ==, 0);
+  g_assert_cmpint (g_rmdir (base), ==, 0);
+}
+
+static void
 test_windows_child_lock_fixture (void)
 {
   const gchar *local = g_getenv ("LOCALAPPDATA");
@@ -1308,6 +1597,8 @@ main (int argc, char **argv)
 #ifndef G_OS_WIN32
   g_test_add_func ("/operation-storage/posix-child/backend",
       test_posix_child_backend);
+  g_test_add_func ("/operation-storage/posix-child/exact-delete",
+      test_posix_exact_delete_backend);
 #endif
 #ifdef G_OS_WIN32
   g_test_add_func ("/operation-storage/windows/child-read-validation",
@@ -1335,6 +1626,8 @@ main (int argc, char **argv)
       test_windows_final_reparse_is_policy);
   g_test_add_func ("/operation-storage/windows/child-delete-fixture",
       test_windows_child_delete_fixture);
+  g_test_add_func ("/operation-storage/windows/child-exact-delete-fixture",
+      test_windows_child_exact_delete_fixture);
   g_test_add_func ("/operation-storage/windows/child-lock-fixture",
       test_windows_child_lock_fixture);
   g_test_add_func ("/operation-storage/windows/relative-override",

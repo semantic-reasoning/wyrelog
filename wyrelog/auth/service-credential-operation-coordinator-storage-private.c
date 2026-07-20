@@ -1,13 +1,25 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 
 #include "auth/service-credential-operation-coordinator-journal-private.h"
 #include "policy/store-private.h"
 #include "wyl-id-private.h"
 #include <sodium.h>
+#ifndef G_OS_WIN32
+#include <sys/file.h>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #ifdef G_OS_WIN32
 #include "auth/service-credential-operation-storage-windows-private.h"
 #endif
+
+G_STATIC_ASSERT (WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES
+    == crypto_generichash_BYTES);
 
 static wyrelog_error_t
 record_child_name (const gchar *request_id,
@@ -120,6 +132,26 @@ storage_child_unlock (const WylServiceCredentialOperationStorage *storage,
 {
   wyl_service_credential_operation_child_unlock (storage, anchor, name, lock);
 }
+
+static wyrelog_error_t
+    storage_child_delete_exact
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * expected)
+{
+  return wyl_service_credential_operation_child_delete_exact (storage, anchor,
+      name, expected);
+}
+
+static wyrelog_error_t
+    storage_child_confirm_absent
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name)
+{
+  return wyl_service_credential_operation_child_confirm_absent (storage,
+      anchor, name);
+}
 #else
 typedef HANDLE WylCoordinatorJournalLock;
 #define WYL_COORDINATOR_JOURNAL_LOCK_INIT INVALID_HANDLE_VALUE
@@ -164,6 +196,26 @@ storage_child_unlock (const WylServiceCredentialOperationStorage *storage,
     WylCoordinatorJournalLock lock)
 {
   wyl_win_child_unlock (storage, anchor, name, lock);
+}
+
+
+static wyrelog_error_t
+    storage_child_delete_exact
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name, GBytes * expected)
+{
+  return wyl_win_child_delete_exact (storage, anchor, name, expected);
+}
+
+
+static wyrelog_error_t
+    storage_child_confirm_absent
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name)
+{
+  return wyl_win_child_confirm_absent (storage, anchor, name);
 }
 #endif
 
@@ -219,6 +271,220 @@ void wyl_service_credential_operation_coordinator_lock_release
   }
   lock->native_handle = NULL;
   wyl_service_credential_operation_child_name_clear (&lock->child_name);
+}
+
+static gboolean
+    lifecycle_lock_matches_expectation
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lock,
+    const gchar * request_id)
+{
+  WylServiceCredentialOperationChildName expected =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationChildName expected_lock =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  gboolean matches = FALSE;
+  g_autofree gchar *digest = NULL;
+  g_autofree gchar *lock_name = NULL;
+#ifndef G_OS_WIN32
+  gint fd = -1;
+  struct stat held = { 0 }, named = { 0 };
+#else
+  BY_HANDLE_FILE_INFORMATION held = { 0 };
+  BY_HANDLE_FILE_INFORMATION named = { 0 };
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  HANDLE named_handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity named_identity = { 0 };
+  wyrelog_error_t open_error = WYRELOG_E_INVALID;
+#endif
+  if (storage == NULL || anchor == NULL || lock == NULL
+      || lock->native_handle == NULL || lock->child_name.component == NULL
+      || lifecycle_lock_child_name (request_id, &expected) != WYRELOG_E_OK
+      || g_strcmp0 (lock->child_name.component, expected.component) != 0
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    goto out;
+  digest = g_compute_checksum_for_string (G_CHECKSUM_SHA256,
+      expected.component, -1);
+  lock_name = digest != NULL ? g_strdup_printf (".lock-%s", digest) : NULL;
+  if (lock_name == NULL
+      || wyl_service_credential_operation_child_name_validate (lock_name,
+          &expected_lock) != WYRELOG_E_OK)
+    goto out;
+#ifndef G_OS_WIN32
+  fd = GPOINTER_TO_INT (lock->native_handle) - 1;
+  if (fd < 0 || fstat (fd, &held) != 0
+      || fstatat (storage->root_fd, expected_lock.component, &named,
+          AT_SYMLINK_NOFOLLOW) != 0
+      || !S_ISREG (held.st_mode) || !S_ISREG (named.st_mode)
+      || held.st_uid != geteuid () || named.st_uid != geteuid ()
+      || (held.st_mode & 07777) != 0600 || (named.st_mode & 07777) != 0600
+      || held.st_size != 0 || named.st_size != 0 || held.st_nlink != 1
+      || named.st_nlink != 1 || held.st_dev != named.st_dev
+      || held.st_ino != named.st_ino || flock (fd, LOCK_EX | LOCK_NB) != 0)
+    goto out;
+#else
+  handle = lock->native_handle;
+  if (handle == INVALID_HANDLE_VALUE
+      || !GetFileInformationByHandle (handle, &held)
+      || (held.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+              | FILE_ATTRIBUTE_DIRECTORY))
+      || held.nFileSizeHigh != 0 || held.nFileSizeLow != 0
+      || held.nNumberOfLinks != 1)
+    goto out;
+  if (!wyl_win_nt_create_relative (storage->root_handle, &expected_lock,
+          FILE_READ_ATTRIBUTES, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ
+          | FILE_SHARE_WRITE, &named_handle, &named_identity, &open_error)
+      || !GetFileInformationByHandle (named_handle, &named)
+      || (named.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+              | FILE_ATTRIBUTE_DIRECTORY))
+      || named.nFileSizeHigh != 0 || named.nFileSizeLow != 0
+      || named.nNumberOfLinks != 1
+      || named.dwVolumeSerialNumber != named_identity.volume_serial
+      || named.nFileIndexHigh != named_identity.file_index_high
+      || named.nFileIndexLow != named_identity.file_index_low
+      || held.dwVolumeSerialNumber != named.dwVolumeSerialNumber
+      || held.nFileIndexHigh != named.nFileIndexHigh
+      || held.nFileIndexLow != named.nFileIndexLow)
+    goto out;
+#endif
+  matches = wyl_service_credential_operation_storage_anchor_matches (storage,
+      anchor);
+out:
+#ifdef G_OS_WIN32
+  if (named_handle != INVALID_HANDLE_VALUE)
+    CloseHandle (named_handle);
+#endif
+  wyl_service_credential_operation_child_name_clear (&expected_lock);
+  wyl_service_credential_operation_child_name_clear (&expected);
+  return matches;
+}
+
+static gboolean
+    exact_delete_expectation_is_valid
+    (const WylServiceCredentialOperationExactDeleteExpectation * expectation)
+{
+  if (expectation == NULL || expectation->request_id == NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (expectation->request_id)
+      || expectation->expected_journal_version !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+      || sodium_is_zero (expectation->raw_snapshot_digest,
+          sizeof expectation->raw_snapshot_digest))
+    return FALSE;
+  if (expectation->terminal_kind ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED)
+    return expectation->remediation_request_id == NULL
+        || (wyl_service_credential_operation_coordinator_request_id_is_valid
+        (expectation->remediation_request_id)
+        && g_strcmp0 (expectation->request_id,
+            expectation->remediation_request_id) != 0);
+  return expectation->terminal_kind ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
+      && expectation->remediation_request_id != NULL
+      && wyl_service_credential_operation_coordinator_request_id_is_valid
+      (expectation->remediation_request_id)
+      && g_strcmp0 (expectation->request_id,
+      expectation->remediation_request_id) != 0;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
+    const WylServiceCredentialOperationExactDeleteExpectation * expectation)
+{
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock operation_lock = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  WylServiceCredentialOperationRecord record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  guint8 digest[crypto_generichash_BYTES] = { 0 };
+  g_autofree gchar *terminal_remediation = NULL;
+  WylServiceCredentialOperationTerminalKind terminal_kind = 0;
+  wyrelog_error_t rc = WYRELOG_E_POLICY;
+
+  if (storage == NULL || anchor == NULL || lifecycle_lock == NULL
+      || expectation == NULL)
+    return WYRELOG_E_INVALID;
+  if (!exact_delete_expectation_is_valid (expectation)
+      || !lifecycle_lock_matches_expectation (storage, anchor, lifecycle_lock,
+          expectation->request_id))
+    return WYRELOG_E_POLICY;
+  rc = record_child_name (expectation->request_id, &name);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_lock (storage, anchor, &name, &operation_lock);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    rc = storage_child_confirm_absent (storage, anchor, &name);
+    goto out;
+  }
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  gsize length = 0;
+  const guint8 *raw = g_bytes_get_data (bytes, &length);
+  if (raw == NULL || crypto_generichash (digest, sizeof digest, raw, length,
+          NULL, 0) != 0
+      || sodium_memcmp (digest, expectation->raw_snapshot_digest,
+          sizeof digest) != 0) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  rc = wyl_service_credential_operation_record_decode (bytes, &record);
+  if (rc != WYRELOG_E_OK) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  if (record.version != expectation->expected_journal_version
+      || record.state != WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
+      || g_strcmp0 (record.request_id, expectation->request_id) != 0
+      || g_strcmp0 (record.operation_id, expectation->request_id) != 0
+      || !wyl_service_credential_operation_terminal_reason_parse
+      (record.terminal_reason, &terminal_kind, &terminal_remediation)
+      || terminal_kind != expectation->terminal_kind) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  if (terminal_kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED) {
+    if (terminal_remediation != NULL
+        || (expectation->remediation_request_id == NULL
+            && (record.last_remediation_action !=
+                WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE
+                || !same_nullable_text (record.last_remediation_request_id,
+                    NULL)))
+        || (expectation->remediation_request_id != NULL
+            && (record.last_remediation_action !=
+                WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME
+                || g_strcmp0 (record.last_remediation_request_id,
+                    expectation->remediation_request_id) != 0))) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+  } else if (g_strcmp0 (terminal_remediation,
+          expectation->remediation_request_id) != 0
+      || record.last_remediation_action !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE
+      || g_strcmp0 (record.last_remediation_request_id,
+          expectation->remediation_request_id) != 0
+      || record.last_remediation_applied_target_state !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  rc = storage_child_delete_exact (storage, anchor, &name, bytes);
+out:
+  sodium_memzero (digest, sizeof digest);
+  wyl_service_credential_operation_record_clear (&record);
+  if (operation_lock != WYL_COORDINATOR_JOURNAL_LOCK_INIT)
+    storage_child_unlock (storage, anchor, &name, operation_lock);
+  wyl_service_credential_operation_child_name_clear (&name);
+  return rc;
 }
 
 wyrelog_error_t

@@ -2,6 +2,7 @@
 #include "auth/service-credential-operation-storage-windows-private.h"
 
 #ifdef G_OS_WIN32
+#include <sodium.h>
 #include <winternl.h>
 #include <stddef.h>
 #include <string.h>
@@ -59,6 +60,25 @@ wyl_win_nt_create_error (NTSTATUS status)
   }
 }
 
+static wyrelog_error_t
+wyl_win_system_error (DWORD error)
+{
+  switch (error) {
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND:
+      return WYRELOG_E_NOT_FOUND;
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION:
+      return WYRELOG_E_BUSY;
+    case ERROR_ACCESS_DENIED:
+    case ERROR_INVALID_NAME:
+    case ERROR_DIRECTORY:
+      return WYRELOG_E_POLICY;
+    default:
+      return WYRELOG_E_IO;
+  }
+}
+
 wyrelog_error_t
 wyl_win_child_classify_nt_create_status_for_test (LONG status)
 {
@@ -101,6 +121,9 @@ wyl_win_set_delete_disposition (HANDLE handle)
 static volatile LONG wyl_win_next_directory_flush_error = ERROR_SUCCESS;
 static WylWinChildBeforeRenameHookForTest wyl_win_before_rename_hook;
 static gpointer wyl_win_before_rename_hook_data;
+static WylServiceCredentialOperationBeforeExactDeleteHookForTest
+    wyl_win_before_exact_delete_hook;
+static gpointer wyl_win_before_exact_delete_hook_data;
 
 void
 wyl_win_child_fail_next_directory_flush_for_test (DWORD error)
@@ -113,6 +136,26 @@ void wyl_win_child_set_before_rename_hook_for_test
 {
   wyl_win_before_rename_hook = hook;
   wyl_win_before_rename_hook_data = user_data;
+}
+
+void wyl_win_child_set_before_exact_delete_hook_for_test
+    (WylServiceCredentialOperationBeforeExactDeleteHookForTest hook,
+    gpointer user_data)
+{
+  wyl_win_before_exact_delete_hook = hook;
+  wyl_win_before_exact_delete_hook_data = user_data;
+}
+
+static void
+wyl_win_child_run_before_exact_delete_hook_for_test (void)
+{
+  WylServiceCredentialOperationBeforeExactDeleteHookForTest hook =
+      wyl_win_before_exact_delete_hook;
+  gpointer user_data = wyl_win_before_exact_delete_hook_data;
+  wyl_win_before_exact_delete_hook = NULL;
+  wyl_win_before_exact_delete_hook_data = NULL;
+  if (hook != NULL)
+    hook (user_data);
 }
 
 static void
@@ -587,6 +630,179 @@ wyl_win_child_delete (const WylServiceCredentialOperationStorage *storage,
   return rc;
 }
 
+static gboolean
+wyl_win_exact_delete_info_matches (const BY_HANDLE_FILE_INFORMATION *info,
+    const WylWinChildIdentity *identity, gsize expected_size)
+{
+  return info != NULL && identity != NULL
+      && !(info->dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+          | FILE_ATTRIBUTE_DIRECTORY))
+      && info->nFileSizeHigh == 0 && info->nFileSizeLow == expected_size
+      && info->nNumberOfLinks == 1
+      && info->dwVolumeSerialNumber == identity->volume_serial
+      && info->nFileIndexHigh == identity->file_index_high
+      && info->nFileIndexLow == identity->file_index_low;
+}
+
+static gboolean
+    wyl_win_exact_delete_info_unchanged
+    (const BY_HANDLE_FILE_INFORMATION * before,
+    const BY_HANDLE_FILE_INFORMATION * after)
+{
+  return before->dwFileAttributes == after->dwFileAttributes
+      && before->nFileSizeHigh == after->nFileSizeHigh
+      && before->nFileSizeLow == after->nFileSizeLow
+      && before->nNumberOfLinks == after->nNumberOfLinks
+      && before->dwVolumeSerialNumber == after->dwVolumeSerialNumber
+      && before->nFileIndexHigh == after->nFileIndexHigh
+      && before->nFileIndexLow == after->nFileIndexLow
+      && CompareFileTime (&before->ftCreationTime, &after->ftCreationTime) == 0
+      && CompareFileTime (&before->ftLastWriteTime,
+      &after->ftLastWriteTime) == 0;
+}
+
+wyrelog_error_t
+    wyl_win_child_delete_exact
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name,
+    GBytes * expected_bytes)
+{
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  HANDLE named_handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity = { 0 };
+  WylWinChildIdentity named_identity = { 0 };
+  BY_HANDLE_FILE_INFORMATION before = { 0 }, after = { 0 }, post_hook = { 0 };
+  BY_HANDLE_FILE_INFORMATION named = { 0 };
+  wyrelog_error_t error = WYRELOG_E_INVALID;
+  wyrelog_error_t rc = WYRELOG_E_POLICY;
+  guint8 buffer[4096] = { 0 };
+  gsize expected_size = 0;
+  const guint8 *expected;
+  gboolean delete_pending = FALSE;
+
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || expected_bytes == NULL
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  expected = g_bytes_get_data (expected_bytes, &expected_size);
+  if (expected_size > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES)
+    return WYRELOG_E_POLICY;
+  /* The operation lock excludes cooperative writers.  Sharing only reads
+   * also prevents an untrusted writer or namespace rebinder from opening a
+   * conflicting handle through validation and delete disposition. */
+  if (!wyl_win_nt_create_relative (storage->root_handle, name,
+          GENERIC_READ | DELETE, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ, &handle,
+          &identity, &error)) {
+    if (error == WYRELOG_E_NOT_FOUND) {
+      rc = wyl_win_flush_directory (storage->root_handle);
+      if (rc == WYRELOG_E_OK
+          && !wyl_service_credential_operation_storage_anchor_matches
+          (storage, anchor))
+        rc = WYRELOG_E_POLICY;
+      return rc == WYRELOG_E_OK ? WYRELOG_E_NOT_FOUND : rc;
+    }
+    return error;
+  }
+  if (!GetFileInformationByHandle (handle, &before)) {
+    rc = wyl_win_system_error (GetLastError ());
+    goto out;
+  }
+  if (!wyl_win_exact_delete_info_matches (&before, &identity, expected_size))
+    goto out;
+  for (gsize offset = 0; offset < expected_size;) {
+    DWORD got = 0;
+    DWORD wanted = (DWORD) MIN (sizeof buffer, expected_size - offset);
+    if (!ReadFile (handle, buffer, wanted, &got, NULL) || got == 0) {
+      rc = WYRELOG_E_IO;
+      goto out;
+    }
+    if (memcmp (buffer, expected + offset, got) != 0)
+      goto out;
+    offset += got;
+  }
+  if (!GetFileInformationByHandle (handle, &after)) {
+    rc = wyl_win_system_error (GetLastError ());
+    goto out;
+  }
+  if (!wyl_win_exact_delete_info_matches (&after, &identity, expected_size)
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    goto out;
+  wyl_win_child_run_before_exact_delete_hook_for_test ();
+  if (!GetFileInformationByHandle (handle, &post_hook)) {
+    rc = wyl_win_system_error (GetLastError ());
+    goto out;
+  }
+  if (!wyl_win_exact_delete_info_matches (&post_hook, &identity, expected_size)
+      || !wyl_win_exact_delete_info_unchanged (&after, &post_hook)
+      || !wyl_win_nt_create_relative (storage->root_handle, name,
+          FILE_READ_ATTRIBUTES, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ
+          | FILE_SHARE_DELETE, &named_handle, &named_identity, &error)
+      || !GetFileInformationByHandle (named_handle, &named)
+      || !wyl_win_exact_delete_info_matches (&named, &named_identity,
+          expected_size)
+      || named.dwVolumeSerialNumber != post_hook.dwVolumeSerialNumber
+      || named.nFileIndexHigh != post_hook.nFileIndexHigh
+      || named.nFileIndexLow != post_hook.nFileIndexLow
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    goto out;
+  CloseHandle (named_handle);
+  named_handle = INVALID_HANDLE_VALUE;
+  rc = wyl_win_set_delete_disposition (handle);
+  if (rc == WYRELOG_E_OK)
+    delete_pending = TRUE;
+out:
+  sodium_memzero (buffer, sizeof buffer);
+  if (named_handle != INVALID_HANDLE_VALUE)
+    CloseHandle (named_handle);
+  if (handle != INVALID_HANDLE_VALUE && !CloseHandle (handle)
+      && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (delete_pending) {
+    wyrelog_error_t flush_rc = wyl_win_flush_directory (storage->root_handle);
+    if (flush_rc != WYRELOG_E_OK)
+      rc = flush_rc;
+    else if (!wyl_service_credential_operation_storage_anchor_matches
+        (storage, anchor))
+      rc = WYRELOG_E_POLICY;
+  }
+  return rc;
+}
+
+
+wyrelog_error_t
+    wyl_win_child_confirm_absent
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name)
+{
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylWinChildIdentity identity = { 0 };
+  wyrelog_error_t error = WYRELOG_E_INVALID;
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  if (wyl_win_nt_create_relative (storage->root_handle, name,
+          FILE_READ_ATTRIBUTES, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ
+          | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &handle, &identity, &error)) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
+  if (error != WYRELOG_E_NOT_FOUND)
+    return error;
+  wyrelog_error_t rc = wyl_win_flush_directory (storage->root_handle);
+  if (rc == WYRELOG_E_OK
+      && !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    rc = WYRELOG_E_POLICY;
+  return rc == WYRELOG_E_OK ? WYRELOG_E_NOT_FOUND : rc;
+}
+
 wyrelog_error_t
 wyl_win_child_lock (const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationRootAnchor *anchor,
@@ -612,17 +828,20 @@ wyl_win_child_lock (const WylServiceCredentialOperationStorage *storage,
   lock.component = g_strdup_printf (".lock-%s", digest);
   if (lock.component == NULL)
     return WYRELOG_E_NOMEM;
-  /* Exclusive share mode makes a concurrent lock open fail with a sharing
-   * violation, which the opener maps to WYRELOG_E_BUSY.  DELETE access lets
-   * the matching unlock remove the lock file through the held handle. */
+  /* Share only metadata reads used to re-bind a supplied lifecycle HANDLE to
+   * this permanent namespace object.  A contender needs GENERIC_WRITE, so it
+   * still fails with a sharing violation until release closes this handle. */
   if (!wyl_win_nt_create_relative (storage->root_handle, &lock,
-          GENERIC_READ | GENERIC_WRITE | DELETE, WYL_WIN_CHILD_OPEN_ALWAYS, 0,
-          &handle, &identity, &error)) {
+          GENERIC_READ | GENERIC_WRITE, WYL_WIN_CHILD_OPEN_ALWAYS,
+          FILE_SHARE_READ, &handle, &identity, &error)) {
     wyl_service_credential_operation_child_name_clear (&lock);
     return error;
   }
   if (!GetFileInformationByHandle (handle, &info)
       || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      || (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      || info.nFileSizeHigh != 0 || info.nFileSizeLow != 0
+      || info.nNumberOfLinks != 1
       || info.dwVolumeSerialNumber != identity.volume_serial
       || info.nFileIndexHigh != identity.file_index_high
       || info.nFileIndexLow != identity.file_index_low
