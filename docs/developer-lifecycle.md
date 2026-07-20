@@ -208,3 +208,42 @@ successful production-route exchange and exercises the core transport guard
 with a non-loopback marker for the denial path. Fence uncertainty is represented
 by the canonical `not_committed_terminal` reconciliation outcome; there is no
 separate uncertainty enum.
+
+## Private service credential operation retirement
+
+Terminal handoff journal retirement is private library work. It has no daemon
+route, `wyctl` command, public API, timer, or scheduling policy. Public ingress
+and scheduling remain deferred to #517.
+
+Eligibility requires an exact version-6 `TERMINAL` snapshot: `FILE_PUBLISHED`
+with no remediation marker or the exact prior `RESUME` marker, or
+`OPERATOR_REVOKE_AND_WIPE` with its exact revoke marker. Version 5,
+`NOT_COMMITTED`, and every nonterminal state are excluded. The trusted clock
+must be at least 30 days beyond the greatest timestamp among the journal and
+all referenced delivery, remediation, and revoke-event provenance.
+
+The purge coordinator preserves this order for one original request id:
+lifecycle lock, service-authority write lease, short authority transaction,
+permanent receipt, transaction completion, then exact anchored journal
+deletion and synchronization. The authority transaction either validates an
+existing receipt or records and commits the exact non-secret provenance and
+dual escrow absence. No journal filesystem read or deletion occurs while that
+transaction is active. The lifecycle lock and write lease remain held through
+deletion; exact storage deletion takes the shorter operation lock inside that
+boundary.
+
+Crash recovery is receipt first. A validated permanent receipt supplies the
+exact delete expectation, and only that path may treat an already missing
+snapshot as success. If no receipt exists, the coordinator must load and
+validate an eligible version-6 terminal snapshot, obtain the authority receipt,
+and confirm its replay before deleting anything.
+
+Production operation creation must use the retirement-guarded begin path. It
+checks the permanent receipt while holding the same lifecycle lock and write
+lease used by purge, so a burned request id cannot create or replay a journal.
+The raw locked begin helper is restricted to the retirement coordinator and
+explicit test friends; it is not a production ingress contract.
+
+Permanent retirement receipts and lifecycle or operation lock artifacts must
+never be manually updated or deleted. There is no supported administrative
+reset that makes a retired request id reusable.
