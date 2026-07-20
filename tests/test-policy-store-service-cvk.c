@@ -2389,6 +2389,7 @@ test_rotation_recover (void)
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
     g_assert_cmpmem (after, after_len, before, before_len);
+    g_assert_cmpuint (factory.frees, ==, factory.old_mints + factory.new_mints);
     TestProvider reopened = { 0 };
     TestRuntime reopened_runtime = { 0 };
     wyl_policy_store_t *store = NULL;
@@ -2419,6 +2420,7 @@ test_rotation_recover (void)
     g_assert_cmpint (wyl_policy_store_rotation_recover (path, &api), ==,
         WYRELOG_E_POLICY);
     g_assert_false (g_file_test (path, G_FILE_TEST_EXISTS));
+    g_assert_cmpuint (factory.frees, ==, factory.old_mints + factory.new_mints);
 
     remove_rotation_sidecar (path);
     g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
