@@ -17,6 +17,7 @@
 #else
 #include <errno.h>
 #include <stdlib.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -194,6 +195,34 @@ canonical_windows_path (const gchar *path, GError **error)
   }
   return g_utf16_to_utf8 ((const gunichar2 *) long_path, -1, NULL, NULL, error);
 }
+
+static gunichar2 *
+test_filesystem_wide_path (const gchar *path, GError **error)
+{
+  glong units = 0;
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, &units, error);
+  if (wide == NULL)
+    return NULL;
+  for (glong i = 0; i < units; i++) {
+    if (wide[i] == '/')
+      wide[i] = '\\';
+  }
+  gboolean absolute_drive = units >= 3 && ((wide[0] >= 'A' && wide[0] <= 'Z')
+      || (wide[0] >= 'a' && wide[0] <= 'z'))
+      && wide[1] == ':' && wide[2] == '\\';
+  if (!absolute_drive || units < MAX_PATH)
+    return g_steal_pointer (&wide);
+
+  gunichar2 *extended = g_try_new (gunichar2, (gsize) units + 5);
+  if (extended == NULL) {
+    g_set_error_literal (error, G_FILE_ERROR, G_FILE_ERROR_NOMEM,
+        "Failed to allocate a native test path");
+    return NULL;
+  }
+  memcpy (extended, L"\\\\?\\", 4 * sizeof *extended);
+  memcpy (extended + 4, wide, ((gsize) units + 1) * sizeof *extended);
+  return extended;
+}
 #endif
 
 gboolean
@@ -342,6 +371,74 @@ wyl_test_remove_directory_alias (const gchar *alias, GError **error)
   g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
       "Failed to remove directory alias '%s': %s", alias,
       g_strerror (saved_errno));
+  return FALSE;
+#endif
+}
+
+gboolean
+wyl_test_remove_empty_directory (const gchar *path, GError **error)
+{
+#ifdef G_OS_WIN32
+  g_autofree gunichar2 *wide = test_filesystem_wide_path (path, error);
+  if (wide == NULL)
+    return FALSE;
+  if (RemoveDirectoryW ((LPCWSTR) wide))
+    return TRUE;
+  DWORD saved_error = GetLastError ();
+  if (saved_error == ERROR_FILE_NOT_FOUND
+      || saved_error == ERROR_PATH_NOT_FOUND)
+    return TRUE;
+  g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+      "Failed to remove an empty test directory: Win32 error %lu",
+      (gulong) saved_error);
+  return FALSE;
+#else
+  if (g_rmdir (path) == 0 || errno == ENOENT)
+    return TRUE;
+  gint saved_errno = errno;
+  g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+      "Failed to remove an empty test directory: %s", g_strerror (saved_errno));
+  return FALSE;
+#endif
+}
+
+gboolean
+wyl_test_path_exists (const gchar *path, gboolean *out_exists, GError **error)
+{
+  if (out_exists == NULL) {
+    g_set_error_literal (error, G_FILE_ERROR, G_FILE_ERROR_INVAL,
+        "Missing test path existence output");
+    return FALSE;
+  }
+  *out_exists = FALSE;
+#ifdef G_OS_WIN32
+  g_autofree gunichar2 *wide = test_filesystem_wide_path (path, error);
+  if (wide == NULL)
+    return FALSE;
+  DWORD attributes = GetFileAttributesW ((LPCWSTR) wide);
+  if (attributes != INVALID_FILE_ATTRIBUTES) {
+    *out_exists = TRUE;
+    return TRUE;
+  }
+  DWORD saved_error = GetLastError ();
+  if (saved_error == ERROR_FILE_NOT_FOUND
+      || saved_error == ERROR_PATH_NOT_FOUND)
+    return TRUE;
+  g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+      "Failed to inspect a native test path: Win32 error %lu",
+      (gulong) saved_error);
+  return FALSE;
+#else
+  struct stat status;
+  if (lstat (path, &status) == 0) {
+    *out_exists = TRUE;
+    return TRUE;
+  }
+  gint saved_errno = errno;
+  if (saved_errno == ENOENT)
+    return TRUE;
+  g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+      "Failed to inspect a test path: %s", g_strerror (saved_errno));
   return FALSE;
 #endif
 }

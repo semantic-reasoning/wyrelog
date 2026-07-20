@@ -5802,9 +5802,29 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
       graph, TRUE, &path, &needs_hardening);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_open (path, out_store);
-  if (rc == WYRELOG_E_OK && needs_hardening) {
+  if (needs_hardening) {
+    wyrelog_error_t materialize_rc = rc;
+    if (rc == WYRELOG_E_OK)
+      materialize_rc = wyl_fact_store_create_schema (*out_store);
     g_clear_pointer (out_store, wyl_fact_store_close);
-    rc = secure_http_fact_db_mode (ctx, policy_store, tenant, graph);
+
+    wyrelog_error_t harden_rc = secure_http_fact_db_mode (ctx, policy_store,
+        tenant, graph);
+    if (harden_rc != WYRELOG_E_OK && harden_rc != WYRELOG_E_NOT_FOUND)
+      return harden_rc;
+    if (materialize_rc != WYRELOG_E_OK)
+      return materialize_rc;
+    if (harden_rc != WYRELOG_E_OK)
+      return harden_rc;
+
+    /* The creation handoff is re-anchored before the descriptive path is
+     * given back to DuckDB.  A replacement or weak ACL fails closed. */
+    g_clear_pointer (&path, g_free);
+    gboolean still_missing = FALSE;
+    rc = resolve_http_fact_db_path (ctx, policy_store, tenant, graph, TRUE,
+        &path, &still_missing);
+    if (rc == WYRELOG_E_OK && still_missing)
+      rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_open (path, out_store);
   }

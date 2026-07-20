@@ -9,3 +9,6 @@ gboolean wyl_test_secure_regular_file (const gchar * path, GError ** error);
 gboolean wyl_test_create_directory_alias (const gchar * alias,
     const gchar * target, GError ** error);
 gboolean wyl_test_remove_directory_alias (const gchar * alias, GError ** error);
+gboolean wyl_test_remove_empty_directory (const gchar * path, GError ** error);
+gboolean wyl_test_path_exists (const gchar * path, gboolean * out_exists,
+    GError ** error);

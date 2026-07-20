@@ -712,7 +712,12 @@ fact_graph_iter_probe_cb (const wyl_policy_fact_graph_info_t *info,
 static gboolean
 remove_empty_directory_if_present (const gchar *path)
 {
-  return g_rmdir (path) == 0 || errno == ENOENT;
+  g_autoptr (GError) error = NULL;
+  gboolean removed = wyl_test_remove_empty_directory (path, &error);
+  if (!removed)
+    g_printerr ("fact graph cleanup failed: %s\n",
+        error != NULL ? error->message : "unknown native error");
+  return removed;
 }
 
 static gboolean
@@ -760,7 +765,14 @@ cleanup_fact_graph_root (const gchar *root)
   }
   if (!remove_empty_directory_if_present (root))
     removed = FALSE;
-  return removed && !g_file_test (root, G_FILE_TEST_EXISTS);
+  gboolean exists = TRUE;
+  g_autoptr (GError) error = NULL;
+  if (!wyl_test_path_exists (root, &exists, &error)) {
+    g_printerr ("fact graph cleanup verification failed: %s\n",
+        error != NULL ? error->message : "unknown native error");
+    return FALSE;
+  }
+  return removed && !exists;
 }
 
 static wyl_policy_fact_graph_create_options_t
