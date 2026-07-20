@@ -21,6 +21,10 @@ typedef struct
   GCancellable *cancellable;
   gboolean acquired;
   gboolean may_release;
+  gboolean gated;               /* honor the start gate before acquiring */
+  gboolean start_gate;          /* released by the test to launch the acquire */
+  gint *order_source;           /* shared counter recording acquisition order */
+  gint acquire_order;           /* value observed on acquire; -1 until acquired */
   wyrelog_error_t rc;
 } LeaseThread;
 
@@ -149,6 +153,65 @@ finish_writer (LeaseThread *writer, GThread **thread)
   g_cond_broadcast (&writer->changed);
   g_mutex_unlock (&writer->mutex);
   g_thread_join (g_steal_pointer (thread));
+}
+
+/* Writer variant that records the order in which it wins the lease and then
+   releases it immediately, so the acquisition sequence can be asserted without
+   any thread having to hold the lease (which would deadlock if a barge stole
+   it out of the expected order).  When gated, it parks until the test opens the
+   gate so a newcomer can be primed to race a queued writer for a just-freed
+   lease. */
+static gpointer
+ordered_writer_thread (gpointer data)
+{
+  LeaseThread *thread = data;
+  if (thread->gated) {
+    g_mutex_lock (&thread->mutex);
+    while (!thread->start_gate)
+      g_cond_wait (&thread->changed, &thread->mutex);
+    g_mutex_unlock (&thread->mutex);
+  }
+
+  WylServiceAuthWriteLease *lease = NULL;
+  thread->rc = wyl_service_auth_authority_acquire_write (thread->authority,
+      thread->handle, thread->cancellable, &lease);
+  if (thread->rc != WYRELOG_E_OK)
+    return NULL;
+
+  thread->acquire_order = g_atomic_int_add (thread->order_source, 1);
+  g_mutex_lock (&thread->mutex);
+  thread->acquired = TRUE;
+  g_cond_broadcast (&thread->changed);
+  g_mutex_unlock (&thread->mutex);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+  return NULL;
+}
+
+static void
+open_gate (LeaseThread *thread)
+{
+  g_mutex_lock (&thread->mutex);
+  thread->start_gate = TRUE;
+  g_cond_broadcast (&thread->changed);
+  g_mutex_unlock (&thread->mutex);
+}
+
+static void
+ordered_writer_init (LeaseThread *thread, WylServiceAuthAuthority *authority,
+    WylHandle *handle, gint *order_source)
+{
+  lease_thread_init (thread, authority, handle);
+  thread->order_source = order_source;
+  thread->acquire_order = -1;
+}
+
+static gboolean
+two_writers_waiting (const WylServiceAuthAuthoritySnapshot *snapshot)
+{
+  return snapshot->waiting_writers == 2;
 }
 
 static void
@@ -721,6 +784,240 @@ test_close_wakes_and_drains (void)
   g_assert_cmpint (close.rc, ==, WYRELOG_E_OK);
   lease_thread_clear (&writer);
   lease_thread_clear (&reader);
+}
+
+/* A writer that queues before the lease is freed must win it ahead of a
+   writer that only arrives after the release, no matter which of the two
+   reaches the authority mutex first. */
+static void
+test_writer_no_barge_after_write_release (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  gint order = 0;
+
+  WylServiceAuthWriteLease *holder = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority, handle,
+          NULL, &holder), ==, WYRELOG_E_OK);
+
+  LeaseThread queued = { 0 };
+  ordered_writer_init (&queued, authority, handle, &order);
+  GThread *queued_handle = g_thread_new ("no-barge-queued",
+      ordered_writer_thread, &queued);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  LeaseThread newcomer = { 0 };
+  ordered_writer_init (&newcomer, authority, handle, &order);
+  newcomer.gated = TRUE;
+  GThread *newcomer_handle = g_thread_new ("no-barge-newcomer",
+      ordered_writer_thread, &newcomer);
+
+  /* Free the lease, then immediately release the primed newcomer so it races
+     the queued writer for the just-freed lease.  Both writers record their
+     order and self-release, so the sequence resolves regardless of who wins. */
+  g_assert_cmpint (wyl_service_auth_write_lease_release (holder), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (holder);
+  open_gate (&newcomer);
+
+  g_thread_join (g_steal_pointer (&queued_handle));
+  g_thread_join (g_steal_pointer (&newcomer_handle));
+
+  g_assert_cmpint (queued.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (newcomer.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (queued.acquire_order, ==, 0);
+  g_assert_cmpint (newcomer.acquire_order, ==, 1);
+
+  lease_thread_clear (&queued);
+  lease_thread_clear (&newcomer);
+}
+
+/* Same guarantee when the lease is freed by the last reader draining rather
+   than by a writer releasing. */
+static void
+test_writer_no_barge_after_reader_drain (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  gint order = 0;
+
+  WylServiceAuthReadLease *reader = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &reader), ==, WYRELOG_E_OK);
+
+  LeaseThread queued = { 0 };
+  ordered_writer_init (&queued, authority, handle, &order);
+  GThread *queued_handle = g_thread_new ("drain-queued",
+      ordered_writer_thread, &queued);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  LeaseThread newcomer = { 0 };
+  ordered_writer_init (&newcomer, authority, handle, &order);
+  newcomer.gated = TRUE;
+  GThread *newcomer_handle = g_thread_new ("drain-newcomer",
+      ordered_writer_thread, &newcomer);
+
+  g_assert_cmpint (wyl_service_auth_read_lease_release (reader), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_read_lease_free (reader);
+  open_gate (&newcomer);
+
+  g_thread_join (g_steal_pointer (&queued_handle));
+  g_thread_join (g_steal_pointer (&newcomer_handle));
+
+  g_assert_cmpint (queued.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (newcomer.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (queued.acquire_order, ==, 0);
+  g_assert_cmpint (newcomer.acquire_order, ==, 1);
+
+  lease_thread_clear (&queued);
+  lease_thread_clear (&newcomer);
+}
+
+/* Same guarantee when the last reader drains through the terminal release path
+   (production-reachable via the daemon bearer resolver), not just the ordinary
+   read release. */
+static void
+test_writer_no_barge_after_terminal_drain (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  gint order = 0;
+
+  WylServiceAuthReadLease *reader = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_read (authority, handle,
+          NULL, &reader), ==, WYRELOG_E_OK);
+
+  LeaseThread queued = { 0 };
+  ordered_writer_init (&queued, authority, handle, &order);
+  GThread *queued_handle = g_thread_new ("terminal-drain-queued",
+      ordered_writer_thread, &queued);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  LeaseThread newcomer = { 0 };
+  ordered_writer_init (&newcomer, authority, handle, &order);
+  newcomer.gated = TRUE;
+  GThread *newcomer_handle = g_thread_new ("terminal-drain-newcomer",
+      ordered_writer_thread, &newcomer);
+
+  /* A successful terminal drain of the last reader must reserve the freed
+     lease for the queued writer, exactly like the ordinary read release. */
+  g_assert_cmpint (wyl_service_auth_read_lease_release_terminal (&reader), ==,
+      WYRELOG_E_OK);
+  g_assert_null (reader);
+  open_gate (&newcomer);
+
+  g_thread_join (g_steal_pointer (&queued_handle));
+  g_thread_join (g_steal_pointer (&newcomer_handle));
+
+  g_assert_cmpint (queued.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (newcomer.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (queued.acquire_order, ==, 0);
+  g_assert_cmpint (newcomer.acquire_order, ==, 1);
+
+  lease_thread_clear (&queued);
+  lease_thread_clear (&newcomer);
+}
+
+/* A writer that cancels mid-wait must not leave a reservation that stalls a
+   later writer. */
+static void
+test_writer_cancel_does_not_strand_reservation (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  gint order = 0;
+
+  WylServiceAuthWriteLease *holder = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority, handle,
+          NULL, &holder), ==, WYRELOG_E_OK);
+
+  LeaseThread cancelled = { 0 };
+  ordered_writer_init (&cancelled, authority, handle, &order);
+  cancelled.cancellable = g_cancellable_new ();
+  GThread *cancelled_handle = g_thread_new ("cancel-queued",
+      ordered_writer_thread, &cancelled);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  g_cancellable_cancel (cancelled.cancellable);
+  g_thread_join (g_steal_pointer (&cancelled_handle));
+  g_assert_cmpint (cancelled.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (cancelled.acquire_order, ==, -1);
+
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_service_auth_authority_snapshot (authority, &snapshot);
+  g_assert_cmpuint (snapshot.waiting_writers, ==, 0);
+
+  g_assert_cmpint (wyl_service_auth_write_lease_release (holder), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (holder);
+
+  LeaseThread later = { 0 };
+  ordered_writer_init (&later, authority, handle, &order);
+  GThread *later_handle = g_thread_new ("cancel-later", ordered_writer_thread,
+      &later);
+  g_thread_join (g_steal_pointer (&later_handle));
+  g_assert_cmpint (later.rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (later.acquire_order, ==, 0);
+
+  lease_thread_clear (&cancelled);
+  lease_thread_clear (&later);
+}
+
+/* Closing an authority with writers queued must wake every queued writer with
+   WYRELOG_E_BUSY and let the drain complete; the reservation must never keep a
+   waiter parked. */
+static void
+test_close_drains_queued_writers (void)
+{
+  g_autoptr (WylHandle) handle = new_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  gint order = 0;
+
+  LeaseThread holder = { 0 };
+  lease_thread_init (&holder, authority, handle);
+  GThread *holder_handle = g_thread_new ("close-holder", reader_thread,
+      &holder);
+  wait_for_flag (&holder, &holder.acquired);
+
+  LeaseThread first = { 0 };
+  LeaseThread second = { 0 };
+  ordered_writer_init (&first, authority, handle, &order);
+  ordered_writer_init (&second, authority, handle, &order);
+  GThread *first_handle = g_thread_new ("close-writer-1",
+      ordered_writer_thread, &first);
+  GThread *second_handle = g_thread_new ("close-writer-2",
+      ordered_writer_thread, &second);
+  wait_for_snapshot (authority, two_writers_waiting);
+
+  CloseThread close = { authority, WYRELOG_E_INTERNAL };
+  GThread *closer = g_thread_new ("close-drain", close_thread, &close);
+  wait_for_snapshot (authority, authority_is_closing);
+
+  g_mutex_lock (&holder.mutex);
+  holder.may_release = TRUE;
+  g_cond_broadcast (&holder.changed);
+  g_mutex_unlock (&holder.mutex);
+
+  g_thread_join (g_steal_pointer (&first_handle));
+  g_thread_join (g_steal_pointer (&second_handle));
+  g_thread_join (g_steal_pointer (&holder_handle));
+  g_thread_join (g_steal_pointer (&closer));
+
+  g_assert_cmpint (first.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (second.rc, ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (first.acquire_order, ==, -1);
+  g_assert_cmpint (second.acquire_order, ==, -1);
+  g_assert_cmpint (close.rc, ==, WYRELOG_E_OK);
+
+  lease_thread_clear (&holder);
+  lease_thread_clear (&first);
+  lease_thread_clear (&second);
 }
 
 static void
@@ -2749,6 +3046,16 @@ main (int argc, char **argv)
       test_waiting_writer_blocks_later_reader);
   g_test_add_func ("/service-auth/authority/writer-cancellation",
       test_writer_cancellation_restores_progress);
+  g_test_add_func ("/service-auth/authority/writer-no-barge-write-release",
+      test_writer_no_barge_after_write_release);
+  g_test_add_func ("/service-auth/authority/writer-no-barge-reader-drain",
+      test_writer_no_barge_after_reader_drain);
+  g_test_add_func ("/service-auth/authority/writer-no-barge-terminal-drain",
+      test_writer_no_barge_after_terminal_drain);
+  g_test_add_func ("/service-auth/authority/writer-cancel-no-strand",
+      test_writer_cancel_does_not_strand_reservation);
+  g_test_add_func ("/service-auth/authority/close-drains-queued-writers",
+      test_close_drains_queued_writers);
   g_test_add_func ("/service-auth/authority/close-drain",
       test_close_wakes_and_drains);
   g_test_add_func ("/service-auth/unavailable/terminal-exact-token",

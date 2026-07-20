@@ -21,6 +21,18 @@ struct _WylServiceAuthAuthority
   guint waiting_readers;
   guint waiting_writers;
   gboolean writer_active;
+  /* Set when the lease becomes free while writers are queued, so a writer that
+     arrives afterwards and has never yet parked defers to the queued cohort
+     instead of barging past it.  Guarantee: a writer that has never parked can
+     never overtake a writer that was already parked (no-barge / newcomer
+     defers).  This is NOT a fairness guarantee among the cohort itself: order
+     within the parked cohort is decided by an unfair broadcast wakeup race, so
+     under sustained contention a given cohort member may be overtaken by other
+     cohort members without bound - but never by a newcomer.  The flag is TRUE
+     only while at least one writer waits: the last writer to leave the wait -
+     whether it claims the lease or bails via cancel, close, or unavailability -
+     clears it, so it can never strand a later acquisition. */
+  gboolean writer_priority_reserved;
   gboolean closing;
   void (*close_checkpoint) (gpointer data);
   gpointer close_checkpoint_data;
@@ -326,15 +338,23 @@ wyl_service_auth_authority_acquire_write (WylServiceAuthAuthority *authority,
   if (thread_owns_lease_locked (authority, thread)) {
     rc = WYRELOG_E_BUSY;
   } else {
+    gboolean waited = FALSE;
     authority->waiting_writers++;
     while (!authority->closing && !authority_unavailable_locked (authority)
         && !acquisition_cancelled (cancellable)
-        && (authority->writer_active || authority->active_readers > 0))
+        && (authority->writer_active || authority->active_readers > 0
+            || (authority->writer_priority_reserved && !waited))) {
+      waited = TRUE;
       g_cond_wait (&authority->changed, &authority->mutex);
+    }
     authority->waiting_writers--;
     if (authority->closing || authority_unavailable_locked (authority)
         || acquisition_cancelled (cancellable))
       rc = WYRELOG_E_BUSY;
+    else
+      authority->writer_priority_reserved = FALSE;      /* cohort claimed it */
+    if (authority->waiting_writers == 0)
+      authority->writer_priority_reserved = FALSE;      /* never strand it */
     if (rc != WYRELOG_E_OK)
       g_cond_broadcast (&authority->changed);
   }
@@ -638,6 +658,8 @@ wyl_service_auth_read_lease_release (WylServiceAuthReadLease *lease)
     lease->state = WYL_SERVICE_AUTH_LEASE_RELEASED;
     g_hash_table_remove (authority->reader_owners, lease->owner);
     authority->active_readers--;
+    if (authority->active_readers == 0 && authority->waiting_writers > 0)
+      authority->writer_priority_reserved = TRUE;
     g_assert_cmpint (wyl_service_auth_rank_leave (lease->handle,
             WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
     g_cond_broadcast (&authority->changed);
@@ -690,6 +712,8 @@ wyl_service_auth_read_lease_release_terminal (WylServiceAuthReadLease
     lease->state = WYL_SERVICE_AUTH_LEASE_RELEASED;
     g_hash_table_remove (authority->reader_owners, lease->owner);
     authority->active_readers--;
+    if (authority->active_readers == 0 && authority->waiting_writers > 0)
+      authority->writer_priority_reserved = TRUE;
     if (rc != WYRELOG_E_OK)
       wyl_handle_service_auth_set_unavailable_reason_locked (lease->handle,
           WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
@@ -727,6 +751,8 @@ wyl_service_auth_write_lease_release (WylServiceAuthWriteLease *lease)
     authority->writer_active = FALSE;
     authority->writer_owner = NULL;
     authority->writer_serial = 0;
+    if (authority->waiting_writers > 0)
+      authority->writer_priority_reserved = TRUE;
     g_assert_cmpint (wyl_service_auth_rank_leave (lease->handle,
             WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
     g_cond_broadcast (&authority->changed);
