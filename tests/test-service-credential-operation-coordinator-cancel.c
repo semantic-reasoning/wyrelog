@@ -192,8 +192,9 @@ test_cancellation_tenant_binding (void)
   g_assert_cmpint (wyl_policy_store_create_tenant (store_of (handle),
           "tenant-b", &tenant_created), ==, WYRELOG_E_OK);
   g_assert_true (tenant_created);
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "cancel-tenant-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "cancel-tenant-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -450,8 +451,9 @@ test_cancellation_lifecycle_contention (void)
   WylHandle *handle = fixture.handle;
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "cancel-contention-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "cancel-contention-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -633,8 +635,9 @@ test_cancellation_state_matrix (void)
   WylHandle *handle = fixture.handle;
   sqlite3 *db = db_of (handle);
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "cancel-state-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "cancel-state-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -928,8 +931,9 @@ test_prepared_cancellation_reconciliation (void)
   WylHandle *handle = fixture.handle;
   sqlite3 *db = db_of (handle);
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "cancel-prepared-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "cancel-prepared-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -1203,8 +1207,9 @@ test_prepared_rotate_cancellation_reconciliation (void)
   WylHandle *handle = fixture.handle;
   sqlite3 *db = db_of (handle);
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "cancel-prepared-rotate-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "cancel-prepared-rotate-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -1326,8 +1331,9 @@ test_authenticated_cancellation_and_executor_gate (void)
   sqlite3 *db = db_of (handle);
   prepare_authority (handle, "svc:handoff:executor");
 
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "cancel-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "cancel-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =

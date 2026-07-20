@@ -144,8 +144,9 @@ test_authenticated_resume_replay_and_new_epoch (void)
   fixture_init (&fixture);
   WylHandle *handle = fixture.handle;
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "remediation-resume-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "remediation-resume-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -322,8 +323,9 @@ test_revoke_replay_invalidation (void)
   fixture_init (&fixture);
   WylHandle *handle = fixture.handle;
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "remediation-revoke-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "remediation-revoke-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -405,8 +407,9 @@ test_authority_before_checkpoint_converges (void)
   fixture_init (&fixture);
   WylHandle *handle = fixture.handle;
   prepare_authority (handle, "svc:handoff:executor");
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "remediation-crash-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "remediation-crash-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =

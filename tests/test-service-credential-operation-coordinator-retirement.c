@@ -7,10 +7,12 @@
 #include "auth/service-credential-operation-coordinator-retirement-private.h"
 #include "wyl-handle-private.h"
 #include "wyl-request-id-private.h"
+#include "test-service-credential-operation-root.h"
 
 typedef struct
 {
   gchar *root;
+  gchar *operation_root;
   gchar *db_path;
   gchar *key_path;
   gchar *key_spec;
@@ -38,12 +40,16 @@ fixture_clear (Fixture *fixture)
 {
   wyl_service_credential_operation_storage_clear (&fixture->storage);
   g_clear_object (&fixture->handle);
+  remove_directory_children (fixture->operation_root);
+  if (fixture->operation_root != NULL)
+    (void) g_rmdir (fixture->operation_root);
   remove_directory_children (fixture->root);
   if (fixture->root != NULL)
     (void) g_rmdir (fixture->root);
   g_free (fixture->key_spec);
   g_free (fixture->key_path);
   g_free (fixture->db_path);
+  g_free (fixture->operation_root);
   g_free (fixture->root);
   memset (fixture, 0, sizeof *fixture);
 }
@@ -58,6 +64,9 @@ fixture_init (Fixture *fixture)
         WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT,};
   fixture->root = g_dir_make_tmp ("wyl-retirement-coordinator-XXXXXX", NULL);
   g_assert_nonnull (fixture->root);
+  fixture->operation_root = service_credential_operation_root_for_test
+      (fixture->root, "retirement-coordinator-operations");
+  g_assert_nonnull (fixture->operation_root);
   fixture->db_path = g_build_filename (fixture->root, "policy.db", NULL);
   fixture->key_path = g_build_filename (fixture->root, "policy.key", NULL);
   guint8 key[32];
@@ -74,7 +83,7 @@ fixture_init (Fixture *fixture)
   g_assert_cmpint (wyl_handle_open_with_options (&options, &fixture->handle),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_open
-      (fixture->root, &fixture->storage), ==, WYRELOG_E_OK);
+      (fixture->operation_root, &fixture->storage), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
       (&fixture->storage, &fixture->anchor), ==, WYRELOG_E_OK);
 }
