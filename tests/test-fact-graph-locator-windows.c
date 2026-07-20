@@ -113,6 +113,47 @@ wide_path (const gchar *path)
   return g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
 }
 
+/* Win32 filesystem APIs keep MAX_PATH semantics unless an absolute drive
+ * path uses the extended-length prefix.  Keep this conversion separate from
+ * wide_path(): junction substitute names use NT namespace syntax of their
+ * own and must never receive this prefix. */
+static gunichar2 *
+filesystem_wide_path (const gchar *path)
+{
+  glong units = 0;
+  g_autofree gunichar2 *wide = g_utf8_to_utf16 (path, -1, NULL, &units, NULL);
+  if (wide == NULL)
+    return NULL;
+  for (glong i = 0; i < units; i++) {
+    if (wide[i] == '/')
+      wide[i] = '\\';
+  }
+  gboolean absolute_drive = units >= 3 && ((wide[0] >= 'A' && wide[0] <= 'Z')
+      || (wide[0] >= 'a' && wide[0] <= 'z'))
+      && wide[1] == ':' && wide[2] == '\\';
+  if (!absolute_drive || units < MAX_PATH)
+    return g_steal_pointer (&wide);
+
+  gunichar2 *extended = g_try_new (gunichar2, (gsize) units + 5);
+  if (extended == NULL)
+    return NULL;
+  memcpy (extended, L"\\\\?\\", 4 * sizeof *extended);
+  memcpy (extended + 4, wide, ((gsize) units + 1) * sizeof *extended);
+  return extended;
+}
+
+static gboolean
+native_directory_exists (const gchar *path)
+{
+  g_autofree gunichar2 *wide = filesystem_wide_path (path);
+  if (wide == NULL)
+    return FALSE;
+  DWORD attributes = GetFileAttributesW ((LPCWSTR) wide);
+  return attributes != INVALID_FILE_ATTRIBUTES
+      && (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0
+      && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
+}
+
 static gchar *
 long_path (const gchar *path)
 {
@@ -279,7 +320,7 @@ typedef struct
 static void
 remove_tree_no_follow (const gchar *path)
 {
-  g_autofree gunichar2 *wide = wide_path (path);
+  g_autofree gunichar2 *wide = filesystem_wide_path (path);
   DWORD attributes;
 
   if (wide == NULL)
@@ -297,7 +338,7 @@ remove_tree_no_follow (const gchar *path)
   }
 
   g_autofree gchar *pattern = g_build_filename (path, "*", NULL);
-  g_autofree gunichar2 *wide_pattern = wide_path (pattern);
+  g_autofree gunichar2 *wide_pattern = filesystem_wide_path (pattern);
   WIN32_FIND_DATAW entry = { 0 };
   HANDLE find = FindFirstFileW ((LPCWSTR) wide_pattern, &entry);
   if (find != INVALID_HANDLE_VALUE) {
@@ -428,7 +469,7 @@ test_create_revalidate_and_component_lengths (void)
   g_assert_cmpint (wyl_fact_graph_resolver_revalidate (&resolver), ==,
       WYRELOG_E_OK);
   g_autofree gchar *path = wyl_fact_graph_directory_descriptive_path (&graph);
-  g_assert_true (g_file_test (path, G_FILE_TEST_IS_DIR));
+  g_assert_true (native_directory_exists (path));
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_locator_clear (&locator);
 
