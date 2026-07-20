@@ -6,7 +6,10 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include <errno.h>
+
 #include "wyrelog/wyrelog.h"
+#include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
@@ -704,25 +707,58 @@ fact_graph_iter_probe_cb (const wyl_policy_fact_graph_info_t *info,
   return WYRELOG_E_OK;
 }
 
-static void
+static gboolean
+remove_empty_directory_if_present (const gchar *path)
+{
+  return g_rmdir (path) == 0 || errno == ENOENT;
+}
+
+static gboolean
 cleanup_fact_graph_root (const gchar *root)
 {
   if (root == NULL)
-    return;
-  g_autofree gchar *tenant_a_graph =
-      g_build_filename (root, "tenant-a", "graph-main", NULL);
-  g_autofree gchar *tenant_a_other =
-      g_build_filename (root, "tenant-a", "graph-sealed", NULL);
-  g_autofree gchar *tenant_b_graph =
-      g_build_filename (root, "tenant-b", "graph-main", NULL);
-  g_autofree gchar *tenant_a = g_build_filename (root, "tenant-a", NULL);
-  g_autofree gchar *tenant_b = g_build_filename (root, "tenant-b", NULL);
-  (void) g_rmdir (tenant_a_graph);
-  (void) g_rmdir (tenant_a_other);
-  (void) g_rmdir (tenant_b_graph);
-  (void) g_rmdir (tenant_a);
-  (void) g_rmdir (tenant_b);
-  (void) g_rmdir (root);
+    return TRUE;
+
+  static const struct
+  {
+    const gchar *tenant_id;
+    const gchar *graph_id;
+  } graph_ids[] = {
+    {"tenant-a", "graph-main"},
+    {"tenant-a", "graph-sealed"},
+    {"tenant-b", "graph-main"},
+  };
+  gboolean removed = TRUE;
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_ids); i++) {
+    WylFactGraphLocator locator = { 0 };
+    if (wyl_fact_graph_locator_init (&locator, graph_ids[i].tenant_id,
+            graph_ids[i].graph_id) != WYRELOG_E_OK) {
+      removed = FALSE;
+      continue;
+    }
+    g_autofree gchar *graph_path =
+        wyl_fact_graph_locator_descriptive_path (root, &locator);
+    wyl_fact_graph_locator_clear (&locator);
+    if (graph_path == NULL || !remove_empty_directory_if_present (graph_path))
+      removed = FALSE;
+  }
+
+  static const gchar *const tenant_ids[] = { "tenant-a", "tenant-b" };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_ids); i++) {
+    g_autofree gchar *tenant_component = NULL;
+    if (wyl_fact_graph_component_encode (tenant_ids[i], &tenant_component)
+        != WYRELOG_E_OK) {
+      removed = FALSE;
+      continue;
+    }
+    g_autofree gchar *tenant_path =
+        g_build_filename (root, tenant_component, NULL);
+    if (!remove_empty_directory_if_present (tenant_path))
+      removed = FALSE;
+  }
+  if (!remove_empty_directory_if_present (root))
+    removed = FALSE;
+  return removed && !g_file_test (root, G_FILE_TEST_EXISTS);
 }
 
 static wyl_policy_fact_graph_create_options_t
@@ -848,7 +884,8 @@ check_store_manages_fact_graph_registry (void)
   }
 
   fact_graph_iter_probe_clear (&probe);
-  cleanup_fact_graph_root (root);
+  if (!cleanup_fact_graph_root (root))
+    return 419;
   return 0;
 #endif
 }
@@ -912,7 +949,8 @@ check_store_seals_fact_graph_registry (void)
       != WYRELOG_E_POLICY)
     return 431;
 
-  cleanup_fact_graph_root (root);
+  if (!cleanup_fact_graph_root (root))
+    return 432;
   return 0;
 #endif
 }
@@ -958,7 +996,12 @@ check_store_rejects_fact_graph_registry_escapes (void)
       != WYRELOG_E_INVALID)
     return 445;
 
-  g_autofree gchar *tenant_link = g_build_filename (root, "tenant-a", NULL);
+  g_autofree gchar *tenant_component = NULL;
+  if (wyl_fact_graph_component_encode ("tenant-a", &tenant_component)
+      != WYRELOG_E_OK)
+    return 446;
+  g_autofree gchar *tenant_link = g_build_filename (root, tenant_component,
+      NULL);
   if (symlink (outside, tenant_link) != 0)
     return 446;
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
@@ -1055,7 +1098,8 @@ check_store_rejects_fact_graph_reserved_metadata (void)
       != WYRELOG_E_INVALID)
     return 468;
 
-  cleanup_fact_graph_root (root);
+  if (!cleanup_fact_graph_root (root))
+    return 470;
   return 0;
 #endif
 }
@@ -1112,7 +1156,8 @@ check_store_fact_graph_metadata_only (void)
   if (matches != 0)
     return 488;
 
-  cleanup_fact_graph_root (root);
+  if (!cleanup_fact_graph_root (root))
+    return 489;
   return 0;
 #endif
 }
