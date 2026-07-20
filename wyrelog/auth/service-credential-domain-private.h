@@ -186,6 +186,34 @@ typedef struct
   gchar *audit_id;
 } wyl_service_credential_handoff_disposition_result_t;
 
+typedef struct
+{
+  const gchar *cancellation_request_id;
+  const gchar *decision_request_id;
+  const gchar *current_actor_subject_id;
+  const gchar *disposition_id;
+  const gchar *audit_id;
+  wyl_service_credential_handoff_exact_tuple_t tuple;
+  wyl_service_credential_handoff_fence_operation_t operation;
+  const gchar *target_a;
+  const gchar *target_b;
+  guint8 target_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  gint64 deadline_at_us;
+} wyl_service_credential_handoff_cancellation_input_t;
+
+typedef struct
+{
+  gboolean replayed;
+  gchar *disposition_id;
+  gchar *audit_id;
+  gint64 created_at_us;
+} wyl_service_credential_handoff_cancellation_result_t;
+
+typedef struct
+{
+  const wyl_service_credential_mutation_authorization_t *authorization;
+} wyl_service_credential_handoff_cancellation_runtime_t;
+
 typedef enum
 {
   WYL_SERVICE_HANDOFF_REMEDIATION_RESUME = 1,
@@ -327,6 +355,8 @@ wyrelog_error_t wyl_service_credential_revoke_with_runtime
     wyl_service_credential_t * out);
 void wyl_service_credential_handoff_disposition_result_clear
     (wyl_service_credential_handoff_disposition_result_t * result);
+G_GNUC_INTERNAL void wyl_service_credential_handoff_cancellation_result_clear
+    (wyl_service_credential_handoff_cancellation_result_t * result);
 void wyl_service_credential_handoff_remediation_result_clear
     (wyl_service_credential_handoff_remediation_result_t * result);
 wyrelog_error_t wyl_service_credential_handoff_record_disposition
@@ -337,6 +367,12 @@ wyrelog_error_t wyl_service_credential_handoff_record_not_committed
     (WylHandle * handle,
     const wyl_service_credential_handoff_disposition_input_t * input,
     wyl_service_credential_handoff_disposition_result_t * out_result);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_handoff_claim_cancellation
+    (WylHandle * handle,
+    const wyl_service_credential_handoff_cancellation_input_t * input,
+    const wyl_service_credential_handoff_cancellation_runtime_t * runtime,
+    wyl_service_credential_handoff_cancellation_result_t * out_result);
 wyrelog_error_t wyl_service_credential_handoff_remediate_exact
     (WylHandle * handle,
     const wyl_service_credential_handoff_remediation_input_t * input,

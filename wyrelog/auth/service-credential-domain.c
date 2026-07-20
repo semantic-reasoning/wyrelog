@@ -648,6 +648,16 @@ void wyl_service_credential_handoff_disposition_result_clear
   memset (result, 0, sizeof *result);
 }
 
+void wyl_service_credential_handoff_cancellation_result_clear
+    (wyl_service_credential_handoff_cancellation_result_t * result)
+{
+  if (result == NULL)
+    return;
+  g_clear_pointer (&result->disposition_id, g_free);
+  g_clear_pointer (&result->audit_id, g_free);
+  memset (result, 0, sizeof *result);
+}
+
 void wyl_service_credential_handoff_remediation_result_clear
     (wyl_service_credential_handoff_remediation_result_t * result)
 {
@@ -768,6 +778,54 @@ wyl_service_credential_handoff_record_not_committed (WylHandle *handle,
     out_result->audit_id = g_steal_pointer (&stored.audit_id);
   }
   wyl_policy_service_handoff_disposition_result_clear (&stored);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_credential_handoff_claim_cancellation (WylHandle *handle,
+    const wyl_service_credential_handoff_cancellation_input_t *input,
+    const wyl_service_credential_handoff_cancellation_runtime_t *runtime,
+    wyl_service_credential_handoff_cancellation_result_t *out_result)
+{
+  if (out_result != NULL)
+    wyl_service_credential_handoff_cancellation_result_clear (out_result);
+  if (handle == NULL || input == NULL || runtime == NULL
+      || runtime->authorization == NULL
+      || runtime->authorization->authorize == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  WylPolicyServiceHandoffCancellationInput stored_input = {
+    .cancellation_request_id = input->cancellation_request_id,
+    .decision_request_id = input->decision_request_id,
+    .current_actor_subject_id = input->current_actor_subject_id,
+    .disposition_id = input->disposition_id,
+    .audit_id = input->audit_id,
+    .operation = (WylPolicyServiceHandoffFenceOperation) input->operation,
+    .target_a = input->target_a,
+    .target_b = input->target_b,
+    .deadline_at_us = input->deadline_at_us,
+  };
+  service_handoff_translate_exact_tuple (&input->tuple, &stored_input.tuple);
+  memcpy (stored_input.target_digest, input->target_digest,
+      sizeof stored_input.target_digest);
+  WylPolicyServiceHandoffCancellationResult stored = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation, runtime->authorization,
+        input->current_actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_handoff_claim_cancellation_core
+        (mutation.transaction, mutation.store, &stored_input, &stored);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK) {
+    out_result->replayed = stored.replayed;
+    out_result->disposition_id = g_steal_pointer (&stored.disposition_id);
+    out_result->audit_id = g_steal_pointer (&stored.audit_id);
+    out_result->created_at_us = stored.created_at_us;
+  }
+  wyl_policy_service_handoff_cancellation_result_clear (&stored);
   return rc;
 }
 

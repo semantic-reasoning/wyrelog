@@ -3,6 +3,7 @@
 
 #include <gio/gio.h>
 
+#include "auth/service-credential-operation-coordinator-proof-private.h"
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 #include "wyrelog/handle.h"
 
@@ -44,12 +45,5 @@ G_GNUC_INTERNAL wyrelog_error_t
     const gchar * request_id, GCancellable * cancellable,
     WylServiceCredentialOperationMaintenanceOutcome * out_outcome,
     WylServiceCredentialOperationRecord * out_record);
-
-/* Frozen publication-target identity shared by execution and maintenance. */
-G_GNUC_INTERNAL wyrelog_error_t
-    wyl_service_credential_operation_handoff_target_digest
-    (const WylServiceCredentialOperationRecord * record,
-    guint8
-    out_digest[WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES]);
 
 G_END_DECLS
