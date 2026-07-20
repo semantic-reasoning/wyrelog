@@ -134,8 +134,16 @@ jobs:
           if-no-files-found: ignore
 
   build-windows:
-    name: build-windows
+    name: build-windows${{ matrix.job_suffix }}
     runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - fact_store: disabled
+            job_suffix: ''
+          - fact_store: enabled
+            job_suffix: -fact
     env:
       SCCACHE_GHA_ENABLED: "true"
       # Stays the checkout even though vcpkg no longer lives there: this only
@@ -296,7 +304,7 @@ jobs:
             >>windows-native.ini echo cpp = ['clang-cl']
             echo Windows compiler mode: native clang-cl
           )
-          meson setup builddir --native-file windows-native.ini -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Dduckdb_source=prebuilt
+          meson setup builddir --native-file windows-native.ini -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Denable_fact_store=${{ matrix.fact_store }} -Dduckdb_source=prebuilt
           if "%WYRELOG_USE_SCCACHE%"=="1" (
             ninja -C builddir -t commands | findstr /I /C:"sccache" >NUL
             if errorlevel 1 exit /b 1
@@ -308,7 +316,7 @@ jobs:
           @echo off
           call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvars64.bat"
           set PKG_CONFIG=%VCPKG_INSTALLED_DIR%\tools\pkgconf\pkgconf.exe
-          set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
           meson compile -C builddir wyctl wyrelogd
           if not exist builddir\wyrelog\wyctl.exe exit /b 1
           builddir\wyrelog\wyctl.exe --help >NUL
@@ -338,6 +346,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v6
         with:
-          name: meson-logs-windows
+          name: meson-logs-windows${{ matrix.job_suffix }}
           path: builddir/meson-logs/
           if-no-files-found: ignore

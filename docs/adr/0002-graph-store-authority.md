@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Related issues: #536, #537, #539, #544
+Related issues: #536, #537, #539, #540, #544
 
 ## Context
 
@@ -95,22 +95,31 @@ resolves tenant, graph, and file names relative to already-open directory
 descriptors. Symbolic links are rejected at every resolved component. Owned
 fact-root, tenant, and graph directories must retain their recorded identity,
 owner, directory type, and exact mode `0700`; graph files must be owned regular
-files with exact mode `0600`. Named entries are rechecked against the open
-descriptors so replacement, type changes, permission widening, and escape from
-the configured tree fail closed. Creation fsyncs the containing directory.
-Unsupported platforms return a policy error instead of falling back to unsafe
-path traversal.
+files with exact mode `0600`.
+
+On Windows, the resolver accepts only fixed local volumes. It traverses from an
+open volume root with handle-relative `NtCreateFile` calls and opens every entry
+with reparse-point semantics, rejecting reparse points, remote or mapped drives,
+reserved-device aliases, alternate data streams, trailing-dot/space aliases,
+and non-exact case aliases. Directories and regular files must retain their full
+volume/file identity and a protected current-user-only DACL. Windows file
+descriptors are CRT owners of their underlying handles; resolver validation
+borrows those handles and never closes them independently.
+
+On both platforms, named entries are rechecked against held handles so
+replacement, type changes, permission widening, and escape from the configured
+tree fail closed. Creation durably flushes the containing directory where the
+platform supports directory flushes. Unsupported filesystems and platforms
+return a policy error instead of falling back to unsafe path traversal.
 
 Each live policy-store handle binds the first configured fact-root string and
-its POSIX device/inode identity for the rest of that store lifetime. Reusing
-the same configured string revalidates the pinned identity; supplying another
-root or replacing the named root fails before graph materialization, replay,
-or a subsequent resolver operation can enter the replacement tree. This does
-not close the already documented same-owner replacement window after a
-resolver operation hands a pathname to DuckDB; #544 still owns that residual.
-On Windows the configured string can be bound during startup so non-fact
-startup behavior is preserved, while resolver operations continue to fail
-closed until a reparse-safe backend exists.
+its platform identity for the rest of that store lifetime: POSIX device/inode,
+or Windows volume serial and 128-bit file ID. Reusing the same configured string
+revalidates the pinned identity; supplying another root or replacing the named
+root fails before graph materialization, replay, or a subsequent resolver
+operation can enter the replacement tree. This does not close the already
+documented same-owner replacement window after a resolver operation hands a
+pathname to DuckDB; #544 still owns that residual on both platforms.
 
 Tenant and graph directory descriptors remain operation-scoped in #539. Their
 exact identity and named containment are enforced throughout each resolver
@@ -120,19 +129,22 @@ belong to #538 and #544; callers must not infer those stronger guarantees from
 the fact-root binding.
 
 The resolver also supplies a durable staging protocol for immutable file
-publication. A `0600` staging file is synced, linked to a previously absent
-final name without overwrite, the graph directory is synced, the staging name
-is removed, and the graph directory is synced again. Retry classifies the
-stage and final names by the recorded device and inode, allowing recovery after
-either publication checkpoint while rejecting foreign or replaced entries.
-Abort is allowed only before a final name exists; after publication begins,
-the caller must resume publication to convergence.
+publication. A POSIX `0600` or Windows protected owner-only staging file is
+synced and published to a previously absent final name without overwrite.
+POSIX publication links the final name and then removes the stage name; Windows
+uses a handle-relative no-replace rename. The graph directory is durably flushed
+at the platform-defined checkpoints. Retry classifies stage and final names by
+the recorded platform identity, allowing recovery after either publication
+checkpoint while rejecting foreign or replaced entries. Abort is allowed only
+before a final name exists; after publication begins, the caller must resume
+publication to convergence.
 
-#539 deliberately does not reserve physical identity or provision the final
-DuckDB schema. Policy graph creation materializes only the canonical `0700`
-directories. The first fact write may create `facts.duckdb` at the canonical
-derived path, after which its mode and identity are immediately checked and
-hardened. DuckDB currently accepts only a pathname, so there is still a
+#539 and #540 deliberately do not reserve physical identity or provision the
+final DuckDB schema. Policy graph creation materializes only canonical private
+directories. On the first fact write, DuckDB creates `facts.duckdb` at the
+canonical derived path; the caller closes that first handle, hardens and
+revalidates the file through the resolver, and then reopens it. DuckDB currently
+accepts only a pathname, so there is still a
 same-owner replacement window between resolver verification and DuckDB's
 path-based open. Registry metadata cannot exploit that window, but an attacker
 with the service account's filesystem authority can. The identity reservation
@@ -274,9 +286,9 @@ CAS outcomes suitable for later per-graph physical storage work. Concurrency,
 lost responses, crashes, and unsupported formats fail closed without identity
 replacement or partial metadata updates.
 
-Canonical path derivation and fail-closed POSIX resolution are now available,
-and runtime fact operations no longer trust registry paths. Physical identity
-reservation, descriptor-bound DuckDB provisioning/open, runtime engine
+Canonical path derivation and fail-closed POSIX and Windows resolution are now
+available, and runtime fact operations no longer trust registry paths. Physical
+identity reservation, descriptor-bound DuckDB provisioning/open, runtime engine
 ownership, tenant drain barriers, API exposure, deletion, retirement, ID reuse,
 and purge remain follow-up work. This ADR deliberately grants none of those
 operations authority merely because a policy row or canonical directory
