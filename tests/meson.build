@@ -280,6 +280,43 @@ if build_client
 
   test('daemon-http-mfa', test_daemon_http_mfa, timeout : 60)
 
+  test_daemon_http_profile_events_c_args = [
+    '-DWYL_HAS_DAEMON_HTTP',
+    '-DWYL_TEST_DAEMON_HTTP',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ]
+  test_daemon_http_profile_events_deps = [
+    wyrelog_dep,
+    wyrelog_client_dep,
+    libsoup_dep,
+    sodium_dep,
+    sqlite_dep,
+    service_session_private_dep,
+  ]
+  if get_option('enable_fact_store').allowed()
+    test_daemon_http_profile_events_c_args += '-DWYL_HAS_FACT_STORE'
+    test_daemon_http_profile_events_deps += duckdb_dep
+  endif
+  if get_option('enable_audit').allowed()
+    test_daemon_http_profile_events_c_args += '-DWYL_HAS_AUDIT'
+    test_daemon_http_profile_events_deps += duckdb_dep
+    test_daemon_http_profile_events_deps += service_exchange_private_dep
+  endif
+  test_daemon_http_profile_events_deps += daemon_http_private_dep
+  test_daemon_http_profile_events = executable('test-daemon-http-profile-events',
+    'test-daemon-http-profile-events.c',
+    '../wyrelog/daemon/auth-registry-private.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    c_args : test_daemon_http_profile_events_c_args,
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_daemon_http_profile_events_deps,
+  )
+
+  test('daemon-http-profile-events', test_daemon_http_profile_events,
+    timeout : 60)
+
   if get_option('enable_fact_store').allowed()
     test_daemon_http_facts_c_args = [
       '-DWYL_HAS_DAEMON_HTTP',
