@@ -156,6 +156,33 @@ service_session_private_dep = declare_dependency(
   dependencies : [wyrelog_dep],
 )
 
+# Shared, non-installed publication backend. Extracted from wyctl_exe so the
+# same objects can be reused by focused tests today and the daemon in a later
+# PR, with zero behavior change. The POSIX translation unit is unconditionally
+# _GNU_SOURCE / syscall(SYS_renameat2, ...) and cannot compile under clang-cl,
+# so it is selected only off-Windows; the Windows TU is #ifdef G_OS_WIN32 and is
+# safe to list unconditionally (empty off-Windows).
+publication_private_sources = [
+  'wyctl/wyctl-publication-private.c',
+  'wyctl/wyctl-publication-windows-private.c',
+]
+if host_machine.system() != 'windows'
+  publication_private_sources += 'wyctl/wyctl-publication-posix-private.c'
+endif
+
+publication_private_lib = static_library('wyrelog-publication-private',
+  publication_private_sources,
+  include_directories : wyrelog_inc,
+  dependencies : [wyrelog_dep, sodium_dep],
+  install : false,
+  build_by_default : false,
+)
+
+publication_private_dep = declare_dependency(
+  link_with : publication_private_lib,
+  dependencies : [wyrelog_dep, sodium_dep],
+)
+
 if get_option('enable_audit').allowed()
   # Non-installed host companion for the daemon and focused private tests.
   # libwyrelog retains its canonical copies; every external private consumer
@@ -225,14 +252,13 @@ if build_client
   )
 
   wyctl_deps = [wyrelog_client_dep, glib_dep, gio_dep, libsoup_dep,
-    sodium_dep, sqlite_dep]
+    sodium_dep, sqlite_dep, publication_private_dep]
   if host_machine.system() == 'windows'
     wyctl_deps += advapi32_dep
   endif
   wyctl_exe = executable('wyctl',
     files('wyctl/wyctl.c', 'wyctl/wyctl-config.c',
-        'wyctl/wyctl-token-file.c', 'wyctl/wyctl-publication-private.c',
-        'wyctl/wyctl-publication-windows-private.c'),
+        'wyctl/wyctl-token-file.c'),
     include_directories : wyrelog_inc,
     dependencies : wyctl_deps,
     install : true,
