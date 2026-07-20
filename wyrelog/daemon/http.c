@@ -41,6 +41,7 @@
 #include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-fsm-permission-scope-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #define WYL_DAEMON_JWT_ISSUER "wyrelogd"
 #define WYL_DAEMON_JWT_AUDIENCE "wyrelog-client"
@@ -3578,6 +3579,115 @@ profile_status_handler (SoupServer *server, SoupServerMessage *msg,
       SOUP_MEMORY_COPY, body->str, body->len);
 }
 
+#define WYL_DAEMON_PROFILE_EVENT_MAX_BODY 1024
+
+/* Ingest core for POST /profile/events. Applies all denials before any
+ * dispatch and only populates out_* on success (status 200). Authorization
+ * denials strictly precede request-shape denials so an unauthorized caller
+ * cannot learn the endpoint exists or probe its size boundary:
+ *   1. !transport_ok            -> 403 profile_event_ingest_denied
+ *   2. profile != SYSTEM        -> 403 profile_event_ingest_denied (same
+ *                                  token; the loopback gate is not disclosed)
+ *   3. body_oversize            -> 400 invalid_profile_event_request
+ *   4. empty body               -> 400 invalid_profile_event_request
+ *   5. strict typed parse fail  -> 400 invalid_profile_event_request
+ *   6. empty profile/event      -> 400 invalid_profile_event_request
+ *   7. success                  -> 200, out_* = parsed values
+ * There is deliberately NO whitelist on the event value: the receiver is
+ * permissive-but-bounded so a future producer can add event names without a
+ * coordinated receiver upgrade. */
+static wyrelog_error_t
+profile_events_ingest_core (WylDaemonProfile profile, gboolean transport_ok,
+    gboolean body_oversize, const gchar *body, gsize body_len, gint *out_status,
+    const gchar **out_token, gchar **out_profile, gchar **out_event,
+    gint64 *out_timestamp_us)
+{
+  if (out_status == NULL || out_token == NULL || out_profile == NULL
+      || out_event == NULL || out_timestamp_us == NULL)
+    return WYRELOG_E_INVALID;
+  *out_status = 0;
+  *out_token = NULL;
+  *out_profile = NULL;
+  *out_event = NULL;
+  *out_timestamp_us = 0;
+
+  if (!transport_ok) {
+    *out_status = 403;
+    *out_token = "profile_event_ingest_denied";
+    return WYRELOG_E_OK;
+  }
+  if (profile != WYL_DAEMON_PROFILE_SYSTEM) {
+    *out_status = 403;
+    *out_token = "profile_event_ingest_denied";
+    return WYRELOG_E_OK;
+  }
+  if (body_oversize) {
+    *out_status = 400;
+    *out_token = "invalid_profile_event_request";
+    return WYRELOG_E_OK;
+  }
+  if (body == NULL || body_len == 0) {
+    *out_status = 400;
+    *out_token = "invalid_profile_event_request";
+    return WYRELOG_E_OK;
+  }
+
+  static const WylDaemonHttpStrictJsonField fields[] = {
+    {"profile", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"event", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"timestamp_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_INT64},
+  };
+  g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
+  if (!wyl_daemon_http_dup_strict_json_object (body, body_len, fields,
+          G_N_ELEMENTS (fields), values)) {
+    *out_status = 400;
+    *out_token = "invalid_profile_event_request";
+    return WYRELOG_E_OK;
+  }
+
+  const gchar *profile_value = values[0];
+  const gchar *event_value = values[1];
+  const gchar *timestamp_value = values[2];
+  if (profile_value == NULL || profile_value[0] == '\0'
+      || event_value == NULL || event_value[0] == '\0'
+      || timestamp_value == NULL) {
+    *out_status = 400;
+    *out_token = "invalid_profile_event_request";
+    return WYRELOG_E_OK;
+  }
+
+  /* The typed parser already guaranteed a canonical, non-negative,
+   * in-range decimal string; the reconvert cannot fail but is checked
+   * defensively. */
+  errno = 0;
+  gchar *end = NULL;
+  gint64 timestamp_us = g_ascii_strtoll (timestamp_value, &end, 10);
+  if (end == timestamp_value || *end != '\0' || errno == ERANGE
+      || timestamp_us < 0) {
+    *out_status = 400;
+    *out_token = "invalid_profile_event_request";
+    return WYRELOG_E_OK;
+  }
+
+  *out_profile = g_strdup (profile_value);
+  *out_event = g_strdup (event_value);
+  *out_timestamp_us = timestamp_us;
+  *out_status = 200;
+  return WYRELOG_E_OK;
+}
+
+/* POST /profile/events receives events forwarded by a service-profile
+ * daemon over the loopback transport (no session token; the loopback gate
+ * is the authenticator, matching /auth/service-token). The producer
+ * (runtime.c) drains its spool and stops on the first non-2xx, retrying up
+ * to event_queue_limit, so a body this handler 400s would wedge the
+ * producer's queue. Today the producer emits exactly the well-formed shape
+ * this handler accepts (200), so malformed-body 400 does not regress it;
+ * the literal-payload regression test guards that shape. Returning 400 for
+ * genuinely malformed input is the honest contract for #555. A future
+ * producer schema change must remain parseable by deployed receivers, or
+ * migrate to additive-tolerant handling; lenient accept-and-200 is the
+ * safer-against-version-skew alternative but is out of #555 scope. */
 static void
 profile_events_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -3591,13 +3701,71 @@ profile_events_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 405, "method_not_allowed");
     return;
   }
-  if (ctx->profile != WYL_DAEMON_PROFILE_SYSTEM) {
-    set_json_error (msg, 403, "profile_event_ingest_denied");
+
+  gboolean transport_ok =
+      wyl_daemon_http_message_has_actual_loopback_transport (msg);
+
+  /* Bound the read: only copy the body when it fits. Oversize is reported
+   * to the core as a flag so the authorization (403) gates evaluate before
+   * this request-shape (400) denial, keeping all denials ordered in one
+   * place. */
+  SoupMessageBody *req = soup_server_message_get_request_body (msg);
+  gsize raw_len = (req != NULL && req->data != NULL && req->length > 0)
+      ? (gsize) req->length : 0;
+  gboolean body_oversize = raw_len > WYL_DAEMON_PROFILE_EVENT_MAX_BODY;
+
+  g_autofree gchar *body = NULL;
+  gsize body_len = 0;
+  if (!body_oversize && raw_len > 0) {
+    body = g_strndup (req->data, raw_len);
+    body_len = raw_len;
+  }
+
+  gint status = 0;
+  const gchar *token = NULL;
+  g_autofree gchar *out_profile = NULL;
+  g_autofree gchar *out_event = NULL;
+  gint64 out_ts = 0;
+  wyrelog_error_t rc = profile_events_ingest_core (ctx->profile, transport_ok,
+      body_oversize, body, body_len, &status, &token, &out_profile, &out_event,
+      &out_ts);
+  if (rc != WYRELOG_E_OK) {
+    set_json_error (msg, 500, "invalid_profile_event_request");
     return;
   }
 
-  set_json_ok (msg);
+  if (status == 200) {
+    WYL_LOG_INFO (WYL_LOG_SECTION_GENERAL,
+        "profile event ingested profile=%s event=%s timestamp_us=%"
+        G_GINT64_FORMAT, out_profile, out_event, out_ts);
+    set_json_ok (msg);
+    return;
+  }
+  if (status == 400) {
+    /* Only reached once authorization passed, so an oversize warn here does
+     * not leak to unauthorized callers (they are denied 403 first). */
+    if (body_oversize)
+      WYL_LOG_WARN (WYL_LOG_SECTION_GENERAL,
+          "profile event rejected: oversize body %zu bytes", raw_len);
+    else
+      WYL_LOG_WARN (WYL_LOG_SECTION_GENERAL,
+          "profile event rejected: malformed body (%d)", (int) body_len);
+  }
+  set_json_error (msg, (guint) status, token);
 }
+
+#ifdef WYL_TEST_DAEMON_HTTP
+wyrelog_error_t
+wyl_daemon_http_profile_events_ingest_for_test (WylDaemonProfile profile,
+    gboolean transport_ok, gboolean body_oversize, const gchar *body,
+    gsize body_len, gint *out_status, const gchar **out_token,
+    gchar **out_profile, gchar **out_event, gint64 *out_timestamp_us)
+{
+  return profile_events_ingest_core (profile, transport_ok, body_oversize,
+      body, body_len, out_status, out_token, out_profile, out_event,
+      out_timestamp_us);
+}
+#endif
 
 static gboolean
 tenant_scope_is_allowed (const gchar * tenant, const gchar * scope);

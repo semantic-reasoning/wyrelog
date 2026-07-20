@@ -227,6 +227,11 @@ void wyl_daemon_http_refresh_counters_for_test (SoupServer * server,
 wyrelog_error_t wyl_daemon_http_service_token_exchange_for_test (SoupServer *
     server, const WylDaemonServiceTokenRequest * request, guint * out_status,
     gchar ** out_body, guint * out_retry_after);
+wyrelog_error_t wyl_daemon_http_profile_events_ingest_for_test
+    (WylDaemonProfile profile, gboolean transport_ok, gboolean body_oversize,
+    const gchar * body, gsize body_len, gint * out_status,
+    const gchar ** out_token, gchar ** out_profile, gchar ** out_event,
+    gint64 * out_timestamp_us);
 #ifdef WYL_HAS_AUDIT
 void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
     (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot);
