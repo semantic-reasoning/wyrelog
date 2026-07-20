@@ -2,6 +2,10 @@
 #include "auth/service-credential-operation-coordinator-cancel-private.h"
 #include "auth/service-credential-operation-coordinator-remediate-private.h"
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
+
 #define main handoff_execute_fixture_main
 #include "test-service-credential-operation-coordinator-execute.c"
 #undef main
@@ -386,9 +390,59 @@ test_revoke_replay_invalidation (void)
   remove_operation_root_for_test (operation_root);
 }
 
+/* Force the post-authorization checkpoint write to fail so remediation
+ * converges instead of committing.  On POSIX a non-writable operation root
+ * (0500) blocks the atomic temp-create.  On Windows a read-only directory
+ * does not gate child creation, so instead mark the target journal file
+ * read-only: the checkpoint commits via a FileRenameInformation replace,
+ * which cannot overwrite a read-only destination and fails with
+ * STATUS_ACCESS_DENIED (mapped to WYRELOG_E_POLICY), leaving it untouched. */
+static void
+remediation_block_checkpoint_writes (const gchar *operation_root,
+    const gchar *request_id)
+{
+#ifdef G_OS_WIN32
+  g_autofree gchar *child = g_strdup_printf ("op-%s", request_id);
+  g_autofree gchar *target =
+      g_build_filename (operation_root, child, NULL);
+  g_autofree gunichar2 *target_utf16 =
+      g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
+  g_assert_nonnull (target_utf16);
+  DWORD attrs = GetFileAttributesW ((wchar_t *) target_utf16);
+  g_assert_cmpuint (attrs, !=, INVALID_FILE_ATTRIBUTES);
+  g_assert_true (SetFileAttributesW ((wchar_t *) target_utf16,
+          attrs | FILE_ATTRIBUTE_READONLY));
+#else
+  (void) request_id;
+  g_assert_cmpint (g_chmod (operation_root, 0500), ==, 0);
+#endif
+}
+
+static void
+remediation_unblock_checkpoint_writes (const gchar *operation_root,
+    const gchar *request_id)
+{
+#ifdef G_OS_WIN32
+  g_autofree gchar *child = g_strdup_printf ("op-%s", request_id);
+  g_autofree gchar *target =
+      g_build_filename (operation_root, child, NULL);
+  g_autofree gunichar2 *target_utf16 =
+      g_utf8_to_utf16 (target, -1, NULL, NULL, NULL);
+  g_assert_nonnull (target_utf16);
+  DWORD attrs = GetFileAttributesW ((wchar_t *) target_utf16);
+  g_assert_cmpuint (attrs, !=, INVALID_FILE_ATTRIBUTES);
+  g_assert_true (SetFileAttributesW ((wchar_t *) target_utf16,
+          attrs & ~FILE_ATTRIBUTE_READONLY));
+#else
+  (void) request_id;
+  g_assert_cmpint (g_chmod (operation_root, 0700), ==, 0);
+#endif
+}
+
 typedef struct
 {
   const gchar *operation_root;
+  const gchar *original_request_id;
   guint *authorization_calls;
 } CrashCheckpoint;
 
@@ -397,7 +451,8 @@ deny_checkpoint_after_authorization (gpointer data)
 {
   CrashCheckpoint *checkpoint = data;
   (*checkpoint->authorization_calls)++;
-  g_assert_cmpint (g_chmod (checkpoint->operation_root, 0500), ==, 0);
+  remediation_block_checkpoint_writes (checkpoint->operation_root,
+      checkpoint->original_request_id);
 }
 
 static void
@@ -438,6 +493,7 @@ test_authority_before_checkpoint_converges (void)
       remediation_runtime (session, decision_id, &authorization_calls);
   CrashCheckpoint checkpoint = {
     .operation_root = operation_root,
+    .original_request_id = attention.original_request_id,
     .authorization_calls = &authorization_calls,
   };
   runtime.after_authorization = deny_checkpoint_after_authorization;
@@ -450,7 +506,8 @@ test_authority_before_checkpoint_converges (void)
           &result), ==, WYRELOG_E_POLICY);
   g_assert_null (result.remediation_request_id);
   g_assert_cmpuint (authorization_calls, ==, 1);
-  g_assert_cmpint (g_chmod (operation_root, 0700), ==, 0);
+  remediation_unblock_checkpoint_writes (operation_root,
+      attention.original_request_id);
   g_autoptr (GBytes) journal_after_crash =
       read_handoff_journal_bytes (operation_root,
       attention.original_request_id);
