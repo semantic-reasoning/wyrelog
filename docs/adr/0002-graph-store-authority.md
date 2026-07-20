@@ -101,6 +101,24 @@ the configured tree fail closed. Creation fsyncs the containing directory.
 Unsupported platforms return a policy error instead of falling back to unsafe
 path traversal.
 
+Each live policy-store handle binds the first configured fact-root string and
+its POSIX device/inode identity for the rest of that store lifetime. Reusing
+the same configured string revalidates the pinned identity; supplying another
+root or replacing the named root fails before graph materialization, replay,
+or a subsequent resolver operation can enter the replacement tree. This does
+not close the already documented same-owner replacement window after a
+resolver operation hands a pathname to DuckDB; #544 still owns that residual.
+On Windows the configured string can be bound during startup so non-fact
+startup behavior is preserved, while resolver operations continue to fail
+closed until a reparse-safe backend exists.
+
+Tenant and graph directory descriptors remain operation-scoped in #539. Their
+exact identity and named containment are enforced throughout each resolver
+operation, but they are opened and verified again for a later operation. A
+store-lifetime tenant/graph identity pin and descriptor-bound DuckDB ownership
+belong to #538 and #544; callers must not infer those stronger guarantees from
+the fact-root binding.
+
 The resolver also supplies a durable staging protocol for immutable file
 publication. A `0600` staging file is synced, linked to a previously absent
 final name without overwrite, the graph directory is synced, the staging name

@@ -75,6 +75,8 @@ gchar *wyl_fact_graph_locator_descriptive_path (const gchar * fact_root,
     const WylFactGraphLocator * locator);
 wyrelog_error_t wyl_fact_graph_resolver_open (const gchar * fact_root,
     WylFactGraphResolver * out_resolver);
+wyrelog_error_t wyl_fact_graph_resolver_revalidate (WylFactGraphResolver *
+    resolver);
 void wyl_fact_graph_resolver_clear (WylFactGraphResolver * resolver);
 void wyl_fact_graph_resolver_set_checkpoint_for_test
     (WylFactGraphResolver * resolver,

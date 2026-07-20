@@ -163,6 +163,8 @@ struct wyl_policy_store_t
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
   GRecMutex graph_authority_mutex;
+  gchar *fact_root_path;
+  WylFactGraphResolver fact_root_resolver;
   gint service_authority_transaction_active;
   gint service_authority_transaction_poisoned;
   gint service_authority_abort_allowed;
@@ -7562,6 +7564,8 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   g_mutex_init (&self->service_domain_gate_mutex);
   g_mutex_init (&self->service_lifecycle_mutex);
   g_rec_mutex_init (&self->graph_authority_mutex);
+  self->fact_root_resolver = (WylFactGraphResolver)
+      WYL_FACT_GRAPH_RESOLVER_INIT;
   self->next_service_authority_transaction_id = 1;
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
@@ -7827,6 +7831,8 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_clear_pointer (&store->work_basename, g_free);
   g_clear_pointer (&store->canonical_path, g_free);
   g_clear_pointer (&store->work_path, g_free);
+  g_clear_pointer (&store->fact_root_path, g_free);
+  wyl_fact_graph_resolver_clear (&store->fact_root_resolver);
   g_mutex_clear (&store->service_cvk_mutex);
   g_mutex_clear (&store->service_domain_gate_mutex);
   g_mutex_clear (&store->service_lifecycle_mutex);
@@ -7840,6 +7846,72 @@ wyl_policy_store_get_db (wyl_policy_store_t *store)
   if (store == NULL)
     return NULL;
   return store->db;
+}
+
+static wyrelog_error_t
+bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root)
+{
+  if (store->fact_root_path != NULL) {
+    if (g_strcmp0 (store->fact_root_path, fact_root) != 0)
+      return WYRELOG_E_POLICY;
+#ifdef G_OS_WIN32
+    return WYRELOG_E_OK;
+#else
+    return wyl_fact_graph_resolver_revalidate (&store->fact_root_resolver);
+#endif
+  }
+
+  gchar *bound_path = g_strdup (fact_root);
+#ifndef G_OS_WIN32
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc != WYRELOG_E_OK) {
+    g_free (bound_path);
+    return rc;
+  }
+  store->fact_root_resolver = resolver;
+#endif
+  store->fact_root_path = bound_path;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_policy_store_bind_fact_root (wyl_policy_store_t *store,
+    const gchar *fact_root)
+{
+  if (store == NULL || store->db == NULL || fact_root == NULL
+      || fact_root[0] == '\0')
+    return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  return bind_fact_root_locked (store, fact_root);
+}
+
+wyrelog_error_t
+wyl_policy_store_open_fact_graph_directory (wyl_policy_store_t *store,
+    const gchar *fact_root, const gchar *tenant_id, const gchar *graph_id,
+    gboolean create, WylFactGraphDirectory *out_directory)
+{
+  if (out_directory == NULL)
+    return WYRELOG_E_INVALID;
+  *out_directory = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+  if (store == NULL || store->db == NULL || fact_root == NULL
+      || fact_root[0] == '\0')
+    return WYRELOG_E_INVALID;
+
+  WylFactGraphLocator locator = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, tenant_id,
+      graph_id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  rc = bind_fact_root_locked (store, fact_root);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_directory (&store->fact_root_resolver,
+        &locator, create, out_directory);
+  wyl_fact_graph_locator_clear (&locator);
+  return rc;
 }
 
 typedef struct
@@ -9480,24 +9552,19 @@ validate_fact_graph_options (wyl_policy_store_t *store,
 
 #ifndef G_OS_WIN32
 static wyrelog_error_t
-materialize_fact_graph_storage (const wyl_policy_fact_graph_create_options_t
-    *opts, gchar **out_storage_path, gchar **out_storage_uri)
+materialize_fact_graph_storage (wyl_policy_store_t *store,
+    const wyl_policy_fact_graph_create_options_t *opts,
+    gchar **out_storage_path, gchar **out_storage_uri)
 {
-  if (opts == NULL || out_storage_path == NULL || out_storage_uri == NULL)
+  if (store == NULL || opts == NULL || out_storage_path == NULL
+      || out_storage_uri == NULL)
     return WYRELOG_E_INVALID;
   *out_storage_path = NULL;
   *out_storage_uri = NULL;
 
-  WylFactGraphLocator locator = { 0 };
-  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator,
-      opts->tenant_id, opts->graph_id);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open (opts->fact_root, &resolver);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, TRUE,
-        &directory);
+  wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory (store,
+      opts->fact_root, opts->tenant_id, opts->graph_id, TRUE, &directory);
   g_autofree gchar *graph_path = NULL;
   if (rc == WYRELOG_E_OK) {
     graph_path = wyl_fact_graph_directory_descriptive_path (&directory);
@@ -9514,8 +9581,6 @@ materialize_fact_graph_storage (const wyl_policy_fact_graph_create_options_t
     *out_storage_uri = g_steal_pointer (&uri);
   }
   wyl_fact_graph_directory_clear (&directory);
-  wyl_fact_graph_resolver_clear (&resolver);
-  wyl_fact_graph_locator_clear (&locator);
   return rc;
 }
 #endif
@@ -9708,7 +9773,8 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
 #else
   g_autofree gchar *storage_path = NULL;
   g_autofree gchar *storage_uri = NULL;
-  rc = materialize_fact_graph_storage (opts, &storage_path, &storage_uri);
+  rc = materialize_fact_graph_storage (store, opts, &storage_path,
+      &storage_uri);
   if (rc != WYRELOG_E_OK)
     return rc;
 

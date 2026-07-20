@@ -690,6 +690,45 @@ test_handle_replay_is_idempotent_and_graph_local (void)
 #endif
 }
 
+static void
+test_handle_replay_rejects_fact_root_replacement (void)
+{
+#ifndef G_OS_WIN32
+  TEST ("handle replay retains the startup fact-root identity");
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *base = g_dir_make_tmp ("wyl-fact-replay-pin-XXXXXX",
+      &error);
+  g_assert_no_error (error);
+  g_autofree gchar *root = g_build_filename (base, "facts", NULL);
+  g_autofree gchar *old_root = g_build_filename (base, "facts-old", NULL);
+  g_autofree gchar *policy_path = g_build_filename (base, "policy.sqlite",
+      NULL);
+  g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions opts = {
+    .policy_store_path = policy_path,
+    .fact_root = root,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (g_rename (root, old_root), ==, 0);
+  g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
+
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, NULL), ==,
+      WYRELOG_E_POLICY);
+  g_autoptr (GDir) replacement = g_dir_open (root, 0, &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (replacement);
+  g_assert_null (g_dir_read_name (replacement));
+
+  g_clear_object (&handle);
+  remove_tree (base);
+#else
+  g_test_skip ("fact graph path isolation is Unix-only in this build");
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -702,5 +741,7 @@ main (int argc, char **argv)
       test_compound_replay_cache_reuses_nested_child);
   g_test_add_func ("/fact-replay/handle",
       test_handle_replay_is_idempotent_and_graph_local);
+  g_test_add_func ("/fact-replay/handle-root-replacement",
+      test_handle_replay_rejects_fact_root_replacement);
   return g_test_run ();
 }
