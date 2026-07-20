@@ -63,6 +63,15 @@ typedef enum
   WYL_POLICY_GRAPH_ERROR_INTERNAL,
 } WylPolicyGraphErrorClass;
 
+typedef enum
+{
+  WYL_POLICY_AUTHORITY_MUTATION_APPLIED,
+  WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY,
+  WYL_POLICY_AUTHORITY_MUTATION_STALE,
+  WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION,
+  WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND,
+} WylPolicyAuthorityMutationResult;
+
 typedef struct
 {
   gchar *tenant_id;
@@ -102,6 +111,38 @@ wyrelog_error_t wyl_policy_store_read_graph_authority
 wyrelog_error_t wyl_policy_store_list_graph_authorities
     (wyl_policy_store_t * store, const gchar * tenant_id,
     GPtrArray ** out_records);
+wyrelog_error_t wyl_policy_store_reserve_graph_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, const gchar * store_uuid, guint64 format_version,
+    guint64 path_encoding_version, guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult * out_result);
+wyrelog_error_t wyl_policy_store_transition_graph_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, WylPolicyGraphLifecycleState expected_state,
+    WylPolicyGraphLifecycleState target_state,
+    WylPolicyGraphErrorClass target_error_class,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult * out_result);
+wyrelog_error_t wyl_policy_store_reconcile_graph_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult * out_result);
+wyrelog_error_t wyl_policy_store_transition_tenant_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyTenantLifecycleState expected_state,
+    WylPolicyTenantLifecycleState target_state,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult * out_result);
+wyrelog_error_t wyl_policy_store_reconcile_tenant_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyTenantLifecycleState target_state,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult * out_result);
 
 /* No pinned SQLite VFS is shipped yet. File-backed plaintext provider stores
  * remain fail-closed until a platform implementation can bind SQLite's main
