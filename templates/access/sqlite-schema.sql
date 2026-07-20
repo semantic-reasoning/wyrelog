@@ -853,6 +853,56 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_disposition_exact
         coalesce(successor_credential_id, ''),
         coalesce(successor_issuance_generation, 0));
 
+CREATE TABLE IF NOT EXISTS service_credential_handoff_cancellation_claims (
+    cancellation_request_id TEXT NOT NULL PRIMARY KEY CHECK (
+        typeof(cancellation_request_id) = 'text' AND length(cancellation_request_id) = 27
+        AND instr(cancellation_request_id, char(0)) = 0),
+    request_fingerprint BLOB NOT NULL CHECK (typeof(request_fingerprint) = 'blob'
+        AND length(request_fingerprint) = 32),
+    decision_request_id TEXT NOT NULL UNIQUE CHECK (typeof(decision_request_id) = 'text'
+        AND length(decision_request_id) = 27 AND instr(decision_request_id, char(0)) = 0),
+    original_request_id TEXT NOT NULL CHECK (typeof(original_request_id) = 'text'
+        AND length(original_request_id) = 27 AND instr(original_request_id, char(0)) = 0),
+    original_actor_subject_id TEXT NOT NULL CHECK (typeof(original_actor_subject_id) = 'text'
+        AND length(original_actor_subject_id) BETWEEN 1 AND 128
+        AND instr(original_actor_subject_id, char(0)) = 0),
+    current_actor_subject_id TEXT NOT NULL CHECK (typeof(current_actor_subject_id) = 'text'
+        AND length(current_actor_subject_id) BETWEEN 1 AND 128
+        AND instr(current_actor_subject_id, char(0)) = 0),
+    escrow_id TEXT NOT NULL CHECK (typeof(escrow_id) = 'text'
+        AND length(escrow_id) = 36 AND instr(escrow_id, char(0)) = 0),
+    binding_digest BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob'
+        AND length(binding_digest) = 32 AND binding_digest <> zeroblob(32)),
+    successor_credential_id TEXT NOT NULL CHECK (typeof(successor_credential_id) = 'text'
+        AND length(successor_credential_id) = 31
+        AND substr(successor_credential_id, 1, 4) = 'wlc_'
+        AND instr(successor_credential_id, char(0)) = 0),
+    successor_issuance_generation INTEGER NOT NULL CHECK (successor_issuance_generation >= 1),
+    operation TEXT NOT NULL CHECK (operation IN ('issue', 'rotate')),
+    target_a TEXT NOT NULL CHECK (typeof(target_a) = 'text'
+        AND length(target_a) BETWEEN 1 AND 128 AND instr(target_a, char(0)) = 0),
+    target_b TEXT CHECK (target_b IS NULL OR (typeof(target_b) = 'text'
+        AND length(target_b) BETWEEN 1 AND 128 AND instr(target_b, char(0)) = 0)),
+    target_digest BLOB NOT NULL CHECK (typeof(target_digest) = 'blob'
+        AND length(target_digest) = 32 AND target_digest <> zeroblob(32)),
+    deadline_at_us INTEGER NOT NULL CHECK (deadline_at_us > 0),
+    disposition_id TEXT NOT NULL UNIQUE CHECK (typeof(disposition_id) = 'text'
+        AND length(disposition_id) = 36 AND instr(disposition_id, char(0)) = 0),
+    audit_id TEXT NOT NULL UNIQUE CHECK (typeof(audit_id) = 'text'
+        AND length(audit_id) = 36 AND instr(audit_id, char(0)) = 0),
+    created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),
+    CHECK (original_request_id <> cancellation_request_id
+        AND original_request_id <> decision_request_id
+        AND cancellation_request_id <> decision_request_id),
+    CHECK (original_actor_subject_id <> current_actor_subject_id),
+    CHECK ((operation = 'issue' AND target_b IS NOT NULL)
+        OR (operation = 'rotate' AND target_b IS NULL))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_cancellation_exact
+    ON service_credential_handoff_cancellation_claims (
+        original_request_id);
+
 CREATE TABLE IF NOT EXISTS service_credential_handoff_remediation_actions (
     remediation_request_id TEXT NOT NULL PRIMARY KEY CHECK (
         typeof(remediation_request_id) = 'text' AND length(remediation_request_id) = 27
@@ -1003,6 +1053,38 @@ BEGIN
     SELECT RAISE(ABORT, 'service credential handoff dispositions are append-only');
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_cancellation_no_update
+BEFORE UPDATE ON service_credential_handoff_cancellation_claims
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff cancellation claims are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_cancellation_no_delete
+BEFORE DELETE ON service_credential_handoff_cancellation_claims
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff cancellation claims are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_cancellation_no_legacy_collision
+BEFORE INSERT ON service_credential_handoff_cancellation_claims
+WHEN EXISTS (
+    SELECT 1 FROM service_domain_requests
+    WHERE request_id = NEW.cancellation_request_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff cancellation request collides with service domain request');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_cancellation_no_remediation_collision
+BEFORE INSERT ON service_credential_handoff_cancellation_claims
+WHEN EXISTS (
+    SELECT 1 FROM service_credential_handoff_remediation_actions
+    WHERE remediation_request_id = NEW.cancellation_request_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff cancellation request collides with remediation request');
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_service_handoff_remediation_no_update
 BEFORE UPDATE ON service_credential_handoff_remediation_actions
 BEGIN
@@ -1025,6 +1107,16 @@ BEGIN
     SELECT RAISE(ABORT, 'service handoff remediation request collides with service domain request');
 END;
 
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_remediation_no_cancellation_collision
+BEFORE INSERT ON service_credential_handoff_remediation_actions
+WHEN EXISTS (
+    SELECT 1 FROM service_credential_handoff_cancellation_claims
+    WHERE cancellation_request_id = NEW.remediation_request_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'service handoff remediation request collides with cancellation request');
+END;
+
 CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_remediation_collision
 BEFORE INSERT ON service_domain_requests
 WHEN EXISTS (
@@ -1033,6 +1125,16 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'service domain request collides with service handoff remediation request');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_cancellation_collision
+BEFORE INSERT ON service_domain_requests
+WHEN EXISTS (
+    SELECT 1 FROM service_credential_handoff_cancellation_claims
+    WHERE cancellation_request_id = NEW.request_id
+)
+BEGIN
+    SELECT RAISE(ABORT, 'service domain request collides with service handoff cancellation request');
 END;
 
 -- ---------------------------------------------------------------------------

@@ -958,6 +958,10 @@ if get_option('enable_audit').allowed()
   test_policy_store_private_companion = static_library(
     'test-policy-store-private-companion',
     '../wyrelog/policy/store.c',
+    '../wyrelog/auth/service-credential-domain.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-auth-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-proof-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-cancel-private.c',
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : wyrelog_deps,
     c_args : wyrelog_c_args,
@@ -966,6 +970,8 @@ if get_option('enable_audit').allowed()
   )
   test_service_credential_domain_c_args += \
     '-DWYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE'
+  test_service_credential_domain_c_args += \
+    '-DWYL_TEST_HAS_HANDOFF_CANCELLATION'
   test_service_credential_domain_deps += service_exchange_private_dep
   test_service_credential_domain_link_with += \
     test_policy_store_private_companion
@@ -1049,6 +1055,23 @@ test('service-credential-operation-coordinator-execute',
   is_parallel : host_machine.system() != 'windows',
   timeout : service_credential_operation_coordinator_execute_timeout,
 )
+
+if get_option('enable_audit').allowed()
+  test_service_credential_operation_coordinator_cancel = executable(
+    'test-service-credential-operation-coordinator-cancel',
+    'test-service-credential-operation-coordinator-cancel.c',
+    link_with : test_policy_store_private_companion,
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_service_credential_domain_deps,
+    c_args : test_service_credential_operation_coordinator_execute_c_args,
+  )
+
+  test('service-credential-operation-coordinator-cancel',
+    test_service_credential_operation_coordinator_cancel,
+    is_parallel : host_machine.system() != 'windows',
+    timeout : service_credential_operation_coordinator_execute_timeout,
+  )
+endif
 
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
   'test-service-credential-operation-storage.c',

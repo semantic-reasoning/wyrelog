@@ -595,6 +595,29 @@ typedef struct
   gint64 created_at_us;
 } WylPolicyServiceHandoffDispositionResult;
 
+typedef struct
+{
+  const gchar *cancellation_request_id;
+  const gchar *decision_request_id;
+  const gchar *current_actor_subject_id;
+  const gchar *disposition_id;
+  const gchar *audit_id;
+  WylPolicyServiceHandoffExactTuple tuple;
+  WylPolicyServiceHandoffFenceOperation operation;
+  const gchar *target_a;
+  const gchar *target_b;
+  guint8 target_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  gint64 deadline_at_us;
+} WylPolicyServiceHandoffCancellationInput;
+
+typedef struct
+{
+  gboolean replayed;
+  gchar *disposition_id;
+  gchar *audit_id;
+  gint64 created_at_us;
+} WylPolicyServiceHandoffCancellationResult;
+
 typedef enum
 {
   WYL_POLICY_HANDOFF_REMEDIATION_RESUME = 1,
@@ -647,6 +670,8 @@ typedef enum
 
 void wyl_policy_service_handoff_disposition_result_clear
     (WylPolicyServiceHandoffDispositionResult * result);
+G_GNUC_INTERNAL void wyl_policy_service_handoff_cancellation_result_clear
+    (WylPolicyServiceHandoffCancellationResult * result);
 void wyl_policy_service_handoff_remediation_result_clear
     (WylPolicyServiceHandoffRemediationResult * result);
 
@@ -1214,6 +1239,12 @@ wyrelog_error_t wyl_policy_store_record_service_handoff_not_committed_core
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffDispositionInput * input,
     WylPolicyServiceHandoffDispositionResult * out_result);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_policy_store_handoff_claim_cancellation_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffCancellationInput * input,
+    WylPolicyServiceHandoffCancellationResult * out_result);
 wyrelog_error_t wyl_policy_store_remediate_service_handoff_exact_core
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
