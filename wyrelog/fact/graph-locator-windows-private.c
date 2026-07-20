@@ -730,9 +730,7 @@ locator_is_valid_for_windows (const WylFactGraphLocator *locator)
       && wyl_fact_graph_component_encode (graph,
       &graph_encoded) == WYRELOG_E_OK
       && g_str_equal (locator->tenant_component, tenant_encoded)
-      && g_str_equal (locator->graph_component, graph_encoded)
-      && utf8_component_is_safe (locator->tenant_component)
-      && utf8_component_is_safe (locator->graph_component);
+      && g_str_equal (locator->graph_component, graph_encoded);
 }
 
 wyrelog_error_t
@@ -1011,22 +1009,56 @@ validate_upgradeable_file_acl (HANDLE handle)
   ACL_SIZE_INFORMATION size = { 0 };
   ACCESS_ALLOWED_ACE *ace = NULL;
   wyrelog_error_t rc = copy_token_user ((PSID *) & token_user);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=upgradeable-acl-token rc=%d", (int) rc);
     return rc;
+  }
   DWORD error = GetSecurityInfo (handle, SE_FILE_OBJECT,
       OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
       &dacl, NULL, &descriptor);
-  if (error != ERROR_SUCCESS)
+  if (error != ERROR_SUCCESS) {
+    trace_windows_failure ("upgradeable-acl-query", WYRELOG_E_IO, error);
     return WYRELOG_E_IO;
-  gboolean valid = owner != NULL && EqualSid (owner, token_user)
-      && GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted)
-      && present && dacl != NULL && !defaulted
-      && GetAclInformation (dacl, &size, sizeof size, AclSizeInformation)
-      && size.AceCount == 1 && GetAce (dacl, 0, (LPVOID *) & ace)
-      && ace != NULL && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE
-      && (ace->Header.AceFlags & ~INHERITED_ACE) == 0
-      && ace->Mask == FILE_ALL_ACCESS
-      && EqualSid ((PSID) & ace->SidStart, token_user);
+  }
+  gboolean descriptor_ok = descriptor != NULL;
+  gboolean owner_match = owner != NULL && IsValidSid (owner)
+      && EqualSid (owner, token_user);
+  gboolean dacl_ok = descriptor_ok
+      && GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted);
+  gboolean acl_info_ok = dacl_ok && present && dacl != NULL
+      && GetAclInformation (dacl, &size, sizeof size, AclSizeInformation);
+  gboolean ace_ok = acl_info_ok && size.AceCount == 1
+      && GetAce (dacl, 0, (LPVOID *) & ace) && ace != NULL;
+  gboolean allowed_ace = ace_ok
+      && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE;
+  gboolean ace_flags_ok = allowed_ace
+      && (ace->Header.AceFlags & ~INHERITED_ACE) == 0;
+  gboolean ace_mask_ok = allowed_ace && ace->Mask == FILE_ALL_ACCESS;
+  PSID ace_sid = allowed_ace ? (PSID) & ace->SidStart : NULL;
+  gboolean ace_sid_valid = ace_sid != NULL && IsValidSid (ace_sid);
+  gboolean ace_sid_match = ace_sid_valid && EqualSid (ace_sid, token_user);
+  gboolean valid = descriptor_ok && owner_match && dacl_ok && present
+      && dacl != NULL && !defaulted && acl_info_ok && size.AceCount == 1
+      && ace_ok && allowed_ace && ace_flags_ok && ace_mask_ok && ace_sid_match;
+  if (!valid)
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=upgradeable-acl-validate rc=%d descriptor-ok=%u "
+        "owner-match=%u dacl-ok=%u present=%u defaulted=%u "
+        "acl-info-ok=%u ace-count=%lu ace-ok=%u ace-type=%u "
+        "ace-flags=0x%02x ace-flags-ok=%u ace-mask=0x%08lx "
+        "ace-mask-ok=%u ace-sid-valid=%u ace-sid-match=%u",
+        (int) WYRELOG_E_POLICY, (unsigned int) descriptor_ok,
+        (unsigned int) owner_match, (unsigned int) dacl_ok,
+        (unsigned int) present, (unsigned int) defaulted,
+        (unsigned int) acl_info_ok, (unsigned long) size.AceCount,
+        (unsigned int) ace_ok,
+        ace != NULL ? (unsigned int) ace->Header.AceType : 0,
+        ace != NULL ? (unsigned int) ace->Header.AceFlags : 0,
+        (unsigned int) ace_flags_ok,
+        allowed_ace ? (unsigned long) ace->Mask : 0,
+        (unsigned int) ace_mask_ok, (unsigned int) ace_sid_valid,
+        (unsigned int) ace_sid_match);
   LocalFree (descriptor);
   return valid ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }

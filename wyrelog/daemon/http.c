@@ -5740,6 +5740,15 @@ typedef enum
 } fact_http_op_t;
 
 #ifdef WYL_HAS_FACT_STORE
+#define WYL_FACT_HTTP_STORE_LOG_DOMAIN "wyrelog-fact-http-store"
+
+static void
+trace_http_fact_store (const gchar *stage, wyrelog_error_t rc)
+{
+  g_log (WYL_FACT_HTTP_STORE_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+      "stage=%s rc=%d", stage, (int) rc);
+}
+
 static wyrelog_error_t
 resolve_http_fact_db_path (WylDaemonHttpContext *ctx,
     wyl_policy_store_t *policy_store, const gchar *tenant, const gchar *graph,
@@ -5800,16 +5809,21 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
   gboolean needs_hardening = FALSE;
   wyrelog_error_t rc = resolve_http_fact_db_path (ctx, policy_store, tenant,
       graph, TRUE, &path, &needs_hardening);
-  if (rc == WYRELOG_E_OK)
+  trace_http_fact_store ("resolve", rc);
+  if (rc == WYRELOG_E_OK) {
     rc = wyl_fact_store_open (path, out_store);
+    trace_http_fact_store ("duckdb-open", rc);
+  }
   if (needs_hardening) {
     wyrelog_error_t materialize_rc = rc;
     if (rc == WYRELOG_E_OK)
       materialize_rc = wyl_fact_store_create_schema (*out_store);
+    trace_http_fact_store ("materialize-schema", materialize_rc);
     g_clear_pointer (out_store, wyl_fact_store_close);
 
     wyrelog_error_t harden_rc = secure_http_fact_db_mode (ctx, policy_store,
         tenant, graph);
+    trace_http_fact_store ("harden", harden_rc);
     if (harden_rc != WYRELOG_E_OK && harden_rc != WYRELOG_E_NOT_FOUND)
       return harden_rc;
     if (materialize_rc != WYRELOG_E_OK)
@@ -5825,8 +5839,11 @@ open_http_fact_store (WylDaemonHttpContext *ctx,
         &path, &still_missing);
     if (rc == WYRELOG_E_OK && still_missing)
       rc = WYRELOG_E_POLICY;
-    if (rc == WYRELOG_E_OK)
+    trace_http_fact_store ("strict-resolve", rc);
+    if (rc == WYRELOG_E_OK) {
       rc = wyl_fact_store_open (path, out_store);
+      trace_http_fact_store ("duckdb-reopen", rc);
+    }
   }
   return rc;
 }

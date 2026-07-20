@@ -348,8 +348,11 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       fact_body, &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
+  if (status != 200 || strstr (body, "\"inserted\":true") == NULL) {
+    g_printerr ("first fact append mismatch: status=%u body=%s\n", status,
+        body != NULL ? body : "(null)");
     return 27;
+  }
   rc = check_fact_projection_row_count (fact_root, "orders", 1);
   if (rc != 0)
     return rc;
