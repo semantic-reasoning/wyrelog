@@ -1,8 +1,15 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
+
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "daemon/delta.h"
@@ -52,6 +59,25 @@ remove_tree (const gchar *path)
     }
   }
   (void) g_rmdir (path);
+}
+
+static gchar *
+make_fact_root (const gchar *tmpl, GError **error)
+{
+  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+  if (created == NULL)
+    return NULL;
+  gchar *root = realpath (created, NULL);
+  if (root != NULL)
+    return root;
+
+  gint saved_errno = errno;
+  (void) g_rmdir (created);
+  if (error != NULL && *error == NULL)
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  return NULL;
 }
 
 static gboolean
@@ -822,7 +848,7 @@ int
 main (void)
 {
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *fact_root = g_dir_make_tmp ("wyl-daemon-facts-XXXXXX",
+  g_autofree gchar *fact_root = make_fact_root ("wyl-daemon-facts-XXXXXX",
       &error);
   if (fact_root == NULL)
     return 1;

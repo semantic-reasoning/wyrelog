@@ -6,6 +6,9 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 
+#include <errno.h>
+#include <stdlib.h>
+
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/policy/store-private.h"
 
@@ -14,13 +17,41 @@ cleanup_fact_root (const gchar *root)
 {
   if (root == NULL)
     return;
-  g_autofree gchar *graph =
-      g_build_filename (root, "tenant-a", "graph-main", NULL);
-  g_autofree gchar *tenant = g_build_filename (root, "tenant-a", NULL);
-  (void) g_rmdir (graph);
-  (void) g_rmdir (tenant);
+  g_autoptr (GDir) directory = g_dir_open (root, 0, NULL);
+  if (directory != NULL) {
+    const gchar *name;
+    while ((name = g_dir_read_name (directory)) != NULL) {
+      g_autofree gchar *child = g_build_filename (root, name, NULL);
+      if (g_file_test (child, G_FILE_TEST_IS_DIR)
+          && !g_file_test (child, G_FILE_TEST_IS_SYMLINK))
+        cleanup_fact_root (child);
+      else
+        (void) g_remove (child);
+    }
+  }
   (void) g_rmdir (root);
 }
+
+#ifndef G_OS_WIN32
+static gchar *
+make_fact_root (const gchar *tmpl, GError **error)
+{
+  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+  if (created == NULL)
+    return NULL;
+  gchar *root = realpath (created, NULL);
+  if (root != NULL)
+    return root;
+
+  gint saved_errno = errno;
+  (void) g_rmdir (created);
+  if (error != NULL && *error == NULL)
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  return NULL;
+}
+#endif
 
 static wyrelog_error_t
 open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
@@ -31,7 +62,7 @@ open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
   return WYRELOG_E_POLICY;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-schema-XXXXXX", &error);
+  g_autofree gchar *root = make_fact_root ("wyl-fact-schema-XXXXXX", &error);
   if (root == NULL)
     return WYRELOG_E_IO;
 

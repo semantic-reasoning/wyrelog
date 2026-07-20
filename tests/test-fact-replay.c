@@ -7,6 +7,9 @@
 #include <glib/gstdio.h>
 #include <sqlite3.h>
 
+#include <errno.h>
+#include <stdlib.h>
+
 #include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
@@ -87,6 +90,27 @@ remove_tree (const gchar *path)
   }
   (void) g_rmdir (path);
 }
+
+#ifndef G_OS_WIN32
+static gchar *
+make_fact_root (const gchar *tmpl, GError **error)
+{
+  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+  if (created == NULL)
+    return NULL;
+  gchar *root = realpath (created, NULL);
+  if (root != NULL)
+    return root;
+
+  gint saved_errno = errno;
+  (void) g_rmdir (created);
+  if (error != NULL && *error == NULL)
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  return NULL;
+}
+#endif
 
 static wyl_policy_fact_relation_schema_options_t
 make_schema (const gchar *tenant_id, const gchar *graph_id,
@@ -502,7 +526,7 @@ test_direct_replay_retracts_and_mangles (void)
 #ifndef G_OS_WIN32
   TEST ("direct replay loads net facts with mangled relation names");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-replay-XXXXXX", &error);
+  g_autofree gchar *root = make_fact_root ("wyl-fact-replay-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -538,7 +562,7 @@ test_direct_replay_shares_compounds_across_relations (void)
 #ifndef G_OS_WIN32
   TEST ("direct replay keeps compound handles graph scoped across relations");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-replay-compound-XXXXXX",
+  g_autofree gchar *root = make_fact_root ("wyl-fact-replay-compound-XXXXXX",
       &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
@@ -632,7 +656,7 @@ test_handle_replay_is_idempotent_and_graph_local (void)
 #ifndef G_OS_WIN32
   TEST ("handle replay replaces graph engines and isolates corrupt graphs");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-replay-handle-XXXXXX",
+  g_autofree gchar *root = make_fact_root ("wyl-fact-replay-handle-XXXXXX",
       &error);
   g_assert_no_error (error);
   g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
@@ -696,7 +720,7 @@ test_handle_replay_rejects_fact_root_replacement (void)
 #ifndef G_OS_WIN32
   TEST ("handle replay retains the startup fact-root identity");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *base = g_dir_make_tmp ("wyl-fact-replay-pin-XXXXXX",
+  g_autofree gchar *base = make_fact_root ("wyl-fact-replay-pin-XXXXXX",
       &error);
   g_assert_no_error (error);
   g_autofree gchar *root = g_build_filename (base, "facts", NULL);

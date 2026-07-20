@@ -1,9 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#ifndef G_OS_WIN32
-#define _POSIX_C_SOURCE 200809L
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
 #endif
 #include <glib.h>
 #include <glib/gstdio.h>
+
+#include <errno.h>
+#include <stdlib.h>
 
 #ifndef G_OS_WIN32
 #include <fcntl.h>
@@ -124,6 +127,8 @@ test_locator_round_trip (void)
   WylFactGraphLocator locator = { 0 };
   g_autofree gchar *relative = NULL;
   g_autofree gchar *path = NULL;
+  g_autofree gchar *expected_relative = NULL;
+  g_autofree gchar *expected_path = NULL;
 
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant/雪",
           "../orders"), ==, WYRELOG_E_OK);
@@ -133,8 +138,12 @@ test_locator_round_trip (void)
 
   relative = wyl_fact_graph_locator_relative_dir (&locator);
   path = wyl_fact_graph_locator_descriptive_path ("/facts", &locator);
-  g_assert_cmpstr (relative, ==, "v1-ehimsobeegnuj6ta/v1-5on2urrichin4so");
-  g_assert_cmpstr (path, ==, "/facts/v1-ehimsobeegnuj6ta/v1-5on2urrichin4so");
+  expected_relative = g_build_filename ("v1-ehimsobeegnuj6ta",
+      "v1-5on2urrichin4so", NULL);
+  expected_path = g_build_filename ("/facts", "v1-ehimsobeegnuj6ta",
+      "v1-5on2urrichin4so", NULL);
+  g_assert_cmpstr (relative, ==, expected_relative);
+  g_assert_cmpstr (path, ==, expected_path);
 
   wyl_fact_graph_locator_clear (&locator);
   g_assert_null (locator.tenant_component);
@@ -181,7 +190,18 @@ static gchar *
 make_root (void)
 {
   g_autoptr (GError) error = NULL;
-  gchar *root = g_dir_make_tmp ("wyl-graph-resolver-XXXXXX", &error);
+  g_autofree gchar *created =
+      g_dir_make_tmp ("wyl-graph-resolver-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (created);
+  gchar *root = realpath (created, NULL);
+  if (root == NULL) {
+    gint saved_errno = errno;
+    (void) g_rmdir (created);
+    g_set_error (&error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  }
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_assert_cmpint (g_chmod (root, 0700), ==, 0);
