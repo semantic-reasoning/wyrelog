@@ -193,6 +193,8 @@ typedef enum
   WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD = 1,
   WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW = 2,
   WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED = 3,
+  /* A clean old root with no rotation in flight: nothing to recover. */
+  WYL_POLICY_ROTATION_RECOVERY_NONE = 4,
 } WylPolicyRotationRecoveryAction;
 
 typedef enum
@@ -617,6 +619,24 @@ wyrelog_error_t wyl_policy_store_rotation_probe (const gchar * path,
     wyl_policy_store_open_options_t * old_opts,
     wyl_policy_store_open_options_t * new_opts,
     WylPolicyRotationRecoveryProbeResult * out_result);
+/* Mints a fresh, single-use set of open options for one retained provider root.
+ * Each callback is invoked at most once per recovery entry point and its state
+ * is consumed under wyl_policy_store_open_with_options() ownership rules. */
+typedef struct
+{
+  wyrelog_error_t (*make_old_opts) (gpointer data,
+      wyl_policy_store_open_options_t * out);
+  wyrelog_error_t (*make_new_opts) (gpointer data,
+      wyl_policy_store_open_options_t * out);
+  gpointer data;
+} wyl_policy_rotation_recovery_factory_t;
+/* Read-only: probes both retained roots and derives the safe next action
+ * directly from (state, intent_state). A probe error (including WYRELOG_E_BUSY)
+ * is returned verbatim and performs no writes. */
+wyrelog_error_t wyl_policy_store_rotation_recovery_status (const gchar * path,
+    const wyl_policy_rotation_recovery_factory_t * factory,
+    WylPolicyRotationRecoveryProbeResult * out_probe,
+    WylPolicyRotationRecoveryAction * out_action);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);
