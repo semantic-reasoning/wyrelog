@@ -5,6 +5,7 @@
 
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sqlite3.h>
 
 #include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
@@ -45,6 +46,27 @@ lookup_graph_storage_path (wyl_policy_store_t *store, const gchar *tenant_id,
           capture_graph_path_cb, &probe) != WYRELOG_E_OK)
     return NULL;
   return probe.storage_path;
+}
+
+static void
+tamper_graph_storage_path (const gchar *policy_path, const gchar *tenant_id,
+    const gchar *graph_id, const gchar *storage_path)
+{
+  sqlite3 *db = NULL;
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_open (policy_path, &db), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+          "UPDATE fact_graphs SET storage_path=? "
+          "WHERE tenant_id=? AND graph_id=?;", -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, storage_path, -1,
+          SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 2, tenant_id, -1,
+          SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 3, graph_id, -1,
+          SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  sqlite3_finalize (stmt);
+  sqlite3_close (db);
 }
 
 static void
@@ -255,6 +277,7 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
   g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch2,
           &inserted), ==, WYRELOG_E_OK);
   g_assert_true (inserted);
+  g_assert_cmpint (g_chmod (fact_path, 0600), ==, 0);
 }
 
 static void
@@ -348,6 +371,7 @@ append_compound_route_batches (wyl_policy_store_t *policy,
             &inserted), ==, WYRELOG_E_OK);
     g_assert_true (inserted);
   }
+  g_assert_cmpint (g_chmod (fact_path, 0600), ==, 0);
 }
 
 typedef struct
@@ -498,8 +522,8 @@ test_direct_replay_retracts_and_mangles (void)
     .schema_version = 1,
   };
   g_autoptr (WylEngine) engine = NULL;
-  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, &info, &engine),
-      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+          &engine), ==, WYRELOG_E_OK);
   assert_replayed_order_b_only (engine);
   g_free (info_probe.storage_path);
   remove_tree (root);
@@ -535,8 +559,8 @@ test_direct_replay_shares_compounds_across_relations (void)
     .schema_version = 1,
   };
   g_autoptr (WylEngine) engine = NULL;
-  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, &info, &engine),
-      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_replay_open_graph_engine (policy, root, &info,
+          &engine), ==, WYRELOG_E_OK);
 
   gint64 child_handle = snapshot_single_compound_handle (engine,
       "shipment-route");
@@ -613,6 +637,7 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   g_assert_no_error (error);
   g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
       NULL);
+  g_autofree gchar *bad_path = NULL;
 
   {
     g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -623,18 +648,20 @@ test_handle_replay_is_idempotent_and_graph_local (void)
     create_graph_with_schema (policy, root, "tenant-b", "orders");
     append_order_batches (policy, root, "tenant-a", "orders");
 
-    g_autofree gchar *bad_path = lookup_graph_storage_path (policy,
-        "tenant-b", "orders");
+    bad_path = lookup_graph_storage_path (policy, "tenant-b", "orders");
     g_assert_nonnull (bad_path);
     g_autofree gchar *bad_fact_path = g_build_filename (bad_path,
         "facts.duckdb", NULL);
     g_assert_true (g_file_set_contents (bad_fact_path, "not a database", -1,
             NULL));
+    g_assert_cmpint (g_chmod (bad_fact_path, 0600), ==, 0);
   }
+  tamper_graph_storage_path (policy_path, "tenant-a", "orders", bad_path);
 
   g_autoptr (WylHandle) handle = NULL;
   const WylHandleOpenOptions opts = {
     .policy_store_path = policy_path,
+    .fact_root = root,
   };
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);

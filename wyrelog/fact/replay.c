@@ -4,7 +4,12 @@
 #include <string.h>
 
 #include "compound-private.h"
+#include "graph-locator-private.h"
 #include "wyrelog/wyl-engine-private.h"
+
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#endif
 
 #define WYL_FACT_REPLAY_MAX_ROWS G_MAXUINT32
 
@@ -33,6 +38,7 @@ typedef struct
 typedef struct
 {
   wyl_policy_store_t *policy;
+  const gchar *fact_root;
   GHashTable *graph_engines;
   GHashTable *graph_statuses;
   wyl_fact_replay_summary_t *summary;
@@ -495,37 +501,64 @@ replay_relations_into_engine (wyl_fact_store_t *store,
   return WYRELOG_E_OK;
 }
 
-static gchar *
-fact_db_path_for_graph (const gchar *storage_path)
+static wyrelog_error_t
+resolve_fact_db_path (const gchar *fact_root,
+    const wyl_policy_fact_graph_info_t *graph_info, gchar **out_path)
 {
-  if (storage_path == NULL)
-    return NULL;
-  if (g_file_test (storage_path, G_FILE_TEST_IS_DIR))
-    return g_build_filename (storage_path, "facts.duckdb", NULL);
-  return g_strdup (storage_path);
+  *out_path = NULL;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator,
+      graph_info->tenant_id, graph_info->graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
+        &directory);
+  gint fd = -1;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
+        FALSE, &fd);
+  if (rc == WYRELOG_E_OK) {
+    *out_path = wyl_fact_graph_directory_descriptive_file (&directory,
+        "facts.duckdb");
+    if (*out_path == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+#ifndef G_OS_WIN32
+  if (fd >= 0)
+    close (fd);
+#else
+  (void) fd;
+#endif
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  return rc;
 }
 
 wyrelog_error_t
 wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
-    const wyl_policy_fact_graph_info_t *graph_info, WylEngine **out_engine)
+    const gchar *fact_root, const wyl_policy_fact_graph_info_t *graph_info,
+    WylEngine **out_engine)
 {
   if (out_engine != NULL)
     *out_engine = NULL;
-  if (policy == NULL || graph_info == NULL || graph_info->storage_path == NULL
-      || out_engine == NULL)
+  if (policy == NULL || fact_root == NULL || fact_root[0] == '\0'
+      || graph_info == NULL || out_engine == NULL)
     return WYRELOG_E_INVALID;
   if (graph_info->sealed)
     return WYRELOG_E_POLICY;
 
-  g_autofree gchar *fact_db_path =
-      fact_db_path_for_graph (graph_info->storage_path);
-  if (fact_db_path == NULL)
-    return WYRELOG_E_NOMEM;
-  if (!g_file_test (fact_db_path, G_FILE_TEST_EXISTS))
-    return WYRELOG_E_NOT_FOUND;
+  g_autofree gchar *fact_db_path = NULL;
+  wyrelog_error_t rc = resolve_fact_db_path (fact_root, graph_info,
+      &fact_db_path);
+  if (rc != WYRELOG_E_OK)
+    return rc;
 
   g_autoptr (wyl_fact_store_t) store = NULL;
-  wyrelog_error_t rc = wyl_fact_store_open (fact_db_path, &store);
+  rc = wyl_fact_store_open (fact_db_path, &store);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_autoptr (GPtrArray) relations = NULL;
@@ -596,8 +629,8 @@ replay_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
 {
   PolicyReplayCtx *ctx = user_data;
   WylEngine *engine = NULL;
-  wyrelog_error_t rc = wyl_fact_replay_open_graph_engine (ctx->policy, info,
-      &engine);
+  wyrelog_error_t rc = wyl_fact_replay_open_graph_engine (ctx->policy,
+      ctx->fact_root, info, &engine);
   ctx->summary->graphs_seen++;
   if (rc == WYRELOG_E_OK) {
     g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
@@ -616,8 +649,8 @@ replay_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
 
 wyrelog_error_t
 wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
-    GHashTable *graph_engines, GHashTable *graph_statuses,
-    wyl_fact_replay_summary_t *out_summary)
+    const gchar *fact_root, GHashTable *graph_engines,
+    GHashTable *graph_statuses, wyl_fact_replay_summary_t *out_summary)
 {
   if (out_summary != NULL)
     memset (out_summary, 0, sizeof (*out_summary));
@@ -628,6 +661,7 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
   g_hash_table_remove_all (graph_statuses);
   PolicyReplayCtx ctx = {
     .policy = policy,
+    .fact_root = fact_root,
     .graph_engines = graph_engines,
     .graph_statuses = graph_statuses,
     .summary = &summary,

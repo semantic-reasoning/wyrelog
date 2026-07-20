@@ -5,6 +5,9 @@
 #include <errno.h>
 #include <sodium.h>
 #include <string.h>
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#endif
 
 #include "daemon/auth-registry-private.h"
 #include "daemon/http-guards-private.h"
@@ -23,6 +26,7 @@
 #include "wyrelog/wyl-session-layout-private.h"
 #endif
 #ifdef WYL_HAS_FACT_STORE
+#include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
@@ -5733,6 +5737,69 @@ typedef enum
   FACT_HTTP_OP_FORGET,
 } fact_http_op_t;
 
+#ifdef WYL_HAS_FACT_STORE
+static wyrelog_error_t
+resolve_http_fact_db_path (WylDaemonHttpContext *ctx, const gchar *tenant,
+    const gchar *graph, gboolean writable, gchar **out_path)
+{
+  *out_path = NULL;
+  if (ctx->fact_root == NULL || ctx->fact_root[0] == '\0')
+    return WYRELOG_E_POLICY;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, tenant, graph);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (ctx->fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
+        &directory);
+  gint fd = -1;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
+        writable, &fd);
+  if (rc == WYRELOG_E_NOT_FOUND && writable)
+    rc = WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    *out_path = wyl_fact_graph_directory_descriptive_file (&directory,
+        "facts.duckdb");
+    if (*out_path == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+#ifndef G_OS_WIN32
+  if (fd >= 0)
+    close (fd);
+#else
+  (void) fd;
+#endif
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  return rc;
+}
+
+static wyrelog_error_t
+secure_http_fact_db_mode (WylDaemonHttpContext *ctx, const gchar *tenant,
+    const gchar *graph)
+{
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, tenant, graph);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (ctx->fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
+        &directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_directory_secure_file_mode (&directory, "facts.duckdb");
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  return rc;
+}
+#endif
+
 static gboolean
 parse_fact_op_path (const gchar *path, gchar **out_tenant,
     gchar **out_graph, gchar **out_relation, fact_http_op_t *out_op)
@@ -6195,9 +6262,12 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       .n_columns = n_loaded,
     };
     g_autoptr (wyl_fact_store_t) fact_store = NULL;
-    g_autofree gchar *fact_db_path =
-        g_build_filename (lookup.info.storage_path, "facts.duckdb", NULL);
-    rc = wyl_fact_store_open (fact_db_path, &fact_store);
+    g_autofree gchar *fact_db_path = NULL;
+    rc = resolve_http_fact_db_path (ctx, tenant, graph, TRUE, &fact_db_path);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_store_open (fact_db_path, &fact_store);
+    if (rc == WYRELOG_E_OK)
+      rc = secure_http_fact_db_mode (ctx, tenant, graph);
     gsize rows_purged = 0;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_create_schema (fact_store);
@@ -6353,9 +6423,12 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   g_autoptr (wyl_fact_store_t) fact_store = NULL;
-  g_autofree gchar *fact_db_path = g_build_filename (lookup.info.storage_path,
-      "facts.duckdb", NULL);
-  rc = wyl_fact_store_open (fact_db_path, &fact_store);
+  g_autofree gchar *fact_db_path = NULL;
+  rc = resolve_http_fact_db_path (ctx, tenant, graph, TRUE, &fact_db_path);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_open (fact_db_path, &fact_store);
+  if (rc == WYRELOG_E_OK)
+    rc = secure_http_fact_db_mode (ctx, tenant, graph);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_create_schema (fact_store);
   gboolean inserted = FALSE;

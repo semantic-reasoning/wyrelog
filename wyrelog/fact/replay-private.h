@@ -43,10 +43,11 @@ gchar *wyl_fact_replay_wirelog_relation_name (const gchar * namespace_id,
     const gchar * relation_name);
 
 wyrelog_error_t wyl_fact_replay_open_graph_engine (wyl_policy_store_t * policy,
-    const wyl_policy_fact_graph_info_t * graph_info, WylEngine ** out_engine);
+    const gchar * fact_root, const wyl_policy_fact_graph_info_t * graph_info,
+    WylEngine ** out_engine);
 
 wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,
-    GHashTable * graph_engines, GHashTable * graph_statuses,
-    wyl_fact_replay_summary_t * out_summary);
+    const gchar * fact_root, GHashTable * graph_engines,
+    GHashTable * graph_statuses, wyl_fact_replay_summary_t * out_summary);
 
 G_END_DECLS;
