@@ -461,6 +461,21 @@ def main() -> int:
         assert regular_snapshot.resolution_hits == 0
         assert regular_snapshot.candidate_hits == 1
         assert regular_snapshot.identity_resolves == warm_identity_resolves + 1
+        collision_root = cache_root / "collision-root"
+        collision_root.mkdir()
+        (collision_root / "namespace").write_text(
+            "built executable\n", encoding="utf-8")
+        source_root = cache_root / "source-root"
+        (source_root / "namespace").mkdir(parents=True)
+        source_header = source_root / "namespace" / "private.h"
+        source_header.write_text("source header\n", encoding="utf-8")
+        collision_snapshot = guard_module.IncludeSnapshot(
+            (cache_root.resolve(),))
+        assert collision_snapshot.resolve(
+            cache_root, '<', "namespace/private.h",
+            [collision_root, source_root],
+            "basename-collision.c") == source_header.resolve()
+        collision_snapshot.validate()
         try:
             selected_link = cache_root / "selected-link.h"
             selected_link.symlink_to(common)

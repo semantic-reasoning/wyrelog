@@ -614,7 +614,7 @@ class IncludeSnapshot:
                     "distill", "lstat", root=self.root_ordinal,
                     roots=self.root_total)
                 info = current.lstat()
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 return
             except OSError as error:
                 raise BoundaryError(
@@ -645,7 +645,7 @@ class IncludeSnapshot:
                     "distill", "stat", root=self.root_ordinal,
                     roots=self.root_total)
                 info = candidate.stat()
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 return CandidateObservation(
                     anchor_identity, str(lexical), str(candidate), "missing")
             state = "regular" if stat_module.S_ISREG(info.st_mode) else "nonregular"
@@ -762,7 +762,7 @@ class IncludeSnapshot:
         for path in sorted(self.negative_paths, key=str):
             try:
                 path.lstat()
-            except FileNotFoundError:
+            except (FileNotFoundError, NotADirectoryError):
                 continue
             except OSError as error:
                 raise BoundaryError(
