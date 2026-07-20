@@ -571,6 +571,19 @@ typedef struct
 
 typedef enum
 {
+  WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_PREPARED = 1,
+  WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED = 2,
+  WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_TERMINAL_NOT_COMMITTED = 3,
+} WylPolicyServiceHandoffCancellationObservation;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION = 1,
+  WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED = 2,
+} WylPolicyServiceHandoffCancellationOutcome;
+
+typedef enum
+{
   WYL_POLICY_HANDOFF_FENCE_ISSUE = 1,
   WYL_POLICY_HANDOFF_FENCE_ROTATE = 2,
 } WylPolicyServiceHandoffFenceOperation;
@@ -616,6 +629,7 @@ typedef struct
   const gchar *disposition_id;
   const gchar *audit_id;
   WylPolicyServiceHandoffExactTuple tuple;
+  WylPolicyServiceHandoffCancellationObservation observation;
   WylPolicyServiceHandoffFenceOperation operation;
   const gchar *target_a;
   const gchar *target_b;
@@ -626,9 +640,13 @@ typedef struct
 typedef struct
 {
   gboolean replayed;
+  WylPolicyServiceHandoffCancellationOutcome outcome;
   gchar *disposition_id;
   gchar *audit_id;
   gint64 created_at_us;
+  gchar successor_credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  guint64 successor_issuance_generation;
+  guint8 binding_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
 } WylPolicyServiceHandoffCancellationResult;
 
 typedef enum
