@@ -1190,6 +1190,81 @@ create_golden_store (const gchar *path, guint8 salt[16], guint8 verifier[32],
   wyl_policy_store_close (store);
 }
 
+/* Recovery factory that mints fresh, single-use provider option sets. Each
+ * provider box carries a back-pointer to the factory so the ownership-driven
+ * state_free callback can count consumption (N3 free-count assertions). The
+ * TestProvider is the first member so keyprovider_state aliases the box. */
+typedef struct RecoveryFactory RecoveryFactory;
+
+typedef struct
+{
+  TestProvider provider;
+  RecoveryFactory *owner;
+} RecoveryProvider;
+
+struct RecoveryFactory
+{
+  guint8 old_seed;
+  guint8 new_seed;
+  TestRuntime runtime;
+  wyl_policy_store_cvk_runtime_t cvk_runtime;
+  guint old_mints;
+  guint new_mints;
+  guint frees;
+};
+
+static void
+recovery_provider_free (gpointer state)
+{
+  RecoveryProvider *box = state;
+  box->owner->frees++;
+  g_free (box);
+}
+
+static wyrelog_error_t
+recovery_make_opts (RecoveryFactory *factory, guint8 seed,
+    wyl_policy_store_open_options_t *out)
+{
+  RecoveryProvider *box = g_new0 (RecoveryProvider, 1);
+  box->provider.seed = seed;
+  box->owner = factory;
+  *out = (wyl_policy_store_open_options_t) {
+  .keyprovider_vtable = &provider_vtable,.keyprovider_state =
+        box,.keyprovider_state_free =
+        recovery_provider_free,.require_encrypted =
+        TRUE,.service_cvk_runtime = &factory->cvk_runtime,};
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+recovery_make_old (gpointer data, wyl_policy_store_open_options_t *out)
+{
+  RecoveryFactory *factory = data;
+  factory->old_mints++;
+  return recovery_make_opts (factory, factory->old_seed, out);
+}
+
+static wyrelog_error_t
+recovery_make_new (gpointer data, wyl_policy_store_open_options_t *out)
+{
+  RecoveryFactory *factory = data;
+  factory->new_mints++;
+  return recovery_make_opts (factory, factory->new_seed, out);
+}
+
+static void
+recovery_factory_init (RecoveryFactory *factory, guint8 old_seed,
+    guint8 new_seed, wyl_policy_rotation_recovery_factory_t *out)
+{
+  memset (factory, 0, sizeof *factory);
+  factory->old_seed = old_seed;
+  factory->new_seed = new_seed;
+  factory->cvk_runtime = make_runtime (&factory->runtime);
+  *out = (wyl_policy_rotation_recovery_factory_t) {
+  .make_old_opts = recovery_make_old,.make_new_opts =
+        recovery_make_new,.data = factory,};
+}
+
 static void
 insert_golden_handoff_escrow (const gchar *path, wyl_id_t *out_escrow_id,
     guint8 out_target[32], guint8 out_binding[32], guint8 out_secret[32])
@@ -1935,6 +2010,150 @@ test_rotation_recovery_plan (void)
 }
 
 static void
+test_rotation_recovery_status (void)
+{
+  /* (a) A clean rotation leaves a single new root: probe NEW, action FINALIZE. */
+  {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-recovery-status-a-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = 0x20 };
+    TestRuntime rotate_runtime = { 0 };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &rotate_runtime, NULL), ==, WYRELOG_E_OK);
+
+    RecoveryFactory factory;
+    wyl_policy_rotation_recovery_factory_t api;
+    recovery_factory_init (&factory, 0x00, 0x20, &api);
+    WylPolicyRotationRecoveryProbeResult probe = { 0 };
+    WylPolicyRotationRecoveryAction action =
+        WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+    g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
+            &probe, &action), ==, WYRELOG_E_OK);
+    g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
+    g_assert_cmpint (probe.intent_state, ==,
+        WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT);
+    g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW);
+    g_assert_cmpuint (probe.new_generation, ==, 2);
+    g_assert_cmpuint (factory.old_mints, ==, 1);
+    g_assert_cmpuint (factory.new_mints, ==, 1);
+    g_assert_cmpuint (factory.frees, ==, 2);
+
+    g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+
+  /* (b) A crash before the rename leaves the old root plus a pending intent. */
+  {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-recovery-status-b-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = 0x20 };
+    TestRuntime rotate_runtime = { 0 };
+    RotationFault fault = {
+      .fail_stage = WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
+    };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &rotate_runtime, &fault), ==, WYRELOG_E_IO);
+
+    RecoveryFactory factory;
+    wyl_policy_rotation_recovery_factory_t api;
+    recovery_factory_init (&factory, 0x00, 0x20, &api);
+    WylPolicyRotationRecoveryProbeResult probe = { 0 };
+    WylPolicyRotationRecoveryAction action =
+        WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+    g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
+            &probe, &action), ==, WYRELOG_E_OK);
+    g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_OLD);
+    g_assert_cmpint (probe.intent_state, ==,
+        WYL_POLICY_ROTATION_INTENT_STATUS_PENDING);
+    g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD);
+    g_assert_cmpuint (probe.old_generation, ==, 1);
+    g_assert_false (sodium_is_zero ((const unsigned char *)
+            &probe.transaction_id, sizeof probe.transaction_id));
+
+    /* Cross-check the probe against the intent sidecar the crash left behind. */
+    TestProvider inspect = { 0 };
+    TestRuntime inspect_runtime = { 0 };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_store (path, &inspect, &inspect_runtime, &store), ==,
+        WYRELOG_E_OK);
+    WylPolicyRotationIntentStatus status = { 0 };
+    g_assert_cmpint (wyl_policy_store_rotation_intent_status (store, &status),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==,
+        WYL_POLICY_ROTATION_INTENT_STATUS_PENDING);
+    g_assert_cmpmem (&status.transaction_id, sizeof status.transaction_id,
+        &probe.transaction_id, sizeof probe.transaction_id);
+    g_assert_cmpuint (status.old_generation, ==, 1);
+    g_assert_cmpuint (status.expected_new_generation, ==, 2);
+    wyl_policy_store_close (store);
+
+    g_assert_cmpuint (factory.frees, ==, factory.old_mints + factory.new_mints);
+
+    g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+
+  /* (c) When neither retained provider authenticates, the state is ambiguous. */
+  {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-recovery-status-c-XXXXXX",
+        NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+
+    RecoveryFactory factory;
+    wyl_policy_rotation_recovery_factory_t api;
+    recovery_factory_init (&factory, 0x11, 0x22, &api);
+    WylPolicyRotationRecoveryProbeResult probe = { 0 };
+    WylPolicyRotationRecoveryAction action =
+        WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD;
+    g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
+            &probe, &action), ==, WYRELOG_E_OK);
+    g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS);
+    g_assert_cmpint (action, ==, WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED);
+    g_assert_cmpuint (factory.frees, ==, 2);
+
+    g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+
+  /* Argument validation returns invalid without minting or touching a store. */
+  {
+    RecoveryFactory factory;
+    wyl_policy_rotation_recovery_factory_t api;
+    recovery_factory_init (&factory, 0x00, 0x20, &api);
+    WylPolicyRotationRecoveryProbeResult probe = { 0 };
+    WylPolicyRotationRecoveryAction action =
+        WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD;
+    g_assert_cmpint (wyl_policy_store_rotation_recovery_status (NULL, &api,
+            &probe, &action), ==, WYRELOG_E_INVALID);
+    g_assert_cmpint (wyl_policy_store_rotation_recovery_status ("p", NULL,
+            &probe, &action), ==, WYRELOG_E_INVALID);
+    g_assert_cmpuint (factory.old_mints, ==, 0);
+  }
+}
+
+static void
 test_rotation_post_rename_warning_commits (void)
 {
   /* Every post-linearization seam is log-only: the canonical rename has
@@ -2209,6 +2428,8 @@ main (int argc, char **argv)
       test_rotation_recovery_plan);
   g_test_add_func ("/policy-store-service-cvk/rotation-failpoints",
       test_rotation_publish_failpoints);
+  g_test_add_func ("/policy-store-service-cvk/rotation-recovery-status",
+      test_rotation_recovery_status);
   g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",
       test_rotation_post_rename_warning_commits);
   g_test_add_func ("/policy-store-service-cvk/rotation-provider-failures",

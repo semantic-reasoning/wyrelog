@@ -9561,6 +9561,13 @@ wyl_policy_store_rotation_probe (const gchar *path,
   gboolean old_digest_valid = FALSE;
   wyrelog_error_t old_rc = wyl_policy_store_open_with_options (old_opts,
       &old_store);
+  /* Open codes that mean "this retained root is simply not valid under this
+   * provider" are treated as not-authenticated, not propagated: CRYPTO (AEAD
+   * mismatch), NOT_FOUND (no canonical), and POLICY (the canonical header's
+   * provider id does not match this provider, or a malformed/symlinked file).
+   * A root is only ever counted when it fully authenticates, so at worst an
+   * unrecognized canonical yields AMBIGUOUS and the caller fails closed. Only
+   * environmental errors (I/O, BUSY lease, NOMEM) propagate verbatim. */
   /* A probe is strictly read-only. Encrypted fresh opens use an in-memory
    * SQLite image and would otherwise persist a newly-created canonical file
    * during close when the requested path is absent. */
@@ -9596,7 +9603,7 @@ wyl_policy_store_rotation_probe (const gchar *path,
     wyl_policy_store_close (old_store);
     old_store = NULL;
   } else if (old_rc != WYRELOG_E_OK && old_rc != WYRELOG_E_CRYPTO
-      && old_rc != WYRELOG_E_NOT_FOUND) {
+      && old_rc != WYRELOG_E_NOT_FOUND && old_rc != WYRELOG_E_POLICY) {
     if (old_store != NULL)
       wyl_policy_store_close (old_store);
     return old_rc;
@@ -9629,7 +9636,7 @@ wyl_policy_store_rotation_probe (const gchar *path,
       sodium_memzero (new_digest, sizeof new_digest);
     }
   } else if (new_rc != WYRELOG_E_OK && new_rc != WYRELOG_E_CRYPTO
-      && new_rc != WYRELOG_E_NOT_FOUND) {
+      && new_rc != WYRELOG_E_NOT_FOUND && new_rc != WYRELOG_E_POLICY) {
     if (new_store != NULL)
       wyl_policy_store_close (new_store);
     return new_rc;
@@ -9643,6 +9650,73 @@ wyl_policy_store_rotation_probe (const gchar *path,
   if (new_store != NULL)
     wyl_policy_store_close (new_store);
   sodium_memzero (old_digest, sizeof old_digest);
+  return WYRELOG_E_OK;
+}
+
+/* Releases a minted-but-unconsumed option set's provider state under the
+ * open ownership contract (wipe once, then free if a free callback exists). */
+static void
+rotation_recovery_release_opts (wyl_policy_store_open_options_t *opts)
+{
+  WylOwnedKeyProvider orphan = { 0 };
+  owned_keyprovider_adopt (&orphan, opts);
+  owned_keyprovider_release (&orphan);
+  memset (opts, 0, sizeof *opts);
+}
+
+/* Derives the safe next action directly from the probe's (state, intent_state),
+ * without routing an absent intent through recovery_plan. */
+static WylPolicyRotationRecoveryAction
+rotation_recovery_action_from_probe (const WylPolicyRotationRecoveryProbeResult
+    *probe)
+{
+  if (probe->state == WYL_POLICY_ROTATION_RECOVERY_NEW)
+    return WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW;
+  if (probe->state == WYL_POLICY_ROTATION_RECOVERY_OLD) {
+    if (probe->intent_state == WYL_POLICY_ROTATION_INTENT_STATUS_PENDING)
+      return WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD;
+    if (probe->intent_state == WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT)
+      return WYL_POLICY_ROTATION_RECOVERY_NONE;
+    /* A committed intent over a still-old root is contradictory: fail closed. */
+    return WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+  }
+  return WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+}
+
+wyrelog_error_t
+wyl_policy_store_rotation_recovery_status (const gchar *path,
+    const wyl_policy_rotation_recovery_factory_t *factory,
+    WylPolicyRotationRecoveryProbeResult *out_probe,
+    WylPolicyRotationRecoveryAction *out_action)
+{
+  if (out_probe != NULL)
+    memset (out_probe, 0, sizeof *out_probe);
+  if (out_action != NULL)
+    *out_action = WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+  if (path == NULL || path[0] == '\0' || factory == NULL
+      || factory->make_old_opts == NULL || factory->make_new_opts == NULL
+      || out_probe == NULL || out_action == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_open_options_t old_opts = { 0 };
+  wyl_policy_store_open_options_t new_opts = { 0 };
+  wyrelog_error_t rc = factory->make_old_opts (factory->data, &old_opts);
+  if (rc != WYRELOG_E_OK) {
+    rotation_recovery_release_opts (&old_opts);
+    return rc;
+  }
+  rc = factory->make_new_opts (factory->data, &new_opts);
+  if (rc != WYRELOG_E_OK) {
+    rotation_recovery_release_opts (&new_opts);
+    rotation_recovery_release_opts (&old_opts);
+    return rc;
+  }
+  /* The probe is strictly read-only and consumes both option sets. Any error
+   * (including WYRELOG_E_BUSY for divergent roots) passes through verbatim. */
+  rc = wyl_policy_store_rotation_probe (path, &old_opts, &new_opts, out_probe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_action = rotation_recovery_action_from_probe (out_probe);
   return WYRELOG_E_OK;
 }
 
