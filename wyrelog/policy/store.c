@@ -161,6 +161,7 @@ struct wyl_policy_store_t
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
+  GRecMutex graph_authority_mutex;
   gint service_authority_transaction_active;
   gint service_authority_transaction_poisoned;
   gint service_authority_abort_allowed;
@@ -7558,6 +7559,7 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   g_mutex_init (&self->service_cvk_mutex);
   g_mutex_init (&self->service_domain_gate_mutex);
   g_mutex_init (&self->service_lifecycle_mutex);
+  g_rec_mutex_init (&self->graph_authority_mutex);
   self->next_service_authority_transaction_id = 1;
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
@@ -7826,6 +7828,7 @@ wyl_policy_store_close (wyl_policy_store_t *store)
   g_mutex_clear (&store->service_cvk_mutex);
   g_mutex_clear (&store->service_domain_gate_mutex);
   g_mutex_clear (&store->service_lifecycle_mutex);
+  g_rec_mutex_clear (&store->graph_authority_mutex);
   g_free (store);
 }
 
@@ -9104,6 +9107,8 @@ wyl_policy_store_create_tenant (wyl_policy_store_t *store,
       !wyl_policy_store_tenant_id_is_valid (tenant_id))
     return WYRELOG_E_INVALID;
   *out_created = FALSE;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   static const gchar *sql =
       "INSERT OR IGNORE INTO tenants "
@@ -9135,6 +9140,8 @@ wyl_policy_store_set_tenant_sealed (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
   if (sealed && g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
     return WYRELOG_E_POLICY;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   static const gchar *sql =
       "UPDATE tenants SET sealed = ?, updated_at = unixepoch() "
@@ -9611,6 +9618,8 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
   wyrelog_error_t rc = validate_fact_graph_options (store, opts);
   if (rc != WYRELOG_E_OK)
     return rc;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   gboolean tenant_exists = FALSE;
   rc = wyl_policy_store_tenant_exists (store, opts->tenant_id, &tenant_exists);
@@ -9737,6 +9746,8 @@ wyl_policy_store_seal_fact_graph (wyl_policy_store_t *store,
       || !fact_graph_component_is_valid (tenant_id)
       || !fact_graph_customer_name_is_valid (graph_id))
     return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
 
   gboolean exists = FALSE;
   gboolean sealed = FALSE;
@@ -9819,6 +9830,24 @@ tenant_lifecycle_state_parse (const gchar *value,
   return FALSE;
 }
 
+static const gchar *
+tenant_lifecycle_state_name (WylPolicyTenantLifecycleState state)
+{
+  switch (state) {
+    case WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED:
+      return "legacy_unclassified";
+    case WYL_POLICY_TENANT_LIFECYCLE_ACTIVE:
+      return "active";
+    case WYL_POLICY_TENANT_LIFECYCLE_SEALING:
+      return "sealing";
+    case WYL_POLICY_TENANT_LIFECYCLE_SEALED:
+      return "sealed";
+    case WYL_POLICY_TENANT_LIFECYCLE_UNSEALING:
+      return "unsealing";
+  }
+  return NULL;
+}
+
 static gboolean
 graph_lifecycle_state_parse (const gchar *value,
     WylPolicyGraphLifecycleState *out_state)
@@ -9841,6 +9870,24 @@ graph_lifecycle_state_parse (const gchar *value,
     }
   }
   return FALSE;
+}
+
+static const gchar *
+graph_lifecycle_state_name (WylPolicyGraphLifecycleState state)
+{
+  switch (state) {
+    case WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED:
+      return "legacy_unclassified";
+    case WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING:
+      return "provisioning";
+    case WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE:
+      return "active";
+    case WYL_POLICY_GRAPH_LIFECYCLE_SEALED:
+      return "sealed";
+    case WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED:
+      return "degraded";
+  }
+  return NULL;
 }
 
 static gboolean
@@ -9869,6 +9916,32 @@ graph_error_class_parse (const gchar *value,
     }
   }
   return FALSE;
+}
+
+static const gchar *
+graph_error_class_name (WylPolicyGraphErrorClass error_class)
+{
+  switch (error_class) {
+    case WYL_POLICY_GRAPH_ERROR_NONE:
+      return "none";
+    case WYL_POLICY_GRAPH_ERROR_PATH:
+      return "path";
+    case WYL_POLICY_GRAPH_ERROR_IDENTITY:
+      return "identity";
+    case WYL_POLICY_GRAPH_ERROR_FORMAT:
+      return "format";
+    case WYL_POLICY_GRAPH_ERROR_SCHEMA:
+      return "schema";
+    case WYL_POLICY_GRAPH_ERROR_OPEN:
+      return "open";
+    case WYL_POLICY_GRAPH_ERROR_REPLAY:
+      return "replay";
+    case WYL_POLICY_GRAPH_ERROR_RECOVERY:
+      return "recovery";
+    case WYL_POLICY_GRAPH_ERROR_INTERNAL:
+      return "internal";
+  }
+  return NULL;
 }
 
 static gboolean
@@ -10036,6 +10109,7 @@ wyl_policy_store_read_tenant_authority (wyl_policy_store_t *store,
   if (store == NULL || store->db == NULL || out_record == NULL
       || !wyl_policy_store_tenant_id_is_valid (tenant_id))
     return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
   sqlite3_stmt *stmt = NULL;
   wyrelog_error_t rc = prepare_stmt (store->db,
       "SELECT " TENANT_AUTHORITY_SELECT_COLUMNS
@@ -10048,6 +10122,7 @@ wyl_policy_store_read_tenant_authority (wyl_policy_store_t *store,
   else if (rc == WYRELOG_E_OK)
     rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
   sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
 }
 
@@ -10059,6 +10134,7 @@ wyl_policy_store_list_tenant_authorities (wyl_policy_store_t *store,
     *out_records = NULL;
   if (store == NULL || store->db == NULL || out_records == NULL)
     return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
   GPtrArray *records = g_ptr_array_new_with_free_func (
       (GDestroyNotify) wyl_policy_tenant_authority_record_free);
   sqlite3_stmt *stmt = NULL;
@@ -10077,9 +10153,11 @@ wyl_policy_store_list_tenant_authorities (wyl_policy_store_t *store,
   sqlite3_finalize (stmt);
   if (rc != WYRELOG_E_OK) {
     g_ptr_array_unref (records);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
     return rc;
   }
   *out_records = records;
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
   return WYRELOG_E_OK;
 }
 
@@ -10094,6 +10172,7 @@ wyl_policy_store_read_graph_authority (wyl_policy_store_t *store,
       || !wyl_policy_store_tenant_id_is_valid (tenant_id)
       || !fact_graph_customer_name_is_valid (graph_id))
     return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
   sqlite3_stmt *stmt = NULL;
   wyrelog_error_t rc = prepare_stmt (store->db,
       "SELECT " GRAPH_AUTHORITY_SELECT_COLUMNS
@@ -10108,6 +10187,7 @@ wyl_policy_store_read_graph_authority (wyl_policy_store_t *store,
   else if (rc == WYRELOG_E_OK)
     rc = step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
   sqlite3_finalize (stmt);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
   return rc;
 }
 
@@ -10121,6 +10201,7 @@ wyl_policy_store_list_graph_authorities (wyl_policy_store_t *store,
       || (tenant_id != NULL
           && !wyl_policy_store_tenant_id_is_valid (tenant_id)))
     return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
   GPtrArray *records = g_ptr_array_new_with_free_func (
       (GDestroyNotify) wyl_policy_graph_authority_record_free);
   sqlite3_stmt *stmt = NULL;
@@ -10144,10 +10225,547 @@ wyl_policy_store_list_graph_authorities (wyl_policy_store_t *store,
   sqlite3_finalize (stmt);
   if (rc != WYRELOG_E_OK) {
     g_ptr_array_unref (records);
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
     return rc;
   }
   *out_records = records;
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+classify_graph_authority_mutation (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphLifecycleState expected_state,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyGraphLifecycleState replay_state,
+    WylPolicyGraphErrorClass replay_error_class,
+    guint lifecycle_increment, guint reconciliation_increment,
+    gboolean replay_allowed,
+    const gchar *replay_store_uuid, guint64 replay_format_version,
+    guint64 replay_path_encoding_version,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  WylPolicyGraphAuthorityRecord *record = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_graph_authority (store,
+      tenant_id, graph_id, &record);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean generation_can_advance =
+      expected_lifecycle_generation <=
+      (guint64) G_MAXINT64 - lifecycle_increment
+      && expected_reconciliation_generation <=
+      (guint64) G_MAXINT64 - reconciliation_increment;
+  gboolean replay = replay_allowed && generation_can_advance
+      && record->lifecycle_state == replay_state
+      && record->last_error_class == replay_error_class
+      && record->lifecycle_generation ==
+      expected_lifecycle_generation + lifecycle_increment
+      && record->reconciliation_generation ==
+      expected_reconciliation_generation + reconciliation_increment;
+  if (replay_store_uuid != NULL)
+    replay = replay && record->has_store_identity
+        && g_strcmp0 (record->store_uuid, replay_store_uuid) == 0
+        && record->format_version == replay_format_version
+        && record->path_encoding_version == replay_path_encoding_version;
+  if (replay)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+  else if (record->lifecycle_state != expected_state
+      || record->lifecycle_generation != expected_lifecycle_generation
+      || record->reconciliation_generation !=
+      expected_reconciliation_generation)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+  else
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  wyl_policy_graph_authority_record_free (record);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+classify_tenant_authority_mutation (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyTenantLifecycleState expected_state,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyTenantLifecycleState replay_state, guint lifecycle_increment,
+    guint reconciliation_increment, gboolean replay_allowed,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  WylPolicyTenantAuthorityRecord *record = NULL;
+  wyrelog_error_t rc = wyl_policy_store_read_tenant_authority (store,
+      tenant_id, &record);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gboolean generation_can_advance =
+      expected_lifecycle_generation <=
+      (guint64) G_MAXINT64 - lifecycle_increment
+      && expected_reconciliation_generation <=
+      (guint64) G_MAXINT64 - reconciliation_increment;
+  if (replay_allowed && generation_can_advance
+      && record->lifecycle_state == replay_state
+      && record->lifecycle_generation ==
+      expected_lifecycle_generation + lifecycle_increment
+      && record->reconciliation_generation ==
+      expected_reconciliation_generation + reconciliation_increment)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+  else if (record->lifecycle_state != expected_state
+      || record->lifecycle_generation != expected_lifecycle_generation
+      || record->reconciliation_generation !=
+      expected_reconciliation_generation)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+  else
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  wyl_policy_tenant_authority_record_free (record);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_authority_sqlite_error (int sqlite_rc)
+{
+  int primary = sqlite_rc & 0xff;
+  if (primary == SQLITE_BUSY || primary == SQLITE_LOCKED)
+    return WYRELOG_E_BUSY;
+  return WYRELOG_E_IO;
+}
+
+typedef struct
+{
+  gboolean owns_transaction;
+  gboolean active;
+  gboolean locked;
+} GraphAuthorityMutationFrame;
+
+static wyrelog_error_t
+graph_authority_mutation_begin (wyl_policy_store_t *store,
+    GraphAuthorityMutationFrame *frame)
+{
+  *frame = (GraphAuthorityMutationFrame) {
+  0};
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  frame->locked = TRUE;
+  frame->owns_transaction = sqlite3_get_autocommit (store->db) != 0;
+  const gchar *sql = frame->owns_transaction ? "BEGIN IMMEDIATE;" :
+      "SAVEPOINT wyrelog_graph_authority_mutation;";
+  int sqlite_rc = sqlite3_exec (store->db, sql, NULL, NULL, NULL);
+  if (sqlite_rc != SQLITE_OK) {
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    frame->locked = FALSE;
+    return graph_authority_sqlite_error (sqlite_rc);
+  }
+  frame->active = TRUE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_authority_mutation_finish (wyl_policy_store_t *store,
+    GraphAuthorityMutationFrame *frame, gboolean rollback)
+{
+  if (!frame->active)
+    return WYRELOG_E_OK;
+  if (rollback) {
+    const gchar *sql = frame->owns_transaction ? "ROLLBACK;" :
+        "ROLLBACK TO SAVEPOINT wyrelog_graph_authority_mutation;"
+        "RELEASE SAVEPOINT wyrelog_graph_authority_mutation;";
+    int sqlite_rc = sqlite3_exec (store->db, sql, NULL, NULL, NULL);
+    frame->active = FALSE;
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    frame->locked = FALSE;
+    return sqlite_rc == SQLITE_OK ? WYRELOG_E_OK :
+        graph_authority_sqlite_error (sqlite_rc);
+  }
+  const gchar *sql = frame->owns_transaction ? "COMMIT;" :
+      "RELEASE SAVEPOINT wyrelog_graph_authority_mutation;";
+  int sqlite_rc = sqlite3_exec (store->db, sql, NULL, NULL, NULL);
+  if (sqlite_rc == SQLITE_OK) {
+    frame->active = FALSE;
+    g_rec_mutex_unlock (&store->graph_authority_mutex);
+    frame->locked = FALSE;
+    return WYRELOG_E_OK;
+  }
+  wyrelog_error_t commit_rc = graph_authority_sqlite_error (sqlite_rc);
+  wyrelog_error_t cleanup_rc = graph_authority_mutation_finish (store, frame,
+      TRUE);
+  return cleanup_rc != WYRELOG_E_OK ? cleanup_rc : commit_rc;
+}
+
+static wyrelog_error_t
+graph_authority_mutation_complete (wyl_policy_store_t *store,
+    GraphAuthorityMutationFrame *frame, wyrelog_error_t body_rc)
+{
+  wyrelog_error_t finish_rc = graph_authority_mutation_finish (store, frame,
+      body_rc != WYRELOG_E_OK);
+  return finish_rc != WYRELOG_E_OK ? finish_rc : body_rc;
+}
+
+static wyrelog_error_t
+authority_update_step (wyl_policy_store_t *store, sqlite3_stmt *stmt,
+    gboolean allow_unique_constraint, gboolean *out_applied)
+{
+  int step = sqlite3_step (stmt);
+  *out_applied = step == SQLITE_DONE && sqlite3_changes (store->db) == 1;
+  if (step == SQLITE_DONE)
+    return WYRELOG_E_OK;
+  int extended = sqlite3_extended_errcode (store->db);
+  if (allow_unique_constraint && extended == SQLITE_CONSTRAINT_UNIQUE)
+    return WYRELOG_E_OK;
+  if ((extended & 0xff) == SQLITE_CONSTRAINT)
+    return WYRELOG_E_POLICY;
+  return graph_authority_sqlite_error (extended);
+}
+
+wyrelog_error_t
+wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *store_uuid,
+    guint64 format_version, guint64 path_encoding_version,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !graph_store_uuid_is_canonical (store_uuid) || format_version == 0
+      || format_version > G_MAXINT64 || path_encoding_version == 0
+      || path_encoding_version > G_MAXINT64
+      || expected_lifecycle_generation > G_MAXINT64
+      || expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  gboolean applied = FALSE;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "UPDATE fact_graphs SET store_uuid=?,format_version=?,"
+      "path_encoding_version=?,lifecycle_state='provisioning',"
+      "lifecycle_generation=lifecycle_generation+1,updated_at=unixepoch() "
+      "WHERE tenant_id=? AND graph_id=? "
+      "AND lifecycle_state='legacy_unclassified' "
+      "AND sealed=0 "
+      "AND store_uuid IS NULL AND format_version IS NULL "
+      "AND path_encoding_version IS NULL AND lifecycle_generation=? "
+      "AND lifecycle_generation<9223372036854775807 "
+      "AND reconciliation_generation=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, store_uuid) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 2,
+              (sqlite3_int64) format_version) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 3,
+              (sqlite3_int64) path_encoding_version) != SQLITE_OK
+          || bind_text (stmt, 4, tenant_id) != WYRELOG_E_OK
+          || bind_text (stmt, 5, graph_id) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 6,
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 7,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, TRUE, &applied);
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else {
+    rc = classify_graph_authority_mutation (store, tenant_id, graph_id,
+        WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED,
+        expected_lifecycle_generation, expected_reconciliation_generation,
+        WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING, WYL_POLICY_GRAPH_ERROR_NONE,
+        1, 0, expected_lifecycle_generation < G_MAXINT64, store_uuid,
+        format_version, path_encoding_version, out_result);
+  }
+  return graph_authority_mutation_complete (store, &frame, rc);
+}
+
+static gboolean
+graph_normal_transition_is_legal (WylPolicyGraphLifecycleState from,
+    WylPolicyGraphLifecycleState to)
+{
+  return (from == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING
+      && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
+      || (from == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      && (to == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
+      || (from == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+      && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED));
+}
+
+wyrelog_error_t
+wyl_policy_store_transition_graph_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphLifecycleState expected_state,
+    WylPolicyGraphLifecycleState target_state,
+    WylPolicyGraphErrorClass target_error_class,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  const gchar *expected_name = graph_lifecycle_state_name (expected_state);
+  const gchar *target_name = graph_lifecycle_state_name (target_state);
+  const gchar *error_name = graph_error_class_name (target_error_class);
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || expected_name == NULL || target_name == NULL || error_name == NULL
+      || expected_lifecycle_generation > G_MAXINT64
+      || expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  gboolean error_matches = target_state == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED
+      ? target_error_class != WYL_POLICY_GRAPH_ERROR_NONE
+      : target_error_class == WYL_POLICY_GRAPH_ERROR_NONE;
+  gboolean legal = graph_normal_transition_is_legal (expected_state,
+      target_state) && error_matches;
+  if (!legal)
+    return WYRELOG_E_OK;
+  gboolean applied = FALSE;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "UPDATE fact_graphs SET lifecycle_state=?,last_error_class=?,sealed=?,"
+      "lifecycle_generation=lifecycle_generation+1,updated_at=unixepoch() "
+      "WHERE tenant_id=? AND graph_id=? AND lifecycle_state=? "
+      "AND lifecycle_generation=? "
+      "AND lifecycle_generation<9223372036854775807 "
+      "AND reconciliation_generation=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, target_name) != WYRELOG_E_OK
+          || bind_text (stmt, 2, error_name) != WYRELOG_E_OK
+          || sqlite3_bind_int (stmt, 3,
+              target_state == WYL_POLICY_GRAPH_LIFECYCLE_SEALED) != SQLITE_OK
+          || bind_text (stmt, 4, tenant_id) != WYRELOG_E_OK
+          || bind_text (stmt, 5, graph_id) != WYRELOG_E_OK
+          || bind_text (stmt, 6, expected_name) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 7,
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 8,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, FALSE, &applied);
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else {
+    rc = classify_graph_authority_mutation (store, tenant_id, graph_id,
+        expected_state, expected_lifecycle_generation,
+        expected_reconciliation_generation, target_state, target_error_class,
+        1, 0, expected_lifecycle_generation < G_MAXINT64, NULL, 0, 0,
+        out_result);
+  }
+  return graph_authority_mutation_complete (store, &frame, rc);
+}
+
+wyrelog_error_t
+wyl_policy_store_reconcile_graph_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || expected_lifecycle_generation > G_MAXINT64
+      || expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  gboolean applied = FALSE;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "UPDATE fact_graphs SET lifecycle_state='active',"
+      "last_error_class='none',sealed=0,"
+      "lifecycle_generation=lifecycle_generation+1,"
+      "reconciliation_generation=reconciliation_generation+1,"
+      "updated_at=unixepoch() WHERE tenant_id=? AND graph_id=? "
+      "AND lifecycle_state='degraded' AND lifecycle_generation=? "
+      "AND lifecycle_generation<9223372036854775807 "
+      "AND reconciliation_generation=? "
+      "AND reconciliation_generation<9223372036854775807;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, tenant_id) != WYRELOG_E_OK
+          || bind_text (stmt, 2, graph_id) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 3,
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 4,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, FALSE, &applied);
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else {
+    rc = classify_graph_authority_mutation (store, tenant_id, graph_id,
+        WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+        expected_lifecycle_generation, expected_reconciliation_generation,
+        WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 1,
+        expected_lifecycle_generation < G_MAXINT64
+        && expected_reconciliation_generation < G_MAXINT64,
+        NULL, 0, 0, out_result);
+  }
+  return graph_authority_mutation_complete (store, &frame, rc);
+}
+
+static gboolean
+tenant_normal_transition_is_legal (WylPolicyTenantLifecycleState from,
+    WylPolicyTenantLifecycleState to)
+{
+  return (from == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+      && to == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
+      || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+      && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED))
+      || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALED
+      && to == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING)
+      || (from == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING
+      && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED));
+}
+
+wyrelog_error_t
+wyl_policy_store_transition_tenant_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyTenantLifecycleState expected_state,
+    WylPolicyTenantLifecycleState target_state,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  const gchar *expected_name = tenant_lifecycle_state_name (expected_state);
+  const gchar *target_name = tenant_lifecycle_state_name (target_state);
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || expected_name == NULL || target_name == NULL
+      || expected_lifecycle_generation > G_MAXINT64
+      || expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  gboolean legal = tenant_normal_transition_is_legal (expected_state,
+      target_state);
+  if (!legal)
+    return WYRELOG_E_OK;
+  gboolean applied = FALSE;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  gboolean sealed = target_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED
+      || target_state == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING;
+  rc = prepare_stmt (store->db,
+      "UPDATE tenants SET lifecycle_state=?,sealed=?,"
+      "lifecycle_generation=lifecycle_generation+1,updated_at=unixepoch() "
+      "WHERE tenant_id=? AND lifecycle_state=? AND lifecycle_generation=? "
+      "AND lifecycle_generation<9223372036854775807 "
+      "AND reconciliation_generation=?;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, target_name) != WYRELOG_E_OK
+          || sqlite3_bind_int (stmt, 2, sealed) != SQLITE_OK
+          || bind_text (stmt, 3, tenant_id) != WYRELOG_E_OK
+          || bind_text (stmt, 4, expected_name) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 5,
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 6,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, FALSE, &applied);
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else {
+    rc = classify_tenant_authority_mutation (store, tenant_id, expected_state,
+        expected_lifecycle_generation, expected_reconciliation_generation,
+        target_state, 1, 0, expected_lifecycle_generation < G_MAXINT64,
+        out_result);
+  }
+  return graph_authority_mutation_complete (store, &frame, rc);
+}
+
+wyrelog_error_t
+wyl_policy_store_reconcile_tenant_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, WylPolicyTenantLifecycleState target_state,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  const gchar *target_name = tenant_lifecycle_state_name (target_state);
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || target_name == NULL || expected_lifecycle_generation > G_MAXINT64
+      || expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  gboolean legal = (target_state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+      || target_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED);
+  if (!legal)
+    return WYRELOG_E_OK;
+  gboolean applied = FALSE;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "UPDATE tenants SET lifecycle_state=?,sealed=?,"
+      "lifecycle_generation=lifecycle_generation+1,"
+      "reconciliation_generation=reconciliation_generation+1,"
+      "updated_at=unixepoch() WHERE tenant_id=? "
+      "AND lifecycle_state='legacy_unclassified' "
+      "AND lifecycle_generation=? "
+      "AND lifecycle_generation<9223372036854775807 "
+      "AND reconciliation_generation=? "
+      "AND reconciliation_generation<9223372036854775807;", &stmt);
+  if (rc == WYRELOG_E_OK
+      && (bind_text (stmt, 1, target_name) != WYRELOG_E_OK
+          || sqlite3_bind_int (stmt, 2,
+              target_state == WYL_POLICY_TENANT_LIFECYCLE_SEALED) != SQLITE_OK
+          || bind_text (stmt, 3, tenant_id) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 4,
+              (sqlite3_int64) expected_lifecycle_generation) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 5,
+              (sqlite3_int64) expected_reconciliation_generation) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK)
+    rc = authority_update_step (store, stmt, FALSE, &applied);
+  sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (applied) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  } else {
+    rc = classify_tenant_authority_mutation (store, tenant_id,
+        WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED,
+        expected_lifecycle_generation, expected_reconciliation_generation,
+        target_state, 1, 1, expected_lifecycle_generation < G_MAXINT64
+        && expected_reconciliation_generation < G_MAXINT64, out_result);
+  }
+  return graph_authority_mutation_complete (store, &frame, rc);
 }
 
 #undef TENANT_AUTHORITY_SELECT_COLUMNS
