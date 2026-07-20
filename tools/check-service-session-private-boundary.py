@@ -644,6 +644,7 @@ class IncludeSnapshot:
         self.negative_paths = set()
         self.canonical_identities = {}
         self.candidates = {}
+        self.candidate_anchors = {}
         self.logical_lines = {}
         self.expansions = {}
         self.expansion_cap = expansion_cap
@@ -747,6 +748,7 @@ class IncludeSnapshot:
         if observation is None:
             observation = self._observe_candidate(anchor, name, owner)
             self.candidates[key] = observation
+            self.candidate_anchors[key] = anchor
             self.candidate_checks += 1
         else:
             self.candidate_hits += 1
@@ -819,8 +821,9 @@ class IncludeSnapshot:
     def validate(self) -> None:
         for (anchor_identity, name), expected in sorted(
                 self.candidates.items(), key=lambda item: item[0]):
-            actual = self._observe_candidate(Path(anchor_identity), name,
-                                             "snapshot validation")
+            key = (anchor_identity, name)
+            actual = self._observe_candidate(
+                self.candidate_anchors[key], name, "snapshot validation")
             if actual != expected:
                 raise BoundaryError(
                     f"include candidate changed during boundary scan: "

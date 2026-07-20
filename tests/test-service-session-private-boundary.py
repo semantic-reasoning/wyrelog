@@ -558,6 +558,42 @@ def main() -> int:
         try:
             selected_link = cache_root / "selected-link.h"
             selected_link.symlink_to(common)
+            canonical_alias_root = cache_root / "canonical-alias-root"
+            canonical_alias_root.mkdir()
+            lexical_alias_root = cache_root / "lexical-alias-root"
+            lexical_alias_root.symlink_to(
+                canonical_alias_root, target_is_directory=True)
+            alias_collision = lexical_alias_root / "collision"
+            alias_collision.mkdir()
+            (alias_collision / "namespace").write_text(
+                "built executable\n", encoding="utf-8")
+            alias_source = lexical_alias_root / "source"
+            (alias_source / "namespace").mkdir(parents=True)
+            alias_header = alias_source / "namespace" / "private.h"
+            alias_header.write_text("source header\n", encoding="utf-8")
+            alias_snapshot = guard_module.IncludeSnapshot(
+                (cache_root.resolve(),))
+            assert alias_snapshot.resolve(
+                cache_root, '<', "namespace/private.h",
+                [alias_collision, alias_source],
+                "lexical-alias.c") == alias_header.resolve()
+            alias_snapshot.validate()
+            retarget_root = cache_root / "retarget-alias-root"
+            retarget_root.mkdir()
+            (retarget_root / "collision").mkdir()
+            (retarget_root / "collision" / "namespace").write_text(
+                "built executable\n", encoding="utf-8")
+            (retarget_root / "source" / "namespace").mkdir(parents=True)
+            (retarget_root / "source" / "namespace" / "private.h").write_text(
+                "replacement header\n", encoding="utf-8")
+            lexical_alias_root.unlink()
+            lexical_alias_root.symlink_to(
+                retarget_root, target_is_directory=True)
+            try:
+                alias_snapshot.validate()
+                raise AssertionError("retargeted include root was accepted")
+            except guard_module.BoundaryError:
+                pass
             broken_link = cache_root / "broken-link.h"
             broken_link.symlink_to(cache_root / "missing-target.h")
             real_directory = cache_root / "real-directory"
