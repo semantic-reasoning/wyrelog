@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Related issues: #536, #537
+Related issues: #536, #537, #539, #544
 
 ## Context
 
@@ -63,6 +63,60 @@ The existing `sealed` columns remain compatibility projections. They do not
 prove engine drain, engine eviction, a no-open barrier, or canonical store
 identity. Until the later lifecycle work supplies those barriers, callers must
 not infer them from the boolean.
+
+## Canonical physical locator
+
+For path-encoding version 1, the configured fact root and the logical
+`tenant_id` and `graph_id` are the only inputs to the physical location. Each
+identifier is encoded as one filename component with a `v1-` prefix. ASCII
+letters, digits, `.`, `_`, `:`, and `-` remain literal; every other UTF-8 byte
+is encoded as `~hh` with lowercase hexadecimal digits. Decoding and re-encoding
+must reproduce the component byte-for-byte. Uppercase escapes, escapes of a
+byte that should have remained literal, NUL, invalid UTF-8, raw separators,
+and non-canonical spellings are rejected.
+
+The resulting layout is:
+
+```text
+<configured-fact-root>/<v1-tenant>/<v1-graph>/facts.duckdb
+```
+
+`storage_path` and `storage_uri` remain descriptive registry metadata. They
+are useful for inspection and compatibility, but they are never path authority
+and cannot redirect a create, replay, append, retract, or forget operation.
+Restart and replay derive the same location again from the configured root and
+logical identifiers.
+
+On POSIX, the resolver opens an absolute root component by component and then
+resolves tenant, graph, and file names relative to already-open directory
+descriptors. Symbolic links are rejected at every resolved component. Owned
+fact-root, tenant, and graph directories must retain their recorded identity,
+owner, directory type, and exact mode `0700`; graph files must be owned regular
+files with exact mode `0600`. Named entries are rechecked against the open
+descriptors so replacement, type changes, permission widening, and escape from
+the configured tree fail closed. Creation fsyncs the containing directory.
+Unsupported platforms return a policy error instead of falling back to unsafe
+path traversal.
+
+The resolver also supplies a durable staging protocol for immutable file
+publication. A `0600` staging file is synced, linked to a previously absent
+final name without overwrite, the graph directory is synced, the staging name
+is removed, and the graph directory is synced again. Retry classifies the
+stage and final names by the recorded device and inode, allowing recovery after
+either publication checkpoint while rejecting foreign or replaced entries.
+Abort is allowed only before a final name exists; after publication begins,
+the caller must resume publication to convergence.
+
+#539 deliberately does not reserve physical identity or provision the final
+DuckDB schema. Policy graph creation materializes only the canonical `0700`
+directories. The first fact write may create `facts.duckdb` at the canonical
+derived path, after which its mode and identity are immediately checked and
+hardened. DuckDB currently accepts only a pathname, so there is still a
+same-owner replacement window between resolver verification and DuckDB's
+path-based open. Registry metadata cannot exploit that window, but an attacker
+with the service account's filesystem authority can. The identity reservation
+and descriptor-bound provisioning cutover in #544 owns removal of this
+residual risk; `/proc/self/fd` is not treated as a portable substitute.
 
 ## State machines
 
@@ -199,7 +253,10 @@ CAS outcomes suitable for later per-graph physical storage work. Concurrency,
 lost responses, crashes, and unsupported formats fail closed without identity
 replacement or partial metadata updates.
 
-Physical DuckDB creation/open, safe path derivation, runtime engine ownership,
-tenant drain barriers, API exposure, deletion, retirement, ID reuse, and purge
-remain follow-up work. This ADR deliberately grants none of those operations
-authority merely because a policy row exists.
+Canonical path derivation and fail-closed POSIX resolution are now available,
+and runtime fact operations no longer trust registry paths. Physical identity
+reservation, descriptor-bound DuckDB provisioning/open, runtime engine
+ownership, tenant drain barriers, API exposure, deletion, retirement, ID reuse,
+and purge remain follow-up work. This ADR deliberately grants none of those
+operations authority merely because a policy row or canonical directory
+exists.
