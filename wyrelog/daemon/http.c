@@ -5,7 +5,9 @@
 #include <errno.h>
 #include <sodium.h>
 #include <string.h>
-#ifndef G_OS_WIN32
+#ifdef G_OS_WIN32
+#include <io.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -5741,9 +5743,10 @@ typedef enum
 static wyrelog_error_t
 resolve_http_fact_db_path (WylDaemonHttpContext *ctx,
     wyl_policy_store_t *policy_store, const gchar *tenant, const gchar *graph,
-    gboolean writable, gchar **out_path)
+    gboolean writable, gchar **out_path, gboolean *out_needs_hardening)
 {
   *out_path = NULL;
+  *out_needs_hardening = FALSE;
   if (policy_store == NULL || ctx->fact_root == NULL
       || ctx->fact_root[0] == '\0')
     return WYRELOG_E_POLICY;
@@ -5754,19 +5757,21 @@ resolve_http_fact_db_path (WylDaemonHttpContext *ctx,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
         writable, &fd);
-  if (rc == WYRELOG_E_NOT_FOUND && writable)
+  if (rc == WYRELOG_E_NOT_FOUND && writable) {
+    *out_needs_hardening = TRUE;
     rc = WYRELOG_E_OK;
+  }
   if (rc == WYRELOG_E_OK) {
     *out_path = wyl_fact_graph_directory_descriptive_file (&directory,
         "facts.duckdb");
     if (*out_path == NULL)
       rc = WYRELOG_E_NOMEM;
   }
-#ifndef G_OS_WIN32
   if (fd >= 0)
-    close (fd);
+#ifdef G_OS_WIN32
+    _close (fd);
 #else
-  (void) fd;
+    close (fd);
 #endif
   wyl_fact_graph_directory_clear (&directory);
   return rc;
@@ -5782,6 +5787,27 @@ secure_http_fact_db_mode (WylDaemonHttpContext *ctx,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_secure_file_mode (&directory, "facts.duckdb");
   wyl_fact_graph_directory_clear (&directory);
+  return rc;
+}
+
+static wyrelog_error_t
+open_http_fact_store (WylDaemonHttpContext *ctx,
+    wyl_policy_store_t *policy_store, const gchar *tenant, const gchar *graph,
+    wyl_fact_store_t **out_store)
+{
+  *out_store = NULL;
+  g_autofree gchar *path = NULL;
+  gboolean needs_hardening = FALSE;
+  wyrelog_error_t rc = resolve_http_fact_db_path (ctx, policy_store, tenant,
+      graph, TRUE, &path, &needs_hardening);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_store_open (path, out_store);
+  if (rc == WYRELOG_E_OK && needs_hardening) {
+    g_clear_pointer (out_store, wyl_fact_store_close);
+    rc = secure_http_fact_db_mode (ctx, policy_store, tenant, graph);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_store_open (path, out_store);
+  }
   return rc;
 }
 #endif
@@ -6248,13 +6274,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       .n_columns = n_loaded,
     };
     g_autoptr (wyl_fact_store_t) fact_store = NULL;
-    g_autofree gchar *fact_db_path = NULL;
-    rc = resolve_http_fact_db_path (ctx, write.store, tenant, graph, TRUE,
-        &fact_db_path);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_store_open (fact_db_path, &fact_store);
-    if (rc == WYRELOG_E_OK)
-      rc = secure_http_fact_db_mode (ctx, write.store, tenant, graph);
+    rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
     gsize rows_purged = 0;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_create_schema (fact_store);
@@ -6410,13 +6430,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   g_autoptr (wyl_fact_store_t) fact_store = NULL;
-  g_autofree gchar *fact_db_path = NULL;
-  rc = resolve_http_fact_db_path (ctx, write.store, tenant, graph, TRUE,
-      &fact_db_path);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_store_open (fact_db_path, &fact_store);
-  if (rc == WYRELOG_E_OK)
-    rc = secure_http_fact_db_mode (ctx, write.store, tenant, graph);
+  rc = open_http_fact_store (ctx, write.store, tenant, graph, &fact_store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_create_schema (fact_store);
   gboolean inserted = FALSE;

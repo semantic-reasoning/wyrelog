@@ -9,6 +9,7 @@
 #include <errno.h>
 #include <stdlib.h>
 
+#include "fact-test-support.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/policy/store-private.h"
@@ -782,58 +783,12 @@ make_fact_graph_options (const gchar *tenant_id, const gchar *graph_id,
   return opts;
 }
 
-#ifndef G_OS_WIN32
-static gchar *
-make_fact_root (const gchar *tmpl, GError **error)
-{
-  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
-  if (created == NULL)
-    return NULL;
-  gchar *root = realpath (created, NULL);
-  if (root != NULL)
-    return root;
-
-  gint saved_errno = errno;
-  (void) g_rmdir (created);
-  if (error != NULL && *error == NULL)
-    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
-        "Failed to resolve temporary directory '%s': %s", created,
-        g_strerror (saved_errno));
-  return NULL;
-}
-#endif
-
 static gint
 check_store_manages_fact_graph_registry (void)
 {
-#ifdef G_OS_WIN32
-#define WYL_TEST_FACT_ROOT "C:\\\\wyrelog-facts"
-  g_autoptr (wyl_policy_store_t) store = NULL;
-  gboolean created = FALSE;
-  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
-    return 390;
-  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
-    return 391;
-  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
-      != WYRELOG_E_OK || !created)
-    return 392;
-  const wyl_policy_fact_graph_column_t columns[] = {
-    {"subject", "symbol"},
-  };
-  const wyl_policy_fact_graph_relation_t relations[] = {
-    {"site.node", columns, G_N_ELEMENTS (columns)},
-  };
-  wyl_policy_fact_graph_create_options_t opts =
-      make_fact_graph_options ("tenant-a", "graph-main", WYL_TEST_FACT_ROOT,
-      relations, G_N_ELEMENTS (relations), NULL, 0);
-  if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
-      != WYRELOG_E_POLICY)
-    return 393;
-#undef WYL_TEST_FACT_ROOT
-  return 0;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-facts-XXXXXX", &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-facts-XXXXXX", &error);
   if (root == NULL)
     return 400;
 
@@ -906,20 +861,18 @@ check_store_manages_fact_graph_registry (void)
   }
 
   fact_graph_iter_probe_clear (&probe);
+  g_clear_pointer (&store, wyl_policy_store_close);
   if (!cleanup_fact_graph_root (root))
     return 419;
   return 0;
-#endif
 }
 
 static gint
 check_store_seals_fact_graph_registry (void)
 {
-#ifdef G_OS_WIN32
-  return 0;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-facts-seal-XXXXXX", &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-facts-seal-XXXXXX", &error);
   if (root == NULL)
     return 420;
 
@@ -971,22 +924,20 @@ check_store_seals_fact_graph_registry (void)
       != WYRELOG_E_POLICY)
     return 431;
 
+  g_clear_pointer (&store, wyl_policy_store_close);
   if (!cleanup_fact_graph_root (root))
     return 432;
   return 0;
-#endif
 }
 
 static gint
 check_store_rejects_fact_graph_registry_escapes (void)
 {
-#ifdef G_OS_WIN32
-  return 0;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-facts-esc-XXXXXX", &error);
-  g_autofree gchar *outside = make_fact_root ("wyl-facts-out-XXXXXX",
-      &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-facts-esc-XXXXXX", &error);
+  g_autofree gchar *outside = wyl_test_make_secure_fact_root
+      ("wyl-facts-out-XXXXXX", &error);
   if (root == NULL || outside == NULL)
     return 440;
 
@@ -1024,7 +975,7 @@ check_store_rejects_fact_graph_registry_escapes (void)
     return 446;
   g_autofree gchar *tenant_link = g_build_filename (root, tenant_component,
       NULL);
-  if (symlink (outside, tenant_link) != 0)
+  if (!wyl_test_create_directory_alias (tenant_link, outside, &error))
     return 446;
   opts = make_fact_graph_options ("tenant-a", "graph-main", root, relations,
       G_N_ELEMENTS (relations), NULL, 0);
@@ -1032,21 +983,20 @@ check_store_rejects_fact_graph_registry_escapes (void)
       != WYRELOG_E_POLICY)
     return 447;
 
-  (void) g_remove (tenant_link);
+  if (!wyl_test_remove_directory_alias (tenant_link, &error))
+    return 448;
+  g_clear_pointer (&store, wyl_policy_store_close);
   (void) g_rmdir (root);
   (void) g_rmdir (outside);
   return 0;
-#endif
 }
 
 static gint
 check_store_rejects_fact_graph_reserved_metadata (void)
 {
-#ifdef G_OS_WIN32
-  return 0;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-facts-rsv-XXXXXX", &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-facts-rsv-XXXXXX", &error);
   if (root == NULL)
     return 460;
 
@@ -1120,20 +1070,18 @@ check_store_rejects_fact_graph_reserved_metadata (void)
       != WYRELOG_E_INVALID)
     return 468;
 
+  g_clear_pointer (&store, wyl_policy_store_close);
   if (!cleanup_fact_graph_root (root))
     return 470;
   return 0;
-#endif
 }
 
 static gint
 check_store_fact_graph_metadata_only (void)
 {
-#ifdef G_OS_WIN32
-  return 0;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-facts-meta-XXXXXX", &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-facts-meta-XXXXXX", &error);
   if (root == NULL)
     return 480;
 
@@ -1178,10 +1126,10 @@ check_store_fact_graph_metadata_only (void)
   if (matches != 0)
     return 488;
 
+  g_clear_pointer (&store, wyl_policy_store_close);
   if (!cleanup_fact_graph_root (root))
     return 489;
   return 0;
-#endif
 }
 
 static gboolean
@@ -1194,13 +1142,11 @@ directory_is_empty (const gchar *path)
 static gint
 check_store_pins_fact_root_identity (void)
 {
-#ifdef G_OS_WIN32
-  return 0;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-facts-pin-XXXXXX", &error);
-  g_autofree gchar *other_root = make_fact_root ("wyl-facts-other-XXXXXX",
-      &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-facts-pin-XXXXXX", &error);
+  g_autofree gchar *other_root = wyl_test_make_secure_fact_root
+      ("wyl-facts-other-XXXXXX", &error);
   if (root == NULL || other_root == NULL)
     return 490;
   g_autofree gchar *old_root = g_strdup_printf ("%s.old", root);
@@ -1243,7 +1189,8 @@ check_store_pins_fact_root_identity (void)
       != WYRELOG_E_POLICY || !directory_is_empty (other_root))
     return 497;
 
-  if (g_rename (root, old_root) != 0 || g_mkdir (root, 0700) != 0)
+  if (g_rename (root, old_root) != 0
+      || !wyl_test_create_secure_directory (root, &error))
     return 498;
   opts = make_fact_graph_options ("tenant-a", "graph-sealed", root,
       relations, G_N_ELEMENTS (relations), NULL, 0);
@@ -1251,12 +1198,12 @@ check_store_pins_fact_root_identity (void)
       != WYRELOG_E_POLICY || !directory_is_empty (root))
     return 499;
 
+  g_clear_pointer (&store, wyl_policy_store_close);
   if (!remove_empty_directory_if_present (root)
       || !remove_empty_directory_if_present (other_root)
       || !cleanup_fact_graph_root (old_root))
     return 500;
   return 0;
-#endif
 }
 
 static gint

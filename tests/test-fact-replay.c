@@ -1,15 +1,9 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
-#define _XOPEN_SOURCE 700
-#endif
-
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
 
-#include <errno.h>
-#include <stdlib.h>
-
+#include "fact-test-support.h"
 #include "wyrelog/daemon/fact-status.h"
 #include "wyrelog/fact/compound-private.h"
 #include "wyrelog/fact/replay-private.h"
@@ -90,27 +84,6 @@ remove_tree (const gchar *path)
   }
   (void) g_rmdir (path);
 }
-
-#ifndef G_OS_WIN32
-static gchar *
-make_fact_root (const gchar *tmpl, GError **error)
-{
-  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
-  if (created == NULL)
-    return NULL;
-  gchar *root = realpath (created, NULL);
-  if (root != NULL)
-    return root;
-
-  gint saved_errno = errno;
-  (void) g_rmdir (created);
-  if (error != NULL && *error == NULL)
-    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
-        "Failed to resolve temporary directory '%s': %s", created,
-        g_strerror (saved_errno));
-  return NULL;
-}
-#endif
 
 static wyl_policy_fact_relation_schema_options_t
 make_schema (const gchar *tenant_id, const gchar *graph_id,
@@ -301,7 +274,10 @@ append_order_batches (wyl_policy_store_t *policy, const gchar *root,
   g_assert_cmpint (wyl_fact_store_append_batch (store, &schema, &batch2,
           &inserted), ==, WYRELOG_E_OK);
   g_assert_true (inserted);
-  g_assert_cmpint (g_chmod (fact_path, 0600), ==, 0);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
 }
 
 static void
@@ -395,7 +371,10 @@ append_compound_route_batches (wyl_policy_store_t *policy,
             &inserted), ==, WYRELOG_E_OK);
     g_assert_true (inserted);
   }
-  g_assert_cmpint (g_chmod (fact_path, 0600), ==, 0);
+  g_clear_pointer (&store, wyl_fact_store_close);
+  g_autoptr (GError) error = NULL;
+  g_assert_true (wyl_test_secure_regular_file (fact_path, &error));
+  g_assert_no_error (error);
 }
 
 typedef struct
@@ -523,10 +502,10 @@ snapshot_single_compound_handle (WylEngine *engine, const gchar *relation_name)
 static void
 test_direct_replay_retracts_and_mangles (void)
 {
-#ifndef G_OS_WIN32
   TEST ("direct replay loads net facts with mangled relation names");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-fact-replay-XXXXXX", &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-fact-replay-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -550,20 +529,18 @@ test_direct_replay_retracts_and_mangles (void)
           &engine), ==, WYRELOG_E_OK);
   assert_replayed_order_b_only (engine);
   g_free (info_probe.storage_path);
+  g_clear_pointer (&engine, wyl_engine_close);
+  g_clear_pointer (&policy, wyl_policy_store_close);
   remove_tree (root);
-#else
-  g_test_skip ("fact graph path isolation is Unix-only in this build");
-#endif
 }
 
 static void
 test_direct_replay_shares_compounds_across_relations (void)
 {
-#ifndef G_OS_WIN32
   TEST ("direct replay keeps compound handles graph scoped across relations");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-fact-replay-compound-XXXXXX",
-      &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-fact-replay-compound-XXXXXX", &error);
   g_assert_no_error (error);
   g_assert_nonnull (root);
   g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -593,10 +570,9 @@ test_direct_replay_shares_compounds_across_relations (void)
   g_assert_cmpint (child_handle, >, 0);
   g_assert_cmpint (parent_handle, >, 0);
   g_free (info_probe.storage_path);
+  g_clear_pointer (&engine, wyl_engine_close);
+  g_clear_pointer (&policy, wyl_policy_store_close);
   remove_tree (root);
-#else
-  g_test_skip ("fact graph path isolation is Unix-only in this build");
-#endif
 }
 
 static gchar *
@@ -608,11 +584,10 @@ test_compound_cache_key (const gchar *namespace_id, gint64 compound_ref)
 static void
 test_compound_replay_cache_reuses_nested_child (void)
 {
-#ifndef G_OS_WIN32
   TEST ("compound replay cache reuses nested child handles");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-fact-replay-cache-XXXXXX",
-      &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-fact-replay-cache-XXXXXX", &error);
   g_assert_no_error (error);
   g_autofree gchar *fact_path = g_build_filename (root, "facts.duckdb", NULL);
   g_autoptr (wyl_fact_store_t) store = NULL;
@@ -644,20 +619,18 @@ test_compound_replay_cache_reuses_nested_child (void)
           "shipments", "logistics", child_ref, handles, &direct_child_handle),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (direct_child_handle, ==, *nested_child_handle);
+  g_clear_pointer (&engine, wyl_engine_close);
+  g_clear_pointer (&store, wyl_fact_store_close);
   remove_tree (root);
-#else
-  g_test_skip ("fact graph path isolation is Unix-only in this build");
-#endif
 }
 
 static void
 test_handle_replay_is_idempotent_and_graph_local (void)
 {
-#ifndef G_OS_WIN32
   TEST ("handle replay replaces graph engines and isolates corrupt graphs");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-fact-replay-handle-XXXXXX",
-      &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-fact-replay-handle-XXXXXX", &error);
   g_assert_no_error (error);
   g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
       NULL);
@@ -678,7 +651,8 @@ test_handle_replay_is_idempotent_and_graph_local (void)
         "facts.duckdb", NULL);
     g_assert_true (g_file_set_contents (bad_fact_path, "not a database", -1,
             NULL));
-    g_assert_cmpint (g_chmod (bad_fact_path, 0600), ==, 0);
+    g_assert_true (wyl_test_secure_regular_file (bad_fact_path, &error));
+    g_assert_no_error (error);
   }
   tamper_graph_storage_path (policy_path, "tenant-a", "orders", bad_path);
 
@@ -708,26 +682,24 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   g_assert_nonnull (tenant_a);
   assert_replayed_order_b_only (tenant_a);
   assert_handle_fact_status (handle);
+  g_clear_object (&handle);
   remove_tree (root);
-#else
-  g_test_skip ("fact graph path isolation is Unix-only in this build");
-#endif
 }
 
 static void
 test_handle_replay_rejects_fact_root_replacement (void)
 {
-#ifndef G_OS_WIN32
   TEST ("handle replay retains the startup fact-root identity");
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *base = make_fact_root ("wyl-fact-replay-pin-XXXXXX",
-      &error);
+  g_autofree gchar *base = wyl_test_make_secure_fact_root
+      ("wyl-fact-replay-pin-XXXXXX", &error);
   g_assert_no_error (error);
   g_autofree gchar *root = g_build_filename (base, "facts", NULL);
   g_autofree gchar *old_root = g_build_filename (base, "facts-old", NULL);
   g_autofree gchar *policy_path = g_build_filename (base, "policy.sqlite",
       NULL);
-  g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
+  g_assert_true (wyl_test_create_secure_directory (root, &error));
+  g_assert_no_error (error);
 
   g_autoptr (WylHandle) handle = NULL;
   const WylHandleOpenOptions opts = {
@@ -737,7 +709,8 @@ test_handle_replay_rejects_fact_root_replacement (void)
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (g_rename (root, old_root), ==, 0);
-  g_assert_cmpint (g_mkdir (root, 0700), ==, 0);
+  g_assert_true (wyl_test_create_secure_directory (root, &error));
+  g_assert_no_error (error);
 
   g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, NULL), ==,
       WYRELOG_E_POLICY);
@@ -748,9 +721,6 @@ test_handle_replay_rejects_fact_root_replacement (void)
 
   g_clear_object (&handle);
   remove_tree (base);
-#else
-  g_test_skip ("fact graph path isolation is Unix-only in this build");
-#endif
 }
 
 int

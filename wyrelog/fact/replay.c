@@ -7,7 +7,9 @@
 #include "graph-locator-private.h"
 #include "wyrelog/wyl-engine-private.h"
 
-#ifndef G_OS_WIN32
+#ifdef G_OS_WIN32
+#include <io.h>
+#else
 #include <unistd.h>
 #endif
 
@@ -520,11 +522,11 @@ resolve_fact_db_path (wyl_policy_store_t *policy, const gchar *fact_root,
     if (*out_path == NULL)
       rc = WYRELOG_E_NOMEM;
   }
-#ifndef G_OS_WIN32
   if (fd >= 0)
-    close (fd);
+#ifdef G_OS_WIN32
+    _close (fd);
 #else
-  (void) fd;
+    close (fd);
 #endif
   wyl_fact_graph_directory_clear (&directory);
   return rc;

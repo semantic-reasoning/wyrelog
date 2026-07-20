@@ -4,6 +4,12 @@ if host_machine.system() == 'windows'
   advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
     required : true)
 endif
+fact_test_support_deps = []
+fact_test_support_c_args = []
+if host_machine.system() == 'windows'
+  fact_test_support_deps += advapi32_dep
+  fact_test_support_c_args += '-D_WIN32_WINNT=0x0602'
+endif
 
 test_smoke = executable('test-smoke',
   'test-smoke.c',
@@ -280,6 +286,7 @@ if build_client
       '-DWYL_HAS_FACT_STORE',
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ]
+    test_daemon_http_facts_c_args += fact_test_support_c_args
     test_daemon_http_facts_deps = [
       wyrelog_dep,
       wyrelog_client_dep,
@@ -289,6 +296,7 @@ if build_client
       sqlite_dep,
       service_session_private_dep,
     ]
+    test_daemon_http_facts_deps += fact_test_support_deps
     if get_option('enable_audit').allowed()
       test_daemon_http_facts_c_args += '-DWYL_HAS_AUDIT'
       test_daemon_http_facts_deps += duckdb_dep
@@ -297,6 +305,7 @@ if build_client
     test_daemon_http_facts_deps += daemon_http_private_dep
     test_daemon_http_facts = executable('test-daemon-http-facts',
       'test-daemon-http-facts.c',
+      'fact-test-support.c',
       '../wyrelog/daemon/auth-registry-private.c',
       '../wyrelog/daemon/http.c',
       '../wyrelog/daemon/delta.c',
@@ -566,10 +575,11 @@ test('traits-compile', test_traits_compile)
 
 test_policy_store = executable('test-policy-store',
   'test-policy-store.c',
+  'fact-test-support.c',
   c_args : [
     '-DWYL_TEST_SQLITE_SCHEMA_PATH="' + meson.project_source_root() / 'templates' / 'access' / 'sqlite-schema.sql' + '"',
-  ],
-  dependencies : [wyrelog_dep, sqlite_dep],
+  ] + fact_test_support_c_args,
+  dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
 )
 
 test('policy-store', test_policy_store,
@@ -594,6 +604,19 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+if host_machine.system() == 'windows'
+  test_fact_graph_locator_windows = executable(
+    'test-fact-graph-locator-windows',
+    'test-fact-graph-locator-windows.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, advapi32_dep],
+  )
+
+  test('fact-graph-locator-windows', test_fact_graph_locator_windows,
+    timeout : 90,
+  )
+endif
+
 test_policy_store_service_schema = executable('test-policy-store-service-schema',
   'test-policy-store-service-schema.c',
   c_args : [
@@ -609,8 +632,10 @@ test('policy-store-service-schema', test_policy_store_service_schema,
 
 test_fact_schema = executable('test-fact-schema',
   'test-fact-schema.c',
+  'fact-test-support.c',
+  c_args : fact_test_support_c_args,
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep, sqlite_dep],
+  dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
 )
 
 test('fact-schema', test_fact_schema)
@@ -637,11 +662,13 @@ if get_option('enable_fact_store').allowed()
 
   test_fact_replay = executable('test-fact-replay',
     'test-fact-replay.c',
+    'fact-test-support.c',
     '../wyrelog/daemon/fact-status.c',
     # Keep this consumer audit-macro-unaware to cover cross-TU layout stability.
-    c_args : ['-DWYL_HAS_FACT_STORE'],
+    c_args : ['-DWYL_HAS_FACT_STORE'] + fact_test_support_c_args,
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep]
+        + fact_test_support_deps,
   )
 
   test('fact-replay', test_fact_replay)

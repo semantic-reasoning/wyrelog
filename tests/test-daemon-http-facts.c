@@ -1,19 +1,14 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
-#define _XOPEN_SOURCE 700
-#endif
-
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <sqlite3.h>
 
-#include <errno.h>
-#include <stdlib.h>
 #include <string.h>
 
 #include "daemon/delta.h"
 #include "daemon/http.h"
+#include "fact-test-support.h"
 #include "wyrelog/client.h"
 #include "wyrelog/fact/store-private.h"
 #include "wyrelog/fact/graph-locator-private.h"
@@ -59,25 +54,6 @@ remove_tree (const gchar *path)
     }
   }
   (void) g_rmdir (path);
-}
-
-static gchar *
-make_fact_root (const gchar *tmpl, GError **error)
-{
-  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
-  if (created == NULL)
-    return NULL;
-  gchar *root = realpath (created, NULL);
-  if (root != NULL)
-    return root;
-
-  gint saved_errno = errno;
-  (void) g_rmdir (created);
-  if (error != NULL && *error == NULL)
-    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
-        "Failed to resolve temporary directory '%s': %s", created,
-        g_strerror (saved_errno));
-  return NULL;
 }
 
 static gboolean
@@ -848,12 +824,10 @@ int
 main (void)
 {
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *fact_root = make_fact_root ("wyl-daemon-facts-XXXXXX",
-      &error);
+  g_autofree gchar *fact_root = wyl_test_make_secure_fact_root
+      ("wyl-daemon-facts-XXXXXX", &error);
   if (fact_root == NULL)
     return 1;
-  if (g_chmod (fact_root, 0700) != 0)
-    return 2;
 
   g_autoptr (WylHandle) handle = NULL;
   const WylHandleOpenOptions open_opts = {
@@ -897,6 +871,7 @@ main (void)
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  g_clear_object (&handle);
   remove_tree (fact_root);
   return rc;
 }

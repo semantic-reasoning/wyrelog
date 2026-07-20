@@ -7854,15 +7854,10 @@ bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root)
   if (store->fact_root_path != NULL) {
     if (g_strcmp0 (store->fact_root_path, fact_root) != 0)
       return WYRELOG_E_POLICY;
-#ifdef G_OS_WIN32
-    return WYRELOG_E_OK;
-#else
     return wyl_fact_graph_resolver_revalidate (&store->fact_root_resolver);
-#endif
   }
 
   gchar *bound_path = g_strdup (fact_root);
-#ifndef G_OS_WIN32
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
   if (rc != WYRELOG_E_OK) {
@@ -7870,7 +7865,6 @@ bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root)
     return rc;
   }
   store->fact_root_resolver = resolver;
-#endif
   store->fact_root_path = bound_path;
   return WYRELOG_E_OK;
 }
@@ -9550,7 +9544,6 @@ validate_fact_graph_options (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
-#ifndef G_OS_WIN32
 static wyrelog_error_t
 materialize_fact_graph_storage (wyl_policy_store_t *store,
     const wyl_policy_fact_graph_create_options_t *opts,
@@ -9583,7 +9576,6 @@ materialize_fact_graph_storage (wyl_policy_store_t *store,
   wyl_fact_graph_directory_clear (&directory);
   return rc;
 }
-#endif
 
 static wyrelog_error_t
 fact_graph_existing_sealed (wyl_policy_store_t *store, const gchar *tenant_id,
@@ -9765,12 +9757,6 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
   if (graph_exists || graph_sealed)
     return WYRELOG_E_POLICY;
 
-#ifdef G_OS_WIN32
-  /* The registry derives storage from a canonical fact root. Until this path
-   * walk has a Win32 reparse-point-safe implementation, fail closed instead
-   * of accepting metadata that cannot be bound to a safe physical store. */
-  return WYRELOG_E_POLICY;
-#else
   g_autofree gchar *storage_path = NULL;
   g_autofree gchar *storage_uri = NULL;
   rc = materialize_fact_graph_storage (store, opts, &storage_path,
@@ -9803,7 +9789,6 @@ wyl_policy_store_create_fact_graph (wyl_policy_store_t *store,
   if (out_storage_uri != NULL)
     *out_storage_uri = g_strdup (storage_uri);
   return WYRELOG_E_OK;
-#endif
 }
 
 wyrelog_error_t
