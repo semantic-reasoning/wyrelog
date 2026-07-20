@@ -11,6 +11,16 @@
 #include <stddef.h>
 #include <string.h>
 
+static gchar *
+try_strdup (const gchar *value)
+{
+  gsize len = strlen (value);
+  gchar *copy = g_try_malloc (len + 1);
+  if (copy != NULL)
+    memcpy (copy, value, len + 1);
+  return copy;
+}
+
 typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
     POBJECT_ATTRIBUTES, PIO_STATUS_BLOCK, PLARGE_INTEGER, ULONG, ULONG,
     ULONG, ULONG, PVOID, ULONG);
@@ -597,7 +607,7 @@ wyl_fact_graph_resolver_open (const gchar *fact_root,
       TRUE);
   if (rc != WYRELOG_E_OK)
     return rc;
-  gchar *path = g_try_strdup (fact_root);
+  gchar *path = try_strdup (fact_root);
   if (path == NULL) {
     CloseHandle (handle);
     return WYRELOG_E_NOMEM;
@@ -691,9 +701,9 @@ wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
     rc = resolver->checkpoint ("graph-opened", resolver->checkpoint_data);
   if (rc != WYRELOG_E_OK)
     goto fail;
-  out_directory->root_path = g_try_strdup (resolver->path);
-  out_directory->tenant_component = g_try_strdup (locator->tenant_component);
-  out_directory->graph_component = g_try_strdup (locator->graph_component);
+  out_directory->root_path = try_strdup (resolver->path);
+  out_directory->tenant_component = try_strdup (locator->tenant_component);
+  out_directory->graph_component = try_strdup (locator->graph_component);
   if (out_directory->root_path == NULL
       || out_directory->tenant_component == NULL
       || out_directory->graph_component == NULL) {
@@ -1106,8 +1116,8 @@ wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
   gchar *stage_copy = NULL;
   gchar *final_copy = NULL;
   if (rc == WYRELOG_E_OK) {
-    stage_copy = g_try_strdup (stage_name);
-    final_copy = g_try_strdup (final_basename);
+    stage_copy = try_strdup (stage_name);
+    final_copy = try_strdup (final_basename);
     if (stage_copy == NULL || final_copy == NULL)
       rc = WYRELOG_E_NOMEM;
   }
