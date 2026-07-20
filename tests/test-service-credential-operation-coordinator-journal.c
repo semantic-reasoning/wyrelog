@@ -503,6 +503,19 @@ fixture_child_read (JournalFixture *fixture,
 #endif
 }
 
+static wyrelog_error_t
+fixture_child_replace (JournalFixture *fixture,
+    const WylServiceCredentialOperationChildName *name, GBytes *bytes)
+{
+#ifdef G_OS_WIN32
+  return wyl_win_child_replace (&fixture->storage, &fixture->anchor, name,
+      bytes);
+#else
+  return wyl_service_credential_operation_child_replace (&fixture->storage,
+      &fixture->anchor, name, bytes);
+#endif
+}
+
 static void
 store_record (JournalFixture *fixture,
     const WylServiceCredentialOperationCoordinatorRequest *r,
@@ -2258,6 +2271,455 @@ test_operator_remediation_checkpoints (JournalFixture *fixture,
   wyl_service_credential_operation_coordinator_request_clear (&r);
 }
 
+static void
+snapshot_digest (GBytes *bytes,
+    guint8 out[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES])
+{
+  gsize size = 0;
+  const guint8 *data = g_bytes_get_data (bytes, &size);
+  g_assert_nonnull (data);
+  g_assert_cmpint (crypto_generichash (out,
+          WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES, data, size, NULL, 0),
+      ==, 0);
+}
+
+static void
+test_exact_terminal_snapshot_delete (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest target = request ();
+  WylServiceCredentialOperationCoordinatorRequest other = request ();
+  WylServiceCredentialOperationRecord published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord terminal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord other_published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord other_terminal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationCoordinatorLock lifecycle =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationCoordinatorLock wrong_lifecycle =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationChildName target_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationChildName other_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationExactDeleteExpectation expected = {
+    .request_id = target.request_id,
+    .expected_journal_version =
+        WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,
+    .terminal_kind = WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED,
+  };
+
+  store_published_record (fixture, &target, &published);
+  store_published_record (fixture, &other, &other_published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, target.request_id, 6, NULL,
+          &terminal), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, other.request_id, 6, NULL,
+          &other_terminal), ==, WYRELOG_E_OK);
+  record_name (target.request_id, &target_name);
+  record_name (other.request_id, &other_name);
+  g_autoptr (GBytes) target_bytes = NULL;
+  g_autoptr (GBytes) other_before = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &target_name, &target_bytes),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (fixture_child_read (fixture, &other_name, &other_before),
+      ==, WYRELOG_E_OK);
+  snapshot_digest (target_bytes, expected.raw_snapshot_digest);
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, target.request_id, &lifecycle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, other.request_id,
+          &wrong_lifecycle), ==, WYRELOG_E_OK);
+#ifdef G_OS_WIN32
+  WylServiceCredentialOperationChildName arbitrary_name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationCoordinatorLock mixed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylWinChildIdentity arbitrary_identity = { 0 };
+  wyrelog_error_t arbitrary_error = WYRELOG_E_INVALID;
+  HANDLE arbitrary_handle = INVALID_HANDLE_VALUE;
+  g_autoptr (GBytes) empty = g_bytes_new_static ("", 0);
+  g_assert_cmpint (wyl_service_credential_operation_child_name_validate
+      ("arbitrary-zero-lock", &arbitrary_name), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_win_child_create (&fixture->storage, &fixture->anchor,
+          &arbitrary_name, empty), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_win_nt_create_relative (fixture->storage.root_handle,
+          &arbitrary_name, GENERIC_READ, WYL_WIN_CHILD_OPEN, FILE_SHARE_READ
+          | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &arbitrary_handle,
+          &arbitrary_identity, &arbitrary_error));
+  mixed.native_handle = arbitrary_handle;
+  mixed.child_name.component = g_strdup (lifecycle.child_name.component);
+  g_assert_nonnull (mixed.child_name.component);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &mixed, &expected), ==,
+      WYRELOG_E_POLICY);
+  CloseHandle (arbitrary_handle);
+  mixed.native_handle = NULL;
+  wyl_service_credential_operation_child_name_clear (&mixed.child_name);
+  g_assert_cmpint (wyl_win_child_delete (&fixture->storage, &fixture->anchor,
+          &arbitrary_name), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_child_name_clear (&arbitrary_name);
+#endif
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &wrong_lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+
+  expected.raw_snapshot_digest[0]++;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  expected.raw_snapshot_digest[0]--;
+  expected.expected_journal_version =
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  expected.expected_journal_version =
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION;
+
+  gchar wrong_remediation[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (wrong_remediation,
+          sizeof wrong_remediation), ==, WYRELOG_E_OK);
+  expected.terminal_kind =
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE;
+  expected.remediation_request_id = wrong_remediation;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  expected.terminal_kind =
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED;
+  expected.remediation_request_id = NULL;
+
+  FixtureLock operation_lock = FIXTURE_LOCK_INIT;
+  g_assert_cmpint (fixture_child_lock (fixture, &target_name, &operation_lock),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_BUSY);
+  fixture_child_unlock (fixture, &target_name, operation_lock);
+  operation_lock = FIXTURE_LOCK_INIT;
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_OK);
+  g_autoptr (GBytes) absent = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &target_name, &absent), ==,
+      WYRELOG_E_NOT_FOUND);
+#ifndef G_OS_WIN32
+  wyl_service_credential_operation_child_fail_next_root_sync_for_test ();
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_IO);
+#endif
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_autoptr (GBytes) other_after = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &other_name, &other_after), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (other_before, other_after));
+
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &wrong_lifecycle);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, target.request_id, &lifecycle), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+
+  wyl_service_credential_operation_child_name_clear (&other_name);
+  wyl_service_credential_operation_child_name_clear (&target_name);
+  wyl_service_credential_operation_record_clear (&other_terminal);
+  wyl_service_credential_operation_record_clear (&other_published);
+  wyl_service_credential_operation_record_clear (&terminal);
+  wyl_service_credential_operation_record_clear (&published);
+  wyl_service_credential_operation_coordinator_request_clear (&other);
+  wyl_service_credential_operation_coordinator_request_clear (&target);
+}
+
+static void
+test_exact_terminal_snapshot_rejects_unretirable (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest pending = request ();
+  WylServiceCredentialOperationCoordinatorRequest legacy = request ();
+  WylServiceCredentialOperationCoordinatorRequest malformed = request ();
+  WylServiceCredentialOperationCoordinatorRequest alias = request ();
+  WylServiceCredentialOperationRecord pending_record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord terminal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationCoordinatorLock lifecycle =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationExactDeleteExpectation expected = {
+    .expected_journal_version =
+        WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,
+    .terminal_kind = WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED,
+  };
+
+  store_record (fixture, &pending, &pending_record);
+  expected.request_id = pending.request_id;
+  record_name (pending.request_id, &name);
+  g_autoptr (GBytes) bytes = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &bytes), ==,
+      WYRELOG_E_OK);
+  snapshot_digest (bytes, expected.raw_snapshot_digest);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, pending.request_id, &lifecycle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+  wyl_service_credential_operation_child_name_clear (&name);
+
+  store_published_record (fixture, &legacy, &published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, legacy.request_id, 6, NULL,
+          &terminal), ==, WYRELOG_E_OK);
+  record_name (legacy.request_id, &name);
+  terminal.version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION;
+  g_clear_pointer (&bytes, g_bytes_unref);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fixture_child_replace (fixture, &name, bytes), ==,
+      WYRELOG_E_OK);
+  expected.request_id = legacy.request_id;
+  snapshot_digest (bytes, expected.raw_snapshot_digest);
+  lifecycle = (WylServiceCredentialOperationCoordinatorLock)
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, legacy.request_id, &lifecycle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  g_autoptr (GBytes) retained = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &retained), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (bytes, retained));
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  record_name (malformed.request_id, &name);
+  g_clear_pointer (&bytes, g_bytes_unref);
+  bytes = g_bytes_new_static ("malformed", 9);
+  g_assert_cmpint (fixture_child_create (fixture, &name, bytes), ==,
+      WYRELOG_E_OK);
+  expected.request_id = malformed.request_id;
+  snapshot_digest (bytes, expected.raw_snapshot_digest);
+  lifecycle = (WylServiceCredentialOperationCoordinatorLock)
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, malformed.request_id, &lifecycle),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+
+  /* Store a well-formed v6 terminal record under a different canonical
+   * request name.  Digest equality cannot override embedded identity. */
+  wyl_service_credential_operation_child_name_clear (&name);
+  record_name (alias.request_id, &name);
+  terminal.version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION;
+  g_clear_pointer (&bytes, g_bytes_unref);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fixture_child_create (fixture, &name, bytes), ==,
+      WYRELOG_E_OK);
+  expected.request_id = alias.request_id;
+  snapshot_digest (bytes, expected.raw_snapshot_digest);
+  lifecycle = (WylServiceCredentialOperationCoordinatorLock)
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, alias.request_id, &lifecycle), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&terminal);
+  wyl_service_credential_operation_record_clear (&published);
+  wyl_service_credential_operation_record_clear (&pending_record);
+  wyl_service_credential_operation_coordinator_request_clear (&alias);
+  wyl_service_credential_operation_coordinator_request_clear (&malformed);
+  wyl_service_credential_operation_coordinator_request_clear (&legacy);
+  wyl_service_credential_operation_coordinator_request_clear (&pending);
+}
+
+static void
+test_exact_terminal_snapshot_remediation_markers (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest resumed_request = request ();
+  WylServiceCredentialOperationCoordinatorRequest revoked_request = request ();
+  WylServiceCredentialOperationRecord published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord oar =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord marked =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord terminal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylServiceCredentialOperationCoordinatorLock lifecycle =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationExactDeleteExpectation expected = {
+    .expected_journal_version =
+        WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,
+  };
+  guint8 source_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 1 };
+  guint8 fingerprint[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 2 };
+  gchar resume_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar revoke_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar wrong_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (resume_id, sizeof resume_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (revoke_id, sizeof revoke_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (wrong_id, sizeof wrong_id), ==,
+      WYRELOG_E_OK);
+
+  store_published_record (fixture, &resumed_request, &published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&published, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 6,
+          &oar), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_resume_exact
+      (&oar, resume_id, source_digest,
+          WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED, fingerprint, 7,
+          &marked), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_terminal
+      (&marked, WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED,
+          NULL, 8, &terminal), ==, WYRELOG_E_OK);
+  record_name (resumed_request.request_id, &name);
+  g_autoptr (GBytes) bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fixture_child_replace (fixture, &name, bytes), ==,
+      WYRELOG_E_OK);
+  expected.request_id = resumed_request.request_id;
+  expected.terminal_kind =
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED;
+  expected.remediation_request_id = wrong_id;
+  snapshot_digest (bytes, expected.raw_snapshot_digest);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, resumed_request.request_id,
+          &lifecycle), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  expected.remediation_request_id = resume_id;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&terminal);
+  wyl_service_credential_operation_record_clear (&marked);
+  wyl_service_credential_operation_record_clear (&oar);
+  wyl_service_credential_operation_record_clear (&published);
+
+  store_published_record (fixture, &revoked_request, &published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&published, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN, 6,
+          &oar), ==, WYRELOG_E_OK);
+  source_digest[0] = 3;
+  fingerprint[0] = 4;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_revoke_and_wipe
+      (&oar, revoke_id, source_digest, fingerprint, 7, &terminal), ==,
+      WYRELOG_E_OK);
+  record_name (revoked_request.request_id, &name);
+  g_clear_pointer (&bytes, g_bytes_unref);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&terminal,
+          &bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint (fixture_child_replace (fixture, &name, bytes), ==,
+      WYRELOG_E_OK);
+  expected.request_id = revoked_request.request_id;
+  expected.terminal_kind =
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE;
+  expected.remediation_request_id = wrong_id;
+  snapshot_digest (bytes, expected.raw_snapshot_digest);
+  lifecycle = (WylServiceCredentialOperationCoordinatorLock)
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_lock_acquire
+      (&fixture->storage, &fixture->anchor, revoked_request.request_id,
+          &lifecycle), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_POLICY);
+  expected.remediation_request_id = revoke_id;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_delete_exact_terminal_snapshot
+      (&fixture->storage, &fixture->anchor, &lifecycle, &expected), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_operation_coordinator_lock_release (&fixture->storage,
+      &fixture->anchor, &lifecycle);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&terminal);
+  wyl_service_credential_operation_record_clear (&oar);
+  wyl_service_credential_operation_record_clear (&published);
+  wyl_service_credential_operation_coordinator_request_clear (&revoked_request);
+  wyl_service_credential_operation_coordinator_request_clear (&resumed_request);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2319,5 +2781,16 @@ main (int argc, char **argv)
   g_test_add ("/coordinator/journal/operator-remediation-checkpoints",
       JournalFixture, NULL, journal_fixture_set_up,
       test_operator_remediation_checkpoints, journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/exact-terminal-delete", JournalFixture,
+      NULL, journal_fixture_set_up, test_exact_terminal_snapshot_delete,
+      journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/exact-terminal-delete-rejects",
+      JournalFixture, NULL, journal_fixture_set_up,
+      test_exact_terminal_snapshot_rejects_unretirable,
+      journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/exact-terminal-delete-remediation",
+      JournalFixture, NULL, journal_fixture_set_up,
+      test_exact_terminal_snapshot_remediation_markers,
+      journal_fixture_tear_down);
   return g_test_run ();
 }

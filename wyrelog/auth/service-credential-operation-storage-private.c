@@ -8,6 +8,7 @@
 #include <glib/gstdio.h>
 #include <sys/stat.h>
 #ifndef G_OS_WIN32
+#include <sodium.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/file.h>
@@ -659,6 +660,74 @@ posix_child_file_is_private (gint fd)
   return TRUE;
 }
 
+static WylServiceCredentialOperationBeforeExactDeleteHookForTest
+    posix_before_exact_delete_hook;
+static gpointer posix_before_exact_delete_hook_data;
+static gboolean posix_fail_next_root_sync;
+
+void
+wyl_service_credential_operation_child_set_before_exact_delete_hook_for_test
+    (WylServiceCredentialOperationBeforeExactDeleteHookForTest hook,
+    gpointer user_data)
+{
+  posix_before_exact_delete_hook = hook;
+  posix_before_exact_delete_hook_data = user_data;
+}
+
+void
+wyl_service_credential_operation_child_fail_next_root_sync_for_test (void)
+{
+  posix_fail_next_root_sync = TRUE;
+}
+
+static void
+posix_run_before_exact_delete_hook_for_test (void)
+{
+  WylServiceCredentialOperationBeforeExactDeleteHookForTest hook =
+      posix_before_exact_delete_hook;
+  gpointer user_data = posix_before_exact_delete_hook_data;
+  posix_before_exact_delete_hook = NULL;
+  posix_before_exact_delete_hook_data = NULL;
+  if (hook != NULL)
+    hook (user_data);
+}
+
+static wyrelog_error_t
+    posix_exact_delete_sync_root
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor)
+{
+  if (posix_fail_next_root_sync) {
+    posix_fail_next_root_sync = FALSE;
+    return WYRELOG_E_IO;
+  }
+  gint result;
+  do
+    result = fsync (storage->root_fd);
+  while (result != 0 && errno == EINTR);
+  if (result != 0)
+    return WYRELOG_E_IO;
+  return wyl_service_credential_operation_storage_anchor_matches (storage,
+      anchor) ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static gboolean
+posix_exact_delete_stat_shape (const struct stat *info, gsize expected_size,
+    nlink_t expected_links)
+{
+  return info != NULL && S_ISREG (info->st_mode)
+      && info->st_uid == geteuid () && (info->st_mode & 07777) == 0600
+      && info->st_size >= 0 && (guint64) info->st_size == expected_size
+      && expected_size <= WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES
+      && info->st_nlink == expected_links;
+}
+
+static gboolean
+posix_exact_delete_same_identity (const struct stat *a, const struct stat *b)
+{
+  return a->st_dev == b->st_dev && a->st_ino == b->st_ino;
+}
+
 static wyrelog_error_t
 posix_child_open (const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationRootAnchor *anchor,
@@ -857,6 +926,131 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
+    wyl_service_credential_operation_child_delete_exact
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name,
+    GBytes * expected_bytes)
+{
+  gint fd = -1;
+  struct stat before = { 0 }, after = { 0 }, named = { 0 }, unlinked = { 0 };
+  guint8 buffer[4096] = { 0 };
+  gsize expected_size = 0;
+  const guint8 *expected;
+  wyrelog_error_t rc = WYRELOG_E_POLICY;
+  gboolean removed = FALSE;
+
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || expected_bytes == NULL
+      || storage->root_fd < 0 || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  expected = g_bytes_get_data (expected_bytes, &expected_size);
+  if (expected_size > WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_MAX_BYTES)
+    return WYRELOG_E_POLICY;
+
+  fd = openat (storage->root_fd, name->component,
+      O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0) {
+    rc = posix_child_errno (errno);
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      wyrelog_error_t sync_rc = posix_exact_delete_sync_root (storage, anchor);
+      if (sync_rc != WYRELOG_E_OK)
+        rc = sync_rc;
+    }
+    return rc;
+  }
+  if (fstat (fd, &before) != 0) {
+    rc = WYRELOG_E_IO;
+    goto out;
+  }
+  if (!posix_exact_delete_stat_shape (&before, expected_size, 1))
+    goto out;
+  for (gsize offset = 0; offset < expected_size;) {
+    gsize wanted = MIN (sizeof buffer, expected_size - offset);
+    ssize_t count;
+    do
+      count = read (fd, buffer, wanted);
+    while (count < 0 && errno == EINTR);
+    if (count <= 0) {
+      rc = count < 0 ? WYRELOG_E_IO : WYRELOG_E_POLICY;
+      goto out;
+    }
+    if (memcmp (buffer, expected + offset, (gsize) count) != 0)
+      goto out;
+    offset += (gsize) count;
+  }
+  if (fstat (fd, &after) != 0) {
+    rc = WYRELOG_E_IO;
+    goto out;
+  }
+  if (!posix_exact_delete_same_identity (&before, &after)
+      || !posix_exact_delete_stat_shape (&after, expected_size, 1))
+    goto out;
+
+  posix_run_before_exact_delete_hook_for_test ();
+  if (fstatat (storage->root_fd, name->component, &named,
+          AT_SYMLINK_NOFOLLOW) != 0) {
+    rc = errno == ENOENT ? WYRELOG_E_POLICY : posix_child_errno (errno);
+    goto out;
+  }
+  if (!posix_exact_delete_same_identity (&after, &named)
+      || !posix_exact_delete_stat_shape (&named, expected_size, 1)
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    goto out;
+
+  /* The owner-only root and permanent operation lock are the cooperative
+   * writer boundary between this final identity check and unlinkat().  POSIX
+   * has no portable atomic "unlink this inode" primitive; a hostile same-UID
+   * namespace race is detected after unlink but cannot be rolled back. */
+  if (unlinkat (storage->root_fd, name->component, 0) != 0) {
+    rc = errno == ENOENT ? WYRELOG_E_POLICY : posix_child_errno (errno);
+    goto out;
+  }
+  removed = TRUE;
+  if (fstat (fd, &unlinked) != 0)
+    rc = WYRELOG_E_IO;
+  else
+    rc = posix_exact_delete_same_identity (&after, &unlinked)
+        && posix_exact_delete_stat_shape (&unlinked, expected_size, 0)
+        ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+out:
+  sodium_memzero (buffer, sizeof buffer);
+  if (fd >= 0 && close (fd) != 0 && rc == WYRELOG_E_OK)
+    rc = WYRELOG_E_IO;
+  if (removed) {
+    wyrelog_error_t sync_rc = posix_exact_delete_sync_root (storage, anchor);
+    if (sync_rc != WYRELOG_E_OK)
+      rc = sync_rc;
+  }
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_child_confirm_absent
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationChildName * name)
+{
+  struct stat info;
+  if (storage == NULL || anchor == NULL || name == NULL
+      || name->component == NULL || storage->root_fd < 0
+      || !anchor->initialized
+      || !wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  if (fstatat (storage->root_fd, name->component, &info,
+          AT_SYMLINK_NOFOLLOW) == 0)
+    return WYRELOG_E_POLICY;
+  if (errno != ENOENT)
+    return posix_child_errno (errno);
+  wyrelog_error_t rc = posix_exact_delete_sync_root (storage, anchor);
+  return rc == WYRELOG_E_OK ? WYRELOG_E_NOT_FOUND : rc;
+}
+
+wyrelog_error_t
     wyl_service_credential_operation_child_lock
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
@@ -868,6 +1062,8 @@ wyrelog_error_t
   g_autofree gchar *digest = NULL;
   g_autofree gchar *lock_name = NULL;
   gint fd;
+  struct stat lock_info;
+  struct stat named_lock_info;
   wyrelog_error_t rc;
   if (storage == NULL || anchor == NULL || name == NULL
       || name->component == NULL || storage->root_fd < 0 || !anchor->initialized
@@ -881,7 +1077,8 @@ wyrelog_error_t
       O_RDWR | O_CREAT | O_CLOEXEC | O_NOFOLLOW, 0600);
   if (fd < 0)
     return posix_child_errno (errno);
-  if (!posix_child_file_is_private (fd)) {
+  if (!posix_child_file_is_private (fd) || fstat (fd, &lock_info) != 0
+      || lock_info.st_size != 0 || lock_info.st_nlink != 1) {
     close (fd);
     return WYRELOG_E_POLICY;
   }
@@ -901,7 +1098,14 @@ wyrelog_error_t
     *out_fd = -1;
     return rc;
   }
-  if (!wyl_service_credential_operation_storage_anchor_matches
+  if (fstatat (storage->root_fd, lock_name, &named_lock_info,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_lock_info.st_mode)
+      || named_lock_info.st_uid != geteuid ()
+      || (named_lock_info.st_mode & 07777) != 0600
+      || named_lock_info.st_size != 0 || named_lock_info.st_nlink != 1
+      || named_lock_info.st_dev != lock_info.st_dev
+      || named_lock_info.st_ino != lock_info.st_ino
+      || !wyl_service_credential_operation_storage_anchor_matches
       (storage, anchor)) {
     flock (*out_fd, LOCK_UN);
     close (*out_fd);
