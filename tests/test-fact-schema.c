@@ -1,14 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
-#define _XOPEN_SOURCE 700
-#endif
-
 #include <glib.h>
 #include <glib/gstdio.h>
 
-#include <errno.h>
-#include <stdlib.h>
-
+#include "fact-test-support.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/policy/store-private.h"
 
@@ -32,37 +26,12 @@ cleanup_fact_root (const gchar *root)
   (void) g_rmdir (root);
 }
 
-#ifndef G_OS_WIN32
-static gchar *
-make_fact_root (const gchar *tmpl, GError **error)
-{
-  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
-  if (created == NULL)
-    return NULL;
-  gchar *root = realpath (created, NULL);
-  if (root != NULL)
-    return root;
-
-  gint saved_errno = errno;
-  (void) g_rmdir (created);
-  if (error != NULL && *error == NULL)
-    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
-        "Failed to resolve temporary directory '%s': %s", created,
-        g_strerror (saved_errno));
-  return NULL;
-}
-#endif
-
 static wyrelog_error_t
 open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
 {
-#ifdef G_OS_WIN32
-  (void) out_store;
-  (void) out_root;
-  return WYRELOG_E_POLICY;
-#else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = make_fact_root ("wyl-fact-schema-XXXXXX", &error);
+  g_autofree gchar *root = wyl_test_make_secure_fact_root
+      ("wyl-fact-schema-XXXXXX", &error);
   if (root == NULL)
     return WYRELOG_E_IO;
 
@@ -101,7 +70,6 @@ open_store_with_graph (wyl_policy_store_t **out_store, gchar **out_root)
   *out_store = g_steal_pointer (&store);
   *out_root = g_steal_pointer (&root);
   return WYRELOG_E_OK;
-#endif
 }
 
 static wyl_policy_fact_relation_schema_options_t
@@ -127,9 +95,6 @@ make_order_schema (const wyl_policy_fact_relation_schema_column_t *columns,
 static gint
 check_relation_schema_registration_and_validation (void)
 {
-#ifdef G_OS_WIN32
-  return 0;
-#else
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_autofree gchar *root = NULL;
   wyrelog_error_t rc = open_store_with_graph (&store, &root);
@@ -297,9 +262,9 @@ check_relation_schema_registration_and_validation (void)
       != WYRELOG_E_NOT_FOUND)
     return 24;
 
+  g_clear_pointer (&store, wyl_policy_store_close);
   cleanup_fact_root (root);
   return 0;
-#endif
 }
 
 int

@@ -25,10 +25,6 @@ tss2_esys_dep = dependency('tss2-esys', required : get_option('enable_tpm'))
 enable_audit_opt = get_option('enable_audit')
 enable_fact_store_opt = get_option('enable_fact_store')
 enable_break_glass_opt = get_option('enable_break_glass')
-if enable_fact_store_opt.allowed() and host_machine.system() == 'windows'
-  error('enable_fact_store requires Unix path isolation semantics; '
-      + 'disable enable_fact_store for native Windows builds.')
-endif
 if enable_break_glass_opt and not enable_audit_opt.allowed()
   # The break-glass override path emits an audit event with a stable
   # reason code on every arming and every override decision. Without
