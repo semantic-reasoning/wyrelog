@@ -650,6 +650,44 @@ typedef enum
   WYL_POLICY_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED = 4,
 } WylPolicyServiceHandoffRemediationOutcome;
 
+typedef enum
+{
+  WYL_POLICY_HANDOFF_REMEDIATION_SOURCE_COMMITTED_ATTENTION = 1,
+  WYL_POLICY_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED = 2,
+} WylPolicyServiceHandoffRemediationSourceKind;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_PREPARED = 1,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_SERVER_COMMITTED = 2,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_PUBLICATION_PREPARED = 3,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_FILE_PUBLISHED = 4,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_CLEANUP_REQUIRED = 5,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_OPERATOR_ACTION_REQUIRED = 6,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL = 7,
+  WYL_POLICY_HANDOFF_REMEDIATION_STATE_PUBLICATION_PLANNED = 8,
+} WylPolicyServiceHandoffRemediationJournalState;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_NONE = 0,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_RECEIPT_FOREIGN = 1,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_RECEIPT_UNCERTAIN = 2,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_ESCROW_FOREIGN = 3,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_ESCROW_UNCERTAIN = 4,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_SUCCESSOR_REVOKED = 5,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_SUCCESSOR_EXPIRED = 6,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_EXPLICIT_HOLD = 7,
+  WYL_POLICY_HANDOFF_REMEDIATION_OAR_ESCROW_MISSING = 8,
+} WylPolicyServiceHandoffRemediationOarCause;
+
+typedef enum
+{
+  WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED = 1,
+  WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_DELETED = 2,
+  WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_ALREADY_ABSENT = 3,
+} WylPolicyServiceHandoffRemediationEscrowOutcome;
+
 typedef struct
 {
   const gchar *remediation_request_id;
@@ -660,15 +698,53 @@ typedef struct
   WylPolicyServiceHandoffRemediationAction action;
   guint32 confirmation_version;
   gboolean confirmed;
+  WylPolicyServiceHandoffRemediationSourceKind source_kind;
+  guint8 journal_snapshot_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  WylPolicyServiceHandoffRemediationJournalState observed_state;
+  const gchar *source_disposition_id;
+  const gchar *source_audit_id;
+  WylPolicyServiceHandoffDispositionReason source_reason;
+  WylPolicyServiceHandoffRemediationJournalState oar_source_state;
+  WylPolicyServiceHandoffRemediationOarCause oar_cause;
+  WylPolicyServiceHandoffRemediationJournalState resume_target_state;
 } WylPolicyServiceHandoffRemediationInput;
 
 typedef struct
 {
   gboolean replayed;
   gboolean revoked_now;
+  gchar *remediation_request_id;
+  WylPolicyServiceHandoffRemediationAction action;
+  guint32 confirmation_version;
+  gboolean confirmed;
+  gint64 created_at_us;
   WylPolicyServiceSuccessorDisposition successor_disposition;
   WylPolicyServiceHandoffRemediationOutcome outcome;
+  WylPolicyServiceHandoffRemediationEscrowOutcome escrow_outcome;
   guint64 invalidation_generation;
+  guint64 credential_generation_after;
+  gint64 revoke_event_id;
+  guint64 revoke_event_generation;
+  gchar *revoke_event_request_id;
+  gchar *revoke_event_actor_subject_id;
+  gint64 revoke_event_created_at_us;
+  WylPolicyServiceHandoffRemediationSourceKind source_kind;
+  guint8 journal_snapshot_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  guint8 request_fingerprint[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  WylPolicyServiceHandoffRemediationJournalState observed_state;
+  WylPolicyServiceHandoffRemediationJournalState oar_source_state;
+  WylPolicyServiceHandoffRemediationOarCause oar_cause;
+  WylPolicyServiceHandoffRemediationJournalState resume_target_state;
+  WylPolicyServiceHandoffDispositionReason source_reason;
+  gchar *decision_request_id;
+  gchar *original_request_id;
+  gchar *original_actor_subject_id;
+  gchar *source_disposition_id;
+  gchar *source_audit_id;
+  gchar escrow_id[WYL_ID_STRING_BUF];
+  guint8 binding_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  gchar successor_credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  guint64 successor_issuance_generation;
   gchar *audit_id;
 } WylPolicyServiceHandoffRemediationResult;
 
@@ -690,7 +766,7 @@ void wyl_policy_service_handoff_disposition_result_clear
     (WylPolicyServiceHandoffDispositionResult * result);
 G_GNUC_INTERNAL void wyl_policy_service_handoff_cancellation_result_clear
     (WylPolicyServiceHandoffCancellationResult * result);
-void wyl_policy_service_handoff_remediation_result_clear
+G_GNUC_INTERNAL void wyl_policy_service_handoff_remediation_result_clear
     (WylPolicyServiceHandoffRemediationResult * result);
 
 typedef struct
@@ -1263,10 +1339,24 @@ G_GNUC_INTERNAL wyrelog_error_t
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffCancellationInput * input,
     WylPolicyServiceHandoffCancellationResult * out_result);
-wyrelog_error_t wyl_policy_store_remediate_service_handoff_exact_core
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_policy_store_remediate_service_handoff_exact_core
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store,
     const WylPolicyServiceHandoffRemediationInput * input,
+    WylPolicyServiceHandoffRemediationResult * out_result);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_policy_store_resolve_service_handoff_remediation_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const gchar * remediation_request_id,
+    const gchar * current_actor_subject_id,
+    WylPolicyServiceHandoffRemediationResult * out_result);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_policy_store_resolve_service_handoff_remediation_incident_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const gchar * original_request_id,
+    const guint8 journal_snapshot_digest
+    [WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES],
     WylPolicyServiceHandoffRemediationResult * out_result);
 /* Issuance initializes/materializes the CVK before its lifecycle savepoint.
  * A later domain failure may therefore leave only the idempotent CVK row;

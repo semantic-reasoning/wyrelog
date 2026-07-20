@@ -948,33 +948,49 @@ test('service-principal-domain', test_service_principal_domain,
 
 test_service_credential_domain_c_args = []
 test_service_credential_domain_deps = [wyrelog_dep, sodium_dep, sqlite_dep]
-test_service_credential_domain_link_with = []
+service_exchange_audit_private_source = files(
+  '../wyrelog/auth/service-exchange-audit-private.c',
+)
+
+# Non-installed companion for focused tests of hidden policy authority cores.
+# It is needed in every feature configuration because remediation stays private
+# to libwyrelog's dynamic symbol table.  Audit-enabled builds additionally link
+# the one service-exchange private compilation context below, avoiding a second
+# compilation of its audit codec in that configuration.
+test_policy_store_private_companion_sources = files(
+  '../wyrelog/policy/store.c',
+  '../wyrelog/auth/service-credential-domain.c',
+  '../wyrelog/auth/service-credential-operation-coordinator-auth-private.c',
+  '../wyrelog/auth/service-credential-operation-coordinator-proof-private.c',
+  '../wyrelog/auth/service-credential-operation-coordinator-cancel-private.c',
+)
+if not get_option('enable_audit').allowed()
+  # The policy store uses the feature-independent audit codec even when the
+  # service-exchange audit subsystem is disabled. Supply its implementation
+  # here because service_exchange_private_dep does not exist.
+  test_policy_store_private_companion_sources += \
+    service_exchange_audit_private_source
+endif
+
+test_policy_store_private_companion = static_library(
+  'test-policy-store-private-companion',
+  test_policy_store_private_companion_sources,
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : wyrelog_deps,
+  c_args : wyrelog_c_args,
+  install : false,
+  build_by_default : false,
+)
+test_service_credential_domain_link_with = [
+  test_policy_store_private_companion,
+]
 
 if get_option('enable_audit').allowed()
-  # Non-installed companion for focused tests of hidden policy authority
-  # cores.  Reuse the one service-exchange private compilation context for
-  # store.c's hidden audit helpers; the startup boundary forbids compiling
-  # service-exchange-audit-private.c in another companion.
-  test_policy_store_private_companion = static_library(
-    'test-policy-store-private-companion',
-    '../wyrelog/policy/store.c',
-    '../wyrelog/auth/service-credential-domain.c',
-    '../wyrelog/auth/service-credential-operation-coordinator-auth-private.c',
-    '../wyrelog/auth/service-credential-operation-coordinator-proof-private.c',
-    '../wyrelog/auth/service-credential-operation-coordinator-cancel-private.c',
-    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
-    dependencies : wyrelog_deps,
-    c_args : wyrelog_c_args,
-    install : false,
-    build_by_default : false,
-  )
   test_service_credential_domain_c_args += \
     '-DWYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE'
   test_service_credential_domain_c_args += \
     '-DWYL_TEST_HAS_HANDOFF_CANCELLATION'
   test_service_credential_domain_deps += service_exchange_private_dep
-  test_service_credential_domain_link_with += \
-    test_policy_store_private_companion
 endif
 
 test_service_credential_domain = executable('test-service-credential-domain',
@@ -1146,9 +1162,8 @@ test_service_exchange_audit_codec_deps = [
 if get_option('enable_audit').allowed()
   test_service_exchange_audit_codec_deps += service_exchange_private_dep
 else
-  test_service_exchange_audit_codec_sources += files(
-    '../wyrelog/auth/service-exchange-audit-private.c',
-  )
+  test_service_exchange_audit_codec_sources += \
+    service_exchange_audit_private_source
 endif
 test_service_exchange_audit_codec = executable(
   'test-service-exchange-audit-codec',
