@@ -5,10 +5,17 @@
 #include <glib.h>
 #include <libsoup/soup.h>
 
-G_BEGIN_DECLS typedef struct
+G_BEGIN_DECLS typedef enum
+{
+  WYL_DAEMON_HTTP_STRICT_JSON_STRING = 0,
+  WYL_DAEMON_HTTP_STRICT_JSON_INT64 = 1,
+} WylDaemonHttpStrictJsonFieldKind;
+
+typedef struct
 {
   const gchar *name;
   gsize max_len;
+  WylDaemonHttpStrictJsonFieldKind kind;
 } WylDaemonHttpStrictJsonField;
 
 gboolean wyl_daemon_http_socket_addresses_are_actual_loopback
