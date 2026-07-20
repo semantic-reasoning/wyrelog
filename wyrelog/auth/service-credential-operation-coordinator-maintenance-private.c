@@ -31,45 +31,6 @@ authority_transaction_finish (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
-    maintenance_proof_from_record
-    (const WylServiceCredentialOperationRecord * record, wyl_id_t * escrow_id,
-    WylPolicyServiceHandoffMaintenanceProof * out)
-{
-  wyrelog_error_t rc;
-
-  if (record == NULL || escrow_id == NULL || out == NULL)
-    return WYRELOG_E_INVALID;
-  rc = wyl_id_parse (record->escrow_id, escrow_id);
-  if (rc != WYRELOG_E_OK)
-    return WYRELOG_E_POLICY;
-  memset (out, 0, sizeof *out);
-  out->tuple = (WylPolicyServiceHandoffExactTuple) {
-  .original_request_id = record->request_id,.escrow_id =
-        escrow_id,.successor_credential_id =
-        record->successor_credential_id != NULL
-        && record->successor_credential_id[0] !=
-        '\0' ? record->
-        successor_credential_id : NULL,.successor_issuance_generation =
-        record->successor_generation,.original_actor_subject_id =
-        record->actor_subject_id,};
-  memcpy (out->tuple.binding_digest, record->escrow_binding_digest,
-      sizeof out->tuple.binding_digest);
-  if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
-    out->operation = WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE;
-    out->subject_id = record->subject_id;
-    out->tenant_id = record->tenant_id;
-  } else if (record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
-    out->operation = WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE;
-    out->old_credential_id = record->old_credential_id;
-  } else {
-    return WYRELOG_E_POLICY;
-  }
-  out->deadline_at_us = record->expires_at_us;
-  return wyl_service_credential_operation_handoff_target_digest (record,
-      out->target_digest);
-}
-
-static wyrelog_error_t
     delivery_proof_from_record
     (const WylServiceCredentialOperationRecord * record,
     const WylPolicyServiceHandoffMaintenanceProof * maintenance,
@@ -222,52 +183,6 @@ return_record (WylServiceCredentialOperationRecord *source,
   *out_outcome = outcome;
 }
 
-static void
-    remediation_proof_from_result
-    (const wyl_service_credential_handoff_remediation_result_t * result,
-    WylServiceCredentialOperationRemediationProof * proof)
-{
-  memset (proof, 0, sizeof *proof);
-  proof->remediation_request_id = result->remediation_request_id;
-  proof->decision_request_id = result->decision_request_id;
-  proof->current_actor_subject_id = result->current_actor_subject_id;
-  proof->action = result->action;
-  proof->confirmation_version = result->confirmation_version;
-  proof->confirmed = result->confirmed;
-  proof->created_at_us = result->created_at_us;
-  memcpy (proof->request_fingerprint, result->request_fingerprint,
-      sizeof proof->request_fingerprint);
-  proof->source_kind = result->source_kind;
-  memcpy (proof->source_snapshot_digest, result->journal_snapshot_digest,
-      sizeof proof->source_snapshot_digest);
-  proof->observed_state = result->observed_state;
-  proof->original_request_id = result->original_request_id;
-  proof->original_actor_subject_id = result->original_actor_subject_id;
-  proof->escrow_id = result->escrow_id;
-  memcpy (proof->binding_digest, result->binding_digest,
-      sizeof proof->binding_digest);
-  proof->successor_credential_id = result->successor_credential_id;
-  proof->successor_issuance_generation = result->successor_issuance_generation;
-  proof->source_disposition_id = result->source_disposition_id;
-  proof->source_audit_id = result->source_audit_id;
-  proof->source_reason = result->source_reason;
-  proof->oar_source_state = result->oar_source_state;
-  proof->oar_cause = result->oar_cause;
-  proof->resume_target_state = result->resume_target_state;
-  proof->outcome = result->outcome;
-  proof->escrow_outcome = result->escrow_outcome;
-  proof->credential_generation_after = result->credential_generation_after;
-  proof->audit_id = result->audit_id;
-  proof->authority_replayed = result->replayed;
-  proof->revoked_now = result->revoked_now;
-  proof->invalidation_generation = result->invalidation_generation;
-  proof->revoke_event_id = result->revoke_event_id;
-  proof->revoke_event_generation = result->revoke_event_generation;
-  proof->revoke_event_request_id = result->revoke_event_request_id;
-  proof->revoke_event_actor_subject_id = result->revoke_event_actor_subject_id;
-  proof->revoke_event_created_at_us = result->revoke_event_created_at_us;
-}
-
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_maintain_expired_locked
     (WylHandle * handle,
@@ -328,7 +243,8 @@ wyrelog_error_t
   } else if (rc != WYRELOG_E_OK) {
     goto out;
   } else {
-    remediation_proof_from_result (&remediation, &remediation_proof);
+    wyl_service_credential_operation_remediation_proof_from_result
+        (&remediation, &remediation_proof);
     if (remediation.action == WYL_SERVICE_HANDOFF_REMEDIATION_RESUME)
       rc = wyl_service_credential_operation_coordinator_checkpoint_operator_resume (storage, anchor, request_id, &remediation_proof, checkpoint_time (&record, remediation.created_at_us), &replayed, &next);
     else if (remediation.action ==
@@ -394,7 +310,8 @@ wyrelog_error_t
     goto out;
   }
 
-  rc = maintenance_proof_from_record (&record, &escrow_id, &proof);
+  rc = wyl_service_credential_operation_maintenance_proof_from_record
+      (&record, &escrow_id, &proof);
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = wyl_service_auth_authority_acquire_write
@@ -477,7 +394,8 @@ wyrelog_error_t
     next = (WylServiceCredentialOperationRecord)
         WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
     wyl_policy_service_handoff_prepared_maintenance_result_clear (&prepared);
-    rc = maintenance_proof_from_record (&record, &escrow_id, &proof);
+    rc = wyl_service_credential_operation_maintenance_proof_from_record
+        (&record, &escrow_id, &proof);
     if (rc != WYRELOG_E_OK)
       goto out;
   }

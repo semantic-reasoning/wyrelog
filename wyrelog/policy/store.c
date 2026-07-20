@@ -321,7 +321,8 @@ static gboolean service_handoff_cancellation_shape_valid
 static wyrelog_error_t service_handoff_cancellation_lookup
     (wyl_policy_store_t * store,
     const WylPolicyServiceHandoffCancellationInput * input,
-    gboolean validate_authority, gboolean strict_cardinality,
+    gboolean validate_authority, gboolean validate_escrow,
+    gboolean strict_cardinality,
     gboolean * out_found, WylPolicyServiceHandoffCancellationResult * out);
 static wyrelog_error_t service_handoff_classify_successor_without_escrow
     (wyl_policy_store_t * store,
@@ -361,7 +362,8 @@ static wyrelog_error_t
 static wyrelog_error_t
     service_handoff_cancellation_validate_committed
     (wyl_policy_store_t * store,
-    const WylPolicyServiceHandoffCancellationInput * input);
+    const WylPolicyServiceHandoffCancellationInput * input,
+    gboolean validate_escrow);
 static gchar *service_handoff_try_strdup (const gchar * value);
 static wyrelog_error_t
     service_credential_operation_fence_committed_lookup_db
@@ -3663,7 +3665,7 @@ static wyrelog_error_t
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_cancellation_lookup (store, &cancellation, TRUE,
-        TRUE, &found, &result);
+        FALSE, TRUE, &found, &result);
   if (rc == WYRELOG_E_OK && (!found
           || result.outcome !=
           WYL_POLICY_HANDOFF_CANCELLATION_COMMITTED_ATTENTION))
@@ -5009,7 +5011,8 @@ static wyrelog_error_t
     service_handoff_cancellation_lookup
     (wyl_policy_store_t * store,
     const WylPolicyServiceHandoffCancellationInput * input,
-    gboolean validate_authority, gboolean strict_cardinality,
+    gboolean validate_authority, gboolean validate_escrow,
+    gboolean strict_cardinality,
     gboolean * out_found, WylPolicyServiceHandoffCancellationResult * out)
 {
   *out_found = FALSE;
@@ -5139,7 +5142,7 @@ static wyrelog_error_t
       resolved_input.observation =
           WYL_POLICY_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED;
       rc = service_handoff_cancellation_validate_committed (store,
-          &resolved_input);
+          &resolved_input, validate_escrow);
     }
     if (rc == WYRELOG_E_OK)
       rc = service_handoff_fill_cancellation_result (resolution,
@@ -5156,7 +5159,8 @@ static wyrelog_error_t
 
 static wyrelog_error_t
 service_handoff_cancellation_validate_committed (wyl_policy_store_t *store,
-    const WylPolicyServiceHandoffCancellationInput *input)
+    const WylPolicyServiceHandoffCancellationInput *input,
+    gboolean validate_escrow)
 {
   WylServiceCredentialFenceOperation operation =
       input->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE ?
@@ -5187,6 +5191,8 @@ service_handoff_cancellation_validate_committed (wyl_policy_store_t *store,
   sodium_memzero (expected, sizeof expected);
   sodium_memzero (committed, sizeof committed);
   sodium_memzero (credential, sizeof credential);
+  if (rc == WYRELOG_E_OK && !validate_escrow)
+    return WYRELOG_E_OK;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_validate_exact_escrow (store, &input->tuple);
   gchar escrow[WYL_ID_STRING_BUF];
@@ -5351,7 +5357,7 @@ wyrelog_error_t
   guint8 fingerprint[crypto_generichash_BYTES] = { 0 };
   gboolean found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_lookup (store, input, TRUE, TRUE,
+    rc = service_handoff_cancellation_lookup (store, input, TRUE, TRUE, TRUE,
         &found, out_result);
   if (rc != WYRELOG_E_OK || found) {
     if (rc == WYRELOG_E_OK)
@@ -5437,7 +5443,7 @@ wyrelog_error_t
     memcpy (resolved_input.target_digest, input->target_digest,
         sizeof resolved_input.target_digest);
     rc = service_handoff_cancellation_validate_committed (store,
-        &resolved_input);
+        &resolved_input, TRUE);
   }
   if (rc == WYRELOG_E_OK
       && resolution == WYL_POLICY_HANDOFF_CANCELLATION_TERMINAL_NOT_COMMITTED)
@@ -15659,7 +15665,7 @@ static wyrelog_error_t
     rc = WYRELOG_E_POLICY;
   gboolean exact_found = FALSE;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_cancellation_lookup (store, &input, TRUE, TRUE,
+    rc = service_handoff_cancellation_lookup (store, &input, TRUE, TRUE, TRUE,
         &exact_found, &cancellation);
   if (rc == WYRELOG_E_OK && !exact_found)
     rc = WYRELOG_E_POLICY;
@@ -15898,7 +15904,8 @@ static wyrelog_error_t
   gboolean exact_found = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_cancellation_lookup (store, &input,
-        validate_authority, strict_cardinality, &exact_found, &cancellation);
+        validate_authority, validate_authority, strict_cardinality,
+        &exact_found, &cancellation);
   if (rc == WYRELOG_E_OK && !exact_found)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)

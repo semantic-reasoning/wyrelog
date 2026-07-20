@@ -1113,6 +1113,24 @@ if get_option('enable_audit').allowed()
     is_parallel : host_machine.system() != 'windows',
     timeout : service_credential_operation_coordinator_execute_timeout,
   )
+
+  test_service_credential_operation_coordinator_remediate = executable(
+    'test-service-credential-operation-coordinator-remediate',
+    'test-service-credential-operation-coordinator-remediate.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-remediate-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    link_with : test_policy_store_private_companion,
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_service_credential_domain_deps,
+    c_args : test_service_credential_operation_coordinator_execute_c_args,
+  )
+
+  test('service-credential-operation-coordinator-remediate',
+    test_service_credential_operation_coordinator_remediate,
+    is_parallel : host_machine.system() != 'windows',
+    timeout : service_credential_operation_coordinator_execute_timeout,
+  )
 endif
 
 test_service_credential_operation_storage = executable('test-service-credential-operation-storage',
