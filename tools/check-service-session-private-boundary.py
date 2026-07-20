@@ -16,7 +16,7 @@ import hashlib
 import json
 import locale
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import shlex
 import secrets
@@ -101,9 +101,76 @@ MANIFEST["wyl_session_get_service_issued_at_seconds_private"][
 MANIFEST["wyl_session_get_service_expires_at_seconds_private"][
     "tests/test-service-exchange-private.c"] = 1
 
+CONDITIONAL_COMPILED_OWNERS = frozenset({
+    "tests/test-service-exchange-private.c",
+})
+
 
 class BoundaryError(RuntimeError):
     pass
+
+
+def allowed_uncompiled_owners(values: list[str]) -> frozenset[str]:
+    """Validate explicit conditional owners; duplicate flags fail closed."""
+    current_c_owners = {
+        path for owners in MANIFEST.values() for path in owners
+        if path.endswith(".c")
+    }
+    invalid_config = CONDITIONAL_COMPILED_OWNERS - current_c_owners
+    if invalid_config:
+        raise BoundaryError(
+            "configured conditional owner is not a current MANIFEST C owner: "
+            + json.dumps(sorted(invalid_config)))
+    accepted = set()
+    for value in values:
+        path = PurePosixPath(value)
+        if (not value or "\\" in value or path.is_absolute()
+                or path.as_posix() != value or value.endswith("/")
+                or any(part in {"", ".", ".."} for part in value.split("/"))
+                or path.suffix != ".c"):
+            raise BoundaryError(
+                f"non-canonical uncompiled owner path: {value!r}")
+        if value not in current_c_owners:
+            raise BoundaryError(
+                f"uncompiled owner is not a current MANIFEST C owner: {value}")
+        if value not in CONDITIONAL_COMPILED_OWNERS:
+            raise BoundaryError(
+                f"uncompiled owner is not conditionally compiled: {value}")
+        if value in accepted:
+            raise BoundaryError(f"duplicate uncompiled owner allowance: {value}")
+        accepted.add(value)
+    return frozenset(accepted)
+
+
+def validate_allowance_scope(fixture_manifest: str | None,
+                             allowed: frozenset[str]) -> None:
+    if fixture_manifest is not None and allowed:
+        raise BoundaryError(
+            "--allow-uncompiled-owner cannot be used with --fixture-manifest")
+
+
+def validate_compiled_owners(root: Path,
+                             manifest: dict[str, dict[str, int]],
+                             database: dict,
+                             allowed: frozenset[str]) -> None:
+    required = {
+        path for owners in manifest.values() for path in owners
+        if path.endswith(".c")
+    }
+    missing = {
+        path for path in required
+        if str((root / path).resolve()) not in database
+    }
+    stale = sorted(allowed - missing)
+    if stale:
+        raise BoundaryError(
+            "uncompiled owner allowance is present in compile database: "
+            + json.dumps(stale))
+    unallowed = sorted(missing - allowed)
+    if unallowed:
+        raise BoundaryError(
+            "allowed compiled boundary owner missing from compile database: "
+            + json.dumps(unallowed))
 
 
 def decode_escapes(text: str) -> str:
@@ -1002,12 +1069,13 @@ def semantic_batch_tasks(tasks, compiler: list[str], compiler_id: str,
 def guarded_inspect(root: Path, manifest: dict[str, dict[str, int]],
             protected: tuple[str, ...], compiler: list[str],
             compiler_id: str, build_root: Path | None = None,
+            allowed_uncompiled: frozenset[str] = frozenset(),
             reporter_factory=HeartbeatReporter) -> None:
     reporter = make_reporter(reporter_factory)
     reporter.start()
     try:
         return inspect(root, manifest, protected, compiler, compiler_id,
-                       build_root, reporter)
+                       build_root, reporter, allowed_uncompiled)
     finally:
         try:
             reporter.stop()
@@ -1018,7 +1086,7 @@ def guarded_inspect(root: Path, manifest: dict[str, dict[str, int]],
 def inspect(root: Path, manifest: dict[str, dict[str, int]],
             protected: tuple[str, ...], compiler: list[str],
             compiler_id: str, build_root: Path | None,
-            reporter) -> None:
+            reporter, allowed_uncompiled: frozenset[str] = frozenset()) -> None:
     reporter.update("discovery", "read")
     actual = {symbol: {} for symbol in protected}
     files = list(source_files(root))
@@ -1134,14 +1202,7 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
 
     if manifest is MANIFEST:
         reporter.update("owners", "resolve", validations=2)
-        required = {str((root / path).resolve())
-                    for owners in manifest.values() for path in owners
-                    if path.endswith(".c")}
-        missing = sorted(path for path in required if path not in database)
-        if missing:
-            raise BoundaryError(
-                "allowed compiled boundary owner missing from compile database: "
-                + json.dumps(missing))
+        validate_compiled_owners(root, manifest, database, allowed_uncompiled)
 
     reporter.update("owners", "read", validations=2)
     if actual != manifest:
@@ -1280,6 +1341,10 @@ def main() -> int:
     parser.add_argument("--fixture-symbol")
     parser.add_argument("--compiler-id", default="")
     parser.add_argument("--build-root", type=Path)
+    parser.add_argument(
+        "--allow-uncompiled-owner", action="append", default=[],
+        help=("repeatable canonical repo-relative MANIFEST .c owner omitted "
+              "by this build; duplicate allowances are rejected"))
     args = parser.parse_args(argv)
     if not compiler:
         compiler = shlex.split(os.environ.get("CC", "cc"))
@@ -1289,6 +1354,9 @@ def main() -> int:
         compiler_id = "clang-cl" if "clang-cl" in name else (
             "msvc" if name in {"cl", "cl.exe"} else "gnu")
     try:
+        allowed_uncompiled = allowed_uncompiled_owners(
+            args.allow_uncompiled_owner)
+        validate_allowance_scope(args.fixture_manifest, allowed_uncompiled)
         if args.fixture_manifest is not None:
             if args.fixture_symbol not in PROTECTED:
                 raise BoundaryError("invalid fixture symbol")
@@ -1296,12 +1364,14 @@ def main() -> int:
             guarded_inspect(
                 args.root.resolve(), manifest, (args.fixture_symbol,),
                 compiler, compiler_id,
-                args.build_root.resolve() if args.build_root else None)
+                args.build_root.resolve() if args.build_root else None,
+                allowed_uncompiled)
         else:
             guarded_inspect(
                 args.root.resolve(), MANIFEST, PROTECTED, compiler,
                 compiler_id,
-                args.build_root.resolve() if args.build_root else None)
+                args.build_root.resolve() if args.build_root else None,
+                allowed_uncompiled)
     except (BoundaryError, json.JSONDecodeError, OSError) as error:
         print(error, file=sys.stderr)
         return 1

@@ -74,6 +74,85 @@ def main() -> int:
     guard_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(guard_module)
 
+    conditional_owner = "tests/test-service-exchange-private.c"
+    unconditional_owner = "wyrelog/auth/service-session-private.c"
+    synthetic_root = Path("/synthetic-service-session-boundary").resolve()
+    required_c_owners = {
+        path for owners in guard_module.MANIFEST.values() for path in owners
+        if path.endswith(".c")
+    }
+    compiled = {
+        str((synthetic_root / path).resolve()): []
+        for path in required_c_owners if path != conditional_owner
+    }
+    allowed_conditional = guard_module.allowed_uncompiled_owners(
+        [conditional_owner])
+    guard_module.validate_compiled_owners(
+        synthetic_root, guard_module.MANIFEST, compiled, allowed_conditional)
+
+    def expect_boundary_error(callback, fragment: str) -> None:
+        try:
+            callback()
+            raise AssertionError("boundary failure was accepted")
+        except guard_module.BoundaryError as error:
+            assert fragment in str(error)
+
+    expect_boundary_error(
+        lambda: guard_module.validate_compiled_owners(
+            synthetic_root, guard_module.MANIFEST, compiled, frozenset()),
+        conditional_owner)
+    compiled_without_unconditional = dict(compiled)
+    compiled_without_unconditional.pop(
+        str((synthetic_root / unconditional_owner).resolve()))
+    expect_boundary_error(
+        lambda: guard_module.validate_compiled_owners(
+            synthetic_root, guard_module.MANIFEST,
+            compiled_without_unconditional, allowed_conditional),
+        unconditional_owner)
+    compiled_with_conditional = dict(compiled)
+    compiled_with_conditional[
+        str((synthetic_root / conditional_owner).resolve())] = []
+    expect_boundary_error(
+        lambda: guard_module.validate_compiled_owners(
+            synthetic_root, guard_module.MANIFEST,
+            compiled_with_conditional, allowed_conditional),
+        "present in compile database")
+    expect_boundary_error(
+        lambda: guard_module.allowed_uncompiled_owners(
+            [unconditional_owner]),
+        "not conditionally compiled")
+    expect_boundary_error(
+        lambda: guard_module.allowed_uncompiled_owners(
+            ["tests/not-a-manifest-owner.c"]),
+        "not a current MANIFEST")
+    for noncanonical in (
+            "./tests/test-service-exchange-private.c",
+            "tests//test-service-exchange-private.c",
+            "tests/../tests/test-service-exchange-private.c",
+            "tests\\test-service-exchange-private.c",
+            "/tests/test-service-exchange-private.c",
+            "tests/test-service-exchange-private.cc"):
+        expect_boundary_error(
+            lambda value=noncanonical:
+                guard_module.allowed_uncompiled_owners([value]),
+            "non-canonical")
+    expect_boundary_error(
+        lambda: guard_module.allowed_uncompiled_owners(
+            [conditional_owner, conditional_owner]),
+        "duplicate")
+    expect_boundary_error(
+        lambda: guard_module.validate_allowance_scope(
+            "{}", allowed_conditional),
+        "cannot be used with --fixture-manifest")
+    fixture_allowance_result = subprocess.run([
+        sys.executable, str(guard), str(synthetic_root),
+        "--fixture-symbol", PROTECTED[0], "--fixture-manifest", "{}",
+        "--allow-uncompiled-owner", conditional_owner, "--", *compiler,
+    ], check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    assert fixture_allowance_result.returncode == 1
+    assert "cannot be used with --fixture-manifest" \
+        in fixture_allowance_result.stderr
+
     direct_output = "WYL_BOUNDARY_CALIBRATION_TEST — direct\n"
     direct_result = subprocess.CompletedProcess(
         ["cc"], 0, stdout=direct_output.encode("utf-8"), stderr=b"")
