@@ -169,6 +169,7 @@ struct wyl_policy_store_t
   guint64 service_authority_poison_serial;
   gint service_authority_coordination_terminal;
   WylPolicyGraphAuthorityMigrationFailStage graph_authority_migration_fail_once;
+  WylPolicyGraphAuthorityMutationFailStage mutation_fail_once;
   guint64 next_service_authority_transaction_id;
     WylPolicyAuthorityTransactionFailStage
       service_authority_transaction_fail_once;
@@ -7944,9 +7945,8 @@ static const gchar tenant_authority_insert_guard_sql[] =
     "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
     "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
     "SELECT CASE WHEN NOT ("
-    "NEW.lifecycle_state='legacy_unclassified' OR "
-    "(NEW.lifecycle_state IN ('active','sealing') AND NEW.sealed=0) OR "
-    "(NEW.lifecycle_state IN ('sealed','unsealing') AND NEW.sealed=1)) "
+    "NEW.lifecycle_state='legacy_unclassified' AND "
+    "NEW.lifecycle_generation=0 AND NEW.reconciliation_generation=0) "
     "THEN RAISE(ABORT,'invalid tenant authority') END; END";
 
 static const gchar tenant_authority_update_guard_sql[] =
@@ -7988,7 +7988,6 @@ static const gchar tenant_authority_update_guard_sql[] =
     "THEN RAISE(ABORT,'tenant promotion requires reconciliation') END; "
     "SELECT CASE WHEN NOT (OLD.lifecycle_state='legacy_unclassified' AND "
     "NEW.lifecycle_state IN ('active','sealed')) AND "
-    "NEW.lifecycle_state!=OLD.lifecycle_state AND "
     "NEW.reconciliation_generation!=OLD.reconciliation_generation "
     "THEN RAISE(ABORT,'unexpected tenant reconciliation generation') END; "
     "END";
@@ -8010,10 +8009,8 @@ static const gchar graph_authority_insert_guard_sql[] =
     "SELECT CASE WHEN NOT ("
     "(NEW.store_uuid IS NULL AND NEW.format_version IS NULL AND "
     " NEW.path_encoding_version IS NULL AND "
-    " NEW.lifecycle_state='legacy_unclassified') OR "
-    "(NEW.store_uuid IS NOT NULL AND NEW.format_version IS NOT NULL AND "
-    " NEW.path_encoding_version IS NOT NULL AND "
-    " NEW.lifecycle_state!='legacy_unclassified')) "
+    " NEW.lifecycle_state='legacy_unclassified' AND "
+    " NEW.lifecycle_generation=0 AND NEW.reconciliation_generation=0)) "
     "THEN RAISE(ABORT,'incomplete graph store identity') END; "
     "SELECT CASE WHEN NEW.store_uuid IS NOT NULL AND NOT ("
     "length(NEW.store_uuid)=36 AND substr(NEW.store_uuid,9,1)='-' AND "
@@ -8059,6 +8056,9 @@ static const gchar graph_authority_update_guard_sql[] =
     "SELECT CASE WHEN OLD.path_encoding_version IS NOT NULL AND "
     "OLD.path_encoding_version IS NOT NEW.path_encoding_version "
     "THEN RAISE(ABORT,'immutable graph path encoding version') END; "
+    "SELECT CASE WHEN OLD.lifecycle_state='legacy_unclassified' AND "
+    "OLD.sealed=1 AND NEW.sealed=0 "
+    "THEN RAISE(ABORT,'sealed legacy graph cannot be unsealed') END; "
     "SELECT CASE WHEN NOT ("
     "(NEW.store_uuid IS NULL AND NEW.format_version IS NULL AND "
     " NEW.path_encoding_version IS NULL AND "
@@ -8080,8 +8080,8 @@ static const gchar graph_authority_update_guard_sql[] =
     "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND ("
     "OLD.lifecycle_generation=9223372036854775807 OR "
     "NEW.lifecycle_generation!=OLD.lifecycle_generation+1 OR NOT ("
-    "(OLD.lifecycle_state='legacy_unclassified' AND NEW.lifecycle_state IN "
-    " ('provisioning','active','sealed','degraded')) OR "
+    "(OLD.lifecycle_state='legacy_unclassified' AND "
+    " NEW.lifecycle_state='provisioning' AND OLD.sealed=0) OR "
     "(OLD.lifecycle_state='provisioning' AND "
     " NEW.lifecycle_state IN ('active','degraded')) OR "
     "(OLD.lifecycle_state='active' AND "
@@ -8094,22 +8094,17 @@ static const gchar graph_authority_update_guard_sql[] =
     "OLD.reconciliation_generation OR "
     "NEW.reconciliation_generation>OLD.reconciliation_generation+1 "
     "THEN RAISE(ABORT,'invalid graph reconciliation generation') END; "
-    "SELECT CASE WHEN ((OLD.lifecycle_state='degraded' AND "
-    " NEW.lifecycle_state='active') OR "
-    "(OLD.lifecycle_state='legacy_unclassified' AND "
-    " NEW.lifecycle_state IN ('active','sealed','degraded'))) AND "
+    "SELECT CASE WHEN OLD.lifecycle_state='degraded' AND "
+    "NEW.lifecycle_state='active' AND "
     "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
     "THEN RAISE(ABORT,'graph transition requires reconciliation') END; "
-    "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND NOT ("
-    "(OLD.lifecycle_state='degraded' AND NEW.lifecycle_state='active') OR "
-    "(OLD.lifecycle_state='legacy_unclassified' AND "
-    " NEW.lifecycle_state IN ('active','sealed','degraded'))) AND "
+    "SELECT CASE WHEN NOT (OLD.lifecycle_state='degraded' AND "
+    "NEW.lifecycle_state='active') AND "
     "NEW.reconciliation_generation!=OLD.reconciliation_generation "
     "THEN RAISE(ABORT,'unexpected graph reconciliation generation') END; "
     "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
-    "NEW.last_error_class IS NOT OLD.last_error_class AND "
-    "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
-    "THEN RAISE(ABORT,'graph error change requires reconciliation') END; "
+    "NEW.last_error_class IS NOT OLD.last_error_class "
+    "THEN RAISE(ABORT,'graph error class requires transition') END; "
     "SELECT CASE WHEN NOT ("
     "(NEW.lifecycle_state='legacy_unclassified' AND "
     " NEW.last_error_class='none') OR "
@@ -8146,6 +8141,102 @@ graph_authority_normalize_sql (const gchar *sql)
   return g_string_free (g_steal_pointer (&normalized), FALSE);
 }
 
+static gchar *
+graph_authority_strip_sql_comments (const gchar *sql)
+{
+  g_autoptr (GString) stripped = g_string_new (NULL);
+  gboolean in_string = FALSE;
+  for (const gchar * cursor = sql; cursor != NULL && *cursor != '\0'; cursor++) {
+    if (in_string && *cursor == '\'' && cursor[1] == '\'') {
+      g_string_append_c (stripped, *cursor);
+      g_string_append_c (stripped, *++cursor);
+      continue;
+    }
+    if (*cursor == '\'') {
+      in_string = !in_string;
+      g_string_append_c (stripped, *cursor);
+      continue;
+    }
+    if (!in_string && *cursor == '-' && cursor[1] == '-') {
+      cursor += 2;
+      while (*cursor != '\0' && *cursor != '\n' && *cursor != '\r')
+        cursor++;
+      if (*cursor == '\0')
+        break;
+      g_string_append_c (stripped, ' ');
+      continue;
+    }
+    if (!in_string && *cursor == '/' && cursor[1] == '*') {
+      cursor += 2;
+      while (*cursor != '\0' && !(cursor[0] == '*' && cursor[1] == '/'))
+        cursor++;
+      if (*cursor == '\0')
+        break;
+      cursor++;
+      g_string_append_c (stripped, ' ');
+      continue;
+    }
+    g_string_append_c (stripped, *cursor);
+  }
+  return g_string_free (g_steal_pointer (&stripped), FALSE);
+}
+
+static gboolean
+graph_authority_column_segment_has_constraint (const gchar *table_sql,
+    const WylGraphAuthorityColumn *expected)
+{
+  g_autofree gchar *without_comments =
+      graph_authority_strip_sql_comments (table_sql);
+  const gchar *open = without_comments != NULL ? strchr (without_comments,
+      '(') : NULL;
+  if (open == NULL)
+    return FALSE;
+  const gchar *segment_start = open + 1;
+  guint depth = 1;
+  gboolean in_string = FALSE;
+  for (const gchar * cursor = segment_start; *cursor != '\0'; cursor++) {
+    if (in_string && *cursor == '\'' && cursor[1] == '\'') {
+      cursor++;
+      continue;
+    }
+    if (*cursor == '\'') {
+      in_string = !in_string;
+      continue;
+    }
+    if (in_string)
+      continue;
+    if (*cursor == '(') {
+      depth++;
+      continue;
+    }
+    gboolean segment_ends = *cursor == ',' && depth == 1;
+    if (*cursor == ')') {
+      if (depth == 1)
+        segment_ends = TRUE;
+      else
+        depth--;
+    }
+    if (!segment_ends)
+      continue;
+    g_autofree gchar *segment = g_strndup (segment_start,
+        (gsize) (cursor - segment_start));
+    gchar *definition = g_strstrip (segment);
+    gsize column_len = strlen (expected->column);
+    if (strlen (definition) > column_len
+        && g_ascii_strncasecmp (definition, expected->column, column_len) == 0
+        && g_ascii_isspace (definition[column_len])) {
+      g_autofree gchar *actual = graph_authority_normalize_sql (definition);
+      g_autofree gchar *constraint =
+          graph_authority_normalize_sql (expected->constraint_sql);
+      return strstr (actual, constraint) != NULL;
+    }
+    if (*cursor == ')')
+      break;
+    segment_start = cursor + 1;
+  }
+  return FALSE;
+}
+
 static wyrelog_error_t
 graph_authority_table_has_constraint (sqlite3 *db,
     const WylGraphAuthorityColumn *expected, gboolean *out_matches)
@@ -8163,10 +8254,8 @@ graph_authority_table_has_constraint (sqlite3 *db,
   int step = sqlite3_step (stmt);
   if (step == SQLITE_ROW) {
     const gchar *table_sql = (const gchar *) sqlite3_column_text (stmt, 0);
-    g_autofree gchar *actual = graph_authority_normalize_sql (table_sql);
-    g_autofree gchar *constraint =
-        graph_authority_normalize_sql (expected->constraint_sql);
-    *out_matches = strstr (actual, constraint) != NULL;
+    *out_matches = graph_authority_column_segment_has_constraint (table_sql,
+        expected);
   }
   sqlite3_finalize (stmt);
   if (step != SQLITE_ROW)
@@ -8368,6 +8457,17 @@ wyl_policy_store_graph_authority_migration_fail_once (wyl_policy_store_t *store,
       WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT)
     return;
   store->graph_authority_migration_fail_once = stage;
+}
+
+void
+wyl_policy_store_graph_authority_mutation_fail_once (wyl_policy_store_t *store,
+    WylPolicyGraphAuthorityMutationFailStage stage)
+{
+  if (store == NULL || stage <=
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_NONE || stage >=
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_COUNT)
+    return;
+  store->mutation_fail_once = stage;
 }
 
 static wyrelog_error_t
@@ -10344,6 +10444,16 @@ typedef struct
 } GraphAuthorityMutationFrame;
 
 static wyrelog_error_t
+graph_authority_mutation_checkpoint (wyl_policy_store_t *store,
+    WylPolicyGraphAuthorityMutationFailStage stage)
+{
+  if (store->mutation_fail_once != stage)
+    return WYRELOG_E_OK;
+  store->mutation_fail_once = WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_NONE;
+  return WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
 graph_authority_mutation_begin (wyl_policy_store_t *store,
     GraphAuthorityMutationFrame *frame)
 {
@@ -10472,6 +10582,9 @@ wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, TRUE, &applied);
   sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   if (rc != WYRELOG_E_OK)
     return graph_authority_mutation_complete (store, &frame, rc);
   if (applied) {
@@ -10484,6 +10597,9 @@ wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
         1, 0, expected_lifecycle_generation < G_MAXINT64, store_uuid,
         format_version, path_encoding_version, out_result);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
   return graph_authority_mutation_complete (store, &frame, rc);
 }
 
@@ -10559,6 +10675,9 @@ wyl_policy_store_transition_graph_authority (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, FALSE, &applied);
   sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   if (rc != WYRELOG_E_OK)
     return graph_authority_mutation_complete (store, &frame, rc);
   if (applied) {
@@ -10570,6 +10689,9 @@ wyl_policy_store_transition_graph_authority (wyl_policy_store_t *store,
         1, 0, expected_lifecycle_generation < G_MAXINT64, NULL, 0, 0,
         out_result);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
   return graph_authority_mutation_complete (store, &frame, rc);
 }
 
@@ -10614,6 +10736,9 @@ wyl_policy_store_reconcile_graph_authority (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, FALSE, &applied);
   sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   if (rc != WYRELOG_E_OK)
     return graph_authority_mutation_complete (store, &frame, rc);
   if (applied) {
@@ -10627,6 +10752,9 @@ wyl_policy_store_reconcile_graph_authority (wyl_policy_store_t *store,
         && expected_reconciliation_generation < G_MAXINT64,
         NULL, 0, 0, out_result);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
   return graph_authority_mutation_complete (store, &frame, rc);
 }
 
@@ -10694,6 +10822,9 @@ wyl_policy_store_transition_tenant_authority (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, FALSE, &applied);
   sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   if (rc != WYRELOG_E_OK)
     return graph_authority_mutation_complete (store, &frame, rc);
   if (applied) {
@@ -10704,6 +10835,9 @@ wyl_policy_store_transition_tenant_authority (wyl_policy_store_t *store,
         target_state, 1, 0, expected_lifecycle_generation < G_MAXINT64,
         out_result);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
   return graph_authority_mutation_complete (store, &frame, rc);
 }
 
@@ -10754,6 +10888,9 @@ wyl_policy_store_reconcile_tenant_authority (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = authority_update_step (store, stmt, FALSE, &applied);
   sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   if (rc != WYRELOG_E_OK)
     return graph_authority_mutation_complete (store, &frame, rc);
   if (applied) {
@@ -10765,6 +10902,9 @@ wyl_policy_store_reconcile_tenant_authority (wyl_policy_store_t *store,
         target_state, 1, 1, expected_lifecycle_generation < G_MAXINT64
         && expected_reconciliation_generation < G_MAXINT64, out_result);
   }
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
   return graph_authority_mutation_complete (store, &frame, rc);
 }
 
