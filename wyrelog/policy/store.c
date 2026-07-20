@@ -44,6 +44,7 @@
 
 #include "policy/store-handoff-delivery-private.h"
 #include "policy/store-handoff-maintenance-private.h"
+#include "policy/store-handoff-retirement-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -692,6 +693,7 @@ static const gchar *const required_tables[] = {
   "service_credential_handoff_dispositions",
   "service_credential_handoff_cancellation_claims",
   "service_credential_handoff_remediation_actions",
+  "service_credential_handoff_retirement_receipts",
 };
 
 /* Kept separate from the baseline DDL so upgrading a pre-#353 store can
@@ -1125,6 +1127,95 @@ static const gchar service_schema_ddl[] =
     " (original_request_id,escrow_id,binding_digest,successor_credential_id,"
     " successor_issuance_generation,action)"
     " WHERE action='revoke_and_wipe';"
+    "CREATE TABLE IF NOT EXISTS service_credential_handoff_retirement_receipts ("
+    " original_request_id TEXT NOT NULL PRIMARY KEY"
+    "   CHECK (typeof(original_request_id)='text'"
+    "   AND length(original_request_id)=27 AND instr(original_request_id,char(0))=0),"
+    " terminal_kind TEXT NOT NULL CHECK (terminal_kind IN"
+    "   ('file_published','operator_revoke_and_wipe')) ,"
+    " raw_journal_snapshot_digest BLOB NOT NULL CHECK"
+    "   (typeof(raw_journal_snapshot_digest)='blob'"
+    "   AND length(raw_journal_snapshot_digest)=32"
+    "   AND raw_journal_snapshot_digest<>zeroblob(32)),"
+    " delivery_disposition_id TEXT CHECK (delivery_disposition_id IS NULL OR"
+    "   (typeof(delivery_disposition_id)='text'"
+    "   AND length(delivery_disposition_id)=36"
+    "   AND instr(delivery_disposition_id,char(0))=0)),"
+    " delivery_audit_id TEXT CHECK (delivery_audit_id IS NULL OR"
+    "   (typeof(delivery_audit_id)='text' AND length(delivery_audit_id)=36"
+    "   AND instr(delivery_audit_id,char(0))=0)),"
+    " delivery_proof_digest BLOB NOT NULL CHECK"
+    "   (typeof(delivery_proof_digest)='blob'"
+    "   AND length(delivery_proof_digest)=32),"
+    " revoke_remediation_request_id TEXT CHECK"
+    "   (revoke_remediation_request_id IS NULL OR"
+    "   (typeof(revoke_remediation_request_id)='text'"
+    "   AND length(revoke_remediation_request_id)=27"
+    "   AND instr(revoke_remediation_request_id,char(0))=0)),"
+    " revoke_audit_id TEXT CHECK (revoke_audit_id IS NULL OR"
+    "   (typeof(revoke_audit_id)='text' AND length(revoke_audit_id)=36"
+    "   AND instr(revoke_audit_id,char(0))=0)),"
+    " revoke_event_id INTEGER CHECK (revoke_event_id IS NULL OR revoke_event_id>0),"
+    " resume_remediation_request_id TEXT CHECK"
+    "   (resume_remediation_request_id IS NULL OR"
+    "   (typeof(resume_remediation_request_id)='text'"
+    "   AND length(resume_remediation_request_id)=27"
+    "   AND instr(resume_remediation_request_id,char(0))=0)),"
+    " resume_audit_id TEXT CHECK (resume_audit_id IS NULL OR"
+    "   (typeof(resume_audit_id)='text' AND length(resume_audit_id)=36"
+    "   AND instr(resume_audit_id,char(0))=0)),"
+    " remediation_source_snapshot_digest BLOB CHECK"
+    "   (remediation_source_snapshot_digest IS NULL OR"
+    "   (typeof(remediation_source_snapshot_digest)='blob'"
+    "   AND length(remediation_source_snapshot_digest)=32"
+    "   AND remediation_source_snapshot_digest<>zeroblob(32))),"
+    " remediation_request_fingerprint BLOB CHECK"
+    "   (remediation_request_fingerprint IS NULL OR"
+    "   (typeof(remediation_request_fingerprint)='blob'"
+    "   AND length(remediation_request_fingerprint)=32"
+    "   AND remediation_request_fingerprint<>zeroblob(32))),"
+    " retention_basis_at_us INTEGER NOT NULL CHECK (retention_basis_at_us>0),"
+    " retired_at_us INTEGER NOT NULL CHECK"
+    "   (retired_at_us>=retention_basis_at_us"
+    "   AND retired_at_us-retention_basis_at_us>=2592000000000),"
+    " CHECK ((terminal_kind='file_published'"
+    "     AND delivery_disposition_id IS NOT NULL"
+    "     AND delivery_audit_id IS NOT NULL"
+    "     AND delivery_proof_digest<>zeroblob(32)"
+    "     AND revoke_remediation_request_id IS NULL"
+    "     AND revoke_audit_id IS NULL AND revoke_event_id IS NULL"
+    "     AND ((resume_remediation_request_id IS NULL"
+    "       AND resume_audit_id IS NULL"
+    "       AND remediation_source_snapshot_digest IS NULL"
+    "       AND remediation_request_fingerprint IS NULL)"
+    "      OR (resume_remediation_request_id IS NOT NULL"
+    "       AND resume_audit_id IS NOT NULL"
+    "       AND remediation_source_snapshot_digest<>zeroblob(32)"
+    "       AND remediation_request_fingerprint<>zeroblob(32))))"
+    "   OR (terminal_kind='operator_revoke_and_wipe'"
+    "     AND delivery_disposition_id IS NULL AND delivery_audit_id IS NULL"
+    "     AND delivery_proof_digest=zeroblob(32)"
+    "     AND revoke_remediation_request_id IS NOT NULL"
+    "     AND revoke_audit_id IS NOT NULL"
+    "     AND resume_remediation_request_id IS NULL"
+    "     AND resume_audit_id IS NULL"
+    "     AND remediation_source_snapshot_digest<>zeroblob(32)"
+    "     AND remediation_request_fingerprint<>zeroblob(32)))"
+    ");"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_raw"
+    " ON service_credential_handoff_retirement_receipts"
+    " (raw_journal_snapshot_digest);"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_delivery"
+    " ON service_credential_handoff_retirement_receipts"
+    " (delivery_disposition_id) WHERE delivery_disposition_id IS NOT NULL;"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_revoke"
+    " ON service_credential_handoff_retirement_receipts"
+    " (revoke_remediation_request_id)"
+    " WHERE revoke_remediation_request_id IS NOT NULL;"
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_resume"
+    " ON service_credential_handoff_retirement_receipts"
+    " (resume_remediation_request_id)"
+    " WHERE resume_remediation_request_id IS NOT NULL;"
     "CREATE TABLE IF NOT EXISTS service_authority_writer_gate ("
     " singleton INTEGER PRIMARY KEY CHECK (singleton = 1),"
     " lock_word INTEGER NOT NULL CHECK (lock_word = 0)"
@@ -1247,6 +1338,14 @@ static const gchar service_schema_ddl[] =
     "   WHERE cancellation_request_id = NEW.remediation_request_id)"
     " BEGIN SELECT RAISE(ABORT,"
     "   'service handoff remediation request collides with cancellation request'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_handoff_retirement_no_update"
+    " BEFORE UPDATE ON service_credential_handoff_retirement_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service credential handoff retirement receipts are append-only'); END;"
+    "CREATE TRIGGER IF NOT EXISTS trg_service_handoff_retirement_no_delete"
+    " BEFORE DELETE ON service_credential_handoff_retirement_receipts"
+    " BEGIN SELECT RAISE(ABORT,"
+    "   'service credential handoff retirement receipts are permanent'); END;"
     "CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_remediation_collision"
     " BEFORE INSERT ON service_domain_requests"
     " WHEN EXISTS (SELECT 1 FROM service_credential_handoff_remediation_actions"
@@ -1470,6 +1569,26 @@ static const gchar *const service_handoff_remediation_needles[] = {
   NULL,
 };
 
+static const gchar *const service_handoff_retirement_needles[] = {
+  "check(typeof(original_request_id)='text'andlength(original_request_id)=27andinstr(original_request_id,char(0))=0)",
+  "check(terminal_kindin('file_published','operator_revoke_and_wipe'))",
+  "check(typeof(raw_journal_snapshot_digest)='blob'andlength(raw_journal_snapshot_digest)=32andraw_journal_snapshot_digest<>zeroblob(32))",
+  "check(delivery_disposition_idisnullor(typeof(delivery_disposition_id)='text'andlength(delivery_disposition_id)=36andinstr(delivery_disposition_id,char(0))=0))",
+  "check(delivery_audit_idisnullor(typeof(delivery_audit_id)='text'andlength(delivery_audit_id)=36andinstr(delivery_audit_id,char(0))=0))",
+  "check(typeof(delivery_proof_digest)='blob'andlength(delivery_proof_digest)=32)",
+  "check(revoke_remediation_request_idisnullor(typeof(revoke_remediation_request_id)='text'andlength(revoke_remediation_request_id)=27andinstr(revoke_remediation_request_id,char(0))=0))",
+  "check(revoke_audit_idisnullor(typeof(revoke_audit_id)='text'andlength(revoke_audit_id)=36andinstr(revoke_audit_id,char(0))=0))",
+  "check(revoke_event_idisnullorrevoke_event_id>0)",
+  "check(resume_remediation_request_idisnullor(typeof(resume_remediation_request_id)='text'andlength(resume_remediation_request_id)=27andinstr(resume_remediation_request_id,char(0))=0))",
+  "check(resume_audit_idisnullor(typeof(resume_audit_id)='text'andlength(resume_audit_id)=36andinstr(resume_audit_id,char(0))=0))",
+  "check(remediation_source_snapshot_digestisnullor(typeof(remediation_source_snapshot_digest)='blob'andlength(remediation_source_snapshot_digest)=32andremediation_source_snapshot_digest<>zeroblob(32)))",
+  "check(remediation_request_fingerprintisnullor(typeof(remediation_request_fingerprint)='blob'andlength(remediation_request_fingerprint)=32andremediation_request_fingerprint<>zeroblob(32)))",
+  "check(retention_basis_at_us>0)",
+  "check(retired_at_us>=retention_basis_at_usandretired_at_us-retention_basis_at_us>=2592000000000)",
+  "check((terminal_kind='file_published'anddelivery_disposition_idisnotnullanddelivery_audit_idisnotnullanddelivery_proof_digest<>zeroblob(32)andrevoke_remediation_request_idisnullandrevoke_audit_idisnullandrevoke_event_idisnulland((resume_remediation_request_idisnullandresume_audit_idisnullandremediation_source_snapshot_digestisnullandremediation_request_fingerprintisnull)or(resume_remediation_request_idisnotnullandresume_audit_idisnotnullandremediation_source_snapshot_digest<>zeroblob(32)andremediation_request_fingerprint<>zeroblob(32))))or(terminal_kind='operator_revoke_and_wipe'anddelivery_disposition_idisnullanddelivery_audit_idisnullanddelivery_proof_digest=zeroblob(32)andrevoke_remediation_request_idisnotnullandrevoke_audit_idisnotnullandresume_remediation_request_idisnullandresume_audit_idisnullandremediation_source_snapshot_digest<>zeroblob(32)andremediation_request_fingerprint<>zeroblob(32)))",
+  NULL,
+};
+
 static const gchar *const service_handoff_cancellation_needles[] = {
   "check(typeof(cancellation_request_id)='text'andlength(cancellation_request_id)=27andinstr(cancellation_request_id,char(0))=0)",
   "check(typeof(request_fingerprint)='blob'andlength(request_fingerprint)=32)",
@@ -1590,6 +1709,10 @@ static const ServiceTableDescriptor service_table_descriptors[] = {
         "remediation_request_id:TEXT:1::1,request_fingerprint:BLOB:1::0,incident_fingerprint:BLOB:1::0,decision_request_id:TEXT:1::0,original_request_id:TEXT:1::0,original_actor_subject_id:TEXT:1::0,current_actor_subject_id:TEXT:1::0,source_kind:TEXT:1::0,journal_snapshot_digest:BLOB:1::0,observed_state:TEXT:1::0,source_disposition_id:TEXT:0::0,source_audit_id:TEXT:0::0,source_reason:TEXT:0::0,oar_source_state:TEXT:0::0,oar_cause:TEXT:0::0,resume_target_state:TEXT:0::0,escrow_id:TEXT:1::0,binding_digest:BLOB:1::0,successor_credential_id:TEXT:1::0,successor_issuance_generation:INTEGER:1::0,action:TEXT:1::0,confirmation_version:INTEGER:1::0,confirmed:INTEGER:1::0,outcome:TEXT:1::0,escrow_outcome:TEXT:1::0,credential_generation_after:INTEGER:1::0,revoke_event_id:INTEGER:0::0,revoke_event_generation:INTEGER:0::0,revoke_event_request_id:TEXT:0::0,revoke_event_actor_subject_id:TEXT:0::0,revoke_event_created_at_us:INTEGER:0::0,audit_id:TEXT:1::0,created_at_us:INTEGER:1::0",
         service_handoff_remediation_needles, 40, "",
       "idx_service_handoff_completed_revoke:1:c:1:0:4:original_request_id:0:BINARY:1,1:16:escrow_id:0:BINARY:1,2:17:binding_digest:0:BINARY:1,3:18:successor_credential_id:0:BINARY:1,4:19:successor_issuance_generation:0:BINARY:1,5:20:action:0:BINARY:1,6:-1::0:BINARY:0;idx_service_handoff_remediation_incident:1:c:0:0:2:incident_fingerprint:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_remediation_actions_1:1:pk:0:0:0:remediation_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_remediation_actions_2:1:u:0:0:3:decision_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_remediation_actions_3:1:u:0:0:31:audit_id:0:BINARY:1,1:-1::0:BINARY:0"},
+  {"service_credential_handoff_retirement_receipts",
+        "original_request_id:TEXT:1::1,terminal_kind:TEXT:1::0,raw_journal_snapshot_digest:BLOB:1::0,delivery_disposition_id:TEXT:0::0,delivery_audit_id:TEXT:0::0,delivery_proof_digest:BLOB:1::0,revoke_remediation_request_id:TEXT:0::0,revoke_audit_id:TEXT:0::0,revoke_event_id:INTEGER:0::0,resume_remediation_request_id:TEXT:0::0,resume_audit_id:TEXT:0::0,remediation_source_snapshot_digest:BLOB:0::0,remediation_request_fingerprint:BLOB:0::0,retention_basis_at_us:INTEGER:1::0,retired_at_us:INTEGER:1::0",
+        service_handoff_retirement_needles, 16, "",
+      "idx_service_handoff_retirement_delivery:1:c:1:0:3:delivery_disposition_id:0:BINARY:1,1:-1::0:BINARY:0;idx_service_handoff_retirement_raw:1:c:0:0:2:raw_journal_snapshot_digest:0:BINARY:1,1:-1::0:BINARY:0;idx_service_handoff_retirement_resume:1:c:1:0:9:resume_remediation_request_id:0:BINARY:1,1:-1::0:BINARY:0;idx_service_handoff_retirement_revoke:1:c:1:0:6:revoke_remediation_request_id:0:BINARY:1,1:-1::0:BINARY:0;sqlite_autoindex_service_credential_handoff_retirement_receipts_1:1:pk:0:0:0:original_request_id:0:BINARY:1,1:-1::0:BINARY:0"},
 };
 
 static const ServiceIndexDescriptor service_index_descriptors[] = {
@@ -1605,6 +1728,18 @@ static const ServiceIndexDescriptor service_index_descriptors[] = {
   {"idx_service_handoff_completed_revoke",
         "service_credential_handoff_remediation_actions",
       "createuniqueindexidx_service_handoff_completed_revokeonservice_credential_handoff_remediation_actions(original_request_id,escrow_id,binding_digest,successor_credential_id,successor_issuance_generation,action)whereaction='revoke_and_wipe'"},
+  {"idx_service_handoff_retirement_raw",
+        "service_credential_handoff_retirement_receipts",
+      "createuniqueindexidx_service_handoff_retirement_rawonservice_credential_handoff_retirement_receipts(raw_journal_snapshot_digest)"},
+  {"idx_service_handoff_retirement_delivery",
+        "service_credential_handoff_retirement_receipts",
+      "createuniqueindexidx_service_handoff_retirement_deliveryonservice_credential_handoff_retirement_receipts(delivery_disposition_id)wheredelivery_disposition_idisnotnull"},
+  {"idx_service_handoff_retirement_revoke",
+        "service_credential_handoff_retirement_receipts",
+      "createuniqueindexidx_service_handoff_retirement_revokeonservice_credential_handoff_retirement_receipts(revoke_remediation_request_id)whererevoke_remediation_request_idisnotnull"},
+  {"idx_service_handoff_retirement_resume",
+        "service_credential_handoff_retirement_receipts",
+      "createuniqueindexidx_service_handoff_retirement_resumeonservice_credential_handoff_retirement_receipts(resume_remediation_request_id)whereresume_remediation_request_idisnotnull"},
 };
 
 static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
@@ -1666,6 +1801,12 @@ static const ServiceTriggerDescriptor service_trigger_descriptors[] = {
   {"trg_service_handoff_remediation_no_cancellation_collision",
         "service_credential_handoff_remediation_actions",
       "createtriggertrg_service_handoff_remediation_no_cancellation_collisionbeforeinsertonservice_credential_handoff_remediation_actionswhenexists(select1fromservice_credential_handoff_cancellation_claimswherecancellation_request_id=new.remediation_request_id)beginselectraise(abort,'servicehandoffremediationrequestcollideswithcancellationrequest');end"},
+  {"trg_service_handoff_retirement_no_update",
+        "service_credential_handoff_retirement_receipts",
+      "createtriggertrg_service_handoff_retirement_no_updatebeforeupdateonservice_credential_handoff_retirement_receiptsbeginselectraise(abort,'servicecredentialhandoffretirementreceiptsareappend-only');end"},
+  {"trg_service_handoff_retirement_no_delete",
+        "service_credential_handoff_retirement_receipts",
+      "createtriggertrg_service_handoff_retirement_no_deletebeforedeleteonservice_credential_handoff_retirement_receiptsbeginselectraise(abort,'servicecredentialhandoffretirementreceiptsarepermanent');end"},
   {"trg_service_domain_requests_no_remediation_collision",
         "service_domain_requests",
       "createtriggertrg_service_domain_requests_no_remediation_collisionbeforeinsertonservice_domain_requestswhenexists(select1fromservice_credential_handoff_remediation_actionswhereremediation_request_id=new.request_id)beginselectraise(abort,'servicedomainrequestcollideswithservicehandoffremediationrequest');end"},
@@ -3854,10 +3995,55 @@ service_handoff_validate_exact_audit_pair (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
+service_handoff_validate_historical_revoke_event (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffRemediationInput *input, gint64 event_id,
+    guint64 event_generation, const gchar *event_request,
+    const gchar *event_actor, gint64 event_created)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT 1 FROM service_credential_events WHERE event_id=?"
+      " AND credential_id=? AND event='revoked' AND from_state='active'"
+      " AND to_state='revoked' AND generation=? AND actor_subject_id=?"
+      " AND request_id=? AND created_at_us=?;";
+  wyrelog_error_t rc = event_id > 0 && event_generation > 0
+      && event_request != NULL && event_actor != NULL && event_created > 0 ?
+      prepare_stmt (store->db, sql, &stmt) : WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && (input->tuple.successor_issuance_generation == G_MAXINT64
+          || event_generation !=
+          input->tuple.successor_issuance_generation + 1))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_int64 (stmt, 1, event_id) != SQLITE_OK
+          || (rc = bind_text (stmt, 2,
+                  input->tuple.successor_credential_id)) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 3,
+              (sqlite3_int64) event_generation) != SQLITE_OK
+          || (rc = bind_text (stmt, 4, event_actor)) != WYRELOG_E_OK
+          || (rc = bind_text (stmt, 5, event_request)) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 6, event_created) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    int final_step = sqlite3_step (stmt);
+    rc = final_step == SQLITE_DONE ? WYRELOG_E_OK :
+        service_handoff_sqlite_error (store->db, final_step);
+  } else if (rc == WYRELOG_E_OK) {
+    rc = step == SQLITE_DONE ? WYRELOG_E_POLICY :
+        service_handoff_sqlite_error (store->db, step);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+static wyrelog_error_t
 service_handoff_remediation_lookup (wyl_policy_store_t *store,
     const WylPolicyServiceHandoffRemediationInput *input,
     const guint8 fingerprint[crypto_generichash_BYTES],
     const guint8 incident_fingerprint[crypto_generichash_BYTES],
+    gboolean validate_live_state,
     gboolean *out_found, WylPolicyServiceHandoffRemediationResult *out)
 {
   *out_found = FALSE;
@@ -3978,18 +4164,18 @@ service_handoff_remediation_lookup (wyl_policy_store_t *store,
           "service.credential.handoff.remediation.resume" :
           "service.credential.handoff.remediation.revoke_and_wipe", successor,
           input->remediation_request_id);
-    if (rc == WYRELOG_E_OK && escrow_outcome ==
+    if (rc == WYRELOG_E_OK && validate_live_state && escrow_outcome ==
         WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED)
       rc = service_handoff_validate_exact_escrow (store, &input->tuple);
-    if (rc == WYRELOG_E_OK && escrow_outcome !=
+    if (rc == WYRELOG_E_OK && validate_live_state && escrow_outcome !=
         WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED)
       rc = service_handoff_escrow_absent (store, input->tuple.escrow_id);
-    if (rc == WYRELOG_E_OK && escrow_outcome !=
+    if (rc == WYRELOG_E_OK && validate_live_state && escrow_outcome !=
         WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED)
       rc = service_handoff_request_escrow_absent (store,
           input->tuple.original_request_id);
     WylPolicyServiceSuccessorExactClassification classification = { 0 };
-    if (rc == WYRELOG_E_OK)
+    if (rc == WYRELOG_E_OK && validate_live_state)
       rc = service_handoff_classify_successor_without_escrow (store,
           &input->tuple, stored_created_at_us, &classification);
     gint64 event_id = sqlite3_column_type (stmt, 25) == SQLITE_INTEGER ?
@@ -4000,18 +4186,18 @@ service_handoff_remediation_lookup (wyl_policy_store_t *store,
         29) == SQLITE_INTEGER ? sqlite3_column_int64 (stmt, 29) : 0;
     guint64 credential_generation_after =
         (guint64) sqlite3_column_int64 (stmt, 24);
-    if (rc == WYRELOG_E_OK
+    if (rc == WYRELOG_E_OK && validate_live_state
         && classification.observed_generation != credential_generation_after)
       rc = WYRELOG_E_POLICY;
-    if (rc == WYRELOG_E_OK
+    if (rc == WYRELOG_E_OK && validate_live_state
         && outcome == WYL_POLICY_HANDOFF_REMEDIATION_RECORDED
         && classification.disposition != WYL_POLICY_SERVICE_SUCCESSOR_ACTIVE)
       rc = WYRELOG_E_POLICY;
-    if (rc == WYRELOG_E_OK
+    if (rc == WYRELOG_E_OK && validate_live_state
         && outcome == WYL_POLICY_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED
         && classification.disposition != WYL_POLICY_SERVICE_SUCCESSOR_EXPIRED)
       rc = WYRELOG_E_POLICY;
-    if (rc == WYRELOG_E_OK
+    if (rc == WYRELOG_E_OK && validate_live_state
         && (outcome == WYL_POLICY_HANDOFF_REMEDIATION_REVOKED_AND_WIPED
             || outcome ==
             WYL_POLICY_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED)
@@ -4025,6 +4211,13 @@ service_handoff_remediation_lookup (wyl_policy_store_t *store,
                 event_actor) != 0
             || classification.revocation_event_created_at_us != event_created))
       rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && !validate_live_state
+        && (outcome == WYL_POLICY_HANDOFF_REMEDIATION_REVOKED_AND_WIPED
+            || outcome ==
+            WYL_POLICY_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED))
+      rc = service_handoff_validate_historical_revoke_event (store, input,
+          event_id, event_generation, event_request, event_actor,
+          event_created);
     if (rc == WYRELOG_E_OK)
       rc = service_handoff_fill_remediation_result (input, audit, outcome,
           TRUE, FALSE, disposition, escrow_outcome,
@@ -4045,7 +4238,8 @@ service_handoff_remediation_lookup (wyl_policy_store_t *store,
 
 static wyrelog_error_t
 service_handoff_remediation_resolve_stmt (wyl_policy_store_t *store,
-    sqlite3_stmt *stmt, WylPolicyServiceHandoffRemediationResult *out)
+    sqlite3_stmt *stmt, gboolean validate_live_state,
+    WylPolicyServiceHandoffRemediationResult *out)
 {
   int step = sqlite3_step (stmt);
   if (step != SQLITE_ROW)
@@ -4204,7 +4398,7 @@ service_handoff_remediation_resolve_stmt (wyl_policy_store_t *store,
   gboolean found = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_remediation_lookup (store, &input, fingerprint,
-        incident_fingerprint, &found, out);
+        incident_fingerprint, validate_live_state, &found, out);
   if (rc == WYRELOG_E_OK && !found)
     rc = WYRELOG_E_POLICY;
   sodium_memzero (fingerprint, sizeof fingerprint);
@@ -4250,7 +4444,8 @@ wyrelog_error_t
           != WYRELOG_E_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_remediation_resolve_stmt (store, stmt, out_result);
+    rc = service_handoff_remediation_resolve_stmt (store, stmt, TRUE,
+        out_result);
   if (stmt != NULL)
     sqlite3_finalize (stmt);
   return service_handoff_map_sqlite_io (store->db, rc);
@@ -4287,7 +4482,8 @@ wyrelog_error_t
               SQLITE_TRANSIENT) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
-    rc = service_handoff_remediation_resolve_stmt (store, stmt, out_result);
+    rc = service_handoff_remediation_resolve_stmt (store, stmt, TRUE,
+        out_result);
   if (stmt != NULL)
     sqlite3_finalize (stmt);
   return service_handoff_map_sqlite_io (store->db, rc);
@@ -4556,7 +4752,7 @@ wyrelog_error_t
   gboolean found = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_remediation_lookup (store, input, fingerprint,
-        incident_fingerprint, &found, out_result);
+        incident_fingerprint, TRUE, &found, out_result);
   if (rc != WYRELOG_E_OK || found) {
     sodium_memzero (fingerprint, sizeof fingerprint);
     sodium_memzero (incident_fingerprint, sizeof incident_fingerprint);
@@ -9607,6 +9803,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts',"
       "'service_exchange_audit_intentions') "
       "AND name NOT IN ("
       "'trg_service_principals_identity_immutable',"
@@ -9629,6 +9826,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'trg_service_handoff_remediation_no_delete',"
       "'trg_service_handoff_remediation_no_legacy_collision',"
       "'trg_service_handoff_remediation_no_cancellation_collision',"
+      "'trg_service_handoff_retirement_no_update',"
+      "'trg_service_handoff_retirement_no_delete',"
       "'trg_service_domain_requests_no_remediation_collision',"
       "'trg_service_domain_requests_no_cancellation_collision',"
       "'trg_service_exchange_audit_no_update',"
@@ -9648,6 +9847,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate') OR temp_object.name IN ("
       " SELECT name FROM main.sqlite_schema WHERE tbl_name IN ("
@@ -9658,6 +9858,7 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
       "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts',"
       "'service_exchange_audit_intentions',"
       "'service_authority_writer_gate')) LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
@@ -9693,7 +9894,8 @@ wyl_policy_store_validate_service_schema (wyl_policy_store_t *store)
       "'service_credential_operation_fences',"
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
-      "'service_credential_handoff_remediation_actions') LIMIT 1;", &found);
+      "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts') LIMIT 1;", &found);
   if (rc != WYRELOG_E_OK)
     return rc;
   if (found)
@@ -14946,6 +15148,820 @@ service_handoff_maintenance_now (wyl_policy_store_t *store, gint64 *out_now_us)
     return WYRELOG_E_INVALID;
   *out_now_us = now_us;
   return WYRELOG_E_OK;
+}
+
+void wyl_policy_service_handoff_retirement_result_clear
+    (WylPolicyServiceHandoffRetirementResult * result)
+{
+  if (result == NULL)
+    return;
+  g_free (result->original_request_id);
+  g_free (result->delivery_disposition_id);
+  g_free (result->delivery_audit_id);
+  g_free (result->revoke_remediation_request_id);
+  g_free (result->revoke_audit_id);
+  g_free (result->resume_remediation_request_id);
+  g_free (result->resume_audit_id);
+  sodium_memzero (result, sizeof *result);
+}
+
+static const gchar *service_handoff_retirement_kind_name
+    (WylPolicyServiceHandoffRetirementKind kind)
+{
+  return kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED ?
+      "file_published" :
+      (kind == WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE ?
+      "operator_revoke_and_wipe" : NULL);
+}
+
+static WylPolicyServiceHandoffRetirementKind
+service_handoff_retirement_kind_parse (const gchar *kind)
+{
+  return g_strcmp0 (kind, "file_published") == 0 ?
+      WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED :
+      (g_strcmp0 (kind, "operator_revoke_and_wipe") == 0 ?
+      WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE : 0);
+}
+
+static gboolean
+    service_handoff_retirement_input_is_valid
+    (const WylPolicyServiceHandoffRetirementInput * input)
+{
+  if (input == NULL || input->journal_version != 6
+      || input->journal_state != WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL
+      || !service_handoff_exact_tuple_is_valid (&input->tuple)
+      || input->tuple.successor_credential_id == NULL
+      || input->journal_updated_at_us <= 0
+      || sodium_is_zero (input->raw_journal_snapshot_digest, 32))
+    return FALSE;
+  gboolean marker_id = input->remediation_request_id != NULL;
+  gboolean marker_source = !sodium_is_zero
+      (input->remediation_source_snapshot_digest, 32);
+  gboolean marker_fingerprint = !sodium_is_zero
+      (input->remediation_request_fingerprint, 32);
+  if (marker_id != marker_source || marker_id != marker_fingerprint
+      || (marker_id && !service_handoff_request_id_is_canonical
+          (input->remediation_request_id)))
+    return FALSE;
+  if (input->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED)
+    return wyl_policy_service_actor_subject_is_valid
+        (input->delivery_actor_subject_id)
+        && g_strcmp0 (input->delivery_actor_subject_id,
+        input->tuple.original_actor_subject_id) == 0
+        && !sodium_is_zero (input->delivery_proof_digest, 32);
+  return input->terminal_kind ==
+      WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE
+      && marker_id && input->delivery_actor_subject_id == NULL
+      && sodium_is_zero (input->delivery_proof_digest, 32);
+}
+
+static gboolean
+    service_handoff_retirement_tuple_matches_result
+    (const WylPolicyServiceHandoffExactTuple * tuple,
+    const WylPolicyServiceHandoffRemediationResult * remediation)
+{
+  gchar escrow[WYL_ID_STRING_BUF];
+  return wyl_id_format (tuple->escrow_id, escrow, sizeof escrow) ==
+      WYRELOG_E_OK
+      && g_strcmp0 (tuple->original_request_id,
+      remediation->original_request_id) == 0
+      && g_strcmp0 (tuple->original_actor_subject_id,
+      remediation->original_actor_subject_id) == 0
+      && g_strcmp0 (escrow, remediation->escrow_id) == 0
+      && sodium_memcmp (tuple->binding_digest,
+      remediation->binding_digest, 32) == 0
+      && g_strcmp0 (tuple->successor_credential_id,
+      remediation->successor_credential_id) == 0
+      && tuple->successor_issuance_generation ==
+      remediation->successor_issuance_generation;
+}
+
+static wyrelog_error_t
+service_handoff_retirement_resolve_remediation (wyl_policy_store_t *store,
+    const gchar *remediation_request_id,
+    WylPolicyServiceHandoffRemediationResult *out)
+{
+  g_autofree gchar *sql = g_strdup_printf
+      ("SELECT %s FROM service_credential_handoff_remediation_actions"
+      " WHERE remediation_request_id=?;",
+      service_handoff_remediation_resolve_columns);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = sql != NULL ? prepare_stmt (store->db, sql, &stmt) :
+      WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, remediation_request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_remediation_resolve_stmt (store, stmt, FALSE, out);
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+typedef struct
+{
+  WylPolicyServiceHandoffExactTuple tuple;
+  wyl_id_t escrow_id;
+  gchar *original_request_id;
+  gchar *successor_credential_id;
+  gchar *actor_subject_id;
+} ServiceHandoffRetirementDelivery;
+
+static void
+    service_handoff_retirement_delivery_clear
+    (ServiceHandoffRetirementDelivery * delivery)
+{
+  if (delivery == NULL)
+    return;
+  g_free (delivery->original_request_id);
+  g_free (delivery->successor_credential_id);
+  g_free (delivery->actor_subject_id);
+  sodium_memzero (delivery, sizeof *delivery);
+}
+
+static wyrelog_error_t
+service_handoff_retirement_load_delivery (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffRetirementResult *receipt,
+    ServiceHandoffRetirementDelivery *delivery, gint64 *out_created_at_us)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT original_request_id,escrow_id,binding_digest,"
+      "successor_credential_id,successor_issuance_generation,"
+      "actor_subject_id,created_at_us FROM"
+      " service_credential_handoff_dispositions WHERE disposition_id=?"
+      " AND audit_id=? AND reason='delivered'" " AND outcome='escrow_deleted';";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK
+      && ((rc = bind_text (stmt, 1, receipt->delivery_disposition_id))
+          != WYRELOG_E_OK || (rc = bind_text (stmt, 2,
+                  receipt->delivery_audit_id)) != WYRELOG_E_OK))
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const gchar *original = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *escrow = (const gchar *) sqlite3_column_text (stmt, 1);
+    const gchar *successor = (const gchar *) sqlite3_column_text (stmt, 3);
+    const gchar *actor = (const gchar *) sqlite3_column_text (stmt, 5);
+    gint64 created = sqlite3_column_int64 (stmt, 6);
+    guint8 binding_digest[32] = { 0 };
+    guint64 successor_generation = (guint64) sqlite3_column_int64 (stmt, 4);
+    g_autofree gchar *original_copy = sqlite3_column_type (stmt, 0) ==
+        SQLITE_TEXT ? service_handoff_try_strdup (original) : NULL;
+    g_autofree gchar *successor_copy = sqlite3_column_type (stmt, 3) ==
+        SQLITE_TEXT ? service_handoff_try_strdup (successor) : NULL;
+    g_autofree gchar *actor_copy = sqlite3_column_type (stmt, 5) ==
+        SQLITE_TEXT ? service_handoff_try_strdup (actor) : NULL;
+    if (sqlite3_column_type (stmt, 2) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 2) == 32)
+      memcpy (binding_digest, sqlite3_column_blob (stmt, 2), 32);
+    gboolean exact = sqlite3_column_type (stmt, 0) == SQLITE_TEXT
+        && sqlite3_column_type (stmt, 1) == SQLITE_TEXT
+        && sqlite3_column_type (stmt, 2) == SQLITE_BLOB
+        && sqlite3_column_bytes (stmt, 2) == 32
+        && sqlite3_column_type (stmt, 3) == SQLITE_TEXT
+        && sqlite3_column_type (stmt, 4) == SQLITE_INTEGER
+        && sqlite3_column_int64 (stmt, 4) > 0
+        && sqlite3_column_type (stmt, 5) == SQLITE_TEXT
+        && sqlite3_column_type (stmt, 6) == SQLITE_INTEGER && created > 0
+        && original_copy != NULL && successor_copy != NULL
+        && actor_copy != NULL
+        && g_strcmp0 (original_copy, receipt->original_request_id) == 0
+        && wyl_id_parse (escrow, &delivery->escrow_id) == WYRELOG_E_OK
+        && sqlite3_step (stmt) == SQLITE_DONE;
+    if (!exact) {
+      rc = WYRELOG_E_POLICY;
+    } else {
+      delivery->original_request_id = g_steal_pointer (&original_copy);
+      delivery->successor_credential_id = g_steal_pointer (&successor_copy);
+      delivery->actor_subject_id = g_steal_pointer (&actor_copy);
+      delivery->tuple.original_request_id = delivery->original_request_id;
+      delivery->tuple.escrow_id = &delivery->escrow_id;
+      memcpy (delivery->tuple.binding_digest, binding_digest, 32);
+      delivery->tuple.successor_credential_id =
+          delivery->successor_credential_id;
+      delivery->tuple.successor_issuance_generation = successor_generation;
+      delivery->tuple.original_actor_subject_id = delivery->actor_subject_id;
+      *out_created_at_us = created;
+    }
+    sodium_memzero (binding_digest, sizeof binding_digest);
+  } else if (rc == WYRELOG_E_OK) {
+    rc = step == SQLITE_DONE ? WYRELOG_E_POLICY :
+        service_handoff_sqlite_error (store->db, step);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc != WYRELOG_E_OK)
+    service_handoff_retirement_delivery_clear (delivery);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+static wyrelog_error_t
+service_handoff_retirement_load_receipt_stmt (wyl_policy_store_t *store,
+    sqlite3_stmt *stmt, WylPolicyServiceHandoffRetirementResult *out)
+{
+  int step = sqlite3_step (stmt);
+  if (step != SQLITE_ROW)
+    return step == SQLITE_DONE ? WYRELOG_E_NOT_FOUND :
+        service_handoff_sqlite_error (store->db, step);
+  const gchar *original = (const gchar *) sqlite3_column_text (stmt, 0);
+  const gchar *kind_text = (const gchar *) sqlite3_column_text (stmt, 1);
+  const gchar *delivery_disposition =
+      (const gchar *) sqlite3_column_text (stmt, 3);
+  const gchar *delivery_audit = (const gchar *) sqlite3_column_text (stmt, 4);
+  const gchar *revoke_request = (const gchar *) sqlite3_column_text (stmt, 6);
+  const gchar *revoke_audit = (const gchar *) sqlite3_column_text (stmt, 7);
+  const gchar *resume_request = (const gchar *) sqlite3_column_text (stmt, 9);
+  const gchar *resume_audit = (const gchar *) sqlite3_column_text (stmt, 10);
+  WylPolicyServiceHandoffRetirementKind kind =
+      service_handoff_retirement_kind_parse (kind_text);
+  gboolean delivery_digest_valid = sqlite3_column_type (stmt, 5) ==
+      SQLITE_BLOB && sqlite3_column_bytes (stmt, 5) == 32;
+  gboolean delivery_digest_nonzero = delivery_digest_valid
+      && !sodium_is_zero (sqlite3_column_blob (stmt, 5), 32);
+  gboolean marker = sqlite3_column_type (stmt, 11) != SQLITE_NULL
+      || sqlite3_column_type (stmt, 12) != SQLITE_NULL;
+  gboolean malformed = sqlite3_column_type (stmt, 0) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 1) != SQLITE_TEXT || kind == 0
+      || !service_handoff_request_id_is_canonical (original)
+      || sqlite3_column_type (stmt, 2) != SQLITE_BLOB
+      || sqlite3_column_bytes (stmt, 2) != 32
+      || sodium_is_zero (sqlite3_column_blob (stmt, 2), 32)
+      || !delivery_digest_valid
+      || (marker && (sqlite3_column_type (stmt, 11) != SQLITE_BLOB
+          || sqlite3_column_bytes (stmt, 11) != 32
+          || sodium_is_zero (sqlite3_column_blob (stmt, 11), 32)
+          || sqlite3_column_type (stmt, 12) != SQLITE_BLOB
+          || sqlite3_column_bytes (stmt, 12) != 32
+          || sodium_is_zero (sqlite3_column_blob (stmt, 12), 32)))
+      || sqlite3_column_type (stmt, 13) != SQLITE_INTEGER
+      || sqlite3_column_int64 (stmt, 13) <= 0
+      || sqlite3_column_type (stmt, 14) != SQLITE_INTEGER
+      || sqlite3_column_int64 (stmt, 14) < sqlite3_column_int64 (stmt, 13);
+  gboolean file_shape = kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED
+      && sqlite3_column_type (stmt, 3) == SQLITE_TEXT
+      && sqlite3_column_type (stmt, 4) == SQLITE_TEXT
+      && service_handoff_uuid_is_canonical (delivery_disposition)
+      && service_handoff_uuid_is_canonical (delivery_audit)
+      && delivery_digest_nonzero
+      && sqlite3_column_type (stmt, 6) == SQLITE_NULL
+      && sqlite3_column_type (stmt, 7) == SQLITE_NULL
+      && sqlite3_column_type (stmt, 8) == SQLITE_NULL
+      && ((sqlite3_column_type (stmt, 9) == SQLITE_NULL
+          && sqlite3_column_type (stmt, 10) == SQLITE_NULL && !marker)
+      || (sqlite3_column_type (stmt, 9) == SQLITE_TEXT
+          && sqlite3_column_type (stmt, 10) == SQLITE_TEXT && marker));
+  if (file_shape && resume_request != NULL)
+    file_shape = service_handoff_request_id_is_canonical (resume_request)
+        && service_handoff_uuid_is_canonical (resume_audit);
+  gboolean revoke_shape = kind ==
+      WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE
+      && sqlite3_column_type (stmt, 3) == SQLITE_NULL
+      && sqlite3_column_type (stmt, 4) == SQLITE_NULL
+      && delivery_digest_valid && !delivery_digest_nonzero
+      && sqlite3_column_type (stmt, 6) == SQLITE_TEXT
+      && sqlite3_column_type (stmt, 7) == SQLITE_TEXT
+      && service_handoff_request_id_is_canonical (revoke_request)
+      && service_handoff_uuid_is_canonical (revoke_audit)
+      && (sqlite3_column_type (stmt, 8) == SQLITE_NULL
+      || (sqlite3_column_type (stmt, 8) == SQLITE_INTEGER
+          && sqlite3_column_int64 (stmt, 8) > 0))
+      && sqlite3_column_type (stmt, 9) == SQLITE_NULL
+      && sqlite3_column_type (stmt, 10) == SQLITE_NULL && marker;
+  if (malformed || (!file_shape && !revoke_shape))
+    return WYRELOG_E_POLICY;
+  g_autofree gchar *original_copy = service_handoff_try_strdup (original);
+  g_autofree gchar *delivery_disposition_copy = delivery_disposition != NULL ?
+      service_handoff_try_strdup (delivery_disposition) : NULL;
+  g_autofree gchar *delivery_audit_copy = delivery_audit != NULL ?
+      service_handoff_try_strdup (delivery_audit) : NULL;
+  g_autofree gchar *revoke_request_copy = revoke_request != NULL ?
+      service_handoff_try_strdup (revoke_request) : NULL;
+  g_autofree gchar *revoke_audit_copy = revoke_audit != NULL ?
+      service_handoff_try_strdup (revoke_audit) : NULL;
+  g_autofree gchar *resume_request_copy = resume_request != NULL ?
+      service_handoff_try_strdup (resume_request) : NULL;
+  g_autofree gchar *resume_audit_copy = resume_audit != NULL ?
+      service_handoff_try_strdup (resume_audit) : NULL;
+  if (original_copy == NULL
+      || (delivery_disposition != NULL && delivery_disposition_copy == NULL)
+      || (delivery_audit != NULL && delivery_audit_copy == NULL)
+      || (revoke_request != NULL && revoke_request_copy == NULL)
+      || (revoke_audit != NULL && revoke_audit_copy == NULL)
+      || (resume_request != NULL && resume_request_copy == NULL)
+      || (resume_audit != NULL && resume_audit_copy == NULL))
+    return WYRELOG_E_NOMEM;
+  memcpy (out->raw_journal_snapshot_digest, sqlite3_column_blob (stmt, 2), 32);
+  memcpy (out->delivery_proof_digest, sqlite3_column_blob (stmt, 5), 32);
+  if (marker) {
+    memcpy (out->remediation_source_snapshot_digest,
+        sqlite3_column_blob (stmt, 11), 32);
+    memcpy (out->remediation_request_fingerprint,
+        sqlite3_column_blob (stmt, 12), 32);
+  }
+  out->terminal_kind = kind;
+  out->revoke_event_id = sqlite3_column_type (stmt, 8) == SQLITE_INTEGER ?
+      sqlite3_column_int64 (stmt, 8) : 0;
+  out->retention_basis_at_us = sqlite3_column_int64 (stmt, 13);
+  out->retired_at_us = sqlite3_column_int64 (stmt, 14);
+  out->original_request_id = g_steal_pointer (&original_copy);
+  out->delivery_disposition_id = g_steal_pointer (&delivery_disposition_copy);
+  out->delivery_audit_id = g_steal_pointer (&delivery_audit_copy);
+  out->revoke_remediation_request_id = g_steal_pointer (&revoke_request_copy);
+  out->revoke_audit_id = g_steal_pointer (&revoke_audit_copy);
+  out->resume_remediation_request_id = g_steal_pointer (&resume_request_copy);
+  out->resume_audit_id = g_steal_pointer (&resume_audit_copy);
+  int second = sqlite3_step (stmt);
+  if (second != SQLITE_DONE) {
+    wyl_policy_service_handoff_retirement_result_clear (out);
+    return second == SQLITE_ROW ? WYRELOG_E_POLICY :
+        service_handoff_sqlite_error (store->db, second);
+  }
+  return WYRELOG_E_OK;
+}
+
+static const gchar *const service_handoff_retirement_columns =
+    "original_request_id,terminal_kind,raw_journal_snapshot_digest,"
+    "delivery_disposition_id,delivery_audit_id,delivery_proof_digest,"
+    "revoke_remediation_request_id,revoke_audit_id,revoke_event_id,"
+    "resume_remediation_request_id,resume_audit_id,"
+    "remediation_source_snapshot_digest,remediation_request_fingerprint,"
+    "retention_basis_at_us,retired_at_us";
+
+static wyrelog_error_t
+service_handoff_retirement_load_by_request (wyl_policy_store_t *store,
+    const gchar *original_request_id,
+    WylPolicyServiceHandoffRetirementResult *out)
+{
+  g_autofree gchar *sql = g_strdup_printf
+      ("SELECT %s FROM service_credential_handoff_retirement_receipts"
+      " WHERE original_request_id=?;", service_handoff_retirement_columns);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = sql != NULL ? prepare_stmt (store->db, sql, &stmt) :
+      WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, original_request_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_retirement_load_receipt_stmt (store, stmt, out);
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+static wyrelog_error_t
+    service_handoff_retirement_validate_receipt_authority
+    (wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffRetirementResult * receipt)
+{
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  gint64 basis = 0;
+  wyl_id_t escrow_id;
+  WylPolicyServiceHandoffExactTuple remediation_tuple = { 0 };
+  const WylPolicyServiceHandoffExactTuple *tuple = NULL;
+  ServiceHandoffRetirementDelivery delivery = { 0 };
+  WylPolicyServiceHandoffRemediationResult remediation = { 0 };
+  if (receipt->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED) {
+    gint64 delivery_created = 0;
+    rc = service_handoff_retirement_load_delivery (store, receipt, &delivery,
+        &delivery_created);
+    WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+    gboolean found = FALSE;
+    if (rc == WYRELOG_E_OK)
+      rc = service_handoff_lookup_delivered (store, &delivery.tuple,
+          delivery.actor_subject_id, receipt->delivery_proof_digest, &found,
+          &disposition);
+    if (rc == WYRELOG_E_OK
+        && (!found || g_strcmp0 (disposition.disposition_id,
+                receipt->delivery_disposition_id) != 0
+            || g_strcmp0 (disposition.audit_id,
+                receipt->delivery_audit_id) != 0))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK)
+      basis = delivery_created;
+    wyl_policy_service_handoff_disposition_result_clear (&disposition);
+    tuple = &delivery.tuple;
+    if (rc == WYRELOG_E_OK && receipt->resume_remediation_request_id != NULL) {
+      rc = service_handoff_retirement_resolve_remediation (store,
+          receipt->resume_remediation_request_id, &remediation);
+      if (rc == WYRELOG_E_OK
+          && (remediation.action != WYL_POLICY_HANDOFF_REMEDIATION_RESUME
+              || remediation.outcome !=
+              WYL_POLICY_HANDOFF_REMEDIATION_RECORDED
+              || remediation.escrow_outcome !=
+              WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED
+              || g_strcmp0 (remediation.audit_id,
+                  receipt->resume_audit_id) != 0
+              || sodium_memcmp (remediation.journal_snapshot_digest,
+                  receipt->remediation_source_snapshot_digest, 32) != 0
+              || sodium_memcmp (remediation.request_fingerprint,
+                  receipt->remediation_request_fingerprint, 32) != 0
+              || !service_handoff_retirement_tuple_matches_result
+              (&delivery.tuple, &remediation)))
+        rc = WYRELOG_E_POLICY;
+      if (rc == WYRELOG_E_OK)
+        basis = MAX (basis, remediation.created_at_us);
+    }
+  } else if (receipt->terminal_kind ==
+      WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE) {
+    rc = service_handoff_retirement_resolve_remediation (store,
+        receipt->revoke_remediation_request_id, &remediation);
+    gboolean normalized = remediation.outcome ==
+        WYL_POLICY_HANDOFF_REMEDIATION_REVOKED_AND_WIPED
+        || remediation.outcome ==
+        WYL_POLICY_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED
+        || remediation.outcome ==
+        WYL_POLICY_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED;
+    if (rc == WYRELOG_E_OK
+        && (remediation.action !=
+            WYL_POLICY_HANDOFF_REMEDIATION_REVOKE_AND_WIPE
+            || !normalized || remediation.escrow_outcome ==
+            WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED
+            || g_strcmp0 (remediation.audit_id,
+                receipt->revoke_audit_id) != 0
+            || remediation.revoke_event_id != receipt->revoke_event_id
+            || sodium_memcmp (remediation.journal_snapshot_digest,
+                receipt->remediation_source_snapshot_digest, 32) != 0
+            || sodium_memcmp (remediation.request_fingerprint,
+                receipt->remediation_request_fingerprint, 32) != 0
+            || g_strcmp0 (remediation.original_request_id,
+                receipt->original_request_id) != 0
+            || wyl_id_parse (remediation.escrow_id, &escrow_id)
+            != WYRELOG_E_OK))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      remediation_tuple.original_request_id = remediation.original_request_id;
+      remediation_tuple.escrow_id = &escrow_id;
+      memcpy (remediation_tuple.binding_digest, remediation.binding_digest, 32);
+      remediation_tuple.successor_credential_id =
+          remediation.successor_credential_id;
+      remediation_tuple.successor_issuance_generation =
+          remediation.successor_issuance_generation;
+      remediation_tuple.original_actor_subject_id =
+          remediation.original_actor_subject_id;
+      tuple = &remediation_tuple;
+      basis = MAX (remediation.created_at_us,
+          remediation.revoke_event_created_at_us);
+    }
+  } else {
+    rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK && tuple != NULL)
+    rc = service_handoff_escrow_absent (store, tuple->escrow_id);
+  if (rc == WYRELOG_E_OK && tuple != NULL)
+    rc = service_handoff_request_escrow_absent (store,
+        tuple->original_request_id);
+  if (rc == WYRELOG_E_OK
+      && (basis <= 0 || receipt->retention_basis_at_us < basis
+          || receipt->retired_at_us < basis
+          || receipt->retired_at_us - basis <
+          WYL_POLICY_HANDOFF_RETENTION_MIN_US))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_service_handoff_remediation_result_clear (&remediation);
+  service_handoff_retirement_delivery_clear (&delivery);
+  return rc;
+}
+
+static wyrelog_error_t
+service_handoff_retirement_build_expected (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffRetirementInput *input, gint64 trusted_now,
+    gboolean enforce_due, WylPolicyServiceHandoffRetirementResult *out)
+{
+  out->original_request_id = service_handoff_try_strdup
+      (input->tuple.original_request_id);
+  if (out->original_request_id == NULL)
+    return WYRELOG_E_NOMEM;
+  out->terminal_kind = input->terminal_kind;
+  memcpy (out->raw_journal_snapshot_digest,
+      input->raw_journal_snapshot_digest, 32);
+  out->retention_basis_at_us = input->journal_updated_at_us;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  if (input->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED) {
+    WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+    gboolean found = FALSE;
+    rc = service_handoff_lookup_delivered (store, &input->tuple,
+        input->delivery_actor_subject_id, input->delivery_proof_digest, &found,
+        &disposition);
+    if (rc == WYRELOG_E_OK && !found)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      out->delivery_disposition_id = g_strdup (disposition.disposition_id);
+      out->delivery_audit_id = g_strdup (disposition.audit_id);
+      if (out->delivery_disposition_id == NULL
+          || out->delivery_audit_id == NULL)
+        rc = WYRELOG_E_NOMEM;
+      memcpy (out->delivery_proof_digest, input->delivery_proof_digest, 32);
+      out->retention_basis_at_us = MAX (out->retention_basis_at_us,
+          disposition.created_at_us);
+    }
+    wyl_policy_service_handoff_disposition_result_clear (&disposition);
+  }
+  WylPolicyServiceHandoffRemediationResult remediation = { 0 };
+  if (rc == WYRELOG_E_OK && input->remediation_request_id != NULL) {
+    rc = service_handoff_retirement_resolve_remediation (store,
+        input->remediation_request_id, &remediation);
+    if (rc == WYRELOG_E_OK
+        && (!service_handoff_retirement_tuple_matches_result (&input->tuple,
+                &remediation)
+            || sodium_memcmp (remediation.journal_snapshot_digest,
+                input->remediation_source_snapshot_digest, 32) != 0
+            || sodium_memcmp (remediation.request_fingerprint,
+                input->remediation_request_fingerprint, 32) != 0))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && input->terminal_kind ==
+        WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED
+        && (remediation.action != WYL_POLICY_HANDOFF_REMEDIATION_RESUME
+            || remediation.outcome != WYL_POLICY_HANDOFF_REMEDIATION_RECORDED
+            || remediation.escrow_outcome !=
+            WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED))
+      rc = WYRELOG_E_POLICY;
+    gboolean normalized = remediation.outcome ==
+        WYL_POLICY_HANDOFF_REMEDIATION_REVOKED_AND_WIPED
+        || remediation.outcome ==
+        WYL_POLICY_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED
+        || remediation.outcome ==
+        WYL_POLICY_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED;
+    if (rc == WYRELOG_E_OK && input->terminal_kind ==
+        WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE
+        && (remediation.action !=
+            WYL_POLICY_HANDOFF_REMEDIATION_REVOKE_AND_WIPE
+            || !normalized || remediation.escrow_outcome ==
+            WYL_POLICY_HANDOFF_REMEDIATION_ESCROW_RETAINED))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      if (input->terminal_kind == WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED) {
+        out->resume_remediation_request_id =
+            g_strdup (remediation.remediation_request_id);
+        out->resume_audit_id = g_strdup (remediation.audit_id);
+        if (out->resume_remediation_request_id == NULL
+            || out->resume_audit_id == NULL)
+          rc = WYRELOG_E_NOMEM;
+      } else {
+        out->revoke_remediation_request_id =
+            g_strdup (remediation.remediation_request_id);
+        out->revoke_audit_id = g_strdup (remediation.audit_id);
+        out->revoke_event_id = remediation.revoke_event_id;
+        if (out->revoke_remediation_request_id == NULL
+            || out->revoke_audit_id == NULL)
+          rc = WYRELOG_E_NOMEM;
+      }
+      memcpy (out->remediation_source_snapshot_digest,
+          input->remediation_source_snapshot_digest, 32);
+      memcpy (out->remediation_request_fingerprint,
+          input->remediation_request_fingerprint, 32);
+      out->retention_basis_at_us = MAX (out->retention_basis_at_us,
+          remediation.created_at_us);
+      out->retention_basis_at_us = MAX (out->retention_basis_at_us,
+          remediation.revoke_event_created_at_us);
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_escrow_absent (store, input->tuple.escrow_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_request_escrow_absent (store,
+        input->tuple.original_request_id);
+  if (rc == WYRELOG_E_OK && enforce_due
+      && (trusted_now < out->retention_basis_at_us
+          || trusted_now - out->retention_basis_at_us <
+          WYL_POLICY_HANDOFF_RETENTION_MIN_US))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && enforce_due)
+    out->retired_at_us = trusted_now;
+  wyl_policy_service_handoff_remediation_result_clear (&remediation);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_handoff_retirement_result_clear (out);
+  return rc;
+}
+
+static gboolean
+    service_handoff_retirement_result_exact
+    (const WylPolicyServiceHandoffRetirementResult * stored,
+    const WylPolicyServiceHandoffRetirementResult * expected)
+{
+  return g_strcmp0 (stored->original_request_id,
+      expected->original_request_id) == 0
+      && stored->terminal_kind == expected->terminal_kind
+      && sodium_memcmp (stored->raw_journal_snapshot_digest,
+      expected->raw_journal_snapshot_digest, 32) == 0
+      && g_strcmp0 (stored->delivery_disposition_id,
+      expected->delivery_disposition_id) == 0
+      && g_strcmp0 (stored->delivery_audit_id,
+      expected->delivery_audit_id) == 0
+      && sodium_memcmp (stored->delivery_proof_digest,
+      expected->delivery_proof_digest, 32) == 0
+      && g_strcmp0 (stored->revoke_remediation_request_id,
+      expected->revoke_remediation_request_id) == 0
+      && g_strcmp0 (stored->revoke_audit_id,
+      expected->revoke_audit_id) == 0
+      && stored->revoke_event_id == expected->revoke_event_id
+      && g_strcmp0 (stored->resume_remediation_request_id,
+      expected->resume_remediation_request_id) == 0
+      && g_strcmp0 (stored->resume_audit_id,
+      expected->resume_audit_id) == 0
+      && sodium_memcmp (stored->remediation_source_snapshot_digest,
+      expected->remediation_source_snapshot_digest, 32) == 0
+      && sodium_memcmp (stored->remediation_request_fingerprint,
+      expected->remediation_request_fingerprint, 32) == 0
+      && stored->retention_basis_at_us == expected->retention_basis_at_us
+      && stored->retired_at_us >= stored->retention_basis_at_us;
+}
+
+static wyrelog_error_t
+service_handoff_retirement_reject_collision (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffRetirementResult *expected)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT 1 FROM service_credential_handoff_retirement_receipts WHERE"
+      " raw_journal_snapshot_digest=?"
+      " OR (? IS NOT NULL AND delivery_disposition_id=?)"
+      " OR (? IS NOT NULL AND revoke_remediation_request_id=?)"
+      " OR (? IS NOT NULL AND resume_remediation_request_id=?) LIMIT 1;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK
+      && (sqlite3_bind_blob (stmt, 1,
+              expected->raw_journal_snapshot_digest, 32, SQLITE_TRANSIENT)
+          != SQLITE_OK
+          || (expected->delivery_disposition_id == NULL ?
+              sqlite3_bind_null (stmt, 2) : sqlite3_bind_text (stmt, 2,
+                  expected->delivery_disposition_id, -1, SQLITE_TRANSIENT))
+          != SQLITE_OK
+          || (expected->delivery_disposition_id == NULL ?
+              sqlite3_bind_null (stmt, 3) : sqlite3_bind_text (stmt, 3,
+                  expected->delivery_disposition_id, -1, SQLITE_TRANSIENT))
+          != SQLITE_OK
+          || (expected->revoke_remediation_request_id == NULL ?
+              sqlite3_bind_null (stmt, 4) : sqlite3_bind_text (stmt, 4,
+                  expected->revoke_remediation_request_id, -1,
+                  SQLITE_TRANSIENT)) != SQLITE_OK
+          || (expected->revoke_remediation_request_id == NULL ?
+              sqlite3_bind_null (stmt, 5) : sqlite3_bind_text (stmt, 5,
+                  expected->revoke_remediation_request_id, -1,
+                  SQLITE_TRANSIENT)) != SQLITE_OK
+          || (expected->resume_remediation_request_id == NULL ?
+              sqlite3_bind_null (stmt, 6) : sqlite3_bind_text (stmt, 6,
+                  expected->resume_remediation_request_id, -1,
+                  SQLITE_TRANSIENT)) != SQLITE_OK
+          || (expected->resume_remediation_request_id == NULL ?
+              sqlite3_bind_null (stmt, 7) : sqlite3_bind_text (stmt, 7,
+                  expected->resume_remediation_request_id, -1,
+                  SQLITE_TRANSIENT)) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK)
+    rc = step == SQLITE_DONE ? WYRELOG_E_OK :
+        (step == SQLITE_ROW ? WYRELOG_E_POLICY :
+        service_handoff_sqlite_error (store->db, step));
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+static wyrelog_error_t
+service_handoff_retirement_insert (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffRetirementResult *receipt)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "INSERT INTO service_credential_handoff_retirement_receipts("
+      "original_request_id,terminal_kind,raw_journal_snapshot_digest,"
+      "delivery_disposition_id,delivery_audit_id,delivery_proof_digest,"
+      "revoke_remediation_request_id,revoke_audit_id,revoke_event_id,"
+      "resume_remediation_request_id,resume_audit_id,"
+      "remediation_source_snapshot_digest,remediation_request_fingerprint,"
+      "retention_basis_at_us,retired_at_us) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?);";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+#define BIND_NULLABLE_TEXT(index, value) \
+  ((value) == NULL ? sqlite3_bind_null (stmt, (index)) : \
+  sqlite3_bind_text (stmt, (index), (value), -1, SQLITE_TRANSIENT))
+  gboolean marker = receipt->revoke_remediation_request_id != NULL
+      || receipt->resume_remediation_request_id != NULL;
+  if (rc == WYRELOG_E_OK
+      && ((rc = bind_text (stmt, 1, receipt->original_request_id))
+          != WYRELOG_E_OK || (rc = bind_text (stmt, 2,
+                  service_handoff_retirement_kind_name
+                  (receipt->terminal_kind))) != WYRELOG_E_OK
+          || sqlite3_bind_blob (stmt, 3,
+              receipt->raw_journal_snapshot_digest, 32, SQLITE_TRANSIENT)
+          != SQLITE_OK || BIND_NULLABLE_TEXT (4,
+              receipt->delivery_disposition_id) != SQLITE_OK
+          || BIND_NULLABLE_TEXT (5, receipt->delivery_audit_id) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 6, receipt->delivery_proof_digest, 32,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || BIND_NULLABLE_TEXT (7,
+              receipt->revoke_remediation_request_id) != SQLITE_OK
+          || BIND_NULLABLE_TEXT (8, receipt->revoke_audit_id) != SQLITE_OK
+          || (receipt->revoke_event_id == 0 ? sqlite3_bind_null (stmt, 9) :
+              sqlite3_bind_int64 (stmt, 9, receipt->revoke_event_id))
+          != SQLITE_OK || BIND_NULLABLE_TEXT (10,
+              receipt->resume_remediation_request_id) != SQLITE_OK
+          || BIND_NULLABLE_TEXT (11, receipt->resume_audit_id) != SQLITE_OK
+          || (marker ? sqlite3_bind_blob (stmt, 12,
+                  receipt->remediation_source_snapshot_digest, 32,
+                  SQLITE_TRANSIENT) : sqlite3_bind_null (stmt, 12))
+          != SQLITE_OK
+          || (marker ? sqlite3_bind_blob (stmt, 13,
+                  receipt->remediation_request_fingerprint, 32,
+                  SQLITE_TRANSIENT) : sqlite3_bind_null (stmt, 13))
+          != SQLITE_OK || sqlite3_bind_int64 (stmt, 14,
+              receipt->retention_basis_at_us) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 15, receipt->retired_at_us)
+          != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+#undef BIND_NULLABLE_TEXT
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT ?
+        WYRELOG_E_POLICY : WYRELOG_E_IO;
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+wyrelog_error_t
+    wyl_policy_store_handoff_retirement_lookup_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * original_request_id,
+    WylPolicyServiceHandoffRetirementResult * out_result)
+{
+  if (out_result != NULL)
+    wyl_policy_service_handoff_retirement_result_clear (out_result);
+  if (store == NULL || out_result == NULL
+      || !service_handoff_request_id_is_canonical (original_request_id))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_retirement_load_by_request (store,
+        original_request_id, out_result);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_retirement_validate_receipt_authority (store,
+        out_result);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_handoff_retirement_result_clear (out_result);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_handoff_retirement_record_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffRetirementInput * input,
+    WylPolicyServiceHandoffRetirementResult * out_result)
+{
+  if (out_result != NULL)
+    wyl_policy_service_handoff_retirement_result_clear (out_result);
+  if (store == NULL || out_result == NULL
+      || !service_handoff_retirement_input_is_valid (input))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  WylPolicyServiceHandoffRetirementResult stored = { 0 };
+  if (rc == WYRELOG_E_OK) {
+    rc = service_handoff_retirement_load_by_request (store,
+        input->tuple.original_request_id, &stored);
+    if (rc == WYRELOG_E_NOT_FOUND)
+      rc = WYRELOG_E_OK;
+  }
+  WylPolicyServiceHandoffRetirementResult expected = { 0 };
+  gboolean found = rc == WYRELOG_E_OK && stored.original_request_id != NULL;
+  if (rc == WYRELOG_E_OK && found) {
+    rc = service_handoff_retirement_validate_receipt_authority (store, &stored);
+    if (rc == WYRELOG_E_OK)
+      rc = service_handoff_retirement_build_expected (store, input, 0,
+          FALSE, &expected);
+    if (rc == WYRELOG_E_OK
+        && !service_handoff_retirement_result_exact (&stored, &expected))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      stored.replayed = TRUE;
+      *out_result = stored;
+      memset (&stored, 0, sizeof stored);
+    }
+  }
+  gboolean replayed = out_result->replayed;
+  gint64 trusted_now = 0;
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_handoff_maintenance_now (store, &trusted_now);
+  if (rc == WYRELOG_E_OK && !found)
+    rc = service_handoff_retirement_build_expected (store, input,
+        trusted_now, TRUE, &expected);
+  if (rc == WYRELOG_E_OK && !replayed)
+    rc = service_handoff_retirement_reject_collision (store, &expected);
+  if (rc == WYRELOG_E_OK && !replayed)
+    rc = service_handoff_retirement_insert (store, &expected);
+  if (rc == WYRELOG_E_OK && !replayed
+      && service_handoff_should_fail (store,
+          WYL_POLICY_HANDOFF_FAIL_AFTER_PROVENANCE))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && !replayed) {
+    *out_result = expected;
+    memset (&expected, 0, sizeof expected);
+  }
+  wyl_policy_service_handoff_retirement_result_clear (&expected);
+  wyl_policy_service_handoff_retirement_result_clear (&stored);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_handoff_retirement_result_clear (out_result);
+  return rc;
 }
 
 static gboolean

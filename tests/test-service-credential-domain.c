@@ -6,12 +6,11 @@
 #include <string.h>
 
 #include "auth/service-credential-domain-private.h"
+#include "policy/store-handoff-delivery-private.h"
+#include "policy/store-handoff-maintenance-private.h"
+#include "policy/store-handoff-retirement-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-request-id-private.h"
-
-#ifdef WYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE
-#include "policy/store-handoff-maintenance-private.h"
-#endif
 
 #define COLLISION_ID "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
 #define SECOND_ID "wlc_000000000000000000000000000"
@@ -2474,15 +2473,41 @@ classifier_transaction_end (Txn *transaction)
   g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
       (transaction->txn), ==, WYRELOG_E_OK);
   wyl_policy_store_service_authority_transaction_free (transaction->txn);
-#ifdef WYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE
   if (transaction->evidence != NULL)
     wyl_policy_store_service_authority_commit_evidence_unref
         (transaction->evidence);
-#endif
   g_assert_cmpint (wyl_service_auth_write_lease_release (transaction->lease),
       ==, WYRELOG_E_OK);
   wyl_service_auth_write_lease_free (transaction->lease);
   memset (transaction, 0, sizeof *transaction);
+}
+
+static void
+retirement_transaction_prepare (wyl_policy_store_t *store, Txn *transaction)
+{
+  g_assert_cmpint (wyl_policy_store_service_authority_prepare_commit_evidence
+      (transaction->txn, store, &transaction->evidence), ==, WYRELOG_E_OK);
+}
+
+static void
+retirement_transaction_commit (Txn *transaction)
+{
+  g_assert_nonnull (transaction->evidence);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (transaction->txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (transaction->txn);
+  wyl_policy_store_service_authority_commit_evidence_unref
+      (transaction->evidence);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (transaction->lease),
+      ==, WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (transaction->lease);
+  memset (transaction, 0, sizeof *transaction);
+}
+
+static gint64
+retirement_fixed_now (gpointer data)
+{
+  return *(const gint64 *) data;
 }
 
 #ifdef WYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE
@@ -5216,6 +5241,49 @@ test_handoff_disposition_attention_and_oar (void)
   g_assert_cmpint (after_expired.escrows, ==, before_expired.escrows - 1);
   g_assert_true (expired_invalidation.called);
   g_assert_cmpuint (expired_invalidation.generation, ==, 1);
+  WylPolicyServiceHandoffRetirementInput expired_retirement = {
+    .journal_version = 6,
+    .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
+    .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE,
+    .tuple = {
+          .original_request_id = expired_original,
+          .escrow_id = &expired_escrow_id,
+          .successor_credential_id = expired_issued.credential.credential_id,
+          .successor_issuance_generation = expired_issued.credential.generation,
+          .original_actor_subject_id = "admin",
+        },
+    .journal_updated_at_us = expired_result.created_at_us,
+    .remediation_request_id = expired_remediation_id,
+  };
+  memcpy (expired_retirement.tuple.binding_digest,
+      expired_issued.handoff.binding_digest,
+      sizeof expired_retirement.tuple.binding_digest);
+  memset (expired_retirement.raw_journal_snapshot_digest, 0xa5,
+      sizeof expired_retirement.raw_journal_snapshot_digest);
+  memcpy (expired_retirement.remediation_source_snapshot_digest,
+      expired_result.journal_snapshot_digest,
+      sizeof expired_retirement.remediation_source_snapshot_digest);
+  memcpy (expired_retirement.remediation_request_fingerprint,
+      expired_result.request_fingerprint,
+      sizeof expired_retirement.remediation_request_fingerprint);
+  gint64 expired_retirement_now = expired_result.created_at_us
+      + WYL_POLICY_HANDOFF_RETENTION_MIN_US;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
+      retirement_fixed_now, &expired_retirement_now);
+  Txn expired_transaction = { 0 };
+  WylPolicyServiceHandoffRetirementResult expired_receipt = { 0 };
+  classifier_transaction_begin (handle, &expired_transaction);
+  retirement_transaction_prepare (store_of (handle), &expired_transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (expired_transaction.txn, store_of (handle), &expired_retirement,
+          &expired_receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpint (expired_receipt.revoke_event_id, ==, 0);
+  g_assert_cmpstr (expired_receipt.revoke_remediation_request_id, ==,
+      expired_remediation_id);
+  wyl_policy_service_handoff_retirement_result_clear (&expired_receipt);
+  retirement_transaction_commit (&expired_transaction);
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
+      NULL, NULL);
   wyl_service_credential_handoff_remediation_result_clear (&expired_result);
   g_clear_pointer (&expired_invalidation.credential_id, g_free);
   expired_invalidation.called = FALSE;
@@ -5331,6 +5399,50 @@ test_handoff_disposition_attention_and_oar (void)
       before_remediation.handoff_remediations + 1);
   g_assert_true (invalidation.called);
   g_assert_cmpuint (invalidation.generation, ==, 1);
+  WylPolicyServiceHandoffRetirementInput revoked_retirement = {
+    .journal_version = 6,
+    .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
+    .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE,
+    .tuple = {
+          .original_request_id = input.tuple.original_request_id,
+          .escrow_id = input.tuple.escrow_id,
+          .successor_credential_id = input.tuple.successor_credential_id,
+          .successor_issuance_generation =
+          input.tuple.successor_issuance_generation,
+          .original_actor_subject_id = input.tuple.original_actor_subject_id,
+        },
+    .journal_updated_at_us = remediation_result.created_at_us,
+    .remediation_request_id = remediation_id,
+  };
+  memcpy (revoked_retirement.tuple.binding_digest,
+      input.tuple.binding_digest,
+      sizeof revoked_retirement.tuple.binding_digest);
+  memset (revoked_retirement.raw_journal_snapshot_digest, 0xa6,
+      sizeof revoked_retirement.raw_journal_snapshot_digest);
+  memcpy (revoked_retirement.remediation_source_snapshot_digest,
+      remediation_result.journal_snapshot_digest,
+      sizeof revoked_retirement.remediation_source_snapshot_digest);
+  memcpy (revoked_retirement.remediation_request_fingerprint,
+      remediation_result.request_fingerprint,
+      sizeof revoked_retirement.remediation_request_fingerprint);
+  gint64 revoked_retirement_now = MAX (remediation_result.created_at_us,
+      remediation_result.revoke_event_created_at_us)
+      + WYL_POLICY_HANDOFF_RETENTION_MIN_US;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
+      retirement_fixed_now, &revoked_retirement_now);
+  Txn revoked_transaction = { 0 };
+  WylPolicyServiceHandoffRetirementResult revoked_receipt = { 0 };
+  classifier_transaction_begin (handle, &revoked_transaction);
+  retirement_transaction_prepare (store_of (handle), &revoked_transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (revoked_transaction.txn, store_of (handle), &revoked_retirement,
+          &revoked_receipt), ==, WYRELOG_E_OK);
+  g_assert_cmpint (revoked_receipt.revoke_event_id, ==,
+      remediation_result.revoke_event_id);
+  wyl_policy_service_handoff_retirement_result_clear (&revoked_receipt);
+  retirement_transaction_commit (&revoked_transaction);
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
+      NULL, NULL);
   wyl_service_credential_handoff_remediation_result_clear (&remediation_result);
   g_clear_pointer (&invalidation.credential_id, g_free);
   g_free (remediation_probe.actor_subject_id);
@@ -5641,6 +5753,459 @@ test_handoff_revoke_wipe_fault_atomicity (void)
   g_free (issue_probe.actor_subject_id);
 }
 
+static void
+test_handoff_terminal_retirement_resumed_file_dual_proof (void)
+{
+  gchar original_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar remediation_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar decision_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar audit_id[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (original_id, sizeof original_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (remediation_id,
+          sizeof remediation_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (decision_id, sizeof decision_id), ==,
+      WYRELOG_E_OK);
+  new_uuid_string (audit_id);
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  wyl_policy_store_t *store = store_of (handle);
+  prepare_authority (handle, "svc:handoff:retirement-resume");
+  CollisionRuntime collision = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &collision,
+  };
+  AuthorizationProbe issue_probe = {.handle = handle,.rc = WYRELOG_E_OK };
+  wyl_service_credential_mutation_authorization_t issue_authorization = {
+    .authorize = probe_mutation_authorization,.data = &issue_probe,
+  };
+  wyl_service_credential_issue_runtime_t issue_runtime = {
+    .authorization = &issue_authorization,
+    .credential_runtime = &credential_runtime,
+  };
+  wyl_id_t escrow_id;
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  memset (target, 0xc5, sizeof target);
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id,.target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  wyl_service_credential_handoff_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          "svc:handoff:retirement-resume", "tenant-a", "admin", original_id,
+          g_get_real_time () + G_TIME_SPAN_HOUR, &handoff, &issue_runtime,
+          &issued), ==, WYRELOG_E_OK);
+  wyl_service_credential_handoff_remediation_input_t remediation_input = {
+    .remediation_request_id = remediation_id,
+    .decision_request_id = decision_id,.current_actor_subject_id = "operator",
+    .audit_id = audit_id,
+    .tuple = {
+          .original_request_id = original_id,.escrow_id = &escrow_id,
+          .successor_credential_id = issued.credential.credential_id,
+          .successor_issuance_generation = issued.credential.generation,
+          .original_actor_subject_id = "admin",
+        },
+    .action = WYL_SERVICE_HANDOFF_REMEDIATION_RESUME,
+  };
+  memcpy (remediation_input.tuple.binding_digest,
+      issued.handoff.binding_digest,
+      sizeof remediation_input.tuple.binding_digest);
+  set_remediation_oar_context (&remediation_input, 0xc6,
+      WYL_SERVICE_HANDOFF_REMEDIATION_OAR_EXPLICIT_HOLD);
+  AuthorizationProbe remediation_probe = {
+    .handle = handle,.rc = WYRELOG_E_OK,
+  };
+  wyl_service_credential_mutation_authorization_t remediation_authorization = {
+    .authorize = probe_mutation_authorization,.data = &remediation_probe,
+  };
+  wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
+    .authorization = &remediation_authorization,
+  };
+  wyl_service_credential_handoff_remediation_result_t remediation = { 0 };
+  g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
+          &remediation_input, &remediation_runtime, &remediation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (remediation.escrow_outcome, ==,
+      WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_RETAINED);
+  WylPolicyServiceHandoffExactTuple tuple = {
+    .original_request_id = original_id,.escrow_id = &escrow_id,
+    .successor_credential_id = issued.credential.credential_id,
+    .successor_issuance_generation = issued.credential.generation,
+    .original_actor_subject_id = "admin",
+  };
+  memcpy (tuple.binding_digest, issued.handoff.binding_digest,
+      sizeof tuple.binding_digest);
+  guint8 delivery_proof[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  memset (delivery_proof, 0xc7, sizeof delivery_proof);
+  WylPolicyServiceHandoffPublicationOutcome publication = 0;
+  WylPolicyServiceHandoffDispositionResult delivered = { 0 };
+  Txn transaction = { 0 };
+  classifier_transaction_begin (handle, &transaction);
+  retirement_transaction_prepare (store, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_consume_delivered_core
+      (transaction.txn, store, &tuple, "admin", delivery_proof, &publication,
+          &delivered), ==, WYRELOG_E_OK);
+  retirement_transaction_commit (&transaction);
+  /* Historical RESUME provenance remains valid even when the successor is
+   * revoked normally after delivery but before terminal metadata retirement. */
+  wyl_service_credential_t later_revoked = { 0 };
+  g_assert_cmpint (wyl_service_credential_revoke (handle,
+          issued.credential.credential_id, "admin", "later-revoke",
+          &later_revoked), ==, WYRELOG_E_OK);
+  WylPolicyServiceHandoffRetirementInput input = {
+    .journal_version = 6,
+    .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
+    .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED,
+    .tuple = tuple,.journal_updated_at_us = MAX (delivered.created_at_us,
+        remediation.created_at_us),.delivery_actor_subject_id = "admin",
+    .remediation_request_id = remediation_id,
+  };
+  memset (input.raw_journal_snapshot_digest, 0xc8,
+      sizeof input.raw_journal_snapshot_digest);
+  memcpy (input.delivery_proof_digest, delivery_proof,
+      sizeof input.delivery_proof_digest);
+  memcpy (input.remediation_source_snapshot_digest,
+      remediation.journal_snapshot_digest,
+      sizeof input.remediation_source_snapshot_digest);
+  memcpy (input.remediation_request_fingerprint,
+      remediation.request_fingerprint,
+      sizeof input.remediation_request_fingerprint);
+  gint64 now_us = input.journal_updated_at_us
+      + WYL_POLICY_HANDOFF_RETENTION_MIN_US;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
+      retirement_fixed_now, &now_us);
+  WylPolicyServiceHandoffRetirementResult result = { 0 };
+  classifier_transaction_begin (handle, &transaction);
+  retirement_transaction_prepare (store, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (result.resume_remediation_request_id, ==, remediation_id);
+  g_assert_cmpstr (result.resume_audit_id, ==, audit_id);
+  wyl_policy_service_handoff_retirement_result_clear (&result);
+  retirement_transaction_commit (&transaction);
+  input.remediation_source_snapshot_digest[0] ^= 0xff;
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
+  classifier_transaction_end (&transaction);
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  wyl_service_credential_clear (&later_revoked);
+  wyl_policy_service_handoff_disposition_result_clear (&delivered);
+  wyl_service_credential_handoff_remediation_result_clear (&remediation);
+  wyl_service_credential_handoff_result_clear (&issued);
+  g_free (remediation_probe.actor_subject_id);
+  g_free (issue_probe.actor_subject_id);
+}
+
+static void
+test_handoff_terminal_retirement_revoke_fault_replay (void)
+{
+  gchar original_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar remediation_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar decision_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar audit_id[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (original_id, sizeof original_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (remediation_id,
+          sizeof remediation_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (decision_id, sizeof decision_id), ==,
+      WYRELOG_E_OK);
+  new_uuid_string (audit_id);
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  wyl_policy_store_t *store = store_of (handle);
+  prepare_authority (handle, "svc:handoff:retirement-revoke");
+  CollisionRuntime collision = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &collision,
+  };
+  AuthorizationProbe issue_probe = {.handle = handle,.rc = WYRELOG_E_OK };
+  wyl_service_credential_mutation_authorization_t issue_authorization = {
+    .authorize = probe_mutation_authorization,.data = &issue_probe,
+  };
+  wyl_service_credential_issue_runtime_t issue_runtime = {
+    .authorization = &issue_authorization,
+    .credential_runtime = &credential_runtime,
+  };
+  wyl_id_t escrow_id;
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  memset (target, 0xc2, sizeof target);
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id,.target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  wyl_service_credential_handoff_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          "svc:handoff:retirement-revoke", "tenant-a", "admin", original_id,
+          g_get_real_time () + G_TIME_SPAN_HOUR, &handoff, &issue_runtime,
+          &issued), ==, WYRELOG_E_OK);
+  wyl_service_credential_handoff_remediation_input_t remediation_input = {
+    .remediation_request_id = remediation_id,
+    .decision_request_id = decision_id,
+    .current_actor_subject_id = "operator",
+    .audit_id = audit_id,
+    .tuple = {
+          .original_request_id = original_id,.escrow_id = &escrow_id,
+          .successor_credential_id = issued.credential.credential_id,
+          .successor_issuance_generation = issued.credential.generation,
+          .original_actor_subject_id = "admin",
+        },
+    .action = WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE,
+    .confirmation_version = 1,.confirmed = TRUE,
+  };
+  memcpy (remediation_input.tuple.binding_digest,
+      issued.handoff.binding_digest,
+      sizeof remediation_input.tuple.binding_digest);
+  set_remediation_oar_context (&remediation_input, 0xc3,
+      WYL_SERVICE_HANDOFF_REMEDIATION_OAR_EXPLICIT_HOLD);
+  AuthorizationProbe remediation_probe = {
+    .handle = handle,.rc = WYRELOG_E_OK,
+  };
+  wyl_service_credential_mutation_authorization_t remediation_authorization = {
+    .authorize = probe_mutation_authorization,.data = &remediation_probe,
+  };
+  InvalidationProbe invalidation = { 0 };
+  wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
+    .authorization = &remediation_authorization,
+    .invalidate_credential = probe_credential_invalidation,
+    .invalidation_data = &invalidation,
+  };
+  wyl_service_credential_handoff_remediation_result_t remediation = { 0 };
+  g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
+          &remediation_input, &remediation_runtime, &remediation), ==,
+      WYRELOG_E_OK);
+  g_assert_true (remediation.revoked_now);
+  g_assert_cmpint (remediation.revoke_event_id, >, 0);
+  WylPolicyServiceHandoffRetirementInput input = {
+    .journal_version = 6,
+    .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
+    .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE,
+    .tuple = {
+          .original_request_id = original_id,.escrow_id = &escrow_id,
+          .successor_credential_id = issued.credential.credential_id,
+          .successor_issuance_generation = issued.credential.generation,
+          .original_actor_subject_id = "admin",
+        },
+    .journal_updated_at_us = remediation.created_at_us,
+    .remediation_request_id = remediation_id,
+  };
+  memcpy (input.tuple.binding_digest, issued.handoff.binding_digest,
+      sizeof input.tuple.binding_digest);
+  memset (input.raw_journal_snapshot_digest, 0xc4,
+      sizeof input.raw_journal_snapshot_digest);
+  memcpy (input.remediation_source_snapshot_digest,
+      remediation.journal_snapshot_digest,
+      sizeof input.remediation_source_snapshot_digest);
+  memcpy (input.remediation_request_fingerprint,
+      remediation.request_fingerprint,
+      sizeof input.remediation_request_fingerprint);
+  gint64 now_us = MAX (remediation.created_at_us,
+      remediation.revoke_event_created_at_us)
+      + WYL_POLICY_HANDOFF_RETENTION_MIN_US;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
+      retirement_fixed_now, &now_us);
+  WylPolicyServiceHandoffRetirementResult result = { 0 };
+  Txn transaction = { 0 };
+  wyl_policy_store_service_handoff_fail_once (store,
+      WYL_POLICY_HANDOFF_FAIL_AFTER_PROVENANCE);
+  classifier_transaction_begin (handle, &transaction);
+  retirement_transaction_prepare (store, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_IO);
+  classifier_transaction_end (&transaction);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_handoff_retirement_receipts;"),
+      ==, 0);
+  classifier_transaction_begin (handle, &transaction);
+  retirement_transaction_prepare (store, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
+  g_assert_false (result.replayed);
+  g_assert_cmpstr (result.revoke_remediation_request_id, ==, remediation_id);
+  g_assert_cmpint (result.revoke_event_id, ==, remediation.revoke_event_id);
+  wyl_policy_service_handoff_retirement_result_clear (&result);
+  retirement_transaction_commit (&transaction);
+  input.remediation_request_fingerprint[0] ^= 0xff;
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
+  classifier_transaction_end (&transaction);
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  wyl_service_credential_handoff_remediation_result_clear (&remediation);
+  wyl_service_credential_handoff_result_clear (&issued);
+  g_clear_pointer (&invalidation.credential_id, g_free);
+  g_free (remediation_probe.actor_subject_id);
+  g_free (issue_probe.actor_subject_id);
+}
+
+static void
+test_handoff_terminal_retirement_file_boundary_replay (void)
+{
+  gchar original_request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (original_request_id,
+          sizeof original_request_id), ==, WYRELOG_E_OK);
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  wyl_policy_store_t *store = store_of (handle);
+  prepare_authority (handle, "svc:handoff:retirement-file");
+
+  CollisionRuntime collision = { 0 };
+  wyl_service_credential_runtime_t credential_runtime = {
+    test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
+    test_random, &collision,
+  };
+  AuthorizationProbe issue_probe = {.handle = handle,.rc = WYRELOG_E_OK };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = probe_mutation_authorization,.data = &issue_probe,
+  };
+  wyl_service_credential_issue_runtime_t issue_runtime = {
+    .authorization = &authorization,.credential_runtime = &credential_runtime,
+  };
+  wyl_id_t escrow_id;
+  guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  memset (target, 0xc1, sizeof target);
+  g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = &escrow_id,.target_digest = target,
+    .deadline_at_us = g_get_real_time () + G_TIME_SPAN_HOUR,
+  };
+  wyl_service_credential_handoff_result_t issued = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          "svc:handoff:retirement-file", "tenant-a", "admin",
+          original_request_id, g_get_real_time () + G_TIME_SPAN_HOUR,
+          &handoff, &issue_runtime, &issued), ==, WYRELOG_E_OK);
+  WylPolicyServiceHandoffExactTuple tuple = {
+    .original_request_id = original_request_id,
+    .escrow_id = &escrow_id,
+    .successor_credential_id = issued.credential.credential_id,
+    .successor_issuance_generation = issued.credential.generation,
+    .original_actor_subject_id = "admin",
+  };
+  memcpy (tuple.binding_digest, issued.handoff.binding_digest,
+      sizeof tuple.binding_digest);
+  guint8 delivery_proof[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
+  memset (delivery_proof, 0xd1, sizeof delivery_proof);
+  WylPolicyServiceHandoffPublicationOutcome publication = 0;
+  WylPolicyServiceHandoffDispositionResult delivered = { 0 };
+  Txn transaction = { 0 };
+  classifier_transaction_begin (handle, &transaction);
+  retirement_transaction_prepare (store, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_consume_delivered_core
+      (transaction.txn, store, &tuple, "admin", delivery_proof, &publication,
+          &delivered), ==, WYRELOG_E_OK);
+  g_assert_cmpint (publication, ==, WYL_POLICY_HANDOFF_PUBLICATION_ACTIVE);
+  retirement_transaction_commit (&transaction);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_handoff_escrows;"), ==, 0);
+
+  WylPolicyServiceHandoffRetirementInput input = {
+    .journal_version = 6,
+    .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
+    .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED,
+    .tuple = tuple,
+    .journal_updated_at_us = delivered.created_at_us,
+    .delivery_actor_subject_id = "admin",
+  };
+  memset (input.raw_journal_snapshot_digest, 0xe1,
+      sizeof input.raw_journal_snapshot_digest);
+  memcpy (input.delivery_proof_digest, delivery_proof,
+      sizeof input.delivery_proof_digest);
+  gint64 now_us = delivered.created_at_us
+      + WYL_POLICY_HANDOFF_RETENTION_MIN_US - 1;
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
+      retirement_fixed_now, &now_us);
+  WylPolicyServiceHandoffRetirementResult result = { 0 };
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
+  classifier_transaction_end (&transaction);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_handoff_retirement_receipts;"),
+      ==, 0);
+
+  now_us++;
+  classifier_transaction_begin (handle, &transaction);
+  retirement_transaction_prepare (store, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
+  g_assert_false (result.replayed);
+  g_assert_cmpstr (result.delivery_disposition_id, ==,
+      delivered.disposition_id);
+  g_assert_cmpstr (result.delivery_audit_id, ==, delivered.audit_id);
+  g_assert_cmpint (result.retention_basis_at_us, ==, delivered.created_at_us);
+  g_assert_cmpint (result.retired_at_us, ==, now_us);
+  gint64 retired_at_us = result.retired_at_us;
+  wyl_policy_service_handoff_retirement_result_clear (&result);
+  retirement_transaction_commit (&transaction);
+
+  /* Permanent exact replay never reopens the elapsed-time gate, even if the
+   * trusted wall clock regresses after the receipt was committed. */
+  now_us = delivered.created_at_us;
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
+  g_assert_true (result.replayed);
+  g_assert_cmpint (result.retired_at_us, ==, retired_at_us);
+  wyl_policy_service_handoff_retirement_result_clear (&result);
+  classifier_transaction_end (&transaction);
+
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_lookup_core
+      (transaction.txn, store, original_request_id, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result.retired_at_us, ==, retired_at_us);
+  wyl_policy_service_handoff_retirement_result_clear (&result);
+  classifier_transaction_end (&transaction);
+
+  input.journal_version = 5;
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_INVALID);
+  classifier_transaction_end (&transaction);
+  input.journal_version = 6;
+  input.raw_journal_snapshot_digest[0] ^= 0xff;
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
+  classifier_transaction_end (&transaction);
+  input.raw_journal_snapshot_digest[0] ^= 0xff;
+  input.delivery_proof_digest[0] ^= 0xff;
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
+      (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
+  classifier_transaction_end (&transaction);
+  input.delivery_proof_digest[0] ^= 0xff;
+
+  wyl_id_t foreign_escrow_id;
+  gchar foreign_escrow[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_new (&foreign_escrow_id), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&foreign_escrow_id, foreign_escrow,
+          sizeof foreign_escrow), ==, WYRELOG_E_OK);
+  g_autofree gchar *insert_foreign = g_strdup_printf
+      ("INSERT INTO service_credential_handoff_escrows VALUES"
+      "('%s','issue','%s','foreign',zeroblob(32),'%s',1,%"
+      G_GINT64_FORMAT ",zeroblob(32),x'01',1);", foreign_escrow,
+      original_request_id, issued.credential.credential_id,
+      g_get_real_time () + G_TIME_SPAN_HOUR);
+  exec_ok (db_of (handle), insert_foreign);
+  classifier_transaction_begin (handle, &transaction);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_lookup_core
+      (transaction.txn, store, original_request_id, &result), ==,
+      WYRELOG_E_POLICY);
+  classifier_transaction_end (&transaction);
+  exec_ok (db_of (handle), "DELETE FROM service_credential_handoff_escrows;");
+  wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  wyl_policy_service_handoff_disposition_result_clear (&delivered);
+  wyl_service_credential_handoff_result_clear (&issued);
+  g_free (issue_probe.actor_subject_id);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -5726,5 +6291,14 @@ main (int argc, char **argv)
       test_handoff_disposition_attention_and_oar);
   g_test_add_func ("/auth/service-credential/handoff-revoke-wipe-faults",
       test_handoff_revoke_wipe_fault_atomicity);
+  g_test_add_func
+      ("/auth/service-credential/handoff-terminal-retirement-file-boundary-replay",
+      test_handoff_terminal_retirement_file_boundary_replay);
+  g_test_add_func
+      ("/auth/service-credential/handoff-terminal-retirement-revoke-fault-replay",
+      test_handoff_terminal_retirement_revoke_fault_replay);
+  g_test_add_func
+      ("/auth/service-credential/handoff-terminal-retirement-resumed-file-dual-proof",
+      test_handoff_terminal_retirement_resumed_file_dual_proof);
   return g_test_run ();
 }
