@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Related issues: #475, #506, #508, #515
+Related issues: #475, #506, #508, #515, #516, #517
 
 ## Context
 
@@ -27,11 +27,13 @@ fence, lifecycle event, and audit intention. The escrow plaintext is never
 placed in an operation journal, audit payload, log, SQL metadata, process
 ordinary memory, or a retry queue.
 
-The operation journal advances to version 5. It stores only an opaque escrow
-reference, a non-secret digest suitable for identity checks, and publication
-receipt/state metadata. A journal decoder rejects every earlier version and
-any v5 record that lacks the required opaque reference or violates its
-non-secret field contract. The journal is not an escrow fallback.
+Version 5 is the legacy delivery journal. Version 6 adds non-secret remediation
+provenance: the last remediation action and request, its source-snapshot digest
+and request fingerprint, and the applied target state. A decoder rejects
+versions 1--4, any v5/v6 hybrid, and either version when it violates its exact
+field contract. Version 5 remains readable for legacy recovery but is never
+eligible for terminal journal retirement. The journal is not an escrow
+fallback.
 
 The sole plaintext-file exception is the final published credential document.
 The publication backend must create it with owner-only permissions and retain
@@ -142,8 +144,39 @@ remediation request and audit action, and the exact credential id and
 generation; if the successor is already inactive it verifies that exact tuple
 before tombstoning and wiping escrow. Resume is separately authorized and
 inspects the receipt before retry. Neither remediation path reuses the
-original actor or request id. Retention later purges only terminal metadata,
-never active or recoverable escrow.
+original actor or request id. Terminal metadata retirement follows the private
+receipt-first rules below; active or recoverable escrow is never eligible.
+
+## Terminal journal retirement
+
+Retirement is limited to an exact version-6 `TERMINAL` snapshot. The eligible
+terminal evidence is either `FILE_PUBLISHED` with no remediation marker or
+with the exact preceding `RESUME` marker, or `OPERATOR_REVOKE_AND_WIPE` with
+its exact revoke marker. `NOT_COMMITTED`, version 5, and every nonterminal
+state are excluded.
+
+The policy authority follows the exact delivery or remediation provenance and
+verifies both escrow-id absence and original-request escrow absence in the
+same write transaction. The retention basis is the greatest timestamp among
+the journal and every referenced delivery, remediation, or revoke-event row.
+A trusted clock must be at least 30 days beyond that basis before the authority
+can commit retirement evidence.
+
+Retirement first commits an immutable, permanent, non-secret receipt. Only
+after that commit may the coordinator delete and synchronize the exact anchored
+journal snapshot, matching its request id, raw digest, version, terminal kind,
+and remediation marker. A crash after receipt commit replays from that receipt;
+an already missing snapshot is normalized to success only after the receipt
+has been validated. Without a receipt, a missing snapshot remains
+`NOT_FOUND`.
+
+The permanent receipt burns the original request id. Retirement and guarded
+operation begin share its lifecycle-lock namespace, and guarded begin rejects
+reuse whenever that receipt exists. The receipt contains no secret, path,
+ciphertext, or duplicate full credential tuple; it retains only the non-secret
+identifiers, digests, timestamps, and provenance references required to prove
+the deletion. Public ingress and any scheduling policy remain deferred to
+#517.
 
 ## Consequences
 
@@ -210,7 +243,8 @@ also depends on #508's current-actor authorization design and implementation.
 7. [#516](https://github.com/semantic-reasoning/wyrelog/issues/516) follows
    #515 (and therefore its v5/atomic prerequisites). It supplies
    receipt-aware `OPERATOR_ACTION_REQUIRED`, explicit terminal remediation,
-   post-delivery deletion, and bounded terminal metadata retention. Tests must
+   post-delivery deletion, version-6 remediation provenance, and permanent
+   receipt-first terminal journal retirement. Tests must
    prove that committed expiry/cancel preserves byte-identical escrow,
    successor, and receipt state in its existing lifecycle state and never
    enters OAR merely for expiry/cancel, without automatic
@@ -221,9 +255,13 @@ also depends on #508's current-actor authorization design and implementation.
    Manual
    revoke-and-wipe/resume requires fresh authorization, confirmation where
    applicable, a distinct request/audit, and exact credential tuple (including
-   inactive-tuple verification); retention removes terminal metadata only.
-8. [#517](https://github.com/semantic-reasoning/wyrelog/issues/517) depends on #515 and #516 and is the final public
-   HTTP/CLI contract. It must disable or replace legacy direct plaintext
+   inactive-tuple verification). Retirement accepts only exact eligible v6
+   terminal evidence after the 30-day minimum, commits its permanent non-secret
+   receipt before exact snapshot deletion, and permanently prevents reuse of
+   the original request id.
+8. [#517](https://github.com/semantic-reasoning/wyrelog/issues/517) depends on
+   #515 and #516 and is the final public ingress and scheduling contract. It
+   must disable or replace legacy direct plaintext
    issue/rotate ingress, make dropped-response retry return the same operation
    and credential without a second secret, redact unauthorized/error/log/body
    paths, and document at-least-once idempotent destination delivery without
