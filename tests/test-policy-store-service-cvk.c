@@ -2439,6 +2439,283 @@ test_rotation_recover (void)
   }
 }
 
+/* Subsequence scan used by the secret-hygiene assertions. */
+static gboolean
+bytes_contains (const guint8 *hay, gsize hay_len, const guint8 *needle,
+    gsize needle_len)
+{
+  if (needle_len == 0 || hay_len < needle_len)
+    return FALSE;
+  for (gsize i = 0; i + needle_len <= hay_len; i++)
+    if (memcmp (hay + i, needle, needle_len) == 0)
+      return TRUE;
+  return FALSE;
+}
+
+static void
+assert_file_lacks_secrets (const gchar *file, const guint8 cvk[32],
+    const guint8 store_key_old[32], const guint8 store_key_new[32])
+{
+  gchar *data = NULL;
+  gsize len = 0;
+  if (!g_file_get_contents (file, &data, &len, NULL))
+    return;
+  g_assert_false (bytes_contains ((const guint8 *) data, len, cvk, 32));
+  g_assert_false (bytes_contains ((const guint8 *) data, len, store_key_old,
+          32));
+  g_assert_false (bytes_contains ((const guint8 *) data, len, store_key_new,
+          32));
+  g_free (data);
+}
+
+/* TestProvider derive() yields the deterministic 32-byte store key
+ * 0x40 + seed + i for the "policy_store_v1" label. */
+static void
+store_key_for_seed (guint8 seed, guint8 out[32])
+{
+  for (guint i = 0; i < 32; i++)
+    out[i] = (guint8) (0x40 + seed + i);
+}
+
+static void
+test_rotation_recover_secret_hygiene (void)
+{
+  /* This runs on every platform (no subprocess) and doubles as the Windows-
+   * runnable recover convergence check: crash in-process before the rename to
+   * strand a pending intent, scan for secret leakage, then recover. */
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-recover-hygiene-XXXXXX", NULL);
+  g_assert_nonnull (dir);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  guint8 salt[16], verifier[32], cvk[32];
+  create_golden_store (path, salt, verifier, cvk);
+  guint8 store_key_old[32], store_key_new[32];
+  store_key_for_seed (0x00, store_key_old);
+  store_key_for_seed (0x20, store_key_new);
+
+  TestProvider old_provider = { 0 };
+  TestProvider new_provider = {.seed = 0x20 };
+  TestRuntime rotate_runtime = { 0 };
+  RotationFault fault = {
+    .fail_stage = WYL_POLICY_ROTATION_AFTER_INTENT_WRITE,
+  };
+  g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+          &rotate_runtime, &fault), ==, WYRELOG_E_POLICY);
+
+  g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
+      NULL);
+  g_assert_true (g_file_test (sidecar, G_FILE_TEST_EXISTS));
+  /* Neither the raw CVK nor either derived store key may appear on disk. */
+  assert_file_lacks_secrets (sidecar, cvk, store_key_old, store_key_new);
+  assert_file_lacks_secrets (path, cvk, store_key_old, store_key_new);
+
+  g_autofree gchar *tmp = g_strconcat (path, ".wyrelog-tmp", NULL);
+  assert_file_lacks_secrets (tmp, cvk, store_key_old, store_key_new);
+  g_autofree gchar *work = g_build_filename (dir, "policy.db.wyrelog-work",
+      NULL);
+  assert_file_lacks_secrets (work, cvk, store_key_old, store_key_new);
+
+  /* Recover converges the stranded rotation to the new root at generation 2. */
+  RecoveryFactory factory;
+  wyl_policy_rotation_recovery_factory_t api;
+  recovery_factory_init (&factory, 0x00, 0x20, &api);
+  g_assert_cmpint (wyl_policy_store_rotation_recover (path, &api), ==,
+      WYRELOG_E_OK);
+  g_assert_false (g_file_test (sidecar, G_FILE_TEST_EXISTS));
+  assert_file_lacks_secrets (path, cvk, store_key_old, store_key_new);
+
+  guint8 cvk_after[32];
+  read_store_cvk (path, 0x20, cvk_after);
+  g_assert_cmpmem (cvk_after, 32, cvk, 32);
+  TestProvider reopened = {.seed = 0x20 };
+  TestRuntime reopened_runtime = { 0 };
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
+      WYRELOG_E_OK);
+  assert_golden_verifies (store, salt, verifier);
+  wyl_policy_store_close (store);
+
+  g_assert_cmpint (g_remove (path), ==, 0);
+  remove_rotation_sidecar (path);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+  (void) g_remove (lock_path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+#ifndef G_OS_WIN32
+static gchar *rotate_crash_self_path;
+static wyl_policy_store_rotation_stage_t rotate_crash_target;
+
+static int
+rotate_crash_checkpoint (gpointer data, wyl_policy_store_rotation_stage_t stage)
+{
+  (void) data;
+  if (stage == rotate_crash_target)
+    _exit (99);
+  return 0;
+}
+
+/* Child entry: simulate a power loss at the requested seam by _exit(99) inside
+ * the rotation checkpoint. The golden store already exists (parent-created). */
+static int
+rotate_crash_child (const gchar *path, int seam_id)
+{
+  rotate_crash_target = (wyl_policy_store_rotation_stage_t) seam_id;
+  TestProvider old_provider = { 0 };
+  TestProvider new_provider = {.seed = 0x20 };
+  TestRuntime runtime = { 0 };
+  wyl_policy_store_cvk_runtime_t cvk_runtime = make_runtime (&runtime);
+  wyl_policy_store_rotation_runtime_t rotation_runtime = {
+    .checkpoint = rotate_crash_checkpoint,
+  };
+  wyl_policy_store_open_options_t old_opts = {
+    .keyprovider_vtable = &provider_vtable,
+    .keyprovider_state = &old_provider,
+    .require_encrypted = TRUE,
+    .service_cvk_runtime = &cvk_runtime,
+    .rotation_runtime = &rotation_runtime,
+  };
+  wyl_policy_store_open_options_t new_opts = {
+    .keyprovider_vtable = &provider_vtable,
+    .keyprovider_state = &new_provider,
+    .require_encrypted = TRUE,
+  };
+  wyrelog_error_t rc = wyl_policy_store_rotate_keyprovider (path, &old_opts,
+      &new_opts);
+  /* Only reached if the seam never fired; surface a non-99 status. */
+  return rc == WYRELOG_E_OK ? 0 : 1;
+}
+
+static gint
+run_rotate_crash (const gchar *path, wyl_policy_store_rotation_stage_t seam)
+{
+  g_autofree gchar *seam_str = g_strdup_printf ("%d", (int) seam);
+  const gchar *argv[] = { rotate_crash_self_path, "--rotate-crash", path,
+    seam_str, NULL
+  };
+  GError *error = NULL;
+  GSubprocess *proc = g_subprocess_newv (argv,
+      G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+      &error);
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_wait (proc, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_get_if_exited (proc));
+  gint status = g_subprocess_get_exit_status (proc);
+  g_object_unref (proc);
+  return status;
+}
+
+static guint64
+probe_new_generation (const gchar *path)
+{
+  RecoveryFactory factory;
+  wyl_policy_rotation_recovery_factory_t api;
+  recovery_factory_init (&factory, 0x00, 0x20, &api);
+  WylPolicyRotationRecoveryProbeResult probe = { 0 };
+  WylPolicyRotationRecoveryAction action =
+      WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+  g_assert_cmpint (wyl_policy_store_rotation_recovery_status (path, &api,
+          &probe, &action), ==, WYRELOG_E_OK);
+  g_assert_cmpint (probe.state, ==, WYL_POLICY_ROTATION_RECOVERY_NEW);
+  return probe.new_generation;
+}
+#endif /* !G_OS_WIN32 */
+
+static void
+test_rotation_recover_crash_harness (void)
+{
+#ifdef G_OS_WIN32
+  g_test_skip ("GSubprocess power-loss harness is exercised on POSIX only; the "
+      "recover() executor is covered platform-agnostically by the in-process "
+      "recover and secret-hygiene tests.");
+  return;
+#else
+  const wyl_policy_store_rotation_stage_t seams[] = {
+    WYL_POLICY_ROTATION_AFTER_INTENT_WRITE,
+    WYL_POLICY_ROTATION_AFTER_SQLITE_COMMIT,
+    WYL_POLICY_ROTATION_AFTER_ENCRYPTED_IMAGE_PREP,
+    WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
+    WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME,
+    WYL_POLICY_ROTATION_AFTER_PARENT_DIR_FSYNC,
+    WYL_POLICY_ROTATION_DURING_INTENT_CLEANUP,
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (seams); i++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-recover-crash-XXXXXX", NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    guint8 store_key_old[32], store_key_new[32];
+    store_key_for_seed (0x00, store_key_old);
+    store_key_for_seed (0x20, store_key_new);
+
+    /* Simulated power loss at this seam. */
+    g_assert_cmpint (run_rotate_crash (path, seams[i]), ==, 99);
+
+    /* Recovery converges to exactly one clean new root. */
+    RecoveryFactory factory;
+    wyl_policy_rotation_recovery_factory_t api;
+    recovery_factory_init (&factory, 0x00, 0x20, &api);
+    g_assert_cmpint (wyl_policy_store_rotation_recover (path, &api), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpuint (factory.frees, ==, factory.old_mints + factory.new_mints);
+
+    /* (a) Exactly one valid canonical: new opens, old fails. */
+    TestProvider new_p = {.seed = 0x20 };
+    TestRuntime new_rt = { 0 };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_store (path, &new_p, &new_rt, &store), ==,
+        WYRELOG_E_OK);
+    /* (b) Golden credential verifies (with its wrong-secret negative check) and
+     * the recovered CVK equals the pre-crash snapshot. */
+    assert_golden_verifies (store, salt, verifier);
+    wyl_policy_store_close (store);
+    guint8 cvk_after[32];
+    read_store_cvk (path, 0x20, cvk_after);
+    g_assert_cmpmem (cvk_after, 32, cvk, 32);
+    TestProvider old_p = { 0 };
+    TestRuntime old_rt = { 0 };
+    store = NULL;
+    g_assert_cmpint (open_store (path, &old_p, &old_rt, &store), !=,
+        WYRELOG_E_OK);
+    g_assert_null (store);
+
+    /* (c) Generation advanced by exactly one. */
+    g_assert_cmpuint (probe_new_generation (path), ==, 2);
+
+    /* Secret hygiene across the retained artifacts. */
+    g_autofree gchar *sidecar = g_strconcat (path, ".wyrelog-rotation-intent",
+        NULL);
+    assert_file_lacks_secrets (path, cvk, store_key_old, store_key_new);
+    assert_file_lacks_secrets (sidecar, cvk, store_key_old, store_key_new);
+    g_autofree gchar *tmp = g_strconcat (path, ".wyrelog-tmp", NULL);
+    assert_file_lacks_secrets (tmp, cvk, store_key_old, store_key_new);
+
+    /* (d) Idempotent: re-running recover changes nothing. */
+    g_autofree gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+    RecoveryFactory again;
+    wyl_policy_rotation_recovery_factory_t again_api;
+    recovery_factory_init (&again, 0x00, 0x20, &again_api);
+    g_assert_cmpint (wyl_policy_store_rotation_recover (path, &again_api), ==,
+        WYRELOG_E_OK);
+    g_autofree gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+    g_assert_cmpuint (probe_new_generation (path), ==, 2);
+    g_assert_false (g_file_test (sidecar, G_FILE_TEST_EXISTS));
+
+    g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
+#endif
+}
+
 static void
 test_rotation_post_rename_warning_commits (void)
 {
@@ -2672,6 +2949,17 @@ test_rotation_policy_edges (void)
 int
 main (int argc, char **argv)
 {
+#ifndef G_OS_WIN32
+  /* Child power-loss mode must be handled before g_test_init consumes argv. */
+  if (argc >= 4 && g_strcmp0 (argv[1], "--rotate-crash") == 0) {
+    if (sodium_init () < 0)
+      return 2;
+    return rotate_crash_child (argv[2],
+        (int) g_ascii_strtoll (argv[3], NULL, 10));
+  }
+  if (argc >= 1 && argv[0] != NULL && argv[0][0] != '\0')
+    rotate_crash_self_path = g_canonicalize_filename (argv[0], NULL);
+#endif
   g_test_init (&argc, &argv, NULL);
   g_assert_cmpint (sodium_init (), >=, 0);
   g_test_add_func ("/policy-store-service-cvk/fixture-concurrency-reopen",
@@ -2718,6 +3006,10 @@ main (int argc, char **argv)
       test_rotation_recovery_status);
   g_test_add_func ("/policy-store-service-cvk/rotation-recover",
       test_rotation_recover);
+  g_test_add_func ("/policy-store-service-cvk/rotation-recover-hygiene",
+      test_rotation_recover_secret_hygiene);
+  g_test_add_func ("/policy-store-service-cvk/rotation-recover-crash-harness",
+      test_rotation_recover_crash_harness);
   g_test_add_func ("/policy-store-service-cvk/rotation-post-rename",
       test_rotation_post_rename_warning_commits);
   g_test_add_func ("/policy-store-service-cvk/rotation-provider-failures",
