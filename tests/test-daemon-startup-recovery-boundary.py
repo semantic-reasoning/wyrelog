@@ -98,8 +98,9 @@ session_boundary_target = test_meson.split(
 session_boundary_self_test = test_meson.split(
     "test('check-service-session-private-boundary-self-test',", 1
 )[1].split("check_service_session_private_exports", 1)[0]
-assert session_boundary_target.count("timeout : 900") == 1
+assert session_boundary_target.count("timeout : 1500") == 1
 assert "timeout : 720" not in session_boundary_target
+assert "timeout : 900" not in session_boundary_target
 assert session_boundary_target.count("is_parallel : false") == 1
 assert session_boundary_self_test.count("timeout : 120") == 1
 assert session_boundary_self_test.count("is_parallel : false") == 1
