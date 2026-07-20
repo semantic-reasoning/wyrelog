@@ -449,6 +449,23 @@ if build_client and host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  # Drives `wyctl key status --store' and `wyctl key recover' as a subprocess
+  # against an encrypted policy store, fabricating clean-NEW and interrupted
+  # OLD+PENDING on-disk states in-process via the rotation crash seam.
+  test_wyctl_key = executable('test-wyctl-key',
+    'test-wyctl-key.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, glib_dep, gio_dep, sodium_dep],
+  )
+
+  test('wyctl-key', test_wyctl_key,
+    depends : [wyctl_exe],
+    timeout : 60,
+  )
+
   # End-to-end: drives wyctl as a subprocess against an in-process daemon
   # so the policy mutation subcommands exercise the full client -> HTTP
   # -> handler path, including bearer-only credentials and the privileged

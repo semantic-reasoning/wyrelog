@@ -2629,6 +2629,216 @@ run_mfa (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/* Borrowed const spec strings threaded to the recovery factory callbacks as
+ * factory.data. The callbacks fire multiple times (the probe opens both roots;
+ * recover re-opens), so each call mints a brand-new keyprovider from its spec
+ * and hands it to the store under the open-ownership contract. */
+typedef struct
+{
+  const gchar *from_spec;
+  const gchar *to_spec;
+} WyctlKeyRecoveryData;
+
+/* Mints a fresh, single-use provider option set from one spec. Never reuses a
+ * keyprovider across calls: the callbacks are invoked once per retained root
+ * and the state is consumed under wyl_policy_store_open_with_options()
+ * ownership rules. Returns WYRELOG_E_IO without leaking on an unreadable spec. */
+static wyrelog_error_t
+wyctl_key_recovery_make_opts (const gchar *spec,
+    wyl_policy_store_open_options_t *out_opts)
+{
+  wyl_keyprovider_file_t *keyprovider =
+      wyl_keyprovider_file_new_from_spec (spec);
+  if (keyprovider == NULL)
+    return WYRELOG_E_IO;
+  *out_opts = (wyl_policy_store_open_options_t) {
+  .keyprovider_vtable =
+        wyl_keyprovider_file_get_vtable (),.keyprovider_state =
+        keyprovider,.keyprovider_state_free =
+        (void (*)(gpointer)) wyl_keyprovider_file_free,.require_encrypted =
+        TRUE,};
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+wyctl_key_recovery_make_old (gpointer data,
+    wyl_policy_store_open_options_t *out_opts)
+{
+  const WyctlKeyRecoveryData *fd = data;
+  return wyctl_key_recovery_make_opts (fd->from_spec, out_opts);
+}
+
+static wyrelog_error_t
+wyctl_key_recovery_make_new (gpointer data,
+    wyl_policy_store_open_options_t *out_opts)
+{
+  const WyctlKeyRecoveryData *fd = data;
+  return wyctl_key_recovery_make_opts (fd->to_spec, out_opts);
+}
+
+/* Preflight: mint the spec once, free it, and report readability. */
+static gboolean
+wyctl_key_spec_is_readable (const gchar *spec)
+{
+  wyl_keyprovider_file_t *keyprovider =
+      wyl_keyprovider_file_new_from_spec (spec);
+  if (keyprovider == NULL)
+    return FALSE;
+  wyl_keyprovider_file_free (keyprovider);
+  return TRUE;
+}
+
+/* Validates the --store/--from-keyprovider/--to-keyprovider triple shared by
+ * the recovery subcommands, preflight-checks both specs, and wires the
+ * recovery factory to borrowed spec pointers in *out_data. Returns 0 on
+ * success; otherwise the process exit code (2 usage, 1 unreadable) after
+ * printing a diagnostic. */
+static int
+wyctl_key_recovery_validate (const WyctlKeyOptions *opts,
+    WyctlKeyRecoveryData *out_data,
+    wyl_policy_rotation_recovery_factory_t *out_factory)
+{
+  if (opts->store_path == NULL || opts->store_path[0] == '\0') {
+    g_printerr ("wyctl: missing --store\n");
+    return 2;
+  }
+  if (opts->from_keyprovider_path == NULL
+      || opts->from_keyprovider_path[0] == '\0') {
+    g_printerr ("wyctl: missing --from-keyprovider\n");
+    return 2;
+  }
+  if (opts->to_keyprovider_path == NULL || opts->to_keyprovider_path[0] == '\0') {
+    g_printerr ("wyctl: missing --to-keyprovider\n");
+    return 2;
+  }
+  if (!wyctl_key_spec_is_readable (opts->from_keyprovider_path)) {
+    g_printerr ("wyctl: current keyprovider unreadable\n");
+    return 1;
+  }
+  if (!wyctl_key_spec_is_readable (opts->to_keyprovider_path)) {
+    g_printerr ("wyctl: new keyprovider unreadable\n");
+    return 1;
+  }
+  out_data->from_spec = opts->from_keyprovider_path;
+  out_data->to_spec = opts->to_keyprovider_path;
+  *out_factory = (wyl_policy_rotation_recovery_factory_t) {
+  .make_old_opts = wyctl_key_recovery_make_old,.make_new_opts =
+        wyctl_key_recovery_make_new,.data = out_data,};
+  return 0;
+}
+
+static const gchar *
+wyctl_key_state_string (WylPolicyRotationRecoveryState state)
+{
+  switch (state) {
+    case WYL_POLICY_ROTATION_RECOVERY_OLD:
+      return "old";
+    case WYL_POLICY_ROTATION_RECOVERY_NEW:
+      return "new";
+    case WYL_POLICY_ROTATION_RECOVERY_AMBIGUOUS:
+    default:
+      return "ambiguous";
+  }
+}
+
+static const gchar *
+wyctl_key_intent_string (WylPolicyRotationIntentStatusState intent)
+{
+  switch (intent) {
+    case WYL_POLICY_ROTATION_INTENT_STATUS_PENDING:
+      return "pending";
+    case WYL_POLICY_ROTATION_INTENT_STATUS_COMMITTED:
+      return "committed";
+    case WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT:
+    default:
+      return "absent";
+  }
+}
+
+/* Presentation of the safe next action. FINALIZE_NEW with no residual intent
+ * sidecar means the new root is fully authoritative and nothing remains to
+ * recover: present it as `none' so the operator can retire the old root. Any
+ * FINALIZE_NEW that still has a residual sidecar is surfaced as `finalize-new'. */
+static const gchar *
+wyctl_key_action_string (const WylPolicyRotationRecoveryProbeResult *probe,
+    WylPolicyRotationRecoveryAction action)
+{
+  switch (action) {
+    case WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD:
+      return "resume-old";
+    case WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW:
+      return (probe->intent_state == WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT)
+          ? "none" : "finalize-new";
+    case WYL_POLICY_ROTATION_RECOVERY_NONE:
+      return "none";
+    case WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED:
+    default:
+      return "fail-closed";
+  }
+}
+
+/* Read-only crash-recovery probe over an encrypted store using the retained
+ * from/to provider roots. Renders only non-secret probe fields. */
+static int
+run_key_status_recovery (const WyctlKeyOptions *opts)
+{
+  WyctlKeyRecoveryData data = { 0 };
+  wyl_policy_rotation_recovery_factory_t factory = { 0 };
+  int vrc = wyctl_key_recovery_validate (opts, &data, &factory);
+  if (vrc != 0)
+    return vrc;
+
+  WylPolicyRotationRecoveryProbeResult probe = { 0 };
+  WylPolicyRotationRecoveryAction action =
+      WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+  wyrelog_error_t rc = wyl_policy_store_rotation_recovery_status
+      (opts->store_path, &factory, &probe, &action);
+  if (rc != WYRELOG_E_OK) {
+    g_printerr ("wyctl: key status failed: %s\n", wyrelog_error_string (rc));
+    return 1;
+  }
+
+  const gchar *action_str = wyctl_key_action_string (&probe, action);
+  /* `none' covers two distinct clean states: a settled old root with no
+   * rotation in flight (keep the old provider) and a fully-rotated new root
+   * that is already sealed under the new provider (keep the new provider).
+   * Reporting `old' for the latter would send an operator to provision the
+   * old key against a store they can no longer open, so key on the state. */
+  const gchar *required_roots;
+  if (g_strcmp0 (action_str, "none") == 0)
+    required_roots =
+        (probe.state == WYL_POLICY_ROTATION_RECOVERY_NEW) ? "new" : "old";
+  else
+    required_roots = "both";
+  gboolean retire_old = (probe.state == WYL_POLICY_ROTATION_RECOVERY_NEW
+      && g_strcmp0 (action_str, "none") == 0);
+
+  gchar old_hex[65];
+  gchar new_hex[65];
+  sodium_bin2hex (old_hex, sizeof old_hex, probe.old_provider_id,
+      sizeof probe.old_provider_id);
+  sodium_bin2hex (new_hex, sizeof new_hex, probe.new_provider_id,
+      sizeof probe.new_provider_id);
+
+  g_print ("state=%s\n", wyctl_key_state_string (probe.state));
+  g_print ("intent-state=%s\n", wyctl_key_intent_string (probe.intent_state));
+  if (probe.intent_state != WYL_POLICY_ROTATION_INTENT_STATUS_ABSENT) {
+    gchar txn[WYL_ID_STRING_BUF];
+    if (wyl_id_format (&probe.transaction_id, txn, sizeof txn) == WYRELOG_E_OK)
+      g_print ("transaction-id=%s\n", txn);
+  }
+  g_print ("old-generation=%" G_GUINT64_FORMAT "  new-generation=%"
+      G_GUINT64_FORMAT "\n", probe.old_generation, probe.new_generation);
+  g_print ("old-provider-id=%s  new-provider-id=%s\n", old_hex, new_hex);
+  g_print ("old-root-authenticated=%s  new-root-authenticated=%s\n",
+      probe.old_root_authenticated ? "yes" : "no",
+      probe.new_root_authenticated ? "yes" : "no");
+  g_print ("safe-next-action=%s\n", action_str);
+  g_print ("required-roots=%s\n", required_roots);
+  g_print ("retire-old-root=%s\n", retire_old ? "yes" : "no");
+  return 0;
+}
+
 static int
 run_key_status (gint argc, gchar **argv)
 {
@@ -2636,6 +2846,12 @@ run_key_status (gint argc, gchar **argv)
   GOptionEntry entries[] = {
     {"keyprovider", 0, 0, G_OPTION_ARG_STRING, &opts.keyprovider_path,
         "Policy KeyProvider spec: systemd-creds:NAME or file:PATH", "SPEC"},
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Encrypted policy store path (rotation recovery status)", "PATH"},
+    {"from-keyprovider", 0, 0, G_OPTION_ARG_STRING,
+        &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
+    {"to-keyprovider", 0, 0, G_OPTION_ARG_STRING,
+        &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -2651,6 +2867,13 @@ run_key_status (gint argc, gchar **argv)
     g_printerr ("wyctl: unexpected key status argument: %s\n", argv[1]);
     return 2;
   }
+
+  /* Recovery-status mode: --store selects the crash-recovery probe over an
+   * encrypted store using the retained from/to provider roots. */
+  if (opts.store_path != NULL && opts.store_path[0] != '\0')
+    return run_key_status_recovery (&opts);
+
+  /* Back-compat readiness mode: a lone --keyprovider probes a single spec. */
   if (opts.keyprovider_path == NULL || opts.keyprovider_path[0] == '\0') {
     g_printerr ("wyctl: missing --keyprovider\n");
     return 2;
@@ -2752,6 +2975,59 @@ run_key_rotate (gint argc, gchar **argv)
   return 0;
 }
 
+/* Idempotently drives an interrupted keyprovider rotation to a single clean
+ * root. A thin delegation over wyl_policy_store_rotation_recover(): parse and
+ * validate args, build the recovery factory, delegate, map exit codes. */
+static int
+run_key_recover (gint argc, gchar **argv)
+{
+  WyctlKeyOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"store", 0, 0, G_OPTION_ARG_STRING, &opts.store_path,
+        "Encrypted policy store path", "PATH"},
+    {"from-keyprovider", 0, 0, G_OPTION_ARG_STRING,
+        &opts.from_keyprovider_path, "Current Policy KeyProvider spec", "SPEC"},
+    {"to-keyprovider", 0, 0, G_OPTION_ARG_STRING,
+        &opts.to_keyprovider_path, "New Policy KeyProvider spec", "SPEC"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new
+      ("- recover an interrupted policy store key rotation");
+  g_option_context_add_main_entries (context, entries, NULL);
+
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected key recover argument: %s\n", argv[1]);
+    return 2;
+  }
+
+  WyctlKeyRecoveryData data = { 0 };
+  wyl_policy_rotation_recovery_factory_t factory = { 0 };
+  int vrc = wyctl_key_recovery_validate (&opts, &data, &factory);
+  if (vrc != 0)
+    return vrc;
+
+  wyrelog_error_t rc =
+      wyl_policy_store_rotation_recover (opts.store_path, &factory);
+  if (rc == WYRELOG_E_OK) {
+    g_print ("status=recovered store=%s\n", opts.store_path);
+    return 0;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    g_printerr ("wyctl: key recovery fail-closed: ambiguous or contradictory "
+        "rotation state; both provider roots retained, operator action "
+        "required\n");
+    return 1;
+  }
+  g_printerr ("wyctl: key recovery failed: %s\n", wyrelog_error_string (rc));
+  return 1;
+}
+
 static int
 run_key (gint argc, gchar **argv)
 {
@@ -2764,6 +3040,8 @@ run_key (gint argc, gchar **argv)
     return run_key_status (argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "rotate") == 0)
     return run_key_rotate (argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "recover") == 0 || g_strcmp0 (argv[1], "resume") == 0)
+    return run_key_recover (argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown key command: %s\n", argv[1]);
   return 2;
