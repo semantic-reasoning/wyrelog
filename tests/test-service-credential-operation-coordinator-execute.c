@@ -1000,6 +1000,21 @@ test_authenticated_handoff_issue_end_to_end (void)
   g_assert_cmpint (allow_first.outcome.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
   g_assert_cmpuint (publication.plan_calls, ==, 0);
+  /* after_authorization fires only when authorization ALLOWs (it is gated on
+     rc == WYRELOG_E_OK in service-credential-operation-coordinator-execute-
+     private.c:207).  Exactly one ALLOW happened here: the mutation-phase
+     authorize ALLOWed and fired the checkpoint once - that is where the
+     barrier parked the executor while the revoker queued.  The publication-
+     phase recheck in resume_committed_handoff (:501) then observed the revoke,
+     was DENIED, and so did NOT re-fire the checkpoint.  That the recheck
+     actually ran and denied is proven by the trio above: rc == WYRELOG_E_POLICY
+     with plan_calls == 0 and a SERVER_COMMITTED outcome pins the denial to the
+     only post-commit authorize.  barrier.calls == 1 corroborates that this
+     second authorize did not re-ALLOW - a barging executor that reacquired the
+     lease ahead of the revoker would have rechecked the stale pre-revoke policy,
+     re-ALLOWed, and fired the checkpoint a second time, making this assert fail
+     with 2. */
+  g_assert_cmpuint (barrier.calls, ==, 1);
   g_cond_clear (&barrier.cond);
   g_mutex_clear (&barrier.mutex);
   runtime.after_authorization = NULL;
