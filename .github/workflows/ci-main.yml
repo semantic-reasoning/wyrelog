@@ -19,6 +19,10 @@ jobs:
   build-posix:
     name: build-${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    # Fail fast on a wedged build instead of letting a hung compile burn the
+    # runner's full default lease (macOS still builds DuckDB from source in
+    # ~30 min, so keep comfortable headroom over that).
+    timeout-minutes: 45
     env:
       SCCACHE_GHA_ENABLED: "true"
       # Relativise absolute paths baked into debug info so cache entries stay
@@ -29,10 +33,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # DuckDB source vs prebuilt is split deliberately: the amalgamation is
+          # one ~300k-line C++ translation unit pinned to optimization=2 (needed
+          # for the fact/audit runtime envelope, issue #386). Compiling it from
+          # source is heavy, and on the Linux runner it is not reliably cached,
+          # so it was recompiled every run and exhausted the runner mid-build
+          # (SIGTERM / "lost communication"). macOS keeps the from-source build
+          # as the amalgamation-compiles-clean canary; Linux uses the optimized
+          # prebuilt library (same one the Windows job already ships).
           - os: ubuntu-latest
             tpm: enabled
+            duckdb: prebuilt
           - os: macos-latest
             tpm: disabled
+            duckdb: subproject
     steps:
       - name: Check out source
         uses: actions/checkout@v5
@@ -86,16 +100,20 @@ jobs:
           meson setup builddir \
             -Denable_tpm=${{ matrix.tpm }} \
             -Denable_audit=enabled \
-            -Dduckdb_source=subproject
+            -Dduckdb_source=${{ matrix.duckdb }}
 
       - name: Build and test
         run: meson test -C builddir --print-errorlogs --suite wyrelog
 
       - name: Build fact-store production daemon
         if: runner.os == 'Linux'
+        # Guards that wyrelogd still compiles in the fact-store production
+        # configuration (issue #497). Prebuilt DuckDB, matching the Linux
+        # "Build and test" job above, so the runner never compiles the heavy
+        # DuckDB amalgamation; the from-source compile is covered by macOS.
         run: |
           meson setup build-fact -Denable_fact_store=enabled \
-            -Denable_audit=enabled -Dduckdb_source=subproject
+            -Denable_audit=enabled -Dduckdb_source=prebuilt
           meson compile -C build-fact wyrelogd
 
       - name: Show sccache statistics
