@@ -128,8 +128,9 @@ begin_rotate_handoff_for_cancel (WylHandle *handle,
   request->expected_generation = old_generation;
   gboolean replayed = TRUE;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (storage,
-          anchor, request, now_us, &replayed, prepared), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (storage, anchor, request, now_us, &replayed, prepared), ==,
+      WYRELOG_E_OK);
   g_assert_false (replayed);
 }
 

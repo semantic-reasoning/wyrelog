@@ -2,6 +2,7 @@
 #pragma once
 
 #include "policy/store-handoff-delivery-private.h"
+#include "auth/service-credential-operation-journal-private.h"
 #include "wyctl/wyctl-publication-private.h"
 
 G_BEGIN_DECLS
@@ -41,6 +42,16 @@ typedef enum
   WYL_SERVICE_HANDOFF_DELIVERY_SUCCESSOR_EXPIRED = 4,
   WYL_SERVICE_HANDOFF_DELIVERY_SUCCESSOR_REVOKED = 5,
 } WylServiceCredentialHandoffDeliveryOutcome;
+
+/* Reconstruct the canonical v1 FILE_PUBLISHED delivery proof from an exact
+ * v6 TERMINAL journal.  The source is normalized to FILE_PUBLISHED and the
+ * shared delivery digest implementation is used. */
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_handoff_delivery_retirement_proof_digest
+    (const WylServiceCredentialOperationRecord * record,
+    const WylPolicyServiceHandoffExactTuple * tuple,
+    const guint8 target_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES],
+    guint8 out_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES]);
 
 /* Validate and hash the complete journal-derived proof, then look up only the
  * exact durable delivery tombstone.  This never inspects escrow, classifies a

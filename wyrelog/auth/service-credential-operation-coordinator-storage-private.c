@@ -584,9 +584,10 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_credential_operation_coordinator_begin_or_replay
+    wyl_service_credential_operation_coordinator_begin_or_replay_locked
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record)
@@ -604,9 +605,14 @@ wyrelog_error_t
 
   if (out_replayed != NULL)
     *out_replayed = FALSE;
-  if (storage == NULL || anchor == NULL || request == NULL
-      || out_record == NULL)
+  if (storage == NULL || anchor == NULL || lifecycle_lock == NULL
+      || request == NULL || out_record == NULL)
     return WYRELOG_E_INVALID;
+  if (!wyl_service_credential_operation_coordinator_request_is_valid (request))
+    return WYRELOG_E_INVALID;
+  if (!lifecycle_lock_matches_expectation (storage, anchor, lifecycle_lock,
+          request->request_id))
+    return WYRELOG_E_POLICY;
   rc = wyl_service_credential_operation_coordinator_build_prepared (request,
       request->request_id, now_us, &prepared);
   if (rc != WYRELOG_E_OK)

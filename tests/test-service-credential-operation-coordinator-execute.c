@@ -556,8 +556,9 @@ begin_handoff_issue_for_test (const WylServiceCredentialOperationStorage
   request->escrow_id = g_strdup (escrow_id);
   request->expires_at_us = now_us + G_TIME_SPAN_HOUR;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (storage,
-          anchor, request, now_us, &replayed, prepared), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (storage, anchor, request, now_us, &replayed, prepared), ==,
+      WYRELOG_E_OK);
   g_assert_false (replayed);
 }
 
@@ -865,8 +866,9 @@ test_authenticated_handoff_issue_end_to_end (void)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   gboolean replayed = FALSE;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &prepared), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &prepared), ==,
+      WYRELOG_E_OK);
   g_assert_false (replayed);
 
   HandoffPublication publication = {
@@ -917,9 +919,9 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord malformed_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &malformed_request, now, &replayed, &malformed_prepared), ==,
-      WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &malformed_request, now, &replayed,
+          &malformed_prepared), ==, WYRELOG_E_OK);
   g_autofree gchar *malformed_journal = g_strdup_printf ("%s/op-%s",
       operation_root, malformed_request_id);
   replace_journal_destination_for_test (malformed_journal,
@@ -1032,8 +1034,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord denied_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &denied_prepared), ==,
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &denied_prepared), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_revoke_direct_permission (store, "admin",
           "wr.service_credential.manage", session_id), ==, WYRELOG_E_OK);
@@ -1091,8 +1093,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord rotate_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &rotate_prepared), ==,
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &rotate_prepared), ==,
       WYRELOG_E_OK);
   publication = (HandoffPublication) {
   0};
@@ -1146,8 +1148,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord plan_crash_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &plan_crash_prepared), ==,
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &plan_crash_prepared), ==,
       WYRELOG_E_OK);
   publication = (HandoffPublication) {
   .fail_plan_once = TRUE};
@@ -1189,9 +1191,9 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord publish_crash_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &publish_crash_prepared), ==,
-      WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &publish_crash_prepared),
+      ==, WYRELOG_E_OK);
   publication = (HandoffPublication) {
   .fail_commit_after_publish_once = TRUE,};
   runtime.decision_request_id = publish_crash_request_id;
@@ -1278,8 +1280,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord foreign_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &foreign_prepared), ==,
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &foreign_prepared), ==,
       WYRELOG_E_OK);
   publication = (HandoffPublication) {
   .foreign_stage = TRUE};
@@ -1330,8 +1332,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord allow_first_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &allow_first_prepared), ==,
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &allow_first_prepared), ==,
       WYRELOG_E_OK);
   publication = (HandoffPublication) {
   0};
@@ -1416,8 +1418,8 @@ test_authenticated_handoff_issue_end_to_end (void)
   WylServiceCredentialOperationRecord revoke_first_prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_begin_or_replay (&storage,
-          &anchor, &request, now, &replayed, &revoke_first_prepared), ==,
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, now, &replayed, &revoke_first_prepared), ==,
       WYRELOG_E_OK);
   WylServiceAuthWriteLease *blocking_lease = NULL;
   wyl_policy_store_t *blocking_store = NULL;

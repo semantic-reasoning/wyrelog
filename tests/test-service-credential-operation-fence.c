@@ -570,7 +570,8 @@ test_precheck_with_committed (void)
   WylServiceCredentialOperationCoordinatorRequest pending_request = request;
   pending_request.request_id = pending_request_id;
   pending_request.expires_at_us = 3;
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
       (&storage, &anchor, &pending_request, 1, NULL, &begun), ==, WYRELOG_E_OK);
   total_changes = sqlite3_total_changes (db);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
@@ -591,7 +592,8 @@ test_precheck_with_committed (void)
   WylServiceCredentialOperationCoordinatorRequest expired_request = request;
   expired_request.request_id = expired_request_id;
   expired_request.expires_at_us = 2;
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
       (&storage, &anchor, &expired_request, 1, NULL, &begun), ==, WYRELOG_E_OK);
   g_autoptr (GBytes) begun_bytes = NULL;
   g_assert_cmpint (wyl_service_credential_operation_record_encode (&begun,
@@ -631,7 +633,8 @@ test_precheck_with_committed (void)
           sizeof terminal_request_id), ==, WYRELOG_E_OK);
   WylServiceCredentialOperationCoordinatorRequest terminal_request = request;
   terminal_request.request_id = terminal_request_id;
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
       (&storage, &anchor, &terminal_request, 1, NULL, &begun), ==,
       WYRELOG_E_OK);
   Txn terminal_txn = begin_txn (handle);
@@ -659,7 +662,8 @@ test_precheck_with_committed (void)
   WylServiceCredentialOperationCoordinatorRequest conflict_request = request;
   conflict_request.request_id = conflict_request_id;
   conflict_request.tenant_id = "tenant-b";
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
       (&storage, &anchor, &conflict_request, 1, NULL, &begun), ==,
       WYRELOG_E_OK);
   Txn conflict_txn = begin_txn (handle);
@@ -681,7 +685,8 @@ test_precheck_with_committed (void)
   wyl_service_credential_operation_record_clear (&recovered);
   wyl_service_credential_operation_record_clear (&begun);
 
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
       (&storage, &anchor, &request, 1, &begin_replayed, &begun), ==,
       WYRELOG_E_OK);
   g_assert_false (begin_replayed);
@@ -759,7 +764,8 @@ test_precheck_with_committed (void)
   rotate_request.old_credential_id = issued_id;
   rotate_request.expected_generation = issued_generation;
   rotate_request.expires_at_us = 1;
-  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
       (&storage, &anchor, &rotate_request, 1, NULL, &begun), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_service_credential_operation_coordinator_recover
       (&storage, &anchor, store, NULL, rotate_request_id, 2, &recovery,

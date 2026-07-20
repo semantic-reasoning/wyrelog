@@ -960,9 +960,11 @@ service_exchange_audit_private_source = files(
 test_policy_store_private_companion_sources = files(
   '../wyrelog/policy/store.c',
   '../wyrelog/auth/service-credential-domain.c',
+  '../wyrelog/auth/service-credential-handoff-delivery-private.c',
   '../wyrelog/auth/service-credential-operation-coordinator-auth-private.c',
   '../wyrelog/auth/service-credential-operation-coordinator-proof-private.c',
   '../wyrelog/auth/service-credential-operation-coordinator-cancel-private.c',
+  '../wyrelog/auth/service-credential-operation-coordinator-retirement-private.c',
 )
 if not get_option('enable_audit').allowed()
   # The policy store uses the feature-independent audit codec even when the
@@ -994,7 +996,13 @@ if get_option('enable_audit').allowed()
 endif
 
 test_service_credential_domain = executable('test-service-credential-domain',
-  'test-service-credential-domain.c',
+  [
+    'test-service-credential-domain.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
   c_args : test_service_credential_domain_c_args,
   link_with : test_service_credential_domain_link_with,
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
@@ -1009,7 +1017,14 @@ test('service-credential-domain', test_service_credential_domain,
 )
 
 test_service_credential_operation_fence = executable('test-service-credential-operation-fence',
-  'test-service-credential-operation-fence.c',
+  [
+    'test-service-credential-operation-fence.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
+  c_args : ['-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS'],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
 )
@@ -1047,12 +1062,35 @@ test_service_credential_operation_coordinator_journal = executable('test-service
     '../wyrelog/auth/service-credential-operation-storage-private.c',
     '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
   ],
+  c_args : ['-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS'],
   dependencies : [wyrelog_dep, sodium_dep],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')])
 test('service-credential-operation-coordinator-journal', test_service_credential_operation_coordinator_journal)
 
+test_service_credential_operation_coordinator_retirement = executable(
+  'test-service-credential-operation-coordinator-retirement',
+  [
+    'test-service-credential-operation-coordinator-retirement.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
+  c_args : ['-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS'],
+  link_with : test_policy_store_private_companion,
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : test_service_credential_domain_deps,
+)
+
+test('service-credential-operation-coordinator-retirement',
+  test_service_credential_operation_coordinator_retirement,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : 180,
+)
+
 test_service_credential_operation_coordinator_execute_c_args = [
   '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  '-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS',
 ]
 test_service_credential_operation_coordinator_execute_deps = [
   wyrelog_dep,
@@ -1068,7 +1106,13 @@ if get_option('enable_audit').allowed()
 endif
 
 test_service_credential_operation_coordinator_execute = executable('test-service-credential-operation-coordinator-execute',
-  'test-service-credential-operation-coordinator-execute.c',
+  [
+    'test-service-credential-operation-coordinator-execute.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
   link_with : test_policy_store_private_companion,
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : test_service_credential_operation_coordinator_execute_deps,
@@ -1086,7 +1130,13 @@ test('service-credential-operation-coordinator-execute',
 if get_option('enable_audit').allowed()
   test_service_credential_operation_coordinator_cancel = executable(
     'test-service-credential-operation-coordinator-cancel',
-    'test-service-credential-operation-coordinator-cancel.c',
+    [
+      'test-service-credential-operation-coordinator-cancel.c',
+      '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+      '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+      '../wyrelog/auth/service-credential-operation-storage-private.c',
+      '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+    ],
     link_with : test_policy_store_private_companion,
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : test_service_credential_domain_deps,
