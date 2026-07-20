@@ -64,10 +64,29 @@ wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_operator_resume
     (const WylServiceCredentialOperationRecord * existing, gint64 now_us,
     WylServiceCredentialOperationRecord * out_record);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_operator_resume_exact
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * remediation_request_id,
+    const guint8 source_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    WylServiceCredentialOperationState target_state,
+    const guint8 request_fingerprint
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    gint64 now_us, WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_build_terminal
     (const WylServiceCredentialOperationRecord * existing,
     WylServiceCredentialOperationTerminalKind kind,
     const gchar * remediation_request_id,
+    gint64 now_us, WylServiceCredentialOperationRecord * out_record);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_operator_revoke_and_wipe
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * remediation_request_id,
+    const guint8 source_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    const guint8 request_fingerprint
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
     gint64 now_us, WylServiceCredentialOperationRecord * out_record);
 G_END_DECLS

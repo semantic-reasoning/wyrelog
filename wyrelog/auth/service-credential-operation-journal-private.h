@@ -8,7 +8,8 @@
 
 G_BEGIN_DECLS;
 
-#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 5u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION 5u
+#define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION 6u
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES (64u * 1024u)
 #define WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_TEXT 4096u
 #define WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES 32u
@@ -58,6 +59,13 @@ typedef enum
   WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE = 3,
 } WylServiceCredentialOperationTerminalKind;
 
+typedef enum
+{
+  WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE = 0,
+  WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME = 1,
+  WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE = 2,
+} WylServiceCredentialOperationRemediationAction;
+
 typedef struct
 {
   guint32 version;
@@ -93,6 +101,15 @@ typedef struct
   gint64 created_at_us;
   gint64 updated_at_us;
   guint32 attempts;
+  /* Durable v6 proof marker.  These fields are appended to the frozen v5
+   * payload and survive every transition after an explicit remediation. */
+  WylServiceCredentialOperationRemediationAction last_remediation_action;
+  gchar *last_remediation_request_id;
+  guint8 last_remediation_source_snapshot_digest
+      [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES];
+  WylServiceCredentialOperationState last_remediation_applied_target_state;
+  guint8 last_remediation_request_fingerprint
+      [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES];
 } WylServiceCredentialOperationRecord;
 
 #define WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT { 0 }

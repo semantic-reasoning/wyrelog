@@ -1011,7 +1011,13 @@ static wyrelog_error_t
       || (terminal_kind !=
           WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED
           && terminal_kind !=
-          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED))
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED
+          && (terminal_kind !=
+              WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
+              || record->version !=
+              WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+              || record->last_remediation_action !=
+              WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE)))
     return WYRELOG_E_POLICY;
   *out_stop = TRUE;
   return WYRELOG_E_OK;

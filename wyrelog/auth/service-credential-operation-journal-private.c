@@ -12,7 +12,8 @@
 
 #define JOURNAL_MAGIC "WYLJNL01"
 #define JOURNAL_MAGIC_LEN 8u
-#define JOURNAL_FIELD_COUNT 17u
+#define JOURNAL_V5_FIELD_COUNT 17u
+#define JOURNAL_V6_FIELD_COUNT 22u
 
 static void
 put_u32 (guint8 out[4], guint32 value)
@@ -100,6 +101,79 @@ state_is_valid (WylServiceCredentialOperationState state)
     default:
       return FALSE;
   }
+}
+
+static gboolean
+resumable_state_is_valid (WylServiceCredentialOperationState state)
+{
+  return state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED;
+}
+
+static guint
+resumable_state_rank (WylServiceCredentialOperationState state)
+{
+  switch (state) {
+    case WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED:
+      return 1;
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED:
+      return 2;
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED:
+      return 3;
+    case WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED:
+      return 4;
+    case WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED:
+      return 5;
+    default:
+      return 0;
+  }
+}
+
+static gboolean
+remediation_marker_matches_state (const WylServiceCredentialOperationRecord
+    *record)
+{
+  if (record->last_remediation_action ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE)
+    return TRUE;
+  if (record->last_remediation_action ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE) {
+    WylServiceCredentialOperationTerminalKind kind = 0;
+    g_autofree gchar *request_id = NULL;
+    return record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
+        && wyl_service_credential_operation_terminal_reason_parse
+        (record->terminal_reason, &kind, &request_id)
+        && kind ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
+        && g_strcmp0 (request_id, record->last_remediation_request_id) == 0;
+  }
+  guint target_rank = resumable_state_rank
+      (record->last_remediation_applied_target_state);
+  if (target_rank == 0)
+    return FALSE;
+  if (resumable_state_is_valid (record->state))
+    return resumable_state_rank (record->state) >= target_rank;
+  if (record->state ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
+    WylServiceCredentialOperationState source = 0;
+    WylServiceCredentialOperationOarCause cause = 0;
+    return wyl_service_credential_operation_oar_reason_parse
+        (record->terminal_reason, &source, &cause)
+        && resumable_state_rank (source) >= target_rank;
+  }
+  if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL) {
+    WylServiceCredentialOperationTerminalKind kind = 0;
+    return wyl_service_credential_operation_terminal_reason_parse
+        (record->terminal_reason, &kind, NULL)
+        && kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED
+        && target_rank <=
+        resumable_state_rank
+        (WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+  }
+  return FALSE;
 }
 
 static gboolean
@@ -323,7 +397,9 @@ gboolean
     (const WylServiceCredentialOperationRecord * record)
 {
   if (record == NULL
-      || record->version != WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+      || (record->version != WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+          && record->version !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION)
       || !kind_is_valid (record->kind) || !state_is_valid (record->state)
       || !text_is_valid (record->operation_id, TRUE)
       || !request_id_is_canonical (record->request_id)
@@ -347,6 +423,44 @@ gboolean
       || record->attempts > G_MAXINT32 || record->expires_at_us <= 0
       || record->created_at_us <= 0
       || record->updated_at_us < record->created_at_us)
+    return FALSE;
+  gboolean marker_source_zero = digest_is_zero
+      (record->last_remediation_source_snapshot_digest);
+  gboolean marker_fingerprint_zero = digest_is_zero
+      (record->last_remediation_request_fingerprint);
+  if (record->version ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION) {
+    if (record->last_remediation_action !=
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE
+        || !text_is_absent (record->last_remediation_request_id)
+        || !marker_source_zero || !marker_fingerprint_zero
+        || record->last_remediation_applied_target_state != 0)
+      return FALSE;
+  } else if (record->last_remediation_action ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE) {
+    if (!text_is_absent (record->last_remediation_request_id)
+        || !marker_source_zero || !marker_fingerprint_zero
+        || record->last_remediation_applied_target_state != 0)
+      return FALSE;
+  } else {
+    if (!request_id_is_canonical (record->last_remediation_request_id)
+        || marker_source_zero || marker_fingerprint_zero)
+      return FALSE;
+    if (record->last_remediation_action ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME) {
+      if (!resumable_state_is_valid
+          (record->last_remediation_applied_target_state))
+        return FALSE;
+    } else if (record->last_remediation_action ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE) {
+      if (record->last_remediation_applied_target_state !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL)
+        return FALSE;
+    } else {
+      return FALSE;
+    }
+  }
+  if (!remediation_marker_matches_state (record))
     return FALSE;
   if (record->publication_receipt_version == 0
       && ((record->reservation_id != NULL && record->reservation_id[0] != '\0')
@@ -425,6 +539,12 @@ gboolean
     if (!wyl_service_credential_operation_terminal_reason_parse
         (record->terminal_reason, &kind, &remediation_request_id))
       return FALSE;
+    if (record->version == WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+        && kind ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
+        && record->last_remediation_action !=
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE)
+      return FALSE;
     if (kind == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED)
       return (record->successor_credential_id == NULL
           || record->successor_credential_id[0] == '\0')
@@ -472,6 +592,7 @@ void wyl_service_credential_operation_record_clear
   g_clear_pointer (&record->escrow_id, g_free);
   g_clear_pointer (&record->publication_receipt_id, g_free);
   g_clear_pointer (&record->terminal_reason, g_free);
+  g_clear_pointer (&record->last_remediation_request_id, g_free);
   memset (record, 0, sizeof *record);
 }
 
@@ -521,7 +642,9 @@ wyrelog_error_t
   append_u32 (bytes, record->version);
   append_u32 (bytes, record->kind);
   append_u32 (bytes, record->state);
-  append_u32 (bytes, JOURNAL_FIELD_COUNT);
+  append_u32 (bytes,
+      record->version == WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION ?
+      JOURNAL_V6_FIELD_COUNT : JOURNAL_V5_FIELD_COUNT);
   append_text (bytes, record->operation_id);
   append_text (bytes, record->request_id);
   append_text (bytes, record->subject_id);
@@ -546,6 +669,15 @@ wyrelog_error_t
   append_u64 (bytes, (guint64) record->created_at_us);
   append_u64 (bytes, (guint64) record->updated_at_us);
   append_u32 (bytes, record->attempts);
+  if (record->version == WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION) {
+    append_u32 (bytes, record->last_remediation_action);
+    append_text (bytes, record->last_remediation_request_id);
+    append_fixed (bytes, record->last_remediation_source_snapshot_digest,
+        sizeof record->last_remediation_source_snapshot_digest);
+    append_u32 (bytes, record->last_remediation_applied_target_state);
+    append_fixed (bytes, record->last_remediation_request_fingerprint,
+        sizeof record->last_remediation_request_fingerprint);
+  }
   if (bytes->len > WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES) {
     g_byte_array_unref (bytes);
     return WYRELOG_E_INVALID;
@@ -591,7 +723,16 @@ wyrelog_error_t
   offset += 4;
   decoded.state = get_u32 (data + offset);
   offset += 4;
-  if (get_u32 (data + offset) != JOURNAL_FIELD_COUNT)
+  guint32 field_count = get_u32 (data + offset);
+  if ((decoded.version ==
+          WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION
+          && field_count != JOURNAL_V5_FIELD_COUNT)
+      || (decoded.version == WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+          && field_count != JOURNAL_V6_FIELD_COUNT)
+      || (decoded.version !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION
+          && decoded.version !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION))
     goto invalid;
   offset += 4;
   if (!read_text (data, len, &offset, &decoded.operation_id)
@@ -632,6 +773,25 @@ wyrelog_error_t
   offset += 8;
   decoded.attempts = get_u32 (data + offset);
   offset += 4;
+  if (decoded.version == WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION) {
+    if (len - offset < 4)
+      goto invalid;
+    decoded.last_remediation_action = get_u32 (data + offset);
+    offset += 4;
+    if (!read_text (data, len, &offset, &decoded.last_remediation_request_id)
+        || len - offset <
+        sizeof decoded.last_remediation_source_snapshot_digest + 4
+        + sizeof decoded.last_remediation_request_fingerprint)
+      goto invalid;
+    memcpy (decoded.last_remediation_source_snapshot_digest, data + offset,
+        sizeof decoded.last_remediation_source_snapshot_digest);
+    offset += sizeof decoded.last_remediation_source_snapshot_digest;
+    decoded.last_remediation_applied_target_state = get_u32 (data + offset);
+    offset += 4;
+    memcpy (decoded.last_remediation_request_fingerprint, data + offset,
+        sizeof decoded.last_remediation_request_fingerprint);
+    offset += sizeof decoded.last_remediation_request_fingerprint;
+  }
   if (expires_raw > G_MAXINT64 || created_raw > G_MAXINT64
       || updated_raw > G_MAXINT64)
     goto invalid;

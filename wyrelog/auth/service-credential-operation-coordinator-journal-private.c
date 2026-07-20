@@ -2,6 +2,7 @@
 #include "auth/service-credential-operation-coordinator-journal-private.h"
 
 #include "auth/service-credential-private.h"
+#include <sodium.h>
 #include <string.h>
 
 wyrelog_error_t
@@ -399,27 +400,118 @@ wyrelog_error_t
     (const WylServiceCredentialOperationRecord * existing, gint64 now_us,
     WylServiceCredentialOperationRecord * out_record)
 {
+  (void) now_us;
+  return existing == NULL || out_record == NULL ?
+      WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
+static gboolean
+remediation_marker_matches (const WylServiceCredentialOperationRecord *record,
+    WylServiceCredentialOperationRemediationAction action,
+    const gchar *request_id, const guint8 *source_digest,
+    WylServiceCredentialOperationState target_state,
+    const guint8 *request_fingerprint)
+{
+  return record->last_remediation_action == action
+      && g_strcmp0 (record->last_remediation_request_id, request_id) == 0
+      && sodium_memcmp (record->last_remediation_source_snapshot_digest,
+      source_digest,
+      sizeof record->last_remediation_source_snapshot_digest) == 0
+      && record->last_remediation_applied_target_state == target_state
+      && sodium_memcmp (record->last_remediation_request_fingerprint,
+      request_fingerprint,
+      sizeof record->last_remediation_request_fingerprint) == 0;
+}
+
+static wyrelog_error_t
+set_remediation_marker (WylServiceCredentialOperationRecord *record,
+    WylServiceCredentialOperationRemediationAction action,
+    const gchar *request_id, const guint8 *source_digest,
+    WylServiceCredentialOperationState target_state,
+    const guint8 *request_fingerprint)
+{
+  if (request_id == NULL || source_digest == NULL
+      || request_fingerprint == NULL
+      || sodium_is_zero (source_digest,
+          WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES)
+      || sodium_is_zero (request_fingerprint,
+          WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *request_copy = g_strdup (request_id);
+  if (request_copy == NULL)
+    return WYRELOG_E_NOMEM;
+  record->version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION;
+  record->last_remediation_action = action;
+  g_free (record->last_remediation_request_id);
+  record->last_remediation_request_id = g_steal_pointer (&request_copy);
+  memcpy (record->last_remediation_source_snapshot_digest, source_digest,
+      sizeof record->last_remediation_source_snapshot_digest);
+  record->last_remediation_applied_target_state = target_state;
+  memcpy (record->last_remediation_request_fingerprint, request_fingerprint,
+      sizeof record->last_remediation_request_fingerprint);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_operator_resume_exact
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * remediation_request_id,
+    const guint8 source_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    WylServiceCredentialOperationState target_state,
+    const guint8 request_fingerprint
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    gint64 now_us, WylServiceCredentialOperationRecord * out_record)
+{
   WylServiceCredentialOperationRecord next =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
-  WylServiceCredentialOperationState source = 0;
-  WylServiceCredentialOperationOarCause cause = 0;
-  if (existing == NULL || out_record == NULL)
+  if (existing == NULL || out_record == NULL || remediation_request_id == NULL
+      || source_snapshot_digest == NULL || request_fingerprint == NULL)
     return WYRELOG_E_INVALID;
-  if (existing->state !=
-      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED
-      || !wyl_service_credential_operation_oar_reason_parse
-      (existing->terminal_reason, &source, &cause))
+  if (existing->last_remediation_action !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE) {
+    if (remediation_marker_matches (existing,
+            WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME,
+            remediation_request_id, source_snapshot_digest, target_state,
+            request_fingerprint))
+      return clone_for_transition (existing, existing->updated_at_us,
+          out_record);
+    if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL)
+      return WYRELOG_E_POLICY;
+  }
+  if (existing->state ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
+    WylServiceCredentialOperationState source = 0;
+    WylServiceCredentialOperationOarCause cause = 0;
+    if (!wyl_service_credential_operation_oar_reason_parse
+        (existing->terminal_reason, &source, &cause)
+        || source != target_state
+        || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED
+        || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED
+        || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING)
+      return WYRELOG_E_POLICY;
+  } else if (existing->state != target_state
+      || (target_state != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
+          && target_state !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+          && target_state !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+          && target_state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+          && target_state !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)) {
     return WYRELOG_E_POLICY;
-  if (cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED
-      || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED
-      || cause == WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING)
-    return WYRELOG_E_POLICY;
+  }
   wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
   if (rc != WYRELOG_E_OK)
     goto out;
-  next.state = source;
+  next.state = target_state;
   g_clear_pointer (&next.terminal_reason, g_free);
-  rc = finish_transition (&next, out_record);
+  rc = set_remediation_marker (&next,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME,
+      remediation_request_id, source_snapshot_digest, target_state,
+      request_fingerprint);
+  if (rc == WYRELOG_E_OK)
+    rc = finish_transition (&next, out_record);
 out:
   wyl_service_credential_operation_record_clear (&next);
   return rc;
@@ -434,6 +526,9 @@ wyrelog_error_t
 {
   if (existing == NULL || out_record == NULL)
     return WYRELOG_E_INVALID;
+  if (kind ==
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE)
+    return WYRELOG_E_POLICY;
   g_autofree gchar *reason =
       wyl_service_credential_operation_terminal_reason_format (kind,
       remediation_request_id);
@@ -473,4 +568,63 @@ wyrelog_error_t
     return WYRELOG_E_POLICY;
   return build_reason_transition (existing,
       WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL, reason, now_us, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_build_operator_revoke_and_wipe
+    (const WylServiceCredentialOperationRecord * existing,
+    const gchar * remediation_request_id,
+    const guint8 source_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    const guint8 request_fingerprint
+    [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES],
+    gint64 now_us, WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  if (existing == NULL || out_record == NULL || remediation_request_id == NULL
+      || source_snapshot_digest == NULL || request_fingerprint == NULL)
+    return WYRELOG_E_INVALID;
+  if (existing->last_remediation_action !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE) {
+    if (remediation_marker_matches (existing,
+            WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE,
+            remediation_request_id, source_snapshot_digest,
+            WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL, request_fingerprint))
+      return clone_for_transition (existing, existing->updated_at_us,
+          out_record);
+    if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL)
+      return WYRELOG_E_POLICY;
+  }
+  if (existing->state !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED
+      && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
+      && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+      && existing->state !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+      && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+      && existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  next.state = WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+  g_clear_pointer (&next.terminal_reason, g_free);
+  next.terminal_reason =
+      wyl_service_credential_operation_terminal_reason_format
+      (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+      remediation_request_id);
+  if (next.terminal_reason == NULL) {
+    rc = WYRELOG_E_INVALID;
+    goto out;
+  }
+  rc = set_remediation_marker (&next,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE,
+      remediation_request_id, source_snapshot_digest,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL, request_fingerprint);
+  if (rc == WYRELOG_E_OK)
+    rc = finish_transition (&next, out_record);
+out:
+  wyl_service_credential_operation_record_clear (&next);
+  return rc;
 }

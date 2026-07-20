@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
+#include <sodium.h>
 #include <string.h>
 
 #include "auth/service-credential-operation-journal-private.h"
@@ -65,6 +66,8 @@ test_roundtrip (void)
   g_assert_cmpuint (output.expected_generation, ==, 0);
   g_assert_cmpint (output.expires_at_us, ==, input.expires_at_us);
   g_assert_cmpint (output.state, ==, input.state);
+  g_assert_cmpint (output.last_remediation_action, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE);
   g_assert_true (g_bytes_get_size (bytes) <
       WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_MAX_BYTES);
   wyl_service_credential_operation_record_clear (&input);
@@ -177,6 +180,27 @@ test_rejects_trailing_and_unknown (void)
   g_assert_cmpint (wyl_service_credential_operation_record_decode (v4,
           &output), ==, WYRELOG_E_POLICY);
   g_assert_null (output.request_id);
+  guint8 *hybrid = g_memdup2 (data, len);
+  hybrid[11] = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION;
+  GBytes *v5_with_v6_fields = g_bytes_new_take (hybrid, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode
+      (v5_with_v6_fields, &output), ==, WYRELOG_E_POLICY);
+  hybrid = g_memdup2 (data, len);
+  hybrid[20] = 0;
+  hybrid[21] = 0;
+  hybrid[22] = 0;
+  hybrid[23] = 17;
+  GBytes *v6_with_v5_fields = g_bytes_new_take (hybrid, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode
+      (v6_with_v5_fields, &output), ==, WYRELOG_E_POLICY);
+  hybrid = g_memdup2 (data, len);
+  hybrid[11] = 7;
+  GBytes *unknown = g_bytes_new_take (hybrid, len);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (unknown,
+          &output), ==, WYRELOG_E_POLICY);
+  g_bytes_unref (unknown);
+  g_bytes_unref (v6_with_v5_fields);
+  g_bytes_unref (v5_with_v6_fields);
   g_bytes_unref (v4);
   g_bytes_unref (v3);
   g_bytes_unref (v2);
@@ -361,7 +385,7 @@ static WylServiceCredentialOperationRecord
 golden_nonterminal_v5_record (WylServiceCredentialOperationState state)
 {
   WylServiceCredentialOperationRecord record = {
-    .version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION,
+    .version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION,
     .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE,
     .state = state,
     .operation_id = g_strdup ("operation-1"),
@@ -504,6 +528,9 @@ test_typed_reason_codec (void)
       wyl_service_credential_operation_terminal_reason_format
       (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
       terminal_request);
+  /* Frozen v5 terminals remain readable; v6 can only create this shape
+   * through an exact remediation checkpoint with a matching marker. */
+  input.version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION;
   g_clear_pointer (&encoded, g_bytes_unref);
   g_assert_cmpint (wyl_service_credential_operation_record_encode (&input,
           &encoded), ==, WYRELOG_E_OK);
@@ -647,6 +674,26 @@ test_nonterminal_v5_byte_compatibility (void)
     g_assert_cmpuint (output.version, ==, 5);
     g_assert_cmpint (output.kind, ==, 1);
     g_assert_cmpint (output.state, ==, fixtures[i].state);
+    g_autoptr (GBytes) replay = NULL;
+    g_assert_cmpint (wyl_service_credential_operation_record_encode (&output,
+            &replay), ==, WYRELOG_E_OK);
+    g_assert_true (g_bytes_equal (expected, replay));
+    if (fixtures[i].state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED) {
+      static const guint8 expected_digest[crypto_generichash_BYTES] = {
+        0x13, 0xd8, 0x73, 0x0d, 0x29, 0x73, 0x74, 0xe5,
+        0xb2, 0x86, 0x2f, 0x69, 0x15, 0x21, 0x0c, 0xbe,
+        0x29, 0x50, 0x65, 0x98, 0xae, 0x89, 0x0a, 0x25,
+        0x93, 0x65, 0xa0, 0x39, 0x74, 0x85, 0x39, 0xdf,
+      };
+      guint8 digest[crypto_generichash_BYTES];
+      gsize expected_len = 0;
+      const guint8 *expected_data = g_bytes_get_data (expected,
+          &expected_len);
+      g_assert_cmpint (crypto_generichash (digest, sizeof digest,
+              expected_data, expected_len, NULL, 0), ==, 0);
+      g_assert_cmpmem (digest, sizeof digest, expected_digest,
+          sizeof expected_digest);
+    }
     wyl_service_credential_operation_record_clear (&output);
     wyl_service_credential_operation_record_clear (&input);
   }
@@ -716,6 +763,7 @@ test_terminal_reason_shapes (void)
       wyl_service_credential_operation_terminal_reason_format
       (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
       remediation_request);
+  record.version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION;
   g_clear_pointer (&encoded, g_bytes_unref);
   g_clear_pointer (&malformed, g_bytes_unref);
   g_assert_cmpint (wyl_service_credential_operation_record_encode (&record,
@@ -729,6 +777,124 @@ test_terminal_reason_shapes (void)
           &output), ==, WYRELOG_E_POLICY);
   g_assert_null (output.request_id);
   wyl_service_credential_operation_record_clear (&record);
+}
+
+static void
+test_v6_remediation_marker_roundtrip (void)
+{
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  gchar remediation_id[WYL_REQUEST_ID_STRING_BUF];
+  WylServiceCredentialOperationRecord record = record_new (request_id,
+      credential_id);
+  WylServiceCredentialOperationRecord output =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint (wyl_request_id_new (remediation_id, sizeof remediation_id),
+      ==, WYRELOG_E_OK);
+  record.last_remediation_action =
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME;
+  record.last_remediation_request_id = g_strdup (remediation_id);
+  record.last_remediation_source_snapshot_digest[0] = 1;
+  record.last_remediation_applied_target_state =
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED;
+  record.last_remediation_request_fingerprint[0] = 2;
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&record,
+          &encoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode (encoded,
+          &output), ==, WYRELOG_E_OK);
+  g_assert_cmpint (output.last_remediation_action, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME);
+  g_assert_cmpstr (output.last_remediation_request_id, ==, remediation_id);
+  g_assert_cmpmem (output.last_remediation_source_snapshot_digest, 32,
+      record.last_remediation_source_snapshot_digest, 32);
+  g_assert_cmpint (output.last_remediation_applied_target_state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
+  g_assert_cmpmem (output.last_remediation_request_fingerprint, 32,
+      record.last_remediation_request_fingerprint, 32);
+  g_autoptr (GBytes) replay = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&output,
+          &replay), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (encoded, replay));
+
+  gsize len = 0;
+  const guint8 *data = g_bytes_get_data (encoded, &len);
+  for (gsize cut = 1; cut < len; cut++) {
+    g_autoptr (GBytes) truncated = g_bytes_new (data, len - cut);
+    WylServiceCredentialOperationRecord rejected =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    g_assert_cmpint (wyl_service_credential_operation_record_decode
+        (truncated, &rejected), ==, WYRELOG_E_POLICY);
+    g_assert_null (rejected.request_id);
+  }
+  output.last_remediation_applied_target_state =
+      WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED;
+  g_assert_false (wyl_service_credential_operation_record_is_valid (&output));
+  wyl_service_credential_operation_record_clear (&output);
+  wyl_service_credential_operation_record_clear (&record);
+
+  WylServiceCredentialOperationRecord revoke = record_new (request_id,
+      credential_id);
+  WylServiceCredentialOperationRecord decoded_revoke =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gchar mismatched_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (remediation_id, sizeof remediation_id),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (mismatched_id, sizeof mismatched_id),
+      ==, WYRELOG_E_OK);
+  revoke.state = WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+  revoke.terminal_reason =
+      wyl_service_credential_operation_terminal_reason_format
+      (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+      remediation_id);
+  revoke.last_remediation_action =
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE;
+  revoke.last_remediation_request_id = g_strdup (remediation_id);
+  revoke.last_remediation_source_snapshot_digest[0] = 1;
+  revoke.last_remediation_applied_target_state =
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+  revoke.last_remediation_request_fingerprint[0] = 2;
+  g_autoptr (GBytes) encoded_revoke = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&revoke,
+          &encoded_revoke), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode
+      (encoded_revoke, &decoded_revoke), ==, WYRELOG_E_OK);
+  g_assert_cmpint (decoded_revoke.last_remediation_action, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE);
+
+  g_clear_pointer (&decoded_revoke.terminal_reason, g_free);
+  decoded_revoke.terminal_reason =
+      wyl_service_credential_operation_terminal_reason_format
+      (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+      mismatched_id);
+  g_autoptr (GBytes) rejected = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&decoded_revoke, &rejected), ==, WYRELOG_E_INVALID);
+  g_clear_pointer (&decoded_revoke.terminal_reason, g_free);
+  decoded_revoke.terminal_reason =
+      wyl_service_credential_operation_terminal_reason_format
+      (WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
+      remediation_id);
+  decoded_revoke.last_remediation_action =
+      (WylServiceCredentialOperationRemediationAction) 99;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&decoded_revoke, &rejected), ==, WYRELOG_E_INVALID);
+  decoded_revoke.last_remediation_action =
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE;
+  decoded_revoke.last_remediation_source_snapshot_digest[0] = 0;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&decoded_revoke, &rejected), ==, WYRELOG_E_INVALID);
+  decoded_revoke.last_remediation_source_snapshot_digest[0] = 1;
+  decoded_revoke.last_remediation_request_fingerprint[0] = 0;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&decoded_revoke, &rejected), ==, WYRELOG_E_INVALID);
+  decoded_revoke.last_remediation_request_fingerprint[0] = 2;
+  g_clear_pointer (&decoded_revoke.last_remediation_request_id, g_free);
+  decoded_revoke.last_remediation_request_id = g_strdup ("not-canonical");
+  g_assert_cmpint (wyl_service_credential_operation_record_encode
+      (&decoded_revoke, &rejected), ==, WYRELOG_E_INVALID);
+  wyl_service_credential_operation_record_clear (&decoded_revoke);
+  wyl_service_credential_operation_record_clear (&revoke);
 }
 
 static void
@@ -804,5 +970,7 @@ main (int argc, char **argv)
       test_nonterminal_v5_byte_compatibility);
   g_test_add_func ("/operation-journal/terminal-reason-shapes",
       test_terminal_reason_shapes);
+  g_test_add_func ("/operation-journal/v6-remediation-marker-roundtrip",
+      test_v6_remediation_marker_roundtrip);
   return g_test_run ();
 }

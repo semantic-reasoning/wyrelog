@@ -334,6 +334,7 @@ typedef struct
       resume_target_state;
   wyl_service_credential_handoff_disposition_reason_t source_reason;
   gchar *decision_request_id;
+  gchar *current_actor_subject_id;
   gchar *original_request_id;
   gchar *original_actor_subject_id;
   gchar *source_disposition_id;
