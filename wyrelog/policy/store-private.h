@@ -1231,8 +1231,6 @@ wyrelog_error_t wyl_policy_store_service_handoff_escrow_unseal
     (wyl_policy_store_t * store,
     const wyl_policy_service_handoff_escrow_info_t * expected,
     wyl_policy_service_handoff_secret_t ** out_secret);
-wyrelog_error_t wyl_policy_store_service_handoff_escrow_delete
-    (wyl_policy_store_t * store, const wyl_id_t * escrow_id);
 wyrelog_error_t
     wyl_policy_store_classify_service_credential_successor_exact_core
     (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,

@@ -2,6 +2,7 @@
 #include "auth/service-credential-operation-coordinator-execute-private.h"
 #include "../wyctl/wyctl-publication-private.h"
 #include "auth/service-auth-coordination-private.h"
+#include "auth/service-credential-handoff-delivery-private.h"
 #include "auth/service-credential-operation-destination-private.h"
 #include "auth/service-credential-operation-coordinator-recovery-private.h"
 #include "auth/service-credential-operation-coordinator-storage-private.h"
@@ -469,6 +470,146 @@ execute_prepared_handoff (WylHandle *handle,
 }
 
 static wyrelog_error_t
+handoff_authority_transaction_finish (wyl_policy_store_t *store,
+    WylServiceAuthorityTransaction *transaction, wyrelog_error_t operation)
+{
+  wyrelog_error_t result = operation;
+  wyrelog_error_t terminal = operation == WYRELOG_E_OK ?
+      wyl_policy_store_service_authority_transaction_commit (transaction) :
+      wyl_policy_store_service_authority_transaction_rollback (transaction);
+  if (operation == WYRELOG_E_OK || terminal != WYRELOG_E_OK)
+    result = terminal;
+  if (wyl_policy_store_service_authority_transaction_is_poisoned (store)) {
+    wyrelog_error_t abort_rc =
+        wyl_policy_store_service_authority_transaction_abort (transaction);
+    if (abort_rc != WYRELOG_E_OK)
+      result = abort_rc;
+  }
+  wyl_policy_store_service_authority_transaction_free (transaction);
+  return result;
+}
+
+static WylPolicyServiceHandoffExactTuple
+handoff_exact_tuple (const WylServiceCredentialOperationRecord *record,
+    const wyl_id_t *escrow_id)
+{
+  WylPolicyServiceHandoffExactTuple tuple = {
+    .original_request_id = record->request_id,
+    .escrow_id = escrow_id,
+    .successor_credential_id = record->successor_credential_id,
+    .successor_issuance_generation = record->successor_generation,
+    .original_actor_subject_id = record->actor_subject_id,
+  };
+  memcpy (tuple.binding_digest, record->escrow_binding_digest,
+      sizeof tuple.binding_digest);
+  return tuple;
+}
+
+static wyrelog_error_t
+handoff_classify_for_publication (WylHandle *handle,
+    WylServiceAuthWriteLease *lease, wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffExactTuple *tuple,
+    const gchar *actor_subject_id,
+    WylPolicyServiceHandoffPublicationOutcome *out_outcome,
+    WylPolicyServiceHandoffDispositionResult *out_disposition)
+{
+  WylServiceAuthorityTransaction *transaction = NULL;
+  wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &transaction);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_handoff_classify_for_publication_core (transaction,
+        store, tuple, actor_subject_id, out_outcome, out_disposition);
+  return transaction == NULL ? rc :
+      handoff_authority_transaction_finish (store, transaction, rc);
+}
+
+static wyrelog_error_t
+handoff_prepare_delivery (WylHandle *handle, WylServiceAuthWriteLease *lease,
+    wyl_policy_store_t *store,
+    const WylServiceCredentialHandoffDeliveryProof *proof,
+    WylServiceCredentialHandoffDeliveryOutcome *out_outcome,
+    WylServiceCredentialHandoffDeliveryPreflight **out_preflight,
+    WylPolicyServiceHandoffDispositionResult *out_disposition)
+{
+  WylServiceAuthorityTransaction *transaction = NULL;
+  wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &transaction);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_credential_handoff_prepare_delivery_core (transaction,
+        store, proof, out_outcome, out_preflight, out_disposition);
+  if (transaction != NULL)
+    rc = handoff_authority_transaction_finish (store, transaction, rc);
+  if (rc != WYRELOG_E_OK) {
+    g_clear_pointer (out_preflight,
+        wyl_service_credential_handoff_delivery_preflight_free);
+    wyl_policy_service_handoff_disposition_result_clear (out_disposition);
+  }
+  return rc;
+}
+
+static wyrelog_error_t
+handoff_consume_delivery (WylHandle *handle, WylServiceAuthWriteLease *lease,
+    wyl_policy_store_t *store,
+    WylServiceCredentialHandoffDeliveryCapability *capability,
+    WylPolicyServiceHandoffPublicationOutcome *out_outcome,
+    WylPolicyServiceHandoffDispositionResult *out_disposition)
+{
+  WylServiceAuthorityTransaction *transaction = NULL;
+  wyrelog_error_t rc = wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &transaction);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_credential_handoff_delivery_consume_core (transaction,
+        store, capability, out_outcome, out_disposition);
+  if (transaction != NULL)
+    rc = handoff_authority_transaction_finish (store, transaction, rc);
+  if (rc != WYRELOG_E_OK)
+    wyl_policy_service_handoff_disposition_result_clear (out_disposition);
+  return rc;
+}
+
+static WylServiceCredentialOperationOarCause
+handoff_inactive_cause (WylPolicyServiceHandoffPublicationOutcome outcome)
+{
+  return outcome == WYL_POLICY_HANDOFF_PUBLICATION_SUCCESSOR_EXPIRED ?
+      WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED :
+      WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED;
+}
+
+static wyrelog_error_t
+handoff_require_active_or_checkpoint (WylHandle *handle,
+    WylServiceAuthWriteLease *lease, wyl_policy_store_t *store,
+    const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const gchar *request_id,
+    const WylServiceCredentialOperationHandoffExecuteRuntime *runtime,
+    const WylPolicyServiceHandoffExactTuple *tuple,
+    WylServiceCredentialOperationRecord *record, gboolean *out_active)
+{
+  WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+  WylPolicyServiceHandoffPublicationOutcome outcome = 0;
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean replayed = FALSE;
+  *out_active = FALSE;
+  wyrelog_error_t rc = handoff_classify_for_publication (handle, lease, store,
+      tuple, record->actor_subject_id, &outcome, &disposition);
+  if (rc == WYRELOG_E_OK && outcome == WYL_POLICY_HANDOFF_PUBLICATION_ACTIVE) {
+    *out_active = TRUE;
+  } else if (rc == WYRELOG_E_OK) {
+    rc = wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar (storage, anchor, request_id, handoff_inactive_cause (outcome), handoff_now_us (runtime), &replayed, &next);
+    if (rc == WYRELOG_E_OK) {
+      wyl_service_credential_operation_record_clear (record);
+      *record = next;
+      next = (WylServiceCredentialOperationRecord)
+          WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    }
+  }
+  wyl_service_credential_operation_record_clear (&next);
+  wyl_policy_service_handoff_disposition_result_clear (&disposition);
+  return rc;
+}
+
+static wyrelog_error_t
 resume_committed_handoff (WylHandle *handle,
     const WylServiceCredentialOperationStorage *storage,
     const WylServiceCredentialOperationRootAnchor *anchor,
@@ -481,6 +622,9 @@ resume_committed_handoff (WylHandle *handle,
   wyl_policy_store_t *store = NULL;
   wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
   wyl_policy_service_handoff_secret_t *sealed_secret = NULL;
+  WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+  WylServiceCredentialHandoffDeliveryPreflight *preflight = NULL;
+  WylServiceCredentialHandoffDeliveryCapability *capability = NULL;
   WyctlSensitiveText secret = { 0 };
   WyctlPublicationPlan plan = { 0 };
   WyctlPublicationReceipt receipt = { 0 };
@@ -503,6 +647,11 @@ resume_committed_handoff (WylHandle *handle,
   while (rc == WYRELOG_E_OK) {
     wyl_policy_service_handoff_escrow_info_clear (&escrow);
     wyl_policy_service_handoff_secret_clear (&sealed_secret);
+    wyl_policy_service_handoff_disposition_result_clear (&disposition);
+    g_clear_pointer (&preflight,
+        wyl_service_credential_handoff_delivery_preflight_free);
+    g_clear_pointer (&capability,
+        wyl_service_credential_handoff_delivery_capability_free);
     handoff_sensitive_clear (&secret);
     handoff_plan_clear (&plan);
     handoff_receipt_clear (&receipt);
@@ -515,6 +664,9 @@ resume_committed_handoff (WylHandle *handle,
     target_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
     wyl_service_credential_operation_record_clear (&next);
 
+    WylPolicyServiceHandoffExactTuple tuple =
+        handoff_exact_tuple (record, escrow_id);
+
     if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED) {
       WyctlPublicationPlan request = { 0 };
       rc = handoff_escrow_load_exact (store, record, escrow_id, target_digest,
@@ -522,6 +674,14 @@ resume_committed_handoff (WylHandle *handle,
       if (rc == WYRELOG_E_OK)
         rc = handoff_plan_request_create (record->destination,
             record->parent_identity, &request);
+      gboolean active = FALSE;
+      if (rc == WYRELOG_E_OK)
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+      if (rc == WYRELOG_E_OK && !active) {
+        handoff_plan_clear (&request);
+        break;
+      }
       if (rc == WYRELOG_E_OK)
         rc = runtime->publication->plan (runtime->publication_data, &request,
             &plan);
@@ -536,11 +696,22 @@ resume_committed_handoff (WylHandle *handle,
           &escrow);
       if (rc == WYRELOG_E_OK)
         rc = handoff_plan_from_record (record, &plan);
+      gboolean active = FALSE;
+      if (rc == WYRELOG_E_OK)
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+      if (rc == WYRELOG_E_OK && !active)
+        break;
       if (rc == WYRELOG_E_OK)
         rc = wyl_policy_store_service_handoff_escrow_unseal (store, &escrow,
             &sealed_secret);
       if (rc == WYRELOG_E_OK)
         rc = handoff_secret_encode (sealed_secret, &secret);
+      if (rc == WYRELOG_E_OK)
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+      if (rc == WYRELOG_E_OK && !active)
+        break;
       if (rc == WYRELOG_E_OK)
         rc = runtime->publication->stage_exact (runtime->publication_data,
             &plan, record->successor_credential_id, &secret, &receipt, &result,
@@ -552,6 +723,7 @@ resume_committed_handoff (WylHandle *handle,
         rc = wyl_service_credential_operation_coordinator_checkpoint_publication_prepared (storage, anchor, request_id, receipt.reservation_id, receipt.stage_basename, receipt.stage_identity, receipt.reservation_id, handoff_now_us (runtime), &replayed, &next);
     } else if (record->state ==
         WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED) {
+      gboolean active = FALSE;
       rc = handoff_plan_from_record (record, &plan);
       if (rc == WYRELOG_E_OK)
         rc = handoff_receipt_from_record (record, &receipt);
@@ -569,10 +741,20 @@ resume_committed_handoff (WylHandle *handle,
         rc = handoff_escrow_load_exact (store, record, escrow_id,
             target_digest, &escrow);
       if (rc == WYRELOG_E_OK)
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+      if (rc == WYRELOG_E_OK && !active)
+        break;
+      if (rc == WYRELOG_E_OK)
         rc = wyl_policy_store_service_handoff_escrow_unseal (store, &escrow,
             &sealed_secret);
       if (rc == WYRELOG_E_OK)
         rc = handoff_secret_encode (sealed_secret, &secret);
+      if (rc == WYRELOG_E_OK)
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+      if (rc == WYRELOG_E_OK && !active)
+        break;
       if (rc == WYRELOG_E_OK)
         rc = runtime->publication->receipt_target_inspect
             (runtime->publication_data, target_lease,
@@ -580,9 +762,14 @@ resume_committed_handoff (WylHandle *handle,
       if (rc == WYRELOG_E_OK && result.kind ==
           WYCTL_PUBLICATION_RESULT_COMMITTED_DURABILITY_UNCERTAIN) {
         handoff_publication_result_clear (&result);
-        rc = runtime->publication->receipt_target_inspect
-            (runtime->publication_data, target_lease,
-            record->successor_credential_id, &secret, &result);
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+        if (rc == WYRELOG_E_OK && active)
+          rc = runtime->publication->receipt_target_inspect
+              (runtime->publication_data, target_lease,
+              record->successor_credential_id, &secret, &result);
+        if (rc == WYRELOG_E_OK && !active)
+          break;
       }
       if (rc == WYRELOG_E_OK
           && ((target_kind == WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE
@@ -593,60 +780,217 @@ resume_committed_handoff (WylHandle *handle,
         rc = WYRELOG_E_POLICY;
       if (rc == WYRELOG_E_OK && publication_is_exact_precommit (&result)) {
         handoff_publication_result_clear (&result);
-        rc = runtime->publication->receipt_target_commit
-            (runtime->publication_data, target_lease,
-            record->successor_credential_id, &secret, &result);
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+        if (rc == WYRELOG_E_OK && active)
+          rc = runtime->publication->receipt_target_commit
+              (runtime->publication_data, target_lease,
+              record->successor_credential_id, &secret, &result);
+        if (rc == WYRELOG_E_OK && !active)
+          break;
         if (rc == WYRELOG_E_OK
             && publication_is_foreign_or_nonexact_commit (&result))
           rc = WYRELOG_E_POLICY;
         if (rc == WYRELOG_E_OK) {
           handoff_publication_result_clear (&result);
-          rc = runtime->publication->receipt_target_inspect
-              (runtime->publication_data, target_lease,
-              record->successor_credential_id, &secret, &result);
+          rc = handoff_require_active_or_checkpoint (handle, lease, store,
+              storage, anchor, request_id, runtime, &tuple, record, &active);
+          if (rc == WYRELOG_E_OK && active)
+            rc = runtime->publication->receipt_target_inspect
+                (runtime->publication_data, target_lease,
+                record->successor_credential_id, &secret, &result);
+          if (rc == WYRELOG_E_OK && !active)
+            break;
         }
       }
       if (rc == WYRELOG_E_OK && !publication_is_exact_durable (&result))
         rc = WYRELOG_E_POLICY;
       if (rc == WYRELOG_E_OK)
         rc = wyl_service_credential_operation_coordinator_checkpoint_file_published (storage, anchor, request_id, receipt.reservation_id, receipt.stage_basename, receipt.stage_identity, receipt.reservation_id, handoff_now_us (runtime), &replayed, &next);
-    } else if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
-      rc = handoff_escrow_load_exact (store, record, escrow_id, target_digest,
-          &escrow);
-      if (rc == WYRELOG_E_NOT_FOUND) {
-        rc = WYRELOG_E_OK;
+    } else if (record->state ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+        || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
+      WylServiceCredentialHandoffDeliveryProof proof = {
+        .source = record->state ==
+            WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED ?
+            WYL_SERVICE_HANDOFF_DELIVERY_SOURCE_FILE_PUBLISHED :
+            WYL_SERVICE_HANDOFF_DELIVERY_SOURCE_CLEANUP_REQUIRED,
+        .tuple = tuple,
+        .actor_subject_id = record->actor_subject_id,
+        .operation = record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE ?
+            "issue" : "rotate",
+        .deadline_at_us = record->expires_at_us,
+        .receipt_version = record->publication_receipt_version,
+        .destination = record->destination,
+        .reservation_id = record->reservation_id,
+        .parent_identity = record->parent_identity,
+        .stage_basename = record->stage_basename,
+        .stage_identity = record->stage_identity,
+        .publication_receipt_id = record->publication_receipt_id,
+      };
+      memcpy (proof.target_digest, target_digest, sizeof proof.target_digest);
+      WylServiceCredentialHandoffDeliveryOutcome delivery_outcome = 0;
+      rc = handoff_prepare_delivery (handle, lease, store, &proof,
+          &delivery_outcome, &preflight, &disposition);
+      if (rc != WYRELOG_E_OK)
+        break;
+      if (delivery_outcome == WYL_SERVICE_HANDOFF_DELIVERY_REPLAYED
+          || delivery_outcome ==
+          WYL_SERVICE_HANDOFF_DELIVERY_LEGACY_BACKFILLED) {
+        rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published (storage, anchor, request_id, handoff_now_us (runtime), &replayed, &next);
+        if (rc == WYRELOG_E_OK) {
+          wyl_service_credential_operation_record_clear (record);
+          *record = next;
+          next = (WylServiceCredentialOperationRecord)
+              WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+        }
         break;
       }
-      if (rc == WYRELOG_E_OK)
-        rc = handoff_plan_from_record (record, &plan);
+      if (delivery_outcome == WYL_SERVICE_HANDOFF_DELIVERY_SUCCESSOR_EXPIRED
+          || delivery_outcome ==
+          WYL_SERVICE_HANDOFF_DELIVERY_SUCCESSOR_REVOKED) {
+        WylServiceCredentialOperationOarCause cause =
+            delivery_outcome ==
+            WYL_SERVICE_HANDOFF_DELIVERY_SUCCESSOR_EXPIRED ?
+            WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED :
+            WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED;
+        rc = wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar (storage, anchor, request_id, cause, handoff_now_us (runtime), &replayed, &next);
+        if (rc == WYRELOG_E_OK) {
+          wyl_service_credential_operation_record_clear (record);
+          *record = next;
+          next = (WylServiceCredentialOperationRecord)
+              WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+        }
+        break;
+      }
+      gboolean active = FALSE;
+      rc = handoff_plan_from_record (record, &plan);
       if (rc == WYRELOG_E_OK)
         rc = handoff_receipt_from_record (record, &receipt);
       if (rc == WYRELOG_E_OK)
         rc = runtime->publication->receipt_target_acquire
             (runtime->publication_data, &plan, &receipt, TRUE,
             &target_lease, &target_kind);
-      if (rc == WYRELOG_E_OK && target_kind !=
-          WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION)
-        rc = WYRELOG_E_POLICY;
-      if (rc == WYRELOG_E_OK && target_lease == NULL)
+      if (rc == WYRELOG_E_OK
+          && target_kind ==
+          WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN) {
+        if (target_lease != NULL) {
+          runtime->publication->receipt_target_release
+              (runtime->publication_data, target_lease);
+          target_lease = NULL;
+        }
+        rc = wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+            (storage, anchor, request_id,
+            WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN,
+            handoff_now_us (runtime), &replayed, &next);
+        if (rc == WYRELOG_E_OK) {
+          wyl_service_credential_operation_record_clear (record);
+          *record = next;
+          next = (WylServiceCredentialOperationRecord)
+              WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+        }
+        break;
+      }
+      if (rc == WYRELOG_E_OK
+          && (target_kind != WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION
+              || target_lease == NULL))
         rc = WYRELOG_E_POLICY;
       if (rc == WYRELOG_E_OK)
-        rc = wyl_policy_store_service_handoff_escrow_unseal (store, &escrow,
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+      if (rc == WYRELOG_E_OK && !active)
+        break;
+      if (rc == WYRELOG_E_OK)
+        rc = wyl_service_credential_handoff_delivery_unseal (store, preflight,
             &sealed_secret);
       if (rc == WYRELOG_E_OK)
         rc = handoff_secret_encode (sealed_secret, &secret);
+      gboolean inspect_attempted = FALSE;
+      if (rc == WYRELOG_E_OK) {
+        rc = handoff_require_active_or_checkpoint (handle, lease, store,
+            storage, anchor, request_id, runtime, &tuple, record, &active);
+        if (rc == WYRELOG_E_OK && active) {
+          inspect_attempted = TRUE;
+          rc = runtime->publication->receipt_target_inspect
+              (runtime->publication_data, target_lease,
+              record->successor_credential_id, &secret, &result);
+        }
+      }
+      if (rc == WYRELOG_E_OK && !active)
+        break;
+      if (rc != WYRELOG_E_OK || !publication_is_exact_durable (&result)) {
+        if (target_lease != NULL) {
+          runtime->publication->receipt_target_release
+              (runtime->publication_data, target_lease);
+          target_lease = NULL;
+        }
+        if (inspect_attempted) {
+          WylServiceCredentialOperationOarCause cause =
+              rc == WYRELOG_E_OK
+              && result.kind == WYCTL_PUBLICATION_RESULT_FOREIGN_OR_UNCERTAIN ?
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN :
+              WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN;
+          wyrelog_error_t checkpoint_rc =
+              wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+              (storage, anchor, request_id, cause, handoff_now_us (runtime),
+              &replayed, &next);
+          if (checkpoint_rc == WYRELOG_E_OK) {
+            wyl_service_credential_operation_record_clear (record);
+            *record = next;
+            next = (WylServiceCredentialOperationRecord)
+                WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+            rc = WYRELOG_E_OK;
+          } else {
+            rc = checkpoint_rc;
+          }
+        }
+        break;
+      }
+      rc = wyl_service_credential_handoff_delivery_confirm_inspection
+          (preflight, &result, &capability);
       if (rc == WYRELOG_E_OK)
-        rc = runtime->publication->receipt_target_inspect
-            (runtime->publication_data, target_lease,
-            record->successor_credential_id, &secret, &result);
-      if (rc == WYRELOG_E_OK && !publication_is_exact_durable (&result))
-        rc = WYRELOG_E_POLICY;
-      if (rc == WYRELOG_E_OK)
-        rc = wyl_policy_store_service_handoff_escrow_delete (store, escrow_id);
+        preflight = NULL;
       if (target_lease != NULL) {
         runtime->publication->receipt_target_release
             (runtime->publication_data, target_lease);
         target_lease = NULL;
+      }
+      if (rc != WYRELOG_E_OK)
+        break;
+      WylPolicyServiceHandoffPublicationOutcome consume_outcome = 0;
+      rc = handoff_consume_delivery (handle, lease, store, capability,
+          &consume_outcome, &disposition);
+      if (rc == WYRELOG_E_OK
+          && consume_outcome != WYL_POLICY_HANDOFF_PUBLICATION_ACTIVE) {
+        rc = wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar (storage, anchor, request_id, handoff_inactive_cause (consume_outcome), handoff_now_us (runtime), &replayed, &next);
+        if (rc == WYRELOG_E_OK) {
+          wyl_service_credential_operation_record_clear (record);
+          *record = next;
+          next = (WylServiceCredentialOperationRecord)
+              WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+        }
+        break;
+      }
+      if (rc != WYRELOG_E_OK) {
+        wyrelog_error_t consume_rc = rc;
+        if (record->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
+          wyrelog_error_t checkpoint_rc =
+              wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+              (storage, anchor, request_id, handoff_now_us (runtime),
+              &replayed, &next);
+          if (checkpoint_rc != WYRELOG_E_OK)
+            rc = checkpoint_rc;
+          else
+            rc = consume_rc;
+        }
+        break;
+      }
+      rc = wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published (storage, anchor, request_id, handoff_now_us (runtime), &replayed, &next);
+      if (rc == WYRELOG_E_OK) {
+        wyl_service_credential_operation_record_clear (record);
+        *record = next;
+        next = (WylServiceCredentialOperationRecord)
+            WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
       }
       break;
     } else {
@@ -671,6 +1015,11 @@ resume_committed_handoff (WylHandle *handle,
   handoff_sensitive_clear (&secret);
   wyl_policy_service_handoff_secret_clear (&sealed_secret);
   wyl_policy_service_handoff_escrow_info_clear (&escrow);
+  wyl_policy_service_handoff_disposition_result_clear (&disposition);
+  g_clear_pointer (&preflight,
+      wyl_service_credential_handoff_delivery_preflight_free);
+  g_clear_pointer (&capability,
+      wyl_service_credential_handoff_delivery_capability_free);
   if (lease != NULL) {
     wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
     if (rc == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
@@ -679,6 +1028,7 @@ resume_committed_handoff (WylHandle *handle,
   }
   return rc;
 }
+
 
 static wyrelog_error_t
 recover_handoff_with_store_pin (WylHandle *handle,
@@ -868,11 +1218,29 @@ wyrelog_error_t
         WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   }
 
+  if (record.state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL) {
+    WylServiceCredentialOperationTerminalKind terminal_kind = 0;
+    if (!wyl_service_credential_operation_terminal_reason_parse
+        (record.terminal_reason, &terminal_kind, NULL)
+        || terminal_kind !=
+        WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    wyl_service_credential_operation_record_clear (out_record);
+    *out_record = record;
+    record = (WylServiceCredentialOperationRecord)
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    rc = WYRELOG_E_OK;
+    goto out;
+  }
+
   if (record.state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED
       && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
       && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
       && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
-      && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
+      && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+      && record.state != WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
     rc = WYRELOG_E_POLICY;
     goto out;
   }

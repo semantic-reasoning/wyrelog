@@ -471,6 +471,54 @@ store_record (JournalFixture *fixture,
   wyl_service_credential_operation_child_name_clear (&name);
 }
 
+static void
+store_published_record (JournalFixture *fixture,
+    const WylServiceCredentialOperationCoordinatorRequest *r,
+    WylServiceCredentialOperationRecord *record)
+{
+  const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord planned =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord publication =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_build_prepared
+      (r, r->request_id, 1, &prepared), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_server_committed
+      (&prepared, successor, 1, 2, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_planned
+      (&committed, "reservation", "stage", "receipt", 3, &planned), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_prepared
+      (&planned, "reservation", "stage", "stage-id", "receipt", 4,
+          &publication), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_file_published
+      (&publication, "reservation", "stage", "stage-id", "receipt", 5,
+          record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (record,
+          &bytes), ==, WYRELOG_E_OK);
+  record_name (r->request_id, &name);
+  g_assert_cmpint (fixture_child_create (fixture, &name, bytes), ==,
+      WYRELOG_E_OK);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&publication);
+  wyl_service_credential_operation_record_clear (&planned);
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&prepared);
+}
+
 #ifndef G_OS_WIN32
 typedef gint FixtureLock;
 #define FIXTURE_LOCK_INIT (-1)
@@ -1235,6 +1283,26 @@ test_v5_handoff_lifecycle_builders (void)
       (&published, 15, &cleanup), ==, WYRELOG_E_OK);
   g_assert_cmpint (cleanup.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+  g_autoptr (GBytes) cleanup_bytes = NULL;
+  g_autoptr (GBytes) cleanup_replay_bytes = NULL;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&cleanup,
+          &cleanup_bytes), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_cleanup_required
+      (&cleanup, 99, &resumed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (resumed.updated_at_us, ==, cleanup.updated_at_us);
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&resumed,
+          &cleanup_replay_bytes), ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (cleanup_bytes, cleanup_replay_bytes));
+  wyl_service_credential_operation_record_clear (&resumed);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_cleanup_required
+      (&planned, 15, &resumed), ==, WYRELOG_E_POLICY);
+  g_assert_null (resumed.operation_id);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_cleanup_required
+      (&cleanup, 14, &resumed), ==, WYRELOG_E_INVALID);
+  g_assert_null (resumed.operation_id);
 
   const WylServiceCredentialOperationRecord *source_records[] = {
     &committed, &planned, &publication, &published, &cleanup,
@@ -1593,6 +1661,263 @@ test_publication_checkpoints_and_operation_lock (JournalFixture *fixture,
   wyl_service_credential_operation_coordinator_request_clear (&r);
 }
 
+static void
+test_lifecycle_checkpoints (JournalFixture *fixture, gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest inactive_request = request ();
+  WylServiceCredentialOperationCoordinatorRequest receipt_request = request ();
+  WylServiceCredentialOperationCoordinatorRequest receipt_cleanup_request =
+      request ();
+  WylServiceCredentialOperationCoordinatorRequest direct_terminal_request =
+      request ();
+  WylServiceCredentialOperationCoordinatorRequest cleanup_terminal_request =
+      request ();
+  WylServiceCredentialOperationRecord published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord receipt_published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord receipt_current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord receipt_cleanup_published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord receipt_cleanup_current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord direct_published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord direct_terminal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord cleanup_published =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord cleanup_current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) first_bytes = NULL;
+  g_autoptr (GBytes) replay_bytes = NULL;
+  gboolean replayed = TRUE;
+
+  store_published_record (fixture, &inactive_request, &published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id, 6,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (current.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+  g_assert_cmpint (current.updated_at_us, ==, 6);
+  assert_handoff_tuple_preserved (&published, &current);
+  record_name (inactive_request.request_id, &name);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &first_bytes), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id, 99,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (current.updated_at_us, ==, 6);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED, 7,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (current.updated_at_us, ==, 7);
+  g_assert_cmpstr (current.terminal_reason, ==,
+      "oar.v1:cleanup-required:successor-expired");
+  assert_handoff_tuple_preserved (&published, &current);
+  g_clear_pointer (&first_bytes, g_bytes_unref);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &first_bytes), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED, 99,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (current.updated_at_us, ==, 7);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED, 100,
+          &replayed, &current), ==, WYRELOG_E_POLICY);
+  g_assert_false (replayed);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_EXPLICIT_HOLD, 100, NULL,
+          &current), ==, WYRELOG_E_INVALID);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, inactive_request.request_id, 100,
+          NULL, &current), ==, WYRELOG_E_POLICY);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+  wyl_service_credential_operation_child_name_clear (&name);
+
+  store_published_record (fixture, &receipt_request, &receipt_published);
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&fixture->storage, &fixture->anchor, receipt_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN, 6,
+          &replayed, &receipt_current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (receipt_current.updated_at_us, ==, 6);
+  g_assert_cmpstr (receipt_current.terminal_reason, ==,
+      "oar.v1:file-published:receipt-foreign");
+  assert_handoff_tuple_preserved (&receipt_published, &receipt_current);
+  record_name (receipt_request.request_id, &name);
+  g_clear_pointer (&first_bytes, g_bytes_unref);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &first_bytes), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&fixture->storage, &fixture->anchor, receipt_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN, 99,
+          &replayed, &receipt_current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (receipt_current.updated_at_us, ==, 6);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&fixture->storage, &fixture->anchor, receipt_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 100,
+          &replayed, &receipt_current), ==, WYRELOG_E_POLICY);
+  g_assert_false (replayed);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&fixture->storage, &fixture->anchor, receipt_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED, 100, NULL,
+          &receipt_current), ==, WYRELOG_E_INVALID);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+  wyl_service_credential_operation_child_name_clear (&name);
+
+  store_published_record (fixture, &receipt_cleanup_request,
+      &receipt_cleanup_published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+      (&fixture->storage, &fixture->anchor, receipt_cleanup_request.request_id,
+          6, NULL, &receipt_cleanup_current), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&fixture->storage, &fixture->anchor, receipt_cleanup_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 7, NULL,
+          &receipt_cleanup_current), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (receipt_cleanup_current.terminal_reason, ==,
+      "oar.v1:cleanup-required:receipt-uncertain");
+  assert_handoff_tuple_preserved (&receipt_cleanup_published,
+      &receipt_cleanup_current);
+
+  store_published_record (fixture, &direct_terminal_request, &direct_published);
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, direct_terminal_request.request_id,
+          6, &replayed, &direct_terminal), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (direct_terminal.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  g_assert_cmpstr (direct_terminal.terminal_reason, ==,
+      "terminal.v1:file-published");
+  g_assert_cmpint (direct_terminal.updated_at_us, ==, 6);
+  assert_handoff_tuple_preserved (&direct_published, &direct_terminal);
+  record_name (direct_terminal_request.request_id, &name);
+  g_clear_pointer (&first_bytes, g_bytes_unref);
+  g_clear_pointer (&replay_bytes, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &first_bytes), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, direct_terminal_request.request_id,
+          99, &replayed, &direct_terminal), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (direct_terminal.updated_at_us, ==, 6);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first_bytes, replay_bytes));
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&fixture->storage, &fixture->anchor, direct_terminal_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN, 100, NULL,
+          &direct_terminal), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+      (&fixture->storage, &fixture->anchor, direct_terminal_request.request_id,
+          100, NULL, &direct_terminal), ==, WYRELOG_E_POLICY);
+  wyl_service_credential_operation_child_name_clear (&name);
+
+  store_published_record (fixture, &cleanup_terminal_request,
+      &cleanup_published);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+      (&fixture->storage, &fixture->anchor, cleanup_terminal_request.request_id,
+          6, NULL, &cleanup_current), ==, WYRELOG_E_OK);
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&fixture->storage, &fixture->anchor, cleanup_terminal_request.request_id,
+          7, &replayed, &cleanup_current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (cleanup_current.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  g_assert_cmpstr (cleanup_current.terminal_reason, ==,
+      "terminal.v1:file-published");
+  g_assert_cmpint (cleanup_current.updated_at_us, ==, 7);
+  assert_handoff_tuple_preserved (&cleanup_published, &cleanup_current);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&cleanup_current);
+  wyl_service_credential_operation_record_clear (&cleanup_published);
+  wyl_service_credential_operation_record_clear (&direct_terminal);
+  wyl_service_credential_operation_record_clear (&direct_published);
+  wyl_service_credential_operation_record_clear (&current);
+  wyl_service_credential_operation_record_clear (&published);
+  wyl_service_credential_operation_record_clear (&receipt_cleanup_current);
+  wyl_service_credential_operation_record_clear (&receipt_cleanup_published);
+  wyl_service_credential_operation_record_clear (&receipt_current);
+  wyl_service_credential_operation_record_clear (&receipt_published);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&cleanup_terminal_request);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&direct_terminal_request);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&receipt_cleanup_request);
+  wyl_service_credential_operation_coordinator_request_clear (&receipt_request);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&inactive_request);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1644,6 +1969,9 @@ main (int argc, char **argv)
   g_test_add ("/coordinator/journal/publication-checkpoints-operation-lock",
       JournalFixture, NULL, journal_fixture_set_up,
       test_publication_checkpoints_and_operation_lock,
+      journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/lifecycle-checkpoints", JournalFixture,
+      NULL, journal_fixture_set_up, test_lifecycle_checkpoints,
       journal_fixture_tear_down);
   return g_test_run ();
 }

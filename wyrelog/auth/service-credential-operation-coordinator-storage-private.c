@@ -556,3 +556,157 @@ wyrelog_error_t
       CHECKPOINT_FILE_PUBLISHED, reservation_id, stage_basename,
       stage_identity, publication_receipt_id, now_us, out_replayed, out_record);
 }
+
+typedef enum
+{
+  CHECKPOINT_CLEANUP_REQUIRED,
+  CHECKPOINT_SUCCESSOR_INACTIVE_OAR,
+  CHECKPOINT_RECEIPT_OAR,
+  CHECKPOINT_TERMINAL_FILE_PUBLISHED,
+} LifecycleCheckpoint;
+
+static wyrelog_error_t
+checkpoint_lifecycle (const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor,
+    const gchar *request_id, LifecycleCheckpoint checkpoint,
+    WylServiceCredentialOperationOarCause cause, gint64 now_us,
+    gboolean *out_replayed, WylServiceCredentialOperationRecord *out_record)
+{
+  WylServiceCredentialOperationRecord existing =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock lock = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  gboolean replayed = FALSE;
+  wyrelog_error_t rc;
+
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (storage == NULL || anchor == NULL || out_record == NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id))
+    return WYRELOG_E_INVALID;
+  if (checkpoint == CHECKPOINT_SUCCESSOR_INACTIVE_OAR
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_EXPIRED
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_SUCCESSOR_REVOKED)
+    return WYRELOG_E_INVALID;
+  if (checkpoint == CHECKPOINT_RECEIPT_OAR
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN)
+    return WYRELOG_E_INVALID;
+  rc = record_child_name (request_id, &name);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_lock (storage, anchor, &name, &lock);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_service_credential_operation_record_decode (bytes, &existing);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!g_str_equal (existing.request_id, request_id)
+      || !g_str_equal (existing.operation_id, request_id)) {
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  switch (checkpoint) {
+    case CHECKPOINT_CLEANUP_REQUIRED:
+      replayed = existing.state ==
+          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED;
+      rc = wyl_service_credential_operation_coordinator_build_cleanup_required
+          (&existing, now_us, &next);
+      break;
+    case CHECKPOINT_SUCCESSOR_INACTIVE_OAR:
+    case CHECKPOINT_RECEIPT_OAR:
+      replayed = existing.state ==
+          WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED;
+      rc = wyl_service_credential_operation_coordinator_build_operator_action_required (&existing, cause, now_us, &next);
+      break;
+    case CHECKPOINT_TERMINAL_FILE_PUBLISHED:
+      replayed = existing.state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+      rc = wyl_service_credential_operation_coordinator_build_terminal
+          (&existing,
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED, NULL,
+          now_us, &next);
+      break;
+    default:
+      rc = WYRELOG_E_INVALID;
+      goto out;
+  }
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!replayed) {
+    g_clear_pointer (&bytes, g_bytes_unref);
+    rc = wyl_service_credential_operation_record_encode (&next, &bytes);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    rc = storage_child_replace (storage, anchor, &name, bytes);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+  }
+  wyl_service_credential_operation_record_clear (out_record);
+  *out_record = next;
+  next = (WylServiceCredentialOperationRecord)
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+out:
+  if (lock != WYL_COORDINATOR_JOURNAL_LOCK_INIT)
+    storage_child_unlock (storage, anchor, &name, lock);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&next);
+  wyl_service_credential_operation_record_clear (&existing);
+  if (rc == WYRELOG_E_OK && out_replayed != NULL)
+    *out_replayed = replayed;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_lifecycle (storage, anchor, request_id,
+      CHECKPOINT_CLEANUP_REQUIRED, 0, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationOarCause cause,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_lifecycle (storage, anchor, request_id,
+      CHECKPOINT_SUCCESSOR_INACTIVE_OAR, cause, now_us, out_replayed,
+      out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationOarCause cause,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_lifecycle (storage, anchor, request_id,
+      CHECKPOINT_RECEIPT_OAR, cause, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_lifecycle (storage, anchor, request_id,
+      CHECKPOINT_TERMINAL_FILE_PUBLISHED, 0, now_us, out_replayed, out_record);
+}

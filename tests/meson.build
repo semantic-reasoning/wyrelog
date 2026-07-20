@@ -1247,6 +1247,21 @@ test('check-service-session-private-exports-self-test',
   args : ['--self-test'],
 )
 
+check_service_handoff_delivery_boundary = find_program(
+  '../tools/check-service-handoff-delivery-boundary.py',
+)
+
+test('check-service-handoff-delivery-boundary',
+  check_service_handoff_delivery_boundary,
+  args : [meson.project_source_root(), libwyrelog.full_path()],
+  depends : libwyrelog,
+)
+
+test('check-service-handoff-delivery-boundary-self-test',
+  check_service_handoff_delivery_boundary,
+  args : ['--self-test'],
+)
+
 test_login_req = executable('test-login-req',
   'test-login-req.c',
   dependencies : [wyrelog_dep],
