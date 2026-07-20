@@ -502,20 +502,14 @@ replay_relations_into_engine (wyl_fact_store_t *store,
 }
 
 static wyrelog_error_t
-resolve_fact_db_path (const gchar *fact_root,
+resolve_fact_db_path (wyl_policy_store_t *policy, const gchar *fact_root,
     const wyl_policy_fact_graph_info_t *graph_info, gchar **out_path)
 {
   *out_path = NULL;
-  WylFactGraphLocator locator = { 0 };
-  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator,
-      graph_info->tenant_id, graph_info->graph_id);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
-        &directory);
+  wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory (policy,
+      fact_root, graph_info->tenant_id, graph_info->graph_id, FALSE,
+      &directory);
   gint fd = -1;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
@@ -533,8 +527,6 @@ resolve_fact_db_path (const gchar *fact_root,
   (void) fd;
 #endif
   wyl_fact_graph_directory_clear (&directory);
-  wyl_fact_graph_resolver_clear (&resolver);
-  wyl_fact_graph_locator_clear (&locator);
   return rc;
 }
 
@@ -552,7 +544,7 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
     return WYRELOG_E_POLICY;
 
   g_autofree gchar *fact_db_path = NULL;
-  wyrelog_error_t rc = resolve_fact_db_path (fact_root, graph_info,
+  wyrelog_error_t rc = resolve_fact_db_path (policy, fact_root, graph_info,
       &fact_db_path);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -656,6 +648,12 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
     memset (out_summary, 0, sizeof (*out_summary));
   if (policy == NULL || graph_engines == NULL || graph_statuses == NULL)
     return WYRELOG_E_INVALID;
+
+  if (fact_root != NULL && fact_root[0] != '\0') {
+    wyrelog_error_t rc = wyl_policy_store_bind_fact_root (policy, fact_root);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
 
   wyl_fact_replay_summary_t summary = { 0 };
   g_hash_table_remove_all (graph_statuses);

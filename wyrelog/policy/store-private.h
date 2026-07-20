@@ -6,6 +6,7 @@
 
 #include "wyrelog/decide.h"
 #include "wyrelog/error.h"
+#include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/auth/service-exchange-audit-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
@@ -983,6 +984,12 @@ wyrelog_error_t wyl_policy_store_open (const gchar * path,
  * wyl_policy_store_open_options_t above. */
 wyrelog_error_t wyl_policy_store_open_with_options (const
     wyl_policy_store_open_options_t * opts, wyl_policy_store_t ** out_store);
+wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
+    const gchar * fact_root);
+wyrelog_error_t wyl_policy_store_open_fact_graph_directory
+    (wyl_policy_store_t * store, const gchar * fact_root,
+    const gchar * tenant_id, const gchar * graph_id, gboolean create,
+    WylFactGraphDirectory * out_directory);
 /* Basic invalid rotation arguments (empty path, NULL options, or aliased
  * non-NULL old/new state) transfer neither state. Otherwise both states are
  * consumed on every outcome and released exactly once before return. */

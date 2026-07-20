@@ -722,6 +722,15 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     g_object_unref (self);
     return rc;
   }
+#ifdef WYL_HAS_FACT_STORE
+  if (self->fact_root != NULL && self->fact_root[0] != '\0') {
+    rc = wyl_policy_store_bind_fact_root (self->policy_store, self->fact_root);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (self);
+      return rc;
+    }
+  }
+#endif
 
   if (opts->template_dir != NULL) {
     rc = wyl_handle_open_engine_pair (self, opts->template_dir);

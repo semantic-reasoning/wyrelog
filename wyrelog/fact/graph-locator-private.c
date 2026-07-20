@@ -352,6 +352,19 @@ wyl_fact_graph_resolver_open (const gchar *fact_root,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_fact_graph_resolver_revalidate (WylFactGraphResolver *resolver)
+{
+  if (resolver == NULL || resolver->fd < 0 || resolver->path == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = validate_fd_exact (resolver->fd, TRUE, 0700,
+      resolver->device, resolver->inode);
+  if (rc == WYRELOG_E_OK)
+    rc = resolver_revalidate (resolver->path, resolver->device,
+        resolver->inode, NULL);
+  return rc;
+}
+
 void
 wyl_fact_graph_resolver_clear (WylFactGraphResolver *resolver)
 {
@@ -885,6 +898,13 @@ wyl_fact_graph_resolver_open (const gchar *fact_root,
   if (out_resolver != NULL)
     *out_resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
   return out_resolver == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_resolver_revalidate (WylFactGraphResolver *resolver)
+{
+  (void) resolver;
+  return WYRELOG_E_POLICY;
 }
 
 void

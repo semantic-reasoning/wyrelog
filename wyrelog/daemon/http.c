@@ -5739,21 +5739,17 @@ typedef enum
 
 #ifdef WYL_HAS_FACT_STORE
 static wyrelog_error_t
-resolve_http_fact_db_path (WylDaemonHttpContext *ctx, const gchar *tenant,
-    const gchar *graph, gboolean writable, gchar **out_path)
+resolve_http_fact_db_path (WylDaemonHttpContext *ctx,
+    wyl_policy_store_t *policy_store, const gchar *tenant, const gchar *graph,
+    gboolean writable, gchar **out_path)
 {
   *out_path = NULL;
-  if (ctx->fact_root == NULL || ctx->fact_root[0] == '\0')
+  if (policy_store == NULL || ctx->fact_root == NULL
+      || ctx->fact_root[0] == '\0')
     return WYRELOG_E_POLICY;
-  WylFactGraphLocator locator = { 0 };
-  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, tenant, graph);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open (ctx->fact_root, &resolver);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
-        &directory);
+  wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory
+      (policy_store, ctx->fact_root, tenant, graph, FALSE, &directory);
   gint fd = -1;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_open_file (&directory, "facts.duckdb",
@@ -5773,29 +5769,19 @@ resolve_http_fact_db_path (WylDaemonHttpContext *ctx, const gchar *tenant,
   (void) fd;
 #endif
   wyl_fact_graph_directory_clear (&directory);
-  wyl_fact_graph_resolver_clear (&resolver);
-  wyl_fact_graph_locator_clear (&locator);
   return rc;
 }
 
 static wyrelog_error_t
-secure_http_fact_db_mode (WylDaemonHttpContext *ctx, const gchar *tenant,
-    const gchar *graph)
+secure_http_fact_db_mode (WylDaemonHttpContext *ctx,
+    wyl_policy_store_t *policy_store, const gchar *tenant, const gchar *graph)
 {
-  WylFactGraphLocator locator = { 0 };
-  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
-  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator, tenant, graph);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open (ctx->fact_root, &resolver);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, FALSE,
-        &directory);
+  wyrelog_error_t rc = wyl_policy_store_open_fact_graph_directory
+      (policy_store, ctx->fact_root, tenant, graph, FALSE, &directory);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_directory_secure_file_mode (&directory, "facts.duckdb");
   wyl_fact_graph_directory_clear (&directory);
-  wyl_fact_graph_resolver_clear (&resolver);
-  wyl_fact_graph_locator_clear (&locator);
   return rc;
 }
 #endif
@@ -6263,11 +6249,12 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     };
     g_autoptr (wyl_fact_store_t) fact_store = NULL;
     g_autofree gchar *fact_db_path = NULL;
-    rc = resolve_http_fact_db_path (ctx, tenant, graph, TRUE, &fact_db_path);
+    rc = resolve_http_fact_db_path (ctx, write.store, tenant, graph, TRUE,
+        &fact_db_path);
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_open (fact_db_path, &fact_store);
     if (rc == WYRELOG_E_OK)
-      rc = secure_http_fact_db_mode (ctx, tenant, graph);
+      rc = secure_http_fact_db_mode (ctx, write.store, tenant, graph);
     gsize rows_purged = 0;
     if (rc == WYRELOG_E_OK)
       rc = wyl_fact_store_create_schema (fact_store);
@@ -6424,11 +6411,12 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
 
   g_autoptr (wyl_fact_store_t) fact_store = NULL;
   g_autofree gchar *fact_db_path = NULL;
-  rc = resolve_http_fact_db_path (ctx, tenant, graph, TRUE, &fact_db_path);
+  rc = resolve_http_fact_db_path (ctx, write.store, tenant, graph, TRUE,
+      &fact_db_path);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_open (fact_db_path, &fact_store);
   if (rc == WYRELOG_E_OK)
-    rc = secure_http_fact_db_mode (ctx, tenant, graph);
+    rc = secure_http_fact_db_mode (ctx, write.store, tenant, graph);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_store_create_schema (fact_store);
   gboolean inserted = FALSE;

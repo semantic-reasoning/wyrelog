@@ -1162,6 +1162,81 @@ check_store_fact_graph_metadata_only (void)
 #endif
 }
 
+static gboolean
+directory_is_empty (const gchar *path)
+{
+  g_autoptr (GDir) directory = g_dir_open (path, 0, NULL);
+  return directory != NULL && g_dir_read_name (directory) == NULL;
+}
+
+static gint
+check_store_pins_fact_root_identity (void)
+{
+#ifdef G_OS_WIN32
+  return 0;
+#else
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-pin-XXXXXX", &error);
+  g_autofree gchar *other_root = g_dir_make_tmp ("wyl-facts-other-XXXXXX",
+      &error);
+  if (root == NULL || other_root == NULL)
+    return 490;
+  g_autofree gchar *old_root = g_strdup_printf ("%s.old", root);
+
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  gboolean created = FALSE;
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 491;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 492;
+  if (wyl_policy_store_create_tenant (store, "tenant-a", &created)
+      != WYRELOG_E_OK || !created)
+    return 493;
+  if (wyl_policy_store_create_tenant (store, "tenant-b", &created)
+      != WYRELOG_E_OK || !created)
+    return 494;
+
+  const wyl_policy_fact_graph_column_t columns[] = {
+    {"subject", "symbol"},
+  };
+  const wyl_policy_fact_graph_relation_t relations[] = {
+    {"site.node", columns, G_N_ELEMENTS (columns)},
+  };
+  wyl_policy_fact_graph_create_options_t opts =
+      make_fact_graph_options ("tenant-a", "graph-main", root, relations,
+      G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
+      != WYRELOG_E_OK)
+    return 495;
+
+  opts = make_fact_graph_options ("tenant-b", "graph-main", root, relations,
+      G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
+      != WYRELOG_E_OK)
+    return 496;
+
+  opts = make_fact_graph_options ("tenant-a", "graph-sealed", other_root,
+      relations, G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
+      != WYRELOG_E_POLICY || !directory_is_empty (other_root))
+    return 497;
+
+  if (g_rename (root, old_root) != 0 || g_mkdir (root, 0700) != 0)
+    return 498;
+  opts = make_fact_graph_options ("tenant-a", "graph-sealed", root,
+      relations, G_N_ELEMENTS (relations), NULL, 0);
+  if (wyl_policy_store_create_fact_graph (store, &opts, NULL)
+      != WYRELOG_E_POLICY || !directory_is_empty (root))
+    return 499;
+
+  if (!remove_empty_directory_if_present (root)
+      || !remove_empty_directory_if_present (other_root)
+      || !cleanup_fact_graph_root (old_root))
+    return 500;
+  return 0;
+#endif
+}
+
 static gint
 check_permission_seed (wyl_policy_store_t *store, const gchar *perm_id,
     const gchar *klass, gint error_base)
@@ -4747,6 +4822,8 @@ main (void)
   if ((rc = check_store_rejects_fact_graph_reserved_metadata ()) != 0)
     return rc;
   if ((rc = check_store_fact_graph_metadata_only ()) != 0)
+    return rc;
+  if ((rc = check_store_pins_fact_root_identity ()) != 0)
     return rc;
   if ((rc = check_store_sets_deployment_mode ()) != 0)
     return rc;
