@@ -22,6 +22,7 @@ static const gchar *const service_tables[] = {
   "service_credential_handoff_dispositions",
   "service_credential_handoff_cancellation_claims",
   "service_credential_handoff_remediation_actions",
+  "service_credential_handoff_retirement_receipts",
 };
 
 static void
@@ -103,7 +104,8 @@ service_object_count (sqlite3 *db)
       "'service_credential_operation_fences',"
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
-      "'service_credential_handoff_remediation_actions');");
+      "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts');");
 }
 
 static gchar *
@@ -130,7 +132,8 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_credential_operation_fences',"
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
-      "'service_credential_handoff_remediation_actions') "
+      "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts') "
       "ORDER BY type,name;";
   sqlite3_stmt *stmt = NULL;
   g_assert_cmpint (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL), ==,
@@ -156,7 +159,8 @@ service_schema_fingerprint (sqlite3 *db)
       "'service_domain_requests','service_credential_operation_fences',"
       "'service_credential_handoff_dispositions',"
       "'service_credential_handoff_cancellation_claims',"
-      "'service_credential_handoff_remediation_actions') " "ORDER BY name;";
+      "'service_credential_handoff_remediation_actions',"
+      "'service_credential_handoff_retirement_receipts') ORDER BY name;";
   g_assert_cmpint (sqlite3_prepare_v2 (db, index_sql, -1, &stmt, NULL), ==,
       SQLITE_OK);
   while ((rc = sqlite3_step (stmt)) == SQLITE_ROW) {
@@ -1069,6 +1073,10 @@ assert_table_corruption_rejected (const gchar *table, const gchar *needle,
 static void
 test_corruption_matrix (void)
 {
+  assert_table_corruption_rejected
+      ("service_credential_handoff_retirement_receipts",
+      "retired_at_us-retention_basis_at_us>=2592000000000",
+      "retired_at_us-retention_basis_at_us>=1");
   assert_table_corruption_rejected ("service_credentials",
       "updated_at_us INTEGER NOT NULL CHECK (updated_at_us >= created_at_us),",
       "");
@@ -1101,6 +1109,17 @@ test_corruption_matrix (void)
         "DROP INDEX idx_service_credentials_tenant_state_expiry;"
         "CREATE INDEX idx_service_credentials_tenant_state_expiry"
         " ON service_credentials(state,tenant_id,expires_at_us);");
+    g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
+        WYRELOG_E_POLICY);
+  }
+  {
+    g_autoptr (wyl_policy_store_t) store = NULL;
+    g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+    exec_ok (wyl_policy_store_get_db (store),
+        "DROP INDEX idx_service_handoff_retirement_raw;"
+        "CREATE UNIQUE INDEX idx_service_handoff_retirement_raw ON"
+        " service_credential_handoff_retirement_receipts(terminal_kind);");
     g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
         WYRELOG_E_POLICY);
   }

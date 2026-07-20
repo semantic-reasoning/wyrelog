@@ -1057,6 +1057,98 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_completed_revoke
         successor_issuance_generation, action)
     WHERE action = 'revoke_and_wipe';
 
+CREATE TABLE IF NOT EXISTS service_credential_handoff_retirement_receipts (
+    original_request_id TEXT NOT NULL PRIMARY KEY CHECK (
+        typeof(original_request_id) = 'text' AND length(original_request_id) = 27
+        AND instr(original_request_id, char(0)) = 0),
+    terminal_kind TEXT NOT NULL CHECK (
+        terminal_kind IN ('file_published', 'operator_revoke_and_wipe')),
+    raw_journal_snapshot_digest BLOB NOT NULL CHECK (
+        typeof(raw_journal_snapshot_digest) = 'blob'
+        AND length(raw_journal_snapshot_digest) = 32
+        AND raw_journal_snapshot_digest <> zeroblob(32)),
+    delivery_disposition_id TEXT CHECK (delivery_disposition_id IS NULL OR (
+        typeof(delivery_disposition_id) = 'text'
+        AND length(delivery_disposition_id) = 36
+        AND instr(delivery_disposition_id, char(0)) = 0)),
+    delivery_audit_id TEXT CHECK (delivery_audit_id IS NULL OR (
+        typeof(delivery_audit_id) = 'text' AND length(delivery_audit_id) = 36
+        AND instr(delivery_audit_id, char(0)) = 0)),
+    delivery_proof_digest BLOB NOT NULL CHECK (
+        typeof(delivery_proof_digest) = 'blob'
+        AND length(delivery_proof_digest) = 32),
+    revoke_remediation_request_id TEXT CHECK (
+        revoke_remediation_request_id IS NULL OR (
+        typeof(revoke_remediation_request_id) = 'text'
+        AND length(revoke_remediation_request_id) = 27
+        AND instr(revoke_remediation_request_id, char(0)) = 0)),
+    revoke_audit_id TEXT CHECK (revoke_audit_id IS NULL OR (
+        typeof(revoke_audit_id) = 'text' AND length(revoke_audit_id) = 36
+        AND instr(revoke_audit_id, char(0)) = 0)),
+    revoke_event_id INTEGER CHECK (revoke_event_id IS NULL OR revoke_event_id > 0),
+    resume_remediation_request_id TEXT CHECK (
+        resume_remediation_request_id IS NULL OR (
+        typeof(resume_remediation_request_id) = 'text'
+        AND length(resume_remediation_request_id) = 27
+        AND instr(resume_remediation_request_id, char(0)) = 0)),
+    resume_audit_id TEXT CHECK (resume_audit_id IS NULL OR (
+        typeof(resume_audit_id) = 'text' AND length(resume_audit_id) = 36
+        AND instr(resume_audit_id, char(0)) = 0)),
+    remediation_source_snapshot_digest BLOB CHECK (
+        remediation_source_snapshot_digest IS NULL OR (
+        typeof(remediation_source_snapshot_digest) = 'blob'
+        AND length(remediation_source_snapshot_digest) = 32
+        AND remediation_source_snapshot_digest <> zeroblob(32))),
+    remediation_request_fingerprint BLOB CHECK (
+        remediation_request_fingerprint IS NULL OR (
+        typeof(remediation_request_fingerprint) = 'blob'
+        AND length(remediation_request_fingerprint) = 32
+        AND remediation_request_fingerprint <> zeroblob(32))),
+    retention_basis_at_us INTEGER NOT NULL CHECK (retention_basis_at_us > 0),
+    retired_at_us INTEGER NOT NULL CHECK (
+        retired_at_us >= retention_basis_at_us
+        AND retired_at_us - retention_basis_at_us >= 2592000000000),
+    CHECK (
+        (terminal_kind = 'file_published'
+            AND delivery_disposition_id IS NOT NULL
+            AND delivery_audit_id IS NOT NULL
+            AND delivery_proof_digest <> zeroblob(32)
+            AND revoke_remediation_request_id IS NULL
+            AND revoke_audit_id IS NULL AND revoke_event_id IS NULL
+            AND ((resume_remediation_request_id IS NULL
+                    AND resume_audit_id IS NULL
+                    AND remediation_source_snapshot_digest IS NULL
+                    AND remediation_request_fingerprint IS NULL)
+                OR (resume_remediation_request_id IS NOT NULL
+                    AND resume_audit_id IS NOT NULL
+                    AND remediation_source_snapshot_digest <> zeroblob(32)
+                    AND remediation_request_fingerprint <> zeroblob(32))))
+        OR (terminal_kind = 'operator_revoke_and_wipe'
+            AND delivery_disposition_id IS NULL AND delivery_audit_id IS NULL
+            AND delivery_proof_digest = zeroblob(32)
+            AND revoke_remediation_request_id IS NOT NULL
+            AND revoke_audit_id IS NOT NULL
+            AND resume_remediation_request_id IS NULL
+            AND resume_audit_id IS NULL
+            AND remediation_source_snapshot_digest <> zeroblob(32)
+            AND remediation_request_fingerprint <> zeroblob(32)))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_raw
+    ON service_credential_handoff_retirement_receipts
+        (raw_journal_snapshot_digest);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_delivery
+    ON service_credential_handoff_retirement_receipts
+        (delivery_disposition_id) WHERE delivery_disposition_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_revoke
+    ON service_credential_handoff_retirement_receipts
+        (revoke_remediation_request_id)
+    WHERE revoke_remediation_request_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_retirement_resume
+    ON service_credential_handoff_retirement_receipts
+        (resume_remediation_request_id)
+    WHERE resume_remediation_request_id IS NOT NULL;
+
 CREATE TRIGGER IF NOT EXISTS trg_service_exchange_audit_no_update
 BEFORE UPDATE ON service_exchange_audit_intentions
 BEGIN
@@ -1217,6 +1309,18 @@ WHEN EXISTS (
 )
 BEGIN
     SELECT RAISE(ABORT, 'service handoff remediation request collides with cancellation request');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_retirement_no_update
+BEFORE UPDATE ON service_credential_handoff_retirement_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff retirement receipts are append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_service_handoff_retirement_no_delete
+BEFORE DELETE ON service_credential_handoff_retirement_receipts
+BEGIN
+    SELECT RAISE(ABORT, 'service credential handoff retirement receipts are permanent');
 END;
 
 CREATE TRIGGER IF NOT EXISTS trg_service_domain_requests_no_remediation_collision
