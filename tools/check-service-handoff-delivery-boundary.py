@@ -34,6 +34,7 @@ FRIEND_INCLUDES = {
         "wyrelog/auth/service-credential-handoff-delivery-private.c",
         "wyrelog/auth/service-credential-operation-coordinator-execute-private.c",
         "wyrelog/auth/service-credential-operation-coordinator-maintenance-private.c",
+        "wyrelog/auth/service-credential-operation-coordinator-retirement-private.c",
     },
     "store-handoff-delivery-private.h": {
         "wyrelog/auth/service-credential-handoff-delivery-private.c",
@@ -45,6 +46,14 @@ FRIEND_HEADER_INCLUDES = {
     "service-credential-handoff-delivery-private.h": set(),
     "store-handoff-delivery-private.h": {
         "wyrelog/auth/service-credential-handoff-delivery-private.h",
+    },
+}
+
+FRIEND_SYMBOL_REFERENCES = {
+    "wyl_service_credential_operation_coordinator_begin_or_replay_locked": {
+        "wyrelog/auth/service-credential-operation-coordinator-storage-private.c",
+        "wyrelog/auth/service-credential-operation-coordinator-storage-private.h",
+        "wyrelog/auth/service-credential-operation-coordinator-retirement-private.c",
     },
 }
 
@@ -161,6 +170,17 @@ def friend_include_diff(root: Path, include_name: str, allowed: set[str],
     return actual - allowed, allowed - actual
 
 
+def friend_symbol_reference_diff(root: Path, symbol: str,
+                                 allowed: set[str]) -> tuple[set[str], set[str]]:
+    actual = set()
+    pattern = re.compile(rf"\b{re.escape(symbol)}\b")
+    for suffix in ("*.c", "*.h"):
+        for source in (root / "wyrelog").rglob(suffix):
+            if pattern.search(source.read_text(encoding="utf-8")):
+                actual.add(source.relative_to(root).as_posix())
+    return actual - allowed, allowed - actual
+
+
 def self_test() -> int:
     kinds = {
         "libwyrelog.a": "static",
@@ -234,8 +254,9 @@ The Import Tables
         allowed = root / "wyrelog/auth/allowed.c"
         unexpected = root / "wyrelog/general.c"
         allowed.parent.mkdir(parents=True)
-        allowed.write_text('#include "private-friend.h"\n', encoding="utf-8")
-        unexpected.write_text('#include "private-friend.h"\n',
+        allowed.write_text('#include "private-friend.h"\nprivate_begin();\n',
+                           encoding="utf-8")
+        unexpected.write_text('#include "private-friend.h"\nprivate_begin();\n',
                               encoding="utf-8")
         extra, missing = friend_include_diff(root, "private-friend.h", {
             "wyrelog/auth/allowed.c",
@@ -246,6 +267,11 @@ The Import Tables
             "wyrelog/auth/allowed.c", "wyrelog/missing.c",
         }, ".c")
         if extra != {"wyrelog/general.c"} or missing != {"wyrelog/missing.c"}:
+            return 1
+        extra, missing = friend_symbol_reference_diff(root, "private_begin", {
+            "wyrelog/auth/allowed.c",
+        })
+        if extra != {"wyrelog/general.c"} or missing:
             return 1
     return 0
 
@@ -290,6 +316,19 @@ def main() -> int:
         if unexpected or missing:
             print(f"friend header allowlist mismatch for {include_name}",
                   *sorted(unexpected | missing), sep="\n  ", file=sys.stderr)
+            return 1
+    for symbol, allowed in FRIEND_SYMBOL_REFERENCES.items():
+        unexpected, missing = friend_symbol_reference_diff(root, symbol,
+                                                            allowed)
+        if unexpected or missing:
+            print(f"friend symbol allowlist mismatch for {symbol}",
+                  file=sys.stderr)
+            if unexpected:
+                print("unexpected:", *sorted(unexpected), sep="\n  ",
+                      file=sys.stderr)
+            if missing:
+                print("missing:", *sorted(missing), sep="\n  ",
+                      file=sys.stderr)
             return 1
     friend = (root / "wyrelog/auth/"
               "service-credential-handoff-delivery-private.h")

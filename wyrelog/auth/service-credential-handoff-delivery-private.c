@@ -184,6 +184,65 @@ delivery_proof_is_valid (const WylServiceCredentialHandoffDeliveryProof *proof)
       || proof->source == WYL_SERVICE_HANDOFF_DELIVERY_SOURCE_CLEANUP_REQUIRED);
 }
 
+wyrelog_error_t
+    wyl_service_credential_handoff_delivery_retirement_proof_digest
+    (const WylServiceCredentialOperationRecord * record,
+    const WylPolicyServiceHandoffExactTuple * tuple,
+    const guint8 target_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES],
+    guint8 out_digest[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES])
+{
+  WylServiceCredentialOperationTerminalKind kind = 0;
+  g_autofree gchar *terminal_remediation = NULL;
+  wyl_id_t journal_escrow;
+
+  if (record == NULL || tuple == NULL || tuple->escrow_id == NULL
+      || target_digest == NULL || out_digest == NULL)
+    return WYRELOG_E_INVALID;
+  if (record->version != WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+      || record->state != WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL
+      || !wyl_service_credential_operation_record_is_valid (record)
+      || !wyl_service_credential_operation_terminal_reason_parse
+      (record->terminal_reason, &kind, &terminal_remediation)
+      || kind != WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_FILE_PUBLISHED
+      || terminal_remediation != NULL
+      || record->publication_receipt_version != 1
+      || g_strcmp0 (record->publication_receipt_id, record->reservation_id) != 0
+      || wyl_id_parse (record->escrow_id, &journal_escrow) != WYRELOG_E_OK
+      || !wyl_id_equal (&journal_escrow, tuple->escrow_id)
+      || g_strcmp0 (record->request_id, tuple->original_request_id) != 0
+      || g_strcmp0 (record->successor_credential_id,
+          tuple->successor_credential_id) != 0
+      || record->successor_generation != tuple->successor_issuance_generation
+      || g_strcmp0 (record->actor_subject_id,
+          tuple->original_actor_subject_id) != 0
+      || sodium_memcmp (record->escrow_binding_digest, tuple->binding_digest,
+          sizeof tuple->binding_digest) != 0
+      || sodium_is_zero (target_digest,
+          WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES))
+    return WYRELOG_E_POLICY;
+
+  WylServiceCredentialHandoffDeliveryProof proof = {
+    .source = WYL_SERVICE_HANDOFF_DELIVERY_SOURCE_FILE_PUBLISHED,
+    .tuple = *tuple,
+    .actor_subject_id = record->actor_subject_id,
+    .operation = record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE ?
+        "issue" : record->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ?
+        "rotate" : NULL,
+    .deadline_at_us = record->expires_at_us,
+    .receipt_version = record->publication_receipt_version,
+    .destination = record->destination,
+    .reservation_id = record->reservation_id,
+    .parent_identity = record->parent_identity,
+    .stage_basename = record->stage_basename,
+    .stage_identity = record->stage_identity,
+    .publication_receipt_id = record->publication_receipt_id,
+  };
+  memcpy (proof.target_digest, target_digest, sizeof proof.target_digest);
+  if (!delivery_proof_is_valid (&proof))
+    return WYRELOG_E_POLICY;
+  return delivery_proof_digest (&proof, out_digest);
+}
+
 static gboolean
     delivery_escrow_matches
     (const wyl_policy_service_handoff_escrow_info_t * escrow,

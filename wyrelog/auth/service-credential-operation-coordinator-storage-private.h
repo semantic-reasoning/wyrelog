@@ -100,19 +100,61 @@ G_GNUC_INTERNAL wyrelog_error_t
     const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
     const WylServiceCredentialOperationExactDeleteExpectation * expectation);
 
-/* Persist or replay the journal entry selected solely by request_id. The
- * persisted operation_id is the canonical request_id; callers cannot supply
- * a separate operation identity. The
- * caller must initialize out_record with
- * WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT; it is unchanged on error.
- * A successful replay may return any valid lifecycle state for the original
- * operation. expires_at_us is persisted as immutable operation intent. */
-wyrelog_error_t wyl_service_credential_operation_coordinator_begin_or_replay
+/* Raw storage begin used only after the authority-backed retirement guard.
+ * The matching lifecycle lock is mandatory, so begin and permanent receipt
+ * creation serialize on one request ID. */
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_begin_or_replay_locked
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+
+#ifdef WYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS
+/* Storage/journal tests deliberately bypass the authority retirement guard;
+ * production code must use begin_or_replay_retirement_guarded(). */
+static inline wyrelog_error_t
+    wyl_service_credential_operation_coordinator_begin_or_replay_locked_for_test
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorLock * lifecycle_lock,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return wyl_service_credential_operation_coordinator_begin_or_replay_locked
+      (storage, anchor, lifecycle_lock, request, now_us, out_replayed,
+      out_record);
+}
+
+static inline wyrelog_error_t
+    wyl_service_credential_operation_coordinator_begin_or_replay_for_test
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const WylServiceCredentialOperationCoordinatorRequest * request,
     gint64 now_us, gboolean * out_replayed,
-    WylServiceCredentialOperationRecord * out_record);
+    WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationCoordinatorLock lifecycle_lock =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (!wyl_service_credential_operation_coordinator_request_is_valid (request))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_credential_operation_coordinator_lock_acquire (storage,
+      anchor, request != NULL ? request->request_id : NULL, &lifecycle_lock);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_credential_operation_coordinator_begin_or_replay_locked
+        (storage, anchor, &lifecycle_lock, request, now_us, out_replayed,
+        out_record);
+  wyl_service_credential_operation_coordinator_lock_release (storage, anchor,
+      &lifecycle_lock);
+  return rc;
+}
+#endif
 
 /* Load a stable journal snapshot selected solely by a canonical request ID.
  * This intentionally does not acquire the per-operation lock: an anchored

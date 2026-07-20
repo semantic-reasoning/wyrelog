@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include "auth/service-credential-domain-private.h"
+#include "auth/service-credential-handoff-delivery-private.h"
+#include "auth/service-credential-operation-coordinator-proof-private.h"
+#include "auth/service-credential-operation-coordinator-retirement-private.h"
 #include "policy/store-handoff-delivery-private.h"
 #include "policy/store-handoff-maintenance-private.h"
 #include "policy/store-handoff-retirement-private.h"
@@ -2508,6 +2511,12 @@ static gint64
 retirement_fixed_now (gpointer data)
 {
   return *(const gint64 *) data;
+}
+
+static void
+cancel_retirement_before_delete (gpointer data)
+{
+  g_cancellable_cancel (G_CANCELLABLE (data));
 }
 
 #ifdef WYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE
@@ -5772,6 +5781,17 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
   WylHandle *handle = fixture.handle;
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:retirement-resume");
+  g_autofree gchar *operation_root =
+      g_dir_make_tmp ("wyl-retirement-resume-operation-XXXXXX", NULL);
+  WylServiceCredentialOperationStorage operation_storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor operation_anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_assert_nonnull (operation_root);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open
+      (operation_root, &operation_storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&operation_storage, &operation_anchor), ==, WYRELOG_E_OK);
   CollisionRuntime collision = { 0 };
   wyl_service_credential_runtime_t credential_runtime = {
     test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
@@ -5787,7 +5807,12 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
   };
   wyl_id_t escrow_id;
   guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
-  memset (target, 0xc5, sizeof target);
+  WylServiceCredentialOperationRecord target_record = {
+    .destination = "handoff.json",
+    .parent_identity = "parent-v1",
+  };
+  g_assert_cmpint (wyl_service_credential_operation_handoff_target_digest
+      (&target_record, target), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
   wyl_service_credential_handoff_request_t handoff = {
     .escrow_id = &escrow_id,.target_digest = target,
@@ -5798,6 +5823,66 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
           "svc:handoff:retirement-resume", "tenant-a", "admin", original_id,
           g_get_real_time () + G_TIME_SPAN_HOUR, &handoff, &issue_runtime,
           &issued), ==, WYRELOG_E_OK);
+  gchar escrow_text[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_format (&escrow_id, escrow_text,
+          sizeof escrow_text), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest coordinator_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  coordinator_request.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE;
+  coordinator_request.request_id = g_strdup (original_id);
+  coordinator_request.subject_id = g_strdup ("svc:handoff:retirement-resume");
+  coordinator_request.tenant_id = g_strdup ("tenant-a");
+  coordinator_request.destination = g_strdup ("handoff.json");
+  coordinator_request.parent_identity = g_strdup ("parent-v1");
+  coordinator_request.actor_subject_id = g_strdup ("admin");
+  coordinator_request.escrow_id = g_strdup (escrow_text);
+  memcpy (coordinator_request.escrow_binding_digest,
+      issued.handoff.binding_digest,
+      sizeof coordinator_request.escrow_binding_digest);
+  coordinator_request.expires_at_us = handoff.deadline_at_us;
+  WylServiceCredentialOperationGuardedBeginResult begin =
+      WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+      (handle, &operation_storage, &operation_anchor, &coordinator_request,
+          NULL, &begin), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_guarded_begin_result_clear (&begin);
+  WylServiceCredentialOperationRecord journal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean checkpoint_replayed = FALSE;
+  gint64 checkpoint_at = g_get_real_time ();
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+      (&operation_storage, &operation_anchor, original_id,
+          issued.credential.credential_id, issued.credential.generation,
+          checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+      (&operation_storage, &operation_anchor, original_id, "reservation",
+          "stage", "reservation", ++checkpoint_at, &checkpoint_replayed,
+          &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+      (&operation_storage, &operation_anchor, original_id, "reservation",
+          "stage", "stage-id", "reservation", ++checkpoint_at,
+          &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&operation_storage, &operation_anchor, original_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN,
+          ++checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  guint8 remediation_source_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES]
+  = { 0 };
+  WylServiceCredentialOperationRecord oar_snapshot =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&operation_storage, &operation_anchor, original_id,
+          remediation_source_digest, &oar_snapshot), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&oar_snapshot);
   wyl_service_credential_handoff_remediation_input_t remediation_input = {
     .remediation_request_id = remediation_id,
     .decision_request_id = decision_id,.current_actor_subject_id = "operator",
@@ -5814,7 +5899,10 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
       issued.handoff.binding_digest,
       sizeof remediation_input.tuple.binding_digest);
   set_remediation_oar_context (&remediation_input, 0xc6,
-      WYL_SERVICE_HANDOFF_REMEDIATION_OAR_EXPLICIT_HOLD);
+      WYL_SERVICE_HANDOFF_REMEDIATION_OAR_RECEIPT_FOREIGN);
+  memcpy (remediation_input.journal_snapshot_digest,
+      remediation_source_digest,
+      sizeof remediation_input.journal_snapshot_digest);
   AuthorizationProbe remediation_probe = {
     .handle = handle,.rc = WYRELOG_E_OK,
   };
@@ -5830,6 +5918,26 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
       WYRELOG_E_OK);
   g_assert_cmpint (remediation.escrow_outcome, ==,
       WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_RETAINED);
+  WylServiceCredentialOperationRemediationProof remediation_proof = { 0 };
+  wyl_service_credential_operation_remediation_proof_from_result
+      (&remediation, &remediation_proof);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+      (&operation_storage, &operation_anchor, original_id,
+          &remediation_proof, ++checkpoint_at, &checkpoint_replayed,
+          &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_file_published
+      (&operation_storage, &operation_anchor, original_id, "reservation",
+          "stage", "stage-id", "reservation", ++checkpoint_at,
+          &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&operation_storage, &operation_anchor, original_id, ++checkpoint_at,
+          &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
   WylPolicyServiceHandoffExactTuple tuple = {
     .original_request_id = original_id,.escrow_id = &escrow_id,
     .successor_credential_id = issued.credential.credential_id,
@@ -5839,7 +5947,9 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
   memcpy (tuple.binding_digest, issued.handoff.binding_digest,
       sizeof tuple.binding_digest);
   guint8 delivery_proof[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
-  memset (delivery_proof, 0xc7, sizeof delivery_proof);
+  g_assert_cmpint
+      (wyl_service_credential_handoff_delivery_retirement_proof_digest
+      (&journal, &tuple, target, delivery_proof), ==, WYRELOG_E_OK);
   WylPolicyServiceHandoffPublicationOutcome publication = 0;
   WylPolicyServiceHandoffDispositionResult delivered = { 0 };
   Txn transaction = { 0 };
@@ -5859,12 +5969,18 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
     .journal_version = 6,
     .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
     .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED,
-    .tuple = tuple,.journal_updated_at_us = MAX (delivered.created_at_us,
-        remediation.created_at_us),.delivery_actor_subject_id = "admin",
+    .tuple = tuple,.journal_updated_at_us = journal.updated_at_us,
+    .delivery_actor_subject_id = "admin",
     .remediation_request_id = remediation_id,
   };
-  memset (input.raw_journal_snapshot_digest, 0xc8,
-      sizeof input.raw_journal_snapshot_digest);
+  WylServiceCredentialOperationRecord terminal_snapshot =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&operation_storage, &operation_anchor, original_id,
+          input.raw_journal_snapshot_digest, &terminal_snapshot), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&terminal_snapshot);
   memcpy (input.delivery_proof_digest, delivery_proof,
       sizeof input.delivery_proof_digest);
   memcpy (input.remediation_source_snapshot_digest,
@@ -5873,25 +5989,47 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
   memcpy (input.remediation_request_fingerprint,
       remediation.request_fingerprint,
       sizeof input.remediation_request_fingerprint);
-  gint64 now_us = input.journal_updated_at_us
+  gint64 now_us = MAX (input.journal_updated_at_us,
+      MAX (delivered.created_at_us, remediation.created_at_us))
       + WYL_POLICY_HANDOFF_RETENTION_MIN_US;
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
       retirement_fixed_now, &now_us);
   WylPolicyServiceHandoffRetirementResult result = { 0 };
+  WylServiceCredentialOperationRetirementResult purged =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RETIREMENT_RESULT_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_id, NULL,
+          &purged), ==, WYRELOG_E_OK);
+  g_assert_false (purged.receipt_replayed);
+  g_assert_true (purged.snapshot_deleted);
+  wyl_service_credential_operation_retirement_result_clear (&purged);
   classifier_transaction_begin (handle, &transaction);
-  retirement_transaction_prepare (store, &transaction);
-  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
-      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_handoff_retirement_lookup_core
+      (transaction.txn, store, original_id, &result), ==, WYRELOG_E_OK);
   g_assert_cmpstr (result.resume_remediation_request_id, ==, remediation_id);
   g_assert_cmpstr (result.resume_audit_id, ==, audit_id);
   wyl_policy_service_handoff_retirement_result_clear (&result);
-  retirement_transaction_commit (&transaction);
+  classifier_transaction_end (&transaction);
   input.remediation_source_snapshot_digest[0] ^= 0xff;
   classifier_transaction_begin (handle, &transaction);
   g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
       (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
   classifier_transaction_end (&transaction);
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  wyl_service_credential_operation_record_clear (&journal);
+  wyl_service_credential_operation_guarded_begin_result_clear (&begin);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&coordinator_request);
+  wyl_service_credential_operation_storage_clear (&operation_storage);
+  g_autoptr (GDir) operation_directory = g_dir_open (operation_root, 0, NULL);
+  const gchar *operation_entry;
+  g_assert_nonnull (operation_directory);
+  while ((operation_entry = g_dir_read_name (operation_directory)) != NULL) {
+    g_autofree gchar *operation_path =
+        g_build_filename (operation_root, operation_entry, NULL);
+    g_assert_cmpint (g_remove (operation_path), ==, 0);
+  }
+  g_assert_cmpint (g_rmdir (operation_root), ==, 0);
   wyl_service_credential_clear (&later_revoked);
   wyl_policy_service_handoff_disposition_result_clear (&delivered);
   wyl_service_credential_handoff_remediation_result_clear (&remediation);
@@ -5919,6 +6057,17 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   WylHandle *handle = fixture.handle;
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:retirement-revoke");
+  g_autofree gchar *operation_root =
+      g_dir_make_tmp ("wyl-retirement-revoke-operation-XXXXXX", NULL);
+  WylServiceCredentialOperationStorage operation_storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor operation_anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_assert_nonnull (operation_root);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open
+      (operation_root, &operation_storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&operation_storage, &operation_anchor), ==, WYRELOG_E_OK);
   CollisionRuntime collision = { 0 };
   wyl_service_credential_runtime_t credential_runtime = {
     test_alloc, test_lock, test_wipe, test_unlock, test_free, test_new_id,
@@ -5934,7 +6083,12 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   };
   wyl_id_t escrow_id;
   guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
-  memset (target, 0xc2, sizeof target);
+  WylServiceCredentialOperationRecord target_record = {
+    .destination = "handoff.json",
+    .parent_identity = "parent-v1",
+  };
+  g_assert_cmpint (wyl_service_credential_operation_handoff_target_digest
+      (&target_record, target), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
   wyl_service_credential_handoff_request_t handoff = {
     .escrow_id = &escrow_id,.target_digest = target,
@@ -5945,6 +6099,66 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
           "svc:handoff:retirement-revoke", "tenant-a", "admin", original_id,
           g_get_real_time () + G_TIME_SPAN_HOUR, &handoff, &issue_runtime,
           &issued), ==, WYRELOG_E_OK);
+  gchar escrow_text[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_format (&escrow_id, escrow_text,
+          sizeof escrow_text), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest coordinator_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  coordinator_request.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE;
+  coordinator_request.request_id = g_strdup (original_id);
+  coordinator_request.subject_id = g_strdup ("svc:handoff:retirement-revoke");
+  coordinator_request.tenant_id = g_strdup ("tenant-a");
+  coordinator_request.destination = g_strdup ("handoff.json");
+  coordinator_request.parent_identity = g_strdup ("parent-v1");
+  coordinator_request.actor_subject_id = g_strdup ("admin");
+  coordinator_request.escrow_id = g_strdup (escrow_text);
+  memcpy (coordinator_request.escrow_binding_digest,
+      issued.handoff.binding_digest,
+      sizeof coordinator_request.escrow_binding_digest);
+  coordinator_request.expires_at_us = handoff.deadline_at_us;
+  WylServiceCredentialOperationGuardedBeginResult begin =
+      WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+      (handle, &operation_storage, &operation_anchor, &coordinator_request,
+          NULL, &begin), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_guarded_begin_result_clear (&begin);
+  WylServiceCredentialOperationRecord journal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean checkpoint_replayed = FALSE;
+  gint64 checkpoint_at = g_get_real_time ();
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+      (&operation_storage, &operation_anchor, original_id,
+          issued.credential.credential_id, issued.credential.generation,
+          checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+      (&operation_storage, &operation_anchor, original_id, "reservation",
+          "stage", "reservation", ++checkpoint_at, &checkpoint_replayed,
+          &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+      (&operation_storage, &operation_anchor, original_id, "reservation",
+          "stage", "stage-id", "reservation", ++checkpoint_at,
+          &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+      (&operation_storage, &operation_anchor, original_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN,
+          ++checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  guint8 remediation_source_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES]
+  = { 0 };
+  WylServiceCredentialOperationRecord oar_snapshot =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&operation_storage, &operation_anchor, original_id,
+          remediation_source_digest, &oar_snapshot), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&oar_snapshot);
   wyl_service_credential_handoff_remediation_input_t remediation_input = {
     .remediation_request_id = remediation_id,
     .decision_request_id = decision_id,
@@ -5963,7 +6177,10 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
       issued.handoff.binding_digest,
       sizeof remediation_input.tuple.binding_digest);
   set_remediation_oar_context (&remediation_input, 0xc3,
-      WYL_SERVICE_HANDOFF_REMEDIATION_OAR_EXPLICIT_HOLD);
+      WYL_SERVICE_HANDOFF_REMEDIATION_OAR_RECEIPT_FOREIGN);
+  memcpy (remediation_input.journal_snapshot_digest,
+      remediation_source_digest,
+      sizeof remediation_input.journal_snapshot_digest);
   AuthorizationProbe remediation_probe = {
     .handle = handle,.rc = WYRELOG_E_OK,
   };
@@ -5982,6 +6199,15 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
       WYRELOG_E_OK);
   g_assert_true (remediation.revoked_now);
   g_assert_cmpint (remediation.revoke_event_id, >, 0);
+  WylServiceCredentialOperationRemediationProof remediation_proof = { 0 };
+  wyl_service_credential_operation_remediation_proof_from_result
+      (&remediation, &remediation_proof);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+      (&operation_storage, &operation_anchor, original_id,
+          &remediation_proof, ++checkpoint_at, &checkpoint_replayed,
+          &journal), ==, WYRELOG_E_OK);
   WylPolicyServiceHandoffRetirementInput input = {
     .journal_version = 6,
     .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
@@ -5992,21 +6218,27 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
           .successor_issuance_generation = issued.credential.generation,
           .original_actor_subject_id = "admin",
         },
-    .journal_updated_at_us = remediation.created_at_us,
+    .journal_updated_at_us = journal.updated_at_us,
     .remediation_request_id = remediation_id,
   };
   memcpy (input.tuple.binding_digest, issued.handoff.binding_digest,
       sizeof input.tuple.binding_digest);
-  memset (input.raw_journal_snapshot_digest, 0xc4,
-      sizeof input.raw_journal_snapshot_digest);
+  WylServiceCredentialOperationRecord terminal_snapshot =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&operation_storage, &operation_anchor, original_id,
+          input.raw_journal_snapshot_digest, &terminal_snapshot), ==,
+      WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&terminal_snapshot);
   memcpy (input.remediation_source_snapshot_digest,
       remediation.journal_snapshot_digest,
       sizeof input.remediation_source_snapshot_digest);
   memcpy (input.remediation_request_fingerprint,
       remediation.request_fingerprint,
       sizeof input.remediation_request_fingerprint);
-  gint64 now_us = MAX (remediation.created_at_us,
-      remediation.revoke_event_created_at_us)
+  gint64 now_us = MAX (journal.updated_at_us,
+      MAX (remediation.created_at_us, remediation.revoke_event_created_at_us))
       + WYL_POLICY_HANDOFF_RETENTION_MIN_US;
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
       retirement_fixed_now, &now_us);
@@ -6014,29 +6246,52 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   Txn transaction = { 0 };
   wyl_policy_store_service_handoff_fail_once (store,
       WYL_POLICY_HANDOFF_FAIL_AFTER_PROVENANCE);
-  classifier_transaction_begin (handle, &transaction);
-  retirement_transaction_prepare (store, &transaction);
-  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
-      (transaction.txn, store, &input, &result), ==, WYRELOG_E_IO);
-  classifier_transaction_end (&transaction);
+  WylServiceCredentialOperationRetirementResult purged =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RETIREMENT_RESULT_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_id, NULL,
+          &purged), ==, WYRELOG_E_IO);
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM service_credential_handoff_retirement_receipts;"),
       ==, 0);
-  classifier_transaction_begin (handle, &transaction);
-  retirement_transaction_prepare (store, &transaction);
-  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
-      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
-  g_assert_false (result.replayed);
-  g_assert_cmpstr (result.revoke_remediation_request_id, ==, remediation_id);
-  g_assert_cmpint (result.revoke_event_id, ==, remediation.revoke_event_id);
-  wyl_policy_service_handoff_retirement_result_clear (&result);
-  retirement_transaction_commit (&transaction);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+      (&operation_storage, &operation_anchor, original_id,
+          &terminal_snapshot), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&terminal_snapshot);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_id, NULL,
+          &purged), ==, WYRELOG_E_OK);
+  g_assert_false (purged.receipt_replayed);
+  g_assert_true (purged.snapshot_deleted);
+  g_assert_cmpint (purged.kind, ==,
+      WYL_POLICY_HANDOFF_RETIREMENT_OPERATOR_REVOKE_AND_WIPE);
+  wyl_service_credential_operation_retirement_result_clear (&purged);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_id, NULL,
+          &purged), ==, WYRELOG_E_OK);
+  g_assert_true (purged.receipt_replayed);
+  g_assert_false (purged.snapshot_deleted);
+  wyl_service_credential_operation_retirement_result_clear (&purged);
   input.remediation_request_fingerprint[0] ^= 0xff;
   classifier_transaction_begin (handle, &transaction);
   g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
       (transaction.txn, store, &input, &result), ==, WYRELOG_E_POLICY);
   classifier_transaction_end (&transaction);
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  wyl_service_credential_operation_record_clear (&journal);
+  wyl_service_credential_operation_guarded_begin_result_clear (&begin);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&coordinator_request);
+  wyl_service_credential_operation_storage_clear (&operation_storage);
+  g_autoptr (GDir) operation_directory = g_dir_open (operation_root, 0, NULL);
+  const gchar *operation_entry;
+  g_assert_nonnull (operation_directory);
+  while ((operation_entry = g_dir_read_name (operation_directory)) != NULL) {
+    g_autofree gchar *operation_path =
+        g_build_filename (operation_root, operation_entry, NULL);
+    g_assert_cmpint (g_remove (operation_path), ==, 0);
+  }
+  g_assert_cmpint (g_rmdir (operation_root), ==, 0);
   wyl_service_credential_handoff_remediation_result_clear (&remediation);
   wyl_service_credential_handoff_result_clear (&issued);
   g_clear_pointer (&invalidation.credential_id, g_free);
@@ -6055,6 +6310,17 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   WylHandle *handle = fixture.handle;
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:retirement-file");
+  g_autofree gchar *operation_root =
+      g_dir_make_tmp ("wyl-retirement-file-operation-XXXXXX", NULL);
+  WylServiceCredentialOperationStorage operation_storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor operation_anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_assert_nonnull (operation_root);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open
+      (operation_root, &operation_storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&operation_storage, &operation_anchor), ==, WYRELOG_E_OK);
 
   CollisionRuntime collision = { 0 };
   wyl_service_credential_runtime_t credential_runtime = {
@@ -6070,7 +6336,12 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   };
   wyl_id_t escrow_id;
   guint8 target[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
-  memset (target, 0xc1, sizeof target);
+  WylServiceCredentialOperationRecord target_record = {
+    .destination = "handoff.json",
+    .parent_identity = "parent-v1",
+  };
+  g_assert_cmpint (wyl_service_credential_operation_handoff_target_digest
+      (&target_record, target), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_id_new (&escrow_id), ==, WYRELOG_E_OK);
   wyl_service_credential_handoff_request_t handoff = {
     .escrow_id = &escrow_id,.target_digest = target,
@@ -6081,6 +6352,63 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
           "svc:handoff:retirement-file", "tenant-a", "admin",
           original_request_id, g_get_real_time () + G_TIME_SPAN_HOUR,
           &handoff, &issue_runtime, &issued), ==, WYRELOG_E_OK);
+  gchar escrow_text[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_format (&escrow_id, escrow_text,
+          sizeof escrow_text), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationCoordinatorRequest coordinator_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  coordinator_request.kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE;
+  coordinator_request.request_id = g_strdup (original_request_id);
+  coordinator_request.subject_id = g_strdup ("svc:handoff:retirement-file");
+  coordinator_request.tenant_id = g_strdup ("tenant-a");
+  coordinator_request.destination = g_strdup ("handoff.json");
+  coordinator_request.parent_identity = g_strdup ("parent-v1");
+  coordinator_request.actor_subject_id = g_strdup ("admin");
+  coordinator_request.escrow_id = g_strdup (escrow_text);
+  memcpy (coordinator_request.escrow_binding_digest,
+      issued.handoff.binding_digest,
+      sizeof coordinator_request.escrow_binding_digest);
+  coordinator_request.expires_at_us = handoff.deadline_at_us;
+  WylServiceCredentialOperationGuardedBeginResult begin =
+      WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+      (handle, &operation_storage, &operation_anchor, &coordinator_request,
+          NULL, &begin), ==, WYRELOG_E_OK);
+  g_assert_false (begin.replayed);
+  wyl_service_credential_operation_guarded_begin_result_clear (&begin);
+  WylServiceCredentialOperationRecord journal =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean checkpoint_replayed = FALSE;
+  gint64 checkpoint_at = g_get_real_time ();
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+      (&operation_storage, &operation_anchor, original_request_id,
+          issued.credential.credential_id, issued.credential.generation,
+          checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+      (&operation_storage, &operation_anchor, original_request_id,
+          "reservation", "stage", "reservation", ++checkpoint_at,
+          &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+      (&operation_storage, &operation_anchor, original_request_id,
+          "reservation", "stage", "stage-id", "reservation",
+          ++checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_file_published
+      (&operation_storage, &operation_anchor, original_request_id,
+          "reservation", "stage", "stage-id", "reservation",
+          ++checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&journal);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+      (&operation_storage, &operation_anchor, original_request_id,
+          ++checkpoint_at, &checkpoint_replayed, &journal), ==, WYRELOG_E_OK);
   WylPolicyServiceHandoffExactTuple tuple = {
     .original_request_id = original_request_id,
     .escrow_id = &escrow_id,
@@ -6091,7 +6419,9 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   memcpy (tuple.binding_digest, issued.handoff.binding_digest,
       sizeof tuple.binding_digest);
   guint8 delivery_proof[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES];
-  memset (delivery_proof, 0xd1, sizeof delivery_proof);
+  g_assert_cmpint
+      (wyl_service_credential_handoff_delivery_retirement_proof_digest
+      (&journal, &tuple, target, delivery_proof), ==, WYRELOG_E_OK);
   WylPolicyServiceHandoffPublicationOutcome publication = 0;
   WylPolicyServiceHandoffDispositionResult delivered = { 0 };
   Txn transaction = { 0 };
@@ -6110,15 +6440,21 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
     .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
     .terminal_kind = WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED,
     .tuple = tuple,
-    .journal_updated_at_us = delivered.created_at_us,
+    .journal_updated_at_us = journal.updated_at_us,
     .delivery_actor_subject_id = "admin",
   };
-  memset (input.raw_journal_snapshot_digest, 0xe1,
-      sizeof input.raw_journal_snapshot_digest);
+  WylServiceCredentialOperationRecord loaded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&operation_storage, &operation_anchor, original_request_id,
+          input.raw_journal_snapshot_digest, &loaded), ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&loaded);
   memcpy (input.delivery_proof_digest, delivery_proof,
       sizeof input.delivery_proof_digest);
-  gint64 now_us = delivered.created_at_us
-      + WYL_POLICY_HANDOFF_RETENTION_MIN_US - 1;
+  gint64 retirement_basis = MAX (delivered.created_at_us,
+      journal.updated_at_us);
+  gint64 now_us = retirement_basis + WYL_POLICY_HANDOFF_RETENTION_MIN_US - 1;
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store,
       retirement_fixed_now, &now_us);
   WylPolicyServiceHandoffRetirementResult result = { 0 };
@@ -6131,23 +6467,59 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
       ==, 0);
 
   now_us++;
-  classifier_transaction_begin (handle, &transaction);
-  retirement_transaction_prepare (store, &transaction);
-  g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
-      (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
-  g_assert_false (result.replayed);
-  g_assert_cmpstr (result.delivery_disposition_id, ==,
-      delivered.disposition_id);
-  g_assert_cmpstr (result.delivery_audit_id, ==, delivered.audit_id);
-  g_assert_cmpint (result.retention_basis_at_us, ==, delivered.created_at_us);
-  g_assert_cmpint (result.retired_at_us, ==, now_us);
-  gint64 retired_at_us = result.retired_at_us;
-  wyl_policy_service_handoff_retirement_result_clear (&result);
-  retirement_transaction_commit (&transaction);
+  WylServiceCredentialOperationRetirementResult purged =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RETIREMENT_RESULT_INIT;
+  g_autoptr (GCancellable) delete_cancel = g_cancellable_new ();
+  wyl_service_credential_operation_retirement_set_before_delete_hook_for_test
+      (cancel_retirement_before_delete, delete_cancel);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_request_id,
+          delete_cancel, &purged), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (scalar (db_of (handle),
+          "SELECT count(*) FROM service_credential_handoff_retirement_receipts;"),
+      ==, 1);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+      (&operation_storage, &operation_anchor, original_request_id, &loaded),
+      ==, WYRELOG_E_OK);
+  wyl_service_credential_operation_record_clear (&loaded);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_request_id,
+          NULL, &purged), ==, WYRELOG_E_OK);
+  g_assert_true (purged.receipt_replayed);
+  g_assert_true (purged.snapshot_deleted);
+  g_assert_cmpint (purged.kind, ==,
+      WYL_POLICY_HANDOFF_RETIREMENT_FILE_PUBLISHED);
+  g_assert_cmpint (purged.retired_at_us, ==, now_us);
+  gint64 retired_at_us = purged.retired_at_us;
+  wyl_service_credential_operation_retirement_result_clear (&purged);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+      (&operation_storage, &operation_anchor, original_request_id, &loaded),
+      ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_purge_retired
+      (handle, &operation_storage, &operation_anchor, original_request_id,
+          NULL, &purged), ==, WYRELOG_E_OK);
+  g_assert_true (purged.receipt_replayed);
+  g_assert_false (purged.snapshot_deleted);
+  g_assert_cmpint (purged.retired_at_us, ==, retired_at_us);
+  wyl_service_credential_operation_retirement_result_clear (&purged);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+      (handle, &operation_storage, &operation_anchor, &coordinator_request,
+          NULL, &begin), ==, WYRELOG_E_POLICY);
+  g_assert_null (begin.record.request_id);
+  g_free (coordinator_request.destination);
+  coordinator_request.destination = g_strdup ("different.json");
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded
+      (handle, &operation_storage, &operation_anchor, &coordinator_request,
+          NULL, &begin), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_load
+      (&operation_storage, &operation_anchor, original_request_id, &loaded),
+      ==, WYRELOG_E_NOT_FOUND);
 
   /* Permanent exact replay never reopens the elapsed-time gate, even if the
    * trusted wall clock regresses after the receipt was committed. */
-  now_us = delivered.created_at_us;
+  now_us = retirement_basis;
   classifier_transaction_begin (handle, &transaction);
   g_assert_cmpint (wyl_policy_store_handoff_retirement_record_core
       (transaction.txn, store, &input, &result), ==, WYRELOG_E_OK);
@@ -6201,6 +6573,20 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   classifier_transaction_end (&transaction);
   exec_ok (db_of (handle), "DELETE FROM service_credential_handoff_escrows;");
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store, NULL, NULL);
+  wyl_service_credential_operation_record_clear (&journal);
+  wyl_service_credential_operation_guarded_begin_result_clear (&begin);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&coordinator_request);
+  wyl_service_credential_operation_storage_clear (&operation_storage);
+  g_autoptr (GDir) operation_directory = g_dir_open (operation_root, 0, NULL);
+  const gchar *operation_entry;
+  g_assert_nonnull (operation_directory);
+  while ((operation_entry = g_dir_read_name (operation_directory)) != NULL) {
+    g_autofree gchar *operation_path =
+        g_build_filename (operation_root, operation_entry, NULL);
+    g_assert_cmpint (g_remove (operation_path), ==, 0);
+  }
+  g_assert_cmpint (g_rmdir (operation_root), ==, 0);
   wyl_policy_service_handoff_disposition_result_clear (&delivered);
   wyl_service_credential_handoff_result_clear (&issued);
   g_free (issue_probe.actor_subject_id);
