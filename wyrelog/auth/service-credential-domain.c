@@ -1057,20 +1057,24 @@ static void
 wyrelog_error_t
 wyl_service_credential_handoff_resolve_remediation (WylHandle *handle,
     const gchar *remediation_request_id, const gchar *current_actor_subject_id,
-    const wyl_service_credential_mutation_authorization_t *authorization,
+    const wyl_service_credential_handoff_remediation_runtime_t *runtime,
     wyl_service_credential_handoff_remediation_result_t *out_result)
 {
   if (out_result != NULL)
     wyl_service_credential_handoff_remediation_result_clear (out_result);
   if (handle == NULL || remediation_request_id == NULL
-      || current_actor_subject_id == NULL || authorization == NULL
-      || authorization->authorize == NULL || out_result == NULL)
+      || current_actor_subject_id == NULL || runtime == NULL
+      || runtime->authorization == NULL
+      || runtime->authorization->authorize == NULL || out_result == NULL)
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
-  if (rc == WYRELOG_E_OK)
-    rc = service_mutation_authorize (&mutation, authorization,
+  if (rc == WYRELOG_E_OK) {
+    mutation.invalidate_credential = runtime->invalidate_credential;
+    mutation.invalidation_data = runtime->invalidation_data;
+    rc = service_mutation_authorize (&mutation, runtime->authorization,
         current_actor_subject_id);
+  }
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   WylPolicyServiceHandoffRemediationResult stored = { 0 };
@@ -1078,6 +1082,11 @@ wyl_service_credential_handoff_resolve_remediation (WylHandle *handle,
     rc = wyl_policy_store_resolve_service_handoff_remediation_core
         (mutation.transaction, mutation.store, remediation_request_id,
         current_actor_subject_id, &stored);
+  if (rc == WYRELOG_E_OK && mutation.invalidate_credential != NULL
+      && stored.invalidation_generation > 0) {
+    mutation.invalidation_credential_id = stored.successor_credential_id;
+    mutation.invalidation_generation = stored.invalidation_generation;
+  }
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK)
     service_handoff_take_remediation_result (&stored, out_result);

@@ -15744,6 +15744,43 @@ static wyrelog_error_t
 }
 
 wyrelog_error_t
+    wyl_policy_store_handoff_resolve_current_attention_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    WylPolicyServiceHandoffCommittedMaintenanceResult * out_result)
+{
+  if (out_result != NULL)
+    wyl_policy_service_handoff_committed_maintenance_result_clear (out_result);
+  if (store == NULL || out_result == NULL
+      || !service_handoff_maintenance_proof_is_valid (proof)
+      || proof->tuple.successor_credential_id == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  gboolean found = FALSE;
+  gboolean resumed = FALSE;
+  WylPolicyServiceHandoffCommittedMaintenanceOutcome attention = 0;
+  WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_lookup_attention (store, proof, &found,
+        &attention, &disposition);
+  if (rc == WYRELOG_E_OK && found)
+    rc = service_handoff_maintenance_attention_resumed (transaction, store,
+        proof, attention, &disposition, &resumed);
+  if (rc == WYRELOG_E_OK && (!found || resumed))
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK) {
+    out_result->outcome = attention;
+    out_result->created_at_us = disposition.created_at_us;
+    out_result->disposition = disposition;
+    memset (&disposition, 0, sizeof disposition);
+  }
+  wyl_policy_service_handoff_disposition_result_clear (&disposition);
+  return rc;
+}
+
+wyrelog_error_t
     wyl_policy_store_handoff_maintain_committed_core
     (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const WylPolicyServiceHandoffMaintenanceProof * proof,

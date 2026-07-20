@@ -480,7 +480,7 @@ G_GNUC_INTERNAL wyrelog_error_t
     wyl_service_credential_handoff_resolve_remediation
     (WylHandle * handle, const gchar * remediation_request_id,
     const gchar * current_actor_subject_id,
-    const wyl_service_credential_mutation_authorization_t * authorization,
+    const wyl_service_credential_handoff_remediation_runtime_t * runtime,
     wyl_service_credential_handoff_remediation_result_t * out_result);
 G_GNUC_INTERNAL wyrelog_error_t
     wyl_service_credential_handoff_resolve_remediation_incident
