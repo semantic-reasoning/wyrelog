@@ -9532,6 +9532,9 @@ rotation_probe_store_authenticated (wyl_policy_store_t *store,
   return rc == WYRELOG_E_OK;
 }
 
+static void rotation_recovery_release_opts
+    (wyl_policy_store_open_options_t * opts);
+
 wyrelog_error_t
 wyl_policy_store_rotation_probe (const gchar *path,
     wyl_policy_store_open_options_t *old_opts,
@@ -9598,6 +9601,10 @@ wyl_policy_store_rotation_probe (const gchar *path,
     } else if (intent_rc != WYRELOG_E_NOT_FOUND) {
       wyl_policy_store_close (old_store);
       sodium_memzero (old_digest, sizeof old_digest);
+      /* new_opts has not been opened yet, so open() never consumed its state.
+       * Release the not-yet-opened provider box through its wiping free
+       * callback so its secret key material is not leaked on this path. */
+      rotation_recovery_release_opts (new_opts);
       return intent_rc;
     }
     wyl_policy_store_close (old_store);
@@ -9606,6 +9613,8 @@ wyl_policy_store_rotation_probe (const gchar *path,
       && old_rc != WYRELOG_E_NOT_FOUND && old_rc != WYRELOG_E_POLICY) {
     if (old_store != NULL)
       wyl_policy_store_close (old_store);
+    /* Same as above: new_opts is still unconsumed on this early return. */
+    rotation_recovery_release_opts (new_opts);
     return old_rc;
   } else if (old_store != NULL) {
     wyl_policy_store_close (old_store);
@@ -9720,6 +9729,17 @@ wyl_policy_store_rotation_recovery_status (const gchar *path,
   return WYRELOG_E_OK;
 }
 
+/* Maps a recovery reopen failure. Environmental errors (I/O, BUSY lease, NOMEM,
+ * argument shape) pass through verbatim so the operator can retry; only a
+ * genuine authentication or validation failure (CRYPTO/POLICY) is normalized to
+ * a fail-closed WYRELOG_E_POLICY. */
+static wyrelog_error_t
+rotation_recover_reopen_error (wyrelog_error_t rc)
+{
+  return (rc == WYRELOG_E_CRYPTO || rc == WYRELOG_E_POLICY)
+      ? WYRELOG_E_POLICY : rc;
+}
+
 /* FINALIZE_NEW: the rename already linearized to the new root. Open under the
  * new provider and unlink any residual intent sidecar. The sidecar is keyed by
  * the old store key and is unreadable here, so the clear is keyless and
@@ -9743,7 +9763,7 @@ rotation_recover_finalize_new (const gchar *path,
   if (rc != WYRELOG_E_OK) {
     if (store != NULL)
       wyl_policy_store_close (store);
-    return WYRELOG_E_POLICY;
+    return rotation_recover_reopen_error (rc);
   }
   /* The new root is authoritative and unchanged: only the sidecar is touched. */
   store->suppress_close_persist = TRUE;
@@ -9776,7 +9796,7 @@ rotation_recover_resume_old (const gchar *path,
   if (rc != WYRELOG_E_OK) {
     if (store != NULL)
       wyl_policy_store_close (store);
-    return WYRELOG_E_POLICY;
+    return rotation_recover_reopen_error (rc);
   }
   store->suppress_close_persist = TRUE;
 
@@ -9814,6 +9834,13 @@ rotation_recover_resume_old (const gchar *path,
   if (rc != WYRELOG_E_OK)
     return rc;
 
+  /* Liveness note (not a safety defect): a crash in the window between clearing
+   * the pending sidecar here and the re-invoked rotation writing its own intent
+   * below leaves the old root with an ABSENT intent. The next recover() then
+   * classifies that as NONE (a no-op), so the interrupted rotation is safely
+   * abandoned: the store stays consistent as a single clean old root, no secret
+   * is exposed, and the generation never double-advances. Completing the
+   * rotation must be re-initiated by the operator. */
   wyl_policy_store_open_options_t rotate_old = { 0 };
   wyl_policy_store_open_options_t rotate_new = { 0 };
   rc = factory->make_old_opts (factory->data, &rotate_old);
