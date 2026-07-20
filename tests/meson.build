@@ -382,10 +382,9 @@ if build_client and host_machine.system() != 'windows'
 
   test_wyctl_publication = executable('test-wyctl-publication',
     'test-wyctl-publication.c',
-    '../wyrelog/wyctl/wyctl-publication-private.c',
     include_directories : [include_directories('../wyrelog'),
       include_directories('../wyrelog/wyctl')],
-    dependencies : [wyrelog_dep, sodium_dep],
+    dependencies : [wyrelog_dep, sodium_dep, publication_private_dep],
   )
 
   test('wyctl-publication', test_wyctl_publication)
@@ -393,23 +392,20 @@ if build_client and host_machine.system() != 'windows'
   if host_machine.system() != 'windows'
     test_wyctl_publication_posix = executable('test-wyctl-publication-posix',
       'test-wyctl-publication-posix.c',
-      '../wyrelog/wyctl/wyctl-publication-private.c',
-      '../wyrelog/wyctl/wyctl-publication-posix-private.c',
       include_directories : [include_directories('../wyrelog'),
         include_directories('../wyrelog/wyctl')],
-      dependencies : [wyrelog_dep, sodium_dep],
+      dependencies : [wyrelog_dep, sodium_dep, publication_private_dep],
     )
 
     test('wyctl-publication-posix', test_wyctl_publication_posix)
   else
     test_wyctl_publication_windows = executable('test-wyctl-publication-windows',
       'test-wyctl-publication-windows.c',
-      '../wyrelog/wyctl/wyctl-publication-private.c',
-      '../wyrelog/wyctl/wyctl-publication-windows-private.c',
       c_args : ['-DWYL_TEST_WYCTL_PUBLICATION_WINDOWS'],
       include_directories : [include_directories('../wyrelog'),
         include_directories('../wyrelog/wyctl')],
-      dependencies : [wyrelog_dep, sodium_dep, advapi32_dep],
+      dependencies : [wyrelog_dep, sodium_dep, advapi32_dep,
+        publication_private_dep],
     )
 
     test('wyctl-publication-windows', test_wyctl_publication_windows)
