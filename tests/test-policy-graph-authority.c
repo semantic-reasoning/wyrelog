@@ -179,6 +179,41 @@ test_graph_identity_and_state_constraints (void)
   sqlite3 *db = wyl_policy_store_get_db (store);
   insert_graph (db, "tenant-a", "graph-a", FALSE);
   insert_graph (db, "tenant-b", "graph-b", FALSE);
+  insert_graph (db, "tenant-sealed-bypass", "graph-sealed-bypass", TRUE);
+
+  exec_rejected (db,
+      "INSERT INTO fact_graphs "
+      "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+      "owner_scope,sealed,lifecycle_state,store_uuid,format_version,"
+      "path_encoding_version,lifecycle_generation,created_at,updated_at) "
+      "VALUES ('tenant-a','graph-direct','file:///direct','/direct',1,"
+      "'tenant-a',0,'active','01890f47-3c4b-7cc2-b8c4-dc0c0c073990',"
+      "1,1,1,1,1);");
+  const gchar *legacy_bypasses[] = {
+    "lifecycle_state='active',last_error_class='none',sealed=0",
+    "lifecycle_state='sealed',last_error_class='none',sealed=1",
+    "lifecycle_state='degraded',last_error_class='replay',sealed=0",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (legacy_bypasses); i++) {
+    g_autofree gchar *sql = g_strdup_printf ("UPDATE fact_graphs SET "
+        "store_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c07398%" G_GSIZE_FORMAT
+        "',format_version=1,path_encoding_version=1,%s,"
+        "lifecycle_generation=1,reconciliation_generation=1 "
+        "WHERE tenant_id='tenant-b' AND graph_id='graph-b';", i,
+        legacy_bypasses[i]);
+    exec_rejected (db, sql);
+  }
+  exec_rejected (db,
+      "UPDATE fact_graphs SET sealed=0 "
+      "WHERE tenant_id='tenant-sealed-bypass' "
+      "AND graph_id='graph-sealed-bypass';");
+  exec_rejected (db,
+      "UPDATE fact_graphs SET sealed=0,"
+      "store_uuid='01890f47-3c4b-7cc2-b8c4-dc0c0c073989',"
+      "format_version=1,path_encoding_version=1,"
+      "lifecycle_state='provisioning',lifecycle_generation=1 "
+      "WHERE tenant_id='tenant-sealed-bypass' "
+      "AND graph_id='graph-sealed-bypass';");
 
   exec_rejected (db,
       "UPDATE fact_graphs SET store_uuid="
@@ -225,6 +260,17 @@ test_graph_identity_and_state_constraints (void)
       "reconciliation_generation=1 WHERE tenant_id='tenant-a' "
       "AND graph_id='graph-a';");
   exec_rejected (db,
+      "UPDATE fact_graphs SET reconciliation_generation=2 "
+      "WHERE tenant_id='tenant-a' AND graph_id='graph-a';");
+  exec_ok (db,
+      "UPDATE fact_graphs SET lifecycle_state='degraded',"
+      "last_error_class='replay',lifecycle_generation=5 "
+      "WHERE tenant_id='tenant-a' AND graph_id='graph-a';");
+  exec_rejected (db,
+      "UPDATE fact_graphs SET last_error_class='recovery',"
+      "reconciliation_generation=2 WHERE tenant_id='tenant-a' "
+      "AND graph_id='graph-a';");
+  exec_rejected (db,
       "UPDATE fact_graphs SET lifecycle_generation=9223372036854775807 "
       "WHERE tenant_id='tenant-a' AND graph_id='graph-a';");
 }
@@ -239,6 +285,10 @@ test_tenant_state_constraints (void)
   exec_ok (db,
       "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
       "VALUES ('tenant-a',0,1,1);");
+  exec_rejected (db,
+      "INSERT INTO tenants (tenant_id,sealed,lifecycle_state,"
+      "lifecycle_generation,reconciliation_generation,created_at,updated_at) "
+      "VALUES ('tenant-direct',0,'active',1,1,1,1);");
   exec_rejected (db,
       "UPDATE tenants SET lifecycle_state='active',"
       "lifecycle_generation=1 WHERE tenant_id='tenant-a';");
@@ -255,6 +305,9 @@ test_tenant_state_constraints (void)
   exec_ok (db,
       "UPDATE tenants SET lifecycle_state='sealed',sealed=1,"
       "lifecycle_generation=3 WHERE tenant_id='tenant-a';");
+  exec_rejected (db,
+      "UPDATE tenants SET reconciliation_generation=2 "
+      "WHERE tenant_id='tenant-a';");
 }
 
 static void
@@ -534,6 +587,7 @@ test_reservation_and_cross_connection_cas (void)
   g_assert_cmpint (result, ==,
       WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
 
+  exec_ok (db, "DROP TRIGGER fact_graph_authority_insert_guard;");
   exec_ok (db,
       "INSERT INTO fact_graphs "
       "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
@@ -543,6 +597,7 @@ test_reservation_and_cross_connection_cas (void)
       "'tenant-cas',0,'active',"
       "'01890f47-3c4b-7cc2-b8c4-dc0c0c073102',1,1,"
       "9223372036854775807,1,1);");
+  g_assert_cmpint (wyl_policy_store_create_schema (first), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (first,
           "tenant-cas", "graph-max", WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
           WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
@@ -569,12 +624,205 @@ test_reservation_and_cross_connection_cas (void)
 }
 
 static void
+prepare_graph_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *store_uuid,
+    WylPolicyGraphLifecycleState state, guint64 *out_lifecycle_generation,
+    guint64 *out_reconciliation_generation)
+{
+  insert_graph (db, tenant_id, graph_id, FALSE);
+  *out_lifecycle_generation = 0;
+  *out_reconciliation_generation = 0;
+  if (state == WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED)
+    return;
+
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store, tenant_id,
+          graph_id, store_uuid, 1, 1, 0, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 1;
+  if (state == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING)
+    return;
+
+  WylPolicyGraphLifecycleState target =
+      state == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED ?
+      WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED : WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE;
+  WylPolicyGraphErrorClass error =
+      target == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED ?
+      WYL_POLICY_GRAPH_ERROR_REPLAY : WYL_POLICY_GRAPH_ERROR_NONE;
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+          target, error, 1, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 2;
+  if (state != WYL_POLICY_GRAPH_LIFECYCLE_SEALED)
+    return;
+
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          tenant_id, graph_id, WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE, 2,
+          0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 3;
+}
+
+static gboolean
+graph_matrix_edge_is_legal (WylPolicyGraphLifecycleState from,
+    WylPolicyGraphLifecycleState to)
+{
+  return (from == WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING
+      && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
+      || (from == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+      && (to == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED))
+      || (from == WYL_POLICY_GRAPH_LIFECYCLE_SEALED
+      && (to == WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED));
+}
+
+static void
+prepare_tenant_matrix_state (wyl_policy_store_t *store, sqlite3 *db,
+    const gchar *tenant_id, WylPolicyTenantLifecycleState state,
+    guint64 *out_lifecycle_generation, guint64 *out_reconciliation_generation)
+{
+  g_autofree gchar *insert = g_strdup_printf ("INSERT INTO tenants "
+      "(tenant_id,sealed,created_at,updated_at) VALUES ('%s',0,1,1);",
+      tenant_id);
+  exec_ok (db, insert);
+  *out_lifecycle_generation = 0;
+  *out_reconciliation_generation = 0;
+  if (state == WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED)
+    return;
+
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_tenant_authority (store,
+          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_ACTIVE, 0, 0, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 1;
+  *out_reconciliation_generation = 1;
+  if (state == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE)
+    return;
+
+  g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
+          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+          WYL_POLICY_TENANT_LIFECYCLE_SEALING, 1, 1, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 2;
+  if (state == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
+    return;
+
+  g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
+          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_SEALING,
+          WYL_POLICY_TENANT_LIFECYCLE_SEALED, 2, 1, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 3;
+  if (state == WYL_POLICY_TENANT_LIFECYCLE_SEALED)
+    return;
+
+  g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
+          tenant_id, WYL_POLICY_TENANT_LIFECYCLE_SEALED,
+          WYL_POLICY_TENANT_LIFECYCLE_UNSEALING, 3, 1, &result), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  *out_lifecycle_generation = 4;
+}
+
+static gboolean
+tenant_matrix_edge_is_legal (WylPolicyTenantLifecycleState from,
+    WylPolicyTenantLifecycleState to)
+{
+  return (from == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+      && to == WYL_POLICY_TENANT_LIFECYCLE_SEALING)
+      || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALING
+      && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED))
+      || (from == WYL_POLICY_TENANT_LIFECYCLE_SEALED
+      && to == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING)
+      || (from == WYL_POLICY_TENANT_LIFECYCLE_UNSEALING
+      && (to == WYL_POLICY_TENANT_LIFECYCLE_ACTIVE
+          || to == WYL_POLICY_TENANT_LIFECYCLE_SEALED));
+}
+
+static void
+test_complete_transition_matrices (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  const WylPolicyGraphLifecycleState graph_states[] = {
+    WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED,
+    WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+    WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+    WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
+    WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+  };
+  guint sequence = 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_states); i++) {
+    for (gsize j = 0; j < G_N_ELEMENTS (graph_states); j++, sequence++) {
+      g_autofree gchar *tenant = g_strdup_printf ("tenant-gmatrix-%u",
+          sequence);
+      g_autofree gchar *graph = g_strdup_printf ("graph-gmatrix-%u",
+          sequence);
+      g_autofree gchar *uuid =
+          g_strdup_printf ("01890f47-3c4b-7cc2-b8c4-dc0c0c%06u", sequence);
+      guint64 lifecycle_generation, reconciliation_generation;
+      prepare_graph_matrix_state (store, db, tenant, graph, uuid,
+          graph_states[i], &lifecycle_generation, &reconciliation_generation);
+      WylPolicyGraphErrorClass error =
+          graph_states[j] == WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED ?
+          WYL_POLICY_GRAPH_ERROR_REPLAY : WYL_POLICY_GRAPH_ERROR_NONE;
+      WylPolicyAuthorityMutationResult result;
+      g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+              tenant, graph, graph_states[i], graph_states[j], error,
+              lifecycle_generation, reconciliation_generation, &result), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpint (result, ==,
+          graph_matrix_edge_is_legal (graph_states[i], graph_states[j]) ?
+          WYL_POLICY_AUTHORITY_MUTATION_APPLIED :
+          WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
+    }
+  }
+
+  const WylPolicyTenantLifecycleState tenant_states[] = {
+    WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED,
+    WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+    WYL_POLICY_TENANT_LIFECYCLE_SEALING,
+    WYL_POLICY_TENANT_LIFECYCLE_SEALED,
+    WYL_POLICY_TENANT_LIFECYCLE_UNSEALING,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (tenant_states); i++) {
+    for (gsize j = 0; j < G_N_ELEMENTS (tenant_states); j++, sequence++) {
+      g_autofree gchar *tenant = g_strdup_printf ("tenant-tmatrix-%u",
+          sequence);
+      guint64 lifecycle_generation, reconciliation_generation;
+      prepare_tenant_matrix_state (store, db, tenant, tenant_states[i],
+          &lifecycle_generation, &reconciliation_generation);
+      WylPolicyAuthorityMutationResult result;
+      g_assert_cmpint (wyl_policy_store_transition_tenant_authority (store,
+              tenant, tenant_states[i], tenant_states[j],
+              lifecycle_generation, reconciliation_generation, &result), ==,
+          WYRELOG_E_OK);
+      g_assert_cmpint (result, ==,
+          tenant_matrix_edge_is_legal (tenant_states[i], tenant_states[j]) ?
+          WYL_POLICY_AUTHORITY_MUTATION_APPLIED :
+          WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
+    }
+  }
+}
+
+static void
 test_complete_transition_tables_and_overflow (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
   g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "DROP TRIGGER tenant_authority_insert_guard;"
+      "DROP TRIGGER fact_graph_authority_insert_guard;");
   exec_ok (db,
       "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at) "
       "VALUES('tenant-transitions',0,1,1);"
@@ -606,6 +854,7 @@ test_complete_transition_tables_and_overflow (void)
       "'tenant-transitions',0,'active',"
       "'01890f47-3c4b-7cc2-b8c4-dc0c0c073205',1,1,"
       "9223372036854775807,0,'none',1,1);");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
 
   WylPolicyAuthorityMutationResult result;
   g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
@@ -718,6 +967,67 @@ test_nested_transaction_uses_savepoint (void)
 }
 
 static void
+test_mutation_faults_roll_back (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-fault-a", "graph-fault-a", FALSE);
+  insert_graph (db, "tenant-fault-b", "graph-fault-b", FALSE);
+  insert_graph (db, "tenant-fault-nested", "graph-fault-nested", FALSE);
+
+  const WylPolicyGraphAuthorityMutationFailStage stages[] = {
+    WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE,
+    WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH,
+  };
+  const gchar *tenants[] = { "tenant-fault-a", "tenant-fault-b" };
+  const gchar *graphs[] = { "graph-fault-a", "graph-fault-b" };
+  const gchar *uuids[] = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073301",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073302",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (stages); i++) {
+    wyl_policy_store_graph_authority_mutation_fail_once (store, stages[i]);
+    WylPolicyAuthorityMutationResult result;
+    g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+            tenants[i], graphs[i], uuids[i], 1, 1, 0, 0, &result), ==,
+        WYRELOG_E_IO);
+    g_assert_true (sqlite3_get_autocommit (db));
+    g_assert_cmpint (scalar_int64 (db,
+            "SELECT count(*) FROM fact_graphs WHERE "
+            "lifecycle_state='legacy_unclassified' "
+            "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 3);
+  }
+
+  exec_ok (db,
+      "BEGIN;"
+      "INSERT INTO tenants (tenant_id,sealed,created_at,updated_at) "
+      "VALUES ('tenant-outer-marker',0,1,1);");
+  wyl_policy_store_graph_authority_mutation_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+          "tenant-fault-nested", "graph-fault-nested",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c073303", 1, 1, 0, 0, &result), ==,
+      WYRELOG_E_IO);
+  g_assert_false (sqlite3_get_autocommit (db));
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM tenants "
+          "WHERE tenant_id='tenant-outer-marker';"), ==, 1);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM fact_graphs "
+          "WHERE tenant_id='tenant-fault-nested' "
+          "AND graph_id='graph-fault-nested' "
+          "AND lifecycle_state='legacy_unclassified' "
+          "AND lifecycle_generation=0 AND store_uuid IS NULL;"), ==, 1);
+  exec_ok (db, "COMMIT;");
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM tenants "
+          "WHERE tenant_id='tenant-outer-marker';"), ==, 1);
+}
+
+static void
 test_fresh_migration_failures_reopen_and_retry (void)
 {
   for (WylPolicyGraphAuthorityMigrationFailStage stage =
@@ -824,6 +1134,27 @@ test_preexisting_column_without_constraint_fails_closed (void)
 }
 
 static void
+test_constraint_comment_spoof_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  create_pre_537_schema (db);
+  exec_ok (db,
+      "ALTER TABLE tenants ADD COLUMN lifecycle_state TEXT NOT NULL "
+      "DEFAULT 'legacy_unclassified' /* CHECK(lifecycle_state IN "
+      "('legacy_unclassified','active','sealing','sealed','unsealing')) */;");
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT instr(sql,'CHECK(lifecycle_state IN') > 0 "
+          "FROM sqlite_master WHERE type='table' AND name='tenants';"), ==, 1);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM pragma_table_info('tenants') WHERE "
+          "name='lifecycle_generation';"), ==, 0);
+}
+
+static void
 test_preexisting_invalid_row_fails_closed (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -882,10 +1213,14 @@ main (int argc, char **argv)
       test_typed_authority_reads_and_lists);
   g_test_add_func ("/policy/graph-authority/reservation-cross-connection-cas",
       test_reservation_and_cross_connection_cas);
+  g_test_add_func ("/policy/graph-authority/complete-transition-matrices",
+      test_complete_transition_matrices);
   g_test_add_func ("/policy/graph-authority/complete-transition-tables",
       test_complete_transition_tables_and_overflow);
   g_test_add_func ("/policy/graph-authority/nested-transaction-savepoint",
       test_nested_transaction_uses_savepoint);
+  g_test_add_func ("/policy/graph-authority/mutation-fault-rollback",
+      test_mutation_faults_roll_back);
   g_test_add_func ("/policy/graph-authority/fresh-fault-retry",
       test_fresh_migration_failures_reopen_and_retry);
   g_test_add_func ("/policy/graph-authority/legacy-fault-retry",
@@ -894,6 +1229,8 @@ main (int argc, char **argv)
       test_malformed_preexisting_object_fails_closed);
   g_test_add_func ("/policy/graph-authority/missing-column-constraint",
       test_preexisting_column_without_constraint_fails_closed);
+  g_test_add_func ("/policy/graph-authority/constraint-comment-spoof",
+      test_constraint_comment_spoof_fails_closed);
   g_test_add_func ("/policy/graph-authority/preexisting-invalid-row",
       test_preexisting_invalid_row_fails_closed);
   g_test_add_func ("/policy/graph-authority/malformed-trigger",

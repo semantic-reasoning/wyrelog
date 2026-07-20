@@ -433,9 +433,9 @@ BEFORE INSERT ON tenants BEGIN
         NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807)
     THEN RAISE(ABORT, 'invalid tenant generation domain') END;
     SELECT CASE WHEN NOT (
-        NEW.lifecycle_state = 'legacy_unclassified' OR
-        (NEW.lifecycle_state IN ('active', 'sealing') AND NEW.sealed = 0) OR
-        (NEW.lifecycle_state IN ('sealed', 'unsealing') AND NEW.sealed = 1))
+        NEW.lifecycle_state = 'legacy_unclassified' AND
+        NEW.lifecycle_generation = 0 AND
+        NEW.reconciliation_generation = 0)
     THEN RAISE(ABORT, 'invalid tenant authority') END;
 END;
 
@@ -479,7 +479,6 @@ BEFORE UPDATE ON tenants BEGIN
     THEN RAISE(ABORT, 'tenant promotion requires reconciliation') END;
     SELECT CASE WHEN NOT (OLD.lifecycle_state = 'legacy_unclassified' AND
         NEW.lifecycle_state IN ('active', 'sealed')) AND
-        NEW.lifecycle_state != OLD.lifecycle_state AND
         NEW.reconciliation_generation != OLD.reconciliation_generation
     THEN RAISE(ABORT, 'unexpected tenant reconciliation generation') END;
 END;
@@ -501,10 +500,9 @@ BEFORE INSERT ON fact_graphs BEGIN
     SELECT CASE WHEN NOT (
         (NEW.store_uuid IS NULL AND NEW.format_version IS NULL AND
             NEW.path_encoding_version IS NULL AND
-            NEW.lifecycle_state = 'legacy_unclassified') OR
-        (NEW.store_uuid IS NOT NULL AND NEW.format_version IS NOT NULL AND
-            NEW.path_encoding_version IS NOT NULL AND
-            NEW.lifecycle_state != 'legacy_unclassified'))
+            NEW.lifecycle_state = 'legacy_unclassified' AND
+            NEW.lifecycle_generation = 0 AND
+            NEW.reconciliation_generation = 0))
     THEN RAISE(ABORT, 'incomplete graph store identity') END;
     SELECT CASE WHEN NEW.store_uuid IS NOT NULL AND NOT (
         length(NEW.store_uuid) = 36 AND substr(NEW.store_uuid, 9, 1) = '-' AND
@@ -553,6 +551,9 @@ BEFORE UPDATE ON fact_graphs BEGIN
     SELECT CASE WHEN OLD.path_encoding_version IS NOT NULL AND
         OLD.path_encoding_version IS NOT NEW.path_encoding_version
     THEN RAISE(ABORT, 'immutable graph path encoding version') END;
+    SELECT CASE WHEN OLD.lifecycle_state = 'legacy_unclassified' AND
+        OLD.sealed = 1 AND NEW.sealed = 0
+    THEN RAISE(ABORT, 'sealed legacy graph cannot be unsealed') END;
     SELECT CASE WHEN NOT (
         (NEW.store_uuid IS NULL AND NEW.format_version IS NULL AND
             NEW.path_encoding_version IS NULL AND
@@ -576,8 +577,7 @@ BEFORE UPDATE ON fact_graphs BEGIN
         OLD.lifecycle_generation = 9223372036854775807 OR
         NEW.lifecycle_generation != OLD.lifecycle_generation + 1 OR NOT (
         (OLD.lifecycle_state = 'legacy_unclassified' AND
-            NEW.lifecycle_state IN ('provisioning', 'active', 'sealed',
-                'degraded')) OR
+            NEW.lifecycle_state = 'provisioning' AND OLD.sealed = 0) OR
         (OLD.lifecycle_state = 'provisioning' AND
             NEW.lifecycle_state IN ('active', 'degraded')) OR
         (OLD.lifecycle_state = 'active' AND
@@ -591,23 +591,17 @@ BEFORE UPDATE ON fact_graphs BEGIN
         OLD.reconciliation_generation OR NEW.reconciliation_generation >
         OLD.reconciliation_generation + 1
     THEN RAISE(ABORT, 'invalid graph reconciliation generation') END;
-    SELECT CASE WHEN ((OLD.lifecycle_state = 'degraded' AND
-        NEW.lifecycle_state = 'active') OR
-        (OLD.lifecycle_state = 'legacy_unclassified' AND
-            NEW.lifecycle_state IN ('active', 'sealed', 'degraded'))) AND
+    SELECT CASE WHEN OLD.lifecycle_state = 'degraded' AND
+        NEW.lifecycle_state = 'active' AND
         NEW.reconciliation_generation != OLD.reconciliation_generation + 1
     THEN RAISE(ABORT, 'graph transition requires reconciliation') END;
-    SELECT CASE WHEN NEW.lifecycle_state != OLD.lifecycle_state AND NOT (
-        (OLD.lifecycle_state = 'degraded' AND
-            NEW.lifecycle_state = 'active') OR
-        (OLD.lifecycle_state = 'legacy_unclassified' AND
-            NEW.lifecycle_state IN ('active', 'sealed', 'degraded'))) AND
+    SELECT CASE WHEN NOT (OLD.lifecycle_state = 'degraded' AND
+        NEW.lifecycle_state = 'active') AND
         NEW.reconciliation_generation != OLD.reconciliation_generation
     THEN RAISE(ABORT, 'unexpected graph reconciliation generation') END;
     SELECT CASE WHEN NEW.lifecycle_state = OLD.lifecycle_state AND
-        NEW.last_error_class IS NOT OLD.last_error_class AND
-        NEW.reconciliation_generation != OLD.reconciliation_generation + 1
-    THEN RAISE(ABORT, 'graph error change requires reconciliation') END;
+        NEW.last_error_class IS NOT OLD.last_error_class
+    THEN RAISE(ABORT, 'graph error class requires transition') END;
     SELECT CASE WHEN NOT (
         (NEW.lifecycle_state = 'legacy_unclassified' AND
             NEW.last_error_class = 'none') OR

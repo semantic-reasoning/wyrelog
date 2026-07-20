@@ -34,6 +34,14 @@ typedef enum
 
 typedef enum
 {
+  WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_NONE,
+  WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE,
+  WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH,
+  WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_COUNT,
+} WylPolicyGraphAuthorityMutationFailStage;
+
+typedef enum
+{
   WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED,
   WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
   WYL_POLICY_TENANT_LIFECYCLE_SEALING,
@@ -1053,6 +1061,9 @@ wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
 void wyl_policy_store_graph_authority_migration_fail_once
     (wyl_policy_store_t * store,
     WylPolicyGraphAuthorityMigrationFailStage stage);
+void wyl_policy_store_graph_authority_mutation_fail_once
+    (wyl_policy_store_t * store,
+    WylPolicyGraphAuthorityMutationFailStage stage);
 wyrelog_error_t wyl_policy_store_validate_service_schema
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
