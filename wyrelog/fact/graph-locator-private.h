@@ -3,10 +3,6 @@
 
 #include <glib.h>
 
-#ifdef G_OS_WIN32
-#include <windows.h>
-#endif
-
 #include "wyrelog/error.h"
 
 G_BEGIN_DECLS;
@@ -31,7 +27,7 @@ typedef struct
 typedef struct
 {
 #ifdef G_OS_WIN32
-  HANDLE handle;
+  gpointer handle;
   WylFactGraphWinIdentity identity;
 #else
   gint fd;
@@ -46,9 +42,9 @@ typedef struct
 typedef struct
 {
 #ifdef G_OS_WIN32
-  HANDLE root_handle;
-  HANDLE tenant_handle;
-  HANDLE graph_handle;
+  gpointer root_handle;
+  gpointer tenant_handle;
+  gpointer graph_handle;
   WylFactGraphWinIdentity root_identity;
   WylFactGraphWinIdentity tenant_identity;
   WylFactGraphWinIdentity graph_identity;
@@ -87,11 +83,9 @@ typedef struct
 } WylFactGraphStage;
 
 #ifdef G_OS_WIN32
-#define WYL_FACT_GRAPH_RESOLVER_INIT { .handle = INVALID_HANDLE_VALUE }
+#define WYL_FACT_GRAPH_RESOLVER_INIT { .handle = NULL }
 #define WYL_FACT_GRAPH_DIRECTORY_INIT \
-  { .root_handle = INVALID_HANDLE_VALUE, \
-    .tenant_handle = INVALID_HANDLE_VALUE, \
-    .graph_handle = INVALID_HANDLE_VALUE }
+  { .root_handle = NULL, .tenant_handle = NULL, .graph_handle = NULL }
 #else
 #define WYL_FACT_GRAPH_RESOLVER_INIT { .fd = -1 }
 #define WYL_FACT_GRAPH_DIRECTORY_INIT \

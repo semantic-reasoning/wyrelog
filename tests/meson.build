@@ -655,7 +655,7 @@ if get_option('enable_fact_store').allowed()
       '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     ],
     include_directories : include_directories('../wyrelog'),
-    dependencies : [wyrelog_dep, duckdb_dep, sqlite_dep],
+    dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep, sqlite_dep],
   )
 
   test('fact-compound', test_fact_compound)
