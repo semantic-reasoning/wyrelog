@@ -1351,7 +1351,7 @@ test('check-service-session-private-boundary',
   # Full semantic preprocessing follows every configured TU and can vary
   # substantially with compiler/system-header performance on shared runners.
   is_parallel : false,
-  timeout : 900,
+  timeout : 1500,
 )
 
 check_service_session_private_boundary_self_test = find_program(
