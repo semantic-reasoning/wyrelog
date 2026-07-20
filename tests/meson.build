@@ -605,6 +605,12 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 test('fact-graph-locator', test_fact_graph_locator)
 
 if host_machine.system() == 'windows'
+  fact_graph_locator_windows_env = environment()
+  fact_graph_locator_windows_env.set(
+    'G_MESSAGES_DEBUG',
+    'wyrelog-fact-resolver',
+  )
+
   test_fact_graph_locator_windows = executable(
     'test-fact-graph-locator-windows',
     'test-fact-graph-locator-windows.c',
@@ -613,6 +619,7 @@ if host_machine.system() == 'windows'
   )
 
   test('fact-graph-locator-windows', test_fact_graph_locator_windows,
+    env : fact_graph_locator_windows_env,
     timeout : 90,
   )
 endif
