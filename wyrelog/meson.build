@@ -70,6 +70,10 @@ wyrelog_sources = files(
   'wyl-version.c',
 )
 
+if host_machine.system() == 'windows'
+  wyrelog_sources += files('fact/graph-locator-windows-private.c')
+endif
+
 wyrelog_deps = [
   glib_dep,
   gio_dep,
@@ -81,6 +85,7 @@ wyrelog_deps = [
 if host_machine.system() == 'windows'
   advapi32_dep = meson.get_compiler('c').find_library('Advapi32',
     required : true)
+  wyrelog_deps += advapi32_dep
 else
   advapi32_dep = disabler()
 endif
@@ -98,6 +103,9 @@ wyrelog_log_max = wyrelog_log_levels[get_option('wyrelog_log_max_level')]
 wyrelog_c_args = [
   '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
 ]
+if host_machine.system() == 'windows'
+  wyrelog_c_args += ['-D_WIN32_WINNT=0x0602']
+endif
 
 daemon_http_private_dep = disabler()
 

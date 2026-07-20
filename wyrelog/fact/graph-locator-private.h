@@ -3,6 +3,10 @@
 
 #include <glib.h>
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
+
 #include "wyrelog/error.h"
 
 G_BEGIN_DECLS;
@@ -16,30 +20,52 @@ typedef struct
   gchar *graph_component;
 } WylFactGraphLocator;
 
+#ifdef G_OS_WIN32
 typedef struct
 {
+  guint64 volume_serial;
+  guint8 file_id[16];
+} WylFactGraphWinIdentity;
+#endif
+
+typedef struct
+{
+#ifdef G_OS_WIN32
+  HANDLE handle;
+  WylFactGraphWinIdentity identity;
+#else
   gint fd;
-  gchar *path;
   guint64 device;
   guint64 inode;
+#endif
+  gchar *path;
     wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
   gpointer checkpoint_data;
 } WylFactGraphResolver;
 
 typedef struct
 {
+#ifdef G_OS_WIN32
+  HANDLE root_handle;
+  HANDLE tenant_handle;
+  HANDLE graph_handle;
+  WylFactGraphWinIdentity root_identity;
+  WylFactGraphWinIdentity tenant_identity;
+  WylFactGraphWinIdentity graph_identity;
+#else
   gint root_fd;
   gint tenant_fd;
   gint graph_fd;
-  gchar *root_path;
-  gchar *tenant_component;
-  gchar *graph_component;
   guint64 root_device;
   guint64 root_inode;
   guint64 tenant_device;
   guint64 tenant_inode;
   guint64 graph_device;
   guint64 graph_inode;
+#endif
+  gchar *root_path;
+  gchar *tenant_component;
+  gchar *graph_component;
     wyrelog_error_t (*checkpoint) (const gchar * point, gpointer user_data);
   gpointer checkpoint_data;
 } WylFactGraphDirectory;
@@ -49,15 +75,28 @@ typedef struct
   gint fd;
   gchar *stage_basename;
   gchar *final_basename;
+#ifdef G_OS_WIN32
+  WylFactGraphWinIdentity identity;
+  WylFactGraphWinIdentity graph_identity;
+#else
   guint64 device;
   guint64 inode;
   guint64 graph_device;
   guint64 graph_inode;
+#endif
 } WylFactGraphStage;
 
+#ifdef G_OS_WIN32
+#define WYL_FACT_GRAPH_RESOLVER_INIT { .handle = INVALID_HANDLE_VALUE }
+#define WYL_FACT_GRAPH_DIRECTORY_INIT \
+  { .root_handle = INVALID_HANDLE_VALUE, \
+    .tenant_handle = INVALID_HANDLE_VALUE, \
+    .graph_handle = INVALID_HANDLE_VALUE }
+#else
 #define WYL_FACT_GRAPH_RESOLVER_INIT { .fd = -1 }
 #define WYL_FACT_GRAPH_DIRECTORY_INIT \
   { .root_fd = -1, .tenant_fd = -1, .graph_fd = -1 }
+#endif
 #define WYL_FACT_GRAPH_STAGE_INIT { .fd = -1 }
 
 wyrelog_error_t wyl_fact_graph_component_encode (const gchar * value,
