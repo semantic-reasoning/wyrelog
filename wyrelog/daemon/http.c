@@ -2212,8 +2212,8 @@ service_token_exchange_core (WylDaemonHttpContext *ctx,
   }
 
   static const WylDaemonHttpStrictJsonField fields[] = {
-    {"credential_id", 4096},
-    {"credential_secret", 16384},
+    {"credential_id", 4096, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"credential_secret", 16384, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_dup_strict_json_object
@@ -4020,15 +4020,17 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   static const WylDaemonHttpStrictJsonField fields[] = {
-    {"version", 8},
-    {"tenant", 128},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN},
-    {"expires_at_us", 32},
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"tenant", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"expires_at_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   static const WylDaemonHttpStrictJsonField fields_without_expiry[] = {
-    {"version", 8},
-    {"tenant", 128},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN},
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"tenant", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_dup_strict_json_object
@@ -4263,13 +4265,15 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
   g_autofree gchar *credential_id = g_strndup (path + 1,
       (gsize) (tail - (path + 1)));
   static const WylDaemonHttpStrictJsonField fields[] = {
-    {"version", 8},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN},
-    {"expires_at_us", 32},
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"expires_at_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   static const WylDaemonHttpStrictJsonField fields_without_expiry[] = {
-    {"version", 8},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN},
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_request_body_dup_strict_json_object
@@ -4386,8 +4390,9 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   static const WylDaemonHttpStrictJsonField fields[] = {
-    {"version", 8},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN},
+    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"request_id", WYL_REQUEST_ID_STRING_LEN,
+        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   if (!wyl_daemon_http_request_body_dup_strict_json_object (msg, 1024, fields,
@@ -4504,8 +4509,8 @@ service_principal_create_handler (SoupServer *server, SoupServerMessage *msg,
   }
 
   static const WylDaemonHttpStrictJsonField fields[] = {
-    {"subject_id", 128},
-    {"display_name", 256},
+    {"subject_id", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"display_name", 256, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   if (!wyl_daemon_http_dup_strict_json_object (request_body->data,

@@ -2,6 +2,7 @@
 
 #include "daemon/http-guards-private.h"
 
+#include <errno.h>
 #include <string.h>
 
 static const gchar *
@@ -116,6 +117,31 @@ parse_json_string (const gchar **cursor, gchar **out, gsize *out_len)
   return TRUE;
 }
 
+/* Scans a bare JSON non-negative integer token and stores its canonical
+ * decimal representation in *out. The scan stops at the first non-digit;
+ * the caller's trailing-delimiter check rejects fractional/exponent forms
+ * (e.g. 1.0 / 1e5) and other junk. Rejects empty, leading sign, non-digit
+ * lead, and out-of-range (> G_MAXINT64) values. */
+static gboolean
+parse_json_int64_token (const gchar **cursor, gchar **out)
+{
+  const gchar *p = skip_ws (*cursor);
+  if (!g_ascii_isdigit ((guchar) * p))
+    return FALSE;
+
+  errno = 0;
+  gchar *end = NULL;
+  gint64 parsed = g_ascii_strtoll (p, &end, 10);
+  if (end == p || errno == ERANGE || parsed < 0)
+    return FALSE;
+
+  *out = g_strdup_printf ("%" G_GINT64_FORMAT, parsed);
+  if (*out == NULL)
+    return FALSE;
+  *cursor = end;
+  return TRUE;
+}
+
 static void
 clear_values (gchar **values, gsize n_values)
 {
@@ -182,13 +208,11 @@ parse_json_object_values (const gchar *json, gsize json_len,
 
     if (!parse_json_string (&p, &key, &key_len))
       goto fail;
-    p = skip_ws (p);
-    if (*p++ != ':')
-      goto fail;
-    if (!parse_json_string (&p, &value, &value_len))
-      goto fail;
     if (memchr (key, '\0', key_len) != NULL
         || !g_utf8_validate (key, key_len, NULL))
+      goto fail;
+    p = skip_ws (p);
+    if (*p++ != ':')
       goto fail;
 
     gsize slot = n_fields;
@@ -200,9 +224,17 @@ parse_json_object_values (const gchar *json, gsize json_len,
     }
     if (slot == n_fields || out_values[slot] != NULL)
       goto fail;
-    if (!value_is_valid_utf8_and_bounded (value, value_len,
-            fields[slot].max_len))
-      goto fail;
+
+    if (fields[slot].kind == WYL_DAEMON_HTTP_STRICT_JSON_INT64) {
+      if (!parse_json_int64_token (&p, &value))
+        goto fail;
+    } else {
+      if (!parse_json_string (&p, &value, &value_len))
+        goto fail;
+      if (!value_is_valid_utf8_and_bounded (value, value_len,
+              fields[slot].max_len))
+        goto fail;
+    }
     out_values[slot] = g_steal_pointer (&value);
     p = skip_ws (p);
     if (parsed + 1 < n_fields) {

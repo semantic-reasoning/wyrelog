@@ -72,8 +72,8 @@ static void
 test_strict_json_object_parser (void)
 {
   const WylDaemonHttpStrictJsonField fields[] = {
-    {"subject", 64},
-    {"tenant", 64},
+    {"subject", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"tenant", 64, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   gchar *values[G_N_ELEMENTS (fields)] = { NULL, NULL };
 
@@ -138,6 +138,53 @@ test_strict_json_object_parser (void)
           sizeof embedded_nul - 1, fields, G_N_ELEMENTS (fields), values));
 }
 
+static void
+test_strict_json_typed_int (void)
+{
+  const WylDaemonHttpStrictJsonField fields[] = {
+    {"event", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"timestamp_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_INT64},
+  };
+  gchar *values[G_N_ELEMENTS (fields)] = { NULL, NULL };
+
+  /* A valid non-negative int64 that overflows guint parses and is stored
+   * as its canonical decimal string. */
+  const gchar *ok = "{\"event\":\"startup\",\"timestamp_us\":1750000000000000}";
+  g_assert_true (wyl_daemon_http_dup_strict_json_object (ok, strlen (ok),
+          fields, G_N_ELEMENTS (fields), values));
+  g_assert_cmpstr (values[0], ==, "startup");
+  g_assert_cmpstr (values[1], ==, "1750000000000000");
+  wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (values));
+
+  /* Zero is a valid non-negative value. */
+  const gchar *zero = "{\"event\":\"e\",\"timestamp_us\":0}";
+  g_assert_true (wyl_daemon_http_dup_strict_json_object (zero, strlen (zero),
+          fields, G_N_ELEMENTS (fields), values));
+  g_assert_cmpstr (values[1], ==, "0");
+  wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (values));
+
+  static const gchar *reject[] = {
+    "{\"event\":\"e\",\"timestamp_us\":-1}",    /* negative */
+    "{\"event\":\"e\",\"timestamp_us\":+1}",    /* leading plus */
+    "{\"event\":\"e\",\"timestamp_us\":\"5\"}", /* quoted int */
+    "{\"event\":\"e\",\"timestamp_us\":abc}",   /* non-numeric */
+    "{\"event\":\"e\",\"timestamp_us\":1.0}",   /* fractional */
+    "{\"event\":\"e\",\"timestamp_us\":1e5}",   /* exponent */
+    "{\"event\":\"e\",\"timestamp_us\":}",      /* empty value */
+    "{\"event\":\"e\",\"timestamp_us\":99999999999999999999}",  /* overflow */
+    "{\"event\":\"e\"}",        /* missing field */
+    "{\"event\":\"e\",\"timestamp_us\":1,\"timestamp_us\":2}",  /* extra member */
+    "{\"timestamp_us\":1,\"timestamp_us\":2}",  /* duplicate int field */
+    "{\"event\":\"e\",\"timestamp_us\":12 34}", /* trailing junk */
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (reject); i++) {
+    g_assert_false (wyl_daemon_http_dup_strict_json_object (reject[i],
+            strlen (reject[i]), fields, G_N_ELEMENTS (fields), values));
+    g_assert_null (values[0]);
+    g_assert_null (values[1]);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -145,5 +192,7 @@ main (int argc, char **argv)
   g_test_add_func ("/daemon/http/loopback-predicate", test_loopback_predicate);
   g_test_add_func ("/daemon/http/strict-json-object",
       test_strict_json_object_parser);
+  g_test_add_func ("/daemon/http/strict-json-typed-int",
+      test_strict_json_typed_int);
   return g_test_run ();
 }
