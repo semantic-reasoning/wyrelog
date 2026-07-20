@@ -39,8 +39,17 @@ typedef NTSTATUS (NTAPI * WylNtCreateFile) (PHANDLE, ACCESS_MASK,
 typedef NTSTATUS (NTAPI * WylNtSetInformationFile) (HANDLE,
     PIO_STATUS_BLOCK, PVOID, ULONG, int);
 
+typedef NTSTATUS (NTAPI * WylNtQueryInformationFile) (HANDLE,
+    PIO_STATUS_BLOCK, PVOID, ULONG, int);
+
 #define WYL_NT_FILE_RENAME_INFO_CLASS 10
 #define WYL_NT_FILE_DISPOSITION_INFO_CLASS 13
+#define WYL_NT_FILE_IS_REMOTE_DEVICE_INFO_CLASS 51
+
+typedef struct
+{
+  BOOLEAN is_remote;
+} WylFileIsRemoteDeviceInfo;
 
 typedef struct
 {
@@ -107,6 +116,19 @@ nt_set_information_file (void)
     if (module != NULL)
       function = (WylNtSetInformationFile) GetProcAddress (module,
           "NtSetInformationFile");
+  }
+  return function;
+}
+
+static WylNtQueryInformationFile
+nt_query_information_file (void)
+{
+  static WylNtQueryInformationFile function;
+  if (function == NULL) {
+    HMODULE module = GetModuleHandleW (L"ntdll.dll");
+    if (module != NULL)
+      function = (WylNtQueryInformationFile) GetProcAddress (module,
+          "NtQueryInformationFile");
   }
   return function;
 }
@@ -558,22 +580,35 @@ open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
 static wyrelog_error_t
 reject_remote_volume (HANDLE root)
 {
-  FILE_REMOTE_PROTOCOL_INFO remote = { 0 };
-  G_STATIC_ASSERT (sizeof remote <= G_MAXUSHORT);
-  remote.StructureVersion = 2;
-  remote.StructureSize = (USHORT) sizeof remote;
-  if (GetFileInformationByHandleEx (root, FileRemoteProtocolInfo, &remote,
-          sizeof remote)) {
-    trace_windows_failure ("remote-detected", WYRELOG_E_POLICY,
-        remote.Protocol);
+  WylNtQueryInformationFile nt_query = nt_query_information_file ();
+  IO_STATUS_BLOCK iosb = { 0 };
+  WylFileIsRemoteDeviceInfo remote = { TRUE };
+  if (nt_query == NULL) {
+    trace_windows_failure ("remote-query-unavailable", WYRELOG_E_POLICY,
+        ERROR_PROC_NOT_FOUND);
     return WYRELOG_E_POLICY;
   }
-  DWORD error = GetLastError ();
-  if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED
-      || error == ERROR_INVALID_FUNCTION)
-    return WYRELOG_E_OK;
-  trace_windows_failure ("remote-query", WYRELOG_E_POLICY, error);
-  return WYRELOG_E_POLICY;
+  NTSTATUS status = nt_query (root, &iosb, &remote, sizeof remote,
+      WYL_NT_FILE_IS_REMOTE_DEVICE_INFO_CLASS);
+  if (status != 0 || iosb.Status != 0) {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=remote-query-status rc=%d ntstatus=0x%08lx iosb=0x%08lx",
+        (int) WYRELOG_E_POLICY, (unsigned long) (ULONG) status,
+        (unsigned long) (ULONG) iosb.Status);
+    return WYRELOG_E_POLICY;
+  }
+  if (iosb.Information < sizeof remote.is_remote) {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=remote-query-size rc=%d information=%lu expected=%lu",
+        (int) WYRELOG_E_POLICY, (unsigned long) iosb.Information,
+        (unsigned long) sizeof remote.is_remote);
+    return WYRELOG_E_POLICY;
+  }
+  if (remote.is_remote) {
+    trace_windows_failure ("remote-detected", WYRELOG_E_POLICY, 1);
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
