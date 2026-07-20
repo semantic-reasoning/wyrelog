@@ -315,7 +315,15 @@ if build_client
       dependencies : test_daemon_http_facts_deps,
     )
 
+    test_daemon_http_facts_env = environment()
+    if host_machine.system() == 'windows'
+      test_daemon_http_facts_env.set(
+        'G_MESSAGES_DEBUG',
+        'wyrelog-fact-http-store wyrelog-fact-resolver',
+      )
+    endif
     test('daemon-http-facts', test_daemon_http_facts,
+      env : test_daemon_http_facts_env,
       timeout : 60,
     )
   endif
