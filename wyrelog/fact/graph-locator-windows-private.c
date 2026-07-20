@@ -11,6 +11,17 @@
 #include <stddef.h>
 #include <string.h>
 
+#define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
+
+static void
+trace_windows_failure (const gchar *stage, wyrelog_error_t rc,
+    DWORD native_code)
+{
+  g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+      "stage=%s rc=%d native=0x%08lx", stage, (int) rc,
+      (unsigned long) native_code);
+}
+
 static gchar *
 try_strdup (const gchar *value)
 {
@@ -152,13 +163,21 @@ query_directory_identity (HANDLE handle, WylFactGraphWinIdentity *out_identity)
   if (!handle_is_valid (handle) || out_identity == NULL)
     return WYRELOG_E_INVALID;
   if (!GetFileInformationByHandleEx (handle, FileBasicInfo, &basic,
-          sizeof basic)
-      || !GetFileInformationByHandleEx (handle, FileIdInfo, &native_identity,
-          sizeof native_identity))
+          sizeof basic)) {
+    trace_windows_failure ("identity-basic", WYRELOG_E_IO, GetLastError ());
     return WYRELOG_E_IO;
+  }
+  if (!GetFileInformationByHandleEx (handle, FileIdInfo, &native_identity,
+          sizeof native_identity)) {
+    trace_windows_failure ("identity-file-id", WYRELOG_E_IO, GetLastError ());
+    return WYRELOG_E_IO;
+  }
   if ((basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0
-      || (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+      || (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    trace_windows_failure ("identity-attributes", WYRELOG_E_POLICY,
+        basic.FileAttributes);
     return WYRELOG_E_POLICY;
+  }
   out_identity->volume_serial = native_identity.VolumeSerialNumber;
   memcpy (out_identity->file_id, &native_identity.FileId,
       sizeof out_identity->file_id);
@@ -321,19 +340,46 @@ validate_protected_owner_acl (HANDLE handle, BYTE ace_flags)
   DWORD error = GetSecurityInfo (handle, SE_FILE_OBJECT,
       OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
       &dacl, NULL, &descriptor);
-  if (error != ERROR_SUCCESS)
+  if (error != ERROR_SUCCESS) {
+    trace_windows_failure ("acl-query", WYRELOG_E_IO, error);
     return WYRELOG_E_IO;
-  gboolean valid = owner != NULL && EqualSid (owner, token_user)
-      && GetSecurityDescriptorControl (descriptor, &control, &revision)
-      && (control & SE_DACL_PROTECTED) != 0
-      && GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted)
-      && present && dacl != NULL && !defaulted
-      && GetAclInformation (dacl, &size, sizeof size, AclSizeInformation)
-      && size.AceCount == 1 && GetAce (dacl, 0, (LPVOID *) & ace)
-      && ace != NULL && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE
-      && ace->Header.AceFlags == ace_flags
-      && ace->Mask == FILE_ALL_ACCESS
-      && EqualSid ((PSID) & ace->SidStart, token_user);
+  }
+  gboolean owner_match = owner != NULL && IsValidSid (owner)
+      && EqualSid (owner, token_user);
+  gboolean control_ok = GetSecurityDescriptorControl (descriptor, &control,
+      &revision);
+  gboolean dacl_ok = GetSecurityDescriptorDacl (descriptor, &present, &dacl,
+      &defaulted);
+  gboolean acl_info_ok = dacl_ok && present && dacl != NULL
+      && GetAclInformation (dacl, &size, sizeof size, AclSizeInformation);
+  gboolean ace_ok = acl_info_ok && size.AceCount == 1
+      && GetAce (dacl, 0, (LPVOID *) & ace) && ace != NULL;
+  gboolean allowed_ace = ace_ok
+      && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE;
+  PSID ace_sid = allowed_ace ? (PSID) & ace->SidStart : NULL;
+  gboolean ace_sid_valid = ace_sid != NULL && IsValidSid (ace_sid);
+  gboolean ace_sid_match = ace_sid_valid && EqualSid (ace_sid, token_user);
+  gboolean valid = owner_match && control_ok
+      && (control & SE_DACL_PROTECTED) != 0 && dacl_ok && present
+      && dacl != NULL && !defaulted && acl_info_ok && size.AceCount == 1
+      && ace_ok && allowed_ace && ace->Header.AceFlags == ace_flags
+      && ace->Mask == FILE_ALL_ACCESS && ace_sid_match;
+  if (!valid)
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=acl-validate rc=%d owner-match=%u control-ok=%u "
+        "control=0x%04x dacl-ok=%u present=%u defaulted=%u acl-info-ok=%u "
+        "ace-count=%lu ace-ok=%u ace-type=%u ace-flags=0x%02x "
+        "ace-mask=0x%08lx ace-sid-valid=%u ace-sid-match=%u",
+        (int) WYRELOG_E_POLICY, (unsigned int) owner_match,
+        (unsigned int) control_ok, (unsigned int) control,
+        (unsigned int) dacl_ok,
+        (unsigned int) present, (unsigned int) defaulted,
+        (unsigned int) acl_info_ok, (unsigned long) size.AceCount,
+        (unsigned int) ace_ok,
+        ace != NULL ? (unsigned int) ace->Header.AceType : 0,
+        ace != NULL ? (unsigned int) ace->Header.AceFlags : 0,
+        allowed_ace ? (unsigned long) ace->Mask : 0,
+        (unsigned int) ace_sid_valid, (unsigned int) ace_sid_match);
   LocalFree (descriptor);
   return valid ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
@@ -380,8 +426,12 @@ validate_parent_entry (HANDLE parent, const WCHAR *wanted,
 {
   BYTE buffer[64 * 1024];
   gboolean restart = TRUE;
-  guint exact_count = 0;
-  guint alias_count = 0;
+  guint alias_equivalent_count = 0;
+  guint exact_spelling_count = 0;
+  guint exact_identity_count = 0;
+  guint alias_spelling_count = 0;
+  guint identity_mismatch_count = 0;
+  guint rejected_count = 0;
   for (;;) {
     FILE_INFO_BY_HANDLE_CLASS info_class = (FILE_INFO_BY_HANDLE_CLASS)
         (restart ? WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO
@@ -391,6 +441,8 @@ validate_parent_entry (HANDLE parent, const WCHAR *wanted,
       DWORD error = GetLastError ();
       if (error == ERROR_NO_MORE_FILES)
         break;
+      trace_windows_failure ("parent-enumerate",
+          error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO, error);
       return error == ERROR_MORE_DATA ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     }
     restart = FALSE;
@@ -402,12 +454,19 @@ validate_parent_entry (HANDLE parent, const WCHAR *wanted,
         gboolean exact = entry_units == wanted_units
             && memcmp (entry->file_name, wanted,
             wanted_units * sizeof (WCHAR)) == 0;
-        if (exact
-            && memcmp (&entry->file_id, identity->file_id,
-                sizeof entry->file_id) == 0)
-          exact_count++;
+        gboolean identity_match = memcmp (&entry->file_id, identity->file_id,
+            sizeof entry->file_id) == 0;
+        alias_equivalent_count++;
+        if (exact)
+          exact_spelling_count++;
         else
-          alias_count++;
+          alias_spelling_count++;
+        if (exact && identity_match)
+          exact_identity_count++;
+        else
+          rejected_count++;
+        if (!identity_match)
+          identity_mismatch_count++;
       }
       if (entry->next_entry_offset == 0)
         break;
@@ -415,7 +474,16 @@ validate_parent_entry (HANDLE parent, const WCHAR *wanted,
           + entry->next_entry_offset);
     }
   }
-  return exact_count == 1 && alias_count == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (exact_identity_count != 1 || rejected_count != 0) {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=parent-entry rc=%d alias-equivalent=%u exact-spelling=%u "
+        "exact-identity=%u alias-spelling=%u identity-mismatch=%u "
+        "rejected=%u", (int) WYRELOG_E_POLICY, alias_equivalent_count,
+        exact_spelling_count, exact_identity_count, alias_spelling_count,
+        identity_mismatch_count, rejected_count);
+    return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -432,8 +500,13 @@ open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
   wyrelog_error_t rc;
   if (out_handle == NULL || out_identity == NULL || nt_create == NULL
       || !wide_component_is_safe (component, units)
-      || units > G_MAXUSHORT / sizeof (WCHAR))
+      || units > G_MAXUSHORT / sizeof (WCHAR)) {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=relative-precondition rc=%d units=%lu nt-create=%u",
+        (int) WYRELOG_E_POLICY, (unsigned long) units,
+        (unsigned int) (nt_create != NULL));
     return WYRELOG_E_POLICY;
+  }
   *out_handle = INVALID_HANDLE_VALUE;
   memset (out_identity, 0, sizeof *out_identity);
   memset (&security, 0, sizeof security);
@@ -462,8 +535,13 @@ open_relative_directory (HANDLE parent, const WCHAR *component, gsize units,
       FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
       | FILE_OPEN_FOR_BACKUP_INTENT | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
   owner_only_security_clear (&security);
-  if (status < 0 || !handle_is_valid (handle))
+  if (status < 0 || !handle_is_valid (handle)) {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=relative-open rc=%d ntstatus=0x%08lx iosb=0x%08lx",
+        (int) ntstatus_to_error (status), (unsigned long) (ULONG) status,
+        (unsigned long) (ULONG) iosb.Status);
     return ntstatus_to_error (status);
+  }
   rc = query_directory_identity (handle, out_identity);
   if (rc == WYRELOG_E_OK && secured_handle)
     rc = validate_owner_only_acl (handle);
@@ -485,11 +563,17 @@ reject_remote_volume (HANDLE root)
   remote.StructureVersion = 2;
   remote.StructureSize = (USHORT) sizeof remote;
   if (GetFileInformationByHandleEx (root, FileRemoteProtocolInfo, &remote,
-          sizeof remote))
+          sizeof remote)) {
+    trace_windows_failure ("remote-detected", WYRELOG_E_POLICY,
+        remote.Protocol);
     return WYRELOG_E_POLICY;
+  }
   DWORD error = GetLastError ();
-  return error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED
-      || error == ERROR_INVALID_FUNCTION ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (error == ERROR_INVALID_PARAMETER || error == ERROR_NOT_SUPPORTED
+      || error == ERROR_INVALID_FUNCTION)
+    return WYRELOG_E_OK;
+  trace_windows_failure ("remote-query", WYRELOG_E_POLICY, error);
+  return WYRELOG_E_POLICY;
 }
 
 static wyrelog_error_t
@@ -509,28 +593,42 @@ walk_absolute_directory (const gchar *path, HANDLE *out_handle,
   wide = g_utf8_to_utf16 (path, -1, NULL, &units, NULL);
   if (wide == NULL || units < 4
       || !g_ascii_isalpha ((gchar) wide[0]) || wide[1] != L':'
-      || wide[2] != L'\\' || wide[3] == L'\\')
+      || wide[2] != L'\\' || wide[3] == L'\\') {
+    g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+        "stage=absolute-path rc=%d units=%ld", (int) WYRELOG_E_POLICY,
+        (long) units);
     return WYRELOG_E_POLICY;
+  }
   volume_root[0] = (WCHAR) g_ascii_toupper ((gchar) wide[0]);
   UINT drive_type = GetDriveTypeW (volume_root);
-  if (drive_type != DRIVE_FIXED)
+  if (drive_type != DRIVE_FIXED) {
+    trace_windows_failure ("drive-type", WYRELOG_E_POLICY, drive_type);
     return WYRELOG_E_POLICY;
+  }
   current = CreateFileW (volume_root,
       FILE_LIST_DIRECTORY | FILE_TRAVERSE | FILE_READ_ATTRIBUTES
       | READ_CONTROL | SYNCHRONIZE,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
       NULL);
-  if (!handle_is_valid (current))
+  if (!handle_is_valid (current)) {
+    trace_windows_failure ("volume-open", WYRELOG_E_IO, GetLastError ());
     return WYRELOG_E_IO;
+  }
   wyrelog_error_t rc = reject_remote_volume (current);
   if (rc == WYRELOG_E_OK)
     rc = query_directory_identity (current, &current_identity);
-  for (gsize start = 3; rc == WYRELOG_E_OK && start < (gsize) units;) {
+  guint component_index = 0;
+  for (gsize start = 3; rc == WYRELOG_E_OK && start < (gsize) units;
+      component_index++) {
     gsize end = start;
     while (end < (gsize) units && wide[end] != L'\\')
       end++;
     if (end == start || (end < (gsize) units && end + 1 == (gsize) units)) {
+      g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+          "stage=path-component rc=%d index=%u units=%lu",
+          (int) WYRELOG_E_POLICY, component_index,
+          (unsigned long) (end - start));
       rc = WYRELOG_E_POLICY;
       break;
     }
@@ -538,8 +636,13 @@ walk_absolute_directory (const gchar *path, HANDLE *out_handle,
     WylFactGraphWinIdentity next_identity = { 0 };
     rc = open_relative_directory (current, (WCHAR *) wide + start,
         end - start, FALSE, end == (gsize) units, &next, &next_identity);
-    if (rc != WYRELOG_E_OK)
+    if (rc != WYRELOG_E_OK) {
+      g_log (WYL_FACT_GRAPH_LOG_DOMAIN, G_LOG_LEVEL_DEBUG,
+          "stage=walk-component rc=%d index=%u units=%lu final=%u", (int) rc,
+          component_index, (unsigned long) (end - start),
+          (unsigned int) (end == (gsize) units));
       break;
+    }
     CloseHandle (current);
     current = next;
     current_identity = next_identity;
