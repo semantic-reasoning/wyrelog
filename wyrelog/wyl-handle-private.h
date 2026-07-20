@@ -27,6 +27,8 @@ typedef struct
   const gchar *policy_keyprovider_path;
   /* Consumed only by audit builds; unconditional to keep the layout stable. */
   const gchar *audit_store_path;
+  /* Canonical authority root for graph-local fact stores. */
+  const gchar *fact_root;
   gboolean production_mode;
   gboolean require_template_manifest;
 } WylHandleOpenOptions;

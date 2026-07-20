@@ -304,10 +304,6 @@ assert_wyctl_stdout_contains (gchar **argv, const gchar *needle)
 int
 main (void)
 {
-  g_autoptr (WylHandle) handle = NULL;
-  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
-    return 1;
-
 #ifdef WYL_HAS_FACT_STORE
   g_autoptr (GError) fact_root_error = NULL;
   g_autofree gchar *fact_root = g_dir_make_tmp ("wyctl-facts-XXXXXX",
@@ -317,6 +313,16 @@ main (void)
   if (g_chmod (fact_root, 0700) != 0)
     return 102;
 #endif
+
+  g_autoptr (WylHandle) handle = NULL;
+  const WylHandleOpenOptions open_opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+#ifdef WYL_HAS_FACT_STORE
+    .fact_root = fact_root,
+#endif
+  };
+  if (wyl_handle_open_with_options (&open_opts, &handle) != WYRELOG_E_OK)
+    return 1;
 
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,

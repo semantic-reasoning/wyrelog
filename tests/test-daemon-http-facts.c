@@ -2,12 +2,14 @@
 #include <duckdb.h>
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sqlite3.h>
 #include <string.h>
 
 #include "daemon/delta.h"
 #include "daemon/http.h"
 #include "wyrelog/client.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/graph-locator-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -24,12 +26,6 @@ typedef struct
   SoupServer *server;
   GMainLoop *loop;
 } TestHttpServer;
-
-typedef struct
-{
-  const gchar *graph_id;
-  gchar *storage_path;
-} GraphPathProbe;
 
 static gpointer
 test_http_server_thread (gpointer data)
@@ -153,27 +149,6 @@ grant_fact_http_authority (WylHandle *handle, const gchar *subject)
   return wyl_handle_reload_engine_pair (handle);
 }
 
-static wyrelog_error_t
-graph_path_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
-{
-  GraphPathProbe *probe = user_data;
-  if (g_strcmp0 (info->graph_id, probe->graph_id) == 0)
-    probe->storage_path = g_strdup (info->storage_path);
-  return WYRELOG_E_OK;
-}
-
-static gchar *
-capture_graph_path (WylHandle *handle, const gchar *graph_id)
-{
-  GraphPathProbe probe = {
-    .graph_id = graph_id,
-  };
-  if (wyl_policy_store_foreach_fact_graph (wyl_handle_get_policy_store
-          (handle), WYL_TENANT_DEFAULT, graph_path_cb, &probe) != WYRELOG_E_OK)
-    return NULL;
-  return probe.storage_path;
-}
-
 static gboolean
 count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
 {
@@ -188,10 +163,16 @@ count_i64 (duckdb_connection conn, const gchar *sql, gint64 *out_value)
 }
 
 static gint
-check_fact_projection_row_count (WylHandle *handle, const gchar *graph_id,
-    gint64 expected_rows)
+check_fact_projection_row_count (const gchar *fact_root,
+    const gchar *graph_id, gint64 expected_rows)
 {
-  g_autofree gchar *path = capture_graph_path (handle, graph_id);
+  WylFactGraphLocator locator = { 0 };
+  if (wyl_fact_graph_locator_init (&locator, WYL_TENANT_DEFAULT, graph_id)
+      != WYRELOG_E_OK)
+    return 300;
+  g_autofree gchar *path =
+      wyl_fact_graph_locator_descriptive_path (fact_root, &locator);
+  wyl_fact_graph_locator_clear (&locator);
   if (path == NULL)
     return 300;
   g_autofree gchar *db_path = g_build_filename (path, "facts.duckdb", NULL);
@@ -224,7 +205,8 @@ check_fact_projection_row_count (WylHandle *handle, const gchar *graph_id,
 }
 
 static gint
-check_fact_http_contract (WylHandle *handle, const gchar *base_url)
+check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
+    const gchar *base_url)
 {
   g_autoptr (SoupSession) session = soup_session_new ();
   g_autoptr (WylClient) admin_client = NULL;
@@ -280,6 +262,12 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
       strstr (body, "storage_path") != NULL || strstr (body, "facts.duckdb")
       != NULL)
     return 22;
+  if (sqlite3_exec (wyl_policy_store_get_db (wyl_handle_get_policy_store
+              (handle)),
+          "UPDATE fact_graphs SET storage_path='/outside/redirect' "
+          "WHERE tenant_id='__wr_default' AND graph_id='orders';",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 221;
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "GET", base_url, "/graphs", graphs_query,
@@ -360,7 +348,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
     return 27;
-  rc = check_fact_projection_row_count (handle, "orders", 1);
+  rc = check_fact_projection_row_count (fact_root, "orders", 1);
   if (rc != 0)
     return rc;
 
@@ -372,7 +360,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":false") == NULL)
     return 28;
-  rc = check_fact_projection_row_count (handle, "orders", 1);
+  rc = check_fact_projection_row_count (fact_root, "orders", 1);
   if (rc != 0)
     return rc;
 
@@ -462,7 +450,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return rc;
   if (status != 200 || strstr (body, "\"inserted\":true") == NULL)
     return 336;
-  rc = check_fact_projection_row_count (handle, "orders", 2);
+  rc = check_fact_projection_row_count (fact_root, "orders", 2);
   if (rc != 0)
     return rc;
 
@@ -726,7 +714,7 @@ check_fact_http_contract (WylHandle *handle, const gchar *base_url)
     return 29;
   /* Projection table accumulates assert+retract ops: batch-1 (assert o-1),
    * batch-7 (assert o-2), batch-r1 (retract o-2) = 3 physical rows. */
-  rc = check_fact_projection_row_count (handle, "orders", 3);
+  rc = check_fact_projection_row_count (fact_root, "orders", 3);
   if (rc != 0)
     return rc;
 
@@ -842,7 +830,11 @@ main (void)
     return 2;
 
   g_autoptr (WylHandle) handle = NULL;
-  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+  const WylHandleOpenOptions open_opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .fact_root = fact_root,
+  };
+  if (wyl_handle_open_with_options (&open_opts, &handle) != WYRELOG_E_OK)
     return 3;
   if (grant_fact_http_authority (handle, "facts-admin") != WYRELOG_E_OK)
     return 4;
@@ -872,7 +864,7 @@ main (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
-  gint rc = check_fact_http_contract (handle, base_url);
+  gint rc = check_fact_http_contract (handle, fact_root, base_url);
 
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
