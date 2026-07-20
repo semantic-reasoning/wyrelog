@@ -102,4 +102,34 @@ wyrelog_error_t
     const gchar * publication_receipt_id, gint64 now_us,
     gboolean * out_replayed, WylServiceCredentialOperationRecord * out_record);
 
+/* These lifecycle checkpoints derive their durable reason from the typed
+ * operation, so callers cannot provide journal reason strings.  A matching
+ * target record is an exact replay whose bytes and timestamp are retained. */
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_successor_inactive_oar
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationOarCause cause,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_receipt_oar
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationOarCause cause,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+
 G_END_DECLS;

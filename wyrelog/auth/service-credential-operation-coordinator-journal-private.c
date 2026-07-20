@@ -307,11 +307,14 @@ wyrelog_error_t
   wyrelog_error_t rc = clone_for_transition (existing, now_us, &next);
   if (rc != WYRELOG_E_OK)
     goto out;
-  if (existing->state != WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
+  if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
+    next.updated_at_us = existing->updated_at_us;
+  } else if (existing->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED) {
+    next.state = WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED;
+  } else {
     rc = WYRELOG_E_POLICY;
     goto out;
   }
-  next.state = WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED;
   rc = finish_transition (&next, out_record);
 out:
   wyl_service_credential_operation_record_clear (&next);

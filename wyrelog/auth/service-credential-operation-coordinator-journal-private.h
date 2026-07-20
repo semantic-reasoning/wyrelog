@@ -48,6 +48,9 @@ wyl_service_credential_operation_coordinator_build_file_published (const
     const gchar * reservation_id, const gchar * stage_basename,
     const gchar * stage_identity, const gchar * publication_receipt_id,
     gint64 now_us, WylServiceCredentialOperationRecord * out_record);
+/* FILE_PUBLISHED advances to CLEANUP_REQUIRED.  An already
+ * CLEANUP_REQUIRED record is an exact replay and retains its durable
+ * timestamp. */
 wyrelog_error_t
 wyl_service_credential_operation_coordinator_build_cleanup_required (const
     WylServiceCredentialOperationRecord * existing, gint64 now_us,
