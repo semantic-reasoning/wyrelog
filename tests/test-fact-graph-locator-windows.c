@@ -72,6 +72,36 @@ out:
 }
 
 static gboolean
+copy_token_owner (PSID *out_owner)
+{
+  HANDLE token = NULL;
+  TOKEN_OWNER *info = NULL;
+  DWORD needed = 0;
+  PSID copy = NULL;
+
+  *out_owner = NULL;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return FALSE;
+  GetTokenInformation (token, TokenOwner, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+    goto out;
+  info = g_malloc0 (needed);
+  if (info == NULL
+      || !GetTokenInformation (token, TokenOwner, info, needed, &needed)
+      || info->Owner == NULL || !IsValidSid (info->Owner))
+    goto out;
+  needed = GetLengthSid (info->Owner);
+  copy = g_malloc (needed);
+  if (copy == NULL || !CopySid (needed, copy, info->Owner))
+    g_clear_pointer (&copy, g_free);
+out:
+  g_free (info);
+  CloseHandle (token);
+  *out_owner = copy;
+  return copy != NULL;
+}
+
+static gboolean
 test_security_init (TestSecurity *security, BYTE ace_flags,
     gboolean protected_dacl)
 {
@@ -213,15 +243,40 @@ create_insecure_directory (const gchar *path)
 {
   TestSecurity security;
   g_autofree gunichar2 *wide = wide_path (path);
-  gboolean created;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  PSECURITY_DESCRIPTOR persisted = NULL;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  gboolean created = FALSE;
+  gboolean unprotected = FALSE;
 
   if (wide == NULL
       || !test_security_init (&security,
           OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE, FALSE))
     return FALSE;
   created = CreateDirectoryW ((LPCWSTR) wide, &security.attributes);
+  if (created)
+    handle = CreateFileW ((LPCWSTR) wide, READ_CONTROL | WRITE_DAC,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS
+        | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (handle != INVALID_HANDLE_VALUE) {
+    DWORD error = SetSecurityInfo (handle, SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+        NULL, NULL, security.acl, NULL);
+    if (error == ERROR_SUCCESS)
+      error = GetSecurityInfo (handle, SE_FILE_OBJECT,
+          DACL_SECURITY_INFORMATION, NULL, NULL, NULL, NULL, &persisted);
+    if (error == ERROR_SUCCESS && persisted != NULL
+        && GetSecurityDescriptorControl (persisted, &control, &revision))
+      unprotected = (control & SE_DACL_PROTECTED) == 0;
+  }
+  if (persisted != NULL)
+    LocalFree (persisted);
+  if (handle != INVALID_HANDLE_VALUE)
+    CloseHandle (handle);
   test_security_clear (&security);
-  return created;
+  return created && unprotected;
 }
 
 static gboolean
@@ -307,6 +362,51 @@ create_insecure_file (const gchar *path, const gchar *contents)
       && written == length && FlushFileBuffers (handle);
   CloseHandle (handle);
   return ok;
+}
+
+static gboolean
+file_has_security (const gchar *path, PSID expected_owner,
+    PSID expected_ace_sid, BYTE expected_ace_flags, gboolean expected_protected)
+{
+  g_autofree gunichar2 *wide = wide_path (path);
+  HANDLE handle = wide != NULL ? CreateFileW ((LPCWSTR) wide, READ_CONTROL,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL)
+      : INVALID_HANDLE_VALUE;
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  PSID owner = NULL;
+  PACL dacl = NULL;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  BOOL present = FALSE;
+  BOOL defaulted = FALSE;
+  ACL_SIZE_INFORMATION size = { 0 };
+  ACCESS_ALLOWED_ACE *ace = NULL;
+  gboolean valid = FALSE;
+
+  if (handle == INVALID_HANDLE_VALUE)
+    return FALSE;
+  DWORD error = GetSecurityInfo (handle, SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
+      &dacl, NULL, &descriptor);
+  if (error == ERROR_SUCCESS && descriptor != NULL && owner != NULL
+      && IsValidSid (owner) && EqualSid (owner, expected_owner)
+      && GetSecurityDescriptorControl (descriptor, &control, &revision)
+      && ((control & SE_DACL_PROTECTED) != 0) == expected_protected
+      && GetSecurityDescriptorDacl (descriptor, &present, &dacl, &defaulted)
+      && present && dacl != NULL && !defaulted
+      && GetAclInformation (dacl, &size, sizeof size, AclSizeInformation)
+      && size.AceCount == 1 && GetAce (dacl, 0, (LPVOID *) & ace)
+      && ace != NULL && ace->Header.AceType == ACCESS_ALLOWED_ACE_TYPE
+      && ace->Header.AceFlags == expected_ace_flags
+      && ace->Mask == FILE_ALL_ACCESS) {
+    PSID ace_sid = (PSID) & ace->SidStart;
+    valid = IsValidSid (ace_sid) && EqualSid (ace_sid, expected_ace_sid);
+  }
+  if (descriptor != NULL)
+    LocalFree (descriptor);
+  CloseHandle (handle);
+  return valid;
 }
 
 typedef struct
@@ -746,23 +846,38 @@ static void
 test_file_acl_hardening (void)
 {
   g_autofree gchar *root = make_root ();
+  g_autofree PSID token_user = NULL;
+  g_autofree PSID token_owner = NULL;
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactGraphLocator locator = { 0 };
 
+  g_assert_true (copy_token_user (&token_user));
+  g_assert_true (copy_token_owner (&token_owner));
   init_locator (&locator, "tenant", "graph");
   open_graph (root, &locator, &resolver, &graph);
   g_autofree gchar *file =
       wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
   g_assert_true (create_insecure_file (file, "db"));
+  g_assert_true (file_has_security (file, token_owner, token_user,
+          INHERITED_ACE, FALSE));
   gint fd = -1;
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
           "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_secure_file_mode (&graph,
           "facts.duckdb"), ==, WYRELOG_E_OK);
+  g_assert_true (file_has_security (file, token_user, token_user, 0, TRUE));
   g_assert_cmpint (wyl_fact_graph_directory_open_file (&graph,
           "facts.duckdb", FALSE, &fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (_close (fd), ==, 0);
+
+  g_autofree gchar *private_file =
+      wyl_fact_graph_directory_descriptive_file (&graph, "private.duckdb");
+  g_assert_true (create_private_file (private_file, "db"));
+  g_assert_cmpint (wyl_fact_graph_directory_secure_file_mode (&graph,
+          "private.duckdb"), ==, WYRELOG_E_OK);
+  g_assert_true (file_has_security (private_file, token_user, token_user, 0,
+          TRUE));
 
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
