@@ -637,6 +637,12 @@ wyrelog_error_t wyl_policy_store_rotation_recovery_status (const gchar * path,
     const wyl_policy_rotation_recovery_factory_t * factory,
     WylPolicyRotationRecoveryProbeResult * out_probe,
     WylPolicyRotationRecoveryAction * out_action);
+/* Idempotently drives an interrupted rotation to a single clean root. RESUME
+ * OLD re-runs the rotation from the unchanged old root; FINALIZE_NEW clears any
+ * residual intent sidecar over the new root; a clean old root with no intent is
+ * a no-op; an ambiguous or contradictory state fails closed without writes. */
+wyrelog_error_t wyl_policy_store_rotation_recover (const gchar * path,
+    const wyl_policy_rotation_recovery_factory_t * factory);
 void wyl_policy_store_close (wyl_policy_store_t * store);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_policy_store_t, wyl_policy_store_close);

@@ -9720,6 +9720,145 @@ wyl_policy_store_rotation_recovery_status (const gchar *path,
   return WYRELOG_E_OK;
 }
 
+/* FINALIZE_NEW: the rename already linearized to the new root. Open under the
+ * new provider and unlink any residual intent sidecar. The sidecar is keyed by
+ * the old store key and is unreadable here, so the clear is keyless and
+ * idempotent (ENOENT is success); the intent MAC is never read or verified and
+ * rotation_intent_finalize_committed is not reused (it asserts the old provider
+ * binding). */
+static wyrelog_error_t
+rotation_recover_finalize_new (const gchar *path,
+    const wyl_policy_rotation_recovery_factory_t *factory)
+{
+  wyl_policy_store_open_options_t new_opts = { 0 };
+  wyrelog_error_t rc = factory->make_new_opts (factory->data, &new_opts);
+  if (rc != WYRELOG_E_OK) {
+    rotation_recovery_release_opts (&new_opts);
+    return rc;
+  }
+  new_opts.path = path;
+  new_opts.require_encrypted = TRUE;
+  wyl_policy_store_t *store = NULL;
+  rc = wyl_policy_store_open_with_options (&new_opts, &store);
+  if (rc != WYRELOG_E_OK) {
+    if (store != NULL)
+      wyl_policy_store_close (store);
+    return WYRELOG_E_POLICY;
+  }
+  /* The new root is authoritative and unchanged: only the sidecar is touched. */
+  store->suppress_close_persist = TRUE;
+  rc = wyl_policy_rotation_intent_clear_sidecar (store);
+  wyl_policy_store_close (store);
+  return rc;
+}
+
+/* RESUME_OLD: the crash preserved the old root plus a pending intent. Re-verify
+ * the intent under a fresh old-root handle, clear the stale pending sidecar so
+ * the re-rotation's write_pending is not rejected, then re-run the unchanged
+ * rotation. It converges to the same expected new generation reusing the same
+ * CVK, so verifier bytes are identical. Any mismatch fails closed without
+ * changing a byte. */
+static wyrelog_error_t
+rotation_recover_resume_old (const gchar *path,
+    const wyl_policy_rotation_recovery_factory_t *factory,
+    const WylPolicyRotationRecoveryProbeResult *probe)
+{
+  wyl_policy_store_open_options_t old_opts = { 0 };
+  wyrelog_error_t rc = factory->make_old_opts (factory->data, &old_opts);
+  if (rc != WYRELOG_E_OK) {
+    rotation_recovery_release_opts (&old_opts);
+    return rc;
+  }
+  old_opts.path = path;
+  old_opts.require_encrypted = TRUE;
+  wyl_policy_store_t *store = NULL;
+  rc = wyl_policy_store_open_with_options (&old_opts, &store);
+  if (rc != WYRELOG_E_OK) {
+    if (store != NULL)
+      wyl_policy_store_close (store);
+    return WYRELOG_E_POLICY;
+  }
+  store->suppress_close_persist = TRUE;
+
+  /* rotation_intent_status re-checks that the pending intent's provider binding
+   * and canonical digest match the current old root; also require the pending
+   * transaction id and CVK generation to be exactly those the probe observed. */
+  WylPolicyRotationIntentStatus status = { 0 };
+  rc = wyl_policy_store_rotation_intent_status (store, &status);
+  gboolean matches = rc == WYRELOG_E_OK
+      && status.state == WYL_POLICY_ROTATION_INTENT_STATUS_PENDING
+      && memcmp (status.old_provider_id, store->encryption_key_id,
+      sizeof status.old_provider_id) == 0
+      && memcmp (&status.transaction_id, &probe->transaction_id,
+      sizeof status.transaction_id) == 0;
+  if (matches) {
+    wyl_policy_service_cvk_info_t info = { 0 };
+    wyrelog_error_t info_rc = wyl_policy_store_load_service_cvk (store, &info);
+    if (info_rc == WYRELOG_E_OK) {
+      if (info.generation != status.old_generation)
+        matches = FALSE;
+    } else if (info_rc == WYRELOG_E_NOT_FOUND) {
+      if (status.old_generation != 0)
+        matches = FALSE;
+    } else {
+      matches = FALSE;
+    }
+    wyl_policy_service_cvk_info_clear (&info);
+  }
+  if (!matches) {
+    wyl_policy_store_close (store);
+    return WYRELOG_E_POLICY;
+  }
+  rc = wyl_policy_rotation_intent_clear_sidecar (store);
+  wyl_policy_store_close (store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_policy_store_open_options_t rotate_old = { 0 };
+  wyl_policy_store_open_options_t rotate_new = { 0 };
+  rc = factory->make_old_opts (factory->data, &rotate_old);
+  if (rc != WYRELOG_E_OK) {
+    rotation_recovery_release_opts (&rotate_old);
+    return rc;
+  }
+  rc = factory->make_new_opts (factory->data, &rotate_new);
+  if (rc != WYRELOG_E_OK) {
+    rotation_recovery_release_opts (&rotate_new);
+    rotation_recovery_release_opts (&rotate_old);
+    return rc;
+  }
+  return wyl_policy_store_rotate_keyprovider (path, &rotate_old, &rotate_new);
+}
+
+wyrelog_error_t
+wyl_policy_store_rotation_recover (const gchar *path,
+    const wyl_policy_rotation_recovery_factory_t *factory)
+{
+  if (path == NULL || path[0] == '\0' || factory == NULL
+      || factory->make_old_opts == NULL || factory->make_new_opts == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylPolicyRotationRecoveryProbeResult probe = { 0 };
+  WylPolicyRotationRecoveryAction action =
+      WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED;
+  wyrelog_error_t rc = wyl_policy_store_rotation_recovery_status (path, factory,
+      &probe, &action);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  switch (action) {
+    case WYL_POLICY_ROTATION_RECOVERY_FINALIZE_NEW:
+      return rotation_recover_finalize_new (path, factory);
+    case WYL_POLICY_ROTATION_RECOVERY_RESUME_OLD:
+      return rotation_recover_resume_old (path, factory, &probe);
+    case WYL_POLICY_ROTATION_RECOVERY_NONE:
+      return WYRELOG_E_OK;
+    case WYL_POLICY_ROTATION_RECOVERY_FAIL_CLOSED:
+    default:
+      return WYRELOG_E_POLICY;
+  }
+}
+
 static wyrelog_error_t
 service_cvk_insert_initial (wyl_policy_store_t *store, guint8 **out_envelope)
 {
