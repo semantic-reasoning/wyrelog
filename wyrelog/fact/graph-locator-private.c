@@ -16,7 +16,7 @@
 #include <unistd.h>
 #endif
 
-static const gchar hex_digits[] = "0123456789abcdef";
+static const gchar base32hex_digits[] = "0123456789abcdefghijklmnopqrstuv";
 
 static gchar *
 try_strdup (const gchar *value)
@@ -45,44 +45,40 @@ wyl_fact_graph_component_encode (const gchar *value, gchar **out_component)
     return WYRELOG_E_INVALID;
 
   gsize len = strlen (value);
-  gsize encoded_len = 3;
-  for (gsize i = 0; i < len; i++) {
-    guchar byte = (guchar) value[i];
-    gboolean safe = g_ascii_isalnum (byte) || byte == '.' || byte == '_'
-        || byte == ':' || byte == '-';
-    if (encoded_len > G_MAXSIZE - (safe ? 1 : 3))
-      return WYRELOG_E_NOMEM;
-    encoded_len += safe ? 1 : 3;
-  }
+  if (len > (G_MAXSIZE - 4) / 8)
+    return WYRELOG_E_NOMEM;
+  gsize encoded_len = 3 + (len * 8 + 4) / 5;
   gchar *component = g_try_malloc (encoded_len + 1);
   if (component == NULL)
     return WYRELOG_E_NOMEM;
 
   memcpy (component, "v1-", 3);
   gsize output = 3;
+  guint32 buffer = 0;
+  guint bits = 0;
   for (gsize i = 0; i < len; i++) {
-    guchar byte = (guchar) value[i];
-    gboolean safe = g_ascii_isalnum (byte) || byte == '.' || byte == '_'
-        || byte == ':' || byte == '-';
-    if (safe) {
-      component[output++] = (gchar) byte;
-    } else {
-      component[output++] = '~';
-      component[output++] = hex_digits[byte >> 4];
-      component[output++] = hex_digits[byte & 0x0f];
+    buffer = (buffer << 8) | (guchar) value[i];
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      component[output++] = base32hex_digits[(buffer >> bits) & 0x1f];
     }
+    buffer &= bits == 0 ? 0 : (1u << bits) - 1;
   }
+  if (bits != 0)
+    component[output++] = base32hex_digits[(buffer << (5 - bits)) & 0x1f];
+  g_assert (output == encoded_len);
   component[output] = '\0';
   *out_component = component;
   return WYRELOG_E_OK;
 }
 
 static gint
-lower_hex_value (gchar c)
+base32hex_value (gchar c)
 {
   if (c >= '0' && c <= '9')
     return c - '0';
-  if (c >= 'a' && c <= 'f')
+  if (c >= 'a' && c <= 'v')
     return 10 + c - 'a';
   return -1;
 }
@@ -97,48 +93,40 @@ wyl_fact_graph_component_decode (const gchar *component, gchar **out_value)
     return WYRELOG_E_INVALID;
 
   gsize encoded_len = strlen (component + 3);
-  gsize value_len = 0;
-  for (gsize i = 0; i < encoded_len;) {
-    guchar byte = (guchar) component[3 + i];
-    if (byte == '~') {
-      if (i + 2 >= encoded_len
-          || lower_hex_value (component[4 + i]) < 0
-          || lower_hex_value (component[5 + i]) < 0)
-        return WYRELOG_E_INVALID;
-      i += 3;
-    } else {
-      if (!g_ascii_isalnum (byte) && byte != '.' && byte != '_'
-          && byte != ':' && byte != '-')
-        return WYRELOG_E_INVALID;
-      i++;
-    }
-    value_len++;
-  }
+  gsize remainder = encoded_len % 8;
+  if (remainder != 0 && remainder != 2 && remainder != 4
+      && remainder != 5 && remainder != 7)
+    return WYRELOG_E_INVALID;
+  gsize value_len = (encoded_len / 8) * 5 + (remainder * 5) / 8;
   gchar *value = g_try_malloc (value_len + 1);
   if (value == NULL)
     return WYRELOG_E_NOMEM;
 
   gsize output = 0;
-  for (gsize i = 0; i < encoded_len;) {
-    guchar byte = (guchar) component[3 + i];
-    if (byte == '~') {
-      gint high = lower_hex_value (component[4 + i]);
-      gint low = lower_hex_value (component[5 + i]);
-      byte = (guchar) ((high << 4) | low);
-      if (g_ascii_isalnum (byte) || byte == '.' || byte == '_'
-          || byte == ':' || byte == '-') {
-        g_free (value);
-        return WYRELOG_E_INVALID;
-      }
-      i += 3;
-    } else {
-      i++;
-    }
-    if (byte == '\0') {
+  guint32 buffer = 0;
+  guint bits = 0;
+  for (gsize i = 0; i < encoded_len; i++) {
+    gint digit = base32hex_value (component[3 + i]);
+    if (digit < 0) {
       g_free (value);
       return WYRELOG_E_INVALID;
     }
-    value[output++] = (gchar) byte;
+    buffer = (buffer << 5) | (guint32) digit;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      guchar byte = (guchar) ((buffer >> bits) & 0xff);
+      if (byte == '\0') {
+        g_free (value);
+        return WYRELOG_E_INVALID;
+      }
+      value[output++] = (gchar) byte;
+    }
+    buffer &= bits == 0 ? 0 : (1u << bits) - 1;
+  }
+  if (buffer != 0 || output != value_len) {
+    g_free (value);
+    return WYRELOG_E_INVALID;
   }
   value[value_len] = '\0';
   if (!g_utf8_validate (value, value_len, NULL)) {

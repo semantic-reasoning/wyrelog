@@ -68,12 +68,15 @@ not infer them from the boolean.
 
 For path-encoding version 1, the configured fact root and the logical
 `tenant_id` and `graph_id` are the only inputs to the physical location. Each
-identifier is encoded as one filename component with a `v1-` prefix. ASCII
-letters, digits, `.`, `_`, `:`, and `-` remain literal; every other UTF-8 byte
-is encoded as `~hh` with lowercase hexadecimal digits. Decoding and re-encoding
-must reproduce the component byte-for-byte. Uppercase escapes, escapes of a
-byte that should have remained literal, NUL, invalid UTF-8, raw separators,
-and non-canonical spellings are rejected.
+identifier's UTF-8 bytes are encoded as unpadded lowercase base32hex in one
+filename component with a `v1-` prefix. The encoded payload alphabet is limited
+to lowercase ASCII letters and digits, so case folding, reserved-name syntax,
+colons, and trailing dots cannot alias logical identifiers on supported
+filesystems. A 128-byte identifier occupies 208 bytes including the prefix and
+therefore fits a 255-byte filename component. Decoding and re-encoding must
+reproduce the component byte-for-byte. Uppercase or padded spellings, nonzero
+padding bits, NUL, invalid UTF-8, raw separators, and other non-canonical
+spellings are rejected.
 
 The resulting layout is:
 

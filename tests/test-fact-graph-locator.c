@@ -24,14 +24,16 @@ test_encoding_vectors (void)
 {
   static const EncodingVector vectors[] = {
     {"", "v1-"},
-    {".", "v1-."},
-    {"..", "v1-.."},
-    {"a/b\\c", "v1-a~2fb~5cc"},
-    {"tenant-a", "v1-tenant-a"},
-    {"A", "v1-A"},
-    {"a", "v1-a"},
-    {"é", "v1-~c3~a9"},
-    {"雪", "v1-~e9~9b~aa"},
+    {".", "v1-5o"},
+    {"..", "v1-5on0"},
+    {"a/b\\c", "v1-c4nm4n33"},
+    {"tenant-a", "v1-ehimsobeegmm2"},
+    {"A", "v1-84"},
+    {"a", "v1-c4"},
+    {"a:b", "v1-c4t64"},
+    {"foo.", "v1-cpnmubg"},
+    {"é", "v1-oekg"},
+    {"雪", "v1-t6dqk"},
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (vectors); i++) {
@@ -44,6 +46,9 @@ test_encoding_vectors (void)
     g_assert_cmpstr (encoded, !=, ".");
     g_assert_cmpstr (encoded, !=, "..");
     g_assert_null (strchr (encoded, G_DIR_SEPARATOR));
+    g_assert_null (strpbrk (encoded, ".:"));
+    for (const gchar * p = encoded; *p != '\0'; p++)
+      g_assert_false (g_ascii_isupper (*p));
 
     g_assert_cmpint (wyl_fact_graph_component_decode (encoded, &decoded), ==,
         WYRELOG_E_OK);
@@ -78,7 +83,7 @@ test_encoding_long_value (void)
 
   g_assert_cmpint (wyl_fact_graph_component_encode (plain, &encoded), ==,
       WYRELOG_E_OK);
-  g_assert_cmpuint (strlen (encoded), ==, 3 + 4096);
+  g_assert_cmpuint (strlen (encoded), ==, 3 + (4096 * 8 + 4) / 5);
   g_assert_cmpint (wyl_fact_graph_component_decode (encoded, &decoded), ==,
       WYRELOG_E_OK);
   g_assert_cmpstr (decoded, ==, plain);
@@ -88,8 +93,8 @@ static void
 test_decoder_rejects_noncanonical_components (void)
 {
   static const gchar *invalid[] = {
-    NULL, "", "v0-a", "v1-~", "v1-~2", "v1-~2F", "v1-~61", "v1-~00",
-    "v1-~c3", "v1-/", ".", "..",
+    NULL, "", "v0-a", "v1-0", "v1-000", "v1-000000", "v1-w",
+    "v1-A4", "v1-c5", "v1-00", "v1-vs", "v1-/", "v1-c4=", ".", "..",
   };
 
   for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
@@ -123,13 +128,13 @@ test_locator_round_trip (void)
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant/雪",
           "../orders"), ==, WYRELOG_E_OK);
   g_assert_cmpuint (locator.version, ==, WYL_FACT_GRAPH_PATH_VERSION);
-  g_assert_cmpstr (locator.tenant_component, ==, "v1-tenant~2f~e9~9b~aa");
-  g_assert_cmpstr (locator.graph_component, ==, "v1-..~2forders");
+  g_assert_cmpstr (locator.tenant_component, ==, "v1-ehimsobeegnuj6ta");
+  g_assert_cmpstr (locator.graph_component, ==, "v1-5on2urrichin4so");
 
   relative = wyl_fact_graph_locator_relative_dir (&locator);
   path = wyl_fact_graph_locator_descriptive_path ("/facts", &locator);
-  g_assert_cmpstr (relative, ==, "v1-tenant~2f~e9~9b~aa/v1-..~2forders");
-  g_assert_cmpstr (path, ==, "/facts/v1-tenant~2f~e9~9b~aa/v1-..~2forders");
+  g_assert_cmpstr (relative, ==, "v1-ehimsobeegnuj6ta/v1-5on2urrichin4so");
+  g_assert_cmpstr (path, ==, "/facts/v1-ehimsobeegnuj6ta/v1-5on2urrichin4so");
 
   wyl_fact_graph_locator_clear (&locator);
   g_assert_null (locator.tenant_component);
@@ -140,12 +145,12 @@ static void
 test_locator_rejects_manually_tampered_components (void)
 {
   static const gchar *tampered[] = {
-    "..", "../../escape", "v1-~61", "v1-~2F", "v1-a/b", "v0-a",
+    "..", "../../escape", "v1-C4", "v1-c5", "v1-a/b", "v0-a",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (tampered); i++) {
     WylFactGraphLocator locator = {
       .version = WYL_FACT_GRAPH_PATH_VERSION,
-      .tenant_component = (gchar *) "v1-tenant",
+      .tenant_component = (gchar *) "v1-ehimsobk",
       .graph_component = (gchar *) tampered[i],
     };
     g_autofree gchar *relative = wyl_fact_graph_locator_relative_dir (&locator);
@@ -306,7 +311,7 @@ static void
 test_posix_resolver_component_length_boundaries (void)
 {
   g_autofree gchar *root = make_root ();
-  g_autofree gchar *graph_id = g_strnfill (128, 'g');
+  g_autofree gchar *graph_id = g_strnfill (128, 'G');
   g_autofree gchar *long_tenant = g_strnfill (300, 't');
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
@@ -315,7 +320,7 @@ test_posix_resolver_component_length_boundaries (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", graph_id),
       ==, WYRELOG_E_OK);
-  g_assert_cmpuint (strlen (locator.graph_component), ==, 131);
+  g_assert_cmpuint (strlen (locator.graph_component), ==, 208);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
           &locator, TRUE, &graph), ==, WYRELOG_E_OK);
   wyl_fact_graph_directory_clear (&graph);
