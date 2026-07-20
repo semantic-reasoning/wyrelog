@@ -2595,6 +2595,20 @@ maintenance_committed_classify (WylHandle *handle,
   return rc;
 }
 
+static wyrelog_error_t
+maintenance_current_attention_resolve (WylHandle *handle,
+    const WylPolicyServiceHandoffMaintenanceProof *proof,
+    WylPolicyServiceHandoffCommittedMaintenanceResult *out)
+{
+  Txn transaction = { 0 };
+  classifier_transaction_begin (handle, &transaction);
+  wyrelog_error_t rc =
+      wyl_policy_store_handoff_resolve_current_attention_core
+      (transaction.txn, store_of (handle), proof, out);
+  classifier_transaction_end (&transaction);
+  return rc;
+}
+
 static void
 maintenance_assert_prepared_policy_no_mutation (WylHandle *handle,
     const WylPolicyServiceHandoffMaintenanceProof *proof,
@@ -3502,8 +3516,11 @@ test_handoff_remediation_fresh_authorization_and_replay (void)
   wyl_service_credential_handoff_remediation_result_clear (&result);
 
   probe.calls = 0;
+  wyl_service_credential_handoff_remediation_runtime_t resolve_runtime = {
+    .authorization = &authorization,
+  };
   g_assert_cmpint (wyl_service_credential_handoff_resolve_remediation (handle,
-          remediation_request_id, "operator", &authorization, &result), ==,
+          remediation_request_id, "operator", &resolve_runtime, &result), ==,
       WYRELOG_E_OK);
   g_assert_cmpuint (probe.calls, ==, 1);
   g_assert_true (result.replayed);
@@ -3820,6 +3837,18 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
       sizeof precedence_proof.tuple.binding_digest);
   memcpy (precedence_proof.target_digest, target,
       sizeof precedence_proof.target_digest);
+  WylPolicyServiceHandoffCommittedMaintenanceResult current_attention = {
+    0
+  };
+  g_assert_cmpint (maintenance_current_attention_resolve (handle,
+          &precedence_proof, &current_attention), ==, WYRELOG_E_OK);
+  g_assert_cmpint (current_attention.outcome, ==,
+      WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_OPERATION_CANCELLED);
+  g_assert_cmpstr (current_attention.disposition.disposition_id, ==,
+      disposition_id);
+  g_assert_cmpstr (current_attention.disposition.audit_id, ==, audit_id);
+  wyl_policy_service_handoff_committed_maintenance_result_clear
+      (&current_attention);
   gchar resume_request_id[WYL_REQUEST_ID_STRING_BUF];
   gchar resume_decision_id[WYL_REQUEST_ID_STRING_BUF];
   gchar resume_audit_id[WYL_ID_STRING_BUF];
@@ -3862,6 +3891,9 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
   g_assert_cmpuint (probe.calls, ==, 1);
   g_assert_false (resume_result.replayed);
   wyl_service_credential_handoff_remediation_result_clear (&resume_result);
+  g_assert_cmpint (maintenance_current_attention_resolve (handle,
+          &precedence_proof, &current_attention), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (current_attention.disposition.disposition_id);
   g_assert_cmpint
       (wyl_service_credential_handoff_resolve_remediation_incident (handle,
           original_request_id, resume_input.journal_snapshot_digest,
@@ -5183,6 +5215,19 @@ test_handoff_disposition_attention_and_oar (void)
   g_assert_cmpint (after_expired.events, ==, before_expired.events);
   g_assert_cmpint (after_expired.escrows, ==, before_expired.escrows - 1);
   g_assert_true (expired_invalidation.called);
+  g_assert_cmpuint (expired_invalidation.generation, ==, 1);
+  wyl_service_credential_handoff_remediation_result_clear (&expired_result);
+  g_clear_pointer (&expired_invalidation.credential_id, g_free);
+  expired_invalidation.called = FALSE;
+  expired_probe.calls = 0;
+  g_assert_cmpint (wyl_service_credential_handoff_resolve_remediation (handle,
+          expired_remediation_id, "operator", &expired_runtime,
+          &expired_result), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (expired_probe.calls, ==, 1);
+  g_assert_true (expired_result.replayed);
+  g_assert_true (expired_invalidation.called);
+  g_assert_cmpstr (expired_invalidation.credential_id, ==,
+      expired_issued.credential.credential_id);
   g_assert_cmpuint (expired_invalidation.generation, ==, 1);
   wyl_service_credential_handoff_remediation_result_clear (&expired_result);
   g_clear_pointer (&expired_invalidation.credential_id, g_free);

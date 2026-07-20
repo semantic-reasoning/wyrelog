@@ -81,6 +81,16 @@ G_GNUC_INTERNAL wyrelog_error_t
     const WylPolicyServiceHandoffMaintenanceProof * proof,
     WylPolicyServiceHandoffCommittedMaintenanceResult * out_result);
 
+/* Resolve only an existing, still-unconsumed committed ATTENTION incident.
+ * Unlike maintenance classification this read never mints an expiry
+ * disposition and never changes credential, escrow, or remediation state. */
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_policy_store_handoff_resolve_current_attention_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    WylPolicyServiceHandoffCommittedMaintenanceResult * out_result);
+
 typedef gint64 (*WylPolicyServiceHandoffMaintenanceNowFunc) (gpointer data);
 
 /* Test-only borrowed clock. NULL restores trusted real time. */
