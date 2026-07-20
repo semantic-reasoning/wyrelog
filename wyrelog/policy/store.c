@@ -167,6 +167,7 @@ struct wyl_policy_store_t
   GThread *service_authority_poison_owner;
   guint64 service_authority_poison_serial;
   gint service_authority_coordination_terminal;
+  WylPolicyGraphAuthorityMigrationFailStage graph_authority_migration_fail_once;
   guint64 next_service_authority_transaction_id;
     WylPolicyAuthorityTransactionFailStage
       service_authority_transaction_fail_once;
@@ -7836,6 +7837,584 @@ wyl_policy_store_get_db (wyl_policy_store_t *store)
   return store->db;
 }
 
+typedef struct
+{
+  const gchar *table;
+  const gchar *column;
+  const gchar *type;
+  gboolean not_null;
+  const gchar *default_value;
+  const gchar *constraint_sql;
+  const gchar *alter_sql;
+} WylGraphAuthorityColumn;
+
+static const WylGraphAuthorityColumn graph_authority_columns[] = {
+  {
+        "tenants", "lifecycle_state", "TEXT", TRUE,
+        "'legacy_unclassified'",
+        "CHECK(lifecycle_state IN "
+        "('legacy_unclassified','active','sealing','sealed','unsealing'))",
+      "ALTER TABLE tenants ADD COLUMN lifecycle_state TEXT NOT NULL "
+        "DEFAULT 'legacy_unclassified' CHECK (lifecycle_state IN "
+        "('legacy_unclassified','active','sealing','sealed','unsealing'))"},
+  {
+        "tenants", "lifecycle_generation", "INTEGER", TRUE, "0",
+        "CHECK(typeof(lifecycle_generation)='integer' AND "
+        "lifecycle_generation BETWEEN 0 AND 9223372036854775807)",
+      "ALTER TABLE tenants ADD COLUMN lifecycle_generation INTEGER NOT NULL "
+        "DEFAULT 0 CHECK (typeof(lifecycle_generation)='integer' AND "
+        "lifecycle_generation BETWEEN 0 AND 9223372036854775807)"},
+  {
+        "tenants", "reconciliation_generation", "INTEGER", TRUE, "0",
+        "CHECK(typeof(reconciliation_generation)='integer' AND "
+        "reconciliation_generation BETWEEN 0 AND 9223372036854775807)",
+      "ALTER TABLE tenants ADD COLUMN reconciliation_generation INTEGER "
+        "NOT NULL DEFAULT 0 CHECK (typeof(reconciliation_generation)="
+        "'integer' AND reconciliation_generation BETWEEN 0 AND "
+        "9223372036854775807)"},
+  {
+        "fact_graphs", "lifecycle_state", "TEXT", TRUE,
+        "'legacy_unclassified'",
+        "CHECK(lifecycle_state IN "
+        "('legacy_unclassified','provisioning','active','sealed','degraded'))",
+      "ALTER TABLE fact_graphs ADD COLUMN lifecycle_state TEXT NOT NULL "
+        "DEFAULT 'legacy_unclassified' CHECK (lifecycle_state IN "
+        "('legacy_unclassified','provisioning','active','sealed',"
+        "'degraded'))"},
+  {
+        "fact_graphs", "store_uuid", "TEXT", FALSE, NULL,
+        NULL,
+      "ALTER TABLE fact_graphs ADD COLUMN store_uuid TEXT"},
+  {
+        "fact_graphs", "format_version", "INTEGER", FALSE, NULL,
+        "CHECK(format_version IS NULL OR (typeof(format_version)='integer' AND "
+        "format_version BETWEEN 1 AND 9223372036854775807))",
+      "ALTER TABLE fact_graphs ADD COLUMN format_version INTEGER CHECK "
+        "(format_version IS NULL OR (typeof(format_version)='integer' AND "
+        "format_version BETWEEN 1 AND 9223372036854775807))"},
+  {
+        "fact_graphs", "path_encoding_version", "INTEGER", FALSE, NULL,
+        "CHECK(path_encoding_version IS NULL OR "
+        "(typeof(path_encoding_version)='integer' AND "
+        "path_encoding_version BETWEEN 1 AND 9223372036854775807))",
+      "ALTER TABLE fact_graphs ADD COLUMN path_encoding_version INTEGER CHECK "
+        "(path_encoding_version IS NULL OR "
+        "(typeof(path_encoding_version)='integer' AND "
+        "path_encoding_version BETWEEN 1 AND 9223372036854775807))"},
+  {
+        "fact_graphs", "lifecycle_generation", "INTEGER", TRUE, "0",
+        "CHECK(typeof(lifecycle_generation)='integer' AND "
+        "lifecycle_generation BETWEEN 0 AND 9223372036854775807)",
+      "ALTER TABLE fact_graphs ADD COLUMN lifecycle_generation INTEGER NOT "
+        "NULL DEFAULT 0 CHECK (typeof(lifecycle_generation)='integer' AND "
+        "lifecycle_generation BETWEEN 0 AND 9223372036854775807)"},
+  {
+        "fact_graphs", "reconciliation_generation", "INTEGER", TRUE, "0",
+        "CHECK(typeof(reconciliation_generation)='integer' AND "
+        "reconciliation_generation BETWEEN 0 AND 9223372036854775807)",
+      "ALTER TABLE fact_graphs ADD COLUMN reconciliation_generation INTEGER "
+        "NOT NULL DEFAULT 0 CHECK (typeof(reconciliation_generation)="
+        "'integer' AND reconciliation_generation BETWEEN 0 AND "
+        "9223372036854775807)"},
+  {
+        "fact_graphs", "last_error_class", "TEXT", TRUE, "'none'",
+        "CHECK(last_error_class IN "
+        "('none','path','identity','format','schema','open','replay',"
+        "'recovery','internal'))",
+      "ALTER TABLE fact_graphs ADD COLUMN last_error_class TEXT NOT NULL "
+        "DEFAULT 'none' CHECK (last_error_class IN "
+        "('none','path','identity','format','schema','open','replay',"
+        "'recovery','internal'))"},
+};
+
+static const gchar graph_authority_uuid_index_sql[] =
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid "
+    "ON fact_graphs(store_uuid) WHERE store_uuid IS NOT NULL";
+
+static const gchar tenant_authority_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_authority_insert_guard "
+    "BEFORE INSERT ON tenants BEGIN "
+    "SELECT CASE WHEN NOT ("
+    "typeof(NEW.lifecycle_generation)='integer' AND "
+    "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.reconciliation_generation)='integer' AND "
+    "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
+    "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
+    "SELECT CASE WHEN NOT ("
+    "NEW.lifecycle_state='legacy_unclassified' OR "
+    "(NEW.lifecycle_state IN ('active','sealing') AND NEW.sealed=0) OR "
+    "(NEW.lifecycle_state IN ('sealed','unsealing') AND NEW.sealed=1)) "
+    "THEN RAISE(ABORT,'invalid tenant authority') END; END";
+
+static const gchar tenant_authority_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS tenant_authority_update_guard "
+    "BEFORE UPDATE ON tenants BEGIN "
+    "SELECT CASE WHEN NOT ("
+    "typeof(NEW.lifecycle_generation)='integer' AND "
+    "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.reconciliation_generation)='integer' AND "
+    "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807) "
+    "THEN RAISE(ABORT,'invalid tenant generation domain') END; "
+    "SELECT CASE WHEN NOT ("
+    "NEW.lifecycle_state='legacy_unclassified' OR "
+    "(NEW.lifecycle_state IN ('active','sealing') AND NEW.sealed=0) OR "
+    "(NEW.lifecycle_state IN ('sealed','unsealing') AND NEW.sealed=1)) "
+    "THEN RAISE(ABORT,'invalid tenant authority') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
+    "NEW.lifecycle_generation!=OLD.lifecycle_generation "
+    "THEN RAISE(ABORT,'invalid tenant lifecycle generation') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND ("
+    "OLD.lifecycle_generation=9223372036854775807 OR "
+    "NEW.lifecycle_generation!=OLD.lifecycle_generation+1 OR NOT ("
+    "(OLD.lifecycle_state='legacy_unclassified' AND "
+    " NEW.lifecycle_state IN ('active','sealed')) OR "
+    "(OLD.lifecycle_state='active' AND NEW.lifecycle_state='sealing') OR "
+    "(OLD.lifecycle_state='sealing' AND "
+    " NEW.lifecycle_state IN ('active','sealed')) OR "
+    "(OLD.lifecycle_state='sealed' AND NEW.lifecycle_state='unsealing') OR "
+    "(OLD.lifecycle_state='unsealing' AND "
+    " NEW.lifecycle_state IN ('active','sealed')))) "
+    "THEN RAISE(ABORT,'illegal tenant lifecycle transition') END; "
+    "SELECT CASE WHEN NEW.reconciliation_generation<"
+    "OLD.reconciliation_generation OR "
+    "NEW.reconciliation_generation>OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'invalid tenant reconciliation generation') END; "
+    "SELECT CASE WHEN OLD.lifecycle_state='legacy_unclassified' AND "
+    "NEW.lifecycle_state IN ('active','sealed') AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'tenant promotion requires reconciliation') END; "
+    "SELECT CASE WHEN NOT (OLD.lifecycle_state='legacy_unclassified' AND "
+    "NEW.lifecycle_state IN ('active','sealed')) AND "
+    "NEW.lifecycle_state!=OLD.lifecycle_state AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation "
+    "THEN RAISE(ABORT,'unexpected tenant reconciliation generation') END; "
+    "END";
+
+static const gchar graph_authority_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_authority_insert_guard "
+    "BEFORE INSERT ON fact_graphs BEGIN "
+    "SELECT CASE WHEN NOT ("
+    "typeof(NEW.lifecycle_generation)='integer' AND "
+    "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.reconciliation_generation)='integer' AND "
+    "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "(NEW.format_version IS NULL OR (typeof(NEW.format_version)='integer' "
+    " AND NEW.format_version BETWEEN 1 AND 9223372036854775807)) AND "
+    "(NEW.path_encoding_version IS NULL OR "
+    " (typeof(NEW.path_encoding_version)='integer' AND "
+    " NEW.path_encoding_version BETWEEN 1 AND 9223372036854775807))) "
+    "THEN RAISE(ABORT,'invalid graph integer domain') END; "
+    "SELECT CASE WHEN NOT ("
+    "(NEW.store_uuid IS NULL AND NEW.format_version IS NULL AND "
+    " NEW.path_encoding_version IS NULL AND "
+    " NEW.lifecycle_state='legacy_unclassified') OR "
+    "(NEW.store_uuid IS NOT NULL AND NEW.format_version IS NOT NULL AND "
+    " NEW.path_encoding_version IS NOT NULL AND "
+    " NEW.lifecycle_state!='legacy_unclassified')) "
+    "THEN RAISE(ABORT,'incomplete graph store identity') END; "
+    "SELECT CASE WHEN NEW.store_uuid IS NOT NULL AND NOT ("
+    "length(NEW.store_uuid)=36 AND substr(NEW.store_uuid,9,1)='-' AND "
+    "substr(NEW.store_uuid,14,1)='-' AND substr(NEW.store_uuid,19,1)='-' AND "
+    "substr(NEW.store_uuid,24,1)='-' AND "
+    "length(replace(NEW.store_uuid,'-',''))=32 AND "
+    "NEW.store_uuid NOT GLOB '*[^0-9a-f-]*') "
+    "THEN RAISE(ABORT,'invalid graph store uuid') END; "
+    "SELECT CASE WHEN NOT ("
+    "(NEW.lifecycle_state='legacy_unclassified' AND "
+    " NEW.last_error_class='none') OR "
+    "(NEW.lifecycle_state='degraded' AND NEW.last_error_class!='none') OR "
+    "(NEW.lifecycle_state IN ('provisioning','active','sealed') AND "
+    " NEW.last_error_class='none')) "
+    "THEN RAISE(ABORT,'invalid graph error class') END; "
+    "SELECT CASE WHEN NOT ("
+    "NEW.lifecycle_state='legacy_unclassified' OR "
+    "(NEW.lifecycle_state='sealed' AND NEW.sealed=1) OR "
+    "(NEW.lifecycle_state IN ('provisioning','active','degraded') AND "
+    " NEW.sealed=0)) THEN RAISE(ABORT,'invalid graph sealed state') END; "
+    "END";
+
+static const gchar graph_authority_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_authority_update_guard "
+    "BEFORE UPDATE ON fact_graphs BEGIN "
+    "SELECT CASE WHEN NOT ("
+    "typeof(NEW.lifecycle_generation)='integer' AND "
+    "NEW.lifecycle_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "typeof(NEW.reconciliation_generation)='integer' AND "
+    "NEW.reconciliation_generation BETWEEN 0 AND 9223372036854775807 AND "
+    "(NEW.format_version IS NULL OR (typeof(NEW.format_version)='integer' "
+    " AND NEW.format_version BETWEEN 1 AND 9223372036854775807)) AND "
+    "(NEW.path_encoding_version IS NULL OR "
+    " (typeof(NEW.path_encoding_version)='integer' AND "
+    " NEW.path_encoding_version BETWEEN 1 AND 9223372036854775807))) "
+    "THEN RAISE(ABORT,'invalid graph integer domain') END; "
+    "SELECT CASE WHEN OLD.store_uuid IS NOT NULL AND "
+    "OLD.store_uuid IS NOT NEW.store_uuid "
+    "THEN RAISE(ABORT,'immutable graph store uuid') END; "
+    "SELECT CASE WHEN OLD.format_version IS NOT NULL AND "
+    "OLD.format_version IS NOT NEW.format_version "
+    "THEN RAISE(ABORT,'immutable graph format version') END; "
+    "SELECT CASE WHEN OLD.path_encoding_version IS NOT NULL AND "
+    "OLD.path_encoding_version IS NOT NEW.path_encoding_version "
+    "THEN RAISE(ABORT,'immutable graph path encoding version') END; "
+    "SELECT CASE WHEN NOT ("
+    "(NEW.store_uuid IS NULL AND NEW.format_version IS NULL AND "
+    " NEW.path_encoding_version IS NULL AND "
+    " NEW.lifecycle_state='legacy_unclassified') OR "
+    "(NEW.store_uuid IS NOT NULL AND NEW.format_version IS NOT NULL AND "
+    " NEW.path_encoding_version IS NOT NULL AND "
+    " NEW.lifecycle_state!='legacy_unclassified')) "
+    "THEN RAISE(ABORT,'incomplete graph store identity') END; "
+    "SELECT CASE WHEN NEW.store_uuid IS NOT NULL AND NOT ("
+    "length(NEW.store_uuid)=36 AND substr(NEW.store_uuid,9,1)='-' AND "
+    "substr(NEW.store_uuid,14,1)='-' AND substr(NEW.store_uuid,19,1)='-' AND "
+    "substr(NEW.store_uuid,24,1)='-' AND "
+    "length(replace(NEW.store_uuid,'-',''))=32 AND "
+    "NEW.store_uuid NOT GLOB '*[^0-9a-f-]*') "
+    "THEN RAISE(ABORT,'invalid graph store uuid') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
+    "NEW.lifecycle_generation!=OLD.lifecycle_generation "
+    "THEN RAISE(ABORT,'invalid graph lifecycle generation') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND ("
+    "OLD.lifecycle_generation=9223372036854775807 OR "
+    "NEW.lifecycle_generation!=OLD.lifecycle_generation+1 OR NOT ("
+    "(OLD.lifecycle_state='legacy_unclassified' AND NEW.lifecycle_state IN "
+    " ('provisioning','active','sealed','degraded')) OR "
+    "(OLD.lifecycle_state='provisioning' AND "
+    " NEW.lifecycle_state IN ('active','degraded')) OR "
+    "(OLD.lifecycle_state='active' AND "
+    " NEW.lifecycle_state IN ('sealed','degraded')) OR "
+    "(OLD.lifecycle_state='sealed' AND "
+    " NEW.lifecycle_state IN ('active','degraded')) OR "
+    "(OLD.lifecycle_state='degraded' AND NEW.lifecycle_state='active'))) "
+    "THEN RAISE(ABORT,'illegal graph lifecycle transition') END; "
+    "SELECT CASE WHEN NEW.reconciliation_generation<"
+    "OLD.reconciliation_generation OR "
+    "NEW.reconciliation_generation>OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'invalid graph reconciliation generation') END; "
+    "SELECT CASE WHEN ((OLD.lifecycle_state='degraded' AND "
+    " NEW.lifecycle_state='active') OR "
+    "(OLD.lifecycle_state='legacy_unclassified' AND "
+    " NEW.lifecycle_state IN ('active','sealed','degraded'))) AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'graph transition requires reconciliation') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state!=OLD.lifecycle_state AND NOT ("
+    "(OLD.lifecycle_state='degraded' AND NEW.lifecycle_state='active') OR "
+    "(OLD.lifecycle_state='legacy_unclassified' AND "
+    " NEW.lifecycle_state IN ('active','sealed','degraded'))) AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation "
+    "THEN RAISE(ABORT,'unexpected graph reconciliation generation') END; "
+    "SELECT CASE WHEN NEW.lifecycle_state=OLD.lifecycle_state AND "
+    "NEW.last_error_class IS NOT OLD.last_error_class AND "
+    "NEW.reconciliation_generation!=OLD.reconciliation_generation+1 "
+    "THEN RAISE(ABORT,'graph error change requires reconciliation') END; "
+    "SELECT CASE WHEN NOT ("
+    "(NEW.lifecycle_state='legacy_unclassified' AND "
+    " NEW.last_error_class='none') OR "
+    "(NEW.lifecycle_state='degraded' AND NEW.last_error_class!='none') OR "
+    "(NEW.lifecycle_state IN ('provisioning','active','sealed') AND "
+    " NEW.last_error_class='none')) "
+    "THEN RAISE(ABORT,'invalid graph error class') END; "
+    "SELECT CASE WHEN NOT ("
+    "NEW.lifecycle_state='legacy_unclassified' OR "
+    "(NEW.lifecycle_state='sealed' AND NEW.sealed=1) OR "
+    "(NEW.lifecycle_state IN ('provisioning','active','degraded') AND "
+    " NEW.sealed=0)) THEN RAISE(ABORT,'invalid graph sealed state') END; "
+    "END";
+
+static gchar *
+graph_authority_normalize_sql (const gchar *sql)
+{
+  g_autoptr (GString) normalized = g_string_new (NULL);
+  gboolean in_string = FALSE;
+  if (sql == NULL)
+    return g_string_free (g_steal_pointer (&normalized), FALSE);
+  for (const gchar * cursor = sql; *cursor != '\0'; cursor++) {
+    if (in_string && *cursor == '\'' && cursor[1] == '\'') {
+      g_string_append_c (normalized, *cursor);
+      g_string_append_c (normalized, *++cursor);
+      continue;
+    }
+    if (*cursor == '\'')
+      in_string = !in_string;
+    if (!in_string && g_ascii_isspace (*cursor))
+      continue;
+    g_string_append_c (normalized, *cursor);
+  }
+  return g_string_free (g_steal_pointer (&normalized), FALSE);
+}
+
+static wyrelog_error_t
+graph_authority_table_has_constraint (sqlite3 *db,
+    const WylGraphAuthorityColumn *expected, gboolean *out_matches)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT sql FROM sqlite_master WHERE type='table' AND name=?;";
+  *out_matches = FALSE;
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  if (bind_text (stmt, 1, expected->table) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step = sqlite3_step (stmt);
+  if (step == SQLITE_ROW) {
+    const gchar *table_sql = (const gchar *) sqlite3_column_text (stmt, 0);
+    g_autofree gchar *actual = graph_authority_normalize_sql (table_sql);
+    g_autofree gchar *constraint =
+        graph_authority_normalize_sql (expected->constraint_sql);
+    *out_matches = strstr (actual, constraint) != NULL;
+  }
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_ROW)
+    return step == SQLITE_DONE ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_authority_column_status (sqlite3 *db,
+    const WylGraphAuthorityColumn *expected, gboolean *out_exists,
+    gboolean *out_matches)
+{
+  sqlite3_stmt *stmt = NULL;
+  g_autofree gchar *sql = g_strdup_printf ("PRAGMA table_info(%s);",
+      expected->table);
+  *out_exists = FALSE;
+  *out_matches = FALSE;
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  while (sqlite3_step (stmt) == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (stmt, 1);
+    if (g_strcmp0 (name, expected->column) != 0)
+      continue;
+    const gchar *type = (const gchar *) sqlite3_column_text (stmt, 2);
+    const gchar *default_value = (const gchar *) sqlite3_column_text (stmt, 4);
+    *out_exists = TRUE;
+    *out_matches = g_ascii_strcasecmp (type, expected->type) == 0
+        && (sqlite3_column_int (stmt, 3) != 0) == expected->not_null
+        && g_strcmp0 (default_value, expected->default_value) == 0;
+    break;
+  }
+  sqlite3_finalize (stmt);
+  if (*out_exists && *out_matches && expected->constraint_sql != NULL) {
+    gboolean constraint_matches = FALSE;
+    wyrelog_error_t rc = graph_authority_table_has_constraint (db, expected,
+        &constraint_matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    *out_matches = constraint_matches;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+graph_authority_object_matches (sqlite3 *db, const gchar *type,
+    const gchar *name, const gchar *expected_sql)
+{
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT sql FROM sqlite_master WHERE type=? AND name=?;";
+  if (sqlite3_prepare_v2 (db, sql, -1, &stmt, NULL) != SQLITE_OK)
+    return WYRELOG_E_IO;
+  if (bind_text (stmt, 1, type) != WYRELOG_E_OK
+      || bind_text (stmt, 2, name) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  int step = sqlite3_step (stmt);
+  const gchar *actual = step == SQLITE_ROW ?
+      (const gchar *) sqlite3_column_text (stmt, 0) : NULL;
+  g_autofree gchar *canonical = g_strdup (expected_sql);
+  gchar *if_not_exists = strstr (canonical, " IF NOT EXISTS");
+  if (if_not_exists != NULL)
+    memmove (if_not_exists, if_not_exists + strlen (" IF NOT EXISTS"),
+        strlen (if_not_exists + strlen (" IF NOT EXISTS")) + 1);
+  g_autofree gchar *actual_normalized = graph_authority_normalize_sql (actual);
+  g_autofree gchar *expected_normalized =
+      graph_authority_normalize_sql (canonical);
+  gboolean matches = actual != NULL
+      && g_strcmp0 (actual_normalized, expected_normalized) == 0;
+  sqlite3_finalize (stmt);
+  if (step != SQLITE_ROW)
+    return step == SQLITE_DONE ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  return matches ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+validate_graph_authority_rows (sqlite3 *db)
+{
+  static const gchar *const validation_queries[] = {
+    "SELECT EXISTS(SELECT 1 FROM tenants WHERE "
+        "typeof(lifecycle_generation)!='integer' OR "
+        "lifecycle_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "typeof(reconciliation_generation)!='integer' OR "
+        "reconciliation_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "lifecycle_state NOT IN "
+        "('legacy_unclassified','active','sealing','sealed','unsealing') OR "
+        "sealed NOT IN (0,1) OR NOT ("
+        "lifecycle_state='legacy_unclassified' OR "
+        "(lifecycle_state IN ('active','sealing') AND sealed=0) OR "
+        "(lifecycle_state IN ('sealed','unsealing') AND sealed=1)));",
+    "SELECT EXISTS(SELECT 1 FROM fact_graphs WHERE "
+        "typeof(lifecycle_generation)!='integer' OR "
+        "lifecycle_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "typeof(reconciliation_generation)!='integer' OR "
+        "reconciliation_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "(format_version IS NOT NULL AND "
+        " (typeof(format_version)!='integer' OR "
+        " format_version NOT BETWEEN 1 AND 9223372036854775807)) OR "
+        "(path_encoding_version IS NOT NULL AND "
+        " (typeof(path_encoding_version)!='integer' OR "
+        " path_encoding_version NOT BETWEEN 1 AND 9223372036854775807)) OR "
+        "(store_uuid IS NOT NULL AND (typeof(store_uuid)!='text' OR NOT ("
+        " length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+        " substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+        " substr(store_uuid,24,1)='-' AND "
+        " length(replace(store_uuid,'-',''))=32 AND "
+        " store_uuid NOT GLOB '*[^0-9a-f-]*'))) OR NOT ("
+        "(store_uuid IS NULL AND format_version IS NULL AND "
+        " path_encoding_version IS NULL AND "
+        " lifecycle_state='legacy_unclassified') OR "
+        "(store_uuid IS NOT NULL AND format_version IS NOT NULL AND "
+        " path_encoding_version IS NOT NULL AND "
+        " lifecycle_state!='legacy_unclassified')) OR "
+        "lifecycle_state NOT IN "
+        "('legacy_unclassified','provisioning','active','sealed','degraded') OR "
+        "last_error_class NOT IN "
+        "('none','path','identity','format','schema','open','replay',"
+        "'recovery','internal') OR NOT ("
+        "(lifecycle_state='legacy_unclassified' AND last_error_class='none') OR "
+        "(lifecycle_state='degraded' AND last_error_class!='none') OR "
+        "(lifecycle_state IN ('provisioning','active','sealed') AND "
+        " last_error_class='none')) OR sealed NOT IN (0,1) OR NOT ("
+        "lifecycle_state='legacy_unclassified' OR "
+        "(lifecycle_state='sealed' AND sealed=1) OR "
+        "(lifecycle_state IN ('provisioning','active','degraded') AND "
+        " sealed=0)));",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (validation_queries); i++) {
+    sqlite3_stmt *stmt = NULL;
+    if (sqlite3_prepare_v2 (db, validation_queries[i], -1, &stmt, NULL) !=
+        SQLITE_OK)
+      return WYRELOG_E_IO;
+    int step = sqlite3_step (stmt);
+    gboolean invalid = step == SQLITE_ROW && sqlite3_column_int (stmt, 0) != 0;
+    sqlite3_finalize (stmt);
+    if (step != SQLITE_ROW)
+      return WYRELOG_E_IO;
+    if (invalid)
+      return WYRELOG_E_POLICY;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_graph_authority_schema (sqlite3 *db)
+{
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_authority_columns); i++) {
+    gboolean exists = FALSE, matches = FALSE;
+    wyrelog_error_t rc = graph_authority_column_status (db,
+        &graph_authority_columns[i], &exists, &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!exists || !matches)
+      return WYRELOG_E_POLICY;
+  }
+  static const struct
+  {
+    const gchar *type;
+    const gchar *name;
+    const gchar *sql;
+  } objects[] = {
+    {"index", "idx_fact_graphs_store_uuid", graph_authority_uuid_index_sql},
+    {"trigger", "tenant_authority_insert_guard",
+        tenant_authority_insert_guard_sql},
+    {"trigger", "tenant_authority_update_guard",
+        tenant_authority_update_guard_sql},
+    {"trigger", "fact_graph_authority_insert_guard",
+        graph_authority_insert_guard_sql},
+    {"trigger", "fact_graph_authority_update_guard",
+        graph_authority_update_guard_sql},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (objects); i++) {
+    wyrelog_error_t rc = graph_authority_object_matches (db, objects[i].type,
+        objects[i].name, objects[i].sql);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
+  return validate_graph_authority_rows (db);
+}
+
+static wyrelog_error_t
+graph_authority_migration_checkpoint (wyl_policy_store_t *store,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  if (store->graph_authority_migration_fail_once != stage)
+    return WYRELOG_E_OK;
+  store->graph_authority_migration_fail_once =
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE;
+  return WYRELOG_E_IO;
+}
+
+void
+wyl_policy_store_graph_authority_migration_fail_once (wyl_policy_store_t *store,
+    WylPolicyGraphAuthorityMigrationFailStage stage)
+{
+  if (store == NULL || stage <=
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE || stage >=
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT)
+    return;
+  store->graph_authority_migration_fail_once = stage;
+}
+
+static wyrelog_error_t
+migrate_graph_authority_schema (wyl_policy_store_t *store)
+{
+  sqlite3 *db = store->db;
+  for (gsize i = 0; i < G_N_ELEMENTS (graph_authority_columns); i++) {
+    gboolean exists = FALSE, matches = FALSE;
+    wyrelog_error_t rc = graph_authority_column_status (db,
+        &graph_authority_columns[i], &exists, &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (exists && !matches)
+      return WYRELOG_E_POLICY;
+    if (!exists && (rc = exec_sql (db,
+                graph_authority_columns[i].alter_sql)) != WYRELOG_E_OK)
+      return rc;
+  }
+  wyrelog_error_t rc = graph_authority_migration_checkpoint (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = exec_sql (db, graph_authority_uuid_index_sql)) != WYRELOG_E_OK)
+    return rc;
+  if ((rc = graph_authority_migration_checkpoint (store,
+              WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_UUID_INDEX)) !=
+      WYRELOG_E_OK)
+    return rc;
+  if ((rc = exec_sql (db, tenant_authority_insert_guard_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, tenant_authority_update_guard_sql)) !=
+      WYRELOG_E_OK)
+    return rc;
+  if ((rc = graph_authority_migration_checkpoint (store,
+              WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_TENANT_TRIGGERS))
+      != WYRELOG_E_OK)
+    return rc;
+  if ((rc = exec_sql (db, graph_authority_insert_guard_sql)) != WYRELOG_E_OK
+      || (rc = exec_sql (db, graph_authority_update_guard_sql)) != WYRELOG_E_OK)
+    return rc;
+  if ((rc = graph_authority_migration_checkpoint (store,
+              WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_GRAPH_TRIGGERS))
+      != WYRELOG_E_OK)
+    return rc;
+  if ((rc = graph_authority_migration_checkpoint (store,
+              WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_VALIDATION)) !=
+      WYRELOG_E_OK)
+    return rc;
+  return validate_graph_authority_schema (db);
+}
+
 wyrelog_error_t
 wyl_policy_store_create_schema (wyl_policy_store_t *store)
 {
@@ -7867,6 +8446,15 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "CREATE TABLE IF NOT EXISTS tenants ("
       "  tenant_id TEXT PRIMARY KEY,"
       "  sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),"
+      "  lifecycle_state TEXT NOT NULL DEFAULT 'legacy_unclassified' "
+      "    CHECK (lifecycle_state IN ('legacy_unclassified', 'active', "
+      "      'sealing', 'sealed', 'unsealing')),"
+      "  lifecycle_generation INTEGER NOT NULL DEFAULT 0 "
+      "    CHECK (typeof(lifecycle_generation) = 'integer' AND "
+      "      lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+      "  reconciliation_generation INTEGER NOT NULL DEFAULT 0 "
+      "    CHECK (typeof(reconciliation_generation) = 'integer' AND "
+      "      reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
       "  created_at INTEGER NOT NULL,"
       "  updated_at INTEGER NOT NULL"
       ");"
@@ -8093,6 +8681,25 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "  schema_version INTEGER NOT NULL CHECK (schema_version > 0),"
       "  owner_scope TEXT NOT NULL CHECK (owner_scope = tenant_id),"
       "  sealed INTEGER NOT NULL DEFAULT 0 CHECK (sealed IN (0, 1)),"
+      "  lifecycle_state TEXT NOT NULL DEFAULT 'legacy_unclassified' "
+      "    CHECK (lifecycle_state IN ('legacy_unclassified', "
+      "      'provisioning', 'active', 'sealed', 'degraded')),"
+      "  store_uuid TEXT,"
+      "  format_version INTEGER CHECK (format_version IS NULL OR "
+      "    (typeof(format_version) = 'integer' AND "
+      "      format_version BETWEEN 1 AND 9223372036854775807)),"
+      "  path_encoding_version INTEGER CHECK (path_encoding_version IS NULL "
+      "    OR (typeof(path_encoding_version) = 'integer' AND "
+      "      path_encoding_version BETWEEN 1 AND 9223372036854775807)),"
+      "  lifecycle_generation INTEGER NOT NULL DEFAULT 0 "
+      "    CHECK (typeof(lifecycle_generation) = 'integer' AND "
+      "      lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+      "  reconciliation_generation INTEGER NOT NULL DEFAULT 0 "
+      "    CHECK (typeof(reconciliation_generation) = 'integer' AND "
+      "      reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+      "  last_error_class TEXT NOT NULL DEFAULT 'none' CHECK "
+      "    (last_error_class IN ('none', 'path', 'identity', 'format', "
+      "      'schema', 'open', 'replay', 'recovery', 'internal')),"
       "  created_at INTEGER NOT NULL,"
       "  updated_at INTEGER NOT NULL,"
       "  sealed_at INTEGER,"
@@ -8226,9 +8833,36 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
 
   if (store == NULL || store->db == NULL)
     return WYRELOG_E_INVALID;
-  wyrelog_error_t rc = exec_sql (store->db, ddl);
+  wyrelog_error_t rc = exec_sql (store->db,
+      "SAVEPOINT wyrelog_graph_authority_schema;");
   if (rc != WYRELOG_E_OK)
     return rc;
+  rc = exec_sql (store->db, ddl);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL);
+  if (rc == WYRELOG_E_OK)
+    rc = migrate_graph_authority_schema (store);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_migration_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE);
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t release_rc = exec_sql (store->db,
+        "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
+    if (release_rc != WYRELOG_E_OK) {
+      (void) exec_sql (store->db,
+          "ROLLBACK TO SAVEPOINT wyrelog_graph_authority_schema;");
+      (void) exec_sql (store->db,
+          "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
+      return release_rc;
+    }
+  } else {
+    (void) exec_sql (store->db,
+        "ROLLBACK TO SAVEPOINT wyrelog_graph_authority_schema;");
+    (void) exec_sql (store->db,
+        "RELEASE SAVEPOINT wyrelog_graph_authority_schema;");
+    return rc;
+  }
   sqlite3_stmt *stmt = NULL;
   gboolean has_request_id = FALSE;
   if (sqlite3_prepare_v2 (store->db, "PRAGMA table_info(audit_events);", -1,

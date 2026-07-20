@@ -19,6 +19,19 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
 
+typedef enum
+{
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_UUID_INDEX,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_TENANT_TRIGGERS,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_GRAPH_TRIGGERS,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_VALIDATION,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_BEFORE_RELEASE,
+  WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT,
+} WylPolicyGraphAuthorityMigrationFailStage;
+
 /* No pinned SQLite VFS is shipped yet. File-backed plaintext provider stores
  * remain fail-closed until a platform implementation can bind SQLite's main
  * database and every journal/WAL/SHM path to the retained lease authority. */
@@ -925,6 +938,9 @@ wyrelog_error_t wyl_policy_store_commit_mutation (wyl_policy_store_t * store);
 void wyl_policy_store_rollback_mutation (wyl_policy_store_t * store);
 
 wyrelog_error_t wyl_policy_store_create_schema (wyl_policy_store_t * store);
+void wyl_policy_store_graph_authority_migration_fail_once
+    (wyl_policy_store_t * store,
+    WylPolicyGraphAuthorityMigrationFailStage stage);
 wyrelog_error_t wyl_policy_store_validate_service_schema
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_validate_snapshot (wyl_policy_store_t * store);
