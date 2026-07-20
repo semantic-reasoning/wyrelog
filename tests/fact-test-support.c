@@ -165,7 +165,34 @@ canonical_windows_path (const gchar *path, GError **error)
   }
   if (wcsncmp (resolved, L"\\\\?\\", 4) == 0)
     dos_path += 4;
-  return g_utf16_to_utf8 ((const gunichar2 *) dos_path, -1, NULL, NULL, error);
+
+  DWORD long_capacity = MAX_PATH;
+  g_autofree WCHAR *long_path = NULL;
+  for (;;) {
+    if (long_capacity > G_MAXSIZE / sizeof *long_path) {
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_NOMEM,
+          "The expanded test root '%s' is too long", path);
+      return NULL;
+    }
+    g_clear_pointer (&long_path, g_free);
+    long_path = g_try_new0 (WCHAR, long_capacity);
+    if (long_path == NULL) {
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_NOMEM,
+          "Failed to allocate the expanded test root '%s'", path);
+      return NULL;
+    }
+    DWORD long_length = GetLongPathNameW (dos_path, long_path, long_capacity);
+    if (long_length == 0) {
+      g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_FAILED,
+          "Failed to expand the test root '%s': Win32 error %lu", path,
+          (gulong) GetLastError ());
+      return NULL;
+    }
+    if (long_length < long_capacity)
+      break;
+    long_capacity = long_length;
+  }
+  return g_utf16_to_utf8 ((const gunichar2 *) long_path, -1, NULL, NULL, error);
 }
 #endif
 

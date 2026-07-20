@@ -114,12 +114,41 @@ wide_path (const gchar *path)
 }
 
 static gchar *
+long_path (const gchar *path)
+{
+  g_autofree gunichar2 *wide = wide_path (path);
+  if (wide == NULL)
+    return NULL;
+
+  DWORD capacity = MAX_PATH;
+  g_autofree WCHAR *expanded = NULL;
+  for (;;) {
+    if (capacity > G_MAXSIZE / sizeof *expanded)
+      return NULL;
+    g_clear_pointer (&expanded, g_free);
+    expanded = g_try_new0 (WCHAR, capacity);
+    if (expanded == NULL)
+      return NULL;
+    DWORD length = GetLongPathNameW ((LPCWSTR) wide, expanded, capacity);
+    if (length == 0)
+      return NULL;
+    if (length < capacity)
+      break;
+    capacity = length;
+  }
+  return g_utf16_to_utf8 ((const gunichar2 *) expanded, -1, NULL, NULL, NULL);
+}
+
+static gchar *
 unique_path (const gchar *prefix)
 {
+  g_autofree gchar *temp = long_path (g_get_tmp_dir ());
   g_autofree gchar *uuid = g_uuid_string_random ();
   g_autofree gchar *name = g_strdup_printf ("%s-%lu-%s", prefix,
       (gulong) GetCurrentProcessId (), uuid);
-  return g_build_filename (g_get_tmp_dir (), name, NULL);
+  if (temp == NULL)
+    return NULL;
+  return g_build_filename (temp, name, NULL);
 }
 
 static gboolean
