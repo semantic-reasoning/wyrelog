@@ -52,6 +52,7 @@
 #include "wyrelog/wyl-log-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "store-lease-private.h"
+#include "fact/graph-locator-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -9478,40 +9479,6 @@ validate_fact_graph_options (wyl_policy_store_t *store,
 }
 
 #ifndef G_OS_WIN32
-static gboolean
-path_has_root_prefix (const gchar *root, const gchar *child)
-{
-  gsize root_len = strlen (root);
-  return g_str_has_prefix (child, root)
-      && (child[root_len] == G_DIR_SEPARATOR || child[root_len] == '\0');
-}
-
-static wyrelog_error_t
-ensure_fact_graph_dir (const gchar *path)
-{
-  GStatBuf st;
-
-  if (g_lstat (path, &st) == 0) {
-    if (S_ISLNK (st.st_mode))
-      return WYRELOG_E_POLICY;
-    if (!S_ISDIR (st.st_mode))
-      return WYRELOG_E_POLICY;
-    return WYRELOG_E_OK;
-  }
-  if (errno != ENOENT)
-    return WYRELOG_E_IO;
-  if (g_mkdir (path, 0700) != 0) {
-    if (errno == EEXIST)
-      return ensure_fact_graph_dir (path);
-    return WYRELOG_E_IO;
-  }
-  if (g_lstat (path, &st) != 0)
-    return WYRELOG_E_IO;
-  if (!S_ISDIR (st.st_mode) || S_ISLNK (st.st_mode))
-    return WYRELOG_E_POLICY;
-  return WYRELOG_E_OK;
-}
-
 static wyrelog_error_t
 materialize_fact_graph_storage (const wyl_policy_fact_graph_create_options_t
     *opts, gchar **out_storage_path, gchar **out_storage_uri)
@@ -9521,47 +9488,35 @@ materialize_fact_graph_storage (const wyl_policy_fact_graph_create_options_t
   *out_storage_path = NULL;
   *out_storage_uri = NULL;
 
-  GStatBuf root_stat;
-  if (g_lstat (opts->fact_root, &root_stat) != 0)
-    return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
-  if (S_ISLNK (root_stat.st_mode) || !S_ISDIR (root_stat.st_mode))
-    return WYRELOG_E_POLICY;
-
-  g_autofree gchar *root_real = realpath (opts->fact_root, NULL);
-  if (root_real == NULL)
-    return WYRELOG_E_IO;
-
-  g_autofree gchar *tenant_path =
-      g_build_filename (root_real, opts->tenant_id, NULL);
-  wyrelog_error_t rc = ensure_fact_graph_dir (tenant_path);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  g_autofree gchar *tenant_real = realpath (tenant_path, NULL);
-  if (tenant_real == NULL)
-    return WYRELOG_E_IO;
-  if (!path_has_root_prefix (root_real, tenant_real))
-    return WYRELOG_E_POLICY;
-
-  g_autofree gchar *graph_path =
-      g_build_filename (tenant_real, opts->graph_id, NULL);
-  rc = ensure_fact_graph_dir (graph_path);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  g_autofree gchar *graph_real = realpath (graph_path, NULL);
-  if (graph_real == NULL)
-    return WYRELOG_E_IO;
-  if (!path_has_root_prefix (root_real, graph_real))
-    return WYRELOG_E_POLICY;
-
-  g_autofree gchar *uri = g_filename_to_uri (graph_real, NULL, NULL);
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  wyrelog_error_t rc = wyl_fact_graph_locator_init (&locator,
+      opts->tenant_id, opts->graph_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open (opts->fact_root, &resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_open_directory (&resolver, &locator, TRUE,
+        &directory);
+  g_autofree gchar *graph_path = NULL;
+  if (rc == WYRELOG_E_OK) {
+    graph_path = wyl_fact_graph_directory_descriptive_path (&directory);
+    if (graph_path == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+  g_autofree gchar *uri = rc == WYRELOG_E_OK ?
+      g_filename_to_uri (graph_path, NULL, NULL) : NULL;
   if (uri == NULL)
-    return WYRELOG_E_IO;
+    rc = rc == WYRELOG_E_OK ? WYRELOG_E_IO : rc;
 
-  *out_storage_path = g_steal_pointer (&graph_real);
-  *out_storage_uri = g_steal_pointer (&uri);
-  return WYRELOG_E_OK;
+  if (rc == WYRELOG_E_OK) {
+    *out_storage_path = g_steal_pointer (&graph_path);
+    *out_storage_uri = g_steal_pointer (&uri);
+  }
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  return rc;
 }
 #endif
 
