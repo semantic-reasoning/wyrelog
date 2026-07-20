@@ -1057,7 +1057,12 @@ test_service_credential_operation_coordinator = executable('test-service-credent
 )
 test('service-credential-operation-coordinator', test_service_credential_operation_coordinator)
 test_service_credential_operation_coordinator_journal = executable('test-service-credential-operation-coordinator-journal',
-  'test-service-credential-operation-coordinator-journal.c', dependencies : [wyrelog_dep],
+  [
+    'test-service-credential-operation-coordinator-journal.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+  ],
+  dependencies : [wyrelog_dep, sodium_dep],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')])
 test('service-credential-operation-coordinator-journal', test_service_credential_operation_coordinator_journal)
 
@@ -1071,11 +1076,15 @@ test_service_credential_operation_coordinator_execute_deps = [
 ]
 if get_option('enable_audit').allowed()
   test_service_credential_operation_coordinator_execute_c_args += '-DWYL_HAS_AUDIT'
-  test_service_credential_operation_coordinator_execute_deps += duckdb_dep
+  test_service_credential_operation_coordinator_execute_deps += [
+    duckdb_dep,
+    service_exchange_private_dep,
+  ]
 endif
 
 test_service_credential_operation_coordinator_execute = executable('test-service-credential-operation-coordinator-execute',
   'test-service-credential-operation-coordinator-execute.c',
+  link_with : test_policy_store_private_companion,
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : test_service_credential_operation_coordinator_execute_deps,
   c_args : test_service_credential_operation_coordinator_execute_c_args,

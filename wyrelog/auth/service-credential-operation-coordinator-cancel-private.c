@@ -171,7 +171,9 @@ handoff_cancel_input_from_record (const WylServiceCredentialOperationRecord
   wyl_service_credential_handoff_cancellation_observation_t observation = 0;
 
   if (!handoff_cancel_state_observation (record, &observation)
-      || record->version != WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+      || (record->version != WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+          && record->version !=
+          WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION)
       || g_strcmp0 (record->actor_subject_id, current_actor_subject_id) == 0)
     return WYRELOG_E_POLICY;
   if (observation == WYL_SERVICE_HANDOFF_CANCELLATION_OBSERVATION_COMMITTED

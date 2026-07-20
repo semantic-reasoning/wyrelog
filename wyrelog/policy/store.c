@@ -2623,6 +2623,7 @@ void wyl_policy_service_handoff_remediation_result_clear
   g_clear_pointer (&result->audit_id, g_free);
   g_clear_pointer (&result->remediation_request_id, g_free);
   g_clear_pointer (&result->decision_request_id, g_free);
+  g_clear_pointer (&result->current_actor_subject_id, g_free);
   g_clear_pointer (&result->original_request_id, g_free);
   g_clear_pointer (&result->original_actor_subject_id, g_free);
   g_clear_pointer (&result->source_disposition_id, g_free);
@@ -3716,6 +3717,8 @@ static wyrelog_error_t
       (input->remediation_request_id);
   out->decision_request_id = service_handoff_try_strdup
       (input->decision_request_id);
+  out->current_actor_subject_id = service_handoff_try_strdup
+      (input->current_actor_subject_id);
   out->original_request_id = service_handoff_try_strdup
       (input->tuple.original_request_id);
   out->original_actor_subject_id = service_handoff_try_strdup
@@ -3726,6 +3729,7 @@ static wyrelog_error_t
       service_handoff_try_strdup (input->source_audit_id) : NULL;
   if (out->audit_id == NULL || out->remediation_request_id == NULL
       || out->decision_request_id == NULL
+      || out->current_actor_subject_id == NULL
       || out->original_request_id == NULL
       || out->original_actor_subject_id == NULL
       || (input->source_disposition_id != NULL

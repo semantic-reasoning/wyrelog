@@ -222,6 +222,52 @@ return_record (WylServiceCredentialOperationRecord *source,
   *out_outcome = outcome;
 }
 
+static void
+    remediation_proof_from_result
+    (const wyl_service_credential_handoff_remediation_result_t * result,
+    WylServiceCredentialOperationRemediationProof * proof)
+{
+  memset (proof, 0, sizeof *proof);
+  proof->remediation_request_id = result->remediation_request_id;
+  proof->decision_request_id = result->decision_request_id;
+  proof->current_actor_subject_id = result->current_actor_subject_id;
+  proof->action = result->action;
+  proof->confirmation_version = result->confirmation_version;
+  proof->confirmed = result->confirmed;
+  proof->created_at_us = result->created_at_us;
+  memcpy (proof->request_fingerprint, result->request_fingerprint,
+      sizeof proof->request_fingerprint);
+  proof->source_kind = result->source_kind;
+  memcpy (proof->source_snapshot_digest, result->journal_snapshot_digest,
+      sizeof proof->source_snapshot_digest);
+  proof->observed_state = result->observed_state;
+  proof->original_request_id = result->original_request_id;
+  proof->original_actor_subject_id = result->original_actor_subject_id;
+  proof->escrow_id = result->escrow_id;
+  memcpy (proof->binding_digest, result->binding_digest,
+      sizeof proof->binding_digest);
+  proof->successor_credential_id = result->successor_credential_id;
+  proof->successor_issuance_generation = result->successor_issuance_generation;
+  proof->source_disposition_id = result->source_disposition_id;
+  proof->source_audit_id = result->source_audit_id;
+  proof->source_reason = result->source_reason;
+  proof->oar_source_state = result->oar_source_state;
+  proof->oar_cause = result->oar_cause;
+  proof->resume_target_state = result->resume_target_state;
+  proof->outcome = result->outcome;
+  proof->escrow_outcome = result->escrow_outcome;
+  proof->credential_generation_after = result->credential_generation_after;
+  proof->audit_id = result->audit_id;
+  proof->authority_replayed = result->replayed;
+  proof->revoked_now = result->revoked_now;
+  proof->invalidation_generation = result->invalidation_generation;
+  proof->revoke_event_id = result->revoke_event_id;
+  proof->revoke_event_generation = result->revoke_event_generation;
+  proof->revoke_event_request_id = result->revoke_event_request_id;
+  proof->revoke_event_actor_subject_id = result->revoke_event_actor_subject_id;
+  proof->revoke_event_created_at_us = result->revoke_event_created_at_us;
+}
+
 wyrelog_error_t
     wyl_service_credential_operation_coordinator_maintain_expired_locked
     (WylHandle * handle,
@@ -240,11 +286,14 @@ wyrelog_error_t
   WylPolicyServiceHandoffCommittedMaintenanceResult committed = { 0 };
   WylPolicyServiceHandoffDispositionResult delivery_disposition = { 0 };
   WylServiceCredentialHandoffDeliveryProof delivery_proof = { 0 };
+  wyl_service_credential_handoff_remediation_result_t remediation = { 0 };
+  WylServiceCredentialOperationRemediationProof remediation_proof = { 0 };
   WylServiceAuthWriteLease *lease = NULL;
   wyl_policy_store_t *store = NULL;
   wyl_id_t escrow_id;
   gboolean delivery_found = FALSE;
   gboolean replayed = FALSE;
+  guint8 snapshot_digest[crypto_generichash_BYTES] = { 0 };
   wyrelog_error_t rc;
 
   if (handle == NULL || storage == NULL || anchor == NULL
@@ -256,10 +305,51 @@ wyrelog_error_t
       || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
     return WYRELOG_E_INVALID;
 
-  rc = wyl_service_credential_operation_coordinator_load (storage, anchor,
-      request_id, &record);
+  rc = wyl_service_credential_operation_coordinator_load_snapshot (storage,
+      anchor, request_id, snapshot_digest, &record);
   if (rc != WYRELOG_E_OK)
     goto out;
+
+  rc = wyl_service_credential_handoff_resolve_remediation_incident (handle,
+      request_id, snapshot_digest, &remediation);
+  if (rc == WYRELOG_E_NOT_FOUND
+      && record.last_remediation_action !=
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE)
+    rc = wyl_service_credential_handoff_resolve_remediation_incident (handle,
+        request_id, record.last_remediation_source_snapshot_digest,
+        &remediation);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    if (record.last_remediation_action !=
+        WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_NONE) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    rc = WYRELOG_E_OK;
+  } else if (rc != WYRELOG_E_OK) {
+    goto out;
+  } else {
+    remediation_proof_from_result (&remediation, &remediation_proof);
+    if (remediation.action == WYL_SERVICE_HANDOFF_REMEDIATION_RESUME)
+      rc = wyl_service_credential_operation_coordinator_checkpoint_operator_resume (storage, anchor, request_id, &remediation_proof, checkpoint_time (&record, remediation.created_at_us), &replayed, &next);
+    else if (remediation.action ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE)
+      rc = wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe (storage, anchor, request_id, &remediation_proof, checkpoint_time (&record, remediation.created_at_us), &replayed, &next);
+    else
+      rc = WYRELOG_E_POLICY;
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    wyl_service_credential_operation_record_clear (&record);
+    record = next;
+    next = (WylServiceCredentialOperationRecord)
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    if (remediation.action == WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE) {
+      return_record (&record,
+          WYL_SERVICE_CREDENTIAL_OPERATION_MAINTENANCE_UNCHANGED, out_outcome,
+          out_record);
+      rc = WYRELOG_E_OK;
+      goto out;
+    }
+  }
 
   if (record.state == WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED) {
     return_record (&record,
@@ -272,6 +362,15 @@ wyrelog_error_t
     WylServiceCredentialOperationTerminalKind terminal_kind = 0;
     if (!wyl_service_credential_operation_terminal_reason_parse
         (record.terminal_reason, &terminal_kind, NULL)) {
+      rc = WYRELOG_E_POLICY;
+      goto out;
+    }
+    if (terminal_kind ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE
+        && (record.version !=
+            WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION
+            || record.last_remediation_action !=
+            WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE)) {
       rc = WYRELOG_E_POLICY;
       goto out;
     }
@@ -447,6 +546,9 @@ wyrelog_error_t
   rc = WYRELOG_E_OK;
 
 out:
+  sodium_memzero (snapshot_digest, sizeof snapshot_digest);
+  sodium_memzero (&remediation_proof, sizeof remediation_proof);
+  wyl_service_credential_handoff_remediation_result_clear (&remediation);
   sodium_memzero (&proof, sizeof proof);
   sodium_memzero (&delivery_proof, sizeof delivery_proof);
   wyl_policy_service_handoff_disposition_result_clear (&delivery_disposition);

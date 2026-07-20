@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sodium.h>
 #include <string.h>
 #include "wyrelog/auth/service-credential-operation-coordinator-journal-private.h"
 #include "wyrelog/auth/service-credential-operation-coordinator-fence-private.h"
@@ -88,6 +89,9 @@ static void
 test_server_committed_builder (void)
 {
   const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  gchar remediation_request[WYL_REQUEST_ID_STRING_BUF];
+  guint8 remediation_source_digest[32] = { 1 };
+  guint8 remediation_fingerprint[32] = { 2 };
   WylServiceCredentialOperationCoordinatorRequest issue = request ();
   WylServiceCredentialOperationRecord prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
@@ -98,6 +102,52 @@ test_server_committed_builder (void)
   g_assert_cmpint
       (wyl_service_credential_operation_coordinator_build_server_committed
       (&prepared, successor, 1, 11, &committed), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (prepared.version, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION);
+  g_assert_cmpuint (committed.version, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION);
+  g_assert_cmpint (wyl_request_id_new (remediation_request,
+          sizeof remediation_request), ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationRecord legacy_committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord legacy_planned =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord legacy_oar =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord upgraded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  g_autoptr (GBytes) legacy_bytes = NULL;
+  committed.version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION;
+  g_assert_cmpint (wyl_service_credential_operation_record_encode (&committed,
+          &legacy_bytes), ==, WYRELOG_E_OK);
+  committed.version = WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION;
+  g_assert_cmpint (wyl_service_credential_operation_record_decode
+      (legacy_bytes, &legacy_committed), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_publication_planned
+      (&legacy_committed, "legacy-reservation", "legacy-stage",
+          "legacy-receipt", 12, &legacy_planned), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (legacy_planned.version, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_action_required
+      (&legacy_planned, WYL_SERVICE_CREDENTIAL_OPERATION_OAR_EXPLICIT_HOLD,
+          13, &legacy_oar), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (legacy_oar.version, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_LEGACY_VERSION);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_build_operator_resume_exact
+      (&legacy_oar, remediation_request, remediation_source_digest,
+          WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED,
+          remediation_fingerprint, 14, &upgraded), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (upgraded.version, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION);
+  g_assert_cmpint (upgraded.last_remediation_action, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME);
+  wyl_service_credential_operation_record_clear (&upgraded);
+  wyl_service_credential_operation_record_clear (&legacy_oar);
+  wyl_service_credential_operation_record_clear (&legacy_planned);
+  wyl_service_credential_operation_record_clear (&legacy_committed);
   g_assert_cmpint (committed.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED);
   g_assert_cmpstr (committed.successor_credential_id, ==, successor);
@@ -1206,6 +1256,13 @@ static void
 test_v5_handoff_lifecycle_builders (void)
 {
   const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  gchar remediation_request[WYL_REQUEST_ID_STRING_BUF];
+  guint8 remediation_source_digest
+      [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES] = { 1 };
+  guint8 remediation_fingerprint
+      [WYL_SERVICE_CREDENTIAL_OPERATION_ESCROW_BINDING_DIGEST_BYTES] = { 2 };
+  g_assert_cmpint (wyl_request_id_new (remediation_request,
+          sizeof remediation_request), ==, WYRELOG_E_OK);
   WylServiceCredentialOperationCoordinatorRequest request_value = request ();
   WylServiceCredentialOperationRecord prepared =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
@@ -1332,8 +1389,10 @@ test_v5_handoff_lifecycle_builders (void)
         WYL_SERVICE_CREDENTIAL_OPERATION_OAR_EXPLICIT_HOLD);
     assert_handoff_tuple_preserved (source_records[i], &probe_oar);
     g_assert_cmpint
-        (wyl_service_credential_operation_coordinator_build_operator_resume
-        (&probe_oar, 17, &probe_resume), ==, WYRELOG_E_OK);
+        (wyl_service_credential_operation_coordinator_build_operator_resume_exact
+        (&probe_oar, remediation_request, remediation_source_digest,
+            source_states[i], remediation_fingerprint, 17, &probe_resume), ==,
+        WYRELOG_E_OK);
     g_assert_cmpint (probe_resume.state, ==, source_states[i]);
     assert_handoff_tuple_preserved (&probe_oar, &probe_resume);
     wyl_service_credential_operation_record_clear (&probe_resume);
@@ -1380,8 +1439,10 @@ test_v5_handoff_lifecycle_builders (void)
           &resumed), ==, WYRELOG_E_POLICY);
 
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_build_operator_resume
-      (&oar, 17, &resumed), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_build_operator_resume_exact
+      (&oar, remediation_request, remediation_source_digest,
+          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED,
+          remediation_fingerprint, 17, &resumed), ==, WYRELOG_E_OK);
   g_assert_cmpint (resumed.state, ==,
       WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
   g_assert_null (resumed.terminal_reason);
@@ -1418,14 +1479,10 @@ test_v5_handoff_lifecycle_builders (void)
   wyl_service_credential_operation_record_clear (&resumed);
   wyl_service_credential_operation_record_clear (&terminal);
 
-  gchar remediation_request[WYL_REQUEST_ID_STRING_BUF];
-  g_assert_cmpint (wyl_request_id_new (remediation_request,
-          sizeof remediation_request), ==, WYRELOG_E_OK);
   g_assert_cmpint
-      (wyl_service_credential_operation_coordinator_build_terminal
-      (&oar,
-          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
-          remediation_request, 18, &terminal), ==, WYRELOG_E_OK);
+      (wyl_service_credential_operation_coordinator_build_operator_revoke_and_wipe
+      (&oar, remediation_request, remediation_source_digest,
+          remediation_fingerprint, 18, &terminal), ==, WYRELOG_E_OK);
   WylServiceCredentialOperationTerminalKind terminal_kind = 0;
   g_autofree gchar *parsed_remediation = NULL;
   g_assert_true (wyl_service_credential_operation_terminal_reason_parse
@@ -1468,7 +1525,7 @@ test_v5_handoff_lifecycle_builders (void)
       (wyl_service_credential_operation_coordinator_build_terminal
       (&oar,
           WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_OPERATOR_REVOKE_AND_WIPE,
-          "not-canonical", 19, &resumed), ==, WYRELOG_E_INVALID);
+          "not-canonical", 19, &resumed), ==, WYRELOG_E_POLICY);
 
   g_free (oar.terminal_reason);
   oar.terminal_reason = g_strdup ("receipt-uncertain");
@@ -2016,6 +2073,191 @@ test_maintenance_checkpoints (JournalFixture *fixture, gconstpointer unused)
       (&terminal_request);
 }
 
+static void
+test_operator_remediation_checkpoints (JournalFixture *fixture,
+    gconstpointer unused)
+{
+  (void) unused;
+  WylServiceCredentialOperationCoordinatorRequest r = request ();
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord committed =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord preserved =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gboolean replayed = FALSE;
+  store_record (fixture, &r, &prepared);
+  guint8 committed_binding[32] = { 1 };
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+      (&fixture->storage, &fixture->anchor, r.request_id,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv", 1, committed_binding, 2, NULL,
+          &committed), ==, WYRELOG_E_OK);
+  guint8 snapshot[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 0 };
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&fixture->storage, &fixture->anchor, r.request_id, snapshot, &current),
+      ==, WYRELOG_E_OK);
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  record_name (r.request_id, &name);
+  g_autoptr (GBytes) source_bytes = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &source_bytes), ==,
+      WYRELOG_E_OK);
+  guint8 independently_hashed[crypto_generichash_BYTES] = { 0 };
+  gsize source_len = 0;
+  const guint8 *source_data = g_bytes_get_data (source_bytes, &source_len);
+  g_assert_cmpint (crypto_generichash (independently_hashed,
+          sizeof independently_hashed, source_data, source_len, NULL, 0), ==,
+      0);
+  g_assert_cmpmem (snapshot, sizeof snapshot, independently_hashed,
+      sizeof independently_hashed);
+
+  gchar remediation_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar decision_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (remediation_id, sizeof remediation_id),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (decision_id, sizeof decision_id), ==,
+      WYRELOG_E_OK);
+  WylServiceCredentialOperationRemediationProof proof = {
+    .remediation_request_id = remediation_id,
+    .decision_request_id = decision_id,
+    .current_actor_subject_id = "operator",
+    .action = WYL_SERVICE_HANDOFF_REMEDIATION_RESUME,
+    .created_at_us = 3,
+    .source_kind = WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_COMMITTED_ATTENTION,
+    .observed_state = WYL_SERVICE_HANDOFF_REMEDIATION_STATE_SERVER_COMMITTED,
+    .original_request_id = r.request_id,
+    .original_actor_subject_id = r.actor_subject_id,
+    .escrow_id = r.escrow_id,
+    .successor_credential_id = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
+    .successor_issuance_generation = 1,
+    .source_disposition_id = "01890f47-3c4b-7cc2-b8c4-dc0c0c073992",
+    .source_audit_id = "01890f47-3c4b-7cc2-b8c4-dc0c0c073993",
+    .source_reason = WYL_SERVICE_HANDOFF_DISPOSITION_OPERATION_EXPIRED,
+    .outcome = WYL_SERVICE_HANDOFF_REMEDIATION_RECORDED,
+    .escrow_outcome = WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_RETAINED,
+    .credential_generation_after = 1,
+    .audit_id = "01890f47-3c4b-7cc2-b8c4-dc0c0c073994",
+  };
+  memcpy (proof.request_fingerprint, (guint8[32]) {
+      2}
+      , 32);
+  memcpy (proof.source_snapshot_digest, snapshot, sizeof snapshot);
+  memcpy (proof.binding_digest, committed.escrow_binding_digest,
+      sizeof proof.binding_digest);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+      (&fixture->storage, &fixture->anchor, r.request_id, &proof, 3, &replayed,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (current.last_remediation_action, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME);
+  g_assert_cmpuint (current.version, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_JOURNAL_VERSION);
+  g_autoptr (GBytes) applied_bytes = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &applied_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+      (&fixture->storage, &fixture->anchor, r.request_id, &proof, 99, &replayed,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (current.updated_at_us, ==, 3);
+  g_autoptr (GBytes) replay_bytes = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (applied_bytes, replay_bytes));
+
+  wyl_service_credential_operation_record_clear (&preserved);
+  g_assert_cmpint (wyl_service_credential_operation_record_decode
+      (applied_bytes, &preserved), ==, WYRELOG_E_OK);
+  proof.request_fingerprint[0]++;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+      (&fixture->storage, &fixture->anchor, r.request_id, &proof, 100, NULL,
+          &preserved), ==, WYRELOG_E_POLICY);
+  g_autoptr (GBytes) after_tamper = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &after_tamper), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (applied_bytes, after_tamper));
+  g_assert_cmpint (preserved.updated_at_us, ==, 3);
+  proof.request_fingerprint[0]--;
+
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+      (&fixture->storage, &fixture->anchor, r.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN, 4, NULL,
+          &current), ==, WYRELOG_E_OK);
+  guint8 epoch_snapshot[32] = { 0 };
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_load_snapshot
+      (&fixture->storage, &fixture->anchor, r.request_id, epoch_snapshot,
+          &current), ==, WYRELOG_E_OK);
+  gchar revoke_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar revoke_decision[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (revoke_id, sizeof revoke_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_request_id_new (revoke_decision,
+          sizeof revoke_decision), ==, WYRELOG_E_OK);
+  proof.remediation_request_id = revoke_id;
+  proof.decision_request_id = revoke_decision;
+  proof.action = WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE;
+  proof.confirmation_version = 1;
+  proof.confirmed = TRUE;
+  proof.created_at_us = 5;
+  proof.source_kind =
+      WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED;
+  proof.observed_state =
+      WYL_SERVICE_HANDOFF_REMEDIATION_STATE_OPERATOR_ACTION_REQUIRED;
+  proof.source_disposition_id = NULL;
+  proof.source_audit_id = NULL;
+  proof.source_reason = 0;
+  proof.oar_source_state =
+      WYL_SERVICE_HANDOFF_REMEDIATION_STATE_SERVER_COMMITTED;
+  proof.oar_cause = WYL_SERVICE_HANDOFF_REMEDIATION_OAR_ESCROW_UNCERTAIN;
+  proof.resume_target_state =
+      WYL_SERVICE_HANDOFF_REMEDIATION_STATE_SERVER_COMMITTED;
+  proof.outcome = WYL_SERVICE_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED;
+  proof.escrow_outcome = WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_DELETED;
+  proof.invalidation_generation = 1;
+  proof.audit_id = "01890f47-3c4b-7cc2-b8c4-dc0c0c073995";
+  proof.request_fingerprint[0] = 3;
+  memcpy (proof.source_snapshot_digest, epoch_snapshot, sizeof epoch_snapshot);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+      (&fixture->storage, &fixture->anchor, r.request_id, &proof, 5, &replayed,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (current.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  g_assert_cmpstr (current.last_remediation_request_id, ==, revoke_id);
+  g_assert_cmpint (current.last_remediation_action, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE);
+  g_autoptr (GBytes) revoked_bytes = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &revoked_bytes), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+      (&fixture->storage, &fixture->anchor, r.request_id, &proof, 99,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (current.updated_at_us, ==, 5);
+  g_autoptr (GBytes) revoked_replay_bytes = NULL;
+  g_assert_cmpint (fixture_child_read (fixture, &name, &revoked_replay_bytes),
+      ==, WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (revoked_bytes, revoked_replay_bytes));
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&preserved);
+  wyl_service_credential_operation_record_clear (&current);
+  wyl_service_credential_operation_record_clear (&committed);
+  wyl_service_credential_operation_record_clear (&prepared);
+  wyl_service_credential_operation_coordinator_request_clear (&r);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -2074,5 +2316,8 @@ main (int argc, char **argv)
   g_test_add ("/coordinator/journal/maintenance-checkpoints", JournalFixture,
       NULL, journal_fixture_set_up, test_maintenance_checkpoints,
       journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/operator-remediation-checkpoints",
+      JournalFixture, NULL, journal_fixture_set_up,
+      test_operator_remediation_checkpoints, journal_fixture_tear_down);
   return g_test_run ();
 }

@@ -5,6 +5,7 @@
 
 #include "auth/service-credential-operation-coordinator-private.h"
 #include "auth/service-credential-operation-storage-private.h"
+#include "auth/service-credential-domain-private.h"
 
 G_BEGIN_DECLS;
 
@@ -16,6 +17,49 @@ typedef struct
   gpointer native_handle;
   WylServiceCredentialOperationChildName child_name;
 } WylServiceCredentialOperationCoordinatorLock;
+
+/* Borrowed, authority-proven remediation result normalized for one exact
+ * journal checkpoint.  Storage revalidates this proof against the raw locked
+ * source snapshot before replacing any bytes. */
+typedef struct
+{
+  const gchar *remediation_request_id;
+  const gchar *decision_request_id;
+  const gchar *current_actor_subject_id;
+  wyl_service_credential_handoff_remediation_action_t action;
+  guint32 confirmation_version;
+  gboolean confirmed;
+  gint64 created_at_us;
+  guint8 request_fingerprint[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  wyl_service_credential_handoff_remediation_source_kind_t source_kind;
+  guint8 source_snapshot_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  wyl_service_credential_handoff_remediation_journal_state_t observed_state;
+  const gchar *original_request_id;
+  const gchar *original_actor_subject_id;
+  const gchar *escrow_id;
+  guint8 binding_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES];
+  const gchar *successor_credential_id;
+  guint64 successor_issuance_generation;
+  const gchar *source_disposition_id;
+  const gchar *source_audit_id;
+  wyl_service_credential_handoff_disposition_reason_t source_reason;
+  wyl_service_credential_handoff_remediation_journal_state_t oar_source_state;
+  wyl_service_credential_handoff_remediation_oar_cause_t oar_cause;
+    wyl_service_credential_handoff_remediation_journal_state_t
+      resume_target_state;
+  wyl_service_credential_handoff_remediation_outcome_t outcome;
+  wyl_service_credential_handoff_remediation_escrow_outcome_t escrow_outcome;
+  guint64 credential_generation_after;
+  const gchar *audit_id;
+  gboolean authority_replayed;
+  gboolean revoked_now;
+  guint64 invalidation_generation;
+  gint64 revoke_event_id;
+  guint64 revoke_event_generation;
+  const gchar *revoke_event_request_id;
+  const gchar *revoke_event_actor_subject_id;
+  gint64 revoke_event_created_at_us;
+} WylServiceCredentialOperationRemediationProof;
 
 #define WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT \
   { .native_handle = NULL, \
@@ -56,6 +100,14 @@ wyrelog_error_t wyl_service_credential_operation_coordinator_load
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, WylServiceCredentialOperationRecord * out_record);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_load_snapshot
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    guint8 out_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES],
+    WylServiceCredentialOperationRecord * out_record);
 
 /* Durably checkpoint the server-side mutation.  The operation is selected by
  * canonical request_id, locked relative to the anchored root, then atomically
@@ -143,6 +195,23 @@ wyrelog_error_t
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    const WylServiceCredentialOperationRemediationProof * proof,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    const WylServiceCredentialOperationRemediationProof * proof,
+    gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 
 G_END_DECLS;

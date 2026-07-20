@@ -750,6 +750,7 @@ typedef struct
   WylPolicyServiceHandoffRemediationJournalState resume_target_state;
   WylPolicyServiceHandoffDispositionReason source_reason;
   gchar *decision_request_id;
+  gchar *current_actor_subject_id;
   gchar *original_request_id;
   gchar *original_actor_subject_id;
   gchar *source_disposition_id;

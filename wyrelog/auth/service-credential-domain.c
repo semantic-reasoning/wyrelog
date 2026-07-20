@@ -666,6 +666,7 @@ void wyl_service_credential_handoff_remediation_result_clear
   g_clear_pointer (&result->audit_id, g_free);
   g_clear_pointer (&result->remediation_request_id, g_free);
   g_clear_pointer (&result->decision_request_id, g_free);
+  g_clear_pointer (&result->current_actor_subject_id, g_free);
   g_clear_pointer (&result->original_request_id, g_free);
   g_clear_pointer (&result->original_actor_subject_id, g_free);
   g_clear_pointer (&result->source_disposition_id, g_free);
@@ -965,6 +966,8 @@ wyl_service_credential_handoff_remediate_exact (WylHandle *handle,
         stored.source_reason;
     out_result->decision_request_id =
         g_steal_pointer (&stored.decision_request_id);
+    out_result->current_actor_subject_id =
+        g_steal_pointer (&stored.current_actor_subject_id);
     out_result->original_request_id =
         g_steal_pointer (&stored.original_request_id);
     out_result->original_actor_subject_id =
@@ -1035,6 +1038,8 @@ static void
   out->source_reason = (wyl_service_credential_handoff_disposition_reason_t)
       stored->source_reason;
   out->decision_request_id = g_steal_pointer (&stored->decision_request_id);
+  out->current_actor_subject_id =
+      g_steal_pointer (&stored->current_actor_subject_id);
   out->original_request_id = g_steal_pointer (&stored->original_request_id);
   out->original_actor_subject_id =
       g_steal_pointer (&stored->original_actor_subject_id);

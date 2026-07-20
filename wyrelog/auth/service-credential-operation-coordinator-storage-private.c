@@ -2,6 +2,8 @@
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 
 #include "auth/service-credential-operation-coordinator-journal-private.h"
+#include "policy/store-private.h"
+#include "wyl-id-private.h"
 #include <sodium.h>
 #ifdef G_OS_WIN32
 #include "auth/service-credential-operation-storage-windows-private.h"
@@ -255,6 +257,61 @@ wyrelog_error_t
   loaded = (WylServiceCredentialOperationRecord)
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
 out:
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&loaded);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_load_snapshot
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    guint8 out_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES],
+    WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord loaded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock lock = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  guint8 digest[crypto_generichash_BYTES] = { 0 };
+  wyrelog_error_t rc;
+  if (storage == NULL || anchor == NULL || out_snapshot_digest == NULL
+      || out_record == NULL
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id))
+    return WYRELOG_E_INVALID;
+  rc = record_child_name (request_id, &name);
+  if (rc == WYRELOG_E_OK)
+    rc = storage_child_lock (storage, anchor, &name, &lock);
+  if (rc == WYRELOG_E_OK)
+    rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc == WYRELOG_E_OK) {
+    gsize len = 0;
+    const guint8 *data = g_bytes_get_data (bytes, &len);
+    if (data == NULL || crypto_generichash (digest, sizeof digest, data, len,
+            NULL, 0) != 0)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_credential_operation_record_decode (bytes, &loaded);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (loaded.request_id, request_id) != 0
+          || g_strcmp0 (loaded.operation_id, request_id) != 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    memcpy (out_snapshot_digest, digest, sizeof digest);
+    wyl_service_credential_operation_record_clear (out_record);
+    *out_record = loaded;
+    loaded = (WylServiceCredentialOperationRecord)
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  }
+  sodium_memzero (digest, sizeof digest);
+  if (lock != WYL_COORDINATOR_JOURNAL_LOCK_INIT)
+    storage_child_unlock (storage, anchor, &name, lock);
   wyl_service_credential_operation_child_name_clear (&name);
   wyl_service_credential_operation_record_clear (&loaded);
   return rc;
@@ -747,4 +804,330 @@ wyrelog_error_t
 {
   return checkpoint_lifecycle (storage, anchor, request_id,
       CHECKPOINT_TERMINAL_FILE_PUBLISHED, 0, now_us, out_replayed, out_record);
+}
+
+static gboolean
+remediation_id_is_canonical (const gchar *value)
+{
+  wyl_id_t parsed;
+  gchar canonical[WYL_ID_STRING_BUF];
+  return value != NULL && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+      && g_strcmp0 (value, canonical) == 0;
+}
+
+static gboolean
+    remediation_proof_common_is_valid
+    (const WylServiceCredentialOperationRemediationProof * proof,
+    const WylServiceCredentialOperationRecord * record)
+{
+  if (proof == NULL || record == NULL || proof->created_at_us <= 0
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (proof->remediation_request_id)
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (proof->decision_request_id)
+      || !wyl_policy_service_actor_subject_is_valid
+      (proof->current_actor_subject_id)
+      || !remediation_id_is_canonical (proof->audit_id)
+      || g_strcmp0 (proof->remediation_request_id,
+          proof->decision_request_id) == 0
+      || g_strcmp0 (proof->remediation_request_id,
+          proof->original_request_id) == 0
+      || g_strcmp0 (proof->decision_request_id,
+          proof->original_request_id) == 0
+      || g_strcmp0 (proof->current_actor_subject_id,
+          proof->original_actor_subject_id) == 0
+      || sodium_is_zero (proof->request_fingerprint,
+          sizeof proof->request_fingerprint)
+      || sodium_is_zero (proof->source_snapshot_digest,
+          sizeof proof->source_snapshot_digest)
+      || sodium_is_zero (proof->binding_digest, sizeof proof->binding_digest)
+      || g_strcmp0 (proof->original_request_id, record->request_id) != 0
+      || g_strcmp0 (proof->original_actor_subject_id,
+          record->actor_subject_id) != 0
+      || g_strcmp0 (proof->escrow_id, record->escrow_id) != 0
+      || sodium_memcmp (proof->binding_digest,
+          record->escrow_binding_digest, sizeof proof->binding_digest) != 0
+      || g_strcmp0 (proof->successor_credential_id,
+          record->successor_credential_id) != 0
+      || proof->successor_issuance_generation != record->successor_generation)
+    return FALSE;
+  if (proof->source_kind ==
+      WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_COMMITTED_ATTENTION) {
+    gboolean committed_state = proof->observed_state ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_STATE_SERVER_COMMITTED
+        || proof->observed_state ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_STATE_PUBLICATION_PLANNED
+        || proof->observed_state ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_STATE_PUBLICATION_PREPARED
+        || proof->observed_state ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_STATE_FILE_PUBLISHED
+        || proof->observed_state ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_STATE_CLEANUP_REQUIRED;
+    return committed_state
+        && remediation_id_is_canonical (proof->source_disposition_id)
+        && remediation_id_is_canonical (proof->source_audit_id)
+        && (proof->source_reason ==
+        WYL_SERVICE_HANDOFF_DISPOSITION_OPERATION_EXPIRED
+        || proof->source_reason ==
+        WYL_SERVICE_HANDOFF_DISPOSITION_OPERATION_CANCELLED)
+        && proof->oar_source_state == 0 && proof->oar_cause == 0
+        && proof->resume_target_state == 0;
+  }
+  WylServiceCredentialOperationState source =
+      (WylServiceCredentialOperationState) proof->oar_source_state;
+  WylServiceCredentialOperationOarCause cause =
+      (WylServiceCredentialOperationOarCause) proof->oar_cause;
+  g_autofree gchar *legal_oar =
+      wyl_service_credential_operation_oar_reason_format (source, cause);
+  return proof->source_kind ==
+      WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED
+      && proof->source_disposition_id == NULL
+      && proof->source_audit_id == NULL && proof->source_reason == 0
+      && proof->observed_state ==
+      WYL_SERVICE_HANDOFF_REMEDIATION_STATE_OPERATOR_ACTION_REQUIRED
+      && proof->oar_source_state != 0 && proof->oar_cause != 0
+      && proof->resume_target_state == proof->oar_source_state
+      && legal_oar != NULL;
+}
+
+static gboolean
+    remediation_proof_action_is_valid
+    (const WylServiceCredentialOperationRemediationProof * proof)
+{
+  gboolean no_event = proof->revoke_event_id == 0
+      && proof->revoke_event_generation == 0
+      && proof->revoke_event_request_id == NULL
+      && proof->revoke_event_actor_subject_id == NULL
+      && proof->revoke_event_created_at_us == 0;
+  if (proof->action == WYL_SERVICE_HANDOFF_REMEDIATION_RESUME) {
+    return proof->confirmation_version == 0 && !proof->confirmed
+        && proof->outcome == WYL_SERVICE_HANDOFF_REMEDIATION_RECORDED
+        && proof->escrow_outcome ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_RETAINED
+        && proof->credential_generation_after ==
+        proof->successor_issuance_generation
+        && proof->invalidation_generation == 0 && !proof->revoked_now
+        && no_event
+        && !(proof->source_kind ==
+        WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED
+        && (proof->oar_cause ==
+            WYL_SERVICE_HANDOFF_REMEDIATION_OAR_SUCCESSOR_REVOKED
+            || proof->oar_cause ==
+            WYL_SERVICE_HANDOFF_REMEDIATION_OAR_SUCCESSOR_EXPIRED
+            || proof->oar_cause ==
+            WYL_SERVICE_HANDOFF_REMEDIATION_OAR_ESCROW_MISSING));
+  }
+  if (proof->action !=
+      WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE
+      || proof->confirmation_version != 1 || !proof->confirmed
+      || proof->invalidation_generation !=
+      proof->successor_issuance_generation
+      || (proof->escrow_outcome !=
+          WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_DELETED
+          && proof->escrow_outcome !=
+          WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_ALREADY_ABSENT)
+      || (proof->escrow_outcome ==
+          WYL_SERVICE_HANDOFF_REMEDIATION_ESCROW_ALREADY_ABSENT
+          && (proof->source_kind !=
+              WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED
+              || proof->oar_cause !=
+              WYL_SERVICE_HANDOFF_REMEDIATION_OAR_ESCROW_MISSING)))
+    return FALSE;
+  if (proof->outcome == WYL_SERVICE_HANDOFF_REMEDIATION_EXPIRED_AND_WIPED)
+    return !proof->revoked_now && no_event
+        && proof->credential_generation_after ==
+        proof->successor_issuance_generation;
+  if (proof->outcome !=
+      WYL_SERVICE_HANDOFF_REMEDIATION_REVOKED_AND_WIPED
+      && proof->outcome !=
+      WYL_SERVICE_HANDOFF_REMEDIATION_ALREADY_REVOKED_AND_WIPED)
+    return FALSE;
+  if (proof->successor_issuance_generation >= G_MAXINT64
+      || proof->credential_generation_after !=
+      proof->successor_issuance_generation + 1
+      || proof->revoke_event_id <= 0
+      || proof->revoke_event_generation != proof->credential_generation_after
+      || proof->revoke_event_request_id == NULL
+      || proof->revoke_event_actor_subject_id == NULL
+      || proof->revoke_event_created_at_us <= 0)
+    return FALSE;
+  if (proof->outcome == WYL_SERVICE_HANDOFF_REMEDIATION_REVOKED_AND_WIPED)
+    return proof->revoked_now == !proof->authority_replayed
+        && g_strcmp0 (proof->revoke_event_request_id,
+        proof->remediation_request_id) == 0
+        && g_strcmp0 (proof->revoke_event_actor_subject_id,
+        proof->current_actor_subject_id) == 0
+        && proof->revoke_event_created_at_us == proof->created_at_us;
+  return !proof->revoked_now;
+}
+
+static gboolean
+    remediation_source_matches_fresh_record
+    (const WylServiceCredentialOperationRemediationProof * proof,
+    const WylServiceCredentialOperationRecord * record)
+{
+  if ((guint) proof->observed_state != (guint) record->state)
+    return FALSE;
+  if (proof->source_kind ==
+      WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_COMMITTED_ATTENTION)
+    return record->state == WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED
+        || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED
+        || record->state ==
+        WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+        || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+        || record->state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED;
+  WylServiceCredentialOperationState source = 0;
+  WylServiceCredentialOperationOarCause cause = 0;
+  return wyl_service_credential_operation_oar_reason_parse
+      (record->terminal_reason, &source, &cause)
+      && (guint) source == (guint) proof->oar_source_state
+      && (guint) cause == (guint) proof->oar_cause
+      && (guint) source == (guint) proof->resume_target_state;
+}
+
+static gboolean
+    remediation_marker_matches_proof
+    (const WylServiceCredentialOperationRecord * record,
+    const WylServiceCredentialOperationRemediationProof * proof)
+{
+  WylServiceCredentialOperationRemediationAction action =
+      proof->action == WYL_SERVICE_HANDOFF_REMEDIATION_RESUME ?
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME :
+      WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_REVOKE_AND_WIPE;
+  WylServiceCredentialOperationState target =
+      action == WYL_SERVICE_CREDENTIAL_OPERATION_REMEDIATION_RESUME ?
+      (WylServiceCredentialOperationState) (proof->source_kind ==
+      WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED ?
+      proof->resume_target_state : proof->observed_state) :
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+  return record->last_remediation_action == action
+      && g_strcmp0 (record->last_remediation_request_id,
+      proof->remediation_request_id) == 0
+      && sodium_memcmp (record->last_remediation_source_snapshot_digest,
+      proof->source_snapshot_digest,
+      sizeof proof->source_snapshot_digest) == 0
+      && record->last_remediation_applied_target_state == target
+      && sodium_memcmp (record->last_remediation_request_fingerprint,
+      proof->request_fingerprint, sizeof proof->request_fingerprint) == 0;
+}
+
+static wyrelog_error_t
+    checkpoint_operator_remediation
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    const WylServiceCredentialOperationRemediationProof * proof,
+    gboolean resume, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord existing =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord next =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  WylCoordinatorJournalLock lock = WYL_COORDINATOR_JOURNAL_LOCK_INIT;
+  g_autoptr (GBytes) bytes = NULL;
+  guint8 raw_digest[crypto_generichash_BYTES] = { 0 };
+  gboolean replayed = FALSE;
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  if (out_replayed != NULL)
+    *out_replayed = FALSE;
+  if (storage == NULL || anchor == NULL || out_record == NULL || proof == NULL
+      || now_us <= 0
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id)
+      || (resume && proof->action != WYL_SERVICE_HANDOFF_REMEDIATION_RESUME)
+      || (!resume && proof->action !=
+          WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE))
+    return WYRELOG_E_INVALID;
+  rc = record_child_name (request_id, &name);
+  if (rc == WYRELOG_E_OK)
+    rc = storage_child_lock (storage, anchor, &name, &lock);
+  if (rc == WYRELOG_E_OK)
+    rc = storage_child_read (storage, anchor, &name, &bytes);
+  if (rc == WYRELOG_E_OK) {
+    gsize len = 0;
+    const guint8 *data = g_bytes_get_data (bytes, &len);
+    if (data == NULL || crypto_generichash (raw_digest, sizeof raw_digest,
+            data, len, NULL, 0) != 0)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_credential_operation_record_decode (bytes, &existing);
+  if (rc == WYRELOG_E_OK
+      && (g_strcmp0 (existing.request_id, request_id) != 0
+          || g_strcmp0 (existing.operation_id, request_id) != 0
+          || !remediation_proof_common_is_valid (proof, &existing)
+          || !remediation_proof_action_is_valid (proof)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    replayed = remediation_marker_matches_proof (&existing, proof);
+  if (rc == WYRELOG_E_OK && !replayed
+      && (sodium_memcmp (raw_digest, proof->source_snapshot_digest,
+              sizeof raw_digest) != 0
+          || !remediation_source_matches_fresh_record (proof, &existing)))
+    rc = WYRELOG_E_POLICY;
+  WylServiceCredentialOperationState target =
+      (WylServiceCredentialOperationState) (proof->source_kind ==
+      WYL_SERVICE_HANDOFF_REMEDIATION_SOURCE_OPERATOR_ACTION_REQUIRED ?
+      proof->resume_target_state : proof->observed_state);
+  if (rc == WYRELOG_E_OK)
+    rc = resume ?
+        wyl_service_credential_operation_coordinator_build_operator_resume_exact
+        (&existing, proof->remediation_request_id,
+        proof->source_snapshot_digest, target, proof->request_fingerprint,
+        now_us, &next) :
+        wyl_service_credential_operation_coordinator_build_operator_revoke_and_wipe
+        (&existing, proof->remediation_request_id,
+        proof->source_snapshot_digest, proof->request_fingerprint, now_us,
+        &next);
+  if (rc == WYRELOG_E_OK && !replayed) {
+    g_clear_pointer (&bytes, g_bytes_unref);
+    rc = wyl_service_credential_operation_record_encode (&next, &bytes);
+    if (rc == WYRELOG_E_OK)
+      rc = storage_child_replace (storage, anchor, &name, bytes);
+  }
+  if (rc == WYRELOG_E_OK) {
+    wyl_service_credential_operation_record_clear (out_record);
+    *out_record = next;
+    next = (WylServiceCredentialOperationRecord)
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    if (out_replayed != NULL)
+      *out_replayed = replayed;
+  }
+  sodium_memzero (raw_digest, sizeof raw_digest);
+  if (lock != WYL_COORDINATOR_JOURNAL_LOCK_INIT)
+    storage_child_unlock (storage, anchor, &name, lock);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&next);
+  wyl_service_credential_operation_record_clear (&existing);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_operator_resume
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    const WylServiceCredentialOperationRemediationProof * proof,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_operator_remediation (storage, anchor, request_id, proof,
+      TRUE, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_operator_revoke_and_wipe
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id,
+    const WylServiceCredentialOperationRemediationProof * proof,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_operator_remediation (storage, anchor, request_id, proof,
+      FALSE, now_us, out_replayed, out_record);
 }
