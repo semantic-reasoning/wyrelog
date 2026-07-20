@@ -632,7 +632,8 @@ test_absent_with_credentials_is_policy (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
   const gchar *sql =
-      "INSERT INTO tenants VALUES('tenant-a',0,1,1);"
+      "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at) "
+      "VALUES('tenant-a',0,1,1);"
       "INSERT INTO service_principals"
       "(subject_id,display_name,state,generation,created_by,created_at_us,"
       "updated_at_us) VALUES('svc:tenant-a:worker','worker','active',1,"
@@ -1109,7 +1110,8 @@ insert_golden_credential (wyl_policy_store_t *store, const guint8 *cvk,
   wyl_service_credential_secret_clear (&parsed);
   sqlite3 *db = wyl_policy_store_get_db (store);
   g_assert_cmpint (sqlite3_exec (db,
-          "INSERT INTO tenants VALUES('tenant-a',0,1,1);"
+          "INSERT INTO tenants(tenant_id,sealed,created_at,updated_at) "
+          "VALUES('tenant-a',0,1,1);"
           "INSERT INTO service_principals(subject_id,display_name,state,"
           "generation,created_by,created_at_us,updated_at_us) VALUES("
           "'svc:tenant-a:worker','worker','active',1,'admin',1,1);",

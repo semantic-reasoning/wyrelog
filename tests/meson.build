@@ -580,6 +580,16 @@ test('policy-store', test_policy_store,
   timeout : 90,
 )
 
+test_policy_graph_authority = executable('test-policy-graph-authority',
+  'test-policy-graph-authority.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, sqlite_dep],
+)
+
+test('policy-graph-authority', test_policy_graph_authority,
+  timeout : 90,
+)
+
 test_policy_store_service_schema = executable('test-policy-store-service-schema',
   'test-policy-store-service-schema.c',
   c_args : [
