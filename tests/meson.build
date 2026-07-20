@@ -1303,11 +1303,18 @@ if service_session_boundary_cc.length() > 1 \
   service_session_boundary_cc = [service_session_boundary_cc[1]]
 endif
 
+service_session_boundary_args = [meson.project_source_root(), '--compiler-id',
+  service_session_boundary_cc_id, '--build-root', meson.project_build_root()]
+if get_option('enable_audit').disabled()
+  service_session_boundary_args += [
+    '--allow-uncompiled-owner',
+    'tests/test-service-exchange-private.c',
+  ]
+endif
+
 test('check-service-session-private-boundary',
   check_service_session_private_boundary,
-  args : [meson.project_source_root(), '--compiler-id',
-    service_session_boundary_cc_id, '--build-root', meson.project_build_root(),
-    '--'] + service_session_boundary_cc,
+  args : service_session_boundary_args + ['--'] + service_session_boundary_cc,
   # Full semantic preprocessing follows every configured TU and can vary
   # substantially with compiler/system-header performance on shared runners.
   is_parallel : false,
