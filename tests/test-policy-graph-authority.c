@@ -297,6 +297,88 @@ test_integer_domain_constraints (void)
   }
 }
 
+static void
+test_typed_authority_reads_and_lists (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-b", "graph-b", FALSE);
+  insert_graph (db, "tenant-a", "graph-a", TRUE);
+
+  WylPolicyTenantAuthorityRecord *tenant = NULL;
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "tenant-a",
+          &tenant), ==, WYRELOG_E_OK);
+  g_assert_nonnull (tenant);
+  g_assert_cmpstr (tenant->tenant_id, ==, "tenant-a");
+  g_assert_cmpint (tenant->lifecycle_state, ==,
+      WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED);
+  g_assert_cmpuint (tenant->lifecycle_generation, ==, 0);
+  g_assert_cmpuint (tenant->reconciliation_generation, ==, 0);
+  g_assert_true (tenant->sealed_compatibility);
+  wyl_policy_tenant_authority_record_free (tenant);
+
+  tenant = GINT_TO_POINTER (1);
+  g_assert_cmpint (wyl_policy_store_read_tenant_authority (store, "missing",
+          &tenant), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (tenant);
+
+  WylPolicyGraphAuthorityRecord *graph = NULL;
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "tenant-b",
+          "graph-b", &graph), ==, WYRELOG_E_OK);
+  g_assert_nonnull (graph);
+  g_assert_cmpstr (graph->tenant_id, ==, "tenant-b");
+  g_assert_cmpstr (graph->graph_id, ==, "graph-b");
+  g_assert_cmpint (graph->lifecycle_state, ==,
+      WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED);
+  g_assert_false (graph->has_store_identity);
+  g_assert_null (graph->store_uuid);
+  g_assert_cmpint (graph->last_error_class, ==, WYL_POLICY_GRAPH_ERROR_NONE);
+  wyl_policy_graph_authority_record_free (graph);
+
+  GPtrArray *tenants = NULL;
+  g_assert_cmpint (wyl_policy_store_list_tenant_authorities (store, &tenants),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (tenants->len, ==, 3);
+  WylPolicyTenantAuthorityRecord *listed_tenant = g_ptr_array_index (tenants,
+      1);
+  g_assert_cmpstr (listed_tenant->tenant_id, ==, "tenant-a");
+  g_ptr_array_unref (tenants);
+
+  GPtrArray *graphs = NULL;
+  g_assert_cmpint (wyl_policy_store_list_graph_authorities (store, NULL,
+          &graphs), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (graphs->len, ==, 2);
+  WylPolicyGraphAuthorityRecord *listed_graph = g_ptr_array_index (graphs, 0);
+  g_assert_cmpstr (listed_graph->tenant_id, ==, "tenant-a");
+  g_ptr_array_unref (graphs);
+  graphs = NULL;
+  g_assert_cmpint (wyl_policy_store_list_graph_authorities (store, "tenant-b",
+          &graphs), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (graphs->len, ==, 1);
+  listed_graph = g_ptr_array_index (graphs, 0);
+  g_assert_cmpstr (listed_graph->graph_id, ==, "graph-b");
+  g_ptr_array_unref (graphs);
+
+  graph = GINT_TO_POINTER (1);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "tenant-b",
+          "missing", &graph), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (graph);
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "", "x",
+          &graph), ==, WYRELOG_E_INVALID);
+
+  exec_ok (db,
+      "DROP TRIGGER fact_graph_authority_update_guard;"
+      "UPDATE fact_graphs SET store_uuid='not-a-canonical-uuid',"
+      "format_version=1,path_encoding_version=1,"
+      "lifecycle_state='provisioning',lifecycle_generation=1 "
+      "WHERE tenant_id='tenant-b' AND graph_id='graph-b';");
+  g_assert_cmpint (wyl_policy_store_read_graph_authority (store, "tenant-b",
+          "graph-b", &graph), ==, WYRELOG_E_POLICY);
+  g_assert_null (graph);
+}
+
 static gchar *
 make_store_path (gchar **out_root)
 {
@@ -479,6 +561,8 @@ main (int argc, char **argv)
       test_tenant_state_constraints);
   g_test_add_func ("/policy/graph-authority/integer-domain-constraints",
       test_integer_domain_constraints);
+  g_test_add_func ("/policy/graph-authority/typed-read-list",
+      test_typed_authority_reads_and_lists);
   g_test_add_func ("/policy/graph-authority/fresh-fault-retry",
       test_fresh_migration_failures_reopen_and_retry);
   g_test_add_func ("/policy/graph-authority/legacy-fault-retry",

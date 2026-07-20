@@ -32,6 +32,77 @@ typedef enum
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_COUNT,
 } WylPolicyGraphAuthorityMigrationFailStage;
 
+typedef enum
+{
+  WYL_POLICY_TENANT_LIFECYCLE_LEGACY_UNCLASSIFIED,
+  WYL_POLICY_TENANT_LIFECYCLE_ACTIVE,
+  WYL_POLICY_TENANT_LIFECYCLE_SEALING,
+  WYL_POLICY_TENANT_LIFECYCLE_SEALED,
+  WYL_POLICY_TENANT_LIFECYCLE_UNSEALING,
+} WylPolicyTenantLifecycleState;
+
+typedef enum
+{
+  WYL_POLICY_GRAPH_LIFECYCLE_LEGACY_UNCLASSIFIED,
+  WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+  WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+  WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
+  WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED,
+} WylPolicyGraphLifecycleState;
+
+typedef enum
+{
+  WYL_POLICY_GRAPH_ERROR_NONE,
+  WYL_POLICY_GRAPH_ERROR_PATH,
+  WYL_POLICY_GRAPH_ERROR_IDENTITY,
+  WYL_POLICY_GRAPH_ERROR_FORMAT,
+  WYL_POLICY_GRAPH_ERROR_SCHEMA,
+  WYL_POLICY_GRAPH_ERROR_OPEN,
+  WYL_POLICY_GRAPH_ERROR_REPLAY,
+  WYL_POLICY_GRAPH_ERROR_RECOVERY,
+  WYL_POLICY_GRAPH_ERROR_INTERNAL,
+} WylPolicyGraphErrorClass;
+
+typedef struct
+{
+  gchar *tenant_id;
+  WylPolicyTenantLifecycleState lifecycle_state;
+  guint64 lifecycle_generation;
+  guint64 reconciliation_generation;
+  gboolean sealed_compatibility;
+} WylPolicyTenantAuthorityRecord;
+
+typedef struct
+{
+  gchar *tenant_id;
+  gchar *graph_id;
+  WylPolicyGraphLifecycleState lifecycle_state;
+  gchar *store_uuid;
+  guint64 format_version;
+  guint64 path_encoding_version;
+  guint64 lifecycle_generation;
+  guint64 reconciliation_generation;
+  WylPolicyGraphErrorClass last_error_class;
+  gboolean has_store_identity;
+  gboolean sealed_compatibility;
+} WylPolicyGraphAuthorityRecord;
+
+void wyl_policy_tenant_authority_record_free
+    (WylPolicyTenantAuthorityRecord * record);
+void wyl_policy_graph_authority_record_free
+    (WylPolicyGraphAuthorityRecord * record);
+wyrelog_error_t wyl_policy_store_read_tenant_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    WylPolicyTenantAuthorityRecord ** out_record);
+wyrelog_error_t wyl_policy_store_list_tenant_authorities
+    (wyl_policy_store_t * store, GPtrArray ** out_records);
+wyrelog_error_t wyl_policy_store_read_graph_authority
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    const gchar * graph_id, WylPolicyGraphAuthorityRecord ** out_record);
+wyrelog_error_t wyl_policy_store_list_graph_authorities
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    GPtrArray ** out_records);
+
 /* No pinned SQLite VFS is shipped yet. File-backed plaintext provider stores
  * remain fail-closed until a platform implementation can bind SQLite's main
  * database and every journal/WAL/SHM path to the retained lease authority. */
