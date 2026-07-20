@@ -14,6 +14,7 @@
 #include "policy/store-handoff-retirement-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-request-id-private.h"
+#include "test-service-credential-operation-root.h"
 
 #define COLLISION_ID "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
 #define SECOND_ID "wlc_000000000000000000000000000"
@@ -5782,7 +5783,8 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:retirement-resume");
   g_autofree gchar *operation_root =
-      g_dir_make_tmp ("wyl-retirement-resume-operation-XXXXXX", NULL);
+      service_credential_operation_root_for_test (fixture.dir,
+      "retirement-resume-operation");
   WylServiceCredentialOperationStorage operation_storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor operation_anchor =
@@ -6058,7 +6060,8 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:retirement-revoke");
   g_autofree gchar *operation_root =
-      g_dir_make_tmp ("wyl-retirement-revoke-operation-XXXXXX", NULL);
+      service_credential_operation_root_for_test (fixture.dir,
+      "retirement-revoke-operation");
   WylServiceCredentialOperationStorage operation_storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor operation_anchor =
@@ -6311,7 +6314,8 @@ test_handoff_terminal_retirement_file_boundary_replay (void)
   wyl_policy_store_t *store = store_of (handle);
   prepare_authority (handle, "svc:handoff:retirement-file");
   g_autofree gchar *operation_root =
-      g_dir_make_tmp ("wyl-retirement-file-operation-XXXXXX", NULL);
+      service_credential_operation_root_for_test (fixture.dir,
+      "retirement-file-operation");
   WylServiceCredentialOperationStorage operation_storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor operation_anchor =

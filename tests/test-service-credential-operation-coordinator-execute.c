@@ -16,6 +16,7 @@
 #include "wyl-session-layout-private.h"
 #include "wyl-request-id-private.h"
 #include "../wyrelog/wyctl/wyctl-publication-private.h"
+#include "test-service-credential-operation-root.h"
 
 #define ROTATE_CANONICAL_ID "wlc_000000000000000000000000000"
 
@@ -823,18 +824,9 @@ test_authenticated_handoff_issue_end_to_end (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
 
-#ifdef G_OS_WIN32
-  const gchar *local = g_getenv ("LOCALAPPDATA");
-  g_assert_nonnull (local);
-  g_autofree gchar *operation_name = g_strdup_printf
-      ("wyrelog-handoff-execute-%lu-%u", (gulong) GetCurrentProcessId (),
-      g_random_int ());
-  g_autofree gchar *operation_root = g_build_filename (local, operation_name,
-      NULL);
-#else
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "operations", NULL);
-#endif
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "handoff-execute-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -1603,8 +1595,9 @@ test_handoff_delivery_recovery_matrix (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
 
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "delivery-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "delivery-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
@@ -1978,8 +1971,9 @@ test_handoff_automatic_maintenance_gate (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_handle_reload_engine_pair (handle), ==, WYRELOG_E_OK);
   sqlite3 *db = db_of (handle);
-  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
-      "maintenance-operations", NULL);
+  g_autofree gchar *operation_root =
+      service_credential_operation_root_for_test (fixture.dir,
+      "maintenance-operations");
   WylServiceCredentialOperationStorage storage =
       WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
   WylServiceCredentialOperationRootAnchor anchor =
