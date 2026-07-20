@@ -35,6 +35,7 @@ wyrelog_sources = files(
   'auth/service-credential-operation-coordinator-recovery-private.c',
   'auth/service-credential-operation-coordinator-maintenance-private.c',
   'auth/service-credential-operation-coordinator-cancel-private.c',
+  'auth/service-credential-operation-coordinator-remediate-private.c',
   'auth/service-credential-operation-coordinator-execute-private.c',
   'auth/service-credential-operation-coordinator-storage-private.c',
   'auth/service-credential-operation-storage-private.c',
