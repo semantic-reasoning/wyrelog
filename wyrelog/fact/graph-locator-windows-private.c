@@ -481,6 +481,9 @@ static wyrelog_error_t
 reject_remote_volume (HANDLE root)
 {
   FILE_REMOTE_PROTOCOL_INFO remote = { 0 };
+  G_STATIC_ASSERT (sizeof remote <= G_MAXUSHORT);
+  remote.StructureVersion = 2;
+  remote.StructureSize = (USHORT) sizeof remote;
   if (GetFileInformationByHandleEx (root, FileRemoteProtocolInfo, &remote,
           sizeof remote))
     return WYRELOG_E_POLICY;
