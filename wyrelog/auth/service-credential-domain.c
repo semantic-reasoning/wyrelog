@@ -664,6 +664,14 @@ void wyl_service_credential_handoff_remediation_result_clear
   if (result == NULL)
     return;
   g_clear_pointer (&result->audit_id, g_free);
+  g_clear_pointer (&result->remediation_request_id, g_free);
+  g_clear_pointer (&result->decision_request_id, g_free);
+  g_clear_pointer (&result->original_request_id, g_free);
+  g_clear_pointer (&result->original_actor_subject_id, g_free);
+  g_clear_pointer (&result->source_disposition_id, g_free);
+  g_clear_pointer (&result->source_audit_id, g_free);
+  g_clear_pointer (&result->revoke_event_request_id, g_free);
+  g_clear_pointer (&result->revoke_event_actor_subject_id, g_free);
   memset (result, 0, sizeof *result);
 }
 
@@ -874,7 +882,23 @@ wyl_service_credential_handoff_remediate_exact (WylHandle *handle,
     .action = (WylPolicyServiceHandoffRemediationAction) input->action,
     .confirmation_version = input->confirmation_version,
     .confirmed = input->confirmed,
+    .source_kind = (WylPolicyServiceHandoffRemediationSourceKind)
+        input->source_kind,
+    .observed_state = (WylPolicyServiceHandoffRemediationJournalState)
+        input->observed_state,
+    .source_disposition_id = input->source_disposition_id,
+    .source_audit_id = input->source_audit_id,
+    .source_reason = (WylPolicyServiceHandoffDispositionReason)
+        input->source_reason,
+    .oar_source_state = (WylPolicyServiceHandoffRemediationJournalState)
+        input->oar_source_state,
+    .oar_cause = (WylPolicyServiceHandoffRemediationOarCause) input->oar_cause,
+    .resume_target_state = (WylPolicyServiceHandoffRemediationJournalState)
+        input->resume_target_state,
   };
+  memcpy (stored_input.journal_snapshot_digest,
+      input->journal_snapshot_digest,
+      sizeof stored_input.journal_snapshot_digest);
   service_handoff_translate_exact_tuple (&input->tuple, &stored_input.tuple);
   WylPolicyServiceHandoffRemediationResult stored = { 0 };
   if (rc == WYRELOG_E_OK)
@@ -896,9 +920,190 @@ wyl_service_credential_handoff_remediate_exact (WylHandle *handle,
     out_result->revoked_now = stored.revoked_now;
     out_result->outcome =
         (wyl_service_credential_handoff_remediation_outcome_t) stored.outcome;
+    out_result->escrow_outcome =
+        (wyl_service_credential_handoff_remediation_escrow_outcome_t)
+        stored.escrow_outcome;
     out_result->invalidation_generation = stored.invalidation_generation;
+    out_result->credential_generation_after =
+        stored.credential_generation_after;
+    out_result->revoke_event_id = stored.revoke_event_id;
+    out_result->revoke_event_generation = stored.revoke_event_generation;
+    out_result->revoke_event_request_id =
+        g_steal_pointer (&stored.revoke_event_request_id);
+    out_result->revoke_event_actor_subject_id =
+        g_steal_pointer (&stored.revoke_event_actor_subject_id);
+    out_result->revoke_event_created_at_us = stored.revoke_event_created_at_us;
+    out_result->remediation_request_id =
+        g_steal_pointer (&stored.remediation_request_id);
+    out_result->action =
+        (wyl_service_credential_handoff_remediation_action_t) stored.action;
+    out_result->confirmation_version = stored.confirmation_version;
+    out_result->confirmed = stored.confirmed;
+    out_result->created_at_us = stored.created_at_us;
+    out_result->source_kind =
+        (wyl_service_credential_handoff_remediation_source_kind_t)
+        stored.source_kind;
+    memcpy (out_result->journal_snapshot_digest,
+        stored.journal_snapshot_digest,
+        sizeof out_result->journal_snapshot_digest);
+    memcpy (out_result->request_fingerprint, stored.request_fingerprint,
+        sizeof out_result->request_fingerprint);
+    out_result->observed_state =
+        (wyl_service_credential_handoff_remediation_journal_state_t)
+        stored.observed_state;
+    out_result->oar_source_state =
+        (wyl_service_credential_handoff_remediation_journal_state_t)
+        stored.oar_source_state;
+    out_result->oar_cause =
+        (wyl_service_credential_handoff_remediation_oar_cause_t)
+        stored.oar_cause;
+    out_result->resume_target_state =
+        (wyl_service_credential_handoff_remediation_journal_state_t)
+        stored.resume_target_state;
+    out_result->source_reason =
+        (wyl_service_credential_handoff_disposition_reason_t)
+        stored.source_reason;
+    out_result->decision_request_id =
+        g_steal_pointer (&stored.decision_request_id);
+    out_result->original_request_id =
+        g_steal_pointer (&stored.original_request_id);
+    out_result->original_actor_subject_id =
+        g_steal_pointer (&stored.original_actor_subject_id);
+    out_result->source_disposition_id =
+        g_steal_pointer (&stored.source_disposition_id);
+    out_result->source_audit_id = g_steal_pointer (&stored.source_audit_id);
+    g_strlcpy (out_result->escrow_id, stored.escrow_id,
+        sizeof out_result->escrow_id);
+    memcpy (out_result->binding_digest, stored.binding_digest,
+        sizeof out_result->binding_digest);
+    g_strlcpy (out_result->successor_credential_id,
+        stored.successor_credential_id,
+        sizeof out_result->successor_credential_id);
+    out_result->successor_issuance_generation =
+        stored.successor_issuance_generation;
     out_result->audit_id = g_steal_pointer (&stored.audit_id);
   }
+  wyl_policy_service_handoff_remediation_result_clear (&stored);
+  return rc;
+}
+
+static void
+    service_handoff_take_remediation_result
+    (WylPolicyServiceHandoffRemediationResult * stored,
+    wyl_service_credential_handoff_remediation_result_t * out)
+{
+  out->replayed = stored->replayed;
+  out->revoked_now = stored->revoked_now;
+  out->outcome =
+      (wyl_service_credential_handoff_remediation_outcome_t) stored->outcome;
+  out->escrow_outcome =
+      (wyl_service_credential_handoff_remediation_escrow_outcome_t)
+      stored->escrow_outcome;
+  out->invalidation_generation = stored->invalidation_generation;
+  out->credential_generation_after = stored->credential_generation_after;
+  out->revoke_event_id = stored->revoke_event_id;
+  out->revoke_event_generation = stored->revoke_event_generation;
+  out->revoke_event_request_id =
+      g_steal_pointer (&stored->revoke_event_request_id);
+  out->revoke_event_actor_subject_id =
+      g_steal_pointer (&stored->revoke_event_actor_subject_id);
+  out->revoke_event_created_at_us = stored->revoke_event_created_at_us;
+  out->remediation_request_id =
+      g_steal_pointer (&stored->remediation_request_id);
+  out->action =
+      (wyl_service_credential_handoff_remediation_action_t) stored->action;
+  out->confirmation_version = stored->confirmation_version;
+  out->confirmed = stored->confirmed;
+  out->created_at_us = stored->created_at_us;
+  out->source_kind = (wyl_service_credential_handoff_remediation_source_kind_t)
+      stored->source_kind;
+  memcpy (out->journal_snapshot_digest, stored->journal_snapshot_digest,
+      sizeof out->journal_snapshot_digest);
+  memcpy (out->request_fingerprint, stored->request_fingerprint,
+      sizeof out->request_fingerprint);
+  out->observed_state =
+      (wyl_service_credential_handoff_remediation_journal_state_t)
+      stored->observed_state;
+  out->oar_source_state =
+      (wyl_service_credential_handoff_remediation_journal_state_t)
+      stored->oar_source_state;
+  out->oar_cause = (wyl_service_credential_handoff_remediation_oar_cause_t)
+      stored->oar_cause;
+  out->resume_target_state =
+      (wyl_service_credential_handoff_remediation_journal_state_t)
+      stored->resume_target_state;
+  out->source_reason = (wyl_service_credential_handoff_disposition_reason_t)
+      stored->source_reason;
+  out->decision_request_id = g_steal_pointer (&stored->decision_request_id);
+  out->original_request_id = g_steal_pointer (&stored->original_request_id);
+  out->original_actor_subject_id =
+      g_steal_pointer (&stored->original_actor_subject_id);
+  out->source_disposition_id = g_steal_pointer (&stored->source_disposition_id);
+  out->source_audit_id = g_steal_pointer (&stored->source_audit_id);
+  g_strlcpy (out->escrow_id, stored->escrow_id, sizeof out->escrow_id);
+  memcpy (out->binding_digest, stored->binding_digest,
+      sizeof out->binding_digest);
+  g_strlcpy (out->successor_credential_id, stored->successor_credential_id,
+      sizeof out->successor_credential_id);
+  out->successor_issuance_generation = stored->successor_issuance_generation;
+  out->audit_id = g_steal_pointer (&stored->audit_id);
+}
+
+wyrelog_error_t
+wyl_service_credential_handoff_resolve_remediation (WylHandle *handle,
+    const gchar *remediation_request_id, const gchar *current_actor_subject_id,
+    const wyl_service_credential_mutation_authorization_t *authorization,
+    wyl_service_credential_handoff_remediation_result_t *out_result)
+{
+  if (out_result != NULL)
+    wyl_service_credential_handoff_remediation_result_clear (out_result);
+  if (handle == NULL || remediation_request_id == NULL
+      || current_actor_subject_id == NULL || authorization == NULL
+      || authorization->authorize == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_authorize (&mutation, authorization,
+        current_actor_subject_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  WylPolicyServiceHandoffRemediationResult stored = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_resolve_service_handoff_remediation_core
+        (mutation.transaction, mutation.store, remediation_request_id,
+        current_actor_subject_id, &stored);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK)
+    service_handoff_take_remediation_result (&stored, out_result);
+  wyl_policy_service_handoff_remediation_result_clear (&stored);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_credential_handoff_resolve_remediation_incident
+    (WylHandle * handle, const gchar * original_request_id,
+    const guint8 journal_snapshot_digest
+    [WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES],
+    wyl_service_credential_handoff_remediation_result_t * out_result)
+{
+  if (out_result != NULL)
+    wyl_service_credential_handoff_remediation_result_clear (out_result);
+  if (handle == NULL || original_request_id == NULL
+      || journal_snapshot_digest == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  WylPolicyServiceHandoffRemediationResult stored = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_resolve_service_handoff_remediation_incident_core
+        (mutation.transaction, mutation.store, original_request_id,
+        journal_snapshot_digest, &stored);
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK)
+    service_handoff_take_remediation_result (&stored, out_result);
   wyl_policy_service_handoff_remediation_result_clear (&stored);
   return rc;
 }

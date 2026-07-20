@@ -920,7 +920,11 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_remediation_actions (
         typeof(remediation_request_id) = 'text' AND length(remediation_request_id) = 27
         AND instr(remediation_request_id, char(0)) = 0),
     request_fingerprint BLOB NOT NULL CHECK (typeof(request_fingerprint) = 'blob'
-        AND length(request_fingerprint) = 32),
+        AND length(request_fingerprint) = 32
+        AND request_fingerprint <> zeroblob(32)),
+    incident_fingerprint BLOB NOT NULL CHECK (
+        typeof(incident_fingerprint) = 'blob' AND length(incident_fingerprint) = 32
+        AND incident_fingerprint <> zeroblob(32)),
     decision_request_id TEXT NOT NULL UNIQUE CHECK (typeof(decision_request_id) = 'text'
         AND length(decision_request_id) = 27
         AND instr(decision_request_id, char(0)) = 0),
@@ -932,6 +936,31 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_remediation_actions (
     current_actor_subject_id TEXT NOT NULL CHECK (typeof(current_actor_subject_id) = 'text'
         AND length(current_actor_subject_id) BETWEEN 1 AND 128
         AND instr(current_actor_subject_id, char(0)) = 0),
+    source_kind TEXT NOT NULL CHECK (
+        source_kind IN ('committed_attention', 'operator_action_required')),
+    journal_snapshot_digest BLOB NOT NULL CHECK (
+        typeof(journal_snapshot_digest) = 'blob' AND length(journal_snapshot_digest) = 32
+        AND journal_snapshot_digest <> zeroblob(32)),
+    observed_state TEXT NOT NULL CHECK (observed_state IN ('server_committed',
+        'publication_planned', 'publication_prepared', 'file_published',
+        'cleanup_required', 'operator_action_required')),
+    source_disposition_id TEXT CHECK (source_disposition_id IS NULL OR (
+        typeof(source_disposition_id) = 'text' AND length(source_disposition_id) = 36
+        AND instr(source_disposition_id, char(0)) = 0)),
+    source_audit_id TEXT CHECK (source_audit_id IS NULL OR (
+        typeof(source_audit_id) = 'text' AND length(source_audit_id) = 36
+        AND instr(source_audit_id, char(0)) = 0)),
+    source_reason TEXT CHECK (
+        source_reason IS NULL OR source_reason IN ('operation_cancelled', 'operation_expired')),
+    oar_source_state TEXT CHECK (oar_source_state IS NULL OR oar_source_state IN (
+        'server_committed', 'publication_planned', 'publication_prepared',
+        'file_published', 'cleanup_required')),
+    oar_cause TEXT CHECK (oar_cause IS NULL OR oar_cause IN ('receipt_foreign',
+        'receipt_uncertain', 'escrow_foreign', 'escrow_uncertain',
+        'successor_revoked', 'successor_expired', 'explicit_hold', 'escrow_missing')),
+    resume_target_state TEXT CHECK (resume_target_state IS NULL OR resume_target_state IN (
+        'server_committed', 'publication_planned', 'publication_prepared',
+        'file_published', 'cleanup_required')),
     escrow_id TEXT NOT NULL CHECK (typeof(escrow_id) = 'text'
         AND length(escrow_id) = 36 AND instr(escrow_id, char(0)) = 0),
     binding_digest BLOB NOT NULL CHECK (typeof(binding_digest) = 'blob'
@@ -947,6 +976,22 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_remediation_actions (
         AND typeof(confirmed) = 'integer'),
     outcome TEXT NOT NULL CHECK (outcome IN ('recorded', 'revoked_and_wiped',
         'expired_and_wiped', 'already_revoked_and_wiped')),
+    escrow_outcome TEXT NOT NULL CHECK (
+        escrow_outcome IN ('retained', 'deleted', 'already_absent')),
+    credential_generation_after INTEGER NOT NULL CHECK (credential_generation_after >= 1),
+    revoke_event_id INTEGER CHECK (revoke_event_id IS NULL OR revoke_event_id > 0),
+    revoke_event_generation INTEGER CHECK (
+        revoke_event_generation IS NULL OR revoke_event_generation >= 1),
+    revoke_event_request_id TEXT CHECK (revoke_event_request_id IS NULL OR (
+        typeof(revoke_event_request_id) = 'text'
+        AND length(revoke_event_request_id) BETWEEN 1 AND 256
+        AND instr(revoke_event_request_id, char(0)) = 0)),
+    revoke_event_actor_subject_id TEXT CHECK (revoke_event_actor_subject_id IS NULL OR (
+        typeof(revoke_event_actor_subject_id) = 'text'
+        AND length(revoke_event_actor_subject_id) BETWEEN 1 AND 128
+        AND instr(revoke_event_actor_subject_id, char(0)) = 0)),
+    revoke_event_created_at_us INTEGER CHECK (
+        revoke_event_created_at_us IS NULL OR revoke_event_created_at_us > 0),
     audit_id TEXT NOT NULL UNIQUE CHECK (typeof(audit_id) = 'text'
         AND length(audit_id) = 36 AND instr(audit_id, char(0)) = 0),
     created_at_us INTEGER NOT NULL CHECK (created_at_us > 0),
@@ -954,12 +999,57 @@ CREATE TABLE IF NOT EXISTS service_credential_handoff_remediation_actions (
         AND original_request_id <> decision_request_id
         AND remediation_request_id <> decision_request_id),
     CHECK (original_actor_subject_id <> current_actor_subject_id),
+    CHECK ((source_kind = 'committed_attention'
+            AND observed_state IN ('server_committed', 'publication_planned',
+                'publication_prepared', 'file_published', 'cleanup_required')
+            AND source_disposition_id IS NOT NULL AND source_audit_id IS NOT NULL
+            AND source_reason IS NOT NULL AND oar_source_state IS NULL
+            AND oar_cause IS NULL AND resume_target_state IS NULL)
+        OR (source_kind = 'operator_action_required'
+            AND observed_state = 'operator_action_required'
+            AND source_disposition_id IS NULL AND source_audit_id IS NULL
+            AND source_reason IS NULL AND oar_source_state IS NOT NULL
+            AND oar_cause IS NOT NULL
+            AND resume_target_state = oar_source_state)),
+    CHECK (NOT (oar_source_state = 'server_committed'
+        AND oar_cause IN ('receipt_foreign', 'receipt_uncertain'))),
+    CHECK (NOT (action = 'resume' AND oar_cause IN (
+        'successor_revoked', 'successor_expired', 'escrow_missing'))),
+    CHECK (escrow_outcome <> 'already_absent'
+        OR (source_kind = 'operator_action_required'
+            AND oar_cause = 'escrow_missing' AND action = 'revoke_and_wipe')),
     CHECK ((action = 'resume' AND confirmation_version = 0 AND confirmed = 0
-            AND outcome = 'recorded')
+            AND outcome = 'recorded' AND escrow_outcome = 'retained'
+            AND credential_generation_after = successor_issuance_generation
+            AND revoke_event_id IS NULL AND revoke_event_generation IS NULL
+            AND revoke_event_request_id IS NULL AND revoke_event_actor_subject_id IS NULL
+            AND revoke_event_created_at_us IS NULL)
         OR (action = 'revoke_and_wipe' AND confirmation_version = 1 AND confirmed = 1
             AND outcome IN ('revoked_and_wiped',
-            'expired_and_wiped', 'already_revoked_and_wiped')))
+            'expired_and_wiped', 'already_revoked_and_wiped')
+            AND escrow_outcome IN ('deleted', 'already_absent')
+            AND ((outcome = 'expired_and_wiped'
+                    AND credential_generation_after = successor_issuance_generation
+                    AND revoke_event_id IS NULL AND revoke_event_generation IS NULL
+                    AND revoke_event_request_id IS NULL
+                    AND revoke_event_actor_subject_id IS NULL
+                    AND revoke_event_created_at_us IS NULL)
+                OR (outcome IN ('revoked_and_wiped', 'already_revoked_and_wiped')
+                    AND successor_issuance_generation < 9223372036854775807
+                    AND credential_generation_after = successor_issuance_generation + 1
+                    AND revoke_event_id IS NOT NULL AND revoke_event_generation IS NOT NULL
+                    AND revoke_event_generation = credential_generation_after
+                    AND revoke_event_request_id IS NOT NULL
+                    AND revoke_event_actor_subject_id IS NOT NULL
+                    AND revoke_event_created_at_us IS NOT NULL
+                    AND (outcome <> 'revoked_and_wiped'
+                        OR (revoke_event_request_id = remediation_request_id
+                            AND revoke_event_actor_subject_id = current_actor_subject_id
+                            AND revoke_event_created_at_us = created_at_us))))))
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_remediation_incident
+    ON service_credential_handoff_remediation_actions (incident_fingerprint);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_service_handoff_completed_revoke
     ON service_credential_handoff_remediation_actions (
