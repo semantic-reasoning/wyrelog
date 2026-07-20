@@ -1,4 +1,8 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#if !defined(_WIN32) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700
+#endif
+
 /*
  * Drives wyctl as a child process against a wyrelogd HTTP server booted
  * in-process. The four mutation subcommands (permission-grant,
@@ -12,6 +16,9 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <gio/gio.h>
+
+#include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/wait.h>
 
@@ -85,6 +92,25 @@ typedef struct
   const gchar *graph_id;
   gchar *storage_path;
 } GraphPathProbe;
+
+static gchar *
+make_fact_root (const gchar *tmpl, GError **error)
+{
+  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+  if (created == NULL)
+    return NULL;
+  gchar *root = realpath (created, NULL);
+  if (root != NULL)
+    return root;
+
+  gint saved_errno = errno;
+  (void) g_rmdir (created);
+  if (error != NULL && *error == NULL)
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  return NULL;
+}
 
 static wyrelog_error_t
 grant_fact_authority (WylHandle *handle, const gchar *subject)
@@ -306,7 +332,7 @@ main (void)
 {
 #ifdef WYL_HAS_FACT_STORE
   g_autoptr (GError) fact_root_error = NULL;
-  g_autofree gchar *fact_root = g_dir_make_tmp ("wyctl-facts-XXXXXX",
+  g_autofree gchar *fact_root = make_fact_root ("wyctl-facts-XXXXXX",
       &fact_root_error);
   if (fact_root == NULL)
     return 101;

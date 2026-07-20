@@ -7,6 +7,7 @@
 #include <glib/gstdio.h>
 
 #include <errno.h>
+#include <stdlib.h>
 
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/fact/graph-locator-private.h"
@@ -781,6 +782,27 @@ make_fact_graph_options (const gchar *tenant_id, const gchar *graph_id,
   return opts;
 }
 
+#ifndef G_OS_WIN32
+static gchar *
+make_fact_root (const gchar *tmpl, GError **error)
+{
+  g_autofree gchar *created = g_dir_make_tmp (tmpl, error);
+  if (created == NULL)
+    return NULL;
+  gchar *root = realpath (created, NULL);
+  if (root != NULL)
+    return root;
+
+  gint saved_errno = errno;
+  (void) g_rmdir (created);
+  if (error != NULL && *error == NULL)
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (saved_errno),
+        "Failed to resolve temporary directory '%s': %s", created,
+        g_strerror (saved_errno));
+  return NULL;
+}
+#endif
+
 static gint
 check_store_manages_fact_graph_registry (void)
 {
@@ -811,7 +833,7 @@ check_store_manages_fact_graph_registry (void)
   return 0;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-XXXXXX", &error);
+  g_autofree gchar *root = make_fact_root ("wyl-facts-XXXXXX", &error);
   if (root == NULL)
     return 400;
 
@@ -897,7 +919,7 @@ check_store_seals_fact_graph_registry (void)
   return 0;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-seal-XXXXXX", &error);
+  g_autofree gchar *root = make_fact_root ("wyl-facts-seal-XXXXXX", &error);
   if (root == NULL)
     return 420;
 
@@ -962,8 +984,8 @@ check_store_rejects_fact_graph_registry_escapes (void)
   return 0;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-esc-XXXXXX", &error);
-  g_autofree gchar *outside = g_dir_make_tmp ("wyl-facts-out-XXXXXX",
+  g_autofree gchar *root = make_fact_root ("wyl-facts-esc-XXXXXX", &error);
+  g_autofree gchar *outside = make_fact_root ("wyl-facts-out-XXXXXX",
       &error);
   if (root == NULL || outside == NULL)
     return 440;
@@ -1024,7 +1046,7 @@ check_store_rejects_fact_graph_reserved_metadata (void)
   return 0;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-rsv-XXXXXX", &error);
+  g_autofree gchar *root = make_fact_root ("wyl-facts-rsv-XXXXXX", &error);
   if (root == NULL)
     return 460;
 
@@ -1111,7 +1133,7 @@ check_store_fact_graph_metadata_only (void)
   return 0;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-meta-XXXXXX", &error);
+  g_autofree gchar *root = make_fact_root ("wyl-facts-meta-XXXXXX", &error);
   if (root == NULL)
     return 480;
 
@@ -1176,8 +1198,8 @@ check_store_pins_fact_root_identity (void)
   return 0;
 #else
   g_autoptr (GError) error = NULL;
-  g_autofree gchar *root = g_dir_make_tmp ("wyl-facts-pin-XXXXXX", &error);
-  g_autofree gchar *other_root = g_dir_make_tmp ("wyl-facts-other-XXXXXX",
+  g_autofree gchar *root = make_fact_root ("wyl-facts-pin-XXXXXX", &error);
+  g_autofree gchar *other_root = make_fact_root ("wyl-facts-other-XXXXXX",
       &error);
   if (root == NULL || other_root == NULL)
     return 490;
