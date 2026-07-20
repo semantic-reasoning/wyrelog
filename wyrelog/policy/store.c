@@ -2233,7 +2233,8 @@ rotation_intent_write_pending (wyl_policy_store_t *store,
 
 static wyrelog_error_t
 rotation_intent_finalize_committed (wyl_policy_store_t *store,
-    const guint8 *new_key_material)
+    const guint8 *new_key_material,
+    const wyl_policy_store_rotation_runtime_t *rotation_runtime)
 {
   if (store == NULL || new_key_material == NULL)
     return WYRELOG_E_INVALID;
@@ -2275,6 +2276,15 @@ rotation_intent_finalize_committed (wyl_policy_store_t *store,
     rc = wyl_policy_rotation_intent_write_sidecar (store, &intent, auth_key,
         sizeof auth_key);
   }
+  /* Post-linearization: the rotation is already durable. This seam is log-only
+   * and never reverses the committed rename; recovery clears any residual
+   * sidecar left by a crash between the committed write and the unlink. */
+  if (rc == WYRELOG_E_OK && rotation_runtime != NULL
+      && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_DURING_INTENT_CLEANUP) != 0)
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "policy store rotation committed but an intent-cleanup seam signalled");
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_rotation_intent_clear_sidecar (store);
 out:
@@ -2566,6 +2576,15 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
   if (fsync (dirfd) != 0)
     WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
         "policy store canonical replacement completed but directory fsync failed");
+
+  /* Post-linearization: the rename already committed, so this seam is log-only
+   * and the rotation still succeeds. The Windows MoveFileEx twin is write-
+   * through and has no corresponding parent-directory fsync site. */
+  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_AFTER_PARENT_DIR_FSYNC) != 0)
+    WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
+        "policy store canonical replacement durable but a post-fsync seam signalled");
 
   return WYRELOG_E_OK;
 }
@@ -3787,6 +3806,14 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
     rc = prepare_policy_store_encrypted (store, new_key_material,
         new_key_material + WYL_POLICY_STORE_KEY_LEN, &encrypted,
         &encrypted_len);
+  /* Pre-linearization: the encrypted image is staged in memory only; a
+   * signalled seam aborts before publish, leaving the old canonical root. */
+  if (rc == WYRELOG_E_OK && old_opts->rotation_runtime != NULL
+      && old_opts->rotation_runtime->checkpoint != NULL
+      && old_opts->rotation_runtime->checkpoint (old_opts->
+          rotation_runtime->data,
+          WYL_POLICY_ROTATION_AFTER_ENCRYPTED_IMAGE_PREP) != 0)
+    rc = WYRELOG_E_POLICY;
 
   gboolean replaced = FALSE;
   if (rc == WYRELOG_E_OK)
@@ -3799,7 +3826,7 @@ wyl_policy_store_rotate_keyprovider (const gchar *path,
     /* Rename/MoveFileEx is the linearization point. No later fallible cleanup
      * may reverse or report failure for the committed rotation. */
     wyrelog_error_t intent_rc = rotation_intent_finalize_committed (store,
-        new_key_material);
+        new_key_material, old_opts->rotation_runtime);
     if (intent_rc != WYRELOG_E_OK && intent_rc != WYRELOG_E_NOT_FOUND)
       WYL_LOG_WARN (WYL_LOG_SECTION_BOOT,
           "policy store rotation committed but intent finalization needs recovery");
@@ -9843,7 +9870,13 @@ prepare_keyprovider_rotation_work (wyl_policy_store_t *store,
   rc = rotation_intent_write_pending (store, &info, *out_new_key_material);
   if (rc != WYRELOG_E_OK)
     goto finish;
-  if (old_envelope != NULL && rotation_runtime != NULL
+  /* Pre-linearization: the pending intent sidecar now exists but the canonical
+   * root is unchanged, so a signalled seam aborts and preserves the old root. */
+  if (rotation_runtime != NULL && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_AFTER_INTENT_WRITE) != 0)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && old_envelope != NULL && rotation_runtime != NULL
       && rotation_runtime->checkpoint != NULL
       && rotation_runtime->checkpoint (rotation_runtime->data,
           WYL_POLICY_ROTATION_BEFORE_CVK_CAS) != 0)
@@ -9854,6 +9887,13 @@ prepare_keyprovider_rotation_work (wyl_policy_store_t *store,
     rc = exec_sql (store->db, "COMMIT;");
   if (rc == WYRELOG_E_OK)
     transaction = FALSE;
+  /* Pre-linearization: the CVK CAS committed only to the in-memory image, which
+   * is discarded on abort; the durable canonical root is still the old one. */
+  if (rc == WYRELOG_E_OK && rotation_runtime != NULL
+      && rotation_runtime->checkpoint != NULL
+      && rotation_runtime->checkpoint (rotation_runtime->data,
+          WYL_POLICY_ROTATION_AFTER_SQLITE_COMMIT) != 0)
+    rc = WYRELOG_E_POLICY;
 
 finish:
   if (transaction)

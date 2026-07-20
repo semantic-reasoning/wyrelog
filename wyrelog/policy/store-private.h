@@ -90,6 +90,17 @@ typedef enum
   WYL_POLICY_ROTATION_BEFORE_CVK_CAS = 1,
   WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME = 2,
   WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME = 3,
+  /* Pre-linearization seams: a nonzero checkpoint aborts the rotation and
+   * preserves the old canonical root byte-for-byte. */
+  WYL_POLICY_ROTATION_AFTER_INTENT_WRITE = 4,
+  WYL_POLICY_ROTATION_AFTER_SQLITE_COMMIT = 5,
+  WYL_POLICY_ROTATION_AFTER_ENCRYPTED_IMAGE_PREP = 6,
+  /* Post-linearization seams: the canonical rename has already committed, so a
+   * nonzero checkpoint is log-only and the rotation still returns success. */
+  WYL_POLICY_ROTATION_AFTER_PARENT_DIR_FSYNC = 7,
+  WYL_POLICY_ROTATION_DURING_INTENT_CLEANUP = 8,
+  /* Sentinel for array sizing; keep last and never persist stage values. */
+  WYL_POLICY_ROTATION_STAGE_COUNT
 } wyl_policy_store_rotation_stage_t;
 
 typedef struct

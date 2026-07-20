@@ -1049,14 +1049,15 @@ test_binding_and_unseal_boundaries (void)
 typedef struct
 {
   wyl_policy_store_rotation_stage_t fail_stage;
-  guint calls[4];
+  guint calls[WYL_POLICY_ROTATION_STAGE_COUNT];
 } RotationFault;
 
 static int
 rotation_checkpoint (gpointer data, wyl_policy_store_rotation_stage_t stage)
 {
   RotationFault *fault = data;
-  fault->calls[stage]++;
+  if (stage < WYL_POLICY_ROTATION_STAGE_COUNT)
+    fault->calls[stage]++;
   return fault->fail_stage == stage ? -1 : 0;
 }
 
@@ -1443,7 +1444,22 @@ test_rotation_preserves_golden_credential (void)
 static void
 test_rotation_publish_failpoints (void)
 {
-  for (guint iteration = 0; iteration < 2; iteration++) {
+  /* Every pre-linearization seam must abort the rotation and leave the old
+   * canonical root byte-identical. The two originally guarded seams return the
+   * error code produced by their own guard; the three new pre-linearization
+   * seams synthesize WYRELOG_E_POLICY. */
+  const struct
+  {
+    wyl_policy_store_rotation_stage_t stage;
+    wyrelog_error_t expected;
+  } cases[] = {
+    {WYL_POLICY_ROTATION_BEFORE_CVK_CAS, WYRELOG_E_POLICY},
+    {WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME, WYRELOG_E_IO},
+    {WYL_POLICY_ROTATION_AFTER_INTENT_WRITE, WYRELOG_E_POLICY},
+    {WYL_POLICY_ROTATION_AFTER_SQLITE_COMMIT, WYRELOG_E_POLICY},
+    {WYL_POLICY_ROTATION_AFTER_ENCRYPTED_IMAGE_PREP, WYRELOG_E_POLICY},
+  };
+  for (guint iteration = 0; iteration < G_N_ELEMENTS (cases); iteration++) {
     g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-fail-XXXXXX",
         NULL);
     g_assert_nonnull (dir);
@@ -1457,12 +1473,10 @@ test_rotation_publish_failpoints (void)
     TestProvider new_provider = {.seed = 0x20 };
     TestRuntime runtime = { 0 };
     RotationFault fault = {
-      .fail_stage = iteration == 0 ? WYL_POLICY_ROTATION_BEFORE_CVK_CAS :
-          WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME,
+      .fail_stage = cases[iteration].stage,
     };
     g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
-            &runtime, &fault), ==,
-        iteration == 0 ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+            &runtime, &fault), ==, cases[iteration].expected);
     g_autofree gchar *after = NULL;
     gsize after_len = 0;
     g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
@@ -1923,31 +1937,41 @@ test_rotation_recovery_plan (void)
 static void
 test_rotation_post_rename_warning_commits (void)
 {
-  g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
-  g_assert_nonnull (dir);
-  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
-  guint8 salt[16], verifier[32], cvk[32];
-  create_golden_store (path, salt, verifier, cvk);
-  TestProvider old_provider = { 0 };
-  TestProvider new_provider = {.seed = 0x20 };
-  TestRuntime runtime = { 0 };
-  RotationFault fault = {
-    .fail_stage = WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME,
+  /* Every post-linearization seam is log-only: the canonical rename has
+   * already committed, so a signalled checkpoint must still yield success and
+   * a store that opens and verifies under the new provider. */
+  const wyl_policy_store_rotation_stage_t stages[] = {
+    WYL_POLICY_ROTATION_AFTER_CANONICAL_RENAME,
+    WYL_POLICY_ROTATION_AFTER_PARENT_DIR_FSYNC,
+    WYL_POLICY_ROTATION_DURING_INTENT_CLEANUP,
   };
-  g_assert_cmpint (rotate_store (path, &old_provider, &new_provider, &runtime,
-          &fault), ==, WYRELOG_E_OK);
-  TestProvider reopened = {.seed = 0x20 };
-  TestRuntime reopened_runtime = { 0 };
-  wyl_policy_store_t *store = NULL;
-  g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store), ==,
-      WYRELOG_E_OK);
-  assert_golden_verifies (store, salt, verifier);
-  wyl_policy_store_close (store);
-  g_assert_cmpint (g_remove (path), ==, 0);
-  remove_rotation_sidecar (path);
-  g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
-  (void) g_remove (lock_path);
-  g_assert_cmpint (g_rmdir (dir), ==, 0);
+  for (guint iteration = 0; iteration < G_N_ELEMENTS (stages); iteration++) {
+    g_autofree gchar *dir = g_dir_make_tmp ("wyl-cvk-rotate-post-XXXXXX", NULL);
+    g_assert_nonnull (dir);
+    g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+    guint8 salt[16], verifier[32], cvk[32];
+    create_golden_store (path, salt, verifier, cvk);
+    TestProvider old_provider = { 0 };
+    TestProvider new_provider = {.seed = 0x20 };
+    TestRuntime runtime = { 0 };
+    RotationFault fault = {
+      .fail_stage = stages[iteration],
+    };
+    g_assert_cmpint (rotate_store (path, &old_provider, &new_provider,
+            &runtime, &fault), ==, WYRELOG_E_OK);
+    TestProvider reopened = {.seed = 0x20 };
+    TestRuntime reopened_runtime = { 0 };
+    wyl_policy_store_t *store = NULL;
+    g_assert_cmpint (open_store (path, &reopened, &reopened_runtime, &store),
+        ==, WYRELOG_E_OK);
+    assert_golden_verifies (store, salt, verifier);
+    wyl_policy_store_close (store);
+    g_assert_cmpint (g_remove (path), ==, 0);
+    remove_rotation_sidecar (path);
+    g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", path);
+    (void) g_remove (lock_path);
+    g_assert_cmpint (g_rmdir (dir), ==, 0);
+  }
 }
 
 static void
