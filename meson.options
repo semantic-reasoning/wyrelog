@@ -60,8 +60,10 @@ option('duckdb_source',
               + 'upstream amalgamated source release at v1.5.2 and '
               + 'compiles the single 25 MB duckdb.cpp translation unit '
               + 'in tree (slow: multi-minute single-TU compile). '
-              + 'Default is prebuilt; main-branch CI overrides to '
-              + 'subproject for from-source validation.'
+              + 'Default is prebuilt; main-branch CI runs the '
+              + 'from-source validation on the macOS runner while the '
+              + 'Linux runners stay on prebuilt to avoid recompiling the '
+              + 'amalgamation on every push.'
 )
 
 option('wyrelog_log_max_level',
