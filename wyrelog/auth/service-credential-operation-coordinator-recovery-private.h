@@ -18,10 +18,12 @@ G_BEGIN_DECLS
 } WylServiceCredentialOperationRecoveryOutcome;
 
 /* On success, returns the loaded PREPARED record for non-commit outcomes or
- * the durable SERVER_COMMITTED record after a checkpoint. A PREPARED request
- * with no fence evidence at or after expires_at_us fails WYRELOG_E_POLICY;
- * committed evidence remains recoverable after expiry. Future issuance must
- * independently enforce expiry. Caller outputs are unchanged on error. */
+ * the durable SERVER_COMMITTED record after a checkpoint. This read-only
+ * recovery classifier never infers a terminal result from caller time;
+ * authoritative expiry maintenance reconciles and proves that transition in
+ * a WRITE transaction. |now_us| is retained only as the timestamp for a
+ * committed-evidence journal checkpoint. Caller outputs are unchanged on
+ * error. */
 wyrelog_error_t wyl_service_credential_operation_coordinator_recover
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,

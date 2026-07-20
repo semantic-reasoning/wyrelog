@@ -43,6 +43,7 @@
 #include "store-private.h"
 
 #include "policy/store-handoff-delivery-private.h"
+#include "policy/store-handoff-maintenance-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-common-private.h"
@@ -175,6 +176,8 @@ struct wyl_policy_store_t
   guint8 *service_cvk_envelope;
   wyl_policy_store_service_handoff_unseal_gate_fn service_handoff_unseal_gate;
   gpointer service_handoff_unseal_gate_data;
+  WylPolicyServiceHandoffMaintenanceNowFunc service_handoff_maintenance_now;
+  gpointer service_handoff_maintenance_clock_data;
 };
 
 gboolean
@@ -2496,21 +2499,28 @@ static wyrelog_error_t
         input->no_commit_evidence;
     if (!service_handoff_no_commit_evidence_shape_valid (evidence))
       return WYRELOG_E_INVALID;
-    WylServiceCredentialFenceOperation operation =
-        evidence->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE ?
-        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE :
-        WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE;
-    wyrelog_error_t rc =
-        wyl_policy_store_service_credential_operation_fence_fingerprint
-        (operation, evidence->target_a, strlen (evidence->target_a),
-        evidence->target_b,
-        evidence->target_b != NULL ? strlen (evidence->target_b) : 0,
-        proof_digest);
-    if (rc != WYRELOG_E_OK)
-      return rc;
+    if (!sodium_is_zero (evidence->maintenance_proof_digest,
+            sizeof evidence->maintenance_proof_digest)) {
+      memcpy (proof_digest, evidence->maintenance_proof_digest,
+          sizeof proof_digest);
+      proof_tag = "not-committed-maintenance-v1";
+    } else {
+      WylServiceCredentialFenceOperation operation =
+          evidence->operation == WYL_POLICY_HANDOFF_FENCE_ISSUE ?
+          WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE :
+          WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE;
+      wyrelog_error_t rc =
+          wyl_policy_store_service_credential_operation_fence_fingerprint
+          (operation, evidence->target_a, strlen (evidence->target_a),
+          evidence->target_b,
+          evidence->target_b != NULL ? strlen (evidence->target_b) : 0,
+          proof_digest);
+      if (rc != WYRELOG_E_OK)
+        return rc;
+      proof_tag = "not-committed-fence-v1";
+    }
     sodium_bin2hex (proof_hex, sizeof proof_hex, proof_digest,
         sizeof proof_digest);
-    proof_tag = "not-committed-fence-v1";
   }
   const gchar *fields[] = {
     input->tuple.original_request_id,
@@ -2530,9 +2540,11 @@ static wyrelog_error_t
 
 static wyrelog_error_t
 service_handoff_fill_disposition_result (const gchar *disposition_id,
-    const gchar *audit_id, gboolean replayed,
+    const gchar *audit_id, gint64 created_at_us, gboolean replayed,
     WylPolicyServiceHandoffDispositionResult *out)
 {
+  if (created_at_us <= 0)
+    return WYRELOG_E_POLICY;
   out->disposition_id = service_handoff_try_strdup (disposition_id);
   out->audit_id = service_handoff_try_strdup (audit_id);
   if (out->disposition_id == NULL || out->audit_id == NULL) {
@@ -2540,6 +2552,7 @@ service_handoff_fill_disposition_result (const gchar *disposition_id,
     return WYRELOG_E_NOMEM;
   }
   out->replayed = replayed;
+  out->created_at_us = created_at_us;
   return WYRELOG_E_OK;
 }
 
@@ -2625,7 +2638,7 @@ service_handoff_disposition_lookup_exact (wyl_policy_store_t *store,
         original_request_id) : WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK)
       rc = service_handoff_fill_disposition_result (disposition_id, audit_id,
-          TRUE, out);
+          stored_created_at_us, TRUE, out);
     if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
       rc = WYRELOG_E_POLICY;
   } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
@@ -2800,8 +2813,11 @@ static wyrelog_error_t
 service_handoff_record_disposition (WylServiceAuthorityTransaction *transaction,
     wyl_policy_store_t *store,
     const WylPolicyServiceHandoffDispositionInput *input,
-    gboolean require_absent, WylPolicyServiceHandoffDispositionResult *out)
+    gboolean require_absent, gint64 trusted_now,
+    WylPolicyServiceHandoffDispositionResult *out)
 {
+  if (trusted_now <= 0)
+    return WYRELOG_E_INVALID;
   guint8 semantic_key[crypto_generichash_BYTES];
   wyrelog_error_t rc = service_handoff_disposition_semantic_key (input,
       semantic_key);
@@ -2813,7 +2829,6 @@ service_handoff_record_disposition (WylServiceAuthorityTransaction *transaction,
     sodium_memzero (semantic_key, sizeof semantic_key);
     return rc;
   }
-  gint64 trusted_now = g_get_real_time ();
   if (require_absent) {
     rc = service_handoff_validate_no_commit_fence (store, input);
     if (rc == WYRELOG_E_OK)
@@ -2887,7 +2902,7 @@ service_handoff_record_disposition (WylServiceAuthorityTransaction *transaction,
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_fill_disposition_result (input->disposition_id,
-        input->audit_id, FALSE, out);
+        input->audit_id, trusted_now, FALSE, out);
   sodium_memzero (semantic_key, sizeof semantic_key);
   return rc;
 }
@@ -2913,7 +2928,7 @@ wyrelog_error_t
   return rc == WYRELOG_E_OK ? service_handoff_record_disposition
       (transaction, store, input,
       input->reason == WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED,
-      out_result) : rc;
+      g_get_real_time (), out_result) : rc;
 }
 
 wyrelog_error_t
@@ -2933,7 +2948,7 @@ wyrelog_error_t
       wyl_policy_store_service_authority_transaction_enter_participant
       (transaction, store);
   return rc == WYRELOG_E_OK ? service_handoff_record_disposition
-      (transaction, store, input, TRUE, out_result) : rc;
+      (transaction, store, input, TRUE, g_get_real_time (), out_result) : rc;
 }
 
 static wyrelog_error_t
@@ -12437,7 +12452,7 @@ service_handoff_lookup_minted_disposition (wyl_policy_store_t *store,
           tuple->original_request_id, tuple->original_request_id);
     if (rc == WYRELOG_E_OK)
       rc = service_handoff_fill_disposition_result (disposition_id, audit_id,
-          TRUE, out);
+          created_at_us, TRUE, out);
     if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK)
@@ -12489,7 +12504,7 @@ service_handoff_record_minted_disposition (wyl_policy_store_t *store,
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_fill_disposition_result (disposition_id, audit_id,
-        FALSE, out);
+        now_us, FALSE, out);
   sodium_memzero (semantic_key, sizeof semantic_key);
   return rc;
 }
@@ -12532,11 +12547,11 @@ static wyrelog_error_t
   return rc;
 }
 
-wyrelog_error_t
-    wyl_policy_store_handoff_classify_for_publication_core
+static wyrelog_error_t
+    service_handoff_classify_for_publication_at
     (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
     const WylPolicyServiceHandoffExactTuple * tuple,
-    const gchar * actor_subject_id,
+    const gchar * actor_subject_id, gint64 now_us,
     WylPolicyServiceHandoffPublicationOutcome * out_outcome,
     WylPolicyServiceHandoffDispositionResult * out_disposition)
 {
@@ -12546,6 +12561,7 @@ wyrelog_error_t
       || out_disposition == NULL
       || !service_handoff_exact_tuple_is_valid (tuple)
       || tuple->successor_credential_id == NULL
+      || now_us <= 0
       || !wyl_policy_service_actor_subject_is_valid (actor_subject_id))
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc =
@@ -12560,7 +12576,6 @@ wyrelog_error_t
   if (rc != WYRELOG_E_OK || found)
     return rc;
 
-  gint64 now_us = g_get_real_time ();
   WylPolicyServiceSuccessorExactClassification classification = { 0 };
   rc = wyl_policy_store_classify_service_credential_successor_exact_core
       (transaction, store, tuple, now_us, &classification);
@@ -12587,6 +12602,19 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK)
     *out_outcome = outcome;
   return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_handoff_classify_for_publication_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffExactTuple * tuple,
+    const gchar * actor_subject_id,
+    WylPolicyServiceHandoffPublicationOutcome * out_outcome,
+    WylPolicyServiceHandoffDispositionResult * out_disposition)
+{
+  return service_handoff_classify_for_publication_at (transaction, store,
+      tuple, actor_subject_id, g_get_real_time (), out_outcome,
+      out_disposition);
 }
 
 static wyrelog_error_t
@@ -12678,7 +12706,7 @@ service_handoff_lookup_delivered (wyl_policy_store_t *store,
           tuple->original_request_id, tuple->original_request_id);
     if (rc == WYRELOG_E_OK)
       rc = service_handoff_fill_disposition_result (disposition_id, audit_id,
-          TRUE, out);
+          created_at_us, TRUE, out);
     if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
       rc = WYRELOG_E_POLICY;
     if (rc == WYRELOG_E_OK)
@@ -12730,7 +12758,7 @@ service_handoff_record_delivered (wyl_policy_store_t *store,
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     rc = service_handoff_fill_disposition_result (disposition_id, audit_id,
-        FALSE, out);
+        now_us, FALSE, out);
   sodium_memzero (semantic_key, sizeof semantic_key);
   return rc;
 }
@@ -12846,6 +12874,625 @@ wyrelog_error_t
     rc = WYRELOG_E_IO;
   if (rc == WYRELOG_E_OK)
     *out_outcome = WYL_POLICY_HANDOFF_PUBLICATION_ACTIVE;
+  return rc;
+}
+
+#define SERVICE_HANDOFF_MAINTENANCE_ACTOR \
+  "system:service-handoff-maintenance"
+
+typedef enum
+{
+  SERVICE_HANDOFF_MAINTENANCE_ESCROW_EXACT,
+  SERVICE_HANDOFF_MAINTENANCE_ESCROW_MISSING,
+  SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN,
+} ServiceHandoffMaintenanceEscrowState;
+
+void wyl_policy_service_handoff_prepared_maintenance_result_clear
+    (WylPolicyServiceHandoffPreparedMaintenanceResult * result)
+{
+  if (result == NULL)
+    return;
+  wyl_policy_service_handoff_disposition_result_clear (&result->disposition);
+  sodium_memzero (result, sizeof *result);
+}
+
+void wyl_policy_service_handoff_committed_maintenance_result_clear
+    (WylPolicyServiceHandoffCommittedMaintenanceResult * result)
+{
+  if (result == NULL)
+    return;
+  wyl_policy_service_handoff_disposition_result_clear (&result->disposition);
+  sodium_memzero (result, sizeof *result);
+}
+
+void wyl_policy_store_handoff_maintenance_set_clock_for_test
+    (wyl_policy_store_t * store,
+    WylPolicyServiceHandoffMaintenanceNowFunc now_us, gpointer data)
+{
+  if (store == NULL)
+    return;
+  store->service_handoff_maintenance_now = now_us;
+  store->service_handoff_maintenance_clock_data = now_us != NULL ? data : NULL;
+}
+
+static wyrelog_error_t
+service_handoff_maintenance_now (wyl_policy_store_t *store, gint64 *out_now_us)
+{
+  gint64 now_us = store->service_handoff_maintenance_now != NULL ?
+      store->service_handoff_maintenance_now
+      (store->service_handoff_maintenance_clock_data) : g_get_real_time ();
+  if (now_us <= 0)
+    return WYRELOG_E_INVALID;
+  *out_now_us = now_us;
+  return WYRELOG_E_OK;
+}
+
+static gboolean
+    service_handoff_maintenance_proof_is_valid
+    (const WylPolicyServiceHandoffMaintenanceProof * proof)
+{
+  if (proof == NULL || !service_handoff_exact_tuple_is_valid (&proof->tuple)
+      || proof->deadline_at_us <= 0
+      || sodium_is_zero (proof->target_digest, sizeof proof->target_digest))
+    return FALSE;
+  if (proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE)
+    return proof->subject_id != NULL
+        && wyl_policy_service_subject_is_valid (proof->subject_id,
+        strlen (proof->subject_id))
+        && wyl_policy_store_tenant_id_is_valid (proof->tenant_id)
+        && proof->old_credential_id == NULL;
+  if (proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE)
+    return proof->subject_id == NULL && proof->tenant_id == NULL
+        && proof->old_credential_id != NULL
+        && wyl_service_credential_id_is_canonical (proof->old_credential_id,
+        strlen (proof->old_credential_id));
+  return FALSE;
+}
+
+static const gchar *service_handoff_maintenance_operation_name
+    (const WylPolicyServiceHandoffMaintenanceProof * proof)
+{
+  return proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
+      "issue" : "rotate";
+}
+
+static gboolean
+    service_handoff_maintenance_escrow_matches
+    (const wyl_policy_service_handoff_escrow_info_t * escrow,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    const gchar * successor_credential_id, guint64 successor_generation,
+    const guint8 * binding_digest)
+{
+  return g_strcmp0 (escrow->operation,
+      service_handoff_maintenance_operation_name (proof)) == 0
+      && g_strcmp0 (escrow->request_id,
+      proof->tuple.original_request_id) == 0
+      && g_strcmp0 (escrow->actor_subject_id,
+      proof->tuple.original_actor_subject_id) == 0
+      && sodium_memcmp (escrow->target_digest, proof->target_digest,
+      sizeof proof->target_digest) == 0
+      && escrow->deadline_at_us == proof->deadline_at_us
+      && g_strcmp0 (escrow->credential_id, successor_credential_id) == 0
+      && escrow->credential_generation == successor_generation
+      && (binding_digest == NULL
+      || sodium_memcmp (escrow->binding_digest, binding_digest,
+          WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES) == 0);
+}
+
+static wyrelog_error_t
+service_handoff_maintenance_classify_escrow (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffMaintenanceProof *proof,
+    const gchar *successor_credential_id, guint64 successor_generation,
+    const guint8 *binding_digest,
+    ServiceHandoffMaintenanceEscrowState *out_state,
+    wyl_policy_service_handoff_escrow_info_t *out_escrow)
+{
+  *out_state = SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN;
+  wyrelog_error_t rc = wyl_policy_store_service_handoff_escrow_load (store,
+      proof->tuple.escrow_id, out_escrow);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    wyl_policy_service_handoff_escrow_info_t by_request = { 0 };
+    rc = wyl_policy_store_service_handoff_escrow_load_by_request (store,
+        proof->tuple.original_request_id, &by_request);
+    if (rc == WYRELOG_E_NOT_FOUND) {
+      *out_state = SERVICE_HANDOFF_MAINTENANCE_ESCROW_MISSING;
+      return WYRELOG_E_OK;
+    }
+    if (rc == WYRELOG_E_POLICY) {
+      *out_state = SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN;
+      return WYRELOG_E_OK;
+    }
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    wyl_policy_service_handoff_escrow_info_clear (&by_request);
+    *out_state = SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN;
+    return WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_POLICY) {
+    *out_state = SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN;
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!service_handoff_maintenance_escrow_matches (out_escrow, proof,
+          successor_credential_id, successor_generation, binding_digest)) {
+    *out_state = SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN;
+    return WYRELOG_E_OK;
+  }
+  wyl_policy_service_handoff_escrow_input_t binding_input = {
+    .escrow_id = &out_escrow->escrow_id,
+    .operation = out_escrow->operation,
+    .request_id = out_escrow->request_id,
+    .actor_subject_id = out_escrow->actor_subject_id,
+    .target_digest = out_escrow->target_digest,
+    .credential_id = out_escrow->credential_id,
+    .credential_generation = out_escrow->credential_generation,
+    .deadline_at_us = out_escrow->deadline_at_us,
+  };
+  guint8 recomputed[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES] = { 0 };
+  rc = service_handoff_binding_digest (&binding_input, recomputed);
+  gboolean exact = rc == WYRELOG_E_OK
+      && sodium_memcmp (recomputed, out_escrow->binding_digest,
+      sizeof recomputed) == 0;
+  sodium_memzero (recomputed, sizeof recomputed);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_state = exact ? SERVICE_HANDOFF_MAINTENANCE_ESCROW_EXACT :
+      SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+service_handoff_maintenance_digest_frame (crypto_generichash_state *state,
+    const guint8 *value, gsize len)
+{
+  if (len > G_MAXUINT32 || (len != 0 && value == NULL))
+    return WYRELOG_E_INVALID;
+  guint32 framed_len = GUINT32_TO_BE ((guint32) len);
+  if (crypto_generichash_update (state, (const guint8 *) &framed_len,
+          sizeof framed_len) != 0
+      || (len != 0 && crypto_generichash_update (state, value, len) != 0))
+    return WYRELOG_E_CRYPTO;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+    service_handoff_maintenance_proof_digest
+    (const WylPolicyServiceHandoffMaintenanceProof * proof,
+    guint8 out[WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES])
+{
+  static const gchar domain[] =
+      "wyrelog.service-handoff-maintenance-not-committed-proof.v1";
+  gchar escrow[WYL_ID_STRING_BUF];
+  if (wyl_id_format (proof->tuple.escrow_id, escrow, sizeof escrow)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  const gchar *operation = service_handoff_maintenance_operation_name (proof);
+  const gchar *target_a = proof->operation ==
+      WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ? proof->subject_id :
+      proof->old_credential_id;
+  const gchar *target_b = proof->operation ==
+      WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ? proof->tenant_id : NULL;
+  guint64 deadline = GUINT64_TO_BE ((guint64) proof->deadline_at_us);
+  crypto_generichash_state state;
+  if (crypto_generichash_init (&state, NULL, 0,
+          WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES) != 0)
+    return WYRELOG_E_CRYPTO;
+  wyrelog_error_t rc = service_handoff_maintenance_digest_frame (&state,
+      (const guint8 *) domain, sizeof domain - 1);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) operation, strlen (operation));
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) target_a, strlen (target_a));
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) target_b, target_b != NULL ? strlen (target_b) : 0);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) proof->tuple.original_request_id,
+        strlen (proof->tuple.original_request_id));
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) escrow, strlen (escrow));
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) proof->tuple.original_actor_subject_id,
+        strlen (proof->tuple.original_actor_subject_id));
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        proof->target_digest, sizeof proof->target_digest);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_digest_frame (&state,
+        (const guint8 *) &deadline, sizeof deadline);
+  if (rc == WYRELOG_E_OK && crypto_generichash_final (&state, out,
+          WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  sodium_memzero (&state, sizeof state);
+  if (rc != WYRELOG_E_OK)
+    sodium_memzero (out, WYL_POLICY_SERVICE_HANDOFF_DIGEST_BYTES);
+  return rc;
+}
+
+static wyrelog_error_t
+    service_handoff_maintenance_no_commit_evidence
+    (const WylPolicyServiceHandoffMaintenanceProof * proof,
+    WylPolicyServiceHandoffNoCommitEvidence * out_evidence)
+{
+  *out_evidence = (WylPolicyServiceHandoffNoCommitEvidence) {
+  .operation = proof->operation == WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ?
+        WYL_POLICY_HANDOFF_FENCE_ISSUE :
+        WYL_POLICY_HANDOFF_FENCE_ROTATE,.target_a =
+        proof->operation ==
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ? proof->
+        subject_id : proof->old_credential_id,.target_b =
+        proof->operation ==
+        WYL_SERVICE_CREDENTIAL_FENCE_OP_ISSUE ? proof->tenant_id : NULL,};
+  return service_handoff_maintenance_proof_digest (proof,
+      out_evidence->maintenance_proof_digest);
+}
+
+static wyrelog_error_t
+service_handoff_maintenance_validate_no_commit (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffMaintenanceProof *proof,
+    const gchar *disposition_id, const gchar *audit_id,
+    const gchar *actor_subject_id)
+{
+  WylPolicyServiceHandoffNoCommitEvidence evidence = { 0 };
+  wyrelog_error_t rc = service_handoff_maintenance_no_commit_evidence (proof,
+      &evidence);
+  WylPolicyServiceHandoffDispositionInput input = {
+    .disposition_id = disposition_id,
+    .audit_id = audit_id,
+    .tuple = proof->tuple,
+    .actor_subject_id = actor_subject_id,
+    .reason = WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED,
+    .outcome = WYL_POLICY_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED,
+    .no_commit_evidence = &evidence,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_validate_no_commit_fence (store, &input);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_escrow_absent (store, proof->tuple.escrow_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_request_escrow_absent (store,
+        proof->tuple.original_request_id);
+  return rc;
+}
+
+static wyrelog_error_t
+service_handoff_maintenance_lookup_not_committed (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffMaintenanceProof *proof,
+    gboolean *out_found, WylPolicyServiceHandoffDispositionResult *out)
+{
+  *out_found = FALSE;
+  gchar escrow[WYL_ID_STRING_BUF];
+  if (wyl_id_format (proof->tuple.escrow_id, escrow, sizeof escrow)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_INVALID;
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT disposition_id,semantic_key,audit_id,created_at_us,"
+      " actor_subject_id FROM service_credential_handoff_dispositions"
+      " WHERE original_request_id=? AND reason='not_committed'"
+      " AND outcome='terminal_not_committed' AND escrow_id=?"
+      " AND binding_digest=? AND successor_credential_id IS NULL"
+      " AND successor_issuance_generation IS NULL LIMIT 2;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK
+      && ((rc = bind_text (stmt, 1, proof->tuple.original_request_id))
+          != WYRELOG_E_OK || (rc = bind_text (stmt, 2, escrow))
+          != WYRELOG_E_OK || sqlite3_bind_blob (stmt, 3,
+              proof->tuple.binding_digest, sizeof proof->tuple.binding_digest,
+              SQLITE_TRANSIENT) != SQLITE_OK))
+    rc = service_handoff_sqlite_error (store->db,
+        sqlite3_extended_errcode (store->db));
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_DONE;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW) {
+    const gchar *disposition_id = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *audit_id = (const gchar *) sqlite3_column_text (stmt, 2);
+    gint64 created_at_us = sqlite3_column_int64 (stmt, 3);
+    const gchar *actor = (const gchar *) sqlite3_column_text (stmt, 4);
+    WylPolicyServiceHandoffNoCommitEvidence evidence = { 0 };
+    WylPolicyServiceHandoffDispositionInput input = {
+      .disposition_id = disposition_id,
+      .audit_id = audit_id,
+      .tuple = proof->tuple,
+      .actor_subject_id = actor,
+      .reason = WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED,
+      .outcome = WYL_POLICY_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED,
+      .no_commit_evidence = &evidence,
+    };
+    guint8 semantic_key[crypto_generichash_BYTES] = { 0 };
+    rc = service_handoff_maintenance_no_commit_evidence (proof, &evidence);
+    if (rc == WYRELOG_E_OK)
+      rc = disposition_id != NULL && audit_id != NULL
+          && wyl_policy_service_actor_subject_is_valid (actor)
+          && sqlite3_column_type (stmt, 1) == SQLITE_BLOB
+          && sqlite3_column_bytes (stmt, 1) == sizeof semantic_key
+          && sqlite3_column_type (stmt, 3) == SQLITE_INTEGER
+          && created_at_us > 0 ? service_handoff_disposition_semantic_key
+          (&input, semantic_key) : WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK
+        && sodium_memcmp (sqlite3_column_blob (stmt, 1), semantic_key,
+            sizeof semantic_key) != 0)
+      rc = WYRELOG_E_POLICY;
+    sodium_memzero (semantic_key, sizeof semantic_key);
+    if (rc == WYRELOG_E_OK)
+      rc = service_handoff_validate_exact_audit_pair (store, audit_id,
+          created_at_us, actor, "service.credential.handoff.disposition",
+          proof->tuple.original_request_id, proof->tuple.original_request_id);
+    if (rc == WYRELOG_E_OK)
+      rc = service_handoff_maintenance_validate_no_commit (store, proof,
+          disposition_id, audit_id, actor);
+    if (rc == WYRELOG_E_OK)
+      rc = service_handoff_fill_disposition_result (disposition_id, audit_id,
+          created_at_us, TRUE, out);
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK)
+      *out_found = TRUE;
+  } else if (rc == WYRELOG_E_OK && step != SQLITE_DONE) {
+    rc = service_handoff_sqlite_error (store->db, step);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return service_handoff_map_sqlite_io (store->db, rc);
+}
+
+static wyrelog_error_t
+    service_handoff_maintenance_mint_not_committed
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof, gint64 now_us,
+    WylPolicyServiceHandoffDispositionResult * out)
+{
+  gchar disposition_id[WYL_ID_STRING_BUF];
+  gchar audit_id[WYL_ID_STRING_BUF];
+  wyrelog_error_t rc = service_domain_new_audit_id (disposition_id);
+  if (rc == WYRELOG_E_OK)
+    rc = service_domain_new_audit_id (audit_id);
+  WylPolicyServiceHandoffNoCommitEvidence evidence = { 0 };
+  WylPolicyServiceHandoffDispositionInput input = {
+    .disposition_id = disposition_id,
+    .audit_id = audit_id,
+    .tuple = proof->tuple,
+    .actor_subject_id = SERVICE_HANDOFF_MAINTENANCE_ACTOR,
+    .reason = WYL_POLICY_HANDOFF_DISPOSITION_NOT_COMMITTED,
+    .outcome = WYL_POLICY_HANDOFF_OUTCOME_TERMINAL_NOT_COMMITTED,
+    .no_commit_evidence = &evidence,
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_no_commit_evidence (proof, &evidence);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_record_disposition (transaction, store, &input, TRUE,
+        now_us, out);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_handoff_maintain_prepared_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    WylPolicyServiceHandoffPreparedMaintenanceResult * out_result)
+{
+  if (out_result != NULL)
+    wyl_policy_service_handoff_prepared_maintenance_result_clear (out_result);
+  if (store == NULL || out_result == NULL
+      || !service_handoff_maintenance_proof_is_valid (proof)
+      || proof->tuple.successor_credential_id != NULL
+      || !sodium_is_zero (proof->tuple.binding_digest,
+          sizeof proof->tuple.binding_digest))
+    return WYRELOG_E_INVALID;
+  /* Fence reconciliation owns write-intent acquisition.  Merely entering as
+   * a participant first would mark durable work started and make that later
+   * acquisition fail closed. */
+  wyrelog_error_t rc = service_authority_transaction_validate_active
+      (transaction, store);
+  gint64 now_us = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_now (store, &now_us);
+  WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+  gboolean found = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_lookup_not_committed (store, proof,
+        &found, &disposition);
+  if (rc == WYRELOG_E_OK && found) {
+    rc = wyl_policy_store_service_authority_transaction_enter_participant
+        (transaction, store);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    out_result->outcome = WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_NOT_COMMITTED;
+    out_result->created_at_us = disposition.created_at_us;
+    out_result->disposition = disposition;
+    memset (&disposition, 0, sizeof disposition);
+    return WYRELOG_E_OK;
+  }
+  if (rc == WYRELOG_E_OK && now_us < proof->deadline_at_us) {
+    rc = wyl_policy_store_service_authority_transaction_enter_participant
+        (transaction, store);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+    out_result->outcome = WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_NOT_DUE;
+    out_result->created_at_us = now_us;
+    return WYRELOG_E_OK;
+  }
+  WylServiceCredentialFenceResult fence = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_reconcile_service_credential_operation_fence
+        (transaction, store, NULL, proof->operation,
+        proof->tuple.original_request_id, proof->subject_id, proof->tenant_id,
+        proof->old_credential_id, &fence);
+  if (rc == WYRELOG_E_OK
+      && fence.state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_CONFLICT)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && fence.state == WYL_SERVICE_CREDENTIAL_FENCE_RESULT_COMMITTED) {
+    wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
+    ServiceHandoffMaintenanceEscrowState escrow_state = 0;
+    rc = service_handoff_maintenance_classify_escrow (store, proof,
+        fence.successor_credential_id, fence.successor_generation, NULL,
+        &escrow_state, &escrow);
+    if (rc == WYRELOG_E_OK
+        && escrow_state != SERVICE_HANDOFF_MAINTENANCE_ESCROW_EXACT)
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      out_result->outcome = WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_COMMITTED;
+      out_result->created_at_us = now_us;
+      g_strlcpy (out_result->successor_credential_id,
+          fence.successor_credential_id,
+          sizeof out_result->successor_credential_id);
+      out_result->successor_generation = fence.successor_generation;
+      memcpy (out_result->binding_digest, escrow.binding_digest,
+          sizeof out_result->binding_digest);
+    }
+    wyl_policy_service_handoff_escrow_info_clear (&escrow);
+    return rc;
+  }
+  if (rc == WYRELOG_E_OK
+      && fence.state !=
+      WYL_SERVICE_CREDENTIAL_FENCE_RESULT_NOT_COMMITTED_TERMINAL)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_mint_not_committed (transaction, store,
+        proof, now_us, &disposition);
+  if (rc == WYRELOG_E_OK) {
+    out_result->outcome = WYL_POLICY_HANDOFF_PREPARED_MAINTENANCE_NOT_COMMITTED;
+    out_result->created_at_us = disposition.created_at_us;
+    out_result->disposition = disposition;
+    memset (&disposition, 0, sizeof disposition);
+  }
+out:
+  wyl_policy_service_handoff_disposition_result_clear (&disposition);
+  return rc;
+}
+
+static wyrelog_error_t
+service_handoff_maintenance_lookup_attention (wyl_policy_store_t *store,
+    const WylPolicyServiceHandoffExactTuple *tuple, gboolean *out_found,
+    WylPolicyServiceHandoffCommittedMaintenanceOutcome *out_outcome,
+    WylPolicyServiceHandoffDispositionResult *out_disposition)
+{
+  gboolean expired_found = FALSE;
+  gboolean cancelled_found = FALSE;
+  WylPolicyServiceHandoffDispositionResult expired = { 0 };
+  WylPolicyServiceHandoffDispositionResult cancelled = { 0 };
+  wyrelog_error_t rc = service_handoff_lookup_minted_disposition (store,
+      tuple, WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_EXPIRED,
+      WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED, &expired_found, &expired);
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_lookup_minted_disposition (store, tuple,
+        WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_CANCELLED,
+        WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED, &cancelled_found,
+        &cancelled);
+  if (rc == WYRELOG_E_OK && expired_found && cancelled_found)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && expired_found) {
+    *out_found = TRUE;
+    *out_outcome = WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_OPERATION_EXPIRED;
+    *out_disposition = expired;
+    memset (&expired, 0, sizeof expired);
+  } else if (rc == WYRELOG_E_OK && cancelled_found) {
+    *out_found = TRUE;
+    *out_outcome = WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_OPERATION_CANCELLED;
+    *out_disposition = cancelled;
+    memset (&cancelled, 0, sizeof cancelled);
+  }
+  wyl_policy_service_handoff_disposition_result_clear (&expired);
+  wyl_policy_service_handoff_disposition_result_clear (&cancelled);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_handoff_maintain_committed_core
+    (WylServiceAuthorityTransaction * transaction, wyl_policy_store_t * store,
+    const WylPolicyServiceHandoffMaintenanceProof * proof,
+    WylPolicyServiceHandoffCommittedMaintenanceResult * out_result)
+{
+  if (out_result != NULL)
+    wyl_policy_service_handoff_committed_maintenance_result_clear (out_result);
+  if (store == NULL || out_result == NULL
+      || !service_handoff_maintenance_proof_is_valid (proof)
+      || proof->tuple.successor_credential_id == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  gint64 now_us = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_now (store, &now_us);
+  wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
+  ServiceHandoffMaintenanceEscrowState escrow_state = 0;
+  if (rc == WYRELOG_E_OK)
+    rc = service_handoff_maintenance_classify_escrow (store, proof,
+        proof->tuple.successor_credential_id,
+        proof->tuple.successor_issuance_generation,
+        proof->tuple.binding_digest, &escrow_state, &escrow);
+  wyl_policy_service_handoff_escrow_info_clear (&escrow);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (escrow_state == SERVICE_HANDOFF_MAINTENANCE_ESCROW_MISSING) {
+    out_result->outcome =
+        WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_ESCROW_MISSING;
+    out_result->created_at_us = now_us;
+    return WYRELOG_E_OK;
+  }
+  if (escrow_state == SERVICE_HANDOFF_MAINTENANCE_ESCROW_FOREIGN) {
+    out_result->outcome =
+        WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_ESCROW_FOREIGN;
+    out_result->created_at_us = now_us;
+    return WYRELOG_E_OK;
+  }
+
+  WylPolicyServiceHandoffPublicationOutcome publication = 0;
+  WylPolicyServiceHandoffDispositionResult disposition = { 0 };
+  rc = service_handoff_classify_for_publication_at (transaction, store,
+      &proof->tuple, SERVICE_HANDOFF_MAINTENANCE_ACTOR, now_us, &publication,
+      &disposition);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (publication != WYL_POLICY_HANDOFF_PUBLICATION_ACTIVE) {
+    out_result->outcome = publication ==
+        WYL_POLICY_HANDOFF_PUBLICATION_SUCCESSOR_EXPIRED ?
+        WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_SUCCESSOR_EXPIRED :
+        WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_SUCCESSOR_REVOKED;
+    out_result->created_at_us = disposition.created_at_us;
+    out_result->disposition = disposition;
+    memset (&disposition, 0, sizeof disposition);
+    goto out;
+  }
+
+  gboolean found = FALSE;
+  WylPolicyServiceHandoffCommittedMaintenanceOutcome attention = 0;
+  rc = service_handoff_maintenance_lookup_attention (store, &proof->tuple,
+      &found, &attention, &disposition);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (found) {
+    out_result->outcome = attention;
+    out_result->created_at_us = disposition.created_at_us;
+    out_result->disposition = disposition;
+    memset (&disposition, 0, sizeof disposition);
+    goto out;
+  }
+  if (now_us < proof->deadline_at_us) {
+    out_result->outcome = WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_ACTIVE;
+    out_result->created_at_us = now_us;
+    goto out;
+  }
+  rc = service_handoff_record_minted_disposition (store, &proof->tuple,
+      SERVICE_HANDOFF_MAINTENANCE_ACTOR,
+      WYL_POLICY_HANDOFF_DISPOSITION_OPERATION_EXPIRED,
+      WYL_POLICY_HANDOFF_OUTCOME_ATTENTION_REQUIRED, now_us, &disposition);
+  if (rc == WYRELOG_E_OK) {
+    out_result->outcome =
+        WYL_POLICY_HANDOFF_COMMITTED_MAINTENANCE_OPERATION_EXPIRED;
+    out_result->created_at_us = disposition.created_at_us;
+    out_result->disposition = disposition;
+    memset (&disposition, 0, sizeof disposition);
+  }
+out:
+  wyl_policy_service_handoff_disposition_result_clear (&disposition);
   return rc;
 }
 

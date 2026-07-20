@@ -562,6 +562,8 @@ typedef enum
   CHECKPOINT_CLEANUP_REQUIRED,
   CHECKPOINT_SUCCESSOR_INACTIVE_OAR,
   CHECKPOINT_RECEIPT_OAR,
+  CHECKPOINT_ESCROW_OAR,
+  CHECKPOINT_TERMINAL_NOT_COMMITTED,
   CHECKPOINT_TERMINAL_FILE_PUBLISHED,
 } LifecycleCheckpoint;
 
@@ -597,6 +599,11 @@ checkpoint_lifecycle (const WylServiceCredentialOperationStorage *storage,
       && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_FOREIGN
       && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN)
     return WYRELOG_E_INVALID;
+  if (checkpoint == CHECKPOINT_ESCROW_OAR
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_FOREIGN
+      && cause != WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_UNCERTAIN)
+    return WYRELOG_E_INVALID;
   rc = record_child_name (request_id, &name);
   if (rc != WYRELOG_E_OK)
     goto out;
@@ -623,9 +630,17 @@ checkpoint_lifecycle (const WylServiceCredentialOperationStorage *storage,
       break;
     case CHECKPOINT_SUCCESSOR_INACTIVE_OAR:
     case CHECKPOINT_RECEIPT_OAR:
+    case CHECKPOINT_ESCROW_OAR:
       replayed = existing.state ==
           WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED;
       rc = wyl_service_credential_operation_coordinator_build_operator_action_required (&existing, cause, now_us, &next);
+      break;
+    case CHECKPOINT_TERMINAL_NOT_COMMITTED:
+      replayed = existing.state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
+      rc = wyl_service_credential_operation_coordinator_build_terminal
+          (&existing,
+          WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL_NOT_COMMITTED, NULL,
+          now_us, &next);
       break;
     case CHECKPOINT_TERMINAL_FILE_PUBLISHED:
       replayed = existing.state == WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL;
@@ -698,6 +713,29 @@ wyrelog_error_t
 {
   return checkpoint_lifecycle (storage, anchor, request_id,
       CHECKPOINT_RECEIPT_OAR, cause, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationOarCause cause,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_lifecycle (storage, anchor, request_id,
+      CHECKPOINT_ESCROW_OAR, cause, now_us, out_replayed, out_record);
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  return checkpoint_lifecycle (storage, anchor, request_id,
+      CHECKPOINT_TERMINAL_NOT_COMMITTED, 0, now_us, out_replayed, out_record);
 }
 
 wyrelog_error_t

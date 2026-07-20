@@ -17,17 +17,23 @@ FORBIDDEN_GENERAL = (
     "wyl_policy_store_service_handoff_escrow_delete",
 )
 
-FORBIDDEN_EXPORTS = (
+FORBIDDEN_EXPORT_PREFIXES = (
     "wyl_service_credential_handoff_delivery_",
     "wyl_service_credential_handoff_prepare_delivery_core",
+    "wyl_service_credential_operation_coordinator_maintain_expired",
     "wyl_policy_store_handoff_",
     "wyl_policy_store_service_handoff_escrow_delete",
 )
+
+FORBIDDEN_EXPORT_EXACT = {
+    "wyl_service_credential_operation_handoff_target_digest",
+}
 
 FRIEND_INCLUDES = {
     "service-credential-handoff-delivery-private.h": {
         "wyrelog/auth/service-credential-handoff-delivery-private.c",
         "wyrelog/auth/service-credential-operation-coordinator-execute-private.c",
+        "wyrelog/auth/service-credential-operation-coordinator-maintenance-private.c",
     },
     "store-handoff-delivery-private.h": {
         "wyrelog/auth/service-credential-handoff-delivery-private.c",
@@ -122,6 +128,39 @@ def exported_symbols(artifact: Path) -> str:
     return run(command)
 
 
+def forbidden_runtime_exports(output: str, kind: str = "elf") -> set[str]:
+    names = set()
+    for line in output.splitlines():
+        fields = line.split()
+        if not fields:
+            continue
+        name = fields[-1].split("@", 1)[0]
+        # Mach-O's ABI spelling adds exactly one leading underscore.  Avoid a
+        # generic lstrip: multiple underscores are part of a different symbol.
+        if kind == "macho" and name.startswith("_wyl_"):
+            name = name[1:]
+        names.add(name)
+    return {
+        name for name in names
+        if name in FORBIDDEN_EXPORT_EXACT
+        or any(name.startswith(prefix)
+               for prefix in FORBIDDEN_EXPORT_PREFIXES)
+    }
+
+
+def friend_include_diff(root: Path, include_name: str, allowed: set[str],
+                        suffix: str) -> tuple[set[str], set[str]]:
+    actual = set()
+    pattern = re.compile(
+        rf'#include\s+[<"][^">]*{re.escape(include_name)}[>"]')
+    for source in (root / "wyrelog").rglob(f"*{suffix}"):
+        if source.name == include_name:
+            continue
+        if pattern.search(source.read_text(encoding="utf-8")):
+            actual.add(source.relative_to(root).as_posix())
+    return actual - allowed, allowed - actual
+
+
 def self_test() -> int:
     kinds = {
         "libwyrelog.a": "static",
@@ -163,10 +202,50 @@ The Import Tables
     if objdump_coff_exports(objdump_fixture) != {
             "wyl_public_api", "wyl_policy_store_handoff_private"}:
         return 1
+    runtime_fixture = """
+0001 T wyl_service_credential_operation_coordinator_maintain_expired
+0002 T wyl_service_credential_operation_coordinator_maintain_expired_locked
+0003 T wyl_service_credential_operation_handoff_target_digest
+0004 T wyl_service_credential_operation_handoff_target_digest_extra
+0005 T safe_wyl_policy_store_handoff_embedded
+"""
+    if forbidden_runtime_exports(runtime_fixture) != {
+            "wyl_service_credential_operation_coordinator_maintain_expired",
+            "wyl_service_credential_operation_coordinator_maintain_expired_locked",
+            "wyl_service_credential_operation_handoff_target_digest",
+    }:
+        return 1
+    macho_runtime_fixture = """
+0001 T _wyl_service_credential_operation_coordinator_maintain_expired
+0002 T _wyl_service_credential_operation_handoff_target_digest
+0003 T __wyl_service_credential_operation_handoff_target_digest
+"""
+    if forbidden_runtime_exports(macho_runtime_fixture, "macho") != {
+            "wyl_service_credential_operation_coordinator_maintain_expired",
+            "wyl_service_credential_operation_handoff_target_digest",
+    }:
+        return 1
     with tempfile.TemporaryDirectory() as directory:
         archive = Path(directory) / "wyrelog.lib"
         archive.write_bytes(b"not a real archive")
         if exported_symbols(archive) != "":
+            return 1
+        root = Path(directory)
+        allowed = root / "wyrelog/auth/allowed.c"
+        unexpected = root / "wyrelog/general.c"
+        allowed.parent.mkdir(parents=True)
+        allowed.write_text('#include "private-friend.h"\n', encoding="utf-8")
+        unexpected.write_text('#include "private-friend.h"\n',
+                              encoding="utf-8")
+        extra, missing = friend_include_diff(root, "private-friend.h", {
+            "wyrelog/auth/allowed.c",
+        }, ".c")
+        if extra != {"wyrelog/general.c"} or missing:
+            return 1
+        extra, missing = friend_include_diff(root, "private-friend.h", {
+            "wyrelog/auth/allowed.c", "wyrelog/missing.c",
+        }, ".c")
+        if extra != {"wyrelog/general.c"} or missing != {"wyrelog/missing.c"}:
             return 1
     return 0
 
@@ -193,13 +272,8 @@ def main() -> int:
                       file=sys.stderr)
                 return 1
     for include_name, allowed in FRIEND_INCLUDES.items():
-        actual = set()
-        pattern = re.compile(rf'#include\s+[<"][^">]*{re.escape(include_name)}[>"]')
-        for source in (root / "wyrelog").rglob("*.c"):
-            if pattern.search(source.read_text(encoding="utf-8")):
-                actual.add(source.relative_to(root).as_posix())
-        unexpected = actual - allowed
-        missing = allowed - actual
+        unexpected, missing = friend_include_diff(root, include_name,
+                                                   allowed, ".c")
         if unexpected or missing:
             print(f"friend include allowlist mismatch for {include_name}",
                   file=sys.stderr)
@@ -211,16 +285,11 @@ def main() -> int:
                       file=sys.stderr)
             return 1
     for include_name, allowed in FRIEND_HEADER_INCLUDES.items():
-        actual = set()
-        pattern = re.compile(rf'#include\s+[<"][^">]*{re.escape(include_name)}[>"]')
-        for header in (root / "wyrelog").rglob("*.h"):
-            if header.name == include_name:
-                continue
-            if pattern.search(header.read_text(encoding="utf-8")):
-                actual.add(header.relative_to(root).as_posix())
-        if actual != allowed:
+        unexpected, missing = friend_include_diff(root, include_name,
+                                                   allowed, ".h")
+        if unexpected or missing:
             print(f"friend header allowlist mismatch for {include_name}",
-                  *sorted(actual), sep="\n  ", file=sys.stderr)
+                  *sorted(unexpected | missing), sep="\n  ", file=sys.stderr)
             return 1
     friend = (root / "wyrelog/auth/"
               "service-credential-handoff-delivery-private.h")
@@ -240,11 +309,11 @@ def main() -> int:
     except RuntimeError as error:
         print(error, file=sys.stderr)
         return 1
-    for token in FORBIDDEN_EXPORTS:
-        if token in symbols:
-            print(f"delivery authority exported by {artifact}: {token}",
-                  file=sys.stderr)
-            return 1
+    forbidden = forbidden_runtime_exports(symbols, artifact_kind(artifact))
+    if forbidden:
+        print(f"delivery authority exported by {artifact}:",
+              *sorted(forbidden), sep="\n  ", file=sys.stderr)
+        return 1
     return 0
 
 

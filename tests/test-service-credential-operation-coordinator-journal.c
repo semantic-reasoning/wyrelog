@@ -1918,6 +1918,104 @@ test_lifecycle_checkpoints (JournalFixture *fixture, gconstpointer unused)
       (&inactive_request);
 }
 
+static void
+test_maintenance_checkpoints (JournalFixture *fixture, gconstpointer unused)
+{
+  (void) unused;
+  const gchar *successor = "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+  WylServiceCredentialOperationCoordinatorRequest terminal_request = request ();
+  WylServiceCredentialOperationCoordinatorRequest escrow_request = request ();
+  WylServiceCredentialOperationRecord current =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationChildName name =
+      WYL_SERVICE_CREDENTIAL_OPERATION_CHILD_NAME_INIT;
+  g_autoptr (GBytes) first = NULL;
+  g_autoptr (GBytes) replay = NULL;
+  gboolean replayed = TRUE;
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &terminal_request, 10, NULL,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
+      (&fixture->storage, &fixture->anchor, terminal_request.request_id, 20,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (current.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  g_assert_cmpstr (current.terminal_reason, ==, "terminal.v1:not-committed");
+  g_assert_cmpint (current.updated_at_us, ==, 20);
+  record_name (terminal_request.request_id, &name);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &first), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
+      (&fixture->storage, &fixture->anchor, terminal_request.request_id, 99,
+          &replayed, &current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first, replay));
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+      (&fixture->storage, &fixture->anchor, terminal_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING, 100, NULL,
+          &current), ==, WYRELOG_E_POLICY);
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&current);
+
+  g_assert_cmpint (wyl_service_credential_operation_coordinator_begin_or_replay
+      (&fixture->storage, &fixture->anchor, &escrow_request, 10, NULL,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed
+      (&fixture->storage, &fixture->anchor, escrow_request.request_id,
+          successor, 1, 11, NULL, &current), ==, WYRELOG_E_OK);
+  replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+      (&fixture->storage, &fixture->anchor, escrow_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_FOREIGN, 12, &replayed,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+  g_assert_cmpint (current.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
+  g_assert_cmpstr (current.terminal_reason, ==,
+      "oar.v1:server-committed:escrow-foreign");
+  record_name (escrow_request.request_id, &name);
+  g_clear_pointer (&first, g_bytes_unref);
+  g_clear_pointer (&replay, g_bytes_unref);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &first), ==,
+      WYRELOG_E_OK);
+  replayed = FALSE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+      (&fixture->storage, &fixture->anchor, escrow_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_FOREIGN, 99, &replayed,
+          &current), ==, WYRELOG_E_OK);
+  g_assert_true (replayed);
+  g_assert_cmpint (fixture_child_read (fixture, &name, &replay), ==,
+      WYRELOG_E_OK);
+  g_assert_true (g_bytes_equal (first, replay));
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+      (&fixture->storage, &fixture->anchor, escrow_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_ESCROW_MISSING, 100, NULL,
+          &current), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+      (&fixture->storage, &fixture->anchor, escrow_request.request_id,
+          WYL_SERVICE_CREDENTIAL_OPERATION_OAR_RECEIPT_UNCERTAIN, 100, NULL,
+          &current), ==, WYRELOG_E_INVALID);
+
+  wyl_service_credential_operation_child_name_clear (&name);
+  wyl_service_credential_operation_record_clear (&current);
+  wyl_service_credential_operation_coordinator_request_clear (&escrow_request);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&terminal_request);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1972,6 +2070,9 @@ main (int argc, char **argv)
       journal_fixture_tear_down);
   g_test_add ("/coordinator/journal/lifecycle-checkpoints", JournalFixture,
       NULL, journal_fixture_set_up, test_lifecycle_checkpoints,
+      journal_fixture_tear_down);
+  g_test_add ("/coordinator/journal/maintenance-checkpoints", JournalFixture,
+      NULL, journal_fixture_set_up, test_maintenance_checkpoints,
       journal_fixture_tear_down);
   return g_test_run ();
 }

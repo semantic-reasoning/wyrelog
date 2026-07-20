@@ -126,6 +126,19 @@ wyrelog_error_t
     gint64 now_us, gboolean * out_replayed,
     WylServiceCredentialOperationRecord * out_record);
 wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_escrow_oar
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, WylServiceCredentialOperationOarCause cause,
+    gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_checkpoint_terminal_not_committed
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const gchar * request_id, gint64 now_us, gboolean * out_replayed,
+    WylServiceCredentialOperationRecord * out_record);
+wyrelog_error_t
     wyl_service_credential_operation_coordinator_checkpoint_terminal_file_published
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,

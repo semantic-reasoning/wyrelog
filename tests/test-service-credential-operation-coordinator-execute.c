@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <sodium.h>
 #include <sqlite3.h>
 #include <string.h>
 
 #include "auth/service-credential-operation-coordinator-execute-private.h"
+#include "auth/service-credential-operation-coordinator-maintenance-private.h"
 #include "auth/service-auth-coordination-private.h"
 #include "auth/service-credential-operation-coordinator-private.h"
 #include "auth/service-credential-operation-coordinator-storage-private.h"
@@ -48,6 +50,7 @@ static gint64 scalar (sqlite3 * db, const gchar * sql);
 static void prepare_authority (WylHandle * handle, const gchar * subject_id);
 static void fresh_request_id (gchar * buf);
 static gint64 count_credentials (sqlite3 * db);
+static gint64 count_events (sqlite3 * db);
 
 static wyrelog_error_t
 stub_revalidate (gpointer data, const gchar *actor_subject_id)
@@ -63,6 +66,35 @@ stub_revalidate (gpointer data, const gchar *actor_subject_id)
     stub->saw_write_lease = snapshot.writer_active;
   }
   return stub->rc;
+}
+
+static wyrelog_error_t
+allow_handoff_mutation (gpointer data, const gchar *actor_subject_id)
+{
+  (void) data;
+  return g_strcmp0 (actor_subject_id, "admin") == 0 ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+typedef struct
+{
+  gint64 value;
+  guint calls;
+} CountingHandoffClock;
+
+static gint64
+counting_handoff_now (gpointer data)
+{
+  CountingHandoffClock *clock = data;
+  clock->calls++;
+  return clock->value;
+}
+
+static void
+count_handoff_authorization (gpointer data)
+{
+  guint *calls = data;
+  (*calls)++;
 }
 
 static void
@@ -521,6 +553,195 @@ begin_handoff_issue_for_test (const WylServiceCredentialOperationStorage
 }
 
 static void
+handoff_target_put_u32be (guint8 out[4], guint32 value)
+{
+  out[0] = (guint8) (value >> 24);
+  out[1] = (guint8) (value >> 16);
+  out[2] = (guint8) (value >> 8);
+  out[3] = (guint8) value;
+}
+
+static void
+    handoff_target_digest_for_test
+    (const WylServiceCredentialOperationRecord * record,
+    guint8 out[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES])
+{
+  const gchar *fields[] = {
+    "wyrelog.service-credential-owner-publication-target.v1",
+    record->destination,
+    record->parent_identity,
+  };
+  crypto_generichash_state state;
+  g_assert_cmpint (crypto_generichash_init (&state, NULL, 0,
+          WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES), ==, 0);
+  for (gsize i = 0; i < G_N_ELEMENTS (fields); i++) {
+    gsize len = strlen (fields[i]);
+    g_assert_cmpuint (len, <=, G_MAXUINT32);
+    guint8 encoded_len[4];
+    handoff_target_put_u32be (encoded_len, (guint32) len);
+    g_assert_cmpint (crypto_generichash_update (&state, encoded_len,
+            sizeof encoded_len), ==, 0);
+    g_assert_cmpint (crypto_generichash_update (&state,
+            (const guint8 *) fields[i], len), ==, 0);
+  }
+  g_assert_cmpint (crypto_generichash_final (&state, out,
+          WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES), ==, 0);
+  sodium_memzero (&state, sizeof state);
+}
+
+static GBytes *
+read_handoff_journal_bytes (const gchar *root, const gchar *request_id)
+{
+  g_autofree gchar *path = g_strdup_printf ("%s/op-%s", root, request_id);
+  gchar *contents = NULL;
+  gsize len = 0;
+  g_assert_true (g_file_get_contents (path, &contents, &len, NULL));
+  return g_bytes_new_take (contents, len);
+}
+
+static void
+    assert_escrow_info_equal
+    (const wyl_policy_service_handoff_escrow_info_t * left,
+    const wyl_policy_service_handoff_escrow_info_t * right)
+{
+  g_assert_true (wyl_id_equal (&left->escrow_id, &right->escrow_id));
+  g_assert_cmpstr (left->operation, ==, right->operation);
+  g_assert_cmpstr (left->request_id, ==, right->request_id);
+  g_assert_cmpstr (left->actor_subject_id, ==, right->actor_subject_id);
+  g_assert_cmpmem (left->target_digest, sizeof left->target_digest,
+      right->target_digest, sizeof right->target_digest);
+  g_assert_cmpstr (left->credential_id, ==, right->credential_id);
+  g_assert_cmpuint (left->credential_generation, ==,
+      right->credential_generation);
+  g_assert_cmpint (left->deadline_at_us, ==, right->deadline_at_us);
+  g_assert_cmpmem (left->binding_digest, sizeof left->binding_digest,
+      right->binding_digest, sizeof right->binding_digest);
+}
+
+static void
+assert_credential_equal (const wyl_service_credential_t *left,
+    const wyl_service_credential_t *right)
+{
+  g_assert_cmpstr (left->credential_id, ==, right->credential_id);
+  g_assert_cmpuint (left->credential_format_version, ==,
+      right->credential_format_version);
+  g_assert_cmpstr (left->subject_id, ==, right->subject_id);
+  g_assert_cmpstr (left->tenant_id, ==, right->tenant_id);
+  g_assert_cmpuint (left->generation, ==, right->generation);
+  g_assert_cmpstr (left->state, ==, right->state);
+  g_assert_cmpstr (left->created_by, ==, right->created_by);
+  g_assert_cmpint (left->created_at_us, ==, right->created_at_us);
+  g_assert_cmpint (left->updated_at_us, ==, right->updated_at_us);
+  g_assert_cmpint (left->expires_at_us, ==, right->expires_at_us);
+  g_assert_cmpint (left->last_used_at_us, ==, right->last_used_at_us);
+  g_assert_cmpstr (left->revoked_by, ==, right->revoked_by);
+  g_assert_cmpint (left->revoked_at_us, ==, right->revoked_at_us);
+  g_assert_cmpstr (left->rotated_from_id, ==, right->rotated_from_id);
+}
+
+static void
+assert_no_handoff_execution_callbacks (const HandoffPublication *publication,
+    const HandoffUnsealGate *gate, guint authorization_calls,
+    const CountingHandoffClock *clock)
+{
+  g_assert_cmpuint (publication->plan_calls, ==, 0);
+  g_assert_cmpuint (publication->stage_calls, ==, 0);
+  g_assert_cmpuint (publication->preflight_calls, ==, 0);
+  g_assert_cmpuint (publication->inspect_calls, ==, 0);
+  g_assert_cmpuint (publication->commit_calls, ==, 0);
+  g_assert_cmpuint (publication->active_leases, ==, 0);
+  g_assert_cmpuint (publication->release_calls, ==, 0);
+  g_assert_false (publication->published);
+  g_assert_cmpuint (gate->calls, ==, 0);
+  g_assert_cmpuint (authorization_calls, ==, 0);
+  g_assert_cmpuint (clock->calls, ==, 0);
+}
+
+static void
+materialize_handoff_state_for_maintenance (WylHandle *handle,
+    const WylServiceCredentialOperationStorage *storage,
+    const WylServiceCredentialOperationRootAnchor *anchor, gint64 now_us,
+    WylServiceCredentialOperationState state,
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF], wyl_id_t *escrow,
+    WylServiceCredentialOperationCoordinatorRequest *request,
+    WylServiceCredentialOperationRecord *record)
+{
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  begin_handoff_issue_for_test (storage, anchor, now_us, request_id, escrow,
+      request, &prepared);
+  guint8 target_digest[WYL_SERVICE_CREDENTIAL_HANDOFF_DIGEST_BYTES] = { 0 };
+  handoff_target_digest_for_test (&prepared, target_digest);
+  wyl_service_credential_handoff_request_t handoff = {
+    .escrow_id = escrow,
+    .target_digest = target_digest,
+    .deadline_at_us = prepared.expires_at_us,
+  };
+  wyl_service_credential_mutation_authorization_t authorization = {
+    .authorize = allow_handoff_mutation,
+  };
+  wyl_service_credential_issue_runtime_t runtime = {
+    .authorization = &authorization,
+  };
+  wyl_service_credential_handoff_result_t issued = { 0 };
+  gint64 successor_expiry = g_get_real_time () + G_TIME_SPAN_HOUR;
+  g_assert_cmpint (wyl_service_credential_issue_handoff_with_runtime (handle,
+          prepared.subject_id, prepared.tenant_id, prepared.actor_subject_id,
+          request_id, successor_expiry, &handoff, &runtime, &issued), ==,
+      WYRELOG_E_OK);
+  gboolean replayed = TRUE;
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_checkpoint_server_committed_bound
+      (storage, anchor, request_id, issued.handoff.credential_id,
+          issued.handoff.credential_generation, issued.handoff.binding_digest,
+          now_us + 1, &replayed, record), ==, WYRELOG_E_OK);
+  g_assert_false (replayed);
+
+  wyl_id_t reservation;
+  gchar reservation_id[WYL_ID_STRING_BUF];
+  g_assert_cmpint (wyl_id_new (&reservation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_id_format (&reservation, reservation_id,
+          sizeof reservation_id), ==, WYRELOG_E_OK);
+  if (state != WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED) {
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_checkpoint_publication_planned
+        (storage, anchor, request_id, reservation_id, "maintenance-stage",
+            reservation_id, now_us + 2, &replayed, record), ==, WYRELOG_E_OK);
+    g_assert_false (replayed);
+  }
+  if (state == WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_checkpoint_publication_prepared
+        (storage, anchor, request_id, reservation_id, "maintenance-stage",
+            "maintenance-stage-identity", reservation_id, now_us + 3,
+            &replayed, record), ==, WYRELOG_E_OK);
+    g_assert_false (replayed);
+  }
+  if (state == WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED
+      || state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_checkpoint_file_published
+        (storage, anchor, request_id, reservation_id, "maintenance-stage",
+            "maintenance-stage-identity", reservation_id, now_us + 4,
+            &replayed, record), ==, WYRELOG_E_OK);
+    g_assert_false (replayed);
+  }
+  if (state == WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED) {
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_checkpoint_cleanup_required
+        (storage, anchor, request_id, now_us + 5, &replayed, record), ==,
+        WYRELOG_E_OK);
+    g_assert_false (replayed);
+  }
+  g_assert_cmpint (record->state, ==, state);
+  memset (target_digest, 0, sizeof target_digest);
+  wyl_service_credential_handoff_result_clear (&issued);
+  wyl_service_credential_operation_record_clear (&prepared);
+}
+
+static void
 delete_escrow_for_legacy_test (sqlite3 *db, const wyl_id_t *escrow)
 {
   gchar escrow_id[WYL_ID_STRING_BUF];
@@ -530,6 +751,24 @@ delete_escrow_for_legacy_test (sqlite3 *db, const wyl_id_t *escrow)
   g_assert_cmpint (sqlite3_prepare_v2 (db,
           "DELETE FROM service_credential_handoff_escrows WHERE escrow_id=?;",
           -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_bind_text (stmt, 1, escrow_id, -1,
+          SQLITE_TRANSIENT), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
+  g_assert_cmpint (sqlite3_changes (db), ==, 1);
+  sqlite3_finalize (stmt);
+}
+
+static void
+make_escrow_foreign_for_maintenance_test (sqlite3 *db, const wyl_id_t *escrow)
+{
+  gchar escrow_id[WYL_ID_STRING_BUF];
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (wyl_id_format (escrow, escrow_id, sizeof escrow_id), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_prepare_v2 (db,
+          "UPDATE service_credential_handoff_escrows"
+          " SET target_digest=zeroblob(32) WHERE escrow_id=?;", -1, &stmt,
+          NULL), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_bind_text (stmt, 1, escrow_id, -1,
           SQLITE_TRANSIENT), ==, SQLITE_OK);
   g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_DONE);
@@ -1568,7 +1807,7 @@ test_handoff_delivery_recovery_matrix (void)
       (&inactive_request);
 
   /* Legacy FILE with an already-absent escrow may adopt one proof-bound
-   * tombstone.  The same absence from CLEANUP is not legacy evidence. */
+   * tombstone.  The same absence from CLEANUP is typed escrow-missing OAR. */
   for (guint cleanup = 0; cleanup < 2; cleanup++) {
     gchar request_id[WYL_REQUEST_ID_STRING_BUF];
     wyl_id_t escrow;
@@ -1607,10 +1846,10 @@ test_handoff_delivery_recovery_matrix (void)
     delete_escrow_for_legacy_test (db, &escrow);
     guint inspect_before = publication.inspect_calls;
     guint unseal_before = gate.calls;
-    wyrelog_error_t expected = cleanup == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
     g_assert_cmpint
         (wyl_service_credential_operation_coordinator_execute_handoff (handle,
-            &storage, &anchor, request_id, &runtime, &outcome), ==, expected);
+            &storage, &anchor, request_id, &runtime, &outcome), ==,
+        WYRELOG_E_OK);
     g_assert_cmpuint (publication.inspect_calls, ==, inspect_before);
     g_assert_cmpuint (gate.calls, ==, unseal_before);
     g_assert_cmpint (count_handoff_rows_for_request (db, request_id,
@@ -1629,10 +1868,10 @@ test_handoff_delivery_recovery_matrix (void)
       g_assert_cmpint (count_handoff_audits_for_request (db, request_id), ==,
           1);
     } else {
-      g_assert_cmpint (wyl_service_credential_operation_coordinator_load
-          (&storage, &anchor, request_id, &outcome), ==, WYRELOG_E_OK);
       g_assert_cmpint (outcome.state, ==,
-          WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED);
+          WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
+      g_assert_cmpstr (outcome.terminal_reason, ==,
+          "oar.v1:cleanup-required:escrow-missing");
     }
     wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL,
         NULL);
@@ -1687,6 +1926,337 @@ test_handoff_delivery_recovery_matrix (void)
   wyl_service_credential_operation_record_clear (&tamper_prepared);
   wyl_service_credential_operation_coordinator_request_clear (&tamper_request);
 
+  wyl_service_credential_operation_storage_clear (&storage);
+  remove_operation_root_for_test (operation_root);
+}
+
+static void
+test_handoff_automatic_maintenance_gate (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  WylHandle *handle = fixture.handle;
+  prepare_authority (handle, "svc:handoff:executor");
+  g_autoptr (WylSession) session = handoff_human_session_new ("admin",
+      "tenant-a");
+  wyl_policy_store_t *store = store_of (handle);
+  sqlite3 *db = db_of (handle);
+  g_autofree gchar *operation_root = g_build_filename (fixture.dir,
+      "maintenance-operations", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  g_assert_cmpint (wyl_service_credential_operation_storage_open
+      (operation_root, &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+  const WyctlPublicationBackendVTable vtable = {
+    .plan = handoff_test_plan,
+    .stage_exact = handoff_test_stage,
+    .receipt_target_acquire = handoff_test_target_acquire,
+    .receipt_target_inspect = handoff_test_target_inspect,
+    .receipt_target_commit = handoff_test_target_commit,
+    .receipt_target_release = handoff_test_target_release,
+  };
+  HandoffPublication publication = {.store = store };
+  HandoffUnsealGate gate = {.rc = WYRELOG_E_IO };
+  CountingHandoffClock runtime_clock = {.value = 0 };
+  guint authorization_calls = 0;
+  gint64 real_now = g_get_real_time ();
+  WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
+    .session = session,
+    .authenticated_actor_subject_id = "admin",
+    .guard_timestamp = real_now,
+    .guard_loc_class = "trusted",
+    .guard_risk = 0,
+    .publication = &vtable,
+    .publication_data = &publication,
+    .now_us = counting_handoff_now,
+    .clock_data = &runtime_clock,
+    .after_authorization = count_handoff_authorization,
+    .authorization_checkpoint_data = &authorization_calls,
+  };
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store,
+      handoff_unseal_gate, &gate);
+
+  static const WylServiceCredentialOperationState committed_states[] = {
+    WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED,
+    WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (committed_states); i++) {
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+    wyl_id_t escrow;
+    WylServiceCredentialOperationCoordinatorRequest request =
+        WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+    WylServiceCredentialOperationRecord record =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    WylServiceCredentialOperationRecord outcome =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    materialize_handoff_state_for_maintenance (handle, &storage, &anchor,
+        real_now - G_TIME_SPAN_HOUR - G_TIME_SPAN_SECOND - (gint64) i * 10,
+        committed_states[i], request_id, &escrow, &request, &record);
+    runtime.decision_request_id = request_id;
+    publication = (HandoffPublication) {
+    .store = store};
+    gate = (HandoffUnsealGate) {
+    .rc = WYRELOG_E_IO};
+    authorization_calls = 0;
+    runtime_clock = (CountingHandoffClock) {
+    .value = 0};
+    g_autoptr (GBytes) journal_before = read_handoff_journal_bytes
+        (operation_root, request_id);
+    wyl_policy_service_handoff_escrow_info_t escrow_before = { 0 };
+    wyl_policy_service_handoff_escrow_info_t escrow_after = { 0 };
+    wyl_service_credential_t credential_before = { 0 };
+    wyl_service_credential_t credential_after = { 0 };
+    g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+            &escrow, &escrow_before), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_credential_get (handle,
+            record.successor_credential_id, &credential_before), ==,
+        WYRELOG_E_OK);
+    gint64 events_before = count_events (db);
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+            &storage, &anchor, request_id, &runtime, &outcome), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (outcome.state, ==, committed_states[i]);
+    g_autoptr (GBytes) journal_after = read_handoff_journal_bytes
+        (operation_root, request_id);
+    g_assert_true (g_bytes_equal (journal_before, journal_after));
+    g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+            &escrow, &escrow_after), ==, WYRELOG_E_OK);
+    assert_escrow_info_equal (&escrow_before, &escrow_after);
+    g_assert_cmpint (wyl_service_credential_get (handle,
+            record.successor_credential_id, &credential_after), ==,
+        WYRELOG_E_OK);
+    assert_credential_equal (&credential_before, &credential_after);
+    g_assert_cmpint (count_events (db), ==, events_before);
+    g_assert_cmpint (count_handoff_rows_for_request (db, request_id,
+            "operation_expired"), ==, 1);
+    g_assert_cmpint (count_handoff_audits_for_request (db, request_id), ==, 1);
+    assert_no_handoff_execution_callbacks (&publication, &gate,
+        authorization_calls, &runtime_clock);
+
+    /* Re-entry replays the same durable attention without new effects. */
+    wyl_service_credential_operation_record_clear (&outcome);
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+            &storage, &anchor, request_id, &runtime, &outcome), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (outcome.state, ==, committed_states[i]);
+    g_autoptr (GBytes) journal_replay = read_handoff_journal_bytes
+        (operation_root, request_id);
+    g_assert_true (g_bytes_equal (journal_before, journal_replay));
+    g_assert_cmpint (count_handoff_rows_for_request (db, request_id,
+            "operation_expired"), ==, 1);
+    g_assert_cmpint (count_handoff_audits_for_request (db, request_id), ==, 1);
+    assert_no_handoff_execution_callbacks (&publication, &gate,
+        authorization_calls, &runtime_clock);
+
+    wyl_service_credential_clear (&credential_after);
+    wyl_service_credential_clear (&credential_before);
+    wyl_policy_service_handoff_escrow_info_clear (&escrow_after);
+    wyl_policy_service_handoff_escrow_info_clear (&escrow_before);
+    wyl_service_credential_operation_record_clear (&outcome);
+    wyl_service_credential_operation_record_clear (&record);
+    wyl_service_credential_operation_coordinator_request_clear (&request);
+  }
+
+  /* Missing and foreign escrow proofs become durable OAR before any caller
+   * clock, authorization, publication, or unseal callback. */
+  for (guint foreign = 0; foreign < 2; foreign++) {
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+    wyl_id_t escrow;
+    WylServiceCredentialOperationCoordinatorRequest request =
+        WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+    WylServiceCredentialOperationRecord record =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    WylServiceCredentialOperationRecord outcome =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    materialize_handoff_state_for_maintenance (handle, &storage, &anchor,
+        real_now + 100 + foreign,
+        WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED, request_id, &escrow,
+        &request, &record);
+    if (foreign != 0)
+      make_escrow_foreign_for_maintenance_test (db, &escrow);
+    else
+      delete_escrow_for_legacy_test (db, &escrow);
+    runtime.decision_request_id = request_id;
+    publication = (HandoffPublication) {
+    .store = store};
+    gate = (HandoffUnsealGate) {
+    .rc = WYRELOG_E_IO};
+    authorization_calls = 0;
+    runtime_clock = (CountingHandoffClock) {
+    .value = 0};
+    wyl_service_credential_t credential_before = { 0 };
+    wyl_service_credential_t credential_after = { 0 };
+    g_assert_cmpint (wyl_service_credential_get (handle,
+            record.successor_credential_id, &credential_before), ==,
+        WYRELOG_E_OK);
+    wyl_policy_service_handoff_escrow_info_t escrow_before = { 0 };
+    wyl_policy_service_handoff_escrow_info_t escrow_after = { 0 };
+    if (foreign != 0)
+      g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+              &escrow, &escrow_before), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+            &storage, &anchor, request_id, &runtime, &outcome), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (outcome.state, ==,
+        WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED);
+    g_assert_cmpstr (outcome.terminal_reason, ==, foreign != 0 ?
+        "oar.v1:server-committed:escrow-foreign" :
+        "oar.v1:server-committed:escrow-missing");
+    g_autoptr (GBytes) oar_journal = read_handoff_journal_bytes
+        (operation_root, request_id);
+    if (foreign != 0) {
+      g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+              &escrow, &escrow_after), ==, WYRELOG_E_OK);
+      assert_escrow_info_equal (&escrow_before, &escrow_after);
+    }
+    g_assert_cmpint (wyl_service_credential_get (handle,
+            record.successor_credential_id, &credential_after), ==,
+        WYRELOG_E_OK);
+    assert_credential_equal (&credential_before, &credential_after);
+    g_assert_cmpint (count_handoff_audits_for_request (db, request_id), ==, 0);
+    assert_no_handoff_execution_callbacks (&publication, &gate,
+        authorization_calls, &runtime_clock);
+
+    wyl_service_credential_operation_record_clear (&outcome);
+    g_assert_cmpint
+        (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+            &storage, &anchor, request_id, &runtime, &outcome), ==,
+        WYRELOG_E_OK);
+    g_autoptr (GBytes) oar_replay = read_handoff_journal_bytes
+        (operation_root, request_id);
+    g_assert_true (g_bytes_equal (oar_journal, oar_replay));
+    assert_no_handoff_execution_callbacks (&publication, &gate,
+        authorization_calls, &runtime_clock);
+    wyl_policy_service_handoff_escrow_info_clear (&escrow_after);
+    wyl_policy_service_handoff_escrow_info_clear (&escrow_before);
+    wyl_service_credential_clear (&credential_after);
+    wyl_service_credential_clear (&credential_before);
+    wyl_service_credential_operation_record_clear (&outcome);
+    wyl_service_credential_operation_record_clear (&record);
+    wyl_service_credential_operation_coordinator_request_clear (&request);
+  }
+
+  /* An expired PREPARED operation reaches terminal-not-committed without a
+   * credential mutation.  A cancelled maintenance attempt writes nothing. */
+  gchar prepared_request_id[WYL_REQUEST_ID_STRING_BUF];
+  wyl_id_t prepared_escrow;
+  WylServiceCredentialOperationCoordinatorRequest prepared_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  WylServiceCredentialOperationRecord prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord prepared_outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  begin_handoff_issue_for_test (&storage, &anchor,
+      real_now - G_TIME_SPAN_HOUR - G_TIME_SPAN_SECOND, prepared_request_id,
+      &prepared_escrow, &prepared_request, &prepared);
+  runtime.decision_request_id = prepared_request_id;
+  publication = (HandoffPublication) {
+  .store = store};
+  gate = (HandoffUnsealGate) {
+  .rc = WYRELOG_E_IO};
+  authorization_calls = 0;
+  runtime_clock = (CountingHandoffClock) {
+  .value = 0};
+  gint64 credentials_before = count_credentials (db);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, prepared_request_id, &runtime,
+          &prepared_outcome), ==, WYRELOG_E_OK);
+  g_assert_cmpint (prepared_outcome.state, ==,
+      WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL);
+  g_assert_cmpstr (prepared_outcome.terminal_reason, ==,
+      "terminal.v1:not-committed");
+  g_assert_cmpint (count_credentials (db), ==, credentials_before);
+  g_assert_cmpint (count_handoff_rows_for_request (db, prepared_request_id,
+          "not_committed"), ==, 1);
+  g_assert_cmpint (count_handoff_audits_for_request (db,
+          prepared_request_id), ==, 1);
+  wyl_policy_service_handoff_escrow_info_t absent_escrow = { 0 };
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &prepared_escrow, &absent_escrow), ==, WYRELOG_E_NOT_FOUND);
+  assert_no_handoff_execution_callbacks (&publication, &gate,
+      authorization_calls, &runtime_clock);
+  g_autoptr (GBytes) prepared_terminal = read_handoff_journal_bytes
+      (operation_root, prepared_request_id);
+  wyl_service_credential_operation_record_clear (&prepared_outcome);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, prepared_request_id, &runtime,
+          &prepared_outcome), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) prepared_replay = read_handoff_journal_bytes
+      (operation_root, prepared_request_id);
+  g_assert_true (g_bytes_equal (prepared_terminal, prepared_replay));
+  g_assert_cmpint (count_handoff_rows_for_request (db, prepared_request_id,
+          "not_committed"), ==, 1);
+  g_assert_cmpint (count_handoff_audits_for_request (db,
+          prepared_request_id), ==, 1);
+  assert_no_handoff_execution_callbacks (&publication, &gate,
+      authorization_calls, &runtime_clock);
+  wyl_service_credential_operation_record_clear (&prepared_outcome);
+  wyl_service_credential_operation_record_clear (&prepared);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&prepared_request);
+
+  gchar cancelled_request_id[WYL_REQUEST_ID_STRING_BUF];
+  wyl_id_t cancelled_escrow;
+  WylServiceCredentialOperationCoordinatorRequest cancelled_request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  WylServiceCredentialOperationRecord cancelled_prepared =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecord cancelled_outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  begin_handoff_issue_for_test (&storage, &anchor, real_now + 300,
+      cancelled_request_id, &cancelled_escrow, &cancelled_request,
+      &cancelled_prepared);
+  g_autoptr (GBytes) cancelled_before = read_handoff_journal_bytes
+      (operation_root, cancelled_request_id);
+  g_autoptr (GCancellable) cancelled = g_cancellable_new ();
+  g_cancellable_cancel (cancelled);
+  runtime.decision_request_id = cancelled_request_id;
+  runtime.cancellable = cancelled;
+  publication = (HandoffPublication) {
+  .store = store};
+  gate = (HandoffUnsealGate) {
+  .rc = WYRELOG_E_IO};
+  authorization_calls = 0;
+  runtime_clock = (CountingHandoffClock) {
+  .value = 0};
+  credentials_before = count_credentials (db);
+  g_assert_cmpint
+      (wyl_service_credential_operation_coordinator_execute_handoff (handle,
+          &storage, &anchor, cancelled_request_id, &runtime,
+          &cancelled_outcome), !=, WYRELOG_E_OK);
+  g_autoptr (GBytes) cancelled_after = read_handoff_journal_bytes
+      (operation_root, cancelled_request_id);
+  g_assert_true (g_bytes_equal (cancelled_before, cancelled_after));
+  g_assert_cmpint (count_credentials (db), ==, credentials_before);
+  g_assert_cmpint (count_handoff_rows_for_request (db, cancelled_request_id,
+          "not_committed"), ==, 0);
+  g_assert_cmpint (count_handoff_rows_for_request (db, cancelled_request_id,
+          "operation_cancelled"), ==, 0);
+  g_assert_cmpint (count_handoff_audits_for_request (db,
+          cancelled_request_id), ==, 0);
+  g_assert_cmpint (wyl_policy_store_service_handoff_escrow_load (store,
+          &cancelled_escrow, &absent_escrow), ==, WYRELOG_E_NOT_FOUND);
+  assert_no_handoff_execution_callbacks (&publication, &gate,
+      authorization_calls, &runtime_clock);
+  runtime.cancellable = NULL;
+  wyl_service_credential_operation_record_clear (&cancelled_outcome);
+  wyl_service_credential_operation_record_clear (&cancelled_prepared);
+  wyl_service_credential_operation_coordinator_request_clear
+      (&cancelled_request);
+
+  wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
   wyl_service_credential_operation_storage_clear (&storage);
   remove_operation_root_for_test (operation_root);
 }
@@ -2519,5 +3089,8 @@ main (int argc, char *argv[])
   g_test_add_func
       ("/service-credential-operation-execute/handoff-delivery-recovery",
       test_handoff_delivery_recovery_matrix);
+  g_test_add_func
+      ("/service-credential-operation-execute/handoff-maintenance-gate",
+      test_handoff_automatic_maintenance_gate);
   return g_test_run ();
 }
