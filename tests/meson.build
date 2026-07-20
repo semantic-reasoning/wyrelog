@@ -1205,6 +1205,26 @@ test_service_credential_operation_storage = executable('test-service-credential-
 
 test('service-credential-operation-storage', test_service_credential_operation_storage)
 
+# Production OS-dispatch publication backend vtable adapter. Kept outside the
+# `build_client and host_machine.system() != 'windows'` guard on purpose: the
+# wyctl publication tests are off on Windows (and the windows variant sits in an
+# unreachable else-branch), so the daemon-facing adapter would otherwise have
+# zero Windows coverage. The adapter selects the concrete backend per OS
+# internally, so the same test drives the real backend on both platforms.
+test_publication_backend_deps = [wyrelog_dep, sodium_dep,
+  publication_private_dep]
+if host_machine.system() == 'windows'
+  test_publication_backend_deps += advapi32_dep
+endif
+test_publication_backend = executable('test-publication-backend',
+  'test-publication-backend.c',
+  include_directories : [include_directories('../wyrelog'),
+    include_directories('../wyrelog/wyctl')],
+  dependencies : test_publication_backend_deps,
+)
+
+test('publication-backend', test_publication_backend)
+
 test_policy_store_service_cvk = executable('test-policy-store-service-cvk',
   'test-policy-store-service-cvk.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],

@@ -165,6 +165,7 @@ service_session_private_dep = declare_dependency(
 publication_private_sources = [
   'wyctl/wyctl-publication-private.c',
   'wyctl/wyctl-publication-windows-private.c',
+  'wyctl/wyctl-publication-backend-private.c',
 ]
 if host_machine.system() != 'windows'
   publication_private_sources += 'wyctl/wyctl-publication-posix-private.c'
