@@ -109,6 +109,9 @@ wyrelog_error_t wyl_fact_graph_runtime_manager_foreach_status
 wyrelog_error_t wyl_fact_graph_runtime_manager_try_evict
     (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,
     gboolean * out_evicted);
+wyrelog_error_t wyl_fact_graph_runtime_manager_retire_unseen
+    (WylFactGraphRuntimeManager * manager,
+    const WylFactGraphKey * const *seen_keys, gsize n_seen_keys);
 
 /*
  * A snapshot pins an immutable engine generation independently of manager

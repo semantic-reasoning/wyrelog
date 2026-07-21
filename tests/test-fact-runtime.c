@@ -205,6 +205,14 @@ test_refresh_snapshot_status_and_evict (void)
           &b, &other), ==, WYRELOG_E_OK);
   g_assert_cmpint (snapshot_marker (current), ==, 12);
   g_assert_cmpint (snapshot_marker (other), ==, 21);
+  const WylFactGraphKey *seen[] = { &a };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_retire_unseen (manager,
+          seen, G_N_ELEMENTS (seen)), ==, WYRELOG_E_OK);
+  g_assert_cmpint (snapshot_marker (other), ==, 21);
+  WylFactGraphSnapshot *retired = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+          &b, &retired), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (retired);
 
   BuildSpec failed = {.failure = WYRELOG_E_IO };
   g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &a,
