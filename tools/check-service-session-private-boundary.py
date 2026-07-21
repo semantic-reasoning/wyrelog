@@ -1042,10 +1042,11 @@ def worker_count(compiler_id: str) -> int:
 
 
 SEMANTIC_BATCH_CHUNK_SIZE = 8
+CLANG_CL_SEMANTIC_BATCH_CHUNK_SIZE = 4
 
 
 def semantic_batch_tasks(tasks, compiler: list[str], compiler_id: str,
-                         chunk_size: int = SEMANTIC_BATCH_CHUNK_SIZE):
+                         chunk_size: int | None = None):
     """Group probes by semantics and split each group deterministically.
 
     A single clang-cl preprocessing invocation can become very expensive when
@@ -1053,6 +1054,10 @@ def semantic_batch_tasks(tasks, compiler: list[str], compiler_id: str,
     bounded prevents one oversized batch from monopolizing a worker while
     preserving the exact probe set and ordering within every context.
     """
+    if chunk_size is None:
+        chunk_size = (CLANG_CL_SEMANTIC_BATCH_CHUNK_SIZE
+                      if compiler_id == "clang-cl"
+                      else SEMANTIC_BATCH_CHUNK_SIZE)
     if chunk_size < 1:
         raise ValueError("semantic batch chunk size must be positive")
     groups = {}
