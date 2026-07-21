@@ -2,7 +2,7 @@
 
 Status: accepted
 
-Related issues: #536, #537, #539, #540, #544
+Related issues: #536, #537, #538, #539, #540, #544
 
 ## Context
 
@@ -150,6 +150,47 @@ path-based open. Registry metadata cannot exploit that window, but an attacker
 with the service account's filesystem authority can. The identity reservation
 and descriptor-bound provisioning cutover in #544 owns removal of this
 residual risk; `/proc/self/fd` is not treated as a portable substitute.
+
+## Physical graph-store identity
+
+Every identity-aware fact-store handle validates an exact, self-identifying
+record in `main.fact_store_metadata`. The table has only a `VARCHAR PRIMARY
+KEY` named `key` and a non-null `VARCHAR` named `value`, with no defaults
+or additional constraints. It contains exactly one row for each of:
+
+| Key | Required value |
+| --- | --- |
+| `store_kind` | `wyrelog.fact` |
+| `format_version` | Canonical decimal supported format version |
+| `store_uuid` | The exact canonical lowercase UUID reserved in policy |
+| `path_encoding_version` | Canonical decimal supported path-encoding version |
+| `tenant_id` | The exact tenant identifier from policy |
+| `graph_id` | The exact graph identifier from policy |
+
+Validation is read-only and never creates a missing pathname. A missing,
+partial, duplicated, structurally different, foreign, or unsupported identity
+returns no handle. Known audit-store shapes are foreign even if an otherwise
+valid fact metadata table was copied into the catalog. Ordinary fact and
+projection tables are permitted after the identity is established.
+
+Initialization is allowed only when the current DuckDB catalog has no
+user-created table, view, sequence, type, function, or schema. The metadata
+table and all six values are written and read back inside one transaction
+before commit. A failure at any step rolls back the complete identity; a
+committed exact tuple is an idempotent, write-free reentry, while a partial
+legacy table is never repaired or adopted.
+
+Identity-aware opens expose stable fact-local failure classes for identity,
+format, path encoding, schema, open, and internal failures. The returned handle
+owns a copy of the expected tuple and rejects fact operations for another
+tenant or graph. Within one process, discovery through initialization commit is
+serialized because separate DuckDB database objects do not provide a safe
+first-creator boundary for a new pathname. The durable cross-process writer
+lease and long-lived engine ownership remain owned by #541 and #544.
+
+The identity-aware API is private in #538. Existing raw fact-store opens and
+lazy legacy scope binding remain unchanged until the production cutover, so
+this decision does not silently adopt or migrate an existing deployment.
 
 ## State machines
 
