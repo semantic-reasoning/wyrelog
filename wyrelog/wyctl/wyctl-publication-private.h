@@ -142,6 +142,13 @@ typedef struct wyctl_publication_backend_vtable_t
       const gchar * expected_credential_id,
       const WyctlSensitiveText * expected_credential_secret,
       WyctlPublicationResult * out_result);
+  /* Read-only accessor: returns the canonical root identity the backend
+   * stamps into plan.parent_identity for its current root.  *out_identity is
+   * caller-owned (g_free); NULL on any non-OK return.  Fails closed exactly as
+   * plan does (POLICY when the root is not a private 0700 owner directory;
+   * missing root ENOENT -> NOT_FOUND).  Root-dir stat only; no destination
+   * pre-existence check. */
+    wyrelog_error_t (*root_identity) (gpointer self, gchar ** out_identity);
 } WyctlPublicationBackendVTable;
 
 void wyctl_sensitive_text_clear (WyctlSensitiveText * text);
