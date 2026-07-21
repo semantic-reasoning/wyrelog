@@ -45,6 +45,7 @@ wyrelog_sources = files(
   'auth/totp.c',
   'audit/event.c',
   'fact/graph-locator-private.c',
+  'fact/reconcile-private.c',
   'fact/root-writer-lease-private.c',
   'fact/schema.c',
   'policy/store.c',

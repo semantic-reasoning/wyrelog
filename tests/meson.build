@@ -702,6 +702,13 @@ test_fact_schema = executable('test-fact-schema',
 test('fact-schema', test_fact_schema)
 
 if get_option('enable_fact_store').allowed()
+  test_fact_reconcile = executable('test-fact-reconcile',
+    'test-fact-reconcile.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, sqlite_dep],
+  )
+  test('fact-reconcile', test_fact_reconcile)
+
   test_fact_store = executable('test-fact-store',
     'test-fact-store.c',
     include_directories : include_directories('../wyrelog'),
