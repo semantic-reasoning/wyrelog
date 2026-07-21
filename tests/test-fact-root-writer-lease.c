@@ -103,9 +103,12 @@ spawn_holder (const gchar *root, GDataInputStream **out_stdout)
   g_assert_nonnull (process);
   *out_stdout = g_data_input_stream_new
       (g_subprocess_get_stdout_pipe (process));
+  gsize line_length = 0;
   g_autofree gchar *line = g_data_input_stream_read_line_utf8 (*out_stdout,
-      NULL, NULL, &error);
+      &line_length, NULL, &error);
   g_assert_no_error (error);
+  if (line_length > 0 && line[line_length - 1] == '\r')
+    line[line_length - 1] = '\0';
   g_assert_cmpstr (line, ==, "READY");
   return process;
 }
