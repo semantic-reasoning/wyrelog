@@ -18,6 +18,49 @@ created non-inheritable. This makes `fork()` followed immediately by `exec*`
 safe without child-side lifecycle processing while preserving the live
 parent's exclusive store lease.
 
+## Fact-root writer lease
+
+A handle opened with a non-empty fact root is a writer and must acquire one
+exclusive root lease before it opens or creates the policy store. The lock
+order is fact-root writer lease, policy-store lease, graph-authority mutex,
+runtime engine ownership, then DuckDB. Ordered shutdown destroys graph
+engines and closes the policy store before releasing the root lease. Every
+failed handle open follows the same release order.
+
+The fact root is a bootstrap prerequisite: daemon setup may create the empty
+owner-only root before handle open. Lease acquisition then opens and pins the
+root with the secure graph resolver; later lease decisions never trust an
+unchecked configured pathname. Startup readiness uses scratch policy and
+audit stores and deliberately passes no fact root to its handle, so it neither
+acquires write authority nor opens a writable fact store. The runtime handle
+is the first startup consumer that acquires authority, and does so before
+policy schema creation or startup graph replay.
+
+On POSIX, the exclusive non-blocking `flock()` is held on the verified root
+directory descriptor itself. There is no sidecar and no fallback to a
+process-associated `fcntl()` lock. A process-local device/inode registry
+closes alias gaps before the kernel lock attempt. On Windows, a fixed
+`.wyrelog-writer-lock` file is opened relative to the pinned root handle with
+share mode zero. The file must be a zero-length, single-link, non-reparse
+regular file protected by the exact owner-only ACL and must retain the named
+file identity recorded under that root.
+
+The Windows artifact is permanent coordination metadata and is never removed
+or replaced during normal release or recovery. Its presence is not evidence
+of a live owner; the share-mode open is. POSIX and Windows both rely on handle
+close for orderly release and operating-system process teardown for crash
+release. Operators must not delete, truncate, chmod, relink, or otherwise
+"recover" the authority object. A live conflict returns `WYRELOG_E_BUSY`;
+malformed or replaced authority returns `WYRELOG_E_POLICY`; native failures
+return `WYRELOG_E_IO`. Operator-visible startup errors use those fixed,
+path-free error strings.
+
+Lease verification also proves whether another secure resolver has the same
+native root identity. This is the required contract for backup, restore, and
+future maintenance entry points. It prevents cooperating writers and detects
+persistent root replacement; it does not make DuckDB's later pathname opens
+descriptor-bound. That remaining same-owner pathname window belongs to #544.
+
 ## Provider-backed store path threat model
 
 Every provider-backed store, encrypted or plaintext, must be placed in an

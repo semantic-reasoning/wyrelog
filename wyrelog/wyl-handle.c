@@ -20,6 +20,7 @@
 
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/replay-private.h"
+#include "fact/root-writer-lease-private.h"
 #endif
 
 #define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
@@ -92,6 +93,7 @@ struct _WylHandle
   WylServiceAuthUnavailableReason service_auth_unavailable_reason;
 #ifdef WYL_HAS_FACT_STORE
   gchar *fact_root;
+  WylFactRootWriterLease *fact_root_writer_lease;
   GHashTable *fact_graph_engines;
   GHashTable *fact_graph_statuses;
   GMutex fact_graphs_lock;
@@ -236,6 +238,7 @@ wyl_handle_finalize (GObject *object)
   g_clear_pointer (&self->engine_symbols_by_id, g_hash_table_unref);
 #ifdef WYL_HAS_FACT_STORE
   g_clear_pointer (&self->fact_root, g_free);
+  g_assert_null (self->fact_root_writer_lease);
   g_clear_pointer (&self->fact_graph_engines, g_hash_table_unref);
   g_clear_pointer (&self->fact_graph_statuses, g_hash_table_unref);
   g_mutex_clear (&self->fact_graphs_lock);
@@ -670,6 +673,14 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
 #ifdef WYL_HAS_FACT_STORE
   self->fact_root = g_strdup (opts->fact_root);
+  if (self->fact_root != NULL && self->fact_root[0] != '\0') {
+    wyrelog_error_t lease_rc = wyl_fact_root_writer_lease_acquire
+        (self->fact_root, &self->fact_root_writer_lease);
+    if (lease_rc != WYRELOG_E_OK) {
+      g_object_unref (self);
+      return lease_rc;
+    }
+  }
 #endif
   self->require_template_manifest = opts->require_template_manifest
       || opts->production_mode;
@@ -897,6 +908,10 @@ wyl_handle_complete_shutdown (WylHandle *handle,
       wyl_handle_engine_delta_step_fault_once_quark (), NULL);
   g_hash_table_remove_all (handle->engine_symbols_by_id);
   wyl_policy_store_close (detached_store);
+#ifdef WYL_HAS_FACT_STORE
+  g_clear_pointer (&handle->fact_root_writer_lease,
+      wyl_fact_root_writer_lease_release);
+#endif
 
   g_mutex_lock (&handle->policy_store_lifecycle_mutex);
   g_assert_true (handle->policy_store_shutdown_completing);

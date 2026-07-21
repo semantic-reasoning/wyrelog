@@ -612,6 +612,28 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+fact_root_writer_lease_c_args = fact_test_support_c_args
+if get_option('enable_fact_store').allowed()
+  fact_root_writer_lease_c_args += '-DWYL_HAS_FACT_STORE'
+endif
+
+test_fact_root_writer_lease = executable('test-fact-root-writer-lease',
+  'test-fact-root-writer-lease.c',
+  'fact-test-support.c',
+  c_args : fact_root_writer_lease_c_args,
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep, glib_dep, gio_dep] + fact_test_support_deps,
+)
+
+test('fact-root-writer-lease', test_fact_root_writer_lease,
+  timeout : 60,
+)
+
+test('fact-root-writer-lease-boundary', python3,
+  args : [files('test-fact-root-writer-lease-boundary.py'),
+    meson.project_source_root()],
+)
+
 if host_machine.system() == 'windows'
   fact_graph_locator_windows_env = environment()
   fact_graph_locator_windows_env.set(

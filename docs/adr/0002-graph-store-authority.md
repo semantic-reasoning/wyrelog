@@ -149,7 +149,10 @@ same-owner replacement window between resolver verification and DuckDB's
 path-based open. Registry metadata cannot exploit that window, but an attacker
 with the service account's filesystem authority can. The identity reservation
 and descriptor-bound provisioning cutover in #544 owns removal of this
-residual risk; `/proc/self/fd` is not treated as a portable substitute.
+residual risk; `/proc/self/fd` is not treated as a portable substitute. A
+lifetime root-writer lease excludes cooperating daemon writers before policy
+or graph mutation, but deliberately does not claim to close that same-owner
+pathname window.
 
 ## Physical graph-store identity
 
@@ -193,7 +196,8 @@ owns a copy of the expected tuple and rejects fact operations for another
 tenant or graph. Within one process, discovery through initialization commit is
 serialized because separate DuckDB database objects do not provide a safe
 first-creator boundary for a new pathname. The durable cross-process writer
-lease and long-lived engine ownership remain owned by #541 and #544.
+lease is held for the complete writable-handle lifetime. Descriptor-bound
+long-lived engine ownership remains owned by #544.
 
 The identity-aware API is private in #538. Existing raw fact-store opens and
 lazy legacy scope binding remain unchanged until the production cutover, so
