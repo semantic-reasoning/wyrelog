@@ -5098,6 +5098,11 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
+  if (g_strcmp0 (action, "delete") == 0) {
+    set_json_error (msg, 501, "tenant_delete_unsupported");
+    return;
+  }
+
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
   if (!authorize_tenant_management (server, msg, query, ctx, &actor))
@@ -5105,7 +5110,7 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
 
   if (g_strcmp0 (action, "create") != 0
       && g_strcmp0 (action, "seal") != 0 && g_strcmp0 (action, "unseal") != 0) {
-    set_json_error (msg, 405, "tenant_delete_unsupported");
+    set_json_error (msg, 501, "tenant_delete_unsupported");
     return;
   }
 

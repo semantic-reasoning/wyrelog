@@ -37,7 +37,7 @@ default tenant.
 | `POST` | `/tenants/create` | `name`           | Creates a tenant idempotently. |
 | `POST` | `/tenants/seal`   | `name`           | Marks a tenant inactive. |
 | `POST` | `/tenants/unseal` | `name`           | Reactivates a sealed tenant. |
-| `POST` | `/tenants/delete` | `name`           | Returns `tenant_delete_unsupported`; deletion semantics are intentionally unsupported. |
+| `POST` | `/tenants/delete` | `name`           | Returns `501 tenant_delete_unsupported`; deletion semantics are intentionally unsupported. |
 
 `tenant=` in query strings remains the request/auth tenant. Lifecycle
 targets use `name=` so target selection cannot be confused with the
