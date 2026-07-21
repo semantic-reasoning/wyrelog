@@ -119,6 +119,7 @@ handoff_build_receipt (const WylServiceCredentialOperationRecord *record)
 static void
 handoff_build_request (const WylDaemonServiceCredentialHandoffContext *ctx,
     const WylDaemonServiceCredentialHandoffInputs *inputs,
+    const gchar *parent_identity,
     WylServiceCredentialOperationCoordinatorRequest *out)
 {
   *out = (WylServiceCredentialOperationCoordinatorRequest)
@@ -126,7 +127,7 @@ handoff_build_request (const WylDaemonServiceCredentialHandoffContext *ctx,
   out->kind = inputs->kind;
   out->request_id = g_strdup (inputs->request_id);
   out->destination = g_strdup (inputs->destination);
-  out->parent_identity = g_strdup (inputs->parent_identity);
+  out->parent_identity = g_strdup (parent_identity);
   out->actor_subject_id = g_strdup (ctx->authenticated_actor_subject_id);
   out->expires_at_us = inputs->expires_at_us;
   if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
@@ -214,7 +215,17 @@ wyl_daemon_service_credential_handoff (const
     publication_data = wyctl_publication_backend_self (&backend);
   }
 
-  handoff_build_request (ctx, inputs, &request);
+  /* Derive the publication parent_identity from the daemon's own owner root via
+   * the backend accessor.  It is byte-identical to what plan() stamps, so the
+   * executor's plan/record parent_identity assertion holds.  A missing or
+   * non-private root fails closed exactly as plan does; propagate that rc
+   * verbatim (NOT_FOUND -> unavailable, POLICY -> conflict). */
+  g_autofree gchar *parent_identity = NULL;
+  rc = publication->root_identity (publication_data, &parent_identity);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+
+  handoff_build_request (ctx, inputs, parent_identity, &request);
 
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = ctx->session,
