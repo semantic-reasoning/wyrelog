@@ -163,6 +163,9 @@ wyl_daemon_service_credential_handoff (const
   gboolean storage_opened = FALSE;
   gboolean backend_opened = FALSE;
   wyrelog_error_t rc;
+  /* Declared before the first goto: clang rejects a goto that jumps into the
+   * scope of a __cleanup__ (g_autofree) variable. */
+  g_autofree gchar *parent_identity = NULL;
 
   if (out_json != NULL)
     *out_json = NULL;
@@ -220,7 +223,6 @@ wyl_daemon_service_credential_handoff (const
    * executor's plan/record parent_identity assertion holds.  A missing or
    * non-private root fails closed exactly as plan does; propagate that rc
    * verbatim (NOT_FOUND -> unavailable, POLICY -> conflict). */
-  g_autofree gchar *parent_identity = NULL;
   rc = publication->root_identity (publication_data, &parent_identity);
   if (rc != WYRELOG_E_OK)
     goto out;
