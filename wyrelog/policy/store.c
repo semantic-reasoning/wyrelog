@@ -8020,9 +8020,50 @@ static const WylGraphAuthorityColumn graph_authority_columns[] = {
         "'recovery','internal'))"},
 };
 
+/* These are nullable only to migrate already-created journals without
+ * inventing evidence.  The row decoder rejects an all-NULL or partial set,
+ * so an old operation is never publication-eligible. */
+static const WylGraphAuthorityColumn fact_reconcile_evidence_columns[] = {
+  {"fact_reconcile_journal", "artifact_evidence_version", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN artifact_evidence_version INTEGER"},
+  {"fact_reconcile_journal", "source_identity_kind", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_identity_kind INTEGER"},
+  {"fact_reconcile_journal", "source_posix_device", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_posix_device INTEGER"},
+  {"fact_reconcile_journal", "source_posix_inode", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_posix_inode INTEGER"},
+  {"fact_reconcile_journal", "source_windows_volume_serial", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_windows_volume_serial INTEGER"},
+  {"fact_reconcile_journal", "source_windows_file_id", "BLOB", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_windows_file_id BLOB"},
+  {"fact_reconcile_journal", "source_size_bytes", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_size_bytes INTEGER"},
+  {"fact_reconcile_journal", "source_digest_algorithm", "INTEGER", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_digest_algorithm INTEGER"},
+  {"fact_reconcile_journal", "source_digest", "BLOB", FALSE,
+        NULL, NULL,
+      "ALTER TABLE fact_reconcile_journal ADD COLUMN source_digest BLOB"},
+};
+
 static const gchar graph_authority_uuid_index_sql[] =
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_fact_graphs_store_uuid "
     "ON fact_graphs(store_uuid) WHERE store_uuid IS NOT NULL";
+
+static const gchar fact_reconcile_evidence_immutable_trigger_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_reconcile_evidence_immutable "
+    "BEFORE UPDATE OF artifact_evidence_version,source_identity_kind,"
+    "source_posix_device,source_posix_inode,source_windows_volume_serial,"
+    "source_windows_file_id,source_size_bytes,source_digest_algorithm,"
+    "source_digest ON fact_reconcile_journal BEGIN "
+    "SELECT RAISE(ABORT,'reconciliation artifact evidence is immutable'); END";
 
 static const gchar tenant_authority_insert_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS tenant_authority_insert_guard "
@@ -8501,6 +8542,15 @@ validate_graph_authority_schema (sqlite3 *db)
     if (!exists || !matches)
       return WYRELOG_E_POLICY;
   }
+  for (gsize i = 0; i < G_N_ELEMENTS (fact_reconcile_evidence_columns); i++) {
+    gboolean exists = FALSE, matches = FALSE;
+    wyrelog_error_t rc = graph_authority_column_status (db,
+        &fact_reconcile_evidence_columns[i], &exists, &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (!exists || !matches)
+      return WYRELOG_E_POLICY;
+  }
   static const struct
   {
     const gchar *type;
@@ -8516,6 +8566,8 @@ validate_graph_authority_schema (sqlite3 *db)
         graph_authority_insert_guard_sql},
     {"trigger", "fact_graph_authority_update_guard",
         graph_authority_update_guard_sql},
+    {"trigger", "fact_reconcile_evidence_immutable",
+        fact_reconcile_evidence_immutable_trigger_sql},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (objects); i++) {
     wyrelog_error_t rc = graph_authority_object_matches (db, objects[i].type,
@@ -8563,9 +8615,10 @@ static wyrelog_error_t
 migrate_graph_authority_schema (wyl_policy_store_t *store)
 {
   sqlite3 *db = store->db;
+  wyrelog_error_t rc;
   for (gsize i = 0; i < G_N_ELEMENTS (graph_authority_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
-    wyrelog_error_t rc = graph_authority_column_status (db,
+    rc = graph_authority_column_status (db,
         &graph_authority_columns[i], &exists, &matches);
     if (rc != WYRELOG_E_OK)
       return rc;
@@ -8575,7 +8628,22 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
                 graph_authority_columns[i].alter_sql)) != WYRELOG_E_OK)
       return rc;
   }
-  wyrelog_error_t rc = graph_authority_migration_checkpoint (store,
+  for (gsize i = 0; i < G_N_ELEMENTS (fact_reconcile_evidence_columns); i++) {
+    gboolean exists = FALSE, matches = FALSE;
+    rc = graph_authority_column_status (db,
+        &fact_reconcile_evidence_columns[i], &exists, &matches);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    if (exists && !matches)
+      return WYRELOG_E_POLICY;
+    if (!exists && (rc = exec_sql (db,
+                fact_reconcile_evidence_columns[i].alter_sql)) != WYRELOG_E_OK)
+      return rc;
+  }
+  if ((rc = exec_sql (db, fact_reconcile_evidence_immutable_trigger_sql)) !=
+      WYRELOG_E_OK)
+    return rc;
+  rc = graph_authority_migration_checkpoint (store,
       WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -8925,6 +8993,15 @@ wyl_policy_store_create_schema (wyl_policy_store_t *store)
       "     AND instr(canonical_relative_path, char(92)) = 0 "
       "     AND instr(canonical_relative_path, '..') = 0 "
       "     AND instr(canonical_relative_path, char(0)) = 0),"
+      "  artifact_evidence_version INTEGER,"
+      "  source_identity_kind INTEGER,"
+      "  source_posix_device INTEGER,"
+      "  source_posix_inode INTEGER,"
+      "  source_windows_volume_serial INTEGER,"
+      "  source_windows_file_id BLOB,"
+      "  source_size_bytes INTEGER,"
+      "  source_digest_algorithm INTEGER,"
+      "  source_digest BLOB,"
       "  state TEXT NOT NULL DEFAULT 'prepared' CHECK "
       "    (state IN ('prepared', 'moving', 'moved', 'identity_committed', "
       "      'authority_committed', 'done', 'aborted', 'needs_review')),"
@@ -11019,6 +11096,49 @@ fact_reconcile_relative_path_is_valid (const gchar *value)
   return TRUE;
 }
 
+static gboolean
+    fact_reconcile_artifact_evidence_is_valid
+    (const WylPolicyFactReconcileArtifactEvidence * e)
+{
+  if (e == NULL || e->version != WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1
+      || e->digest_algorithm !=
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256
+      || e->posix_device > G_MAXINT64 || e->posix_inode > G_MAXINT64
+      || e->windows_volume_serial > G_MAXINT64 || e->size_bytes > G_MAXINT64)
+    return FALSE;
+  gboolean nonzero_digest = FALSE;
+  gboolean nonzero_windows_id = FALSE;
+  for (gsize i = 0; i < G_N_ELEMENTS (e->digest); i++)
+    nonzero_digest |= e->digest[i] != 0;
+  for (gsize i = 0; i < G_N_ELEMENTS (e->windows_file_id); i++)
+    nonzero_windows_id |= e->windows_file_id[i] != 0;
+  if (!nonzero_digest)
+    return FALSE;
+  if (e->identity_kind == WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_POSIX)
+    return e->posix_device != 0 && e->posix_inode != 0
+        && e->windows_volume_serial == 0 && !nonzero_windows_id;
+  if (e->identity_kind == WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS)
+    return e->windows_volume_serial != 0
+        && nonzero_windows_id && e->posix_device == 0 && e->posix_inode == 0;
+  return FALSE;
+}
+
+static gboolean
+    fact_reconcile_artifact_evidence_equal
+    (const WylPolicyFactReconcileArtifactEvidence * a,
+    const WylPolicyFactReconcileArtifactEvidence * b)
+{
+  return a != NULL && b != NULL && a->version == b->version
+      && a->identity_kind == b->identity_kind
+      && a->posix_device == b->posix_device && a->posix_inode == b->posix_inode
+      && a->windows_volume_serial == b->windows_volume_serial
+      && a->size_bytes == b->size_bytes
+      && a->digest_algorithm == b->digest_algorithm
+      && memcmp (a->windows_file_id, b->windows_file_id,
+      sizeof a->windows_file_id) == 0
+      && memcmp (a->digest, b->digest, sizeof a->digest) == 0;
+}
+
 void wyl_policy_fact_reconcile_journal_record_free
     (WylPolicyFactReconcileJournalRecord * record)
 {
@@ -11043,28 +11163,50 @@ fact_reconcile_journal_record_from_row (sqlite3_stmt *stmt,
       || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
       || sqlite3_column_type (stmt, 8) != SQLITE_TEXT
       || sqlite3_column_type (stmt, 9) != SQLITE_TEXT
-      || sqlite3_column_type (stmt, 10) != SQLITE_TEXT
+      || sqlite3_column_type (stmt, 19) != SQLITE_TEXT
       || (sqlite3_column_type (stmt, 7) != SQLITE_NULL
           && sqlite3_column_type (stmt, 7) != SQLITE_TEXT))
     return WYRELOG_E_POLICY;
   for (gint i = 3; i <= 6; i++)
     if (sqlite3_column_type (stmt, i) != SQLITE_INTEGER)
       return WYRELOG_E_POLICY;
-  if (sqlite3_column_type (stmt, 11) != SQLITE_INTEGER
-      || sqlite3_column_type (stmt, 12) != SQLITE_INTEGER
-      || sqlite3_column_type (stmt, 13) != SQLITE_INTEGER)
+  for (gint i = 10; i <= 14; i++)
+    if (sqlite3_column_type (stmt, i) != SQLITE_INTEGER)
+      return WYRELOG_E_POLICY;
+  if (sqlite3_column_type (stmt, 15) != SQLITE_BLOB
+      || sqlite3_column_bytes (stmt, 15) != 16
+      || sqlite3_column_type (stmt, 16) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 17) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 18) != SQLITE_BLOB
+      || sqlite3_column_bytes (stmt, 18) !=
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_SHA256_BYTES
+      || sqlite3_column_type (stmt, 20) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 21) != SQLITE_INTEGER
+      || sqlite3_column_type (stmt, 22) != SQLITE_INTEGER)
+    return WYRELOG_E_POLICY;
+  for (gint i = 12; i <= 14; i++)
+    if (sqlite3_column_int64 (stmt, i) < 0)
+      return WYRELOG_E_POLICY;
+  if (sqlite3_column_int64 (stmt, 10) !=
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1
+      || sqlite3_column_int64 (stmt, 11) <
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_POSIX
+      || sqlite3_column_int64 (stmt, 11) >
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS
+      || sqlite3_column_int64 (stmt, 17) !=
+      WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256)
     return WYRELOG_E_POLICY;
   const gchar *op = (const gchar *) sqlite3_column_text (stmt, 0);
   const gchar *tenant = (const gchar *) sqlite3_column_text (stmt, 1);
-  const gchar *state_name = (const gchar *) sqlite3_column_text (stmt, 10);
+  const gchar *state_name = (const gchar *) sqlite3_column_text (stmt, 19);
   const gchar *uuid = sqlite3_column_type (stmt, 7) == SQLITE_NULL ? NULL :
       (const gchar *) sqlite3_column_text (stmt, 7);
   WylPolicyFactReconcileJournalState state;
   gint64 values[7] = {
     sqlite3_column_int64 (stmt, 3), sqlite3_column_int64 (stmt, 4),
     sqlite3_column_int64 (stmt, 5), sqlite3_column_int64 (stmt, 6),
-    sqlite3_column_int64 (stmt, 11), sqlite3_column_int64 (stmt, 12),
-    sqlite3_column_int64 (stmt, 13)
+    sqlite3_column_int64 (stmt, 20), sqlite3_column_int64 (stmt, 21),
+    sqlite3_column_int64 (stmt, 22)
   };
   if (!graph_store_uuid_is_canonical (op)
       || !wyl_policy_store_tenant_id_is_valid (tenant)
@@ -11096,6 +11238,29 @@ fact_reconcile_journal_record_from_row (sqlite3_stmt *stmt,
       (stmt, 8));
   record->canonical_relative_path = g_strdup
       ((const gchar *) sqlite3_column_text (stmt, 9));
+  record->source_evidence.version = (guint) sqlite3_column_int64 (stmt, 10);
+  record->source_evidence.identity_kind =
+      (WylPolicyFactReconcileArtifactIdentityKind) sqlite3_column_int64 (stmt,
+      11);
+  record->source_evidence.posix_device =
+      (guint64) sqlite3_column_int64 (stmt, 12);
+  record->source_evidence.posix_inode =
+      (guint64) sqlite3_column_int64 (stmt, 13);
+  record->source_evidence.windows_volume_serial =
+      (guint64) sqlite3_column_int64 (stmt, 14);
+  memcpy (record->source_evidence.windows_file_id, sqlite3_column_blob (stmt,
+          15), sizeof record->source_evidence.windows_file_id);
+  record->source_evidence.size_bytes =
+      (guint64) sqlite3_column_int64 (stmt, 16);
+  record->source_evidence.digest_algorithm =
+      (WylPolicyFactReconcileArtifactDigestAlgorithm)
+      sqlite3_column_int64 (stmt, 17);
+  memcpy (record->source_evidence.digest, sqlite3_column_blob (stmt, 18),
+      sizeof record->source_evidence.digest);
+  if (!fact_reconcile_artifact_evidence_is_valid (&record->source_evidence)) {
+    wyl_policy_fact_reconcile_journal_record_free (record);
+    return WYRELOG_E_POLICY;
+  }
   record->state = state;
   record->attempt = (guint64) values[4];
   record->created_at = values[5];
@@ -11113,7 +11278,10 @@ fact_reconcile_journal_read_locked (wyl_policy_store_t *store,
       "SELECT op_uuid,tenant_id,graph_id,expected_lifecycle_generation,"
       "expected_reconciliation_generation,expected_format_version,"
       "expected_path_encoding_version,expected_store_uuid,source_relative_path,"
-      "canonical_relative_path,state,attempt,created_at,updated_at "
+      "canonical_relative_path,artifact_evidence_version,source_identity_kind,"
+      "source_posix_device,source_posix_inode,source_windows_volume_serial,"
+      "source_windows_file_id,source_size_bytes,source_digest_algorithm,"
+      "source_digest,state,attempt,created_at,updated_at "
       "FROM fact_reconcile_journal WHERE op_uuid=?;", &stmt);
   if (rc == WYRELOG_E_OK)
     rc = bind_text (stmt, 1, op_uuid);
@@ -11160,12 +11328,18 @@ wyl_policy_store_reconcile_journal_list (wyl_policy_store_t *store,
       ? "SELECT op_uuid,tenant_id,graph_id,expected_lifecycle_generation,"
       "expected_reconciliation_generation,expected_format_version,"
       "expected_path_encoding_version,expected_store_uuid,source_relative_path,"
-      "canonical_relative_path,state,attempt,created_at,updated_at "
+      "canonical_relative_path,artifact_evidence_version,source_identity_kind,"
+      "source_posix_device,source_posix_inode,source_windows_volume_serial,"
+      "source_windows_file_id,source_size_bytes,source_digest_algorithm,"
+      "source_digest,state,attempt,created_at,updated_at "
       "FROM fact_reconcile_journal ORDER BY tenant_id,graph_id,op_uuid;"
       : "SELECT op_uuid,tenant_id,graph_id,expected_lifecycle_generation,"
       "expected_reconciliation_generation,expected_format_version,"
       "expected_path_encoding_version,expected_store_uuid,source_relative_path,"
-      "canonical_relative_path,state,attempt,created_at,updated_at "
+      "canonical_relative_path,artifact_evidence_version,source_identity_kind,"
+      "source_posix_device,source_posix_inode,source_windows_volume_serial,"
+      "source_windows_file_id,source_size_bytes,source_digest_algorithm,"
+      "source_digest,state,attempt,created_at,updated_at "
       "FROM fact_reconcile_journal WHERE tenant_id=? "
       "ORDER BY graph_id,op_uuid;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
@@ -11196,7 +11370,8 @@ static gboolean
     guint64 lifecycle_generation, guint64 reconciliation_generation,
     guint64 format_version, guint64 path_encoding_version,
     const gchar * store_uuid, const gchar * source_path,
-    const gchar * canonical_path)
+    const gchar * canonical_path,
+    const WylPolicyFactReconcileArtifactEvidence * source_evidence)
 {
   return g_strcmp0 (record->op_uuid, op_uuid) == 0
       && g_strcmp0 (record->tenant_id, tenant_id) == 0
@@ -11207,7 +11382,9 @@ static gboolean
       && record->expected_path_encoding_version == path_encoding_version
       && g_strcmp0 (record->expected_store_uuid, store_uuid) == 0
       && g_strcmp0 (record->source_relative_path, source_path) == 0
-      && g_strcmp0 (record->canonical_relative_path, canonical_path) == 0;
+      && g_strcmp0 (record->canonical_relative_path, canonical_path) == 0
+      && fact_reconcile_artifact_evidence_equal (&record->source_evidence,
+      source_evidence);
 }
 
 wyrelog_error_t
@@ -11237,6 +11414,8 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
       input != NULL ? input->source_relative_path : NULL;
   const gchar *canonical_relative_path =
       input != NULL ? input->canonical_relative_path : NULL;
+  const WylPolicyFactReconcileArtifactEvidence *source_evidence =
+      input != NULL ? &input->source_evidence : NULL;
   if (store == NULL || store->db == NULL || out_record == NULL
       || out_result == NULL || input == NULL
       || !graph_store_uuid_is_canonical (op_uuid)
@@ -11250,7 +11429,8 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
       || (expected_store_uuid != NULL
           && !graph_store_uuid_is_canonical (expected_store_uuid))
       || !fact_reconcile_relative_path_is_valid (source_relative_path)
-      || !fact_reconcile_relative_path_is_valid (canonical_relative_path))
+      || !fact_reconcile_relative_path_is_valid (canonical_relative_path)
+      || !fact_reconcile_artifact_evidence_is_valid (source_evidence))
     return WYRELOG_E_INVALID;
   GraphAuthorityMutationFrame frame;
   wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
@@ -11262,8 +11442,11 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
       "expected_lifecycle_generation,expected_reconciliation_generation,"
       "expected_format_version,expected_path_encoding_version,"
       "expected_store_uuid,source_relative_path,canonical_relative_path,"
-      "state,attempt,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,"
-      "'prepared',0,unixepoch(),unixepoch());", &stmt);
+      "artifact_evidence_version,source_identity_kind,source_posix_device,"
+      "source_posix_inode,source_windows_volume_serial,source_windows_file_id,"
+      "source_size_bytes,source_digest_algorithm,source_digest,state,attempt,"
+      "created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+      ", 'prepared',0,unixepoch(),unixepoch());", &stmt);
   if (rc == WYRELOG_E_OK
       && (bind_text (stmt, 1, op_uuid) != WYRELOG_E_OK
           || bind_text (stmt, 2, tenant_id) != WYRELOG_E_OK
@@ -11280,7 +11463,26 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
               ? sqlite3_bind_null (stmt, 8) != SQLITE_OK
               : bind_text (stmt, 8, expected_store_uuid) != WYRELOG_E_OK)
           || bind_text (stmt, 9, source_relative_path) != WYRELOG_E_OK
-          || bind_text (stmt, 10, canonical_relative_path) != WYRELOG_E_OK))
+          || bind_text (stmt, 10, canonical_relative_path) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 11,
+              source_evidence->version) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 12,
+              source_evidence->identity_kind) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 13, (sqlite3_int64)
+              source_evidence->posix_device) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 14, (sqlite3_int64)
+              source_evidence->posix_inode) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 15, (sqlite3_int64)
+              source_evidence->windows_volume_serial) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 16, source_evidence->windows_file_id,
+              sizeof source_evidence->windows_file_id,
+              SQLITE_TRANSIENT) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 17, (sqlite3_int64)
+              source_evidence->size_bytes) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 18,
+              source_evidence->digest_algorithm) != SQLITE_OK
+          || sqlite3_bind_blob (stmt, 19, source_evidence->digest,
+              sizeof source_evidence->digest, SQLITE_TRANSIENT) != SQLITE_OK))
     rc = WYRELOG_E_IO;
   int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
   gboolean inserted = rc == WYRELOG_E_OK && step == SQLITE_DONE
@@ -11291,6 +11493,10 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK && !inserted && !constraint)
     rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
   if (rc == WYRELOG_E_OK && inserted) {
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+    if (rc != WYRELOG_E_OK)
+      return graph_authority_mutation_complete (store, &frame, rc);
     rc = graph_authority_mutation_finish (store, &frame, FALSE);
     if (rc == WYRELOG_E_OK) {
       *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
@@ -11311,7 +11517,7 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
         (existing, op_uuid, tenant_id, graph_id, expected_lifecycle_generation,
             expected_reconciliation_generation, expected_format_version,
             expected_path_encoding_version, expected_store_uuid,
-            source_relative_path, canonical_relative_path)) {
+            source_relative_path, canonical_relative_path, source_evidence)) {
       *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
       rc = graph_authority_mutation_finish (store, &frame, TRUE);
       if (rc == WYRELOG_E_OK)
@@ -11387,6 +11593,13 @@ wyl_policy_store_reconcile_journal_transition (wyl_policy_store_t *store,
   wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
   if (rc != WYRELOG_E_OK)
     return rc;
+  /* A state/attempt match alone is not publication authority.  Decode the
+   * immutable evidence under the same transaction before changing state. */
+  WylPolicyFactReconcileJournalRecord *validated = NULL;
+  rc = fact_reconcile_journal_read_locked (store, op_uuid, &validated);
+  wyl_policy_fact_reconcile_journal_record_free (validated);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
   sqlite3_stmt *stmt = NULL;
   rc = prepare_stmt (store->db,
       "UPDATE fact_reconcile_journal SET state=?,attempt=attempt+1,"
