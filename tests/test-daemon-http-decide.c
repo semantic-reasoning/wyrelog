@@ -529,6 +529,50 @@ send_raw_path (SoupSession *session, const gchar *method,
 }
 
 static gint
+check_read_only_method_contract (const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  if (send_raw_path (session, "POST", base_url, "/healthz", &status, &body)
+      != 0)
+    return 550;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 551;
+  g_clear_pointer (&body, g_free);
+
+  if (send_raw_path (session, "POST", base_url, "/readyz", &status, &body)
+      != 0)
+    return 552;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 553;
+  g_clear_pointer (&body, g_free);
+
+  if (send_raw_path (session, "POST", base_url, "/facts/status", &status,
+          &body) != 0)
+    return 554;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 555;
+  g_clear_pointer (&body, g_free);
+
+  if (send_raw_path (session, "POST", base_url, "/profile/status", &status,
+          &body) != 0)
+    return 556;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 557;
+  g_clear_pointer (&body, g_free);
+
+  if (send_raw_path (session, "POST", base_url, "/audit/events", &status,
+          &body) != 0)
+    return 558;
+  if (status != 405 || strstr (body, "\"method_not_allowed\"") == NULL)
+    return 559;
+
+  return 0;
+}
+
+static gint
 check_readyz_runtime_liveness_contract (const gchar *base_url,
     WylDaemonRuntime *runtime)
 {
@@ -7034,6 +7078,10 @@ main (void)
   g_autofree gchar *base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
 
+  gint read_only_method_rc = check_read_only_method_contract (base_url);
+  if (read_only_method_rc != 0)
+    return read_only_method_rc;
+
   if (wyl_policy_store_grant_direct_permission (wyl_handle_get_policy_store
           (handle), "login-user", "wr.login.skip_mfa", "login")
       != WYRELOG_E_OK)
@@ -7150,6 +7198,10 @@ main (void)
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
     return 5;
+
+  gint read_only_method_rc = check_read_only_method_contract (base_url);
+  if (read_only_method_rc != 0)
+    return read_only_method_rc;
 
   gint readyz_rc = check_readyz_runtime_liveness_contract (base_url, &runtime);
   if (readyz_rc != 0)
@@ -7281,6 +7333,11 @@ main (void)
     result = 5;
     goto cleanup;
   }
+  gint read_only_method_rc = check_read_only_method_contract (base_url);
+  if (read_only_method_rc != 0) {
+    result = read_only_method_rc;
+    goto cleanup;
+  }
   gint service_state_rc = check_service_access_token_state_contract
       (http.server, &service_token_snapshot);
   if (service_state_rc != 0) {
@@ -7361,6 +7418,10 @@ main (void)
   g_autoptr (WylClient) client = NULL;
   if (wyl_client_new (base_url, &client) != WYRELOG_E_OK)
     return 5;
+
+  gint read_only_method_rc = check_read_only_method_contract (base_url);
+  if (read_only_method_rc != 0)
+    return read_only_method_rc;
 
   gint readyz_rc = check_readyz_malformed_audit_projection_contract (handle,
       base_url);
