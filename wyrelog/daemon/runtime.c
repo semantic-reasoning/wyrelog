@@ -43,6 +43,60 @@ count_service_profile_spool_events (const WylDaemonOptions *opts,
   return TRUE;
 }
 
+/* Create an optional owner-only (0700) daemon root, mirroring the
+ * fact-root gate. A NULL/empty path is a no-op success: these roots are
+ * optional and an unset deployment simply reports the handoff surface as
+ * unavailable. */
+static gboolean
+prepare_owner_only_root (const gchar *path, const gchar *label, GError **error)
+{
+  if (path == NULL || path[0] == '\0')
+    return TRUE;
+
+  if (g_mkdir_with_parents (path, 0700) != 0) {
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (errno),
+        "failed to create %s directory: %s", label, path);
+    return FALSE;
+  }
+  if (!g_file_test (path, G_FILE_TEST_IS_DIR)) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_NOTDIR,
+        "%s is not a directory: %s", label, path);
+    return FALSE;
+  }
+#ifndef G_OS_WIN32
+  struct stat root_stat;
+  if (g_stat (path, &root_stat) != 0) {
+    g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (errno),
+        "failed to stat %s directory: %s", label, path);
+    return FALSE;
+  }
+  /* Windows st_mode does not represent the directory ACL; the publication
+   * backend and operation storage perform the authoritative checks there. */
+  if ((root_stat.st_mode & 077) != 0) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
+        "%s must not be accessible by group or other users: %s", label, path);
+    return FALSE;
+  }
+  if ((root_stat.st_mode & 0700) != 0700) {
+    g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
+        "%s must be readable, writable, and searchable by owner: %s", label,
+        path);
+    return FALSE;
+  }
+#endif
+  return TRUE;
+}
+
+static gboolean
+prepare_credential_handoff_roots (const WylDaemonOptions *opts, GError **error)
+{
+  if (!prepare_owner_only_root (opts->operation_root,
+          "credential operation root", error))
+    return FALSE;
+  return prepare_owner_only_root (opts->credential_publication_root,
+      "credential publication root", error);
+}
+
 static gboolean
 prepare_fact_root (const WylDaemonOptions *opts, GError **error)
 {
@@ -453,6 +507,12 @@ wyl_daemon_run_runtime (const WylDaemonOptions *opts)
 
   if (!prepare_service_profile_spool (opts, &error)) {
     g_printerr ("wyrelogd: profile setup failed: %s\n", error->message);
+    return 1;
+  }
+
+  if (!prepare_credential_handoff_roots (opts, &error)) {
+    g_printerr ("wyrelogd: credential handoff root setup failed: %s\n",
+        error->message);
     return 1;
   }
 

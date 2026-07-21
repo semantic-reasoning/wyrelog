@@ -174,6 +174,9 @@ load_config_defaults (WylDaemonOptions *opts, GKeyFile *key_file)
   keyfile_take_string (key_file, "audit_db", &opts->audit_store_path);
   keyfile_take_string (key_file, "fact_root", &opts->fact_root);
   keyfile_take_string (key_file, "fact_store_mode", &opts->fact_store_mode);
+  keyfile_take_string (key_file, "operation_root", &opts->operation_root);
+  keyfile_take_string (key_file, "credential_publication_root",
+      &opts->credential_publication_root);
   keyfile_take_string (key_file, "event_spool_dir", &opts->event_spool_dir);
   keyfile_take_string (key_file, "system_url", &opts->system_url);
   keyfile_take_owned_string (key_file, "listen_port", &opts->listen_port_arg);
@@ -394,6 +397,20 @@ default_fact_root (WylDaemonProfile profile)
 }
 #endif
 
+static gboolean
+require_paths_disjoint (const gchar *label_a, const gchar *a,
+    const gchar *label_b, const gchar *b, GError **error)
+{
+  if (a == NULL || a[0] == '\0' || b == NULL || b[0] == '\0')
+    return TRUE;
+  if (path_equal_or_contains (a, b) || path_equal_or_contains (b, a)) {
+    g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
+        "%s must be distinct from %s", label_a, label_b);
+    return FALSE;
+  }
+  return TRUE;
+}
+
 static const gchar *
 default_spool_dir (WylDaemonProfile profile)
 {
@@ -424,6 +441,11 @@ wyl_daemon_parse_options (gint *argc, gchar ***argv, WylDaemonOptions *opts,
     {"fact-store-mode", 0, 0, G_OPTION_ARG_STRING,
           &opts->fact_store_mode,
         "Datalog fact store layout mode: per-tenant-graph", "MODE"},
+    {"operation-root", 0, 0, G_OPTION_ARG_STRING, &opts->operation_root,
+        "Service-credential operation journal root directory", "DIR"},
+    {"credential-publication-root", 0, 0, G_OPTION_ARG_STRING,
+          &opts->credential_publication_root,
+        "Owner-only credential publication root directory", "DIR"},
     {"system-url", 0, 0, G_OPTION_ARG_STRING, &opts->system_url,
           "System-profile daemon URL for service-profile event forwarding",
         "URL"},
@@ -558,6 +580,31 @@ wyl_daemon_options_resolve (WylDaemonOptions *opts, GError **error)
     }
   }
 
+  /* The credential operation and publication roots are opt-in: they are
+   * never auto-defaulted (unlike fact_root), so a deployment that leaves
+   * them unset keeps working and the escrow handoff surface simply reports
+   * unavailable. When explicitly set each must be disjoint from every other
+   * daemon path and from each other so a delivered secret or durable
+   * journal can never share a directory with another store. */
+  if (!require_paths_disjoint ("operation root", opts->operation_root,
+          "credential publication root", opts->credential_publication_root,
+          error))
+    return FALSE;
+  const gchar *cross_roots[][2] = {
+    {"policy database path", opts->policy_store_path},
+    {"audit database path", opts->audit_store_path},
+    {"fact root", opts->fact_root},
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (cross_roots); i++) {
+    if (!require_paths_disjoint ("operation root", opts->operation_root,
+            cross_roots[i][0], cross_roots[i][1], error))
+      return FALSE;
+    if (!require_paths_disjoint ("credential publication root",
+            opts->credential_publication_root, cross_roots[i][0],
+            cross_roots[i][1], error))
+      return FALSE;
+  }
+
   if (opts->profile == WYL_DAEMON_PROFILE_SERVICE) {
     if ((opts->production_mode || opts->show_profile_info) &&
         opts->event_spool_dir == NULL)
@@ -568,6 +615,13 @@ wyl_daemon_options_resolve (WylDaemonOptions *opts, GError **error)
           "fact root must be distinct from the service event spool");
       return FALSE;
     }
+    if (!require_paths_disjoint ("operation root", opts->operation_root,
+            "service event spool", opts->event_spool_dir, error))
+      return FALSE;
+    if (!require_paths_disjoint ("credential publication root",
+            opts->credential_publication_root, "service event spool",
+            opts->event_spool_dir, error))
+      return FALSE;
   } else if (opts->system_url != NULL && opts->system_url[0] != '\0') {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
         "system-url is only valid for the service profile");

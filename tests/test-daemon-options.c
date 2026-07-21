@@ -261,6 +261,93 @@ test_parser_listen_port_string_in_conf (void)
   remove_tmp_conf (path);
 }
 
+static void
+test_credential_roots_from_conf (void)
+{
+  /* Both roots are optional keyfile settings; when present they are
+   * consumed verbatim (disjoint from every other unset path). */
+  gchar *path = make_tmp_conf ("[daemon]\n"
+      "operation_root=/conf/ops\n"
+      "credential_publication_root=/conf/pub\n", 0640);
+  WylDaemonOptions opts = {
+    .config_path = g_strdup (path),
+    .template_dir = "/tmp/templates",
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_cmpstr (opts.operation_root, ==, "/conf/ops");
+  g_assert_cmpstr (opts.credential_publication_root, ==, "/conf/pub");
+
+  g_free ((gchar *) opts.operation_root);
+  g_free ((gchar *) opts.credential_publication_root);
+  g_free (opts.config_path);
+  g_free (opts.profile_arg);
+  remove_tmp_conf (path);
+}
+
+static void
+test_credential_roots_optional_when_unset (void)
+{
+  /* No conf, no production/profile-info: the roots stay NULL so the
+   * handoff surface reports unavailable rather than breaking the daemon. */
+  WylDaemonOptions opts = {
+    .template_dir = "/tmp/templates",
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_null (opts.operation_root);
+  g_assert_null (opts.credential_publication_root);
+
+  g_free (opts.profile_arg);
+}
+
+static void
+test_credential_roots_not_defaulted_in_production (void)
+{
+  /* Unlike fact_root, the handoff roots are opt-in: production must NOT
+   * auto-default them to a /var/lib path (which packaging does not
+   * pre-create and the daemon cannot mkdir under a hardened sandbox).
+   * They stay NULL so an unconfigured deployment keeps working. */
+  WylDaemonOptions opts = {
+    .template_dir = "/tmp/templates",
+    .production_mode = TRUE,
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+
+  g_assert_true (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_no_error (error);
+  g_assert_null (opts.operation_root);
+  g_assert_null (opts.credential_publication_root);
+
+  g_free (opts.profile_arg);
+}
+
+static void
+test_credential_roots_disjoint_enforced (void)
+{
+  /* An operation root that collides with the policy database path is
+   * rejected with a typed BAD_VALUE error. */
+  WylDaemonOptions opts = {
+    .template_dir = "/tmp/templates",
+    .policy_store_path = "/srv/wyrelog/policy.sqlite",
+    .operation_root = "/srv/wyrelog/policy.sqlite",
+    .listen_port = -1,
+  };
+  g_autoptr (GError) error = NULL;
+
+  g_assert_false (wyl_daemon_options_resolve (&opts, &error));
+  g_assert_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE);
+
+  g_free (opts.profile_arg);
+}
+
 /* ------------------------------------------------------------------ */
 /* permission gate                                                    */
 /* ------------------------------------------------------------------ */
@@ -593,6 +680,15 @@ main (int argc, char **argv)
       test_parser_cli_overrides_conf);
   g_test_add_func ("/daemon-options/parser/listen-port-string",
       test_parser_listen_port_string_in_conf);
+  g_test_add_func ("/daemon-options/credential-roots/from-conf",
+      test_credential_roots_from_conf);
+  g_test_add_func ("/daemon-options/credential-roots/optional-when-unset",
+      test_credential_roots_optional_when_unset);
+  g_test_add_func
+      ("/daemon-options/credential-roots/not-defaulted-in-production",
+      test_credential_roots_not_defaulted_in_production);
+  g_test_add_func ("/daemon-options/credential-roots/disjoint-enforced",
+      test_credential_roots_disjoint_enforced);
 
 #ifndef G_OS_WIN32
   g_test_add_func ("/daemon-options/perm/0640-loads", test_perm_0640_loads);

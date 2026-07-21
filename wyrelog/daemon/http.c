@@ -240,6 +240,11 @@ typedef struct _WylDaemonHttpContext
   WylDaemonProfile profile;
   gchar *policy_keyprovider_path;
   gchar *fact_root;
+  /* Optional owner-only roots for the escrow credential handoff. NULL when
+   * the deployment leaves them unset; the handoff surface then reports
+   * unavailable rather than failing. No route consumes them yet. */
+  gchar *operation_root;
+  gchar *credential_publication_root;
   gchar *system_url;
   gchar *event_spool_dir;
   guint event_queue_limit;
@@ -573,6 +578,8 @@ wyl_daemon_http_context_unref (gpointer data)
 #endif
   g_free (ctx->policy_keyprovider_path);
   g_free (ctx->fact_root);
+  g_free (ctx->operation_root);
+  g_free (ctx->credential_publication_root);
   g_free (ctx->system_url);
   g_free (ctx->event_spool_dir);
   g_hash_table_unref (ctx->sessions_by_token);
@@ -817,6 +824,9 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   ctx->profile = opts->profile;
   ctx->policy_keyprovider_path = g_strdup (opts->policy_keyprovider_path);
   ctx->fact_root = g_strdup (opts->fact_root);
+  ctx->operation_root = g_strdup (opts->operation_root);
+  ctx->credential_publication_root =
+      g_strdup (opts->credential_publication_root);
   ctx->system_url = g_strdup (opts->system_url);
   ctx->event_spool_dir = g_strdup (opts->event_spool_dir);
   ctx->event_queue_limit = opts->event_queue_limit;
