@@ -64,6 +64,8 @@ test_invalid (void)
   g_assert_cmpint (wyl_fact_reconcile_classify (NULL, NULL), ==,
       WYRELOG_E_INVALID);
   g_assert_cmpstr (wyl_fact_reconcile_class_name (99), ==, "ambiguous");
+  g_assert_cmpstr (wyl_fact_reconcile_class_name (-1), ==, "ambiguous");
+  g_assert_cmpstr (wyl_fact_reconcile_action_name (-1), ==, "review");
 }
 
 int
