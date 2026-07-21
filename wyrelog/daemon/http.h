@@ -12,6 +12,7 @@
 #include "daemon/delta.h"
 #ifdef WYL_TEST_DAEMON_HTTP
 #include "daemon/auth-registry-private.h"
+#include "daemon/service-credential-handoff-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
 #ifdef WYL_HAS_AUDIT
 #include "wyrelog/auth/service-exchange-limiter-private.h"
@@ -287,5 +288,13 @@ wyrelog_error_t wyl_daemon_http_policy_write_for_test (SoupServer * server,
 gboolean wyl_daemon_http_check_request_tenant_for_test
     (const gchar * request_tenant, const gchar * auth_tenant,
     guint * out_status, gchar ** out_code);
+/*
+ * Inject a mock owner-publication backend into the running daemon HTTP
+ * context so the service credential issue/rotate handlers drive it through the
+ * escrow handoff module instead of opening the real filesystem publication
+ * backend. Passing NULL clears the override.
+ */
+void wyl_daemon_http_set_publication_override_for_test (SoupServer * server,
+    const WyctlPublicationBackendVTable * vtable, gpointer vtable_data);
 #endif
 #endif
