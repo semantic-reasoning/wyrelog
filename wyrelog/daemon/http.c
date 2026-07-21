@@ -4257,6 +4257,13 @@ service_credential_handoff_emit (SoupServerMessage *msg,
     .credential_publication_root = ctx->credential_publication_root,
     .cancellable = NULL,
   };
+  /* Rotate must evict the retired generation from the in-memory service-auth
+   * registry at commit so old-generation bearer tokens stop authenticating;
+   * issue mints a first credential and has nothing to evict. */
+  if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
+    hctx.invalidate_credential = service_credential_registry_invalidate;
+    hctx.invalidation_data = ctx;
+  }
 #ifdef WYL_TEST_DAEMON_HTTP
   hctx.publication_override = ctx->publication_override;
   hctx.publication_override_data = ctx->publication_override_data;
@@ -4585,11 +4592,15 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   guint64 current_generation = current.generation;
+  /* The successor is minted for the retired credential's subject; reuse the
+   * subject from this pre-check rather than a second store lookup. */
+  g_autofree gchar *rotate_subject = g_strdup (current.subject_id);
   wyl_service_credential_clear (&current);
 
   WylDaemonServiceCredentialHandoffInputs inputs = {
     .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE,
     .request_id = values[1],
+    .subject_id = rotate_subject,
     .old_credential_id = credential_id,
     .expected_generation = current_generation,
     .destination = values[2],

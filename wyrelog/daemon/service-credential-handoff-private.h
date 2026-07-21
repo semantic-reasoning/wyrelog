@@ -50,6 +50,16 @@ typedef struct
   const gchar *decision_request_id;
   const gchar *operation_root;
   const gchar *credential_publication_root;
+  /* ROTATE only: invoked at the authority store commit, under the write lease
+   * and before lease release, to evict the retired credential generation from
+   * the daemon's in-memory service-auth registry so already-minted bearer
+   * tokens from the OLD generation stop authenticating.  Fires atomically and
+   * fail-closed with the rotate.  Left NULL for ISSUE and when no registry
+   * eviction is wired; the module forwards it verbatim into the rotate
+   * runtime's invalidate_credential hook. */
+    wyrelog_error_t (*invalidate_credential) (gpointer data,
+      const gchar * credential_id, guint64 generation);
+  gpointer invalidation_data;
   GCancellable *cancellable;
 #ifdef WYL_TEST_DAEMON_HTTP
   /* Test-only publication backend injection.  When publication_override is
