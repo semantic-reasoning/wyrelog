@@ -125,6 +125,8 @@
   "service_credential_conflict"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_NOT_FOUND \
   "service_credential_not_found"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_UNAVAILABLE \
+  "service_credential_unavailable"
 
 typedef gchar WylSensitiveChar;
 
@@ -295,6 +297,12 @@ typedef struct _WylDaemonHttpContext
   WylDaemonRefreshFault refresh_fault;
   GPtrArray *refresh_generated_ids;
   WylHumanRefreshTestLatch refresh_latch;
+  /* Test-only escrow publication backend injection. When set, the service
+   * credential issue/rotate handlers pass these into the handoff module context
+   * so focused tests drive a mock owner-publication backend instead of the real
+   * filesystem publication semantics. Production carries no override surface. */
+  const WyctlPublicationBackendVTable *publication_override;
+  gpointer publication_override_data;
 #endif
 } WylDaemonHttpContext;
 
@@ -1879,6 +1887,17 @@ wyl_daemon_http_policy_write_for_test (SoupServer *server,
     checkpoint (data);
   return wyl_policy_store_set_tenant_sealed (write.store,
       WYL_TENANT_DEFAULT, FALSE);
+}
+
+void
+wyl_daemon_http_set_publication_override_for_test (SoupServer *server,
+    const WyctlPublicationBackendVTable *vtable, gpointer vtable_data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  ctx->publication_override = vtable;
+  ctx->publication_override_data = vtable_data;
 }
 
 gboolean
