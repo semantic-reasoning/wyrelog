@@ -349,6 +349,17 @@ handoff_test_target_release (gpointer data,
   g_free (lease);
 }
 
+/* The daemon module derives the request parent_identity through this accessor;
+ * the mock echoes a fixed value that the mock plan copies verbatim into the
+ * receipt. */
+static wyrelog_error_t
+handoff_test_root_identity (gpointer data, gchar **out_identity)
+{
+  (void) data;
+  *out_identity = g_strdup ("test-parent-identity");
+  return WYRELOG_E_OK;
+}
+
 static const WyctlPublicationBackendVTable handoff_test_vtable = {
   .plan = handoff_test_plan,
   .stage_exact = handoff_test_stage,
@@ -356,6 +367,7 @@ static const WyctlPublicationBackendVTable handoff_test_vtable = {
   .receipt_target_inspect = handoff_test_target_inspect,
   .receipt_target_commit = handoff_test_target_commit,
   .receipt_target_release = handoff_test_target_release,
+  .root_identity = handoff_test_root_identity,
 };
 
 static WylDaemonServiceCredentialHandoffContext
@@ -378,8 +390,7 @@ issue_inputs_for (const gchar *request_id)
   return (WylDaemonServiceCredentialHandoffInputs) {
   .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE,.request_id =
         request_id,.subject_id = "svc:handoff:executor",.tenant_id =
-        "tenant-a",.destination = "credentials.json",.parent_identity =
-        "test-parent-identity",.expires_at_us =
+        "tenant-a",.destination = "credentials.json",.expires_at_us =
         g_get_real_time () + G_TIME_SPAN_HOUR,};
 }
 

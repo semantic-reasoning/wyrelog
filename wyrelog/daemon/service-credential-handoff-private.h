@@ -17,7 +17,9 @@ typedef struct wyctl_publication_backend_vtable_t WyctlPublicationBackendVTable;
  * retry.  In particular expires_at_us is the operator-chosen ABSOLUTE credential
  * expiry and expected_generation is the rotate CAS target: the daemon takes them
  * from the client request and never server-recomputes now()+TTL, so retries do
- * not diverge. */
+ * not diverge.  The publication parent_identity is NOT a client input: the daemon
+ * derives it from its own credential_publication_root via the publication
+ * backend's root_identity accessor. */
 typedef struct
 {
   WylServiceCredentialOperationKind kind;
@@ -29,7 +31,6 @@ typedef struct
   const gchar *old_credential_id;
   guint64 expected_generation;
   const gchar *destination;
-  const gchar *parent_identity;
   gint64 expires_at_us;
 } WylDaemonServiceCredentialHandoffInputs;
 
