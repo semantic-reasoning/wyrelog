@@ -1,5 +1,35 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "wyrelog/fact/reconcile-private.h"
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#else
+#include <io.h>
+#endif
+
+wyrelog_error_t
+wyl_fact_reconcile_probe_file (WylFactGraphDirectory *directory,
+    const gchar *basename, WylFactReconcileFileProbe *out_probe)
+{
+  gint fd = -1;
+  wyrelog_error_t err;
+  if (directory == NULL || basename == NULL || out_probe == NULL)
+    return WYRELOG_E_INVALID;
+  out_probe->present = FALSE;
+  out_probe->regular_secure = FALSE;
+  err = wyl_fact_graph_directory_open_file (directory, basename, FALSE, &fd);
+  if (err == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_OK;
+  if (err != WYRELOG_E_OK)
+    return err;
+  out_probe->present = TRUE;
+  out_probe->regular_secure = TRUE;
+#ifndef G_OS_WIN32
+  close (fd);
+#else
+  _close (fd);
+#endif
+  return WYRELOG_E_OK;
+}
 
 /* Precedence is deliberately explicit.  Safety overrides all positive
  * evidence, so a foreign/ambiguous/newer artifact can never be adopted. */

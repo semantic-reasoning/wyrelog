@@ -2,6 +2,7 @@
 #pragma once
 
 #include "wyrelog/error.h"
+#include "wyrelog/fact/graph-locator-private.h"
 
 G_BEGIN_DECLS;
 
@@ -51,6 +52,17 @@ typedef struct
   WylFactReconcileClass classification;
   WylFactReconcileAction action;
 } WylFactReconcileResult;
+
+typedef struct
+{
+  gboolean present;
+  gboolean regular_secure;
+} WylFactReconcileFileProbe;
+
+/* Opens no directories and creates no files; directory must come from the
+ * secure graph resolver and basename is checked by its private API. */
+wyrelog_error_t wyl_fact_reconcile_probe_file (WylFactGraphDirectory *
+    directory, const gchar * basename, WylFactReconcileFileProbe * out_probe);
 
 wyrelog_error_t wyl_fact_reconcile_classify (const WylFactReconcileEvidence *
     evidence, WylFactReconcileResult * out_result);
