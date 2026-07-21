@@ -172,6 +172,12 @@ partial, duplicated, structurally different, foreign, or unsupported identity
 returns no handle. Known audit-store shapes are foreign even if an otherwise
 valid fact metadata table was copied into the catalog. Ordinary fact and
 projection tables are permitted after the identity is established.
+All catalog-shape and metadata-value reads for one validation run share an
+explicit DuckDB read transaction. Its successful commit is the validation
+linearization boundary; query failures roll it back, and uncertain transaction
+cleanup returns no handle. A concurrent metadata or catalog mutation therefore
+cannot splice observations from different committed states into one accepted
+identity.
 
 Initialization is allowed only when the current DuckDB catalog has no
 user-created table, view, sequence, type, function, or schema. The metadata

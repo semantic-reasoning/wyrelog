@@ -55,6 +55,8 @@ typedef enum
   WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT,
 } WylFactStoreIdentityTestFault;
 
+typedef void (*WylFactStoreIdentityValidationTestHook) (gpointer user_data);
+
 typedef enum
 {
   WYL_FACT_STORE_OP_ASSERT = 0,
@@ -85,6 +87,8 @@ wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
     WylFactStoreIdentityResult * out_result, wyl_fact_store_t ** out_store);
 void wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault
     fault);
+void wyl_fact_store_identity_set_validation_test_hook
+    (WylFactStoreIdentityValidationTestHook hook, gpointer user_data);
 void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 

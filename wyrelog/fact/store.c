@@ -19,6 +19,9 @@ struct wyl_fact_store_t
 
 static gint identity_test_fault;
 G_LOCK_DEFINE_STATIC (identity_open);
+static WylFactStoreIdentityValidationTestHook identity_validation_test_hook;
+static gpointer identity_validation_test_hook_data;
+G_LOCK_DEFINE_STATIC (identity_validation_test_hook);
 
 #define WYL_FACT_STORE_KIND "wyrelog.fact"
 #define WYL_FACT_STORE_FORMAT_VERSION 1
@@ -741,6 +744,17 @@ validate_identity_unlocked (wyl_fact_store_t *store,
         WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
     return rc;
   }
+  WylFactStoreIdentityValidationTestHook hook = NULL;
+  gpointer hook_data = NULL;
+  G_LOCK (identity_validation_test_hook);
+  hook = identity_validation_test_hook;
+  hook_data = identity_validation_test_hook_data;
+  identity_validation_test_hook = NULL;
+  identity_validation_test_hook_data = NULL;
+  G_UNLOCK (identity_validation_test_hook);
+  if (hook != NULL)
+    hook (hook_data);
+
   gint64 audit_tables = 0;
   rc = query_single_count (store->conn,
       "SELECT COUNT(*) FROM duckdb_tables() "
@@ -757,6 +771,29 @@ validate_identity_unlocked (wyl_fact_store_t *store,
   return validate_identity_values (store, identity, out_result);
 }
 
+static wyrelog_error_t
+validate_identity_snapshot (wyl_fact_store_t *store,
+    const WylFactStoreIdentity *identity, gboolean *out_missing,
+    WylFactStoreIdentityResult *out_result)
+{
+  wyrelog_error_t rc = exec_sql (store->conn, "BEGIN TRANSACTION;");
+  if (rc != WYRELOG_E_OK) {
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_OPEN;
+    return rc;
+  }
+
+  rc = validate_identity_unlocked (store, identity, out_missing, out_result);
+  const gchar *cleanup_sql =
+      rc == WYRELOG_E_OK || rc == WYRELOG_E_POLICY ? "COMMIT;" : "ROLLBACK;";
+  if (exec_sql (store->conn, cleanup_sql) != WYRELOG_E_OK) {
+    if (cleanup_sql[0] == 'C')
+      (void) exec_sql (store->conn, "ROLLBACK;");
+    *out_result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL;
+    return WYRELOG_E_INTERNAL;
+  }
+  return rc;
+}
+
 static gboolean
 identity_fault (WylFactStoreIdentityTestFault fault)
 {
@@ -770,6 +807,15 @@ wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault fault)
   if (fault >= WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE
       && fault <= WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT)
     g_atomic_int_set (&identity_test_fault, fault);
+}
+
+void wyl_fact_store_identity_set_validation_test_hook
+    (WylFactStoreIdentityValidationTestHook hook, gpointer user_data)
+{
+  G_LOCK (identity_validation_test_hook);
+  identity_validation_test_hook = hook;
+  identity_validation_test_hook_data = user_data;
+  G_UNLOCK (identity_validation_test_hook);
 }
 
 static wyrelog_error_t
@@ -918,7 +964,7 @@ wyl_fact_store_open_identified (const gchar *path,
   g_mutex_init (&self->lock);
 
   gboolean missing = FALSE;
-  rc = validate_identity_unlocked (self, identity, &missing, out_result);
+  rc = validate_identity_snapshot (self, identity, &missing, out_result);
   if (rc != WYRELOG_E_OK && missing
       && mode == WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY) {
     if (identity->path_encoding_version != WYL_FACT_STORE_PATH_ENCODING_VERSION) {
