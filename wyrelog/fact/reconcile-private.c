@@ -33,8 +33,9 @@ wyl_fact_reconcile_classify (const WylFactReconcileEvidence *e,
   }
 
   if (e->raw_present && e->canonical_present) {
-    out->classification = (e->raw_valid && e->canonical_valid)
-        ? WYL_FACT_RECONCILE_PATH_COLLISION : WYL_FACT_RECONCILE_PARTIAL;
+    /* Presence alone is not evidence of a collision; secure identity probes
+     * must explicitly set path_collision. */
+    out->classification = WYL_FACT_RECONCILE_PARTIAL;
     return WYRELOG_E_OK;
   }
   if (e->raw_present || e->canonical_present) {
@@ -44,7 +45,7 @@ wyl_fact_reconcile_classify (const WylFactReconcileEvidence *e,
       return WYRELOG_E_OK;
     }
     if (!e->schema_registered) {
-      out->classification = WYL_FACT_RECONCILE_MISSING_WITHOUT_SCHEMA;
+      out->classification = WYL_FACT_RECONCILE_ORPHAN;
       return WYRELOG_E_OK;
     }
     if (!e->schema_valid) {
@@ -52,13 +53,15 @@ wyl_fact_reconcile_classify (const WylFactReconcileEvidence *e,
       return WYRELOG_E_OK;
     }
     out->classification = WYL_FACT_RECONCILE_EXISTING_VALID;
-    out->action = WYL_FACT_RECONCILE_ACTION_ADOPT;
+    out->action = WYL_FACT_RECONCILE_ACTION_RECONCILE;
     return WYRELOG_E_OK;
   }
 
   out->classification = e->schema_registered
       ? WYL_FACT_RECONCILE_MISSING_WITH_SCHEMA
       : WYL_FACT_RECONCILE_MISSING_WITHOUT_SCHEMA;
+  if (e->schema_registered)
+    out->action = WYL_FACT_RECONCILE_ACTION_DEGRADE;
   return WYRELOG_E_OK;
 }
 
@@ -75,6 +78,6 @@ wyl_fact_reconcile_class_name (WylFactReconcileClass v)
 const gchar *
 wyl_fact_reconcile_action_name (WylFactReconcileAction v)
 {
-  static const gchar *names[] = { "none", "adopt", "degrade", "review" };
+  static const gchar *names[] = { "none", "reconcile", "degrade", "review" };
   return v < G_N_ELEMENTS (names) ? names[v] : "review";
 }

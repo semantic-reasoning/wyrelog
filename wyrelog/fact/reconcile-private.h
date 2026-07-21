@@ -23,7 +23,8 @@ typedef enum
 typedef enum
 {
   WYL_FACT_RECONCILE_ACTION_NONE = 0,
-  WYL_FACT_RECONCILE_ACTION_ADOPT,
+  /* Verified offline reconciliation only; never production auto-open. */
+  WYL_FACT_RECONCILE_ACTION_RECONCILE,
   WYL_FACT_RECONCILE_ACTION_DEGRADE,
   WYL_FACT_RECONCILE_ACTION_REVIEW,
 } WylFactReconcileAction;
