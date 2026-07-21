@@ -5,11 +5,13 @@
 #include "auth/service-credential-handoff-delivery-private.h"
 #include "auth/service-credential-operation-coordinator-auth-private.h"
 #include "auth/service-credential-operation-coordinator-maintenance-private.h"
+#include "auth/service-credential-operation-coordinator-retirement-private.h"
 #include "auth/service-credential-operation-destination-private.h"
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 #include "policy/store-private.h"
 #include "wyrelog/decide.h"
 #include "wyl-handle-private.h"
+#include "wyl-id-private.h"
 #include "wyl-permission-scope-private.h"
 #include "wyl-session-layout-private.h"
 
@@ -1296,4 +1298,143 @@ wyrelog_error_t
     default:
       return WYRELOG_E_POLICY;
   }
+}
+
+static void
+handoff_put_u32be (guint8 out[4], guint32 value)
+{
+  out[0] = (guint8) (value >> 24);
+  out[1] = (guint8) (value >> 16);
+  out[2] = (guint8) (value >> 8);
+  out[3] = (guint8) value;
+}
+
+/* Domain-separated, length-prefixed BLAKE2b of a single request_id into a
+ * fixed-size digest.  The length prefixes keep the domain and request_id
+ * unambiguous, so two distinct request identities can never collide. */
+static wyrelog_error_t
+handoff_domain_hash (const gchar *domain, const gchar *request_id,
+    guint8 *out, gsize out_len)
+{
+  crypto_generichash_state state;
+  const gchar *inputs[2] = { domain, request_id };
+  if (crypto_generichash_init (&state, NULL, 0, out_len) != 0)
+    return WYRELOG_E_CRYPTO;
+  for (gsize i = 0; i < G_N_ELEMENTS (inputs); i++) {
+    gsize len = strlen (inputs[i]);
+    guint8 encoded_len[4];
+    if (len > G_MAXUINT32) {
+      sodium_memzero (&state, sizeof state);
+      return WYRELOG_E_CRYPTO;
+    }
+    handoff_put_u32be (encoded_len, (guint32) len);
+    if (crypto_generichash_update (&state, encoded_len, sizeof encoded_len) != 0
+        || crypto_generichash_update (&state, (const guint8 *) inputs[i],
+            len) != 0) {
+      sodium_memzero (&state, sizeof state);
+      return WYRELOG_E_CRYPTO;
+    }
+  }
+  if (crypto_generichash_final (&state, out, out_len) != 0) {
+    sodium_memzero (&state, sizeof state);
+    return WYRELOG_E_CRYPTO;
+  }
+  sodium_memzero (&state, sizeof state);
+  return WYRELOG_E_OK;
+}
+
+/* Deterministically derive the escrow_id into request from
+ * request->request_id.  The escrow_id is an immutable identity token, not a
+ * capability: the same request_id always yields the same escrow_id, which is
+ * exactly what lets a retry replay instead of conflict.  On success
+ * request->escrow_id is a freshly owned string.
+ *
+ * escrow_binding_digest is deliberately NOT derived here: it is the actual
+ * committed escrow binding, minted by the domain primitive at server-commit and
+ * stamped into the record by checkpoint_server_committed_bound.  It MUST be zero
+ * on a not-yet-committed request; a non-zero value fails the prepared-record
+ * maintenance invariant.  The caller leaves it zeroed. */
+static wyrelog_error_t
+handoff_derive_escrow (WylServiceCredentialOperationCoordinatorRequest *request)
+{
+  static const gchar id_domain[] = "wyrelog.sc.escrow.id.v1";
+  guint8 id_bytes[WYL_ID_BYTES];
+  wyl_id_t id;
+  wyl_id_t verify;
+  gchar buf[WYL_ID_STRING_BUF];
+  wyrelog_error_t rc = handoff_domain_hash (id_domain, request->request_id,
+      id_bytes, sizeof id_bytes);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  /* Stamp the RFC 9562 UUIDv7 version and variant nibbles so the 16 hash bytes
+   * render as a canonical id that wyl_id_parse accepts. */
+  id_bytes[6] = (guint8) (0x70 | (id_bytes[6] & 0x0f));
+  id_bytes[8] = (guint8) (0x80 | (id_bytes[8] & 0x3f));
+  memcpy (id.bytes, id_bytes, sizeof id.bytes);
+  rc = wyl_id_format (&id, buf, sizeof buf);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (wyl_id_parse (buf, &verify) != WYRELOG_E_OK)
+    return WYRELOG_E_CRYPTO;
+  request->escrow_id = g_strdup (buf);
+  return request->escrow_id != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_handoff
+    (WylHandle * handle,
+    const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
+    const WylServiceCredentialOperationHandoffExecuteRuntime * runtime,
+    WylServiceCredentialOperationRecord * out_record)
+{
+  WylServiceCredentialOperationRecord existing =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationGuardedBeginResult guarded =
+      WYL_SERVICE_CREDENTIAL_OPERATION_GUARDED_BEGIN_RESULT_INIT;
+  WylServiceCredentialOperationCoordinatorRequest local;
+  wyrelog_error_t rc;
+
+  if (out_record != NULL)
+    wyl_service_credential_operation_record_clear (out_record);
+  if (handle == NULL || storage == NULL || anchor == NULL || request == NULL
+      || runtime == NULL || out_record == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* Shallow copy borrows the caller's strings; only escrow_id is ever owned by
+   * this frame.  expires_at_us and expected_generation are carried through
+   * unchanged as the caller-supplied immutable operation identity. */
+  local = *request;
+  local.escrow_id = NULL;
+  memset (local.escrow_binding_digest, 0, sizeof local.escrow_binding_digest);
+
+  rc = handoff_derive_escrow (&local);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  if (!wyl_service_credential_operation_coordinator_request_is_valid (&local)) {
+    rc = WYRELOG_E_INVALID;
+    goto out;
+  }
+
+  rc = wyl_service_credential_operation_coordinator_load (storage, anchor,
+      local.request_id, &existing);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    rc = wyl_service_credential_operation_coordinator_begin_or_replay_retirement_guarded (handle, storage, anchor, &local, runtime->cancellable, &guarded);
+    wyl_service_credential_operation_guarded_begin_result_clear (&guarded);
+    if (rc != WYRELOG_E_OK)
+      goto out;
+  } else if (rc == WYRELOG_E_OK) {
+    wyl_service_credential_operation_record_clear (&existing);
+  } else {
+    goto out;
+  }
+
+  rc = wyl_service_credential_operation_coordinator_execute_handoff (handle,
+      storage, anchor, local.request_id, runtime, out_record);
+
+out:
+  g_free (local.escrow_id);
+  wyl_service_credential_operation_record_clear (&existing);
+  return rc;
 }
