@@ -1284,6 +1284,26 @@ test('service-credential-operation-coordinator-execute',
   timeout : service_credential_operation_coordinator_execute_timeout,
 )
 
+test_service_credential_operation_coordinator_handoff = executable('test-service-credential-operation-coordinator-handoff',
+  [
+    'test-service-credential-operation-coordinator-handoff.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
+  link_with : test_policy_store_private_companion,
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : test_service_credential_operation_coordinator_execute_deps,
+  c_args : test_service_credential_operation_coordinator_execute_c_args,
+)
+
+test('service-credential-operation-coordinator-handoff',
+  test_service_credential_operation_coordinator_handoff,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : service_credential_operation_coordinator_execute_timeout,
+)
+
 if get_option('enable_audit').allowed()
   test_service_credential_operation_coordinator_cancel = executable(
     'test-service-credential-operation-coordinator-cancel',
