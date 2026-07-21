@@ -289,6 +289,11 @@ else
 endif
 
 wyrelogd_deps = [wyrelog_dep, glib_dep, gio_dep, sqlite_dep, wirelog_dep]
+# Owner-only credential publication backend, shared with wyctl and focused
+# tests. Linked unconditionally so the daemon can drive the escrow handoff
+# executor; it transitively pulls only wyrelog_dep and sodium_dep. No route
+# consumes it yet (see daemon/service-credential-handoff-private).
+wyrelogd_deps += publication_private_dep
 wyrelogd_c_args = [
   '-DWYL_DEFAULT_TEMPLATE_DIR="' + get_option('datadir') / 'wyrelog' / 'access' + '"',
 ]
