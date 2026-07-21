@@ -13,6 +13,7 @@
 
 #include "daemon/auth-registry-private.h"
 #include "daemon/http-guards-private.h"
+#include "daemon/service-credential-handoff-private.h"
 #include "daemon/delta.h"
 #include "daemon/fact-status.h"
 #include "wyrelog/wyrelog.h"
@@ -4233,6 +4234,63 @@ service_credential_registry_invalidate (gpointer data,
       (ctx->service_auth_registry, credential_id, generation, &result);
 }
 
+/* Run the built escrow handoff inputs through the daemon handoff module and map
+ * its return code onto the service-credential HTTP contract.  Success emits the
+ * module's non-secret JSON receipt; the credential material is delivered only
+ * through the owner-publication escrow file, never in this response. */
+static void
+service_credential_handoff_emit (SoupServerMessage *msg,
+    WylDaemonHttpContext *ctx, WylSession *session, const gchar *actor,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
+    const gchar *decision_request_id,
+    const WylDaemonServiceCredentialHandoffInputs *inputs)
+{
+  WylDaemonServiceCredentialHandoffContext hctx = {
+    .handle = ctx->handle,
+    .session = session,
+    .authenticated_actor_subject_id = actor,
+    .guard_timestamp = guard_timestamp,
+    .guard_loc_class = guard_loc_class,
+    .guard_risk = guard_risk,
+    .decision_request_id = decision_request_id,
+    .operation_root = ctx->operation_root,
+    .credential_publication_root = ctx->credential_publication_root,
+    .cancellable = NULL,
+  };
+#ifdef WYL_TEST_DAEMON_HTTP
+  hctx.publication_override = ctx->publication_override;
+  hctx.publication_override_data = ctx->publication_override_data;
+#endif
+
+  g_autofree gchar *receipt = NULL;
+  wyrelog_error_t rc = wyl_daemon_service_credential_handoff (&hctx, inputs,
+      &receipt);
+  switch (rc) {
+    case WYRELOG_E_OK:
+      attach_request_id_header (msg);
+      soup_server_message_set_status (msg, 200, NULL);
+      soup_server_message_set_response (msg, "application/json",
+          SOUP_MEMORY_COPY, receipt, strlen (receipt));
+      return;
+    case WYRELOG_E_NOT_FOUND:
+    case WYRELOG_E_BUSY:
+      set_json_error (msg, 503, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_UNAVAILABLE);
+      return;
+    case WYRELOG_E_POLICY:
+      set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
+      return;
+    case WYRELOG_E_INVALID:
+      set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+      return;
+    case WYRELOG_E_AUTH:
+      set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED);
+      return;
+    default:
+      set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
+      return;
+  }
+}
+
 static void
 service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     const char *path, GHashTable *query, gpointer user_data)
@@ -4241,15 +4299,27 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 405, "method_not_allowed");
     return;
   }
+  /* The escrow handoff writes the secret to an owner-only publication file on
+   * the daemon host; only a loopback caller can own that outcome. */
+  if (!wyl_daemon_http_message_has_actual_loopback_transport (msg)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED);
+    return;
+  }
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
-  if (!service_principal_management_authorize (server, msg, query, ctx,
+  g_autoptr (WylSession) session = NULL;
+  gint64 guard_timestamp = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  gint64 guard_risk = 0;
+  if (!service_principal_management_authorize_session (server, msg, query, ctx,
           "wr.service_credential.manage",
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED,
-          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor))
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor, &session,
+          &guard_timestamp, &guard_loc_class, &guard_risk))
     return;
+  const gchar *decision_request_id = ensure_request_id_header (msg);
   if (path == NULL || path[0] != '/') {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
@@ -4266,36 +4336,19 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  SoupMessageBody *request_body = soup_server_message_get_request_body (msg);
-  if (request_body == NULL || request_body->data == NULL
-      || request_body->length <= 0 || request_body->length > 4096) {
-    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
-    return;
-  }
+  /* destination and expires_at_us are mandatory: the handoff never
+   * server-recomputes an expiry, and the escrow target is caller-chosen. */
   static const WylDaemonHttpStrictJsonField fields[] = {
     {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"tenant", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"request_id", WYL_REQUEST_ID_STRING_LEN,
         WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"destination", 256, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"expires_at_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
-  static const WylDaemonHttpStrictJsonField fields_without_expiry[] = {
-    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
-    {"tenant", 128, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN,
-        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
-  };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
-  gboolean parsed = wyl_daemon_http_dup_strict_json_object
-      (request_body->data, (gsize) request_body->length, fields,
-      G_N_ELEMENTS (fields), values);
-  if (!parsed) {
-    wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (fields));
-    values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
-    parsed = wyl_daemon_http_dup_strict_json_object
-        (request_body->data, (gsize) request_body->length,
-        fields_without_expiry, G_N_ELEMENTS (fields_without_expiry), values);
-  }
+  gboolean parsed = wyl_daemon_http_request_body_dup_strict_json_object
+      (msg, 4096, fields, G_N_ELEMENTS (fields), values);
   if (!parsed || g_strcmp0 (values[0], "1") != 0
       || g_strcmp0 (values[1], lookup_request_tenant (query)) != 0
       || !service_credential_request_id_is_valid (values[2])
@@ -4304,62 +4357,22 @@ service_credential_issue_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
   gint64 expires_at_us = 0;
-  if (values[3] != NULL && !service_credential_parse_expiry (values[3],
-          &expires_at_us)) {
+  if (!service_credential_parse_expiry (values[4], &expires_at_us)
+      || expires_at_us <= 0) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
 
-  wyl_service_credential_issue_result_t issued = { 0 };
-  wyrelog_error_t rc = wyl_service_credential_issue (ctx->handle, subject,
-      values[1], actor, values[2], expires_at_us, &issued);
-  if (rc == WYRELOG_E_INVALID) {
-    wyl_service_credential_issue_result_clear (&issued);
-    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
-    return;
-  }
-  if (rc == WYRELOG_E_POLICY) {
-    wyl_service_credential_issue_result_clear (&issued);
-    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
-    return;
-  }
-  if (rc != WYRELOG_E_OK || issued.secret == NULL) {
-    wyl_service_credential_issue_result_clear (&issued);
-    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
-    return;
-  }
-  gsize secret_len = 0;
-  const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (issued.secret, &secret_len);
-  g_autoptr (WylSensitiveChar) response = NULL;
-  if (secret == NULL || secret_len == 0) {
-    wyl_service_credential_issue_result_clear (&issued);
-    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
-    return;
-  }
-  response = g_strdup_printf ("{\"service_credential\":");
-  if (response != NULL) {
-    g_autofree gchar *metadata = service_credential_build_json
-        (&issued.credential);
-    if (metadata != NULL) {
-      g_autoptr (WylSensitiveChar) secret_json = g_strdup_printf
-          (",\"credential_secret\":\"%.*s\"}", (gint) secret_len, secret);
-      if (secret_json != NULL) {
-        g_free (response);
-        response = g_strdup_printf ("%.*s%s", (gint) (strlen (metadata) - 1),
-            metadata, secret_json);
-      }
-    }
-  }
-  wyl_service_credential_issue_result_clear (&issued);
-  if (response == NULL) {
-    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
-    return;
-  }
-  attach_request_id_header (msg);
-  soup_server_message_set_status (msg, 200, NULL);
-  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
-      response, strlen (response));
+  WylDaemonServiceCredentialHandoffInputs inputs = {
+    .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE,
+    .request_id = values[2],
+    .subject_id = subject,
+    .tenant_id = values[1],
+    .destination = values[3],
+    .expires_at_us = expires_at_us,
+  };
+  service_credential_handoff_emit (msg, ctx, session, actor, guard_timestamp,
+      guard_loc_class, guard_risk, decision_request_id, &inputs);
 }
 
 typedef struct
@@ -4495,15 +4508,27 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
     set_json_error (msg, 405, "method_not_allowed");
     return;
   }
+  /* The escrow handoff writes the secret to an owner-only publication file on
+   * the daemon host; only a loopback caller can own that outcome. */
+  if (!wyl_daemon_http_message_has_actual_loopback_transport (msg)) {
+    set_json_error (msg, 403, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED);
+    return;
+  }
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *actor = NULL;
-  if (!service_principal_management_authorize (server, msg, query, ctx,
+  g_autoptr (WylSession) session = NULL;
+  gint64 guard_timestamp = 0;
+  g_autofree gchar *guard_loc_class = NULL;
+  gint64 guard_risk = 0;
+  if (!service_principal_management_authorize_session (server, msg, query, ctx,
           "wr.service_credential.manage",
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_AUTH_REQUIRED,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID,
           WYL_DAEMON_ERR_SERVICE_CREDENTIAL_DENIED,
-          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor))
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED, NULL, &actor, &session,
+          &guard_timestamp, &guard_loc_class, &guard_risk))
     return;
+  const gchar *decision_request_id = ensure_request_id_header (msg);
   if (path == NULL || path[0] != '/') {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
@@ -4517,34 +4542,26 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
   }
   g_autofree gchar *credential_id = g_strndup (path + 1,
       (gsize) (tail - (path + 1)));
+  /* destination and expires_at_us are mandatory: the handoff never
+   * server-recomputes an expiry, and the escrow target is caller-chosen. */
   static const WylDaemonHttpStrictJsonField fields[] = {
     {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"request_id", WYL_REQUEST_ID_STRING_LEN,
         WYL_DAEMON_HTTP_STRICT_JSON_STRING},
+    {"destination", 256, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
     {"expires_at_us", 32, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
-  };
-  static const WylDaemonHttpStrictJsonField fields_without_expiry[] = {
-    {"version", 8, WYL_DAEMON_HTTP_STRICT_JSON_STRING},
-    {"request_id", WYL_REQUEST_ID_STRING_LEN,
-        WYL_DAEMON_HTTP_STRICT_JSON_STRING},
   };
   g_auto (GStrv) values = g_new0 (gchar *, G_N_ELEMENTS (fields) + 1);
   gboolean parsed = wyl_daemon_http_request_body_dup_strict_json_object
       (msg, 4096, fields, G_N_ELEMENTS (fields), values);
-  if (!parsed) {
-    wyl_daemon_http_clear_strv (values, G_N_ELEMENTS (fields));
-    parsed = wyl_daemon_http_request_body_dup_strict_json_object
-        (msg, 4096, fields_without_expiry,
-        G_N_ELEMENTS (fields_without_expiry), values);
-  }
   if (!parsed || g_strcmp0 (values[0], "1") != 0
       || !service_credential_request_id_is_valid (values[1])) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
   gint64 expires_at_us = 0;
-  if (values[2] != NULL && !service_credential_parse_expiry (values[2],
-          &expires_at_us)) {
+  if (!service_credential_parse_expiry (values[3], &expires_at_us)
+      || expires_at_us <= 0) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
@@ -4570,52 +4587,16 @@ service_credential_rotate_handler (SoupServer *server, SoupServerMessage *msg,
   guint64 current_generation = current.generation;
   wyl_service_credential_clear (&current);
 
-  wyl_service_credential_issue_result_t rotated = { 0 };
-  wyl_service_credential_rotate_runtime_t rotate_runtime = {
-    .invalidate_credential = service_credential_registry_invalidate,
-    .invalidation_data = ctx,
-    .old_credential_generation = current_generation,
+  WylDaemonServiceCredentialHandoffInputs inputs = {
+    .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE,
+    .request_id = values[1],
+    .old_credential_id = credential_id,
+    .expected_generation = current_generation,
+    .destination = values[2],
+    .expires_at_us = expires_at_us,
   };
-  rc = wyl_service_credential_rotate_with_runtime (ctx->handle, credential_id,
-      actor, values[1], expires_at_us, &rotate_runtime, &rotated);
-  if (rc == WYRELOG_E_INVALID) {
-    wyl_service_credential_issue_result_clear (&rotated);
-    set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
-    return;
-  }
-  if (rc == WYRELOG_E_POLICY) {
-    wyl_service_credential_issue_result_clear (&rotated);
-    set_json_error (msg, 409, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_CONFLICT);
-    return;
-  }
-  if (rc != WYRELOG_E_OK || rotated.secret == NULL) {
-    wyl_service_credential_issue_result_clear (&rotated);
-    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
-    return;
-  }
-  gsize secret_len = 0;
-  const gchar *secret = wyl_service_credential_secret_peek_encoded
-      (rotated.secret, &secret_len);
-  g_autoptr (WylSensitiveChar) response = NULL;
-  g_autofree gchar *metadata = service_credential_build_json
-      (&rotated.credential);
-  if (secret != NULL && secret_len > 0 && metadata != NULL) {
-    g_autoptr (WylSensitiveChar) secret_json = g_strdup_printf
-        (",\"credential_secret\":\"%.*s\"}", (gint) secret_len, secret);
-    if (secret_json != NULL) {
-      response = g_strdup_printf ("%.*s%s", (gint) (strlen (metadata) - 1),
-          metadata, secret_json);
-    }
-  }
-  wyl_service_credential_issue_result_clear (&rotated);
-  if (response == NULL) {
-    set_json_error (msg, 500, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_FAILED);
-    return;
-  }
-  attach_request_id_header (msg);
-  soup_server_message_set_status (msg, 200, NULL);
-  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
-      response, strlen (response));
+  service_credential_handoff_emit (msg, ctx, session, actor, guard_timestamp,
+      guard_loc_class, guard_risk, decision_request_id, &inputs);
 }
 
 static void
