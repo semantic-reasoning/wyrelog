@@ -4692,12 +4692,38 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
       response, strlen (response));
 }
 
+/* libsoup 3.x delivers the full request path (including the registered prefix)
+ * to soup_server_add_handler callbacks; strip this dispatcher's own prefix at a
+ * path-segment boundary so the sub-handlers see the stripped remainder they
+ * were written for. Returns "" for the bare prefix, "/{rest}" for sub-paths,
+ * or NULL if `path` is not under `prefix`. */
+static const char *
+wyl_daemon_http_strip_route_prefix (const char *path, const char *prefix)
+{
+  if (path == NULL || prefix == NULL || !g_str_has_prefix (path, prefix))
+    return NULL;
+  const char *rest = path + strlen (prefix);
+  if (rest[0] != '\0' && rest[0] != '/')        /* segment-boundary guard */
+    return NULL;
+  return rest;
+}
+
 static void
 service_credential_management_handler (SoupServer *server,
     SoupServerMessage *msg, const char *path, GHashTable *query,
     gpointer user_data)
 {
-  if (path == NULL || path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
+  path = wyl_daemon_http_strip_route_prefix (path, "/service-credentials");
+  /* Defense-in-depth for a security endpoint: unreachable for any request
+   * libsoup actually routes here, since libsoup only dispatches to this
+   * callback when the registered prefix matches at a segment boundary (so the
+   * strip never returns NULL), but guard the credential path anyway. */
+  if (path == NULL) {
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
+    return;
+  }
+  /* path is provably non-NULL past the guard above. */
+  if (path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_CREDENTIAL_INVALID);
     return;
   }
@@ -4908,7 +4934,17 @@ service_principal_management_handler (SoupServer *server,
     SoupServerMessage *msg, const char *path, GHashTable *query,
     gpointer user_data)
 {
-  if (path == NULL || path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
+  path = wyl_daemon_http_strip_route_prefix (path, "/service-principals");
+  /* Defense-in-depth for a security endpoint: unreachable for any request
+   * libsoup actually routes here, since libsoup only dispatches to this
+   * callback when the registered prefix matches at a segment boundary (so the
+   * strip never returns NULL), but guard the principal path anyway. */
+  if (path == NULL) {
+    set_json_error (msg, 404, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
+    return;
+  }
+  /* path is provably non-NULL past the guard above. */
+  if (path[0] == '\0' || g_strcmp0 (path, "/") == 0) {
     if (g_strcmp0 (soup_server_message_get_method (msg), "GET") == 0) {
       service_principal_list_handler (server, msg, path, query, user_data);
       return;
