@@ -232,22 +232,45 @@ if "storage_path" in text or "facts.duckdb" in text:
     raise SystemExit("facts status leaked storage details")
 body = json.loads(text)
 if body.get("status") != expected:
-    raise SystemExit(body)
-graphs = {(g.get("tenant_id"), g.get("graph_id")): g for g in body.get("graphs", [])}
+    raise SystemExit("unexpected facts status")
+graph_list = body.get("graphs")
+if not isinstance(graph_list, list) or len(graph_list) != 2:
+    raise SystemExit("unexpected facts graph count")
+expected_graphs = {
+    ("__wr_default", "orders-a"),
+    ("__wr_default", "orders-b"),
+}
+graphs = {}
+for graph in graph_list:
+    if not isinstance(graph, dict):
+        raise SystemExit("unexpected facts graph entry")
+    key = (graph.get("tenant_id"), graph.get("graph_id"))
+    if key not in expected_graphs or key in graphs:
+        raise SystemExit("unexpected facts graph identity")
+    graphs[key] = graph
+ready = [graph for graph in graph_list if graph.get("state") == "ready"]
+nonready = [graph for graph in graph_list if graph.get("state") != "ready"]
 if expected == "ready":
     if body.get("graphs_total") != 2 or body.get("graphs_ready") != 2 or body.get("graphs_degraded") != 0:
-        raise SystemExit(body)
+        raise SystemExit("unexpected ready facts totals")
+    if len(ready) != 2 or nonready:
+        raise SystemExit("unexpected ready facts graph state")
+    if any(graph.get("queryable") is not True or graph.get("last_error_class") is not None for graph in ready):
+        raise SystemExit("unexpected ready facts graph details")
+elif expected == "degraded":
+    if body.get("graphs_total") != 2 or body.get("graphs_ready") != 1 or body.get("graphs_degraded") != 1:
+        raise SystemExit("unexpected degraded facts totals")
+    if len(ready) != 1 or len(nonready) != 1:
+        raise SystemExit("unexpected degraded facts graph state")
+    if ready[0].get("queryable") is not True or ready[0].get("last_error_class") is not None:
+        raise SystemExit("unexpected surviving facts graph details")
+    if nonready[0].get("queryable") is not False:
+        raise SystemExit("unexpected degraded facts graph queryability")
+    if nonready[0].get("last_error_class") not in ("store_unavailable", "replay_failed"):
+        raise SystemExit("unexpected degraded facts graph error")
+    sys.stdout.write(ready[0]["graph_id"])
 else:
-    a = graphs.get(("__wr_default", "orders-a"))
-    b = graphs.get(("__wr_default", "orders-b"))
-    if not a or not b:
-        raise SystemExit(body)
-    if a.get("state") != "ready" or a.get("queryable") is not True:
-        raise SystemExit(body)
-    if b.get("state") == "ready" or b.get("queryable") is not False:
-        raise SystemExit(body)
-    if b.get("last_error_class") not in ("store_unavailable", "replay_failed"):
-        raise SystemExit(body)
+    raise SystemExit("unsupported expected facts status")
 PY
 }
 
@@ -272,9 +295,49 @@ assert_query_row "$TOKEN_FILE" orders-b order-b 7
 assert_fact_status ready
 
 stop_daemon
-printf 'not a database\n' >"$FACT_ROOT/__wr_default/orders-b/facts.duckdb"
+"$PYTHON" - "$FACT_ROOT" <<'PY'
+import os
+import stat
+import sys
+
+
+def walk_error(_error):
+    raise RuntimeError
+
+
+stores = []
+try:
+    for root, _dirs, files in os.walk(sys.argv[1], onerror=walk_error):
+        for name in files:
+            if name != "facts.duckdb":
+                continue
+            path = os.path.join(root, name)
+            if stat.S_ISREG(os.stat(path, follow_symlinks=False).st_mode):
+                stores.append(path)
+except (OSError, RuntimeError):
+    raise SystemExit("failed to enumerate fact stores") from None
+stores.sort()
+if len(stores) != 2:
+    raise SystemExit(f"expected two fact stores, found {len(stores)}")
+try:
+    with open(stores[0], "wb") as store:
+        store.write(b"not a database\n")
+except OSError:
+    raise SystemExit("failed to corrupt fact store") from None
+PY
 start_daemon
+READY_GRAPH=$(assert_fact_status degraded)
 login_token "$TOKEN_FILE"
-assert_query_row "$TOKEN_FILE" orders-a order-a 42
-assert_fact_status degraded
+case "$READY_GRAPH" in
+  orders-a)
+    assert_query_row "$TOKEN_FILE" orders-a order-a 42
+    ;;
+  orders-b)
+    assert_query_row "$TOKEN_FILE" orders-b order-b 7
+    ;;
+  *)
+    echo "unexpected ready graph: $READY_GRAPH" >&2
+    exit 1
+    ;;
+esac
 stop_daemon
