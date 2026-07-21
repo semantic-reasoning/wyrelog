@@ -537,7 +537,13 @@ test_daemon_handoff_unconfigured (void)
  * would trip the executor's plan/record parent_identity assertion and fail
  * closed with POLICY. This is the sole regression guard for the crux; the mock
  * path cannot catch an accessor != plan divergence. (Windows accessor==plan
- * equality rests on code review; there is no real-Windows daemon test here.) */
+ * equality rests on code review; there is no real-Windows daemon test here.)
+ *
+ * POSIX-only: the fixture's 0700 publication root uses POSIX ownership/mode
+ * semantics, and this exercises the POSIX stat-identity crux specifically. The
+ * real-Windows escrow-publish path is not yet validated end-to-end (tracked
+ * separately) and needs a Windows owner-only-ACL fixture. */
+#ifndef G_OS_WIN32
 static void
 test_daemon_handoff_issue_real_publication (void)
 {
@@ -566,6 +572,7 @@ test_daemon_handoff_issue_real_publication (void)
   g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
   g_assert_cmpint (count_delivered (db_of (fixture.handle), request_id), ==, 1);
 }
+#endif /* !G_OS_WIN32 */
 
 int
 main (int argc, char *argv[])
@@ -579,7 +586,9 @@ main (int argc, char *argv[])
       test_daemon_handoff_malformed);
   g_test_add_func ("/daemon-service-credential-handoff/unconfigured",
       test_daemon_handoff_unconfigured);
+#ifndef G_OS_WIN32
   g_test_add_func ("/daemon-service-credential-handoff/issue-real-publication",
       test_daemon_handoff_issue_real_publication);
+#endif
   return g_test_run ();
 }
