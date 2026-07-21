@@ -1313,7 +1313,8 @@ test_daemon_service_credential_handoff = executable('test-daemon-service-credent
     include_directories('../wyrelog/wyctl')],
   dependencies : test_service_credential_operation_coordinator_execute_deps
     + [publication_private_dep],
-  c_args : test_service_credential_operation_coordinator_execute_c_args,
+  c_args : test_service_credential_operation_coordinator_execute_c_args
+    + ['-DWYL_TEST_DAEMON_HTTP'],
 )
 
 test('daemon-service-credential-handoff',

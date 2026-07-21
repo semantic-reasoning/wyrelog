@@ -50,14 +50,17 @@ typedef struct
   const gchar *operation_root;
   const gchar *credential_publication_root;
   GCancellable *cancellable;
+#ifdef WYL_TEST_DAEMON_HTTP
   /* Test-only publication backend injection.  When publication_override is
    * non-NULL the module drives it (with publication_override_data) instead of
    * opening the production owner-publication backend from
    * credential_publication_root, so focused tests can exercise the handoff
    * without the real filesystem publication semantics.  Production callers leave
-   * both NULL. */
+   * both NULL.  This seam is compiled only into test builds; the shipped daemon
+   * never carries a publication-backend bypass. */
   const WyctlPublicationBackendVTable *publication_override;
   gpointer publication_override_data;
+#endif
 } WylDaemonServiceCredentialHandoffContext;
 
 /* Run one authenticated escrow credential handoff to completion and, on

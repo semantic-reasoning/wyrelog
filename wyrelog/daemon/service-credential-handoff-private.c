@@ -198,10 +198,13 @@ wyl_daemon_service_credential_handoff (const
 
   const WyctlPublicationBackendVTable *publication;
   gpointer publication_data;
+#ifdef WYL_TEST_DAEMON_HTTP
   if (ctx->publication_override != NULL) {
     publication = ctx->publication_override;
     publication_data = ctx->publication_override_data;
-  } else {
+  } else
+#endif
+  {
     rc = wyctl_publication_backend_open (&backend,
         ctx->credential_publication_root);
     if (rc != WYRELOG_E_OK)
