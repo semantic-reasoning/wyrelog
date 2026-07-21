@@ -680,6 +680,9 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
       g_object_unref (self);
       return lease_rc;
     }
+    if (opts->fact_root_lease_acquired_checkpoint != NULL)
+      opts->fact_root_lease_acquired_checkpoint
+          (opts->fact_root_lease_acquired_checkpoint_data);
   }
 #endif
   self->require_template_manifest = opts->require_template_manifest
@@ -718,6 +721,16 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     g_object_unref (self);
     return rc;
   }
+#ifdef WYL_HAS_FACT_STORE
+  if (self->fact_root != NULL && self->fact_root[0] != '\0') {
+    rc = wyl_policy_store_bind_fact_root_authorized (self->policy_store,
+        self->fact_root, self->fact_root_writer_lease);
+    if (rc != WYRELOG_E_OK) {
+      g_object_unref (self);
+      return rc;
+    }
+  }
+#endif
   g_mutex_lock (&self->policy_store_lifecycle_mutex);
   if (self->policy_store_generation_exhausted
       || self->policy_store_generation == G_MAXUINT64) {
@@ -733,16 +746,6 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
     g_object_unref (self);
     return rc;
   }
-#ifdef WYL_HAS_FACT_STORE
-  if (self->fact_root != NULL && self->fact_root[0] != '\0') {
-    rc = wyl_policy_store_bind_fact_root (self->policy_store, self->fact_root);
-    if (rc != WYRELOG_E_OK) {
-      g_object_unref (self);
-      return rc;
-    }
-  }
-#endif
-
   if (opts->template_dir != NULL) {
     rc = wyl_handle_open_engine_pair (self, opts->template_dir);
     if (rc != WYRELOG_E_OK) {

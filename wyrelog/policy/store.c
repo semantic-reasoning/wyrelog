@@ -53,6 +53,7 @@
 #include "wyrelog/wyl-handle-private.h"
 #include "store-lease-private.h"
 #include "fact/graph-locator-private.h"
+#include "fact/root-writer-lease-private.h"
 
 #define WYL_POLICY_STORE_CLEAR_SUFFIX ".wyrelog-clear"
 #define WYL_POLICY_STORE_TMP_SUFFIX ".wyrelog-tmp"
@@ -7849,18 +7850,27 @@ wyl_policy_store_get_db (wyl_policy_store_t *store)
 }
 
 static wyrelog_error_t
-bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root)
+bind_fact_root_locked (wyl_policy_store_t *store, const gchar *fact_root,
+    WylFactRootWriterLease *lease)
 {
   if (store->fact_root_path != NULL) {
     if (g_strcmp0 (store->fact_root_path, fact_root) != 0)
       return WYRELOG_E_POLICY;
-    return wyl_fact_graph_resolver_revalidate (&store->fact_root_resolver);
+    wyrelog_error_t rc = wyl_fact_graph_resolver_revalidate
+        (&store->fact_root_resolver);
+    if (rc == WYRELOG_E_OK && lease != NULL)
+      rc = wyl_fact_root_writer_lease_authorizes_resolver (lease,
+          &store->fact_root_resolver);
+    return rc;
   }
 
   gchar *bound_path = g_strdup (fact_root);
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root, &resolver);
+  if (rc == WYRELOG_E_OK && lease != NULL)
+    rc = wyl_fact_root_writer_lease_authorizes_resolver (lease, &resolver);
   if (rc != WYRELOG_E_OK) {
+    wyl_fact_graph_resolver_clear (&resolver);
     g_free (bound_path);
     return rc;
   }
@@ -7878,7 +7888,19 @@ wyl_policy_store_bind_fact_root (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
   g_autoptr (GRecMutexLocker) authority_locker =
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
-  return bind_fact_root_locked (store, fact_root);
+  return bind_fact_root_locked (store, fact_root, NULL);
+}
+
+wyrelog_error_t
+wyl_policy_store_bind_fact_root_authorized (wyl_policy_store_t *store,
+    const gchar *fact_root, WylFactRootWriterLease *lease)
+{
+  if (store == NULL || store->db == NULL || fact_root == NULL
+      || fact_root[0] == '\0' || lease == NULL)
+    return WYRELOG_E_INVALID;
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  return bind_fact_root_locked (store, fact_root, lease);
 }
 
 wyrelog_error_t
@@ -7900,7 +7922,7 @@ wyl_policy_store_open_fact_graph_directory (wyl_policy_store_t *store,
     return rc;
   g_autoptr (GRecMutexLocker) authority_locker =
       g_rec_mutex_locker_new (&store->graph_authority_mutex);
-  rc = bind_fact_root_locked (store, fact_root);
+  rc = bind_fact_root_locked (store, fact_root, NULL);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_resolver_open_directory (&store->fact_root_resolver,
         &locator, create, out_directory);

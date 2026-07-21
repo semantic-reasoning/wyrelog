@@ -613,8 +613,14 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 test('fact-graph-locator', test_fact_graph_locator)
 
 fact_root_writer_lease_c_args = fact_test_support_c_args
+fact_root_writer_lease_depends = []
 if get_option('enable_fact_store').allowed()
-  fact_root_writer_lease_c_args += '-DWYL_HAS_FACT_STORE'
+  fact_root_writer_lease_c_args += [
+    '-DWYL_HAS_FACT_STORE',
+    '-DWYL_TEST_WYRELOGD_PATH="' + wyrelogd_exe.full_path() + '"',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ]
+  fact_root_writer_lease_depends += wyrelogd_exe
 endif
 
 test_fact_root_writer_lease = executable('test-fact-root-writer-lease',
@@ -622,10 +628,11 @@ test_fact_root_writer_lease = executable('test-fact-root-writer-lease',
   'fact-test-support.c',
   c_args : fact_root_writer_lease_c_args,
   include_directories : include_directories('../wyrelog'),
-  dependencies : [wyrelog_dep, glib_dep, gio_dep] + fact_test_support_deps,
+  dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep] + fact_test_support_deps,
 )
 
 test('fact-root-writer-lease', test_fact_root_writer_lease,
+  depends : fact_root_writer_lease_depends,
   timeout : 60,
 )
 

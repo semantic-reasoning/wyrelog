@@ -29,6 +29,9 @@ typedef struct
   const gchar *audit_store_path;
   /* Canonical authority root for graph-local fact stores. */
   const gchar *fact_root;
+  /* Test-only deterministic seam immediately after writer-lease acquire. */
+  void (*fact_root_lease_acquired_checkpoint) (gpointer data);
+  gpointer fact_root_lease_acquired_checkpoint_data;
   gboolean production_mode;
   gboolean require_template_manifest;
 } WylHandleOpenOptions;

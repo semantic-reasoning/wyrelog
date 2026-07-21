@@ -9,6 +9,7 @@ import sys
 root = Path(sys.argv[1])
 runtime = (root / "wyrelog/daemon/runtime.c").read_text()
 handle = (root / "wyrelog/wyl-handle.c").read_text()
+policy_store = (root / "wyrelog/policy/store.c").read_text()
 posix = (root / "wyrelog/fact/root-writer-lease-private.c").read_text()
 windows = (root / "wyrelog/fact/graph-locator-windows-private.c").read_text()
 
@@ -33,6 +34,8 @@ open_runtime = body(runtime, "open_runtime_handle")
 open_readiness = body(runtime, "open_readiness_handle")
 open_handle = body(handle, "wyl_handle_open_with_options")
 shutdown = body(handle, "wyl_handle_complete_shutdown")
+authorized_bind = body(policy_store, "wyl_policy_store_bind_fact_root_authorized")
+bind_locked = body(policy_store, "bind_fact_root_locked")
 
 assert ".fact_root = opts->fact_root" in open_runtime
 assert ".fact_root" not in open_readiness
@@ -40,6 +43,9 @@ assert open_handle.index("wyl_fact_root_writer_lease_acquire") < open_handle.ind
     "wyl_policy_store_open_with_options"
 )
 assert open_handle.index("wyl_policy_store_open_with_options") < open_handle.index(
+    "wyl_policy_store_bind_fact_root_authorized"
+)
+assert open_handle.index("wyl_policy_store_bind_fact_root_authorized") < open_handle.index(
     "wyl_policy_store_create_schema"
 )
 assert open_handle.index("wyl_policy_store_create_schema") < open_handle.index(
@@ -51,6 +57,9 @@ assert shutdown.index("g_hash_table_remove_all (handle->fact_graph_engines)") < 
 assert shutdown.index("wyl_policy_store_close") < shutdown.index(
     "wyl_fact_root_writer_lease_release"
 )
+assert "g_rec_mutex_locker_new (&store->graph_authority_mutex)" in authorized_bind
+assert "bind_fact_root_locked (store, fact_root, lease)" in authorized_bind
+assert "wyl_fact_root_writer_lease_authorizes_resolver" in bind_locked
 
 # POSIX uses one kernel namespace on the verified root directory itself.  It
 # must never introduce a sidecar or silently fall back to process locks.
