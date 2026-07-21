@@ -394,6 +394,38 @@ issue_inputs_for (const gchar *request_id)
         g_get_real_time () + G_TIME_SPAN_HOUR,};
 }
 
+static WylDaemonServiceCredentialHandoffInputs
+rotate_inputs_for (const gchar *request_id, const gchar *subject_id,
+    const gchar *old_credential_id, guint64 expected_generation)
+{
+  return (WylDaemonServiceCredentialHandoffInputs) {
+  .kind = WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE,.request_id =
+        request_id,.subject_id = subject_id,.old_credential_id =
+        old_credential_id,.expected_generation =
+        expected_generation,.destination = "rotated.json",.expires_at_us =
+        g_get_real_time () + G_TIME_SPAN_HOUR,};
+}
+
+/* Records the (credential_id, generation) the rotate authority commit asks the
+ * daemon to evict from its in-memory service-auth registry. */
+typedef struct
+{
+  guint calls;
+  gchar *credential_id;
+  guint64 generation;
+} InvalidateProbe;
+
+static wyrelog_error_t
+invalidate_probe (gpointer data, const gchar *credential_id, guint64 generation)
+{
+  InvalidateProbe *probe = data;
+  probe->calls++;
+  g_free (probe->credential_id);
+  probe->credential_id = g_strdup (credential_id);
+  probe->generation = generation;
+  return WYRELOG_E_OK;
+}
+
 /* A configured issue emits a non-secret JSON receipt, mints one credential and
  * records exactly one delivery. */
 static void
@@ -429,6 +461,66 @@ test_daemon_handoff_issue (void)
   g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
   g_assert_cmpint (count_delivered (db_of (fixture.handle), request_id), ==, 1);
   g_assert_cmpuint (publication.commit_calls, ==, 1);
+}
+
+/* A configured rotate of an existing credential drives the module to a delivered
+ * terminal and emits a non-secret receipt naming the successor credential. It
+ * also threads the caller's registry-eviction hook into the rotate runtime and
+ * fires it exactly once, keyed by the OLD credential id and generation, so
+ * already-minted bearer tokens from the retired generation stop authenticating.
+ */
+static void
+test_daemon_handoff_rotate (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  prepare_authority (fixture.handle, "svc:handoff:executor");
+  g_autoptr (WylSession) session = handoff_human_session_new ("admin",
+      "tenant-a");
+  authorize_session (fixture.handle, "admin", session);
+
+  /* Seed the rotate target directly through the library; the module rotates an
+   * existing credential regardless of how it was first minted. */
+  wyl_service_credential_issue_result_t seed = { 0 };
+  g_assert_cmpint (wyl_service_credential_issue (fixture.handle,
+          "svc:handoff:executor", "tenant-a", "admin", "rotate-seed-request",
+          g_get_real_time () + G_TIME_SPAN_HOUR, &seed), ==, WYRELOG_E_OK);
+  g_autofree gchar *old_id = g_strdup (seed.credential.credential_id);
+  guint64 old_generation = seed.credential.generation;
+  wyl_service_credential_issue_result_clear (&seed);
+  g_assert_nonnull (old_id);
+  g_assert_cmpuint (old_generation, >, 0);
+
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (request_id);
+  HandoffPublication publication = { 0 };
+  InvalidateProbe probe = { 0 };
+  WylDaemonServiceCredentialHandoffContext ctx =
+      context_for (&fixture, session, request_id, &publication);
+  ctx.invalidate_credential = invalidate_probe;
+  ctx.invalidation_data = &probe;
+  WylDaemonServiceCredentialHandoffInputs inputs =
+      rotate_inputs_for (request_id, "svc:handoff:executor", old_id,
+      old_generation);
+
+  g_autofree gchar *json = NULL;
+  g_assert_cmpint (wyl_daemon_service_credential_handoff (&ctx, &inputs, &json),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"state\":\"terminal\""));
+  g_assert_nonnull (strstr (json, "\"delivered\":true"));
+  g_assert_nonnull (strstr (json, "\"destination\":\"rotated.json\""));
+  g_assert_nonnull (strstr (json, "\"credential_id\":"));
+  g_assert_nonnull (strstr (json, "\"generation\":"));
+  g_assert_null (strstr (json, "secret"));
+  g_assert_cmpuint (publication.commit_calls, ==, 1);
+
+  /* The retired generation was evicted from the registry exactly once, keyed by
+   * the OLD credential id and generation. */
+  g_assert_cmpuint (probe.calls, ==, 1);
+  g_assert_cmpstr (probe.credential_id, ==, old_id);
+  g_assert_cmpuint (probe.generation, ==, old_generation);
+  g_free (probe.credential_id);
 }
 
 /* Re-submitting the same request_id replays to a byte-identical receipt with no
@@ -580,6 +672,8 @@ main (int argc, char *argv[])
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/daemon-service-credential-handoff/issue",
       test_daemon_handoff_issue);
+  g_test_add_func ("/daemon-service-credential-handoff/rotate",
+      test_daemon_handoff_rotate);
   g_test_add_func ("/daemon-service-credential-handoff/retry-replay",
       test_daemon_handoff_retry_is_replay);
   g_test_add_func ("/daemon-service-credential-handoff/malformed",

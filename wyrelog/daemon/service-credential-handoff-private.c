@@ -130,8 +130,11 @@ handoff_build_request (const WylDaemonServiceCredentialHandoffContext *ctx,
   out->parent_identity = g_strdup (parent_identity);
   out->actor_subject_id = g_strdup (ctx->authenticated_actor_subject_id);
   out->expires_at_us = inputs->expires_at_us;
+  /* subject_id identifies the credential's principal for both kinds and is
+   * required by the operation record; tenant_id stays ISSUE-only (a rotate
+   * request must carry a NULL tenant_id). */
+  out->subject_id = g_strdup (inputs->subject_id);
   if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE) {
-    out->subject_id = g_strdup (inputs->subject_id);
     out->tenant_id = g_strdup (inputs->tenant_id);
   } else {
     out->old_credential_id = g_strdup (inputs->old_credential_id);
@@ -228,6 +231,11 @@ wyl_daemon_service_credential_handoff (const
     goto out;
 
   handoff_build_request (ctx, inputs, parent_identity, &request);
+
+  /* Thread the caller's registry-eviction hook into the rotate runtime so it
+   * fires at store commit; ISSUE never consumes rotate_runtime. */
+  rotate_runtime.invalidate_credential = ctx->invalidate_credential;
+  rotate_runtime.invalidation_data = ctx->invalidation_data;
 
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = ctx->session,
