@@ -335,6 +335,7 @@ wyrelogd_sources = files(
     'daemon/http.c',
     'daemon/options.c',
     'daemon/runtime.c',
+    'daemon/service-credential-handoff-private.c',
     'daemon/signals.c',
     'daemon/wyrelogd.c',
 )
