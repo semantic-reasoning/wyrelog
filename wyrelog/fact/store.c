@@ -541,7 +541,7 @@ validate_identity_schema (wyl_fact_store_t *store)
   static const gchar *names[] = { "key", "value" };
   static const gchar *sql =
       "SELECT column_name,data_type,is_nullable,column_default,"
-      "ordinal_position FROM information_schema.columns "
+      "ordinal_position,collation_name FROM information_schema.columns "
       "WHERE table_catalog=current_database() AND table_schema='main' "
       "AND table_name='fact_store_metadata' ORDER BY ordinal_position;";
 
@@ -561,7 +561,8 @@ validate_identity_schema (wyl_fact_store_t *store)
         && strcmp (name, names[row]) == 0 && strcmp (type, "VARCHAR") == 0
         && strcmp (nullable, "NO") == 0
         && duckdb_value_is_null (&result, 3, row)
-        && duckdb_value_int64 (&result, 4, row) == (gint64) row + 1;
+        && duckdb_value_int64 (&result, 4, row) == (gint64) row + 1
+        && duckdb_value_is_null (&result, 5, row);
     duckdb_free (name);
     duckdb_free (type);
     duckdb_free (nullable);
@@ -606,8 +607,28 @@ validate_identity_schema (wyl_fact_store_t *store)
         "AND check_constraint_count=0;", &table_shape_count);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return primary_key_count == 1 && not_null_count == 2 && total_count == 3
-      && table_shape_count == 1 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+  if (primary_key_count != 1 || not_null_count != 2 || total_count != 3
+      || table_shape_count != 1)
+    return WYRELOG_E_POLICY;
+
+  if (duckdb_query (store->conn,
+          "SELECT sql FROM duckdb_tables() "
+          "WHERE database_name=current_database() AND schema_name='main' "
+          "AND table_name='fact_store_metadata' AND NOT internal;", &result)
+      != DuckDBSuccess) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_IO;
+  }
+  if (duckdb_row_count (&result) != 1 || duckdb_value_is_null (&result, 0, 0)) {
+    duckdb_destroy_result (&result);
+    return WYRELOG_E_POLICY;
+  }
+  gchar *ddl = duckdb_value_varchar (&result, 0, 0);
+  g_autofree gchar *lower_ddl = ddl != NULL ? g_ascii_strdown (ddl, -1) : NULL;
+  duckdb_free (ddl);
+  duckdb_destroy_result (&result);
+  return lower_ddl != NULL && strstr (lower_ddl, "collate") == NULL ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 static gchar *
