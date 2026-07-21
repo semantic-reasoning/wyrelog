@@ -1304,6 +1304,24 @@ test('service-credential-operation-coordinator-handoff',
   timeout : service_credential_operation_coordinator_execute_timeout,
 )
 
+test_daemon_service_credential_handoff = executable('test-daemon-service-credential-handoff',
+  [
+    'test-daemon-service-credential-handoff.c',
+    '../wyrelog/daemon/service-credential-handoff-private.c',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog'),
+    include_directories('../wyrelog/wyctl')],
+  dependencies : test_service_credential_operation_coordinator_execute_deps
+    + [publication_private_dep],
+  c_args : test_service_credential_operation_coordinator_execute_c_args,
+)
+
+test('daemon-service-credential-handoff',
+  test_daemon_service_credential_handoff,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : service_credential_operation_coordinator_execute_timeout,
+)
+
 if get_option('enable_audit').allowed()
   test_service_credential_operation_coordinator_cancel = executable(
     'test-service-credential-operation-coordinator-cancel',
