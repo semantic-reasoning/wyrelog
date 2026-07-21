@@ -20,6 +20,13 @@ typedef struct
   const gchar *audit_store_path;
   const gchar *fact_root;
   const gchar *fact_store_mode;
+  /* Owner-only root for the durable service-credential operation journal.
+   * Optional: when unset the escrow handoff surface reports unavailable
+   * instead of failing the daemon. */
+  const gchar *operation_root;
+  /* Owner-only root the publication backend delivers credential secrets
+   * into. Optional, disjoint from every other daemon path. */
+  const gchar *credential_publication_root;
   const gchar *event_spool_dir;
   const gchar *system_url;
   gchar *listen_port_arg;
