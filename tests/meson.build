@@ -612,6 +612,20 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+subprocess_test_env = environment()
+if host_machine.system() == 'windows'
+  glib_genmarshal = glib_dep.get_variable(
+    pkgconfig : 'glib_genmarshal',
+    default_value : '',
+  )
+  if glib_genmarshal != '' and fs.is_absolute(glib_genmarshal)
+    subprocess_test_env.prepend('PATH',
+      fs.parent(glib_genmarshal),
+      separator : ';',
+    )
+  endif
+endif
+
 fact_root_writer_lease_c_args = fact_test_support_c_args
 fact_root_writer_lease_depends = []
 fact_root_writer_lease_deps = [wyrelog_dep, glib_dep, gio_dep, sqlite_dep]
@@ -635,6 +649,7 @@ test_fact_root_writer_lease = executable('test-fact-root-writer-lease',
 
 test('fact-root-writer-lease', test_fact_root_writer_lease,
   depends : fact_root_writer_lease_depends,
+  env : subprocess_test_env,
   timeout : 60,
 )
 
@@ -733,22 +748,8 @@ test_policy_store_lease = executable('test-policy-store-lease',
   dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep],
 )
 
-test_policy_store_lease_env = environment()
-if host_machine.system() == 'windows'
-  glib_genmarshal = glib_dep.get_variable(
-    pkgconfig : 'glib_genmarshal',
-    default_value : '',
-  )
-  if glib_genmarshal != '' and fs.is_absolute(glib_genmarshal)
-    test_policy_store_lease_env.prepend('PATH',
-      fs.parent(glib_genmarshal),
-      separator : ';',
-    )
-  endif
-endif
-
 test('policy-store-lease', test_policy_store_lease,
-  env : test_policy_store_lease_env,
+  env : subprocess_test_env,
   timeout : 60,
 )
 
