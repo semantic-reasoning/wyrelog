@@ -1809,6 +1809,15 @@ run_identity_race (const gchar *path,
   return TRUE;
 }
 
+static gboolean
+identity_race_outcome_is_retryable (const IdentityThread *thread)
+{
+  return (thread->rc == WYRELOG_E_OK
+      && thread->result == WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      || (thread->rc == WYRELOG_E_IO
+      && thread->result == WYL_FACT_STORE_IDENTITY_RESULT_OPEN);
+}
+
 static gint
 check_fact_store_identity_concurrency (void)
 {
@@ -1821,7 +1830,12 @@ check_fact_store_identity_concurrency (void)
   IdentityThread left;
   IdentityThread right;
   run_identity_race (same_path, &test_identity, &test_identity, &left, &right);
-  if (left.rc != WYRELOG_E_OK || right.rc != WYRELOG_E_OK
+  if (!identity_race_outcome_is_retryable (&left)
+      || !identity_race_outcome_is_retryable (&right)
+      || (left.rc != WYRELOG_E_OK && right.rc != WYRELOG_E_OK)
+      || !identified_open_is (same_path, &test_identity,
+          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+          WYL_FACT_STORE_IDENTITY_RESULT_NONE)
       || !identified_open_is (same_path, &test_identity,
           WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
           WYL_FACT_STORE_IDENTITY_RESULT_NONE))
@@ -1831,16 +1845,29 @@ check_fact_store_identity_concurrency (void)
   WylFactStoreIdentity other = test_identity;
   other.store_uuid = "01890f47-3c4b-6cc2-b8c4-dc0c0c073988";
   run_identity_race (conflict_path, &test_identity, &other, &left, &right);
-  if (!((left.rc == WYRELOG_E_OK && right.rc == WYRELOG_E_POLICY
-              && right.result == WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY)
-          || (right.rc == WYRELOG_E_OK && left.rc == WYRELOG_E_POLICY
-              && left.result == WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY)))
+  gboolean left_won = left.rc == WYRELOG_E_OK;
+  gboolean right_won = right.rc == WYRELOG_E_OK;
+  const IdentityThread *loser = left_won ? &right : &left;
+  gboolean loser_retryable =
+      (loser->rc == WYRELOG_E_POLICY
+      && loser->result == WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY)
+      || (loser->rc == WYRELOG_E_IO
+      && loser->result == WYL_FACT_STORE_IDENTITY_RESULT_OPEN);
+  if (left_won == right_won || !loser_retryable)
     return 2502;
+  const WylFactStoreIdentity *winner_identity =
+      left_won ? &test_identity : &other;
+  const WylFactStoreIdentity *loser_identity =
+      left_won ? &other : &test_identity;
   if (!identified_open_is (conflict_path,
-          left.rc == WYRELOG_E_OK ? &test_identity : &other,
+          winner_identity,
           WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_OK,
           WYL_FACT_STORE_IDENTITY_RESULT_NONE))
     return 2503;
+  if (!identified_open_is (conflict_path, loser_identity,
+          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_POLICY,
+          WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY))
+    return 2504;
 
   g_remove (same_path);
   g_remove (conflict_path);
