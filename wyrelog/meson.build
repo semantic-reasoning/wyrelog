@@ -300,14 +300,15 @@ wyrelogd_c_args = [
 if libsoup_dep.found()
   daemon_http_private_lib = static_library('wyrelog-daemon-http-private',
     'daemon/http-guards-private.c',
+    'daemon/service-credential-handoff-private.c',
     include_directories : wyrelog_inc,
-    dependencies : [glib_dep, gio_dep, libsoup_dep],
+    dependencies : [glib_dep, gio_dep, libsoup_dep, publication_private_dep],
     install : false,
     build_by_default : false,
   )
   daemon_http_private_dep = declare_dependency(
     link_with : daemon_http_private_lib,
-    dependencies : [glib_dep, gio_dep, libsoup_dep],
+    dependencies : [glib_dep, gio_dep, libsoup_dep, publication_private_dep],
   )
   wyrelogd_deps += [libsoup_dep, sodium_dep, service_session_private_dep]
   wyrelogd_deps += daemon_http_private_dep
@@ -335,7 +336,6 @@ wyrelogd_sources = files(
     'daemon/http.c',
     'daemon/options.c',
     'daemon/runtime.c',
-    'daemon/service-credential-handoff-private.c',
     'daemon/signals.c',
     'daemon/wyrelogd.c',
 )

@@ -22,6 +22,9 @@
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-request-id-private.h"
 #include "wyrelog/wyl-session-private.h"
+#include "daemon/service-credential-handoff-private.h"
+#include "../wyrelog/wyctl/wyctl-publication-private.h"
+#include "test-service-credential-operation-root.h"
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -6653,6 +6656,195 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
 }
 #endif
 
+/* Best-effort recursive removal of a temporary handoff root created by the
+ * service-principal contract test. */
+static void
+sp_remove_tree (const gchar *path)
+{
+  if (path == NULL)
+    return;
+  GDir *dir = g_dir_open (path, 0, NULL);
+  if (dir != NULL) {
+    const gchar *name;
+    while ((name = g_dir_read_name (dir)) != NULL) {
+      g_autofree gchar *child = g_build_filename (path, name, NULL);
+      if (g_file_test (child, G_FILE_TEST_IS_DIR)
+          && !g_file_test (child, G_FILE_TEST_IS_SYMLINK))
+        sp_remove_tree (child);
+      else
+        (void) g_remove (child);
+    }
+    g_dir_close (dir);
+  }
+  (void) g_rmdir (path);
+}
+
+/* Mock owner-publication backend for the escrow credential handoff. It mirrors
+ * the focused daemon-handoff test vtable so the shared HTTP contract can drive
+ * the issue/rotate handlers through the real handoff module to a delivered
+ * terminal without touching the real filesystem publication semantics. */
+typedef struct
+{
+  guint plan_calls;
+  guint stage_calls;
+  guint preflight_calls;
+  guint inspect_calls;
+  guint commit_calls;
+  guint active_leases;
+  guint release_calls;
+  gboolean published;
+} SpPublication;
+
+typedef struct
+{
+  SpPublication *owner;
+  gboolean destination_target;
+} SpTargetLease;
+
+static void
+sp_copy_plan (const WyctlPublicationPlan *source, WyctlPublicationPlan *out)
+{
+  *out = (WyctlPublicationPlan) {
+  .version = source->version,.destination =
+        g_strdup (source->destination),.reservation_id =
+        g_strdup (source->reservation_id),.parent_identity =
+        g_strdup (source->parent_identity),.stage_basename =
+        g_strdup (source->stage_basename),};
+}
+
+static wyrelog_error_t
+sp_plan (gpointer data, const WyctlPublicationPlan *request,
+    WyctlPublicationPlan *out)
+{
+  SpPublication *backend = data;
+  backend->plan_calls++;
+  sp_copy_plan (request, out);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+sp_stage (gpointer data, const WyctlPublicationPlan *plan,
+    const gchar *credential_id, const WyctlSensitiveText *secret,
+    WyctlPublicationReceipt *out_receipt, WyctlPublicationResult *out_result,
+    gboolean *out_replayed)
+{
+  SpPublication *backend = data;
+  g_assert_nonnull (credential_id);
+  g_assert_nonnull (secret);
+  backend->stage_calls++;
+  *out_receipt = (WyctlPublicationReceipt) {
+  .version = WYCTL_PUBLICATION_RECEIPT_VERSION,.destination =
+        g_strdup (plan->destination),.reservation_id =
+        g_strdup (plan->reservation_id),.parent_identity =
+        g_strdup (plan->parent_identity),.stage_basename =
+        g_strdup (plan->stage_basename),.stage_identity =
+        g_strdup ("test-stage-identity"),};
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,};
+  *out_replayed = FALSE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+sp_target_acquire (gpointer data, const WyctlPublicationPlan *plan,
+    const WyctlPublicationReceipt *receipt, gboolean require_destination,
+    WyctlPublicationReceiptTargetLease **out_lease,
+    WyctlPublicationReceiptTargetKind *out_kind)
+{
+  SpPublication *backend = data;
+  (void) plan;
+  (void) receipt;
+  backend->preflight_calls++;
+  if (require_destination && !backend->published) {
+    *out_lease = NULL;
+    *out_kind = WYCTL_PUBLICATION_RECEIPT_TARGET_FOREIGN_OR_UNCERTAIN;
+    return WYRELOG_E_OK;
+  }
+  SpTargetLease *lease = g_new0 (SpTargetLease, 1);
+  lease->owner = backend;
+  lease->destination_target = backend->published;
+  backend->active_leases++;
+  *out_lease = (WyctlPublicationReceiptTargetLease *) lease;
+  *out_kind = backend->published ?
+      WYCTL_PUBLICATION_RECEIPT_TARGET_DESTINATION :
+      WYCTL_PUBLICATION_RECEIPT_TARGET_STAGE;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+sp_target_commit (gpointer data,
+    WyctlPublicationReceiptTargetLease *target_lease,
+    const gchar *credential_id, const WyctlSensitiveText *secret,
+    WyctlPublicationResult *out_result)
+{
+  SpPublication *backend = data;
+  SpTargetLease *lease = (SpTargetLease *) target_lease;
+  g_assert_true (lease->owner == backend);
+  g_assert_false (lease->destination_target);
+  g_assert_nonnull (credential_id);
+  (void) secret;
+  backend->commit_calls++;
+  backend->published = TRUE;
+  lease->destination_target = TRUE;
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE,.exact_identity = TRUE,};
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+sp_target_inspect (gpointer data,
+    WyctlPublicationReceiptTargetLease *target_lease,
+    const gchar *credential_id, const WyctlSensitiveText *secret,
+    WyctlPublicationResult *out_result)
+{
+  SpPublication *backend = data;
+  SpTargetLease *lease = (SpTargetLease *) target_lease;
+  g_assert_true (lease->owner == backend);
+  g_assert_nonnull (credential_id);
+  (void) secret;
+  backend->inspect_calls++;
+  *out_result = (WyctlPublicationResult) {
+  .version = WYCTL_PUBLICATION_RESULT_VERSION,.kind =
+        lease->destination_target ?
+        WYCTL_PUBLICATION_RESULT_COMMITTED_DURABLE :
+        WYCTL_PUBLICATION_RESULT_PRECOMMIT_FAILED,.exact_identity =
+        TRUE,.cleanup_required = !lease->destination_target,};
+  return WYRELOG_E_OK;
+}
+
+static void
+sp_target_release (gpointer data,
+    WyctlPublicationReceiptTargetLease *target_lease)
+{
+  SpPublication *backend = data;
+  SpTargetLease *lease = (SpTargetLease *) target_lease;
+  g_assert_true (lease->owner == backend);
+  g_assert_cmpuint (backend->active_leases, >, 0);
+  backend->active_leases--;
+  backend->release_calls++;
+  g_free (lease);
+}
+
+static wyrelog_error_t
+sp_root_identity (gpointer data, gchar **out_identity)
+{
+  (void) data;
+  *out_identity = g_strdup ("test-parent-identity");
+  return WYRELOG_E_OK;
+}
+
+static const WyctlPublicationBackendVTable sp_publication_vtable = {
+  .plan = sp_plan,
+  .stage_exact = sp_stage,
+  .receipt_target_acquire = sp_target_acquire,
+  .receipt_target_inspect = sp_target_inspect,
+  .receipt_target_commit = sp_target_commit,
+  .receipt_target_release = sp_target_release,
+  .root_identity = sp_root_identity,
+};
+
 static gint
 check_service_principal_management_contract (void)
 {
@@ -6670,13 +6862,15 @@ check_service_principal_management_contract (void)
   g_autofree gchar *rotate_path = NULL;
   g_autofree gchar *cross_tenant_rotate_path = NULL;
   g_autofree gchar *tenant_query = NULL;
-  g_autofree gchar *issued_secret = NULL;
-  g_autofree gchar *rotated_secret = NULL;
   g_autofree gchar *http_credential_id = NULL;
   g_autofree gchar *http_exchange_body = NULL;
   g_autofree gchar *denied_body = NULL;
   guint denied_status = 0;
   guint denied_retry_after = 0;
+  g_autofree gchar *handoff_dir = NULL;
+  g_autofree gchar *operation_root = NULL;
+  g_autofree gchar *publication_root = NULL;
+  SpPublication publication = { 0 };
   const gchar *session_token = "human-principal-admin";
   guint status = 0;
   const gchar *create_body =
@@ -6687,11 +6881,25 @@ check_service_principal_management_contract (void)
   if (session == NULL)
     return 1976;
 
+  /* The escrow handoff needs both opt-in roots configured; the publication
+   * override then drives a mock backend instead of the real one at
+   * publication_root. */
+  handoff_dir = g_dir_make_tmp ("wyl-daemon-http-handoff-XXXXXX", NULL);
+  if (handoff_dir == NULL)
+    return 1974;
+  operation_root = service_credential_operation_root_for_test (handoff_dir,
+      "http-handoff-operations");
+  publication_root = g_build_filename (handoff_dir, "publication", NULL);
+  if (g_mkdir_with_parents (publication_root, 0700) != 0)
+    return 1974;
+
   g_autoptr (GMainContext) context = g_main_context_new ();
   g_main_context_push_thread_default (context);
   WylDaemonOptions opts = {
     .template_dir = WYL_TEST_TEMPLATE_DIR,
     .listen_port = 0,
+    .operation_root = operation_root,
+    .credential_publication_root = publication_root,
   };
   g_autoptr (GError) error = NULL;
   TestHttpServer http = { 0 };
@@ -6711,6 +6919,9 @@ check_service_principal_management_contract (void)
   }
   base_url = g_uri_to_string (uris->data);
   g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+
+  wyl_daemon_http_set_publication_override_for_test (http.server,
+      &sp_publication_vtable, &publication);
 
   if (!wyl_daemon_http_seed_human_session_for_test (http.server, session_token,
           "human-principal-admin", "__wr_default")) {
@@ -6808,35 +7019,45 @@ check_service_principal_management_contract (void)
   const gchar *issue_body =
       "{\"version\":\"1\",\"tenant\":\"tenant-a\","
       "\"request_id\":\"111111111111111111111111111\","
-      "\"expires_at_us\":\"0\"}";
+      "\"destination\":\"issue.json\",\"expires_at_us\":\"4102444800000000\"}";
   g_clear_pointer (&body, g_free);
+  memset (&publication, 0, sizeof publication);
+  /* Issue now delivers the secret out-of-band via the escrow file; the HTTP
+   * response is the module's non-secret receipt. */
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/credentials",
           tenant_query, issue_body, &status, &body) != 0 || status != 200
-      || body == NULL || strstr (body, "credential_secret") == NULL
-      || strstr (body, "service_credential") == NULL
-      || !g_str_has_prefix (body, "{\"service_credential\":{")
-      || !g_str_has_suffix (body, "\"}")
-      || (issued_secret =
-          extract_json_string (body, "credential_secret")) == NULL
-      || strlen (issued_secret) != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN) {
+      || body == NULL || strstr (body, "credential_secret") != NULL
+      || strstr (body, "\"state\":\"terminal\"") == NULL
+      || strstr (body, "\"delivered\":true") == NULL
+      || strstr (body, "\"destination\":\"issue.json\"") == NULL
+      || (http_credential_id =
+          extract_json_string (body, "credential_id")) == NULL) {
     rc = 1990;
     goto cleanup;
   }
-  if (strstr (body, "credential_secret") !=
-      g_strrstr (body, "credential_secret")) {
-    rc = 1991;
-    goto cleanup;
-  }
 #ifdef WYL_HAS_AUDIT
-  http_credential_id = extract_json_string (body, "credential_id");
-  if (http_credential_id == NULL) {
-    rc = 1993;
-    goto cleanup;
+  /* The service-token exchange is decoupled from the receipt path: seed a
+   * credential secret directly through the library and exchange that. */
+  {
+    wyl_service_credential_issue_result_t exchange_seed = { 0 };
+    if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
+            "human-principal-admin", "http-exchange-seed", 4102444800000000,
+            &exchange_seed) != WYRELOG_E_OK || exchange_seed.secret == NULL
+        || exchange_seed.credential.credential_id == NULL) {
+      wyl_service_credential_issue_result_clear (&exchange_seed);
+      rc = 1993;
+      goto cleanup;
+    }
+    gsize exchange_secret_len = 0;
+    const gchar *exchange_secret = wyl_service_credential_secret_peek_encoded
+        (exchange_seed.secret, &exchange_secret_len);
+    http_exchange_body = g_strdup_printf
+        ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
+        exchange_seed.credential.credential_id, (gint) exchange_secret_len,
+        exchange_secret);
+    wyl_service_credential_issue_result_clear (&exchange_seed);
   }
-  http_exchange_body = g_strdup_printf
-      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%s\"}",
-      http_credential_id, issued_secret);
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/auth/service-token", NULL, http_exchange_body, &status, &body)
@@ -6908,17 +7129,19 @@ check_service_principal_management_contract (void)
   rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
       rotate_seed.credential.credential_id);
   g_clear_pointer (&body, g_free);
+  memset (&publication, 0, sizeof publication);
+  /* Rotate delivers the successor secret via the escrow file too; assert the
+   * non-secret receipt naming a fresh successor credential. */
   if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
           query,
-          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\"}",
+          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+          "\"destination\":\"rotate.json\","
+          "\"expires_at_us\":\"4102444800000000\"}",
           &status, &body) != 0 || status != 200 || body == NULL
-      || strstr (body, "credential_secret") == NULL
-      || strstr (body, "\"rotated_from_id\":") == NULL
-      || (rotated_secret = extract_json_string (body, "credential_secret"))
-      == NULL
-      || strlen (rotated_secret) != WYL_SERVICE_CREDENTIAL_SECRET_TEXT_LEN
-      || strstr (body, "credential_secret") !=
-      g_strrstr (body, "credential_secret")) {
+      || strstr (body, "credential_secret") != NULL
+      || strstr (body, "\"state\":\"terminal\"") == NULL
+      || strstr (body, "\"delivered\":true") == NULL
+      || extract_json_string (body, "credential_id") == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     rc = 1999;
@@ -6927,7 +7150,9 @@ check_service_principal_management_contract (void)
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
           query,
-          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\"}",
+          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+          "\"destination\":\"rotate.json\","
+          "\"expires_at_us\":\"4102444800000000\"}",
           &status, &body) != 0 || status != 409 || body == NULL
       || strstr (body, "service_credential_conflict") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -6952,7 +7177,9 @@ check_service_principal_management_contract (void)
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
           cross_tenant_rotate_path, query,
-          "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\"}",
+          "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\","
+          "\"destination\":\"rotate.json\","
+          "\"expires_at_us\":\"4102444800000000\"}",
           &status, &body) != 0 || status != 404 || body == NULL
       || strstr (body, "service_credential_not_found") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -7038,6 +7265,11 @@ cleanup:
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
+  if (handoff_dir != NULL) {
+    sp_remove_tree (operation_root);
+    sp_remove_tree (publication_root);
+    (void) g_rmdir (handoff_dir);
+  }
   return rc;
 }
 
