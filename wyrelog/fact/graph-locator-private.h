@@ -42,6 +42,19 @@ typedef struct
 typedef struct
 {
 #ifdef G_OS_WIN32
+  gpointer handle;
+  WylFactGraphWinIdentity identity;
+#else
+  gint fd;
+  guint64 device;
+  guint64 inode;
+#endif
+  guint64 size_bytes;
+} WylFactGraphRegularFile;
+
+typedef struct
+{
+#ifdef G_OS_WIN32
   gpointer root_handle;
   gpointer tenant_handle;
   gpointer graph_handle;
@@ -86,10 +99,12 @@ typedef struct
 #define WYL_FACT_GRAPH_RESOLVER_INIT { .handle = NULL }
 #define WYL_FACT_GRAPH_DIRECTORY_INIT \
   { .root_handle = NULL, .tenant_handle = NULL, .graph_handle = NULL }
+#define WYL_FACT_GRAPH_REGULAR_FILE_INIT { .handle = NULL }
 #else
 #define WYL_FACT_GRAPH_RESOLVER_INIT { .fd = -1 }
 #define WYL_FACT_GRAPH_DIRECTORY_INIT \
   { .root_fd = -1, .tenant_fd = -1, .graph_fd = -1 }
+#define WYL_FACT_GRAPH_REGULAR_FILE_INIT { .fd = -1 }
 #endif
 #define WYL_FACT_GRAPH_STAGE_INIT { .fd = -1 }
 
@@ -106,6 +121,7 @@ gchar *wyl_fact_graph_locator_relative_dir (const WylFactGraphLocator *
     locator);
 gchar *wyl_fact_graph_locator_descriptive_path (const gchar * fact_root,
     const WylFactGraphLocator * locator);
+gboolean wyl_fact_graph_relative_path_is_valid (const gchar * value);
 wyrelog_error_t wyl_fact_graph_resolver_open (const gchar * fact_root,
     WylFactGraphResolver * out_resolver);
 wyrelog_error_t wyl_fact_graph_resolver_revalidate (WylFactGraphResolver *
@@ -118,6 +134,10 @@ void wyl_fact_graph_resolver_set_checkpoint_for_test
 wyrelog_error_t wyl_fact_graph_resolver_open_directory
     (WylFactGraphResolver * resolver, const WylFactGraphLocator * locator,
     gboolean create, WylFactGraphDirectory * out_directory);
+wyrelog_error_t wyl_fact_graph_resolver_open_relative_regular
+    (WylFactGraphResolver * resolver, const gchar * relative_path,
+    WylFactGraphRegularFile * out_file);
+void wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile * file);
 void wyl_fact_graph_directory_clear (WylFactGraphDirectory * directory);
 gchar *wyl_fact_graph_directory_descriptive_path (const WylFactGraphDirectory
     * directory);
