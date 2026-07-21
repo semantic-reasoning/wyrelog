@@ -72,12 +72,12 @@ wyl_fact_reconcile_class_name (WylFactReconcileClass v)
     "missing-with-schema", "partial", "corrupt", "foreign",
     "unsupported-newer", "path-collision", "ambiguous", "orphan"
   };
-  return v < G_N_ELEMENTS (names) ? names[v] : "ambiguous";
+  return v >= 0 && v < G_N_ELEMENTS (names) ? names[v] : "ambiguous";
 }
 
 const gchar *
 wyl_fact_reconcile_action_name (WylFactReconcileAction v)
 {
   static const gchar *names[] = { "none", "reconcile", "degrade", "review" };
-  return v < G_N_ELEMENTS (names) ? names[v] : "review";
+  return v >= 0 && v < G_N_ELEMENTS (names) ? names[v] : "review";
 }
