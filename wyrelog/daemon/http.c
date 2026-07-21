@@ -3322,6 +3322,18 @@ wants_json_format (GHashTable *query)
   return g_strcmp0 (format, "json") == 0;
 }
 
+static gboolean
+require_method (SoupServerMessage *msg, const gchar *expected_method)
+{
+  if (g_strcmp0 (soup_server_message_get_method (msg), expected_method) == 0)
+    return TRUE;
+
+  soup_message_headers_replace (soup_server_message_get_response_headers (msg),
+      "Allow", expected_method);
+  set_json_error (msg, 405, "method_not_allowed");
+  return FALSE;
+}
+
 static void
 set_status_json (SoupServerMessage *msg, guint status, const gchar *state,
     const gchar *reason)
@@ -3385,6 +3397,9 @@ healthz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) server;
   (void) path;
   (void) user_data;
+
+  if (!require_method (msg, "GET"))
+    return;
 
   if (wants_json_format (query)) {
     set_status_json (msg, 200, "ok", NULL);
@@ -3499,6 +3514,9 @@ readyz_handler (SoupServer *server, SoupServerMessage *msg, const char *path,
   (void) path;
 
   WylDaemonHttpContext *ctx = user_data;
+  if (!require_method (msg, "GET"))
+    return;
+
   gboolean json = wants_json_format (query);
   const gchar *liveness_error = check_runtime_liveness_ready (ctx->runtime);
   if (liveness_error != NULL) {
@@ -3539,6 +3557,9 @@ facts_status_handler (SoupServer *server, SoupServerMessage *msg,
   (void) path;
   (void) query;
 
+  if (!require_method (msg, "GET"))
+    return;
+
   WylDaemonHttpContext *ctx = user_data;
   g_autofree gchar *body = wyl_daemon_fact_status_json (ctx->handle, TRUE);
   attach_request_id_header (msg);
@@ -3554,6 +3575,9 @@ profile_status_handler (SoupServer *server, SoupServerMessage *msg,
   (void) server;
   (void) path;
   (void) query;
+
+  if (!require_method (msg, "GET"))
+    return;
 
   WylDaemonHttpContext *ctx = user_data;
   const gchar *profile =
@@ -4890,6 +4914,9 @@ audit_events_handler (SoupServer *server, SoupServerMessage *msg,
 {
   (void) server;
   (void) path;
+
+  if (!require_method (msg, "GET"))
+    return;
 
 #ifdef WYL_HAS_AUDIT
   const gchar *filter = NULL;
