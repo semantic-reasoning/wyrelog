@@ -375,8 +375,13 @@ test_daemon_collision_is_path_free_and_nonmutating (void)
   g_assert_no_error (error);
   g_assert_true (g_subprocess_get_if_exited (process));
   g_assert_cmpint (g_subprocess_get_exit_status (process), !=, 0);
-  g_assert_nonnull (strstr (stderr_text,
-          "wyrelogd: init failed: resource is busy\n"));
+  g_auto (GStrv) stderr_lines = g_strsplit_set (stderr_text, "\r\n", -1);
+  gboolean found_busy_line = FALSE;
+  for (guint i = 0; stderr_lines[i] != NULL; i++)
+    if (g_str_equal (stderr_lines[i],
+            "wyrelogd: init failed: resource is busy"))
+      found_busy_line = TRUE;
+  g_assert_true (found_busy_line);
   g_assert_null (strstr (stderr_text, root));
   g_assert_null (strstr (stderr_text, sentinel));
 
