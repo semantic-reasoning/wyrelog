@@ -7,6 +7,7 @@
 #include "wyrelog/error.h"
 #include "wyrelog/session.h"
 #include "wyrelog/auth/service-credential-domain-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-private.h"
 #include "wyrelog/auth/service-credential-operation-journal-private.h"
 #include "wyrelog/auth/service-credential-operation-storage-private.h"
 
@@ -108,6 +109,32 @@ wyrelog_error_t
     const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor,
     const gchar * request_id,
+    const WylServiceCredentialOperationHandoffExecuteRuntime * runtime,
+    WylServiceCredentialOperationRecord * out_record);
+
+/* Exported escrow-handoff front door.  It takes an operation request whose
+ * escrow_id is derived deterministically here from request_id (any
+ * caller-supplied escrow_id is ignored, and escrow_binding_digest is forced to
+ * zero because the real binding is minted at server-commit), durably
+ * begins-or-replays the operation, then drives it to a terminal or
+ * operator-action state through execute_handoff.
+ * out_record is caller-owned, cleared on entry, populated with durable,
+ * non-secret state on success, and left cleared on failure.  Inner return
+ * codes propagate verbatim.
+ *
+ * Idempotency contract: request->expires_at_us is the operator-chosen
+ * ABSOLUTE credential expiry, and request->expected_generation is the rotate
+ * CAS target.  Both are part of the immutable operation identity and MUST be
+ * stable across retries: a well-behaved caller resends the identical absolute
+ * expires_at_us so the operation replays.  The daemon MUST take expires_at_us
+ * from the client request as an absolute value and MUST NOT server-recompute
+ * now()+TTL, which would diverge retries and force a spurious conflict. */
+wyrelog_error_t
+    wyl_service_credential_operation_coordinator_handoff
+    (WylHandle * handle,
+    const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    const WylServiceCredentialOperationCoordinatorRequest * request,
     const WylServiceCredentialOperationHandoffExecuteRuntime * runtime,
     WylServiceCredentialOperationRecord * out_record);
 
