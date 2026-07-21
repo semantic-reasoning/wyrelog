@@ -96,6 +96,42 @@ typedef enum
   WYL_POLICY_FACT_RECONCILE_NEEDS_REVIEW,
 } WylPolicyFactReconcileJournalState;
 
+/* Immutable proof for the source artifact selected by offline
+ * reconciliation.  Version 1 is deliberately a closed contract: SHA-256 of
+ * the bytes read from one held file handle, plus that handle's native file
+ * identity.  It is private because only the reconciler can safely collect
+ * it. */
+typedef enum
+{
+  WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1 = 1,
+} WylPolicyFactReconcileArtifactEvidenceVersion;
+
+typedef enum
+{
+  WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_POSIX = 1,
+  WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS = 2,
+} WylPolicyFactReconcileArtifactIdentityKind;
+
+typedef enum
+{
+  WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256 = 1,
+} WylPolicyFactReconcileArtifactDigestAlgorithm;
+
+#define WYL_POLICY_FACT_RECONCILE_ARTIFACT_SHA256_BYTES 32u
+
+typedef struct
+{
+  guint version;
+  WylPolicyFactReconcileArtifactIdentityKind identity_kind;
+  guint64 posix_device;
+  guint64 posix_inode;
+  guint64 windows_volume_serial;
+  guint8 windows_file_id[16];
+  guint64 size_bytes;
+  WylPolicyFactReconcileArtifactDigestAlgorithm digest_algorithm;
+  guint8 digest[WYL_POLICY_FACT_RECONCILE_ARTIFACT_SHA256_BYTES];
+} WylPolicyFactReconcileArtifactEvidence;
+
 typedef struct
 {
   const gchar *op_uuid;
@@ -108,6 +144,7 @@ typedef struct
   const gchar *expected_store_uuid;
   const gchar *source_relative_path;
   const gchar *canonical_relative_path;
+  WylPolicyFactReconcileArtifactEvidence source_evidence;
 } WylPolicyFactReconcileJournalInput;
 
 typedef struct
@@ -122,6 +159,7 @@ typedef struct
   gchar *expected_store_uuid;
   gchar *source_relative_path;
   gchar *canonical_relative_path;
+  WylPolicyFactReconcileArtifactEvidence source_evidence;
   WylPolicyFactReconcileJournalState state;
   guint64 attempt;
   gint64 created_at;

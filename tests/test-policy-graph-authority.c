@@ -85,6 +85,38 @@ insert_graph (sqlite3 *db, const gchar *tenant_id, const gchar *graph_id,
   exec_ok (db, sql);
 }
 
+static WylPolicyFactReconcileArtifactEvidence
+valid_reconcile_evidence (void)
+{
+  WylPolicyFactReconcileArtifactEvidence evidence = {
+    .version = WYL_POLICY_FACT_RECONCILE_ARTIFACT_EVIDENCE_V1,
+    .identity_kind = WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_POSIX,
+    .posix_device = 17,
+    .posix_inode = 19,
+    .size_bytes = 23,
+    .digest_algorithm = WYL_POLICY_FACT_RECONCILE_ARTIFACT_DIGEST_SHA256,
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (evidence.digest); i++)
+    evidence.digest[i] = (guint8) (i + 1);
+  return evidence;
+}
+
+static void
+assert_reconcile_evidence_equal (const WylPolicyFactReconcileArtifactEvidence
+    *a, const WylPolicyFactReconcileArtifactEvidence *b)
+{
+  g_assert_cmpuint (a->version, ==, b->version);
+  g_assert_cmpint (a->identity_kind, ==, b->identity_kind);
+  g_assert_cmpuint (a->posix_device, ==, b->posix_device);
+  g_assert_cmpuint (a->posix_inode, ==, b->posix_inode);
+  g_assert_cmpuint (a->windows_volume_serial, ==, b->windows_volume_serial);
+  g_assert_cmpuint (a->size_bytes, ==, b->size_bytes);
+  g_assert_cmpint (a->digest_algorithm, ==, b->digest_algorithm);
+  g_assert_cmpmem (a->windows_file_id, sizeof a->windows_file_id,
+      b->windows_file_id, sizeof b->windows_file_id);
+  g_assert_cmpmem (a->digest, sizeof a->digest, b->digest, sizeof b->digest);
+}
+
 static void
 test_fresh_schema_is_legacy_unclassified (void)
 {
@@ -1205,18 +1237,21 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
       "graph-journal", FALSE);
   const gchar *op = "01890f47-3c4b-7cc2-b8c4-dc0c0c073990";
   const gchar *uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c073991";
+  WylPolicyFactReconcileArtifactEvidence evidence = valid_reconcile_evidence ();
   WylPolicyFactReconcileJournalInput input = {
     op, "tenant-journal", "graph-journal", 0, 0, 1, 1, uuid,
-    "legacy/graph/facts.duckdb", "v1/tenant/graph/facts.duckdb"
+    "legacy/graph/facts.duckdb", "v1/tenant/graph/facts.duckdb", evidence
   };
   WylPolicyFactReconcileJournalRecord *record = NULL;
   WylPolicyAuthorityMutationResult result;
-  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
-          &record, &result), ==, WYRELOG_E_OK);
+  wyrelog_error_t prepare_rc = wyl_policy_store_reconcile_journal_prepare
+      (store, &input, &record, &result);
+  g_assert_cmpint (prepare_rc, ==, WYRELOG_E_OK);
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
   g_assert_nonnull (record);
   g_assert_cmpint (record->state, ==, WYL_POLICY_FACT_RECONCILE_PREPARED);
   g_assert_cmpuint (record->attempt, ==, 0);
+  assert_reconcile_evidence_equal (&record->source_evidence, &evidence);
   wyl_policy_fact_reconcile_journal_record_free (record);
   record = NULL;
 
@@ -1225,6 +1260,44 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
   g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
   wyl_policy_fact_reconcile_journal_record_free (record);
   record = NULL;
+#define ASSERT_EVIDENCE_STALE(value) G_STMT_START { \
+  input.source_evidence = (value); \
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input, \
+          &record, &result), ==, WYRELOG_E_OK); \
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE); \
+  g_assert_null (record); \
+} G_STMT_END
+  WylPolicyFactReconcileArtifactEvidence changed = evidence;
+  changed.version = 2;
+  input.source_evidence = changed;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_INVALID);
+  changed = evidence;
+  changed.posix_device++;
+  ASSERT_EVIDENCE_STALE (changed);
+  changed = evidence;
+  changed.posix_inode++;
+  ASSERT_EVIDENCE_STALE (changed);
+  changed = evidence;
+  changed.size_bytes++;
+  ASSERT_EVIDENCE_STALE (changed);
+  changed = evidence;
+  changed.digest_algorithm = 2;
+  input.source_evidence = changed;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_INVALID);
+  changed = evidence;
+  changed.digest[0] ^= 1;
+  ASSERT_EVIDENCE_STALE (changed);
+  changed = evidence;
+  changed.identity_kind = WYL_POLICY_FACT_RECONCILE_ARTIFACT_IDENTITY_WINDOWS;
+  changed.posix_device = 0;
+  changed.posix_inode = 0;
+  changed.windows_volume_serial = 29;
+  memset (changed.windows_file_id, 7, sizeof changed.windows_file_id);
+  ASSERT_EVIDENCE_STALE (changed);
+#undef ASSERT_EVIDENCE_STALE
+  input.source_evidence = evidence;
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
           WYL_POLICY_FACT_RECONCILE_PREPARED,
           WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
@@ -1252,6 +1325,78 @@ test_reconcile_journal_prepare_read_list_and_cas (void)
   g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
           (WylPolicyFactReconcileJournalState) - 1,
           WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_INVALID);
+}
+
+static void
+test_reconcile_journal_evidence_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-evidence", "graph-evidence", FALSE);
+  WylPolicyFactReconcileJournalInput input = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073992", "tenant-evidence",
+    "graph-evidence", 0, 0, 1, 1,
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073993", "legacy/a/facts.duckdb",
+    "v1/a/b/facts.duckdb", valid_reconcile_evidence ()
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_OK);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+  exec_rejected (db, "UPDATE fact_reconcile_journal SET source_size_bytes=24;");
+  exec_ok (db, "DROP TRIGGER fact_reconcile_evidence_immutable;"
+      "UPDATE fact_reconcile_journal SET source_digest=NULL;");
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_read (store,
+          input.op_uuid, &record), ==, WYRELOG_E_POLICY);
+  GPtrArray *records = NULL;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_list (store,
+          "tenant-evidence", &records), ==, WYRELOG_E_POLICY);
+  g_assert_null (records);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store,
+          input.op_uuid, WYL_POLICY_FACT_RECONCILE_PREPARED,
+          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_POLICY);
+}
+
+static void
+test_reconcile_evidence_trigger_is_verified (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  exec_ok (wyl_policy_store_get_db (store),
+      "DROP TRIGGER fact_reconcile_evidence_immutable;"
+      "CREATE TRIGGER fact_reconcile_evidence_immutable "
+      "BEFORE UPDATE ON fact_reconcile_journal BEGIN SELECT 1; END;");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+}
+
+static void
+test_reconcile_evidence_prepare_rolls_back (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-evidence-fault", "graph-evidence-fault", FALSE);
+  WylPolicyFactReconcileJournalInput input = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073994", "tenant-evidence-fault",
+    "graph-evidence-fault", 0, 0, 1, 1,
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c073995", "legacy/a/facts.duckdb",
+    "v1/a/b/facts.duckdb", valid_reconcile_evidence ()
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  wyl_policy_store_graph_authority_mutation_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_IO);
+  g_assert_null (record);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM fact_reconcile_journal;"), ==, 0);
 }
 
 int
@@ -1296,5 +1441,14 @@ main (int argc, char **argv)
       test_malformed_preexisting_trigger_fails_closed);
   g_test_add_func ("/policy/graph-authority/reconcile-journal-cas",
       test_reconcile_journal_prepare_read_list_and_cas);
+  g_test_add_func
+      ("/policy/graph-authority/reconcile-journal-evidence-fails-closed",
+      test_reconcile_journal_evidence_fails_closed);
+  g_test_add_func
+      ("/policy/graph-authority/reconcile-evidence-trigger-verified",
+      test_reconcile_evidence_trigger_is_verified);
+  g_test_add_func
+      ("/policy/graph-authority/reconcile-evidence-prepare-rolls-back",
+      test_reconcile_evidence_prepare_rolls_back);
   return g_test_run ();
 }
