@@ -19,6 +19,7 @@ G_BEGIN_DECLS;
 #define WYL_POLICY_FACT_QUERY_MAX_ROWS 1000000
 
 typedef struct wyl_policy_store_t wyl_policy_store_t;
+typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
 
 typedef enum
 {
@@ -986,6 +987,9 @@ wyrelog_error_t wyl_policy_store_open_with_options (const
     wyl_policy_store_open_options_t * opts, wyl_policy_store_t ** out_store);
 wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
     const gchar * fact_root);
+wyrelog_error_t wyl_policy_store_bind_fact_root_authorized
+    (wyl_policy_store_t * store, const gchar * fact_root,
+    WylFactRootWriterLease * lease);
 wyrelog_error_t wyl_policy_store_open_fact_graph_directory
     (wyl_policy_store_t * store, const gchar * fact_root,
     const gchar * tenant_id, const gchar * graph_id, gboolean create,

@@ -30,11 +30,14 @@ failed handle open follows the same release order.
 The fact root is a bootstrap prerequisite: daemon setup may create the empty
 owner-only root before handle open. Lease acquisition then opens and pins the
 root with the secure graph resolver; later lease decisions never trust an
-unchecked configured pathname. Startup readiness uses scratch policy and
-audit stores and deliberately passes no fact root to its handle, so it neither
-acquires write authority nor opens a writable fact store. The runtime handle
-is the first startup consumer that acquires authority, and does so before
-policy schema creation or startup graph replay.
+unchecked configured pathname. After opening the policy store, handle startup
+binds its graph resolver under the graph-authority mutex only when the lease
+authorizes that resolver's exact native root identity. This authorization
+precedes policy schema creation and startup graph replay. Startup readiness
+uses scratch policy and audit stores and deliberately passes no fact root to
+its handle, so it neither acquires write authority nor opens a writable fact
+store. The runtime handle is the first startup consumer that acquires
+authority.
 
 On POSIX, the exclusive non-blocking `flock()` is held on the verified root
 directory descriptor itself. There is no sidecar and no fallback to a
