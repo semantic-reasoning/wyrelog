@@ -55,7 +55,8 @@ typedef enum
   WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT,
 } WylFactStoreIdentityTestFault;
 
-typedef void (*WylFactStoreIdentityValidationTestHook) (gpointer user_data);
+typedef void (*WylFactStoreIdentityValidationTestHook) (duckdb_database db,
+    gpointer user_data);
 
 typedef enum
 {

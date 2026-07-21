@@ -1877,40 +1877,25 @@ check_fact_store_identity_concurrency (void)
 
 typedef struct
 {
-  GMutex mutex;
-  GCond cond;
-  gboolean reached;
-  gboolean resume;
-} IdentitySnapshotCheckpoint;
-
-typedef struct
-{
-  const gchar *path;
-  wyrelog_error_t rc;
-  WylFactStoreIdentityResult result;
-} IdentitySnapshotOpen;
+  gboolean updated;
+} IdentitySnapshotMutation;
 
 static void
-identity_snapshot_checkpoint (gpointer user_data)
+identity_snapshot_mutate (duckdb_database db, gpointer user_data)
 {
-  IdentitySnapshotCheckpoint *checkpoint = user_data;
-  g_mutex_lock (&checkpoint->mutex);
-  checkpoint->reached = TRUE;
-  g_cond_broadcast (&checkpoint->cond);
-  while (!checkpoint->resume)
-    g_cond_wait (&checkpoint->cond, &checkpoint->mutex);
-  g_mutex_unlock (&checkpoint->mutex);
-}
-
-static gpointer
-identity_snapshot_open_thread (gpointer user_data)
-{
-  IdentitySnapshotOpen *open = user_data;
-  wyl_fact_store_t *store = NULL;
-  open->rc = wyl_fact_store_open_identified (open->path, &test_identity,
-      WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, &open->result, &store);
-  wyl_fact_store_close (store);
-  return NULL;
+  IdentitySnapshotMutation *mutation = user_data;
+  duckdb_connection writer = NULL;
+  duckdb_result update = { 0 };
+  if (duckdb_connect (db, &writer) == DuckDBSuccess) {
+    mutation->updated = duckdb_query (writer,
+        "BEGIN TRANSACTION;"
+        "UPDATE main.fact_store_metadata SET value="
+        "'01890f47-3c4b-6cc2-b8c4-dc0c0c073988' WHERE key='store_uuid';"
+        "CREATE TABLE main.audit_events(seq BIGINT PRIMARY KEY);"
+        "COMMIT;", &update) == DuckDBSuccess;
+  }
+  duckdb_destroy_result (&update);
+  duckdb_disconnect (&writer);
 }
 
 static gint
@@ -1927,56 +1912,13 @@ check_fact_store_identity_validation_snapshot (void)
           WYL_FACT_STORE_IDENTITY_RESULT_NONE))
     return 2601;
 
-  duckdb_database writer_db = NULL;
-  duckdb_connection writer = NULL;
-  if (duckdb_open (path, &writer_db) != DuckDBSuccess
-      || duckdb_connect (writer_db, &writer) != DuckDBSuccess) {
-    duckdb_disconnect (&writer);
-    duckdb_close (&writer_db);
-    return 2602;
-  }
-
-  IdentitySnapshotCheckpoint checkpoint;
-  g_mutex_init (&checkpoint.mutex);
-  g_cond_init (&checkpoint.cond);
-  checkpoint.reached = FALSE;
-  checkpoint.resume = FALSE;
-  IdentitySnapshotOpen open = {
-    .path = path,
-    .rc = WYRELOG_E_INTERNAL,
-    .result = WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL,
-  };
+  IdentitySnapshotMutation mutation = { FALSE };
   wyl_fact_store_identity_set_validation_test_hook
-      (identity_snapshot_checkpoint, &checkpoint);
-  GThread *thread = g_thread_new ("identity-snapshot",
-      identity_snapshot_open_thread, &open);
-
-  g_mutex_lock (&checkpoint.mutex);
-  while (!checkpoint.reached)
-    g_cond_wait (&checkpoint.cond, &checkpoint.mutex);
-  g_mutex_unlock (&checkpoint.mutex);
-
-  duckdb_result update = { 0 };
-  gboolean updated = duckdb_query (writer,
-      "BEGIN TRANSACTION;"
-      "UPDATE main.fact_store_metadata SET value="
-      "'01890f47-3c4b-6cc2-b8c4-dc0c0c073988' WHERE key='store_uuid';"
-      "CREATE TABLE main.audit_events(seq BIGINT PRIMARY KEY);" "COMMIT;",
-      &update) == DuckDBSuccess;
-  duckdb_destroy_result (&update);
-
-  g_mutex_lock (&checkpoint.mutex);
-  checkpoint.resume = TRUE;
-  g_cond_broadcast (&checkpoint.cond);
-  g_mutex_unlock (&checkpoint.mutex);
-  g_thread_join (thread);
-  g_cond_clear (&checkpoint.cond);
-  g_mutex_clear (&checkpoint.mutex);
-  duckdb_disconnect (&writer);
-  duckdb_close (&writer_db);
-
-  if (!updated || open.rc != WYRELOG_E_OK
-      || open.result != WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      (identity_snapshot_mutate, &mutation);
+  if (!identified_open_is (path, &test_identity,
+          WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY, WYRELOG_E_OK,
+          WYL_FACT_STORE_IDENTITY_RESULT_NONE)
+      || !mutation.updated)
     return 2603;
   if (!identified_open_is (path, &test_identity,
           WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,

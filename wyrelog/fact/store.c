@@ -774,7 +774,7 @@ validate_identity_unlocked (wyl_fact_store_t *store,
   identity_validation_test_hook_data = NULL;
   G_UNLOCK (identity_validation_test_hook);
   if (hook != NULL)
-    hook (hook_data);
+    hook (store->db, hook_data);
 
   gint64 audit_tables = 0;
   rc = query_single_count (store->conn,
