@@ -59,6 +59,10 @@ coverage.html
 .omc/
 .claude/
 
+# Developer-local build and test helper scripts
+.local-*.bat
+.local-*.sh
+
 # OS specific
 .DS_Store
 Thumbs.db
