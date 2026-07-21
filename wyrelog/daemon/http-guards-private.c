@@ -2,7 +2,6 @@
 
 #include "daemon/http-guards-private.h"
 
-#include <errno.h>
 #include <string.h>
 
 static const gchar *
@@ -121,24 +120,42 @@ parse_json_string (const gchar **cursor, gchar **out, gsize *out_len)
  * decimal representation in *out. The scan stops at the first non-digit;
  * the caller's trailing-delimiter check rejects fractional/exponent forms
  * (e.g. 1.0 / 1e5) and other junk. Rejects empty, leading sign, non-digit
- * lead, and out-of-range (> G_MAXINT64) values. */
+ * lead, non-canonical (leading-zero) forms, and out-of-range (> G_MAXINT64)
+ * values.
+ *
+ * Overflow is detected by round-tripping the parsed value back to its
+ * canonical decimal string and requiring an exact match against the source
+ * digit run, rather than by inspecting errno == ERANGE after
+ * g_ascii_strtoll. On Windows that ERANGE is not reliably set, so an
+ * out-of-range token would otherwise be silently clamped to G_MAXINT64 and
+ * accepted; the round-trip check is platform-independent. */
 static gboolean
 parse_json_int64_token (const gchar **cursor, gchar **out)
 {
   const gchar *p = skip_ws (*cursor);
+  const gchar *start = p;
   if (!g_ascii_isdigit ((guchar) * p))
     return FALSE;
+  while (g_ascii_isdigit ((guchar) * p))
+    p++;
+  gsize n_digits = (gsize) (p - start);
 
-  errno = 0;
   gchar *end = NULL;
-  gint64 parsed = g_ascii_strtoll (p, &end, 10);
-  if (end == p || errno == ERANGE || parsed < 0)
+  gint64 parsed = g_ascii_strtoll (start, &end, 10);
+  if (end != p || parsed < 0)
     return FALSE;
 
-  *out = g_strdup_printf ("%" G_GINT64_FORMAT, parsed);
-  if (*out == NULL)
+  gchar *canonical = g_strdup_printf ("%" G_GINT64_FORMAT, parsed);
+  if (canonical == NULL)
     return FALSE;
-  *cursor = end;
+  if (strlen (canonical) != n_digits
+      || memcmp (canonical, start, n_digits) != 0) {
+    g_free (canonical);
+    return FALSE;
+  }
+
+  *out = canonical;
+  *cursor = p;
   return TRUE;
 }
 

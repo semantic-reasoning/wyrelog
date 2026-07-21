@@ -172,6 +172,8 @@ test_strict_json_typed_int (void)
     "{\"event\":\"e\",\"timestamp_us\":1e5}",   /* exponent */
     "{\"event\":\"e\",\"timestamp_us\":}",      /* empty value */
     "{\"event\":\"e\",\"timestamp_us\":99999999999999999999}",  /* overflow */
+    "{\"event\":\"e\",\"timestamp_us\":9223372036854775808}",   /* G_MAXINT64+1 */
+    "{\"event\":\"e\",\"timestamp_us\":01}",    /* non-canonical leading zero */
     "{\"event\":\"e\"}",        /* missing field */
     "{\"event\":\"e\",\"timestamp_us\":1,\"timestamp_us\":2}",  /* extra member */
     "{\"timestamp_us\":1,\"timestamp_us\":2}",  /* duplicate int field */
