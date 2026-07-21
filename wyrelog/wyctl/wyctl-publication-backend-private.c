@@ -163,6 +163,15 @@ adapter_cleanup (gpointer self, const WyctlPublicationReceipt *receipt,
       out_result);
 }
 
+/* Read-only accessor shim: identical signature to the concrete free function,
+ * a thin self-cast forward. */
+static wyrelog_error_t
+adapter_root_identity (gpointer self, gchar **out_identity)
+{
+  return WYCTL_PUB_CONCRETE (root_identity) ((const
+          WyctlPublicationConcreteBackend *) self, out_identity);
+}
+
 static const WyctlPublicationBackendVTable adapter_vtable = {
   .plan = adapter_plan,
   .prepare = adapter_prepare,
@@ -175,6 +184,7 @@ static const WyctlPublicationBackendVTable adapter_vtable = {
   .inspect = adapter_inspect,
   .resync = adapter_resync,
   .cleanup = adapter_cleanup,
+  .root_identity = adapter_root_identity,
 };
 
 wyrelog_error_t

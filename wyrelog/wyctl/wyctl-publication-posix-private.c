@@ -726,6 +726,31 @@ wyctl_publication_posix_plan (const WyctlPublicationPosixBackend *backend,
 }
 
 wyrelog_error_t
+wyctl_publication_posix_root_identity (const WyctlPublicationPosixBackend
+    *backend, gchar **out_identity)
+{
+  WyctlPublicationPosixAnchor anchor = { 0 };
+  gchar *identity;
+  wyrelog_error_t rc;
+
+  if (out_identity == NULL)
+    return WYRELOG_E_INVALID;
+  *out_identity = NULL;
+  if (!backend_is_valid (backend))
+    return WYRELOG_E_INVALID;
+
+  if (!open_root_anchor (backend, &anchor, &rc))
+    return rc;
+
+  identity = encode_stat_identity (&anchor.dir_st);
+  close_root_anchor (&anchor);
+  if (identity == NULL)
+    return WYRELOG_E_NOMEM;
+  *out_identity = identity;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyctl_publication_posix_prepare (const WyctlPublicationPosixBackend *backend,
     const WyctlPublicationPlan *plan, WyctlPublicationReceipt *out_receipt)
 {

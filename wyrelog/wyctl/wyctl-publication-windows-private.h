@@ -25,6 +25,8 @@ void wyctl_publication_windows_backend_set_stage_exact_hook
 wyrelog_error_t wyctl_publication_windows_plan
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * request, WyctlPublicationPlan * out_plan);
+wyrelog_error_t wyctl_publication_windows_root_identity
+    (const WyctlPublicationWindowsBackend * backend, gchar ** out_identity);
 wyrelog_error_t wyctl_publication_windows_prepare
     (const WyctlPublicationWindowsBackend * backend,
     const WyctlPublicationPlan * plan, WyctlPublicationReceipt * out_receipt);

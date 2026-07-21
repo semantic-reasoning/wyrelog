@@ -39,6 +39,8 @@ void wyctl_publication_posix_backend_set_receipt_target_sync_hook
 wyrelog_error_t wyctl_publication_posix_plan
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * request, WyctlPublicationPlan * out_plan);
+wyrelog_error_t wyctl_publication_posix_root_identity
+    (const WyctlPublicationPosixBackend * backend, gchar ** out_identity);
 wyrelog_error_t wyctl_publication_posix_prepare
     (const WyctlPublicationPosixBackend * backend,
     const WyctlPublicationPlan * plan, WyctlPublicationReceipt * out_receipt);

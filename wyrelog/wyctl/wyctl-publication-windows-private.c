@@ -1265,6 +1265,32 @@ wyctl_publication_windows_plan (const WyctlPublicationWindowsBackend *backend,
 }
 
 wyrelog_error_t
+wyctl_publication_windows_root_identity (const WyctlPublicationWindowsBackend
+    *backend, gchar **out_identity)
+{
+  WyctlPublicationWindowsAnchor anchor = { 0 };
+  gchar *identity;
+  wyrelog_error_t rc;
+
+  if (out_identity == NULL)
+    return WYRELOG_E_INVALID;
+  *out_identity = NULL;
+  if (!backend_is_valid (backend))
+    return WYRELOG_E_INVALID;
+
+  rc = open_root_anchor (backend, &anchor);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  identity = identity_from_info (&anchor.dir_info);
+  close_root_anchor (&anchor);
+  if (identity == NULL)
+    return WYRELOG_E_NOMEM;
+  *out_identity = identity;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
 wyctl_publication_windows_prepare (const WyctlPublicationWindowsBackend
     *backend, const WyctlPublicationPlan *plan,
     WyctlPublicationReceipt *out_receipt)
