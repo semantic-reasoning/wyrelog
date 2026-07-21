@@ -30,6 +30,12 @@
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
 #endif
 
+/* Far-future (year 2100) credential expiry for contract seeds.  The numeric
+ * form types the guint64 expires_at_us argument; the string form seeds the
+ * same value inside JSON request bodies. */
+#define CONTRACT_FUTURE_EXPIRES_AT_US G_GUINT64_CONSTANT (4102444800000000)
+#define CONTRACT_FUTURE_EXPIRES_AT_US_STR "4102444800000000"
+
 typedef struct
 {
   GMutex mutex;
@@ -43,11 +49,14 @@ typedef struct
   GMainLoop *loop;
 } TestHttpServer;
 
-#ifdef WYL_HAS_FACT_STORE
 /* Credential issuance seals its CVK and consequently requires an owned
  * keyprovider.  Most daemon HTTP variants deliberately use wyl_init()'s
  * providerless in-memory store, but the fact-store service variant exercises
- * reconcile responses for real issue/rotate operations. */
+ * reconcile responses for real issue/rotate operations and the escrow-backed
+ * service-principal contract test opens an encrypted store to issue and rotate
+ * real credentials.  The fixture references only GLib symbols, so it lives
+ * outside the WYL_HAS_FACT_STORE guard and is available in every SERVICE
+ * build. */
 typedef struct
 {
   gchar *dir;
@@ -110,7 +119,6 @@ service_credential_store_fixture_init (ServiceCredentialStoreFixture *fixture)
   fixture->key_spec = g_strdup_printf ("file:%s", fixture->key_path);
   return fixture->key_spec != NULL;
 }
-#endif
 
 typedef struct
 {
@@ -6863,6 +6871,7 @@ check_service_principal_management_contract (void)
   g_autofree gchar *cross_tenant_rotate_path = NULL;
   g_autofree gchar *tenant_query = NULL;
   g_autofree gchar *http_credential_id = NULL;
+  g_autofree gchar *rotate_successor_id = NULL;
   g_autofree gchar *http_exchange_body = NULL;
   g_autofree gchar *denied_body = NULL;
   guint denied_status = 0;
@@ -6871,15 +6880,41 @@ check_service_principal_management_contract (void)
   g_autofree gchar *operation_root = NULL;
   g_autofree gchar *publication_root = NULL;
   SpPublication publication = { 0 };
-  const gchar *session_token = "human-principal-admin";
+  g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+  MainLoopReadyBarrier barrier = { 0 };
+  gchar session_token[WYL_ID_STRING_BUF];
+  wyl_id_t session_id_value = WYL_ID_NIL;
   guint status = 0;
+  guint issue_stage_calls = 0;
+  guint issue_commit_calls = 0;
+  guint rotate_stage_calls = 0;
+  guint rotate_commit_calls = 0;
   const gchar *create_body =
       "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"Worker\"}";
   gint rc = 0;
-  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
-    return 1975;
   if (session == NULL)
     return 1976;
+  /* Escrow issuance seals a service CVK and requires an owned keyprovider, so
+   * open an encrypted production store instead of wyl_init()'s providerless
+   * in-memory store (which would fail issuance with WYRELOG_E_POLICY). */
+  if (!service_credential_store_fixture_init (&credential_store))
+    return 1975;
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = credential_store.policy_path,
+    .policy_keyprovider_path = credential_store.key_spec,
+    .audit_store_path = credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+    return 1975;
+  /* Mint a canonical session id.  The seed helper parses this via
+   * wyl_id_parse and the authorize path evaluates it as the decide resource,
+   * so a literal username would fail to seed the session. */
+  if (wyl_id_new (&session_id_value) != WYRELOG_E_OK
+      || wyl_id_format (&session_id_value, session_token,
+          sizeof session_token) != WYRELOG_E_OK)
+    return 1973;
 
   /* The escrow handoff needs both opt-in roots configured; the publication
    * override then drives a mock backend instead of the real one at
@@ -6911,6 +6946,27 @@ check_service_principal_management_contract (void)
     return 1977;
   thread = g_thread_new ("daemon-http-service-principal",
       test_http_server_thread_ctx, &http);
+  /* Barrier: wait until the worker thread is running g_main_loop_run before
+   * issuing any request, so an early goto cleanup cannot quit the loop before
+   * the worker enters it and hang g_thread_join. */
+  g_mutex_init (&barrier.mutex);
+  g_cond_init (&barrier.changed);
+  g_main_context_invoke_full (context, G_PRIORITY_DEFAULT,
+      mark_main_loop_ready, &barrier, NULL);
+  g_mutex_lock (&barrier.mutex);
+  if (!barrier.ready)
+    g_cond_wait_until (&barrier.changed, &barrier.mutex,
+        g_get_monotonic_time () + 5 * G_USEC_PER_SEC);
+  if (!barrier.ready) {
+    /* Timed out before the worker entered g_main_loop_run.  Unlock first, then
+     * route through cleanup, which quits the loop before joining the thread --
+     * the same quit-before-join ordering the refresh-variant barrier-timeout
+     * handler uses -- and also removes the handoff temp roots. */
+    g_mutex_unlock (&barrier.mutex);
+    rc = 2003;
+    goto cleanup;
+  }
+  g_mutex_unlock (&barrier.mutex);
 
   uris = soup_server_get_uris (http.server);
   if (uris == NULL) {
@@ -6929,6 +6985,19 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   policy_store = wyl_handle_get_policy_store (handle);
+  /* The datalog allow rules require an authenticated principal and an active
+   * session (templates/access/decision.dl); the session seed only marks the
+   * in-memory session active, so set both facts here.  The session-state
+   * scope must be the canonical session id because
+   * service_principal_management_authorize_session evaluates the session id as
+   * the decide resource. */
+  if (wyl_policy_store_set_principal_state (policy_store,
+          "human-principal-admin", "authenticated") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (policy_store, session_token,
+          "active") != WYRELOG_E_OK) {
+    rc = 1971;
+    goto cleanup;
+  }
   if (wyl_policy_store_grant_direct_permission (policy_store,
           "human-principal-admin", "wr.service_principal.manage",
           session_token) != WYRELOG_E_OK
@@ -7019,11 +7088,16 @@ check_service_principal_management_contract (void)
   const gchar *issue_body =
       "{\"version\":\"1\",\"tenant\":\"tenant-a\","
       "\"request_id\":\"111111111111111111111111111\","
-      "\"destination\":\"issue.json\",\"expires_at_us\":\"4102444800000000\"}";
+      "\"destination\":\"issue.json\",\"expires_at_us\":\""
+      CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
   g_clear_pointer (&body, g_free);
   memset (&publication, 0, sizeof publication);
   /* Issue now delivers the secret out-of-band via the escrow file; the HTTP
-   * response is the module's non-secret receipt. */
+   * response is the module's non-secret receipt.  This E2E test exercises the
+   * loopback-permitted arm: both the client and server addresses are always
+   * loopback in-process, and there is no seam to spoof a non-loopback peer, so
+   * the production 403 loopback gate is covered at the module level rather
+   * than here. */
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/credentials",
           tenant_query, issue_body, &status, &body) != 0 || status != 200
@@ -7036,13 +7110,23 @@ check_service_principal_management_contract (void)
     rc = 1990;
     goto cleanup;
   }
+  /* #517: the first successful issue must actually stage the CVK into escrow
+   * and commit it -- one real secret written.  Capture the counts so the
+   * replay arm can prove no second secret is staged. */
+  issue_stage_calls = publication.stage_calls;
+  issue_commit_calls = publication.commit_calls;
+  if (issue_stage_calls == 0 || issue_commit_calls == 0) {
+    rc = 2004;
+    goto cleanup;
+  }
 #ifdef WYL_HAS_AUDIT
   /* The service-token exchange is decoupled from the receipt path: seed a
    * credential secret directly through the library and exchange that. */
   {
     wyl_service_credential_issue_result_t exchange_seed = { 0 };
     if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
-            "human-principal-admin", "http-exchange-seed", 4102444800000000,
+            "human-principal-admin", "http-exchange-seed",
+            CONTRACT_FUTURE_EXPIRES_AT_US,
             &exchange_seed) != WYRELOG_E_OK || exchange_seed.secret == NULL
         || exchange_seed.credential.credential_id == NULL) {
       wyl_service_credential_issue_result_clear (&exchange_seed);
@@ -7082,12 +7166,28 @@ check_service_principal_management_contract (void)
   }
 #endif
   g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url,
-          "/service-principals/svc:tenant-a:worker/credentials",
-          tenant_query, issue_body, &status, &body) != 0 || status != 409
-      || body == NULL || strstr (body, "service_credential_conflict") == NULL
-      || strstr (body, "credential_secret") != NULL) {
-    rc = 1992;
+  /* Re-submitting the identical request_id replays the escrow handoff to the
+   * same non-secret receipt (idempotency), rather than the pre-escrow 409
+   * conflict which came from the library request_id fence. */
+  {
+    g_autofree gchar *replay_id = NULL;
+    if (send_raw_service_principal_full (session, "POST", base_url,
+            "/service-principals/svc:tenant-a:worker/credentials",
+            tenant_query, issue_body, &status, &body) != 0 || status != 200
+        || body == NULL || strstr (body, "credential_secret") != NULL
+        || strstr (body, "\"state\":\"terminal\"") == NULL
+        || strstr (body, "\"delivered\":true") == NULL
+        || (replay_id = extract_json_string (body, "credential_id")) == NULL
+        || g_strcmp0 (replay_id, http_credential_id) != 0) {
+      rc = 1992;
+      goto cleanup;
+    }
+  }
+  /* #517: the replay must return the same receipt WITHOUT re-staging or
+   * re-committing -- no second secret written to escrow. */
+  if (publication.stage_calls != issue_stage_calls
+      || publication.commit_calls != issue_commit_calls) {
+    rc = 2005;
     goto cleanup;
   }
   g_clear_pointer (&query, g_free);
@@ -7100,14 +7200,16 @@ check_service_principal_management_contract (void)
       ("session_token=%s&guard_timestamp=1&guard_loc_class=trusted&guard_risk=0",
       session_token);
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
-          "human-principal-admin", "http-credential-read", 999999999,
+          "human-principal-admin", "http-credential-read",
+          CONTRACT_FUTURE_EXPIRES_AT_US,
           &issued) != WYRELOG_E_OK || issued.credential.credential_id == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 1987;
     goto cleanup;
   }
   if (wyl_service_credential_issue (handle, "svc:tenant-a:worker", "tenant-a",
-          "human-principal-admin", "http-credential-rotate", 999999999,
+          "human-principal-admin", "http-credential-rotate",
+          CONTRACT_FUTURE_EXPIRES_AT_US,
           &rotate_seed) != WYRELOG_E_OK
       || rotate_seed.credential.credential_id == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
@@ -7136,29 +7238,58 @@ check_service_principal_management_contract (void)
           query,
           "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
           "\"destination\":\"rotate.json\","
-          "\"expires_at_us\":\"4102444800000000\"}",
+          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
           &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "credential_secret") != NULL
       || strstr (body, "\"state\":\"terminal\"") == NULL
       || strstr (body, "\"delivered\":true") == NULL
-      || extract_json_string (body, "credential_id") == NULL) {
+      || strstr (body, "\"destination\":\"rotate.json\"") == NULL
+      || (rotate_successor_id = extract_json_string (body, "credential_id"))
+      == NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     rc = 1999;
     goto cleanup;
   }
-  g_clear_pointer (&body, g_free);
-  if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
-          query,
-          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
-          "\"destination\":\"rotate.json\","
-          "\"expires_at_us\":\"4102444800000000\"}",
-          &status, &body) != 0 || status != 409 || body == NULL
-      || strstr (body, "service_credential_conflict") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+  /* #517: the first rotate stages+commits the successor secret exactly once
+   * (publication was reset just above), so both counts must be positive. */
+  rotate_stage_calls = publication.stage_calls;
+  rotate_commit_calls = publication.commit_calls;
+  if (rotate_stage_calls == 0 || rotate_commit_calls == 0) {
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
-    rc = 2000;
+    rc = 2006;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  /* Re-submitting the identical rotate request_id replays the handoff to the
+   * same non-secret successor receipt (idempotency), not a 409 conflict. */
+  {
+    g_autofree gchar *replay_rotate_id = NULL;
+    if (send_raw_service_principal_full (session, "POST", base_url, rotate_path,
+            query,
+            "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+            "\"destination\":\"rotate.json\","
+            "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
+            &status, &body) != 0 || status != 200 || body == NULL
+        || strstr (body, "credential_secret") != NULL
+        || strstr (body, "\"state\":\"terminal\"") == NULL
+        || strstr (body, "\"delivered\":true") == NULL
+        || (replay_rotate_id = extract_json_string (body, "credential_id"))
+        == NULL || g_strcmp0 (replay_rotate_id, rotate_successor_id) != 0) {
+      wyl_service_credential_issue_result_clear (&issued);
+      wyl_service_credential_issue_result_clear (&rotate_seed);
+      rc = 2000;
+      goto cleanup;
+    }
+  }
+  /* #517: the rotate replay returns the same successor WITHOUT re-staging or
+   * re-committing -- no second successor secret written to escrow. */
+  if (publication.stage_calls != rotate_stage_calls
+      || publication.commit_calls != rotate_commit_calls) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 2007;
     goto cleanup;
   }
   wyl_service_credential_issue_result_clear (&rotate_seed);
@@ -7179,7 +7310,7 @@ check_service_principal_management_contract (void)
           cross_tenant_rotate_path, query,
           "{\"version\":\"1\",\"request_id\":\"444444444444444444444444444\","
           "\"destination\":\"rotate.json\","
-          "\"expires_at_us\":\"4102444800000000\"}",
+          "\"expires_at_us\":\"" CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}",
           &status, &body) != 0 || status != 404 || body == NULL
       || strstr (body, "service_credential_not_found") == NULL
       || strstr (body, "credential_secret") != NULL) {
@@ -7262,6 +7393,8 @@ cleanup:
   g_main_loop_quit (http.loop);
   if (thread != NULL)
     g_thread_join (thread);
+  g_cond_clear (&barrier.changed);
+  g_mutex_clear (&barrier.mutex);
   soup_server_disconnect (http.server);
   g_clear_object (&http.server);
   g_clear_pointer (&http.loop, g_main_loop_unref);
@@ -7698,6 +7831,14 @@ main (void)
       (http.server);
   if (service_resolver_rc != 0) {
     result = service_resolver_rc;
+    goto cleanup;
+  }
+  /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
+   * stands up its own encrypted-store handle and server, so run it as a
+   * self-contained check and propagate its return code. */
+  gint service_principal_rc = check_service_principal_management_contract ();
+  if (service_principal_rc != 0) {
+    result = service_principal_rc;
     goto cleanup;
   }
 #ifdef WYL_HAS_FACT_STORE
