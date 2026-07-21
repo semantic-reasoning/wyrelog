@@ -6,6 +6,7 @@
 #include "wyrelog/error.h"
 #include "wyrelog/engine.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/fact/runtime-private.h"
 #include "wyrelog/policy/store-private.h"
 
 G_BEGIN_DECLS;
@@ -47,7 +48,7 @@ wyrelog_error_t wyl_fact_replay_open_graph_engine (wyl_policy_store_t * policy,
     WylEngine ** out_engine);
 
 wyrelog_error_t wyl_fact_replay_policy_graphs (wyl_policy_store_t * policy,
-    const gchar * fact_root, GHashTable * graph_engines,
-    GHashTable * graph_statuses, wyl_fact_replay_summary_t * out_summary);
+    const gchar * fact_root, WylFactGraphRuntimeManager * runtime_manager,
+    wyl_fact_replay_summary_t * out_summary);
 
 G_END_DECLS;

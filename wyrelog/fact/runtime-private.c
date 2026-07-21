@@ -633,6 +633,64 @@ wyrelog_error_t
   return rc;
 }
 
+static gboolean
+key_is_seen (const WylFactGraphKey *key,
+    const WylFactGraphKey *const *seen_keys, gsize n_seen_keys)
+{
+  for (gsize i = 0; i < n_seen_keys; i++) {
+    if (seen_keys[i] != NULL && wyl_fact_graph_key_equal (key, seen_keys[i]))
+      return TRUE;
+  }
+  return FALSE;
+}
+
+wyrelog_error_t
+    wyl_fact_graph_runtime_manager_retire_unseen
+    (WylFactGraphRuntimeManager * manager,
+    const WylFactGraphKey * const *seen_keys, gsize n_seen_keys)
+{
+  if (manager == NULL || (seen_keys == NULL && n_seen_keys > 0))
+    return WYRELOG_E_INVALID;
+  for (gsize i = 0; i < n_seen_keys; i++) {
+    if (seen_keys[i] == NULL
+        || !canonical_component_is_valid (seen_keys[i]->tenant_id)
+        || !canonical_graph_id_is_valid (seen_keys[i]->graph_id))
+      return WYRELOG_E_INVALID;
+  }
+
+  g_autoptr (GPtrArray) entries =
+      g_ptr_array_new_with_free_func ((GDestroyNotify) runtime_entry_unref);
+  g_mutex_lock (&manager->map_lock);
+  if (g_atomic_int_get (&manager->shutdown)) {
+    g_mutex_unlock (&manager->map_lock);
+    return WYRELOG_E_BUSY;
+  }
+  GHashTableIter iter;
+  gpointer value = NULL;
+  g_hash_table_iter_init (&iter, manager->entries);
+  while (g_hash_table_iter_next (&iter, NULL, &value))
+    g_ptr_array_add (entries, runtime_entry_ref (value));
+  g_mutex_unlock (&manager->map_lock);
+
+  for (guint i = 0; i < entries->len; i++) {
+    WylFactGraphRuntimeEntry *entry = g_ptr_array_index (entries, i);
+    if (key_is_seen (&entry->key, seen_keys, n_seen_keys))
+      continue;
+    g_mutex_lock (&entry->writer_lock);
+    g_mutex_lock (&entry->state_lock);
+    WylFactGraphEngineGeneration *old = entry->current;
+    entry->current = NULL;
+    if (!entry->abandoned) {
+      entry->state = WYL_FACT_GRAPH_RUNTIME_EVICTED;
+      entry->last_replay_class = WYL_FACT_GRAPH_REPLAY_NONE;
+    }
+    g_mutex_unlock (&entry->state_lock);
+    engine_generation_unref (old);
+    g_mutex_unlock (&entry->writer_lock);
+  }
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
     wyl_fact_graph_runtime_manager_acquire_snapshot
     (WylFactGraphRuntimeManager * manager, const WylFactGraphKey * key,

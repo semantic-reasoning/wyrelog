@@ -37,15 +37,6 @@ typedef struct
   GHashTable *compound_handles;
 } ReplayMaterializeCtx;
 
-typedef struct
-{
-  wyl_policy_store_t *policy;
-  const gchar *fact_root;
-  GHashTable *graph_engines;
-  GHashTable *graph_statuses;
-  wyl_fact_replay_summary_t *summary;
-} PolicyReplayCtx;
-
 const gchar *
 wyl_fact_graph_state_name (wyl_fact_graph_state_t state)
 {
@@ -580,75 +571,79 @@ wyl_fact_replay_open_graph_engine (wyl_policy_store_t *policy,
   return WYRELOG_E_OK;
 }
 
-static gchar *
-graph_key (const gchar *tenant_id, const gchar *graph_id)
+typedef struct
 {
-  return g_strdup_printf ("%s\n%s", tenant_id, graph_id);
-}
-
-static wyl_fact_graph_state_t
-classify_graph_replay_failure (wyrelog_error_t rc)
-{
-  switch (rc) {
-    case WYRELOG_E_NOT_FOUND:
-    case WYRELOG_E_IO:
-      return WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE;
-    case WYRELOG_E_POLICY:
-      return WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH;
-    default:
-      return WYL_FACT_GRAPH_STATE_REPLAY_FAILED;
-  }
-}
+  wyl_policy_fact_graph_info_t info;
+  WylFactGraphKey key;
+  gboolean key_valid;
+} OwnedGraphSpec;
 
 static void
-record_graph_status (GHashTable *statuses,
-    const wyl_policy_fact_graph_info_t *info, wyl_fact_graph_state_t state)
+owned_graph_spec_free (gpointer data)
 {
-  if (statuses == NULL || info == NULL)
+  OwnedGraphSpec *spec = data;
+  if (spec == NULL)
     return;
-  wyl_fact_graph_status_t *status = g_new0 (wyl_fact_graph_status_t, 1);
-  status->tenant_id = g_strdup (info->tenant_id);
-  status->graph_id = g_strdup (info->graph_id);
-  status->state = state;
-  status->queryable = state == WYL_FACT_GRAPH_STATE_READY;
-  status->last_replay_at_us = g_get_real_time ();
-  if (state != WYL_FACT_GRAPH_STATE_READY)
-    status->last_error_class = g_strdup (wyl_fact_graph_state_name (state));
-  g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
-  g_hash_table_replace (statuses, g_steal_pointer (&key), status);
+  g_free ((gchar *) spec->info.tenant_id);
+  g_free ((gchar *) spec->info.graph_id);
+  g_free ((gchar *) spec->info.storage_uri);
+  g_free ((gchar *) spec->info.storage_path);
+  g_free ((gchar *) spec->info.owner_scope);
+  wyl_fact_graph_key_clear (&spec->key);
+  g_free (spec);
 }
 
 static wyrelog_error_t
-replay_graph_cb (const wyl_policy_fact_graph_info_t *info, gpointer user_data)
+collect_graph_spec (const wyl_policy_fact_graph_info_t *info,
+    gpointer user_data)
 {
-  PolicyReplayCtx *ctx = user_data;
-  WylEngine *engine = NULL;
-  wyrelog_error_t rc = wyl_fact_replay_open_graph_engine (ctx->policy,
-      ctx->fact_root, info, &engine);
-  ctx->summary->graphs_seen++;
-  if (rc == WYRELOG_E_OK) {
-    g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
-    g_hash_table_replace (ctx->graph_engines, g_steal_pointer (&key), engine);
-    record_graph_status (ctx->graph_statuses, info, WYL_FACT_GRAPH_STATE_READY);
-    ctx->summary->graphs_loaded++;
-  } else {
-    g_autofree gchar *key = graph_key (info->tenant_id, info->graph_id);
-    g_hash_table_remove (ctx->graph_engines, key);
-    record_graph_status (ctx->graph_statuses, info,
-        classify_graph_replay_failure (rc));
-    ctx->summary->graphs_degraded++;
+  GPtrArray *specs = user_data;
+  OwnedGraphSpec *spec = g_new0 (OwnedGraphSpec, 1);
+  spec->info.tenant_id = g_strdup (info->tenant_id);
+  spec->info.graph_id = g_strdup (info->graph_id);
+  spec->info.storage_uri = g_strdup (info->storage_uri);
+  spec->info.storage_path = g_strdup (info->storage_path);
+  spec->info.schema_version = info->schema_version;
+  spec->info.owner_scope = g_strdup (info->owner_scope);
+  spec->info.sealed = info->sealed;
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&spec->key, info->tenant_id,
+      info->graph_id);
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_INVALID) {
+    owned_graph_spec_free (spec);
+    return rc;
   }
+  spec->key_valid = rc == WYRELOG_E_OK;
+  g_ptr_array_add (specs, spec);
   return WYRELOG_E_OK;
+}
+
+typedef struct
+{
+  wyl_policy_store_t *policy;
+  const gchar *fact_root;
+  const wyl_policy_fact_graph_info_t *info;
+} GraphBuildCtx;
+
+static wyrelog_error_t
+build_graph_engine (const WylFactGraphKey *key, WylEngine **out_engine,
+    gpointer user_data)
+{
+  GraphBuildCtx *ctx = user_data;
+  if (g_strcmp0 (key->tenant_id, ctx->info->tenant_id) != 0
+      || g_strcmp0 (key->graph_id, ctx->info->graph_id) != 0)
+    return WYRELOG_E_INTERNAL;
+  return wyl_fact_replay_open_graph_engine (ctx->policy, ctx->fact_root,
+      ctx->info, out_engine);
 }
 
 wyrelog_error_t
 wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
-    const gchar *fact_root, GHashTable *graph_engines,
-    GHashTable *graph_statuses, wyl_fact_replay_summary_t *out_summary)
+    const gchar *fact_root, WylFactGraphRuntimeManager *runtime_manager,
+    wyl_fact_replay_summary_t *out_summary)
 {
   if (out_summary != NULL)
     memset (out_summary, 0, sizeof (*out_summary));
-  if (policy == NULL || graph_engines == NULL || graph_statuses == NULL)
+  if (policy == NULL || runtime_manager == NULL)
     return WYRELOG_E_INVALID;
 
   if (fact_root != NULL && fact_root[0] != '\0') {
@@ -657,17 +652,33 @@ wyl_fact_replay_policy_graphs (wyl_policy_store_t *policy,
       return rc;
   }
 
-  wyl_fact_replay_summary_t summary = { 0 };
-  g_hash_table_remove_all (graph_statuses);
-  PolicyReplayCtx ctx = {
-    .policy = policy,
-    .fact_root = fact_root,
-    .graph_engines = graph_engines,
-    .graph_statuses = graph_statuses,
-    .summary = &summary,
-  };
+  g_autoptr (GPtrArray) specs =
+      g_ptr_array_new_with_free_func (owned_graph_spec_free);
   wyrelog_error_t rc = wyl_policy_store_foreach_fact_graph (policy, NULL,
-      replay_graph_cb, &ctx);
+      collect_graph_spec, specs);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_fact_replay_summary_t summary = { 0 };
+  g_autoptr (GPtrArray) seen_keys = g_ptr_array_new ();
+  for (guint i = 0; i < specs->len; i++) {
+    OwnedGraphSpec *spec = g_ptr_array_index (specs, i);
+    summary.graphs_seen++;
+    if (!spec->key_valid) {
+      summary.graphs_degraded++;
+      continue;
+    }
+    GraphBuildCtx build = { policy, fact_root, &spec->info };
+    wyrelog_error_t graph_rc = wyl_fact_graph_runtime_manager_refresh
+        (runtime_manager, &spec->key, build_graph_engine, &build, NULL);
+    if (graph_rc == WYRELOG_E_OK)
+      summary.graphs_loaded++;
+    else
+      summary.graphs_degraded++;
+    g_ptr_array_add (seen_keys, &spec->key);
+  }
+  rc = wyl_fact_graph_runtime_manager_retire_unseen (runtime_manager,
+      (const WylFactGraphKey * const *) seen_keys->pdata, seen_keys->len);
   if (out_summary != NULL)
     *out_summary = summary;
   return rc;

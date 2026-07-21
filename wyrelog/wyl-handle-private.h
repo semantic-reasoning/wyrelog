@@ -104,8 +104,6 @@ WylServiceAuthAuthority *wyl_handle_get_service_auth_authority
 #ifdef WYL_HAS_FACT_STORE
 wyrelog_error_t wyl_handle_replay_fact_graphs (WylHandle * self,
     wyl_fact_replay_summary_t * out_summary);
-WylEngine *wyl_handle_get_fact_graph_engine (WylHandle * self,
-    const gchar * tenant_id, const gchar * graph_id);
 typedef void (*wyl_fact_graph_tuple_cb) (WylEngine * engine,
     const gchar * relation, const gint64 * row, guint ncols,
     gpointer user_data);

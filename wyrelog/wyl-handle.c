@@ -21,6 +21,7 @@
 #ifdef WYL_HAS_FACT_STORE
 #include "fact/replay-private.h"
 #include "fact/root-writer-lease-private.h"
+#include "fact/runtime-private.h"
 #endif
 
 #define WYL_LOGIN_SKIP_MFA_PERMISSION "wr.login.skip_mfa"
@@ -94,9 +95,8 @@ struct _WylHandle
 #ifdef WYL_HAS_FACT_STORE
   gchar *fact_root;
   WylFactRootWriterLease *fact_root_writer_lease;
-  GHashTable *fact_graph_engines;
-  GHashTable *fact_graph_statuses;
-  GMutex fact_graphs_lock;
+  WylFactGraphRuntimeManager *fact_graph_runtime;
+  GMutex fact_replay_coordinator_lock;
 #endif
   gboolean login_skip_mfa_allowed;
   gboolean engine_pair_poisoned;
@@ -239,9 +239,9 @@ wyl_handle_finalize (GObject *object)
 #ifdef WYL_HAS_FACT_STORE
   g_clear_pointer (&self->fact_root, g_free);
   g_assert_null (self->fact_root_writer_lease);
-  g_clear_pointer (&self->fact_graph_engines, g_hash_table_unref);
-  g_clear_pointer (&self->fact_graph_statuses, g_hash_table_unref);
-  g_mutex_clear (&self->fact_graphs_lock);
+  g_clear_pointer (&self->fact_graph_runtime,
+      wyl_fact_graph_runtime_manager_unref);
+  g_mutex_clear (&self->fact_replay_coordinator_lock);
 #endif
   g_clear_pointer (&self->template_dir, g_free);
   g_clear_pointer (&self->pending_deltas, g_ptr_array_unref);
@@ -293,12 +293,10 @@ wyl_handle_init (WylHandle *self)
   self->engine_symbols_by_id =
       g_hash_table_new_full (g_int64_hash, g_int64_equal, g_free, g_free);
 #ifdef WYL_HAS_FACT_STORE
-  self->fact_graph_engines =
-      g_hash_table_new_full (g_str_hash, g_str_equal, g_free, g_object_unref);
-  self->fact_graph_statuses =
-      g_hash_table_new_full (g_str_hash, g_str_equal, g_free,
-      wyl_fact_graph_status_free);
-  g_mutex_init (&self->fact_graphs_lock);
+  if (wyl_fact_graph_runtime_manager_new (&self->fact_graph_runtime)
+      != WYRELOG_E_OK)
+    g_error ("wyl_handle_init: failed to create fact graph runtime");
+  g_mutex_init (&self->fact_replay_coordinator_lock);
 #endif
   self->pending_deltas =
       g_ptr_array_new_with_free_func (wyl_pending_delta_free);
@@ -893,10 +891,7 @@ wyl_handle_complete_shutdown (WylHandle *handle,
   g_clear_object (&handle->read_engine);
   g_clear_object (&handle->delta_engine);
 #ifdef WYL_HAS_FACT_STORE
-  if (handle->fact_graph_engines != NULL)
-    g_hash_table_remove_all (handle->fact_graph_engines);
-  if (handle->fact_graph_statuses != NULL)
-    g_hash_table_remove_all (handle->fact_graph_statuses);
+  wyl_fact_graph_runtime_manager_shutdown (handle->fact_graph_runtime);
 #endif
   handle->engine_pair_poisoned = FALSE;
   clear_pending_deltas (handle);
@@ -1421,20 +1416,16 @@ wyl_handle_policy_store_pin_snapshot_for_test (WylHandle *self,
 }
 
 #ifdef WYL_HAS_FACT_STORE
-static gchar *
-fact_graph_key (const gchar *tenant_id, const gchar *graph_id)
-{
-  return g_strdup_printf ("%s\n%s", tenant_id, graph_id);
-}
-
 wyrelog_error_t
 wyl_handle_replay_fact_graphs (WylHandle *self,
     wyl_fact_replay_summary_t *out_summary)
 {
+  if (out_summary != NULL)
+    memset (out_summary, 0, sizeof (*out_summary));
+
   if (self == NULL || !WYL_IS_HANDLE (self))
     return WYRELOG_E_INVALID;
-  if (self->policy_store == NULL || self->fact_graph_engines == NULL
-      || self->fact_graph_statuses == NULL)
+  if (self->fact_graph_runtime == NULL)
     return WYRELOG_E_INVALID;
 
   /*
@@ -1443,31 +1434,24 @@ wyl_handle_replay_fact_graphs (WylHandle *self,
    * snapshots, and repeated replay replaces the graph engine, making the load
    * lifecycle idempotent without appending duplicate EDB rows.
    */
-  g_mutex_lock (&self->fact_graphs_lock);
-  wyrelog_error_t rc = wyl_fact_replay_policy_graphs (self->policy_store,
-      self->fact_root, self->fact_graph_engines, self->fact_graph_statuses,
-      out_summary);
-  g_mutex_unlock (&self->fact_graphs_lock);
+  wyl_policy_store_t *policy = NULL;
+  g_mutex_lock (&self->fact_replay_coordinator_lock);
+  wyrelog_error_t rc = wyl_handle_policy_store_pin_current (self, &policy);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&self->fact_replay_coordinator_lock);
+    return rc;
+  }
+  rc = wyl_fact_replay_policy_graphs (policy, self->fact_root,
+      self->fact_graph_runtime, out_summary);
+  wyl_handle_policy_store_unpin (self, policy);
+  g_mutex_unlock (&self->fact_replay_coordinator_lock);
   return rc;
-}
-
-WylEngine *
-wyl_handle_get_fact_graph_engine (WylHandle *self, const gchar *tenant_id,
-    const gchar *graph_id)
-{
-  g_return_val_if_fail (WYL_IS_HANDLE (self), NULL);
-  if (tenant_id == NULL || graph_id == NULL || self->fact_graph_engines == NULL)
-    return NULL;
-  g_autofree gchar *key = fact_graph_key (tenant_id, graph_id);
-  g_mutex_lock (&self->fact_graphs_lock);
-  WylEngine *engine = g_hash_table_lookup (self->fact_graph_engines, key);
-  g_mutex_unlock (&self->fact_graphs_lock);
-  return engine;
 }
 
 typedef struct
 {
   WylEngine *engine;
+  const gchar *relation;
   wyl_fact_graph_tuple_cb cb;
   gpointer user_data;
 } FactGraphSnapshotCtx;
@@ -1480,6 +1464,15 @@ fact_graph_snapshot_tuple_trampoline (const gchar *relation,
   ctx->cb (ctx->engine, relation, row, ncols, ctx->user_data);
 }
 
+static wyrelog_error_t
+fact_graph_snapshot_use (WylEngine *engine, gpointer user_data)
+{
+  FactGraphSnapshotCtx *ctx = user_data;
+  ctx->engine = engine;
+  return wyl_engine_snapshot (engine, ctx->relation,
+      fact_graph_snapshot_tuple_trampoline, ctx);
+}
+
 wyrelog_error_t
 wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
     const gchar *tenant_id, const gchar *graph_id, const gchar *relation,
@@ -1487,36 +1480,83 @@ wyl_handle_snapshot_fact_graph_relation (WylHandle *self,
 {
   if (self == NULL || !WYL_IS_HANDLE (self) || tenant_id == NULL
       || graph_id == NULL || relation == NULL || cb == NULL
-      || self->fact_graph_engines == NULL || self->fact_graph_statuses == NULL)
+      || self->fact_graph_runtime == NULL)
     return WYRELOG_E_INVALID;
 
-  g_autofree gchar *key = fact_graph_key (tenant_id, graph_id);
-  g_mutex_lock (&self->fact_graphs_lock);
-  wyl_fact_graph_status_t *status =
-      g_hash_table_lookup (self->fact_graph_statuses, key);
-  if (status == NULL) {
-    g_mutex_unlock (&self->fact_graphs_lock);
-    return WYRELOG_E_NOT_FOUND;
+  WylFactGraphKey key = { 0 };
+  wyrelog_error_t rc = wyl_fact_graph_key_init (&key, tenant_id, graph_id);
+  WylFactGraphRuntimeStatus status = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_get_status
+        (self->fact_graph_runtime, &key, &status);
+  if (rc == WYRELOG_E_OK && !status.queryable) {
+    rc = status.state == WYL_FACT_GRAPH_RUNTIME_DEGRADED
+        ? WYRELOG_E_POLICY : WYRELOG_E_NOT_FOUND;
   }
-  if (!status->queryable) {
-    g_mutex_unlock (&self->fact_graphs_lock);
-    return WYRELOG_E_POLICY;
-  }
-  WylEngine *engine = g_hash_table_lookup (self->fact_graph_engines, key);
-  if (engine == NULL) {
-    g_mutex_unlock (&self->fact_graphs_lock);
-    return WYRELOG_E_NOT_FOUND;
-  }
-
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_runtime_manager_acquire_snapshot
+        (self->fact_graph_runtime, &key, &snapshot);
+  wyl_fact_graph_key_clear (&key);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   FactGraphSnapshotCtx ctx = {
-    .engine = engine,
+    .engine = NULL,
+    .relation = relation,
     .cb = cb,
     .user_data = user_data,
   };
-  wyrelog_error_t rc = wyl_engine_snapshot (engine, relation,
-      fact_graph_snapshot_tuple_trampoline, &ctx);
-  g_mutex_unlock (&self->fact_graphs_lock);
-  return rc;
+  return wyl_fact_graph_snapshot_use (snapshot, fact_graph_snapshot_use, &ctx);
+}
+
+typedef struct
+{
+  wyl_fact_graph_status_cb callback;
+  gpointer user_data;
+} FactGraphStatusCtx;
+
+static wyl_fact_graph_state_t
+legacy_fact_graph_state (const WylFactGraphRuntimeStatus *status)
+{
+  if (status->state == WYL_FACT_GRAPH_RUNTIME_READY
+      || (status->state == WYL_FACT_GRAPH_RUNTIME_BUILDING
+          && status->queryable
+          && status->last_replay_class == WYL_FACT_GRAPH_REPLAY_NONE))
+    return WYL_FACT_GRAPH_STATE_READY;
+  switch (status->last_replay_class) {
+    case WYL_FACT_GRAPH_REPLAY_STORE_UNAVAILABLE:
+      return WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE;
+    case WYL_FACT_GRAPH_REPLAY_SCHEMA_MISMATCH:
+      return WYL_FACT_GRAPH_STATE_SCHEMA_MISMATCH;
+    case WYL_FACT_GRAPH_REPLAY_FAILED:
+    case WYL_FACT_GRAPH_REPLAY_INTERNAL:
+      return WYL_FACT_GRAPH_STATE_REPLAY_FAILED;
+    case WYL_FACT_GRAPH_REPLAY_NONE:
+    default:
+      return WYL_FACT_GRAPH_STATE_DEGRADED;
+  }
+}
+
+static wyrelog_error_t
+fact_graph_runtime_status_cb (const WylFactGraphRuntimeStatus *runtime_status,
+    gpointer user_data)
+{
+  FactGraphStatusCtx *ctx = user_data;
+  if (runtime_status->state == WYL_FACT_GRAPH_RUNTIME_EVICTED
+      || runtime_status->state == WYL_FACT_GRAPH_RUNTIME_ABANDONED)
+    return WYRELOG_E_OK;
+  wyl_fact_graph_state_t state = legacy_fact_graph_state (runtime_status);
+  wyl_fact_graph_status_t status = {
+    .tenant_id = runtime_status->key.tenant_id,
+    .graph_id = runtime_status->key.graph_id,
+    .state = state,
+    .last_error_class = state == WYL_FACT_GRAPH_STATE_READY ? NULL
+        : (gchar *) wyl_fact_graph_state_name (state),
+    .queryable = runtime_status->queryable,
+    .last_replay_at_us = runtime_status->last_replay_at_us,
+  };
+  return ctx->callback (&status, ctx->user_data);
 }
 
 wyrelog_error_t
@@ -1524,21 +1564,11 @@ wyl_handle_foreach_fact_graph_status (WylHandle *self,
     wyl_fact_graph_status_cb cb, gpointer user_data)
 {
   g_return_val_if_fail (WYL_IS_HANDLE (self), WYRELOG_E_INVALID);
-  if (cb == NULL || self->fact_graph_statuses == NULL)
+  if (cb == NULL || self->fact_graph_runtime == NULL)
     return WYRELOG_E_INVALID;
-
-  g_mutex_lock (&self->fact_graphs_lock);
-  GHashTableIter iter;
-  gpointer key = NULL;
-  gpointer value = NULL;
-  wyrelog_error_t rc = WYRELOG_E_OK;
-  g_hash_table_iter_init (&iter, self->fact_graph_statuses);
-  while (rc == WYRELOG_E_OK && g_hash_table_iter_next (&iter, &key, &value)) {
-    (void) key;
-    rc = cb (value, user_data);
-  }
-  g_mutex_unlock (&self->fact_graphs_lock);
-  return rc;
+  FactGraphStatusCtx ctx = { cb, user_data };
+  return wyl_fact_graph_runtime_manager_foreach_status
+      (self->fact_graph_runtime, fact_graph_runtime_status_cb, &ctx);
 }
 #endif
 

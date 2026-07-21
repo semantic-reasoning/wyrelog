@@ -409,12 +409,35 @@ assert_replayed_order_b_only (WylEngine *engine)
   g_assert_true (probe.saw_order_b);
 }
 
+static void
+handle_snapshot_cb (WylEngine *engine, const gchar *relation,
+    const gint64 *row, guint ncols, gpointer user_data)
+{
+  (void) engine;
+  snapshot_cb (relation, row, ncols, user_data);
+}
+
+static void
+assert_handle_replayed_order_b_only (WylHandle *handle,
+    const gchar *tenant_id, const gchar *graph_id)
+{
+  g_autofree gchar *relation = wyl_fact_replay_wirelog_relation_name
+      ("shop.ns", "orders-rel");
+  g_autofree gchar *observed = g_strdup_printf ("%s_observed", relation);
+  SnapshotProbe probe = { observed, 0, FALSE };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle, tenant_id,
+          graph_id, observed, handle_snapshot_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.count, ==, 1);
+  g_assert_true (probe.saw_order_b);
+}
+
 typedef struct
 {
   guint total;
   guint ready;
   guint unavailable;
   gboolean saw_tenant_a_ready;
+  gboolean saw_tenant_a_stale;
   gboolean saw_tenant_b_unavailable;
 } FactStatusProbe;
 
@@ -432,6 +455,12 @@ fact_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
       && status->state == WYL_FACT_GRAPH_STATE_READY
       && status->queryable && status->last_error_class == NULL)
     probe->saw_tenant_a_ready = TRUE;
+  if (g_strcmp0 (status->tenant_id, "tenant-a") == 0
+      && g_strcmp0 (status->graph_id, "orders") == 0
+      && status->state == WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE
+      && status->queryable
+      && g_strcmp0 (status->last_error_class, "store_unavailable") == 0)
+    probe->saw_tenant_a_stale = TRUE;
   if (g_strcmp0 (status->tenant_id, "tenant-b") == 0
       && g_strcmp0 (status->graph_id, "orders") == 0
       && status->state == WYL_FACT_GRAPH_STATE_STORE_UNAVAILABLE
@@ -439,6 +468,19 @@ fact_status_cb (const wyl_fact_graph_status_t *status, gpointer user_data)
       && g_strcmp0 (status->last_error_class, "store_unavailable") == 0)
     probe->saw_tenant_b_unavailable = TRUE;
   return WYRELOG_E_OK;
+}
+
+static void
+assert_handle_stale_fact_status (WylHandle *handle)
+{
+  FactStatusProbe probe = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+          fact_status_cb, &probe), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (probe.total, ==, 2);
+  g_assert_cmpuint (probe.ready, ==, 0);
+  g_assert_cmpuint (probe.unavailable, ==, 2);
+  g_assert_true (probe.saw_tenant_a_stale);
+  g_assert_true (probe.saw_tenant_b_unavailable);
 }
 
 static void
@@ -635,6 +677,7 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   g_autofree gchar *policy_path = g_build_filename (root, "policy.sqlite",
       NULL);
   g_autofree gchar *bad_path = NULL;
+  g_autofree gchar *good_path = NULL;
 
   {
     g_autoptr (wyl_policy_store_t) policy = NULL;
@@ -645,8 +688,21 @@ test_handle_replay_is_idempotent_and_graph_local (void)
     create_graph_with_schema (policy, root, "tenant-b", "orders");
     append_order_batches (policy, root, "tenant-a", "orders");
 
+    good_path = lookup_graph_storage_path (policy, "tenant-a", "orders");
+    g_assert_nonnull (good_path);
+
     bad_path = lookup_graph_storage_path (policy, "tenant-b", "orders");
     g_assert_nonnull (bad_path);
+    sqlite3 *policy_db = wyl_policy_store_get_db (policy);
+    g_assert_nonnull (policy_db);
+    g_assert_cmpint (sqlite3_exec (policy_db,
+            "INSERT INTO fact_graphs "
+            "(tenant_id,graph_id,storage_uri,storage_path,schema_version,"
+            "owner_scope,sealed,created_at,updated_at) "
+            "SELECT tenant_id,'invalid graph','fact://invalid',storage_path,"
+            "schema_version,owner_scope,0,unixepoch(),unixepoch() "
+            "FROM fact_graphs WHERE tenant_id='tenant-a' AND "
+            "graph_id='orders';", NULL, NULL, NULL), ==, SQLITE_OK);
     g_autofree gchar *bad_fact_path = g_build_filename (bad_path,
         "facts.duckdb", NULL);
     g_assert_true (g_file_set_contents (bad_fact_path, "not a database", -1,
@@ -663,25 +719,53 @@ test_handle_replay_is_idempotent_and_graph_local (void)
   };
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);
-  WylEngine *tenant_a = wyl_handle_get_fact_graph_engine (handle, "tenant-a",
-      "orders");
-  WylEngine *tenant_b = wyl_handle_get_fact_graph_engine (handle, "tenant-b",
-      "orders");
-  g_assert_nonnull (tenant_a);
-  g_assert_null (tenant_b);
-  assert_replayed_order_b_only (tenant_a);
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+  SnapshotProbe unavailable = { 0 };
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+          "tenant-b", "orders", "unused", handle_snapshot_cb,
+          &unavailable), ==, WYRELOG_E_POLICY);
   assert_handle_fact_status (handle);
+
+  g_autofree gchar *good_fact_path = g_build_filename (good_path,
+      "facts.duckdb", NULL);
+  g_assert_true (g_file_set_contents (good_fact_path, "not a database", -1,
+          NULL));
+  g_assert_true (wyl_test_secure_regular_file (good_fact_path, &error));
+  g_assert_no_error (error);
 
   wyl_fact_replay_summary_t summary = { 0 };
   g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
       WYRELOG_E_OK);
-  g_assert_cmpuint (summary.graphs_seen, ==, 2);
-  g_assert_cmpuint (summary.graphs_loaded, ==, 1);
-  g_assert_cmpuint (summary.graphs_degraded, ==, 1);
-  tenant_a = wyl_handle_get_fact_graph_engine (handle, "tenant-a", "orders");
-  g_assert_nonnull (tenant_a);
-  assert_replayed_order_b_only (tenant_a);
-  assert_handle_fact_status (handle);
+  g_assert_cmpuint (summary.graphs_seen, ==, 3);
+  g_assert_cmpuint (summary.graphs_loaded, ==, 0);
+  g_assert_cmpuint (summary.graphs_degraded, ==, 3);
+  assert_handle_replayed_order_b_only (handle, "tenant-a", "orders");
+  assert_handle_stale_fact_status (handle);
+
+  sqlite3 *policy_db = wyl_policy_store_get_db
+      (wyl_handle_get_policy_store (handle));
+  g_assert_nonnull (policy_db);
+  g_assert_cmpint (sqlite3_exec (policy_db,
+          "DELETE FROM fact_relation_query_allowlist;"
+          "DELETE FROM fact_relation_schema_columns;"
+          "DELETE FROM fact_relation_schemas;"
+          "DELETE FROM fact_namespaces;"
+          "DELETE FROM fact_graph_query_allowlist;"
+          "DELETE FROM fact_graph_relation_columns;"
+          "DELETE FROM fact_graph_relations;"
+          "DELETE FROM fact_graphs;", NULL, NULL, NULL), ==, SQLITE_OK);
+  memset (&summary, 0, sizeof summary);
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, &summary), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (summary.graphs_seen, ==, 0);
+  g_assert_cmpint (wyl_handle_snapshot_fact_graph_relation (handle,
+          "tenant-a", "orders", "unused", handle_snapshot_cb, &(SnapshotProbe) {
+          0}
+      ), ==, WYRELOG_E_NOT_FOUND);
+  FactStatusProbe swept = { 0 };
+  g_assert_cmpint (wyl_handle_foreach_fact_graph_status (handle,
+          fact_status_cb, &swept), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (swept.total, ==, 0);
   g_clear_object (&handle);
   remove_tree (root);
 }
