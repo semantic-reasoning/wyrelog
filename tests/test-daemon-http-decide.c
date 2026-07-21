@@ -572,6 +572,109 @@ check_read_only_method_contract (const gchar *base_url)
   return 0;
 }
 
+/*
+ * Regression for the service-management HTTP dispatch routing bug. libsoup
+ * 3.x delivers the full request path (including the registered prefix) to
+ * soup_server_add_handler callbacks, so the service-principal and
+ * service-credential dispatchers must strip their own route prefix before
+ * delegating to the sub-handlers that expect the stripped remainder.
+ *
+ * Before the fix the base GET /service-principals request never matched the
+ * dispatcher base check and fell through to a 404
+ * invalid_service_principal_request, and a bare POST /service-credentials was
+ * misrouted to the single-credential get handler, which answered 405. Prove
+ * both dispatchers now route the base path to the correct handler.
+ */
+static gint
+check_service_management_route_prefix_contract (const gchar *base_url)
+{
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /*
+   * GET /service-principals must reach the list handler, which then rejects
+   * the unauthenticated request with 401 service_principal_auth_required,
+   * rather than the pre-strip 404 dispatcher fall-through.
+   */
+  if (send_raw_path (session, "GET", base_url, "/service-principals",
+          &status, &body) != 0)
+    return 2200;
+  if (status != 401
+      || strstr (body, "\"service_principal_auth_required\"") == NULL)
+    return 2201;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * A bare POST /service-credentials must be rejected by the dispatcher base
+   * check with 400 invalid_service_credential_request. The pre-strip bug
+   * misrouted it to the single-credential get handler, which answered 405
+   * method_not_allowed because the method was not GET.
+   */
+  if (send_raw_path (session, "POST", base_url, "/service-credentials",
+          &status, &body) != 0)
+    return 2202;
+  if (status != 400
+      || strstr (body, "\"invalid_service_credential_request\"") == NULL)
+    return 2203;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * Sub-path coverage: the strip must map each dispatcher's own trailing-slash
+   * prefix ("/service-credentials/", "/service-principals/") to the bare "/"
+   * remainder so the base check fires, instead of leaking the full path to a
+   * sub-handler. This exercises the strip's rest[0] == '/' branch, distinct
+   * from the bare-prefix (rest[0] == '\0') cases proven above.
+   *
+   * GET /service-credentials/ must hit the dispatcher base check and return
+   * 400 invalid_service_credential_request. Pre-strip the full path was not
+   * "/" so it fell through to the single-credential get handler, which
+   * authenticates first and answered 401 service_credential_auth_required.
+   */
+  if (send_raw_path (session, "GET", base_url, "/service-credentials/",
+          &status, &body) != 0)
+    return 2204;
+  if (status != 400
+      || strstr (body, "\"invalid_service_credential_request\"") == NULL)
+    return 2205;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * Sub-path coverage: a real two-segment sub-route. The disable handler is
+   * the one service sub-handler that parses the path before authenticating,
+   * so it is the sub-route whose remainder mis-parse is observable without an
+   * authenticated store fixture. POST /service-principals/{subject}/disable
+   * must strip to /{subject}/disable, parse the "/disable" tail, then reject
+   * the unauthenticated request with 401 service_principal_auth_required.
+   * Pre-strip the handler saw /service-principals/{subject}/disable, whose
+   * first '/' tail is "/{subject}/disable" != "/disable", so it returned 400
+   * invalid_service_principal_request before ever reaching auth.
+   */
+  if (send_raw_path (session, "POST", base_url,
+          "/service-principals/svc-alpha/disable", &status, &body) != 0)
+    return 2206;
+  if (status != 401
+      || strstr (body, "\"service_principal_auth_required\"") == NULL)
+    return 2207;
+  g_clear_pointer (&body, g_free);
+
+  /*
+   * GET /service-principals/ must strip to "/" and reach the base list
+   * handler, which rejects the unauthenticated request with 401
+   * service_principal_auth_required. Pre-strip the full path matched no
+   * dispatcher branch and fell through to the 404
+   * invalid_service_principal_request tail.
+   */
+  if (send_raw_path (session, "GET", base_url, "/service-principals/",
+          &status, &body) != 0)
+    return 2208;
+  if (status != 401
+      || strstr (body, "\"service_principal_auth_required\"") == NULL)
+    return 2209;
+
+  return 0;
+}
+
 static gint
 check_readyz_runtime_liveness_contract (const gchar *base_url,
     WylDaemonRuntime *runtime)
@@ -7344,6 +7447,12 @@ main (void)
   gint read_only_method_rc = check_read_only_method_contract (base_url);
   if (read_only_method_rc != 0) {
     result = read_only_method_rc;
+    goto cleanup;
+  }
+  gint route_prefix_rc =
+      check_service_management_route_prefix_contract (base_url);
+  if (route_prefix_rc != 0) {
+    result = route_prefix_rc;
     goto cleanup;
   }
   gint service_state_rc = check_service_access_token_state_contract

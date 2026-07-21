@@ -8,7 +8,11 @@ for needle in (
     '"/service-principals"',
     '"/service-credentials"',
 ):
-    if source.count(needle) != 1:
+    # Count the handler registration specifically. The dispatchers also name
+    # their own prefix when stripping it from the full libsoup request path, so
+    # the bare literal legitimately appears more than once; the registration
+    # must still be unique.
+    if source.count(f'soup_server_add_handler (server, {needle}') != 1:
         raise SystemExit(f"service-credential route must be registered once: {needle}")
 
 for needle in (
