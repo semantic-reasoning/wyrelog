@@ -52,6 +52,47 @@ string_is_present (const gchar *value)
   return value != NULL && value[0] != '\0';
 }
 
+static wchar_t *
+utf8_to_wide (const gchar *path)
+{
+  return (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+}
+
+/* Prefix a DACL-only SDDL string with "O:<current-user-SID>". Windows takes a
+ * new object's owner from the creating token's TokenOwner field, which is
+ * BUILTIN\Administrators under an administrator token that UAC has not
+ * filtered, so a descriptor without an owner produces objects the owner-only
+ * predicate rightly rejects. Naming the token user as owner requires no
+ * privilege and matches what the predicate compares against (issue #559). */
+static gchar *
+current_user_owned_sddl (const gchar *dacl_sddl)
+{
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  LPWSTR wsid = NULL;
+  g_autofree gchar *sid = NULL;
+
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return NULL;
+  if (!GetTokenInformation (token, TokenUser, NULL, 0, &needed)
+      && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
+    CloseHandle (token);
+    return NULL;
+  }
+  user = g_malloc0 (needed);
+  if (user != NULL && GetTokenInformation (token, TokenUser, user, needed,
+          &needed) && ConvertSidToStringSidW (user->User.Sid, &wsid)) {
+    sid = g_utf16_to_utf8 ((const gunichar2 *) wsid, -1, NULL, NULL, NULL);
+    LocalFree (wsid);
+  }
+  g_free (user);
+  CloseHandle (token);
+  if (sid == NULL)
+    return NULL;
+  return g_strconcat ("O:", sid, dacl_sddl, NULL);
+}
+
 static void
     win_owner_only_security_attributes_clear
     (WinOwnerOnlySecurityAttributes * attrs)
@@ -66,12 +107,22 @@ static void
 static wyrelog_error_t
 win_owner_only_security_attributes_init (WinOwnerOnlySecurityAttributes *attrs)
 {
-  static const wchar_t sddl[] = L"D:P(A;;FA;;;OW)";
+  g_autofree gchar *sddl = NULL;
+  g_autofree wchar_t *wsddl = NULL;
 
   if (attrs == NULL)
     return WYRELOG_E_INVALID;
   memset (attrs, 0, sizeof *attrs);
-  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW (sddl,
+  /* Name the token user as owner rather than leaving the object to inherit the
+   * token's TokenOwner; there is no safe ownerless fallback here, so a failed
+   * SID lookup fails the creation (issue #559). */
+  sddl = current_user_owned_sddl ("D:P(A;;FA;;;OW)");
+  if (sddl == NULL)
+    return WYRELOG_E_IO;
+  wsddl = utf8_to_wide (sddl);
+  if (wsddl == NULL)
+    return WYRELOG_E_IO;
+  if (!ConvertStringSecurityDescriptorToSecurityDescriptorW (wsddl,
           SDDL_REVISION_1, &attrs->descriptor, NULL))
     return WYRELOG_E_IO;
   attrs->attrs.nLength = sizeof attrs->attrs;
@@ -100,12 +151,6 @@ map_win32_error (DWORD error)
     default:
       return WYRELOG_E_IO;
   }
-}
-
-static wchar_t *
-utf8_to_wide (const gchar *path)
-{
-  return (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
 }
 
 static wchar_t *
@@ -432,39 +477,34 @@ handle_is_owner_only_directory (HANDLE handle,
 }
 
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
-/* Prefix the DACL-only test fixture with "O:<current-user-SID>" so the parsed
- * descriptor carries an owner the strict predicate can match. Real kernel
- * descriptors always carry an owner, so this keeps the production predicate
- * exercised exactly as it runs against real objects. */
-static gchar *
-current_user_owned_sddl (const gchar *dacl_sddl)
+/* Render the descriptor the backend attaches to every object it creates, so a
+ * test can assert on the production builder's own output rather than on a
+ * fixture string the harness owns. */
+gchar *
+wyctl_publication_windows_test_creation_security_descriptor_sddl (void)
 {
-  HANDLE token = NULL;
-  DWORD needed = 0;
-  TOKEN_USER *user = NULL;
-  LPWSTR wsid = NULL;
-  g_autofree gchar *sid = NULL;
+  WinOwnerOnlySecurityAttributes attrs = { 0 };
+  LPWSTR wsddl = NULL;
+  gchar *sddl = NULL;
 
-  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+  if (win_owner_only_security_attributes_init (&attrs) != WYRELOG_E_OK)
     return NULL;
-  if (!GetTokenInformation (token, TokenUser, NULL, 0, &needed)
-      && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
-    CloseHandle (token);
-    return NULL;
+  if (ConvertSecurityDescriptorToStringSecurityDescriptorW (attrs.descriptor,
+          SDDL_REVISION_1,
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &wsddl,
+          NULL)) {
+    sddl = g_utf16_to_utf8 ((const gunichar2 *) wsddl, -1, NULL, NULL, NULL);
+    LocalFree (wsddl);
   }
-  user = g_malloc0 (needed);
-  if (user != NULL && GetTokenInformation (token, TokenUser, user, needed,
-          &needed) && ConvertSidToStringSidW (user->User.Sid, &wsid)) {
-    sid = g_utf16_to_utf8 ((const gunichar2 *) wsid, -1, NULL, NULL, NULL);
-    LocalFree (wsid);
-  }
-  g_free (user);
-  CloseHandle (token);
-  if (sid == NULL)
-    return NULL;
-  return g_strconcat ("O:", sid, dacl_sddl, NULL);
+  win_owner_only_security_attributes_clear (&attrs);
+  return sddl;
 }
 
+/* Run the production owner-only predicate against a DACL-only SDDL fixture,
+ * supplying the owner the caller's string lacks. Real kernel descriptors always
+ * carry one, so wrapping the fixture keeps the predicate exercised exactly as
+ * it runs against real objects; the owner the backend itself attaches is
+ * covered by the creation-descriptor hook above, not here. */
 gboolean
     wyctl_publication_windows_test_security_descriptor_is_owner_only
     (const gchar * sddl)
