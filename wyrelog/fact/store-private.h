@@ -11,6 +11,50 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_fact_store_t wyl_fact_store_t;
 
+/*
+ * Immutable identity copied from the policy authority record.  The physical
+ * store validator never allocates or substitutes any member of this tuple.
+ */
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *store_uuid;
+  guint64 format_version;
+  guint64 path_encoding_version;
+} WylFactStoreIdentity;
+
+typedef enum
+{
+  WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY = 0,
+  WYL_FACT_STORE_IDENTITY_INITIALIZE_IF_EMPTY,
+} WylFactStoreIdentityOpenMode;
+
+/* Stable fact-local classification for lifecycle/reconciliation callers. */
+typedef enum
+{
+  WYL_FACT_STORE_IDENTITY_RESULT_NONE = 0,
+  WYL_FACT_STORE_IDENTITY_RESULT_IDENTITY,
+  WYL_FACT_STORE_IDENTITY_RESULT_FORMAT,
+  WYL_FACT_STORE_IDENTITY_RESULT_PATH_ENCODING,
+  WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA,
+  WYL_FACT_STORE_IDENTITY_RESULT_OPEN,
+  WYL_FACT_STORE_IDENTITY_RESULT_INTERNAL,
+} WylFactStoreIdentityResult;
+
+typedef enum
+{
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_NONE = 0,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_CREATE,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_KIND,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_FORMAT_VERSION,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_STORE_UUID,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_PATH_ENCODING_VERSION,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_TENANT_ID,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_AFTER_GRAPH_ID,
+  WYL_FACT_STORE_IDENTITY_TEST_FAULT_BEFORE_COMMIT,
+} WylFactStoreIdentityTestFault;
+
 typedef enum
 {
   WYL_FACT_STORE_OP_ASSERT = 0,
@@ -35,6 +79,12 @@ typedef struct
 
 wyrelog_error_t wyl_fact_store_open (const gchar * path,
     wyl_fact_store_t ** out_store);
+wyrelog_error_t wyl_fact_store_open_identified (const gchar * path,
+    const WylFactStoreIdentity * identity,
+    WylFactStoreIdentityOpenMode mode,
+    WylFactStoreIdentityResult * out_result, wyl_fact_store_t ** out_store);
+void wyl_fact_store_identity_set_test_fault (WylFactStoreIdentityTestFault
+    fault);
 void wyl_fact_store_close (wyl_fact_store_t * store);
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (wyl_fact_store_t, wyl_fact_store_close);
 
