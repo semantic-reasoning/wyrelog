@@ -3929,13 +3929,23 @@ append_service_principal_json (const wyl_service_principal_t *info,
   return WYRELOG_E_OK;
 }
 
+/* Authorize a service-principal management request and, in addition to the
+ * bound actor, hand the caller the live WylSession and the parsed guard
+ * context. All out-parameters are optional and are populated only on an
+ * ALLOW: out_session transfers a session reference the caller must unref,
+ * out_guard_loc_class transfers an owned copy the caller must free. On any
+ * denial the message error is already set and every out-parameter is left
+ * untouched. The escrow handoff surface consumes the session and guard
+ * context; existing callers use the thin authorize() wrapper below. */
 static gboolean
-service_principal_management_authorize (SoupServer *server,
+service_principal_management_authorize_session (SoupServer *server,
     SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
     const gchar *action,
     const gchar *auth_required_code, const gchar *invalid_code,
     const gchar *denied_code, const gchar *failed_code,
-    WylDaemonAuthContext *out_auth, gchar **out_actor)
+    WylDaemonAuthContext *out_auth, gchar **out_actor,
+    WylSession **out_session, gint64 *out_guard_timestamp,
+    gchar **out_guard_loc_class, gint64 *out_guard_risk)
 {
   if (ctx == NULL || ctx->profile != WYL_DAEMON_PROFILE_SYSTEM
       || action == NULL || action[0] == '\0') {
@@ -3978,8 +3988,6 @@ service_principal_management_authorize (SoupServer *server,
     set_json_error (msg, 400, invalid_code);
     return FALSE;
   }
-  (void) timestamp;
-  (void) risk;
 
   g_auto (WylDaemonAuthContext) auth = { 0 };
   const gchar *auth_tenant_error = NULL;
@@ -4045,7 +4053,31 @@ service_principal_management_authorize (SoupServer *server,
     *out_actor = actor_copy;
   else
     g_free (actor_copy);
+  if (out_session != NULL)
+    *out_session = g_steal_pointer (&session);
+  if (out_guard_timestamp != NULL)
+    *out_guard_timestamp = timestamp;
+  if (out_guard_loc_class != NULL)
+    *out_guard_loc_class = g_strdup (guard_loc_class);
+  if (out_guard_risk != NULL)
+    *out_guard_risk = risk;
   return TRUE;
+}
+
+/* Thin back-compat wrapper: authorize without exposing the live session or
+ * guard context. Delegates to the _session variant so both share one audit
+ * and decision path. */
+static gboolean
+service_principal_management_authorize (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx,
+    const gchar *action,
+    const gchar *auth_required_code, const gchar *invalid_code,
+    const gchar *denied_code, const gchar *failed_code,
+    WylDaemonAuthContext *out_auth, gchar **out_actor)
+{
+  return service_principal_management_authorize_session (server, msg, query,
+      ctx, action, auth_required_code, invalid_code, denied_code, failed_code,
+      out_auth, out_actor, NULL, NULL, NULL, NULL);
 }
 
 static gchar *
