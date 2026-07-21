@@ -733,6 +733,14 @@ if get_option('enable_fact_store').allowed()
   )
 
   test('fact-replay', test_fact_replay)
+
+  test_fact_runtime = executable('test-fact-runtime',
+    'test-fact-runtime.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, wirelog_dep],
+  )
+
+  test('fact-runtime', test_fact_runtime, timeout : 60)
 endif
 
 test_policy_store_toctou = executable('test-policy-store-toctou',
