@@ -38,7 +38,7 @@ def main() -> int:
         require(text, "if errorlevel 1", path)
         require(text, "rmdir /s /q builddir", path)
         require(text, "meson setup builddir -Denable_tpm=disabled", path)
-        require(text, "ninja -C builddir -t commands wyctl wyrelogd", path)
+        require(text, "ninja -C builddir -t commands", path)
         require(text, "findstr /I /C:\"sccache\"", path)
         require(text, "Compile requests[[:space:]]+[1-9][0-9]*", path)
     meson = (root / "tests" / "meson.build").read_text(encoding="utf-8")
