@@ -530,6 +530,43 @@ test_daemon_handoff_unconfigured (void)
   g_assert_cmpuint (publication.plan_calls, ==, 0);
 }
 
+/* Drives the module against the REAL POSIX publication backend with no override:
+ * the module opens the backend on the fixture's 0700 publication_root and
+ * derives parent_identity through the real accessor. A green delivered receipt
+ * proves the derived parent_identity equals what plan() stamps -- any divergence
+ * would trip the executor's plan/record parent_identity assertion and fail
+ * closed with POLICY. This is the sole regression guard for the crux; the mock
+ * path cannot catch an accessor != plan divergence. (Windows accessor==plan
+ * equality rests on code review; there is no real-Windows daemon test here.) */
+static void
+test_daemon_handoff_issue_real_publication (void)
+{
+  g_auto (Fixture) fixture = { 0 };
+  fixture_init (&fixture);
+  prepare_authority (fixture.handle, "svc:handoff:executor");
+  g_autoptr (WylSession) session = handoff_human_session_new ("admin",
+      "tenant-a");
+  authorize_session (fixture.handle, "admin", session);
+
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  fresh_request_id (request_id);
+  WylDaemonServiceCredentialHandoffContext ctx =
+      context_for (&fixture, session, request_id, NULL);
+  ctx.publication_override = NULL;
+  ctx.publication_override_data = NULL;
+  WylDaemonServiceCredentialHandoffInputs inputs =
+      issue_inputs_for (request_id);
+
+  g_autofree gchar *json = NULL;
+  g_assert_cmpint (wyl_daemon_service_credential_handoff (&ctx, &inputs, &json),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull (json);
+  g_assert_nonnull (strstr (json, "\"state\":\"terminal\""));
+  g_assert_nonnull (strstr (json, "\"delivered\":true"));
+  g_assert_cmpint (count_credentials (db_of (fixture.handle)), ==, 1);
+  g_assert_cmpint (count_delivered (db_of (fixture.handle), request_id), ==, 1);
+}
+
 int
 main (int argc, char *argv[])
 {
@@ -542,5 +579,7 @@ main (int argc, char *argv[])
       test_daemon_handoff_malformed);
   g_test_add_func ("/daemon-service-credential-handoff/unconfigured",
       test_daemon_handoff_unconfigured);
+  g_test_add_func ("/daemon-service-credential-handoff/issue-real-publication",
+      test_daemon_handoff_issue_real_publication);
   return g_test_run ();
 }
