@@ -377,7 +377,6 @@ open_readiness_handle (const WylDaemonOptions *opts, WylHandle **out_handle)
     .template_dir = opts->template_dir,
     .policy_store_path = scratch_policy_store,
     .policy_keyprovider_path = opts->policy_keyprovider_path,
-    .fact_root = opts->fact_root,
     .production_mode = opts->production_mode,
     .require_template_manifest = opts->production_mode,
 #ifdef WYL_HAS_AUDIT

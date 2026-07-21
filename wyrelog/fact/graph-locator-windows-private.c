@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-locator-private.h"
+#include "fact/root-writer-lease-private.h"
 
 #ifdef G_OS_WIN32
 #include <aclapi.h>
@@ -12,6 +13,13 @@
 #include <string.h>
 
 #define WYL_FACT_GRAPH_LOG_DOMAIN "wyrelog-fact-resolver"
+
+struct _WylFactRootWriterLease
+{
+  WylFactGraphResolver resolver;
+  HANDLE lock_handle;
+  WylFactGraphWinIdentity lock_identity;
+};
 
 static void
 trace_windows_failure (const gchar *stage, wyrelog_error_t rc,
@@ -1222,6 +1230,148 @@ open_relative_regular (HANDLE parent, const gchar *basename,
   }
   *out_handle = handle;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+validate_zero_length_regular (HANDLE handle,
+    const WylFactGraphWinIdentity *expected)
+{
+  FILE_STANDARD_INFO standard = { 0 };
+  wyrelog_error_t rc = validate_regular_file (handle, expected, TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!GetFileInformationByHandleEx (handle, FileStandardInfo, &standard,
+          sizeof standard))
+    return WYRELOG_E_IO;
+  return standard.EndOfFile.QuadPart == 0 ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+open_root_writer_lock (WylFactGraphResolver *resolver, HANDLE *out_handle,
+    WylFactGraphWinIdentity *out_identity)
+{
+  static const WCHAR lock_name[] = L".wyrelog-writer-lock";
+  WylNtCreateFile nt_create = nt_create_file ();
+  WylOwnerOnlySecurity security;
+  UNICODE_STRING name = { 0 };
+  OBJECT_ATTRIBUTES attributes = { 0 };
+  IO_STATUS_BLOCK iosb = { 0 };
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  if (resolver == NULL || !handle_is_valid (resolver->handle)
+      || out_handle == NULL || out_identity == NULL || nt_create == NULL)
+    return WYRELOG_E_INVALID;
+  *out_handle = INVALID_HANDLE_VALUE;
+  memset (out_identity, 0, sizeof *out_identity);
+  memset (&security, 0, sizeof security);
+  wyrelog_error_t rc = owner_only_security_init (&security, 0);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  name.Length = (USHORT) (G_N_ELEMENTS (lock_name) - 1) * sizeof (WCHAR);
+  name.MaximumLength = name.Length;
+  name.Buffer = (PWSTR) lock_name;
+  attributes.Length = sizeof attributes;
+  attributes.RootDirectory = resolver->handle;
+  attributes.ObjectName = &name;
+  attributes.Attributes = OBJ_CASE_INSENSITIVE;
+  attributes.SecurityDescriptor = &security.descriptor;
+  NTSTATUS status = nt_create (&handle,
+      FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | READ_CONTROL
+      | SYNCHRONIZE, &attributes, &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
+      0, FILE_OPEN_IF, FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
+      | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+  owner_only_security_clear (&security);
+  if (status < 0 || !handle_is_valid (handle))
+    return ntstatus_to_error (status);
+  rc = query_regular_identity (handle, out_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_zero_length_regular (handle, out_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_parent_entry (resolver->handle, lock_name,
+        G_N_ELEMENTS (lock_name) - 1, out_identity);
+  if (rc != WYRELOG_E_OK) {
+    CloseHandle (handle);
+    return rc;
+  }
+  *out_handle = handle;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+verify_root_writer_lock (WylFactRootWriterLease *lease)
+{
+  static const WCHAR lock_name[] = L".wyrelog-writer-lock";
+  wyrelog_error_t rc = validate_zero_length_regular (lease->lock_handle,
+      &lease->lock_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_parent_entry (lease->resolver.handle, lock_name,
+        G_N_ELEMENTS (lock_name) - 1, &lease->lock_identity);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_root_writer_lease_acquire (const gchar *fact_root,
+    WylFactRootWriterLease **out_lease)
+{
+  if (out_lease != NULL)
+    *out_lease = NULL;
+  if (fact_root == NULL || fact_root[0] == '\0' || out_lease == NULL)
+    return WYRELOG_E_INVALID;
+  WylFactRootWriterLease *lease = g_new0 (WylFactRootWriterLease, 1);
+  lease->resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+  lease->lock_handle = INVALID_HANDLE_VALUE;
+  wyrelog_error_t rc = wyl_fact_graph_resolver_open (fact_root,
+      &lease->resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = open_root_writer_lock (&lease->resolver, &lease->lock_handle,
+        &lease->lock_identity);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (&lease->resolver);
+  if (rc != WYRELOG_E_OK) {
+    if (handle_is_valid (lease->lock_handle))
+      CloseHandle (lease->lock_handle);
+    wyl_fact_graph_resolver_clear (&lease->resolver);
+    g_free (lease);
+    return rc;
+  }
+  *out_lease = lease;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_root_writer_lease_verify (WylFactRootWriterLease *lease)
+{
+  if (lease == NULL || !handle_is_valid (lease->resolver.handle)
+      || !handle_is_valid (lease->lock_handle))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = verify_root_writer_lock (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (&lease->resolver);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_fact_root_writer_lease_authorizes_resolver
+    (WylFactRootWriterLease * lease, WylFactGraphResolver * resolver) {
+  if (lease == NULL || resolver == NULL || !handle_is_valid (resolver->handle))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_root_writer_lease_verify (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK
+      && !identity_equal (&lease->resolver.identity, &resolver->identity))
+    rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+void
+wyl_fact_root_writer_lease_release (WylFactRootWriterLease *lease)
+{
+  if (lease == NULL)
+    return;
+  if (handle_is_valid (lease->lock_handle))
+    CloseHandle (lease->lock_handle);
+  wyl_fact_graph_resolver_clear (&lease->resolver);
+  g_free (lease);
 }
 
 static wyrelog_error_t
