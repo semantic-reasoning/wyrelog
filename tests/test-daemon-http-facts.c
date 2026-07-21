@@ -124,6 +124,26 @@ send_raw (SoupSession *session, const gchar *method, const gchar *base_url,
   return 0;
 }
 
+static gchar *
+dup_safe_api_error_code (const gchar *body)
+{
+  static const gchar marker[] = "\"error\":\"";
+  const gchar *start = body != NULL ? strstr (body, marker) : NULL;
+  if (start == NULL)
+    return NULL;
+  start += sizeof marker - 1;
+  const gchar *end = strchr (start, '"');
+  if (end == NULL || end == start || (gsize) (end - start) > 64)
+    return NULL;
+  gsize length = (gsize) (end - start);
+  for (gsize i = 0; i < length; i++) {
+    gchar c = start[i];
+    if (!(g_ascii_isalnum (c) || c == '_' || c == '-' || c == '.'))
+      return NULL;
+  }
+  return g_strndup (start, length);
+}
+
 static wyrelog_error_t
 grant_fact_http_authority (WylHandle *handle, const gchar *subject)
 {
@@ -415,11 +435,23 @@ check_fact_http_contract (WylHandle *handle, const gchar *fact_root,
       &status, &body);
   if (rc != 0)
     return rc;
-  if (status != 200 || strstr (body, "\"relation\":\"orders\"") == NULL ||
-      strstr (body, "\"columns\":[\"O\",\"A\"]") == NULL ||
-      strstr (body, "{\"O\":\"o-1\",\"A\":42}") == NULL ||
-      strstr (body, "facts.duckdb") != NULL)
+  gboolean status_ok = status == 200;
+  gboolean relation_ok = body != NULL
+      && strstr (body, "\"relation\":\"orders\"") != NULL;
+  gboolean columns_ok = body != NULL
+      && strstr (body, "\"columns\":[\"O\",\"A\"]") != NULL;
+  gboolean row_ok = body != NULL
+      && strstr (body, "{\"O\":\"o-1\",\"A\":42}") != NULL;
+  gboolean path_absent = body == NULL || strstr (body, "facts.duckdb") == NULL;
+  if (!status_ok || !relation_ok || !columns_ok || !row_ok || !path_absent) {
+    g_autofree gchar *error_code = dup_safe_api_error_code (body);
+    g_printerr ("first authorized datalog query mismatch: status=%u "
+        "status-ok=%u relation-ok=%u columns-ok=%u row-ok=%u "
+        "path-absent=%u error=%s\n", status, (guint) status_ok,
+        (guint) relation_ok, (guint) columns_ok, (guint) row_ok,
+        (guint) path_absent, error_code != NULL ? error_code : "(none)");
     return 332;
+  }
 
   g_clear_pointer (&body, g_free);
   rc = send_raw (session, "POST", base_url,
