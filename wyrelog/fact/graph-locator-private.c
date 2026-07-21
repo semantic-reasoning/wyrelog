@@ -9,6 +9,10 @@
 
 #include <string.h>
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+#endif
+
 #ifndef G_OS_WIN32
 #include <errno.h>
 #include <fcntl.h>
@@ -205,12 +209,32 @@ wyl_fact_graph_locator_descriptive_path (const gchar *fact_root,
       locator->graph_component, NULL);
 }
 
+gboolean
+wyl_fact_graph_relative_path_is_valid (const gchar *value)
+{
+  if (value == NULL || value[0] == '\0' || strchr (value, '/') == NULL
+      || g_path_is_absolute (value)
+      || strchr (value, '\\') != NULL || strchr (value, ':') != NULL)
+    return FALSE;
+  g_auto (GStrv) components = g_strsplit (value, "/", -1);
+  if (components == NULL)
+    return FALSE;
+  for (gsize i = 0; components[i] != NULL; i++) {
+    if (components[i][0] == '\0' || g_strcmp0 (components[i], ".") == 0
+        || g_strcmp0 (components[i], "..") == 0)
+      return FALSE;
+  }
+  return TRUE;
+}
+
 #ifndef G_OS_WIN32
 static wyrelog_error_t
 errno_to_resolver_error (gint error_number)
 {
   if (error_number == ENOENT)
     return WYRELOG_E_NOT_FOUND;
+  if (error_number == EBUSY || error_number == ETXTBSY)
+    return WYRELOG_E_BUSY;
   if (error_number == ELOOP || error_number == ENOTDIR
       || error_number == EACCES || error_number == EPERM)
     return WYRELOG_E_POLICY;
@@ -244,6 +268,26 @@ validate_fd (gint fd, gboolean directory, mode_t expected_mode,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+validate_regular_fd (gint fd, mode_t expected_mode, guint64 *out_device,
+    guint64 *out_inode, guint64 *out_size)
+{
+  struct stat st;
+  if (fstat (fd, &st) != 0)
+    return WYRELOG_E_IO;
+  if (!S_ISREG (st.st_mode) || st.st_nlink != 1
+      || !wyl_fact_graph_owner_mode_is_secure_for_test ((guint32) st.st_mode,
+          (guint64) st.st_uid, (guint64) geteuid (), expected_mode))
+    return WYRELOG_E_POLICY;
+  if (out_device != NULL)
+    *out_device = (guint64) st.st_dev;
+  if (out_inode != NULL)
+    *out_inode = (guint64) st.st_ino;
+  if (out_size != NULL)
+    *out_size = (guint64) st.st_size;
+  return WYRELOG_E_OK;
+}
+
 static gboolean
 stat_matches (const struct stat *st, guint64 device, guint64 inode,
     gboolean directory, mode_t expected_mode)
@@ -267,6 +311,92 @@ validate_fd_exact (gint fd, gboolean directory, mode_t expected_mode,
     return rc;
   return current_device == device && current_inode == inode ?
       WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t validate_name_length (gint parent_fd,
+    const gchar * name);
+
+static wyrelog_error_t
+open_relative_regular_at (gint root_fd, const gchar *relative_path,
+    WylFactGraphRegularFile *out_file)
+{
+  if (out_file != NULL)
+    *out_file = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  if (root_fd < 0 || out_file == NULL
+      || !wyl_fact_graph_relative_path_is_valid (relative_path))
+    return WYRELOG_E_INVALID;
+  gint current = dup (root_fd);
+  if (current < 0)
+    return WYRELOG_E_IO;
+  g_auto (GStrv) components = g_strsplit (relative_path, "/", -1);
+  if (components == NULL) {
+    close (current);
+    return WYRELOG_E_NOMEM;
+  }
+  if (fcntl (current, F_SETFD, FD_CLOEXEC) != 0) {
+    close (current);
+    return WYRELOG_E_IO;
+  }
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (gsize i = 0; rc == WYRELOG_E_OK && components[i + 1] != NULL; i++) {
+    rc = validate_name_length (current, components[i]);
+    if (rc != WYRELOG_E_OK)
+      break;
+    gint next = openat (current, components[i],
+        O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (next < 0) {
+      rc = errno_to_resolver_error (errno);
+      break;
+    }
+    close (current);
+    current = next;
+  }
+  if (rc == WYRELOG_E_OK) {
+    const gchar *basename = components[0];
+    for (gsize i = 1; components[i] != NULL; i++)
+      basename = components[i];
+    rc = validate_name_length (current, basename);
+    if (rc == WYRELOG_E_OK) {
+      struct stat before;
+      if (fstatat (current, basename, &before, AT_SYMLINK_NOFOLLOW) != 0)
+        rc = errno_to_resolver_error (errno);
+      else if (!S_ISREG (before.st_mode) || before.st_nlink != 1
+          || !wyl_fact_graph_owner_mode_is_secure_for_test (
+              (guint32) before.st_mode, (guint64) before.st_uid,
+              (guint64) geteuid (), 0600))
+        rc = WYRELOG_E_POLICY;
+      else {
+        gint fd = openat (current, basename,
+            O_RDONLY | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+        if (fd < 0)
+          rc = errno_to_resolver_error (errno);
+        else {
+          guint64 device = 0;
+          guint64 inode = 0;
+          guint64 size_bytes = 0;
+          rc = validate_regular_fd (fd, 0600, &device, &inode, &size_bytes);
+          struct stat after;
+          if (rc == WYRELOG_E_OK
+              && (fstatat (current, basename, &after, AT_SYMLINK_NOFOLLOW) != 0
+                  || !stat_matches (&before, device, inode, FALSE, 0600)
+                  || !stat_matches (&after, device, inode, FALSE, 0600)
+                  || (guint64) before.st_size != size_bytes))
+            rc = WYRELOG_E_POLICY;
+          if (rc == WYRELOG_E_OK) {
+            out_file->fd = fd;
+            out_file->device = device;
+            out_file->inode = inode;
+            out_file->size_bytes = size_bytes;
+          } else
+            close (fd);
+        }
+      }
+    }
+  }
+  close (current);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_graph_regular_file_clear (out_file);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -374,6 +504,26 @@ wyl_fact_graph_resolver_clear (WylFactGraphResolver *resolver)
     close (resolver->fd);
   g_free (resolver->path);
   *resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+}
+
+void
+wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile *file)
+{
+  if (file == NULL)
+    return;
+#ifdef G_OS_WIN32
+  if (handle_is_valid (file->handle))
+    CloseHandle (file->handle);
+  file->handle = NULL;
+  memset (&file->identity, 0, sizeof file->identity);
+#else
+  if (file->fd >= 0)
+    close (file->fd);
+  file->fd = -1;
+  file->device = 0;
+  file->inode = 0;
+#endif
+  file->size_bytes = 0;
 }
 
 void wyl_fact_graph_resolver_set_checkpoint_for_test
@@ -524,6 +674,25 @@ wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
   return rc;
 }
 
+wyrelog_error_t
+wyl_fact_graph_resolver_open_relative_regular (WylFactGraphResolver *resolver,
+    const gchar *relative_path, WylFactGraphRegularFile *out_file)
+{
+  if (out_file != NULL)
+    *out_file = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  if (resolver == NULL || resolver->fd < 0 || resolver->path == NULL
+      || out_file == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular_at (resolver->fd, relative_path, out_file);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_graph_regular_file_clear (out_file);
+  return rc;
+}
+
 void
 wyl_fact_graph_directory_clear (WylFactGraphDirectory *directory)
 {
@@ -614,7 +783,7 @@ wyl_fact_graph_directory_open_file (WylFactGraphDirectory *directory,
   if (fstatat (directory->graph_fd, basename, &before,
           AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
-  if (!S_ISREG (before.st_mode))
+  if (!S_ISREG (before.st_mode) || before.st_nlink != 1)
     return WYRELOG_E_POLICY;
   gint fd = openat (directory->graph_fd, basename,
       (writable ? O_RDWR : O_RDONLY) | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
@@ -629,7 +798,7 @@ wyl_fact_graph_directory_open_file (WylFactGraphDirectory *directory,
   }
   guint64 device = 0;
   guint64 inode = 0;
-  rc = validate_fd (fd, FALSE, 0600, &device, &inode);
+  rc = validate_regular_fd (fd, 0600, &device, &inode, NULL);
   struct stat after;
   if (rc == WYRELOG_E_OK
       && (fstatat (directory->graph_fd, basename, &after,
@@ -662,7 +831,8 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   if (fstatat (directory->graph_fd, basename, &before,
           AT_SYMLINK_NOFOLLOW) != 0)
     return errno_to_resolver_error (errno);
-  if (!S_ISREG (before.st_mode) || before.st_uid != geteuid ())
+  if (!S_ISREG (before.st_mode) || before.st_uid != geteuid ()
+      || before.st_nlink != 1)
     return WYRELOG_E_POLICY;
   gint fd = openat (directory->graph_fd, basename,
       O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
@@ -683,7 +853,7 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   else if (after.st_dev != opened.st_dev || after.st_ino != opened.st_ino)
     rc = WYRELOG_E_POLICY;
   else
-    rc = validate_fd (fd, FALSE, 0600, NULL, NULL);
+    rc = validate_regular_fd (fd, 0600, NULL, NULL, NULL);
   close (fd);
   if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
     rc = WYRELOG_E_IO;
@@ -888,5 +1058,19 @@ wyl_fact_graph_stage_clear (WylFactGraphStage *stage)
   g_free (stage->stage_basename);
   g_free (stage->final_basename);
   *stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+}
+#endif
+
+#ifdef G_OS_WIN32
+void
+wyl_fact_graph_regular_file_clear (WylFactGraphRegularFile *file)
+{
+  if (file == NULL)
+    return;
+  if (file->handle != NULL)
+    CloseHandle ((HANDLE) file->handle);
+  file->handle = NULL;
+  memset (&file->identity, 0, sizeof file->identity);
+  file->size_bytes = 0;
 }
 #endif

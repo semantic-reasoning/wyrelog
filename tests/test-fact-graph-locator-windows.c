@@ -885,6 +885,96 @@ test_file_acl_hardening (void)
   remove_tree_no_follow (root);
 }
 
+static gboolean
+create_hardlink (const gchar *existing, const gchar *linkname)
+{
+  g_autofree gunichar2 *wide_existing = wide_path (existing);
+  g_autofree gunichar2 *wide_link = wide_path (linkname);
+  return wide_existing != NULL && wide_link != NULL
+      && CreateHardLinkW ((LPCWSTR) wide_link, (LPCWSTR) wide_existing, NULL);
+}
+
+static void
+test_relative_regular_open_and_reject_aliases (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphRegularFile file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *legacy = g_build_filename (graph_path, "legacy", NULL);
+  g_autofree gchar *nested = g_build_filename (legacy, "nested", NULL);
+  g_autofree gchar *path = g_build_filename (nested, "facts.duckdb", NULL);
+  g_assert_true (create_private_directory (legacy));
+  g_assert_true (create_private_directory (nested));
+  g_assert_true (create_private_file (path, "duck"));
+  g_autofree gchar *relative = g_strdup_printf ("%s/%s/legacy/nested/"
+      "facts.duckdb", locator.tenant_component, locator.graph_component);
+  g_assert_true (wyl_fact_graph_relative_path_is_valid (relative));
+  static const gchar *invalid[] = {
+    "", "/", ".", "..", "tenant//graph", "tenant/./graph",
+    "tenant/../graph", "tenant\\graph", "tenant:graph",
+    "tenant/graph/",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
+    g_assert_false (wyl_fact_graph_relative_path_is_valid (invalid[i]));
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          relative, &file), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (file.size_bytes, ==, 4);
+  gchar contents[5] = { 0 };
+  DWORD read_bytes = 0;
+  g_assert_true (ReadFile ((HANDLE) file.handle, contents, 4, &read_bytes,
+          NULL));
+  g_assert_cmpuint (read_bytes, ==, 4);
+  g_assert_cmpstr (contents, ==, "duck");
+  wyl_fact_graph_regular_file_clear (&file);
+
+  g_autofree gchar *hardlink = g_build_filename (nested, "facts-hard.duckdb",
+      NULL);
+  g_assert_true (create_hardlink (path, hardlink));
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          relative, &file), ==, WYRELOG_E_POLICY);
+  g_autofree gunichar2 *wide_hardlink = wide_path (hardlink);
+  g_assert_true (wide_hardlink != NULL
+      && DeleteFileW ((LPCWSTR) wide_hardlink));
+
+  g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
+  g_assert_true (create_private_directory (outside));
+  g_autofree gchar *branch_link = g_build_filename (graph_path, "legacy-link",
+      NULL);
+  g_assert_true (create_directory_junction (branch_link, legacy));
+  g_autofree gchar *branch_relative = g_strdup_printf ("%s/%s/legacy-link/"
+      "nested/facts.duckdb", locator.tenant_component,
+      locator.graph_component);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          branch_relative, &file), ==, WYRELOG_E_POLICY);
+  g_autofree gunichar2 *wide_branch_link = wide_path (branch_link);
+  g_assert_true (wide_branch_link != NULL
+      && RemoveDirectoryW ((LPCWSTR) wide_branch_link));
+
+  g_autofree gchar *final_link = g_build_filename (legacy, "facts.duckdb",
+      NULL);
+  g_assert_true (create_directory_junction (final_link, outside));
+  g_autofree gchar *final_relative = g_strdup_printf ("%s/%s/legacy/"
+      "facts.duckdb", locator.tenant_component, locator.graph_component);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          final_relative, &file), ==, WYRELOG_E_POLICY);
+  g_autofree gunichar2 *wide_final_link = wide_path (final_link);
+  g_assert_true (wide_final_link != NULL
+      && RemoveDirectoryW ((LPCWSTR) wide_final_link));
+
+  wyl_fact_graph_regular_file_clear (&file);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree_no_follow (root);
+}
+
 static void
 test_stage_roundtrip_and_abort (void)
 {
@@ -1056,6 +1146,8 @@ main (int argc, char **argv)
       test_reparse_points_fail_closed);
   g_test_add_func ("/fact-graph-locator/windows/file-acl-hardening",
       test_file_acl_hardening);
+  g_test_add_func ("/fact-graph-locator/windows/relative-regular-open",
+      test_relative_regular_open_and_reject_aliases);
   g_test_add_func ("/fact-graph-locator/windows/stage-roundtrip-abort",
       test_stage_roundtrip_and_abort);
   g_test_add_func ("/fact-graph-locator/windows/stage-attack-bindings",

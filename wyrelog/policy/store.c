@@ -11082,21 +11082,6 @@ fact_reconcile_journal_state_parse (const gchar *value,
 }
 
 static gboolean
-fact_reconcile_relative_path_is_valid (const gchar *value)
-{
-  if (value == NULL || value[0] == '\0' || strchr (value, '/') == NULL
-      || value[0] == '/' || strchr (value, '\\') != NULL
-      || strchr (value, ':') != NULL)
-    return FALSE;
-  g_auto (GStrv) components = g_strsplit (value, "/", -1);
-  for (gsize i = 0; components[i] != NULL; i++)
-    if (components[i][0] == '\0' || g_strcmp0 (components[i], ".") == 0
-        || g_strcmp0 (components[i], "..") == 0)
-      return FALSE;
-  return TRUE;
-}
-
-static gboolean
     fact_reconcile_artifact_evidence_is_valid
     (const WylPolicyFactReconcileArtifactEvidence * e)
 {
@@ -11216,9 +11201,9 @@ fact_reconcile_journal_record_from_row (sqlite3_stmt *stmt,
   const gchar *graph = (const gchar *) sqlite3_column_text (stmt, 2);
   if (!fact_graph_customer_name_is_valid (graph)
       || (uuid != NULL && !graph_store_uuid_is_canonical (uuid))
-      || !fact_reconcile_relative_path_is_valid
+      || !wyl_fact_graph_relative_path_is_valid
       ((const gchar *) sqlite3_column_text (stmt, 8))
-      || !fact_reconcile_relative_path_is_valid
+      || !wyl_fact_graph_relative_path_is_valid
       ((const gchar *) sqlite3_column_text (stmt, 9))
       || !fact_reconcile_journal_state_parse (state_name, &state)
       || values[0] < 0 || values[1] < 0 || values[2] <= 0 || values[3] <= 0
@@ -11428,8 +11413,8 @@ wyl_policy_store_reconcile_journal_prepare (wyl_policy_store_t *store,
       || expected_path_encoding_version > G_MAXINT64
       || (expected_store_uuid != NULL
           && !graph_store_uuid_is_canonical (expected_store_uuid))
-      || !fact_reconcile_relative_path_is_valid (source_relative_path)
-      || !fact_reconcile_relative_path_is_valid (canonical_relative_path)
+      || !wyl_fact_graph_relative_path_is_valid (source_relative_path)
+      || !wyl_fact_graph_relative_path_is_valid (canonical_relative_path)
       || !fact_reconcile_artifact_evidence_is_valid (source_evidence))
     return WYRELOG_E_INVALID;
   GraphAuthorityMutationFrame frame;

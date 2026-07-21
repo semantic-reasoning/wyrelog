@@ -898,6 +898,10 @@ void wyl_fact_graph_resolver_set_checkpoint_for_test
 }
 
 static wyrelog_error_t directory_revalidate (WylFactGraphDirectory * directory);
+static wyrelog_error_t
+open_relative_regular_path (HANDLE root, const gchar * relative_path,
+    HANDLE * out_handle, WylFactGraphWinIdentity * out_identity,
+    guint64 * out_size_bytes);
 
 wyrelog_error_t
 wyl_fact_graph_resolver_open_directory (WylFactGraphResolver *resolver,
@@ -976,6 +980,37 @@ fail:
     CloseHandle (root);
   wyl_fact_graph_directory_clear (out_directory);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_resolver_open_relative_regular (WylFactGraphResolver *resolver,
+    const gchar *relative_path, WylFactGraphRegularFile *out_file)
+{
+  HANDLE opened = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity identity = { 0 };
+  guint64 size_bytes = 0;
+  if (out_file != NULL)
+    *out_file = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  if (resolver == NULL || !handle_is_valid (resolver->handle)
+      || resolver->path == NULL || out_file == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular_path (resolver->handle, relative_path,
+        &opened, &identity, &size_bytes);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_resolver_revalidate (resolver);
+  if (rc != WYRELOG_E_OK) {
+    if (handle_is_valid (opened))
+      CloseHandle (opened);
+    if (out_file != NULL)
+      *out_file = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+    return rc;
+  }
+  out_file->handle = opened;
+  out_file->identity = identity;
+  out_file->size_bytes = size_bytes;
+  return WYRELOG_E_OK;
 }
 
 void
@@ -1230,6 +1265,78 @@ open_relative_regular (HANDLE parent, const gchar *basename,
   }
   *out_handle = handle;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+open_relative_regular_path (HANDLE root, const gchar *relative_path,
+    HANDLE *out_handle, WylFactGraphWinIdentity *out_identity,
+    guint64 *out_size_bytes)
+{
+  if (out_handle != NULL)
+    *out_handle = INVALID_HANDLE_VALUE;
+  if (out_identity != NULL)
+    memset (out_identity, 0, sizeof *out_identity);
+  if (out_size_bytes != NULL)
+    *out_size_bytes = 0;
+  if (out_handle == NULL || out_identity == NULL || out_size_bytes == NULL
+      || !wyl_fact_graph_relative_path_is_valid (relative_path))
+    return WYRELOG_E_INVALID;
+  HANDLE current = INVALID_HANDLE_VALUE;
+  if (!DuplicateHandle (GetCurrentProcess (), root, GetCurrentProcess (),
+          &current, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    return WYRELOG_E_IO;
+  g_auto (GStrv) components = g_strsplit (relative_path, "/", -1);
+  if (components == NULL) {
+    CloseHandle (current);
+    return WYRELOG_E_NOMEM;
+  }
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (gsize i = 0; rc == WYRELOG_E_OK && components[i + 1] != NULL; i++) {
+    glong units = 0;
+    g_autofree gunichar2 *wide = g_utf8_to_utf16 (components[i], -1, NULL,
+        &units, NULL);
+    HANDLE next = INVALID_HANDLE_VALUE;
+    WylFactGraphWinIdentity next_identity = { 0 };
+    if (wide == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else if (units <= 0)
+      rc = WYRELOG_E_POLICY;
+    else
+      rc = open_relative_directory (current, (WCHAR *) wide, (gsize) units,
+          FALSE, TRUE, &next, &next_identity);
+    if (rc != WYRELOG_E_OK)
+      break;
+    CloseHandle (current);
+    current = next;
+  }
+  if (rc == WYRELOG_E_OK) {
+    const gchar *basename = components[0];
+    for (gsize i = 1; components[i] != NULL; i++)
+      basename = components[i];
+    rc = open_relative_regular (current, basename, GENERIC_READ, FALSE, TRUE,
+        out_handle, out_identity);
+    if (rc == WYRELOG_E_OK) {
+      FILE_STANDARD_INFO standard = { 0 };
+      if (!GetFileInformationByHandleEx ((HANDLE) * out_handle,
+              FileStandardInfo, &standard, sizeof standard)
+          || standard.EndOfFile.QuadPart < 0)
+        rc = WYRELOG_E_IO;
+      else
+        *out_size_bytes = (guint64) standard.EndOfFile.QuadPart;
+    }
+  }
+  if (handle_is_valid (current))
+    CloseHandle (current);
+  if (rc != WYRELOG_E_OK) {
+    if (handle_is_valid ((HANDLE) * out_handle))
+      CloseHandle ((HANDLE) * out_handle);
+    if (out_handle != NULL)
+      *out_handle = INVALID_HANDLE_VALUE;
+    memset (out_identity, 0, sizeof *out_identity);
+    if (out_size_bytes != NULL)
+      *out_size_bytes = 0;
+  }
+  return rc;
 }
 
 static wyrelog_error_t

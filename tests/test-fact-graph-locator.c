@@ -544,6 +544,99 @@ fail_publish_checkpoint_once (const gchar *point, gpointer user_data)
 }
 
 static void
+test_posix_resolver_opens_nested_relative_regular_file (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphRegularFile file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_autofree gchar *tenant = g_build_filename (root, "tenant", NULL);
+  g_autofree gchar *graph = g_build_filename (tenant, "graph", NULL);
+  g_autofree gchar *legacy = g_build_filename (graph, "legacy", NULL);
+  g_autofree gchar *nested = g_build_filename (legacy, "nested", NULL);
+  g_autofree gchar *path = g_build_filename (nested, "facts.duckdb", NULL);
+
+  g_assert_cmpint (g_mkdir (tenant, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (graph, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (legacy, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (nested, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (path, "duck", 4, NULL));
+  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+
+  g_assert_true (wyl_fact_graph_relative_path_is_valid
+      ("tenant/graph/legacy/nested/facts.duckdb"));
+  static const gchar *invalid[] = {
+    "", "/", ".", "..", "tenant//graph", "tenant/./graph",
+    "tenant/../graph", "tenant\\graph", "tenant:graph",
+    "tenant/graph/",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
+    g_assert_false (wyl_fact_graph_relative_path_is_valid (invalid[i]));
+
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          "tenant/graph/legacy/nested/facts.duckdb", &file), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (file.size_bytes, ==, 4);
+  gchar contents[5] = { 0 };
+  g_assert_cmpint (read (file.fd, contents, 4), ==, 4);
+  g_assert_cmpstr (contents, ==, "duck");
+  wyl_fact_graph_regular_file_clear (&file);
+
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree (root);
+}
+
+static void
+test_posix_resolver_rejects_hardlink_and_aliases (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphRegularFile file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  g_autofree gchar *tenant = g_build_filename (root, "tenant", NULL);
+  g_autofree gchar *graph = g_build_filename (tenant, "graph", NULL);
+  g_autofree gchar *legacy = g_build_filename (graph, "legacy", NULL);
+  g_autofree gchar *path = g_build_filename (legacy, "facts.duckdb", NULL);
+  g_autofree gchar *hardlink = g_build_filename (legacy, "facts-hard.duckdb",
+      NULL);
+  g_autofree gchar *branch_link = g_build_filename (graph, "legacy-link",
+      NULL);
+  g_autofree gchar *final_link = g_build_filename (legacy, "facts-link.duckdb",
+      NULL);
+  g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
+
+  g_assert_cmpint (g_mkdir (tenant, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (graph, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (legacy, 0700), ==, 0);
+  g_assert_true (g_file_set_contents (path, "duck", 4, NULL));
+  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  g_assert_cmpint (link (path, hardlink), ==, 0);
+
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          "tenant/graph/legacy/facts.duckdb", &file), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_unlink (hardlink), ==, 0);
+
+  g_assert_true (g_file_set_contents (outside, "outside", -1, NULL));
+  g_assert_cmpint (g_chmod (outside, 0600), ==, 0);
+  g_assert_cmpint (symlink (outside, branch_link), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          "tenant/graph/legacy-link/facts.duckdb", &file), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (branch_link), ==, 0);
+
+  g_assert_cmpint (symlink (outside, final_link), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_relative_regular (&resolver,
+          "tenant/graph/legacy/facts-link.duckdb", &file), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (final_link), ==, 0);
+
+  wyl_fact_graph_regular_file_clear (&file);
+  wyl_fact_graph_resolver_clear (&resolver);
+  remove_tree (root);
+}
+
+static void
 test_posix_resolver_publish_retries_converge (void)
 {
   g_autofree gchar *root = make_root ();
@@ -769,6 +862,10 @@ main (int argc, char **argv)
       test_posix_resolver_stage_abort_and_final_substitution);
   g_test_add_func ("/fact-graph-locator/posix/graph-replacement-file-mode",
       test_posix_resolver_rejects_graph_replacement_and_file_mode);
+  g_test_add_func ("/fact-graph-locator/posix/relative-regular-nested",
+      test_posix_resolver_opens_nested_relative_regular_file);
+  g_test_add_func ("/fact-graph-locator/posix/relative-regular-rejects-aliases",
+      test_posix_resolver_rejects_hardlink_and_aliases);
   g_test_add_func ("/fact-graph-locator/posix/no-overwrite-stage-replacement",
       test_posix_resolver_never_overwrites_final_or_replaced_stage);
   g_test_add_func ("/fact-graph-locator/posix/publish-retry",
