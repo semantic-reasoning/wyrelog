@@ -297,7 +297,7 @@ jobs:
           )
           meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Denable_fact_store=${{ matrix.fact_store }} -Dduckdb_source=prebuilt
           if "%WYRELOG_USE_SCCACHE%"=="1" (
-            ninja -C builddir -t commands wyctl wyrelogd | findstr /I /C:"sccache" >NUL
+            ninja -C builddir -t commands | findstr /I /C:"sccache" >NUL
             if errorlevel 1 exit /b 1
           )
 
