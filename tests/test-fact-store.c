@@ -1583,6 +1583,7 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
   g_autofree gchar *extra_column =
       g_build_filename (dir, "extra-column.db", NULL);
   g_autofree gchar *defaulted = g_build_filename (dir, "defaulted.db", NULL);
+  g_autofree gchar *collated = g_build_filename (dir, "collated.db", NULL);
   g_autofree gchar *embedded_nul =
       g_build_filename (dir, "embedded-nul.db", NULL);
   g_autofree gchar *policy = g_build_filename (dir, "policy.sqlite", NULL);
@@ -1667,6 +1668,15 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
           WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
     return 2308;
 
+  if (!create_duckdb_with_sql (collated,
+          "CREATE TABLE fact_store_metadata("
+          "key VARCHAR COLLATE nocase PRIMARY KEY,"
+          "value VARCHAR COLLATE nocase NOT NULL);" TEST_IDENTITY_ROWS)
+      || !identified_open_is (collated, &test_identity,
+          WYL_FACT_STORE_IDENTITY_VALIDATE_ONLY, WYRELOG_E_POLICY,
+          WYL_FACT_STORE_IDENTITY_RESULT_SCHEMA))
+    return 2312;
+
   if (create_duckdb_with_sql (embedded_nul,
           "CREATE TABLE fact_store_metadata("
           "key VARCHAR PRIMARY KEY,value VARCHAR NOT NULL);"
@@ -1696,6 +1706,7 @@ check_fact_store_identity_rejects_foreign_catalogs (void)
   g_remove (extra_index);
   g_remove (extra_column);
   g_remove (defaulted);
+  g_remove (collated);
   g_remove (embedded_nul);
   g_remove (policy);
   g_rmdir (dir);
