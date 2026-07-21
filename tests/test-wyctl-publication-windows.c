@@ -11,36 +11,34 @@
 #include <aclapi.h>
 #include <sddl.h>
 
-static gboolean
-sid_matches_current_user (PSID sid)
+static TOKEN_USER *
+current_token_user (void)
 {
   HANDLE token = NULL;
   DWORD needed = 0;
   TOKEN_USER *user = NULL;
-  gboolean matches = FALSE;
 
-  if (sid == NULL || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY,
-          &token))
-    return FALSE;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return NULL;
   if (!GetTokenInformation (token, TokenUser, NULL, 0, &needed)
       && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
     CloseHandle (token);
-    return FALSE;
+    return NULL;
   }
   user = g_malloc0 (needed);
-  if (user == NULL) {
-    CloseHandle (token);
-    return FALSE;
-  }
-  if (!GetTokenInformation (token, TokenUser, user, needed, &needed)) {
-    g_free (user);
-    CloseHandle (token);
-    return FALSE;
-  }
-  matches = EqualSid (sid, user->User.Sid);
-  g_free (user);
+  if (user != NULL && !GetTokenInformation (token, TokenUser, user, needed,
+          &needed))
+    g_clear_pointer (&user, g_free);
   CloseHandle (token);
-  return matches;
+  return user;
+}
+
+static gboolean
+sid_matches_current_user (PSID sid)
+{
+  g_autofree TOKEN_USER *user = current_token_user ();
+
+  return sid != NULL && user != NULL && EqualSid (sid, user->User.Sid);
 }
 
 static gboolean
@@ -121,22 +119,48 @@ typedef struct
   gchar *root_dir;
 } WindowsFixture;
 
+/* Stamp the token user as owner alongside the protected owner-only DACL. A
+ * single call applies the owner before the DACL, so the WRITE_OWNER check
+ * still runs against the inherited parent DACL; stamping the DACL first would
+ * instead depend on the OWNER RIGHTS ACE, which suppresses the implicit owner
+ * READ_CONTROL|WRITE_DAC grant. */
+static void
+stamp_owner_only_root (const gchar *path)
+{
+  g_autofree wchar_t *wpath = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_autofree TOKEN_USER *user = current_token_user ();
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  BOOL dacl_present = FALSE;
+  BOOL dacl_defaulted = FALSE;
+  PACL dacl = NULL;
+  DWORD status;
+
+  g_assert_nonnull (wpath);
+  g_assert_nonnull (user);
+  g_assert_true (ConvertStringSecurityDescriptorToSecurityDescriptorW
+      (L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL));
+  g_assert_true (GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
+          &dacl_defaulted));
+  g_assert_true (dacl_present);
+  status = SetNamedSecurityInfoW ((LPWSTR) wpath, SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION
+      | PROTECTED_DACL_SECURITY_INFORMATION, user->User.Sid, NULL, dacl, NULL);
+  LocalFree (descriptor);
+  g_assert_cmpuint (status, ==, ERROR_SUCCESS);
+}
+
+/* Publication roots in production are created by the caller and are never
+ * owner-stamped by the backend, so an elevated caller's root still arrives
+ * owned by BUILTIN\Administrators and is rejected with WYRELOG_E_POLICY. That
+ * path is deliberately left uncovered: producing such a root requires
+ * elevation, and an elevation-dependent test is the failure mode #559 came
+ * from. */
 static void
 windows_fixture_setup (WindowsFixture *fixture)
 {
   fixture->root_dir = g_dir_make_tmp ("wyctl-publication-windows-XXXXXX", NULL);
   g_assert_nonnull (fixture->root_dir);
-  {
-    g_autofree wchar_t *wroot = g_utf8_to_utf16 (fixture->root_dir, -1,
-        NULL, NULL, NULL);
-    PSECURITY_DESCRIPTOR descriptor = NULL;
-    g_assert_true
-        (ConvertStringSecurityDescriptorToSecurityDescriptorW
-        (L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL));
-    g_assert_true (SetFileSecurityW (wroot, DACL_SECURITY_INFORMATION,
-            descriptor));
-    LocalFree (descriptor);
-  }
+  stamp_owner_only_root (fixture->root_dir);
   wyctl_publication_windows_backend_init (&fixture->backend, fixture->root_dir);
 }
 
@@ -815,6 +839,67 @@ test_owner_only_security_descriptor_predicate (void)
       (wyctl_publication_windows_test_security_descriptor_is_owner_only
       ("D:P(A;;FA;;;WD)"));
 }
+
+/* The predicate test above wraps every input in an owner the harness supplies,
+ * so it passes whether or not the backend stamps one. Assert instead on the
+ * descriptor the backend attaches to the objects it creates: with no owner in
+ * it, Windows takes the owner from the creating token's TokenOwner field,
+ * which is BUILTIN\Administrators under an administrator token UAC has not
+ * filtered, and the backend then rejects its own stage file (issue #559).
+ *
+ * Parse the rendered descriptor back and compare SIDs rather than SDDL text:
+ * the renderer abbreviates well-known owners to two-letter aliases, so
+ * LocalSystem renders as "O:SY" and the built-in Administrator as "O:LA",
+ * while ConvertSidToStringSidW always renders numerically. Comparing the
+ * strings would fail on correct output whenever the test runs under such an
+ * account, and would fail looking exactly like the defect this test exists to
+ * catch. */
+static void
+test_creation_security_descriptor_names_token_user_owner (void)
+{
+  g_autofree gchar *sddl =
+      wyctl_publication_windows_test_creation_security_descriptor_sddl ();
+  g_autofree wchar_t *wsddl = NULL;
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  BOOL owner_defaulted = FALSE;
+  BOOL dacl_present = FALSE;
+  BOOL dacl_defaulted = FALSE;
+  PSID owner = NULL;
+  PACL dacl = NULL;
+  ACL_SIZE_INFORMATION size_info = { 0 };
+  ACCESS_ALLOWED_ACE *ace = NULL;
+
+  g_assert_nonnull (sddl);
+  wsddl = g_utf8_to_utf16 (sddl, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wsddl);
+  g_assert_true (ConvertStringSecurityDescriptorToSecurityDescriptorW (wsddl,
+          SDDL_REVISION_1, &descriptor, NULL));
+
+  g_assert_true (GetSecurityDescriptorOwner (descriptor, &owner,
+          &owner_defaulted));
+  g_assert_nonnull (owner);
+  g_assert_true (sid_matches_current_user (owner));
+
+  g_assert_true (GetSecurityDescriptorControl (descriptor, &control,
+          &revision));
+  g_assert_cmpuint (control & SE_DACL_PROTECTED, ==, SE_DACL_PROTECTED);
+
+  g_assert_true (GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
+          &dacl_defaulted));
+  g_assert_true (dacl_present);
+  g_assert_nonnull (dacl);
+  g_assert_true (GetAclInformation (dacl, &size_info, sizeof size_info,
+          AclSizeInformation));
+  g_assert_cmpuint (size_info.AceCount, ==, 1);
+  g_assert_true (GetAce (dacl, 0, (LPVOID *) & ace));
+  g_assert_cmpuint (ace->Header.AceType, ==, ACCESS_ALLOWED_ACE_TYPE);
+  g_assert_true (sid_is_owner_rights ((PSID) & ace->SidStart));
+  g_assert_cmpuint (ace->Mask, ==, FILE_ALL_ACCESS);
+
+  LocalFree (descriptor);
+}
 #endif
 
 int
@@ -846,6 +931,8 @@ main (int argc, char **argv)
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
   g_test_add_func ("/wyctl/publication/windows/owner-only-security-descriptor",
       test_owner_only_security_descriptor_predicate);
+  g_test_add_func ("/wyctl/publication/windows/creation-descriptor-owner",
+      test_creation_security_descriptor_names_token_user_owner);
 #endif
   return g_test_run ();
 }
