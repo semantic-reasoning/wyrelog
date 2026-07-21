@@ -44,10 +44,23 @@ sid_matches_current_user (PSID sid)
 }
 
 static gboolean
+sid_is_owner_rights (PSID sid)
+{
+  BYTE buffer[SECURITY_MAX_SID_SIZE];
+  DWORD size = sizeof buffer;
+
+  return sid != NULL
+      && CreateWellKnownSid (WinCreatorOwnerRightsSid, NULL, buffer, &size)
+      && EqualSid (sid, buffer);
+}
+
+static gboolean
 security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
 {
   BOOL dacl_present = FALSE;
   BOOL dacl_defaulted = FALSE;
+  BOOL owner_defaulted = FALSE;
+  DWORD revision = 0;
   SECURITY_DESCRIPTOR_CONTROL control = 0;
   PACL dacl = NULL;
   PSID owner = NULL;
@@ -55,9 +68,9 @@ security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
   ACCESS_ALLOWED_ACE *ace = NULL;
 
   if (descriptor == NULL
-      || !GetSecurityDescriptorControl (descriptor, &control, NULL)
+      || !GetSecurityDescriptorControl (descriptor, &control, &revision)
       || (control & SE_DACL_PROTECTED) == 0
-      || !GetSecurityDescriptorOwner (descriptor, &owner, NULL)
+      || !GetSecurityDescriptorOwner (descriptor, &owner, &owner_defaulted)
       || owner == NULL || !sid_matches_current_user (owner)
       || !GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
           &dacl_defaulted)
@@ -69,7 +82,7 @@ security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
   if (!GetAce (dacl, 0, (LPVOID *) & ace) || ace == NULL
       || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
     return FALSE;
-  return EqualSid ((PSID) & ace->SidStart, owner)
+  return sid_is_owner_rights ((PSID) & ace->SidStart)
       && ace->Mask == FILE_ALL_ACCESS;
 }
 

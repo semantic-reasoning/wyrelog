@@ -443,27 +443,17 @@ if build_client and host_machine.system() != 'windows'
 
   test('wyctl-publication', test_wyctl_publication)
 
-  if host_machine.system() != 'windows'
-    test_wyctl_publication_posix = executable('test-wyctl-publication-posix',
-      'test-wyctl-publication-posix.c',
-      include_directories : [include_directories('../wyrelog'),
-        include_directories('../wyrelog/wyctl')],
-      dependencies : [wyrelog_dep, sodium_dep, publication_private_dep],
-    )
+  # The whole enclosing block is already `host_machine.system() != 'windows'`,
+  # so the POSIX publication test lives here directly. The Windows variant is
+  # built in its own `system() == 'windows'` block below (issue #559).
+  test_wyctl_publication_posix = executable('test-wyctl-publication-posix',
+    'test-wyctl-publication-posix.c',
+    include_directories : [include_directories('../wyrelog'),
+      include_directories('../wyrelog/wyctl')],
+    dependencies : [wyrelog_dep, sodium_dep, publication_private_dep],
+  )
 
-    test('wyctl-publication-posix', test_wyctl_publication_posix)
-  else
-    test_wyctl_publication_windows = executable('test-wyctl-publication-windows',
-      'test-wyctl-publication-windows.c',
-      c_args : ['-DWYL_TEST_WYCTL_PUBLICATION_WINDOWS'],
-      include_directories : [include_directories('../wyrelog'),
-        include_directories('../wyrelog/wyctl')],
-      dependencies : [wyrelog_dep, sodium_dep, advapi32_dep,
-        publication_private_dep],
-    )
-
-    test('wyctl-publication-windows', test_wyctl_publication_windows)
-  endif
+  test('wyctl-publication-posix', test_wyctl_publication_posix)
 
   test_wyctl_basic = executable('test-wyctl-basic',
     'test-wyctl-basic.c',
@@ -551,6 +541,25 @@ if build_client and host_machine.system() != 'windows'
   test('wyctl-policy-daemon', test_wyctl_policy_daemon,
     depends : wyctl_exe,
   )
+endif
+
+if build_client and host_machine.system() == 'windows'
+  # The backend translation unit is compiled directly into the test (rather
+  # than linked from publication_private_dep) so the
+  # WYL_TEST_WYCTL_PUBLICATION_WINDOWS-gated owner-only predicate hook is
+  # available, mirroring how the daemon-http tests pull in http.c. Linking
+  # publication_private_dep as well would duplicate the backend symbols.
+  test_wyctl_publication_windows = executable('test-wyctl-publication-windows',
+    'test-wyctl-publication-windows.c',
+    '../wyrelog/wyctl/wyctl-publication-windows-private.c',
+    '../wyrelog/wyctl/wyctl-publication-private.c',
+    c_args : ['-DWYL_TEST_WYCTL_PUBLICATION_WINDOWS'],
+    include_directories : [include_directories('../wyrelog'),
+      include_directories('../wyrelog/wyctl')],
+    dependencies : [wyrelog_dep, sodium_dep, advapi32_dep],
+  )
+
+  test('wyctl-publication-windows', test_wyctl_publication_windows)
 endif
 
 if host_machine.system() != 'windows' and build_client
