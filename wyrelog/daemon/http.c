@@ -6323,6 +6323,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
       };
       rc = wyl_fact_store_forget (fact_store, &schema, &fopts, &rows_purged);
     }
+    g_clear_pointer (&fact_store, wyl_fact_store_close);
     if (rc == WYRELOG_E_OK)
       (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
 
@@ -6495,6 +6496,7 @@ facts_route_handler (SoupServer *server, SoupServerMessage *msg,
     else
       rc = wyl_fact_store_append_batch (fact_store, &schema, &batch, &inserted);
   }
+  g_clear_pointer (&fact_store, wyl_fact_store_close);
   if (rc == WYRELOG_E_OK)
     (void) wyl_handle_replay_fact_graphs (ctx->handle, NULL);
   if (rc == WYRELOG_E_OK)
