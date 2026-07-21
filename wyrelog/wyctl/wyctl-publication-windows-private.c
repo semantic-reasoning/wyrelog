@@ -326,21 +326,41 @@ sid_matches_current_user (PSID sid)
   return matches;
 }
 
+/* The owner-only DACL grants full access to the OWNER RIGHTS well-known SID
+ * (S-1-3-4), not to the owner's own SID: files/roots are created with the
+ * `D:P(A;;FA;;;OW)` descriptor, so "OW" resolves to OWNER RIGHTS and the ACE
+ * SID is always S-1-3-4 regardless of who owns the object (issue #559). */
+static gboolean
+sid_is_owner_rights (PSID sid)
+{
+  BYTE buffer[SECURITY_MAX_SID_SIZE];
+  DWORD size = sizeof buffer;
+
+  return sid != NULL
+      && CreateWellKnownSid (WinCreatorOwnerRightsSid, NULL, buffer, &size)
+      && EqualSid (sid, buffer);
+}
+
 static gboolean
 security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
 {
   BOOL dacl_present = FALSE;
   BOOL dacl_defaulted = FALSE;
+  BOOL owner_defaulted = FALSE;
+  DWORD revision = 0;
   SECURITY_DESCRIPTOR_CONTROL control = 0;
   PACL dacl = NULL;
   PSID owner = NULL;
   ACL_SIZE_INFORMATION size_info = { 0 };
   ACCESS_ALLOWED_ACE *ace = NULL;
 
+  /* GetSecurityDescriptorControl requires a non-NULL lpdwRevision and
+   * GetSecurityDescriptorOwner a non-NULL lpbOwnerDefaulted; passing NULL
+   * faults inside ntdll (issue #559). */
   if (descriptor == NULL
-      || !GetSecurityDescriptorControl (descriptor, &control, NULL)
+      || !GetSecurityDescriptorControl (descriptor, &control, &revision)
       || (control & SE_DACL_PROTECTED) == 0
-      || !GetSecurityDescriptorOwner (descriptor, &owner, NULL)
+      || !GetSecurityDescriptorOwner (descriptor, &owner, &owner_defaulted)
       || owner == NULL || !sid_matches_current_user (owner)
       || !GetSecurityDescriptorDacl (descriptor, &dacl_present, &dacl,
           &dacl_defaulted)
@@ -352,7 +372,7 @@ security_descriptor_is_owner_only (PSECURITY_DESCRIPTOR descriptor)
   if (!GetAce (dacl, 0, (LPVOID *) & ace) || ace == NULL
       || ace->Header.AceType != ACCESS_ALLOWED_ACE_TYPE)
     return FALSE;
-  return EqualSid ((PSID) & ace->SidStart, owner)
+  return sid_is_owner_rights ((PSID) & ace->SidStart)
       && ace->Mask == FILE_ALL_ACCESS;
 }
 
@@ -412,17 +432,54 @@ handle_is_owner_only_directory (HANDLE handle,
 }
 
 #ifdef WYL_TEST_WYCTL_PUBLICATION_WINDOWS
+/* Prefix the DACL-only test fixture with "O:<current-user-SID>" so the parsed
+ * descriptor carries an owner the strict predicate can match. Real kernel
+ * descriptors always carry an owner, so this keeps the production predicate
+ * exercised exactly as it runs against real objects. */
+static gchar *
+current_user_owned_sddl (const gchar *dacl_sddl)
+{
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  LPWSTR wsid = NULL;
+  g_autofree gchar *sid = NULL;
+
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return NULL;
+  if (!GetTokenInformation (token, TokenUser, NULL, 0, &needed)
+      && GetLastError () != ERROR_INSUFFICIENT_BUFFER) {
+    CloseHandle (token);
+    return NULL;
+  }
+  user = g_malloc0 (needed);
+  if (user != NULL && GetTokenInformation (token, TokenUser, user, needed,
+          &needed) && ConvertSidToStringSidW (user->User.Sid, &wsid)) {
+    sid = g_utf16_to_utf8 ((const gunichar2 *) wsid, -1, NULL, NULL, NULL);
+    LocalFree (wsid);
+  }
+  g_free (user);
+  CloseHandle (token);
+  if (sid == NULL)
+    return NULL;
+  return g_strconcat ("O:", sid, dacl_sddl, NULL);
+}
+
 gboolean
     wyctl_publication_windows_test_security_descriptor_is_owner_only
     (const gchar * sddl)
 {
   PSECURITY_DESCRIPTOR descriptor = NULL;
   gboolean result = FALSE;
+  g_autofree gchar *owned_sddl = NULL;
   wchar_t *wsddl = NULL;
 
   if (sddl == NULL)
     return FALSE;
-  wsddl = utf8_to_wide (sddl);
+  owned_sddl = current_user_owned_sddl (sddl);
+  if (owned_sddl == NULL)
+    return FALSE;
+  wsddl = utf8_to_wide (owned_sddl);
   if (wsddl == NULL)
     return FALSE;
   if (!ConvertStringSecurityDescriptorToSecurityDescriptorW (wsddl,

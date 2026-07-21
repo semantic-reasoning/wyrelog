@@ -4,22 +4,20 @@
 #include <glib/gstdio.h>
 #include <string.h>
 
+#ifdef G_OS_WIN32
+#include <windows.h>
+#include <sddl.h>
+#endif
+
 #include "../wyrelog/wyctl/wyctl-publication-backend-private.h"
 
 #define TEST_CREDENTIAL_ID "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
 
 /* The executor-path and conformance-path tests drive the concrete publication
- * backend through the production vtable end to end.  They run on POSIX, where
- * the backend is exercised by the existing publication suite.  The Windows
- * publication backend is currently guarded out of the build's test coverage
- * (see tests/test-wyctl-publication-windows.c, which sits in an unreachable
- * branch) and has not been validated end to end; driving it here is deferred
- * to its own rehabilitation.  The adapter itself still compiles on Windows and
- * is smoke-tested there via test_backend_open_rejects_empty_root.  Its per-OS
- * shims are structurally identical, so POSIX runtime coverage plus the Windows
- * compile-and-link give strong confidence in the Windows forwarding; the real
- * Windows end-to-end validation is tracked in #559. */
-#ifndef G_OS_WIN32
+ * backend through the production vtable end to end on both POSIX and Windows.
+ * The Windows publication backend was rehabilitated and validated end to end
+ * in #559, so the same production vtable exercise runs on every platform; the
+ * per-OS shims are structurally identical and now both have runtime coverage. */
 
 static gchar *
 make_backend_root (const gchar *template)
@@ -27,6 +25,23 @@ make_backend_root (const gchar *template)
   gchar *root = g_dir_make_tmp (template, NULL);
 
   g_assert_nonnull (root);
+#ifdef G_OS_WIN32
+  /* The Windows backend requires a protected, owner-only root DACL (full
+   * access to OWNER RIGHTS); g_dir_make_tmp leaves the inherited parent DACL,
+   * so stamp the owner-only descriptor the backend expects, matching the
+   * windows publication fixture. */
+  {
+    g_autofree wchar_t *wroot = g_utf8_to_utf16 (root, -1, NULL, NULL, NULL);
+    PSECURITY_DESCRIPTOR descriptor = NULL;
+
+    g_assert_nonnull (wroot);
+    g_assert_true (ConvertStringSecurityDescriptorToSecurityDescriptorW
+        (L"D:P(A;;FA;;;OW)", SDDL_REVISION_1, &descriptor, NULL));
+    g_assert_true (SetFileSecurityW (wroot, DACL_SECURITY_INFORMATION,
+            descriptor));
+    LocalFree (descriptor);
+  }
+#endif
   return root;
 }
 
@@ -189,8 +204,6 @@ test_backend_conformance_path (void)
   g_free (root);
 }
 
-#endif /* !G_OS_WIN32 */
-
 static void
 test_backend_open_rejects_empty_root (void)
 {
@@ -208,12 +221,10 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
-#ifndef G_OS_WIN32
   g_test_add_func ("/wyctl/publication-backend/executor-path",
       test_backend_executor_path);
   g_test_add_func ("/wyctl/publication-backend/conformance-path",
       test_backend_conformance_path);
-#endif
   g_test_add_func ("/wyctl/publication-backend/open-rejects-empty-root",
       test_backend_open_rejects_empty_root);
   return g_test_run ();
