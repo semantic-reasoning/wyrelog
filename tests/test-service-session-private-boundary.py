@@ -294,6 +294,8 @@ def main() -> int:
         semantic_tasks, ["clang-cl"], "clang-cl", chunk_size=3)
     default_batches = guard_module.semantic_batch_tasks(
         semantic_tasks, ["clang-cl"], "clang-cl")
+    msvc_batches = guard_module.semantic_batch_tasks(
+        semantic_tasks, ["cl"], "msvc")
     assert [tuple(item[0] for item in batch[0]) for batch in first_batches] == [
         tuple(item[0] for item in batch[0]) for batch in second_batches]
     actual_rel_order = [item[0] for batch in default_batches for item in batch[0]]
@@ -306,9 +308,13 @@ def main() -> int:
                    for item in batch[0])
     assert [len(batch[0]) for batch in first_batches] == [3, 3, 3, 2]
     assert all(len(batch[0]) <= 3 for batch in first_batches)
-    assert [len(batch[0]) for batch in default_batches] == [3, 8]
+    assert [len(batch[0]) for batch in default_batches] == [3, 4, 4]
     assert all(len(batch[0]) <= guard_module.SEMANTIC_BATCH_CHUNK_SIZE
                for batch in default_batches)
+    assert all(len(batch[0])
+               <= guard_module.CLANG_CL_SEMANTIC_BATCH_CHUNK_SIZE
+               for batch in default_batches)
+    assert [len(batch[0]) for batch in msvc_batches] == [3, 8]
     try:
         guard_module.semantic_batch_tasks(semantic_tasks, ["clang-cl"],
                                           "clang-cl", chunk_size=0)
