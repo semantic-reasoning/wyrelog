@@ -5072,6 +5072,14 @@ check_policy_permission_mutation_contract (WylHandle *handle,
   }
   g_clear_pointer (&body, g_free);
 
+  rc = send_raw_policy_mutation (session, "POST", base_url,
+      "/tenants/delete", "name=tenant-a", &status, &body);
+  if (rc != 0)
+    return rc;
+  if (status != 501 || strstr (body, "\"tenant_delete_unsupported\"") == NULL)
+    return 204;
+  g_clear_pointer (&body, g_free);
+
   g_autofree gchar *tenant_create_query =
       g_strdup_printf ("name=tenant-a&tenant=%s&session_token=%s"
       "&guard_timestamp=123&guard_loc_class=public&guard_risk=49",
