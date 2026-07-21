@@ -27,7 +27,7 @@ test_precedence (void)
       WYL_FACT_RECONCILE_ACTION_REVIEW);
   e.unsupported_newer = FALSE;
   classify (e, WYL_FACT_RECONCILE_EXISTING_VALID,
-      WYL_FACT_RECONCILE_ACTION_ADOPT);
+      WYL_FACT_RECONCILE_ACTION_RECONCILE);
 }
 
 static void
@@ -38,17 +38,16 @@ test_classes (void)
       WYL_FACT_RECONCILE_ACTION_REVIEW);
   e.schema_registered = TRUE;
   classify (e, WYL_FACT_RECONCILE_MISSING_WITH_SCHEMA,
-      WYL_FACT_RECONCILE_ACTION_REVIEW);
+      WYL_FACT_RECONCILE_ACTION_DEGRADE);
   e.canonical_present = TRUE;
   classify (e, WYL_FACT_RECONCILE_CORRUPT, WYL_FACT_RECONCILE_ACTION_REVIEW);
   e.canonical_valid = TRUE;
   e.schema_valid = TRUE;
   classify (e, WYL_FACT_RECONCILE_EXISTING_VALID,
-      WYL_FACT_RECONCILE_ACTION_ADOPT);
+      WYL_FACT_RECONCILE_ACTION_RECONCILE);
   e.raw_present = TRUE;
   e.raw_valid = TRUE;
-  classify (e, WYL_FACT_RECONCILE_PATH_COLLISION,
-      WYL_FACT_RECONCILE_ACTION_REVIEW);
+  classify (e, WYL_FACT_RECONCILE_PARTIAL, WYL_FACT_RECONCILE_ACTION_REVIEW);
   e.raw_valid = FALSE;
   classify (e, WYL_FACT_RECONCILE_PARTIAL, WYL_FACT_RECONCILE_ACTION_REVIEW);
   e.raw_present = FALSE;
