@@ -66,6 +66,9 @@ prepare_fact_root (const WylDaemonOptions *opts, GError **error)
         "failed to stat fact root directory: %s", opts->fact_root);
     return FALSE;
   }
+#ifndef G_OS_WIN32
+  /* Windows st_mode does not represent the directory ACL.  The writer
+   * lease performs the authoritative Windows ACL and identity checks. */
   if ((fact_root_stat.st_mode & 077) != 0) {
     g_set_error (error, G_FILE_ERROR, G_FILE_ERROR_ACCES,
         "fact root must not be accessible by group or other users: %s",
@@ -78,6 +81,7 @@ prepare_fact_root (const WylDaemonOptions *opts, GError **error)
         opts->fact_root);
     return FALSE;
   }
+#endif
   return TRUE;
 #else
   g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_BAD_VALUE,
