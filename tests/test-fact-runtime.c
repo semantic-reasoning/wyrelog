@@ -19,6 +19,15 @@ typedef struct
   Gate *gate;
 } BuildSpec;
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  gboolean completed;
+} Completion;
+
+#define DEADLOCK_CEILING_US (30 * G_TIME_SPAN_SECOND)
+
 static void
 gate_init (Gate *gate)
 {
@@ -36,9 +45,13 @@ gate_clear (Gate *gate)
 static void
 gate_wait_entered (Gate *gate)
 {
+  gint64 deadline = g_get_monotonic_time () + DEADLOCK_CEILING_US;
   g_mutex_lock (&gate->mutex);
-  while (!gate->entered)
-    g_cond_wait (&gate->changed, &gate->mutex);
+  while (!gate->entered) {
+    gboolean signaled = g_cond_wait_until (&gate->changed, &gate->mutex,
+        deadline);
+    g_assert_true (signaled || gate->entered);
+  }
   g_mutex_unlock (&gate->mutex);
 }
 
@@ -51,6 +64,44 @@ gate_release (Gate *gate)
   g_mutex_unlock (&gate->mutex);
 }
 
+static void
+completion_init (Completion *completion)
+{
+  g_mutex_init (&completion->mutex);
+  g_cond_init (&completion->changed);
+}
+
+static void
+completion_clear (Completion *completion)
+{
+  g_cond_clear (&completion->changed);
+  g_mutex_clear (&completion->mutex);
+}
+
+static void
+completion_signal (Completion *completion)
+{
+  if (completion == NULL)
+    return;
+  g_mutex_lock (&completion->mutex);
+  completion->completed = TRUE;
+  g_cond_broadcast (&completion->changed);
+  g_mutex_unlock (&completion->mutex);
+}
+
+static void
+completion_wait (Completion *completion)
+{
+  gint64 deadline = g_get_monotonic_time () + DEADLOCK_CEILING_US;
+  g_mutex_lock (&completion->mutex);
+  while (!completion->completed) {
+    gboolean signaled = g_cond_wait_until (&completion->changed,
+        &completion->mutex, deadline);
+    g_assert_true (signaled || completion->completed);
+  }
+  g_mutex_unlock (&completion->mutex);
+}
+
 static wyrelog_error_t
 build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
     gpointer user_data)
@@ -59,11 +110,15 @@ build_marker_engine (const WylFactGraphKey *key, WylEngine **out_engine,
   (void) key;
   *out_engine = NULL;
   if (spec->gate != NULL) {
+    gint64 deadline = g_get_monotonic_time () + DEADLOCK_CEILING_US;
     g_mutex_lock (&spec->gate->mutex);
     spec->gate->entered = TRUE;
     g_cond_broadcast (&spec->gate->changed);
-    while (!spec->gate->released)
-      g_cond_wait (&spec->gate->changed, &spec->gate->mutex);
+    while (!spec->gate->released) {
+      gboolean signaled = g_cond_wait_until (&spec->gate->changed,
+          &spec->gate->mutex, deadline);
+      g_assert_true (signaled || spec->gate->released);
+    }
     g_mutex_unlock (&spec->gate->mutex);
   }
   if (spec->failure != WYRELOG_E_OK)
@@ -267,6 +322,7 @@ typedef struct
   const WylFactGraphKey *key;
   BuildSpec *spec;
   wyrelog_error_t result;
+  Completion *completion;
 } RefreshThread;
 
 static gpointer
@@ -275,6 +331,7 @@ refresh_thread (gpointer user_data)
   RefreshThread *thread = user_data;
   thread->result = wyl_fact_graph_runtime_manager_refresh (thread->manager,
       thread->key, build_marker_engine, thread->spec, NULL);
+  completion_signal (thread->completion);
   return NULL;
 }
 
@@ -290,8 +347,11 @@ test_slow_build_is_graph_local (void)
   Gate gate = { 0 };
   gate_init (&gate);
   BuildSpec slow_spec = {.marker = 31,.gate = &gate };
-  RefreshThread slow_thread = { manager, &slow, &slow_spec,
-    WYRELOG_E_INTERNAL
+  RefreshThread slow_thread = {
+    .manager = manager,
+    .key = &slow,
+    .spec = &slow_spec,
+    .result = WYRELOG_E_INTERNAL,
   };
   GThread *worker = g_thread_new ("slow-build", refresh_thread, &slow_thread);
   gate_wait_entered (&gate);
@@ -329,6 +389,64 @@ typedef struct
   UseGate *gate;
   wyrelog_error_t result;
 } UseThread;
+
+typedef struct
+{
+  WylFactGraphSnapshot *snapshot;
+  UseGate *gate;
+  MarkerProbe probe;
+  wyrelog_error_t result;
+  Completion *completion;
+} QueryThread;
+
+static wyrelog_error_t
+gated_read_marker (WylEngine *engine, gpointer user_data)
+{
+  QueryThread *thread = user_data;
+  gint64 deadline = g_get_monotonic_time () + DEADLOCK_CEILING_US;
+  g_mutex_lock (&thread->gate->mutex);
+  thread->gate->entered = TRUE;
+  g_cond_broadcast (&thread->gate->changed);
+  while (!thread->gate->released) {
+    gboolean signaled = g_cond_wait_until (&thread->gate->changed,
+        &thread->gate->mutex, deadline);
+    g_assert_true (signaled || thread->gate->released);
+  }
+  g_mutex_unlock (&thread->gate->mutex);
+  return read_marker (engine, &thread->probe);
+}
+
+static gpointer
+query_thread (gpointer user_data)
+{
+  QueryThread *thread = user_data;
+  thread->result = wyl_fact_graph_snapshot_use (thread->snapshot,
+      gated_read_marker, thread);
+  completion_signal (thread->completion);
+  return NULL;
+}
+
+static void
+use_gate_wait_entered (UseGate *gate)
+{
+  gint64 deadline = g_get_monotonic_time () + DEADLOCK_CEILING_US;
+  g_mutex_lock (&gate->mutex);
+  while (!gate->entered) {
+    gboolean signaled = g_cond_wait_until (&gate->changed, &gate->mutex,
+        deadline);
+    g_assert_true (signaled || gate->entered);
+  }
+  g_mutex_unlock (&gate->mutex);
+}
+
+static void
+use_gate_release (UseGate *gate)
+{
+  g_mutex_lock (&gate->mutex);
+  gate->released = TRUE;
+  g_cond_broadcast (&gate->changed);
+  g_mutex_unlock (&gate->mutex);
+}
 
 static wyrelog_error_t
 blocking_use (WylEngine *engine, gpointer user_data)
@@ -462,7 +580,12 @@ test_shutdown_keeps_pinned_snapshot_alive (void)
   Gate gate = { 0 };
   gate_init (&gate);
   BuildSpec replacement = {.marker = 62,.gate = &gate };
-  RefreshThread thread = { manager, &key, &replacement, WYRELOG_E_INTERNAL };
+  RefreshThread thread = {
+    .manager = manager,
+    .key = &key,
+    .spec = &replacement,
+    .result = WYRELOG_E_INTERNAL,
+  };
   GThread *builder = g_thread_new ("shutdown-build", refresh_thread, &thread);
   gate_wait_entered (&gate);
   wyl_fact_graph_runtime_manager_shutdown (manager);
@@ -486,6 +609,195 @@ test_shutdown_keeps_pinned_snapshot_alive (void)
   wyl_fact_graph_key_clear (&key);
 }
 
+static void
+test_bounded_query_swap_evict_stress (void)
+{
+  WylFactGraphKey key = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&key, "tenant-stress", "graph"),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec initial = {.marker = 1000 };
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+          build_marker_engine, &initial, &status), ==, WYRELOG_E_OK);
+  guint64 operation_generation = 1;
+  guint64 engine_generation = 1;
+  gint64 published_marker = initial.marker;
+  wyl_fact_graph_runtime_status_clear (&status);
+
+  for (guint iteration = 0; iteration < 16; iteration++) {
+    g_autoptr (WylFactGraphSnapshot) old = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+            &key, &old), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (old), ==,
+        engine_generation);
+    g_assert_cmpint (snapshot_marker (old), ==, published_marker);
+
+    UseGate query_gate = { 0 };
+    g_mutex_init (&query_gate.mutex);
+    g_cond_init (&query_gate.changed);
+    Completion query_completion = { 0 };
+    completion_init (&query_completion);
+    QueryThread query = {
+      old, &query_gate, {0}, WYRELOG_E_INTERNAL, &query_completion
+    };
+    GThread *query_worker = g_thread_new ("stress-query", query_thread,
+        &query);
+    use_gate_wait_entered (&query_gate);
+
+    Gate build_gate = { 0 };
+    gate_init (&build_gate);
+    Completion build_completion = { 0 };
+    completion_init (&build_completion);
+    BuildSpec swap = {
+      .marker = 2000 + (gint64) iteration * 2,
+      .gate = &build_gate,
+    };
+    RefreshThread swap_thread = { manager, &key, &swap, WYRELOG_E_INTERNAL,
+      &build_completion
+    };
+    GThread *builder = g_thread_new ("stress-swap", refresh_thread,
+        &swap_thread);
+    gate_wait_entered (&build_gate);
+
+    g_autoptr (WylFactGraphSnapshot) during_build = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+            &key, &during_build), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (during_build),
+        ==, engine_generation);
+    gboolean evicted = FALSE;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &key,
+            &evicted), ==, WYRELOG_E_BUSY);
+    g_assert_false (evicted);
+
+    gate_release (&build_gate);
+    completion_wait (&build_completion);
+    g_thread_join (builder);
+    completion_clear (&build_completion);
+    gate_clear (&build_gate);
+    g_assert_cmpint (swap_thread.result, ==, WYRELOG_E_OK);
+    operation_generation++;
+    engine_generation++;
+
+    g_autoptr (WylFactGraphSnapshot) current = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+            &key, &current), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (current), ==,
+        engine_generation);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &key,
+            &evicted), ==, WYRELOG_E_BUSY);
+    g_assert_false (evicted);
+
+    use_gate_release (&query_gate);
+    completion_wait (&query_completion);
+    g_thread_join (query_worker);
+    g_assert_cmpint (query.result, ==, WYRELOG_E_OK);
+    g_assert_cmpuint (query.probe.rows, ==, 1);
+    g_assert_cmpint (query.probe.marker, ==, published_marker);
+    completion_clear (&query_completion);
+    g_cond_clear (&query_gate.changed);
+    g_mutex_clear (&query_gate.mutex);
+
+    g_assert_cmpint (snapshot_marker (current), ==, swap.marker);
+    g_assert_cmpint (snapshot_marker (during_build), ==, published_marker);
+
+    g_clear_pointer (&current, wyl_fact_graph_snapshot_unref);
+    g_clear_pointer (&during_build, wyl_fact_graph_snapshot_unref);
+    g_clear_pointer (&old, wyl_fact_graph_snapshot_unref);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_try_evict (manager, &key,
+            &evicted), ==, WYRELOG_E_OK);
+    g_assert_true (evicted);
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, &key,
+            &status), ==, WYRELOG_E_OK);
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_EVICTED);
+    g_assert_cmpuint (status.operation_generation, ==, operation_generation);
+    g_assert_cmpuint (status.engine_generation, ==, engine_generation);
+    wyl_fact_graph_runtime_status_clear (&status);
+
+    BuildSpec republish = {
+      .marker = swap.marker + 1,
+    };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &key,
+            build_marker_engine, &republish, &status), ==, WYRELOG_E_OK);
+    operation_generation++;
+    engine_generation++;
+    g_assert_cmpint (status.state, ==, WYL_FACT_GRAPH_RUNTIME_READY);
+    g_assert_cmpuint (status.operation_generation, ==, operation_generation);
+    g_assert_cmpuint (status.engine_generation, ==, engine_generation);
+    wyl_fact_graph_runtime_status_clear (&status);
+    g_autoptr (WylFactGraphSnapshot) republished = NULL;
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+            &key, &republished), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (wyl_fact_graph_snapshot_engine_generation (republished),
+        ==, engine_generation);
+    g_assert_cmpint (snapshot_marker (republished), ==, republish.marker);
+    published_marker = republish.marker;
+  }
+  wyl_fact_graph_key_clear (&key);
+}
+
+static void
+assert_generation_and_marker (WylFactGraphRuntimeManager *manager,
+    const WylFactGraphKey *key, guint64 operation_generation,
+    guint64 engine_generation, gint64 marker)
+{
+  WylFactGraphRuntimeStatus status = { 0 };
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_get_status (manager, key,
+          &status), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (status.operation_generation, ==, operation_generation);
+  g_assert_cmpuint (status.engine_generation, ==, engine_generation);
+  wyl_fact_graph_runtime_status_clear (&status);
+  g_autoptr (WylFactGraphSnapshot) snapshot = NULL;
+  g_assert_cmpint (wyl_fact_graph_runtime_manager_acquire_snapshot (manager,
+          key, &snapshot), ==, WYRELOG_E_OK);
+  g_assert_cmpint (snapshot_marker (snapshot), ==, marker);
+}
+
+static void
+test_two_tenant_two_graph_generation_isolation (void)
+{
+  WylFactGraphKey keys[4] = { 0 };
+  g_assert_cmpint (wyl_fact_graph_key_init (&keys[0], "tenant-a", "graph-a"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&keys[1], "tenant-a", "graph-b"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&keys[2], "tenant-b", "graph-a"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_key_init (&keys[3], "tenant-b", "graph-b"),
+      ==, WYRELOG_E_OK);
+  g_autoptr (WylFactGraphRuntimeManager) manager = new_manager ();
+  BuildSpec initial[4] = {
+    {.marker = 101}, {.marker = 102},
+    {.marker = 201}, {.marker = 202},
+  };
+  guint64 operation_generations[4] = { 1, 1, 1, 1 };
+  guint64 engine_generations[4] = { 1, 1, 1, 1 };
+  gint64 markers[4] = { 101, 102, 201, 202 };
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++) {
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager, &keys[i],
+            build_marker_engine, &initial[i], NULL), ==, WYRELOG_E_OK);
+  }
+
+  for (guint target = 0; target < G_N_ELEMENTS (keys); target++) {
+    BuildSpec replacement = {
+      .marker = initial[target].marker + 1000,
+    };
+    g_assert_cmpint (wyl_fact_graph_runtime_manager_refresh (manager,
+            &keys[target], build_marker_engine, &replacement, NULL), ==,
+        WYRELOG_E_OK);
+    operation_generations[target]++;
+    engine_generations[target]++;
+    markers[target] = replacement.marker;
+    for (guint observed = 0; observed < G_N_ELEMENTS (keys); observed++)
+      assert_generation_and_marker (manager, &keys[observed],
+          operation_generations[observed], engine_generations[observed],
+          markers[observed]);
+  }
+
+  for (guint i = 0; i < G_N_ELEMENTS (keys); i++)
+    wyl_fact_graph_key_clear (&keys[i]);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -498,5 +810,9 @@ main (int argc, char **argv)
       test_engine_calls_serialize_and_reject_recursion);
   g_test_add_func ("/fact-runtime/shutdown-pinned-lifetime",
       test_shutdown_keeps_pinned_snapshot_alive);
+  g_test_add_func ("/fact-runtime/bounded-query-swap-evict-stress",
+      test_bounded_query_swap_evict_stress);
+  g_test_add_func ("/fact-runtime/two-tenant-two-graph-isolation",
+      test_two_tenant_two_graph_generation_isolation);
   return g_test_run ();
 }
