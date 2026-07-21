@@ -1195,6 +1195,65 @@ test_malformed_preexisting_trigger_fails_closed (void)
       WYRELOG_E_POLICY);
 }
 
+static void
+test_reconcile_journal_prepare_read_list_and_cas (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  insert_graph (wyl_policy_store_get_db (store), "tenant-journal",
+      "graph-journal", FALSE);
+  const gchar *op = "01890f47-3c4b-7cc2-b8c4-dc0c0c073990";
+  const gchar *uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c073991";
+  WylPolicyFactReconcileJournalInput input = {
+    op, "tenant-journal", "graph-journal", 0, 0, 1, 1, uuid,
+    "legacy/graph/facts.duckdb", "v1/tenant/graph/facts.duckdb"
+  };
+  WylPolicyFactReconcileJournalRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_nonnull (record);
+  g_assert_cmpint (record->state, ==, WYL_POLICY_FACT_RECONCILE_PREPARED);
+  g_assert_cmpuint (record->attempt, ==, 0);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+  record = NULL;
+
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+  wyl_policy_fact_reconcile_journal_record_free (record);
+  record = NULL;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
+          WYL_POLICY_FACT_RECONCILE_PREPARED,
+          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
+          WYL_POLICY_FACT_RECONCILE_PREPARED,
+          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
+          WYL_POLICY_FACT_RECONCILE_MOVING,
+          WYL_POLICY_FACT_RECONCILE_DONE, 1, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==,
+      WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION);
+  GPtrArray *records = NULL;
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_list (store,
+          "tenant-journal", &records), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (records->len, ==, 1);
+  g_ptr_array_unref (records);
+  input.source_relative_path = "../escape/facts.duckdb";
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_INVALID);
+  input.source_relative_path = "legacy/./facts.duckdb";
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_policy_store_reconcile_journal_transition (store, op,
+          (WylPolicyFactReconcileJournalState) - 1,
+          WYL_POLICY_FACT_RECONCILE_MOVING, 0, &result), ==, WYRELOG_E_INVALID);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1235,5 +1294,7 @@ main (int argc, char **argv)
       test_preexisting_invalid_row_fails_closed);
   g_test_add_func ("/policy/graph-authority/malformed-trigger",
       test_malformed_preexisting_trigger_fails_closed);
+  g_test_add_func ("/policy/graph-authority/reconcile-journal-cas",
+      test_reconcile_journal_prepare_read_list_and_cas);
   return g_test_run ();
 }

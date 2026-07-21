@@ -82,6 +82,74 @@ typedef enum
   WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND,
 } WylPolicyAuthorityMutationResult;
 
+/* Durable, policy-only state for an offline graph reconciliation operation.
+ * This journal deliberately contains no filesystem or DuckDB handles. */
+typedef enum
+{
+  WYL_POLICY_FACT_RECONCILE_PREPARED,
+  WYL_POLICY_FACT_RECONCILE_MOVING,
+  WYL_POLICY_FACT_RECONCILE_MOVED,
+  WYL_POLICY_FACT_RECONCILE_IDENTITY_COMMITTED,
+  WYL_POLICY_FACT_RECONCILE_AUTHORITY_COMMITTED,
+  WYL_POLICY_FACT_RECONCILE_DONE,
+  WYL_POLICY_FACT_RECONCILE_ABORTED,
+  WYL_POLICY_FACT_RECONCILE_NEEDS_REVIEW,
+} WylPolicyFactReconcileJournalState;
+
+typedef struct
+{
+  const gchar *op_uuid;
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  guint64 expected_lifecycle_generation;
+  guint64 expected_reconciliation_generation;
+  guint64 expected_format_version;
+  guint64 expected_path_encoding_version;
+  const gchar *expected_store_uuid;
+  const gchar *source_relative_path;
+  const gchar *canonical_relative_path;
+} WylPolicyFactReconcileJournalInput;
+
+typedef struct
+{
+  gchar *op_uuid;
+  gchar *tenant_id;
+  gchar *graph_id;
+  guint64 expected_lifecycle_generation;
+  guint64 expected_reconciliation_generation;
+  guint64 expected_format_version;
+  guint64 expected_path_encoding_version;
+  gchar *expected_store_uuid;
+  gchar *source_relative_path;
+  gchar *canonical_relative_path;
+  WylPolicyFactReconcileJournalState state;
+  guint64 attempt;
+  gint64 created_at;
+  gint64 updated_at;
+} WylPolicyFactReconcileJournalRecord;
+
+void wyl_policy_fact_reconcile_journal_record_free
+    (WylPolicyFactReconcileJournalRecord * record);
+const gchar *wyl_policy_fact_reconcile_journal_state_name
+    (WylPolicyFactReconcileJournalState state);
+
+wyrelog_error_t wyl_policy_store_reconcile_journal_prepare
+    (wyl_policy_store_t * store,
+    const WylPolicyFactReconcileJournalInput * input,
+    WylPolicyFactReconcileJournalRecord ** out_record,
+    WylPolicyAuthorityMutationResult * out_result);
+wyrelog_error_t wyl_policy_store_reconcile_journal_read
+    (wyl_policy_store_t * store, const gchar * op_uuid,
+    WylPolicyFactReconcileJournalRecord ** out_record);
+wyrelog_error_t wyl_policy_store_reconcile_journal_list
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    GPtrArray ** out_records);
+wyrelog_error_t wyl_policy_store_reconcile_journal_transition
+    (wyl_policy_store_t * store, const gchar * op_uuid,
+    WylPolicyFactReconcileJournalState expected_state,
+    WylPolicyFactReconcileJournalState target_state, guint64 expected_attempt,
+    WylPolicyAuthorityMutationResult * out_result);
+
 typedef struct
 {
   gchar *tenant_id;
