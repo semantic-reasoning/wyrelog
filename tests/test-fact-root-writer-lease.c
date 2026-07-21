@@ -19,7 +19,7 @@
 #define HOLDER_ARG "--root-lease-holder"
 #define LOCK_NAME ".wyrelog-writer-lock"
 
-static const gchar *self_path;
+static gchar *self_path;
 
 #ifdef WYL_HAS_FACT_STORE
 static void
@@ -453,9 +453,17 @@ test_lock_artifact_shape_is_enforced (void)
 int
 main (int argc, char **argv)
 {
-  if (argc == 3 && g_strcmp0 (argv[1], HOLDER_ARG) == 0)
+  if (argc >= 2 && g_strcmp0 (argv[1], HOLDER_ARG) == 0) {
+    if (argc != 3)
+      return 2;
     return holder_main (argv[2]);
-  self_path = argv[0];
+  }
+  if (argc < 1 || argv == NULL || argv[0] == NULL || argv[0][0] == '\0')
+    g_error ("fact-root writer lease test has no executable path");
+  self_path = g_canonicalize_filename (argv[0], NULL);
+  if (self_path == NULL || !g_path_is_absolute (self_path)
+      || !g_file_test (self_path, G_FILE_TEST_IS_REGULAR))
+    g_error ("fact-root writer lease test executable path is invalid");
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/fact-root-writer-lease/same-process",
       test_same_process_identity_and_orderly_release);
@@ -484,5 +492,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-root-writer-lease/artifact-shape",
       test_lock_artifact_shape_is_enforced);
 #endif
-  return g_test_run ();
+  gint result = g_test_run ();
+  g_clear_pointer (&self_path, g_free);
+  return result;
 }

@@ -708,6 +708,12 @@ test_handle_replay_rejects_fact_root_replacement (void)
   };
   g_assert_cmpint (wyl_handle_open_with_options (&opts, &handle), ==,
       WYRELOG_E_OK);
+#ifdef G_OS_WIN32
+  g_assert_cmpint (g_rename (root, old_root), ==, -1);
+  g_assert_true (g_file_test (root, G_FILE_TEST_IS_DIR));
+  g_assert_cmpint (wyl_handle_replay_fact_graphs (handle, NULL), ==,
+      WYRELOG_E_OK);
+#else
   g_assert_cmpint (g_rename (root, old_root), ==, 0);
   g_assert_true (wyl_test_create_secure_directory (root, &error));
   g_assert_no_error (error);
@@ -718,6 +724,7 @@ test_handle_replay_rejects_fact_root_replacement (void)
   g_assert_no_error (error);
   g_assert_nonnull (replacement);
   g_assert_null (g_dir_read_name (replacement));
+#endif
 
   g_clear_object (&handle);
   remove_tree (base);
