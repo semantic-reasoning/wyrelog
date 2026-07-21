@@ -9007,16 +9007,6 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/auth/service-token",
       service_token_exchange_http_handler, ctx, NULL);
 #endif
-#ifdef WYL_TEST_DAEMON_HTTP
-#ifdef WYL_HAS_FACT_STORE
-  soup_server_add_handler (server, "/__test/reconcile",
-      service_credential_operation_reconcile_handler, ctx, NULL);
-#endif
-  soup_server_add_handler (server, "/" "__test/" "service-" "principals",
-      service_principal_management_handler, ctx, NULL);
-  soup_server_add_handler (server, "/" "__test/" "service-" "credentials",
-      service_credential_management_handler, ctx, NULL);
-#endif
   if (!soup_server_listen_local (server, (guint) opts->listen_port, 0, error)) {
     g_object_unref (server);
     return NULL;
