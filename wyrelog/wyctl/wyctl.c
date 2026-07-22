@@ -3328,6 +3328,21 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
   return exit_rc;
 }
 
+/* Print one non-secret service principal as a single key=value line. The
+ * subject_id / display_name / state DTO fields can be NULL, so guard each
+ * %s with a "-" placeholder. */
+static void
+print_service_principal_row (const WylClientServicePrincipal *principal)
+{
+  const gchar *subject_id =
+      principal->subject_id != NULL ? principal->subject_id : "-";
+  const gchar *display_name =
+      principal->display_name != NULL ? principal->display_name : "-";
+  const gchar *state = principal->state != NULL ? principal->state : "-";
+  g_print ("subject_id=%s display_name=%s state=%s\n", subject_id,
+      display_name, state);
+}
+
 static int
 run_service_principal_create (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -3402,14 +3417,74 @@ run_service_principal_create (const WyctlOptions *global_opts, gint argc,
       guard_risk, &principal);
   int exit_rc = fact_remote_exit (client, "service-principal create", rc,
       "service_principal_create_failed");
+  if (exit_rc == 0)
+    print_service_principal_row (&principal);
+  return exit_rc;
+}
+
+static int
+run_service_principal_list (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServicePrincipalOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-principal list");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-principal list argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  g_auto (WylClientServicePrincipalList) list = { 0 };
+  wyrelog_error_t rc = wyl_client_service_principal_list (client,
+      guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+  int exit_rc = fact_remote_exit (client, "service-principal list", rc,
+      "service_principal_list_failed");
   if (exit_rc == 0) {
-    const gchar *subject_id =
-        principal.subject_id != NULL ? principal.subject_id : "-";
-    const gchar *display_name =
-        principal.display_name != NULL ? principal.display_name : "-";
-    const gchar *state = principal.state != NULL ? principal.state : "-";
-    g_print ("subject_id=%s display_name=%s state=%s\n", subject_id,
-        display_name, state);
+    for (gsize i = 0; i < list.len; i++)
+      print_service_principal_row (&list.items[i]);
   }
   return exit_rc;
 }
@@ -3423,6 +3498,8 @@ run_service_principal (const WyctlOptions *global_opts, gint argc, gchar **argv)
   }
   if (g_strcmp0 (argv[1], "create") == 0)
     return run_service_principal_create (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "list") == 0)
+    return run_service_principal_list (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-principal command: %s\n", argv[1]);
   return 2;
 }
