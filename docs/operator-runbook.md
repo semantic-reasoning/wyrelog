@@ -519,6 +519,77 @@ import flow.
   protect the KeyProvider key file with the same care as the bootstrap
   marker.
 
+## Service Credential Handoff
+
+`wyctl service-credential issue` and `wyctl service-credential rotate`
+drive the loopback-only escrow handoff. Issue mints the first
+credential for a service subject; rotate supersedes an existing
+credential id. Both talk to the local daemon over its loopback listener
+and require a bearer session that holds `wr.service_credential.manage`.
+
+```
+wyctl service-credential issue \
+  --tenant <tenant> \
+  --subject svc:<tenant>:<name> \
+  --destination <escrow-file-name> \
+  --expires-at-us <epoch-microseconds> \
+  [--request-id <id>] \
+  --access-token-file <path>
+
+wyctl service-credential rotate \
+  --tenant <tenant> \
+  --credential-id <credential-id> \
+  --destination <escrow-file-name> \
+  --expires-at-us <epoch-microseconds> \
+  [--request-id <id>] \
+  --access-token-file <path>
+```
+
+`--subject` must be `svc:<tenant>:...` with `<tenant>` equal to
+`--tenant`; rotate names the credential to supersede with
+`--credential-id` instead. `--destination` is the escrow publication
+file and `--expires-at-us` is the absolute publication expiry in epoch
+microseconds and must be greater than zero. Both are mandatory. The
+`--access-token-file` bearer token may instead come from `wyctl`
+configuration, and the guard flags `--guard-timestamp`,
+`--guard-loc-class`, and `--guard-risk` carry policy-guard context.
+
+### Idempotency
+
+`--request-id` is optional; omit it and `wyctl` mints a fresh canonical
+request id. Reusing the same `--request-id` is a safe retry: the daemon
+returns the same operation, credential, and receipt and never mints a
+second secret. Supply a stable `--request-id` when a previous invocation
+may have succeeded without you observing its reply.
+
+### Secret Secrecy
+
+On success `wyctl` writes one `key=value` receipt line to **stdout**:
+
+```
+state=<state> request_id=<id> credential_id=<id> generation=<n> destination=<name> publication_receipt_id=<id> delivered=<yes|no>
+```
+
+This receipt line is non-secret. The one-time credential secret is
+**never** printed: it is delivered out-of-band to the owner-only escrow
+publication file named by `--destination` on the daemon host, and a
+diagnostic to that effect goes to **stderr**. Do not pipe stdout to a
+file expecting the secret there — it is not in the receipt. Protect the
+escrow file as a sealed secret with the same handling as the KeyProvider
+key file. `delivered=yes` appears only once the secret has been durably
+published to that file.
+
+### Exit Codes
+
+| Code | Meaning |
+| --- | --- |
+| 0 | Success; receipt printed to stdout. |
+| 2 | Local usage or validation error (bad flags, no server contacted). |
+| 3 | Server rejected the request as invalid (HTTP 400). |
+| 4 | Policy conflict or authorization denied (HTTP 409 or 403). |
+| 5 | Other remote failure (HTTP 500 or 503). |
+| 6 | Authentication required; missing or invalid token (HTTP 401). |
+
 ## Datalog Product Flow
 
 Wyrelog is a Datalog storage and inference engine. The packaged access-control
