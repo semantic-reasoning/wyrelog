@@ -475,6 +475,20 @@ if build_client and host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  test_wyctl_service_credential = executable('test-wyctl-service-credential',
+    'test-wyctl-service-credential.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    dependencies : [glib_dep, gio_dep],
+  )
+
+  test('wyctl-service-credential', test_wyctl_service_credential,
+    depends : [wyctl_exe, wyctl_gschemas_compiled],
+    env : wyctl_gsettings_test_env,
+    timeout : 60,
+  )
+
   test_wyctl_mfa = executable('test-wyctl-mfa',
     'test-wyctl-mfa.c',
     c_args : [
