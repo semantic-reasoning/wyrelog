@@ -6701,6 +6701,7 @@ typedef struct
   guint active_leases;
   guint release_calls;
   gboolean published;
+  gchar *staged_secret;
 } SpPublication;
 
 typedef struct
@@ -6740,6 +6741,10 @@ sp_stage (gpointer data, const WyctlPublicationPlan *plan,
   g_assert_nonnull (credential_id);
   g_assert_nonnull (secret);
   backend->stage_calls++;
+  /* Capture the exact secret handed to the escrow backend so the contract can
+   * prove that this value never appears in any HTTP response body. */
+  g_free (backend->staged_secret);
+  backend->staged_secret = g_strndup (secret->text, secret->len);
   *out_receipt = (WyctlPublicationReceipt) {
   .version = WYCTL_PUBLICATION_RECEIPT_VERSION,.destination =
         g_strdup (plan->destination),.reservation_id =
@@ -6852,6 +6857,19 @@ static const WyctlPublicationBackendVTable sp_publication_vtable = {
   .receipt_target_release = sp_target_release,
   .root_identity = sp_root_identity,
 };
+
+/* #517 capstone: no issue/rotate response may echo an absolute filesystem
+ * root.  The escrow receipt names only a validated basename destination and
+ * opaque ids; any of the local handoff roots appearing verbatim in a body is
+ * a redaction failure. */
+static gboolean
+sp_body_leaks_root (const gchar *body, const gchar *r1, const gchar *r2,
+    const gchar *r3)
+{
+  return (r1 != NULL && strstr (body, r1) != NULL)
+      || (r2 != NULL && strstr (body, r2) != NULL)
+      || (r3 != NULL && strstr (body, r3) != NULL);
+}
 
 static gint
 check_service_principal_management_contract (void)
@@ -7091,6 +7109,7 @@ check_service_principal_management_contract (void)
       "\"destination\":\"issue.json\",\"expires_at_us\":\""
       CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}";
   g_clear_pointer (&body, g_free);
+  g_clear_pointer (&publication.staged_secret, g_free);
   memset (&publication, 0, sizeof publication);
   /* Issue now delivers the secret out-of-band via the escrow file; the HTTP
    * response is the module's non-secret receipt.  This E2E test exercises the
@@ -7110,6 +7129,23 @@ check_service_principal_management_contract (void)
     rc = 1990;
     goto cleanup;
   }
+  /* #517 capstone: the issue receipt must not echo any absolute handoff
+   * root, and its destination must be the bare basename it was asked for --
+   * never a path (no '/'). */
+  if (sp_body_leaks_root (body, handoff_dir, operation_root, publication_root)) {
+    rc = 2010;
+    goto cleanup;
+  }
+  {
+    g_autofree gchar *issue_destination =
+        extract_json_string (body, "destination");
+    if (issue_destination == NULL
+        || g_strcmp0 (issue_destination, "issue.json") != 0
+        || strchr (issue_destination, '/') != NULL) {
+      rc = 2011;
+      goto cleanup;
+    }
+  }
   /* #517: the first successful issue must actually stage the CVK into escrow
    * and commit it -- one real secret written.  Capture the counts so the
    * replay arm can prove no second secret is staged. */
@@ -7117,6 +7153,13 @@ check_service_principal_management_contract (void)
   issue_commit_calls = publication.commit_calls;
   if (issue_stage_calls == 0 || issue_commit_calls == 0) {
     rc = 2004;
+    goto cleanup;
+  }
+  /* #517 capstone: the actual one-time secret staged into escrow must never
+   * appear anywhere in the HTTP response body -- not merely the key name. */
+  if (publication.staged_secret == NULL || publication.staged_secret[0] == '\0'
+      || strstr (body, publication.staged_secret) != NULL) {
+    rc = 2016;
     goto cleanup;
   }
 #ifdef WYL_HAS_AUDIT
@@ -7182,6 +7225,11 @@ check_service_principal_management_contract (void)
       rc = 1992;
       goto cleanup;
     }
+    if (sp_body_leaks_root (body, handoff_dir, operation_root,
+            publication_root)) {
+      rc = 2012;
+      goto cleanup;
+    }
   }
   /* #517: the replay must return the same receipt WITHOUT re-staging or
    * re-committing -- no second secret written to escrow. */
@@ -7231,6 +7279,7 @@ check_service_principal_management_contract (void)
   rotate_path = g_strdup_printf ("/service-credentials/%s/rotate",
       rotate_seed.credential.credential_id);
   g_clear_pointer (&body, g_free);
+  g_clear_pointer (&publication.staged_secret, g_free);
   memset (&publication, 0, sizeof publication);
   /* Rotate delivers the successor secret via the escrow file too; assert the
    * non-secret receipt naming a fresh successor credential. */
@@ -7251,6 +7300,14 @@ check_service_principal_management_contract (void)
     rc = 1999;
     goto cleanup;
   }
+  /* #517 capstone: the rotate receipt must not echo any absolute handoff
+   * root either. */
+  if (sp_body_leaks_root (body, handoff_dir, operation_root, publication_root)) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 2013;
+    goto cleanup;
+  }
   /* #517: the first rotate stages+commits the successor secret exactly once
    * (publication was reset just above), so both counts must be positive. */
   rotate_stage_calls = publication.stage_calls;
@@ -7259,6 +7316,15 @@ check_service_principal_management_contract (void)
     wyl_service_credential_issue_result_clear (&issued);
     wyl_service_credential_issue_result_clear (&rotate_seed);
     rc = 2006;
+    goto cleanup;
+  }
+  /* #517 capstone: the successor secret staged into escrow must likewise never
+   * surface in the rotate response body. */
+  if (publication.staged_secret == NULL || publication.staged_secret[0] == '\0'
+      || strstr (body, publication.staged_secret) != NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    wyl_service_credential_issue_result_clear (&rotate_seed);
+    rc = 2017;
     goto cleanup;
   }
   g_clear_pointer (&body, g_free);
@@ -7280,6 +7346,13 @@ check_service_principal_management_contract (void)
       wyl_service_credential_issue_result_clear (&issued);
       wyl_service_credential_issue_result_clear (&rotate_seed);
       rc = 2000;
+      goto cleanup;
+    }
+    if (sp_body_leaks_root (body, handoff_dir, operation_root,
+            publication_root)) {
+      wyl_service_credential_issue_result_clear (&issued);
+      wyl_service_credential_issue_result_clear (&rotate_seed);
+      rc = 2014;
       goto cleanup;
     }
   }
@@ -7316,6 +7389,13 @@ check_service_principal_management_contract (void)
       || strstr (body, "credential_secret") != NULL) {
     wyl_service_credential_issue_result_clear (&issued);
     rc = 2002;
+    goto cleanup;
+  }
+  /* #517 capstone: an ERROR body must not leak a root or a secret either;
+   * error bodies are fixed constants, so a root here would be a regression. */
+  if (sp_body_leaks_root (body, handoff_dir, operation_root, publication_root)) {
+    wyl_service_credential_issue_result_clear (&issued);
+    rc = 2015;
     goto cleanup;
   }
   credential_path = g_strdup_printf
@@ -7390,6 +7470,7 @@ check_service_principal_management_contract (void)
   }
 
 cleanup:
+  g_free (publication.staged_secret);
   g_main_loop_quit (http.loop);
   if (thread != NULL)
     g_thread_join (thread);
