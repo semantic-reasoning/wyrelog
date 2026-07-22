@@ -3576,6 +3576,103 @@ run_service_principal (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/* Print one non-secret service credential row as a single key=value line.
+ * String DTO fields (credential_id / subject_id / state / rotated_from_id)
+ * can be NULL, so guard each %s with a "-" placeholder; the numeric fields
+ * are always present. generation is guint64; the *_at_us timestamps are
+ * gint64. No secret material is ever carried by this DTO. */
+static void
+print_service_credential_row (const WylClientServiceCredential *credential)
+{
+  const gchar *credential_id =
+      credential->credential_id != NULL ? credential->credential_id : "-";
+  const gchar *subject_id =
+      credential->subject_id != NULL ? credential->subject_id : "-";
+  const gchar *state = credential->state != NULL ? credential->state : "-";
+  const gchar *rotated_from_id =
+      credential->rotated_from_id != NULL ? credential->rotated_from_id : "-";
+
+  g_print ("credential_id=%s subject_id=%s generation=%" G_GUINT64_FORMAT
+      " state=%s created_at_us=%" G_GINT64_FORMAT " expires_at_us=%"
+      G_GINT64_FORMAT " revoked_at_us=%" G_GINT64_FORMAT
+      " rotated_from_id=%s\n", credential_id, subject_id,
+      credential->generation, state, credential->created_at_us,
+      credential->expires_at_us, credential->revoked_at_us, rotated_from_id);
+}
+
+static int
+run_service_credential_list (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServiceCredentialOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Service subject whose credentials to list", "SUBJECT_ID"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-credential list");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-credential list argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (opts.subject == NULL || opts.subject[0] == '\0') {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  g_auto (WylClientServiceCredentialList) list = { 0 };
+  wyrelog_error_t rc = wyl_client_service_credential_list (client,
+      opts.subject, guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+  int exit_rc = fact_remote_exit (client, "service-credential list", rc,
+      "service_credential_list_failed");
+  if (exit_rc == 0) {
+    for (gsize i = 0; i < list.len; i++)
+      print_service_credential_row (&list.items[i]);
+  }
+  return exit_rc;
+}
+
 static int
 run_service_credential (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -3588,6 +3685,8 @@ run_service_credential (const WyctlOptions *global_opts, gint argc,
     return run_service_credential_issue (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "rotate") == 0)
     return run_service_credential_rotate (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "list") == 0)
+    return run_service_credential_list (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-credential command: %s\n", argv[1]);
   return 2;
 }

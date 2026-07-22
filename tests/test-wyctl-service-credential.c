@@ -71,6 +71,34 @@ test_service_credential_dispatch (void)
 }
 
 static void
+test_service_credential_list_missing_flags (void)
+{
+  gchar *missing_subject_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "list",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_subject_argv, 2, "wyctl: missing --subject");
+
+  gchar *missing_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "list",
+    "--subject", "svc:__wr_default:worker",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+}
+
+static void
 test_service_credential_issue_missing_flags (void)
 {
   gchar *missing_subject_argv[] = {
@@ -307,6 +335,8 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/wyctl/service-credential/dispatch",
       test_service_credential_dispatch);
+  g_test_add_func ("/wyctl/service-credential/list-missing-flags",
+      test_service_credential_list_missing_flags);
   g_test_add_func ("/wyctl/service-credential/issue-missing-flags",
       test_service_credential_issue_missing_flags);
   g_test_add_func ("/wyctl/service-credential/issue-expires-bounds",
