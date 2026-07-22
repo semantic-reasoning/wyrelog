@@ -3490,6 +3490,76 @@ run_service_principal_list (const WyctlOptions *global_opts, gint argc,
 }
 
 static int
+run_service_principal_disable (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServicePrincipalOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Service subject to disable", "SUBJECT_ID"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-principal disable");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-principal disable argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (opts.subject == NULL || opts.subject[0] == '\0') {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  wyrelog_error_t rc = wyl_client_service_principal_disable (client,
+      opts.subject, guard_timestamp, opts.guard_loc_class, guard_risk);
+  int exit_rc = fact_remote_exit (client, "service-principal disable", rc,
+      "service_principal_disable_failed");
+  if (exit_rc == 0)
+    g_print ("subject_id=%s disabled=yes\n", opts.subject);
+  return exit_rc;
+}
+
+static int
 run_service_principal (const WyctlOptions *global_opts, gint argc, gchar **argv)
 {
   if (argc < 2) {
@@ -3500,6 +3570,8 @@ run_service_principal (const WyctlOptions *global_opts, gint argc, gchar **argv)
     return run_service_principal_create (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "list") == 0)
     return run_service_principal_list (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "disable") == 0)
+    return run_service_principal_disable (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-principal command: %s\n", argv[1]);
   return 2;
 }

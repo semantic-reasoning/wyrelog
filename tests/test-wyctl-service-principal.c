@@ -170,6 +170,22 @@ test_service_principal_list_help (void)
   g_assert_null (g_strstr_len (stdout_buf, -1, "--subject"));
 }
 
+static void
+test_service_principal_disable_missing_subject (void)
+{
+  gchar *missing_subject_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-principal", "disable",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_subject_argv, 2, "wyctl: missing --subject");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -184,5 +200,7 @@ main (int argc, char **argv)
       test_service_principal_list_missing_tenant);
   g_test_add_func ("/wyctl/service-principal/list-help",
       test_service_principal_list_help);
+  g_test_add_func ("/wyctl/service-principal/disable-missing-subject",
+      test_service_principal_disable_missing_subject);
   return g_test_run ();
 }
