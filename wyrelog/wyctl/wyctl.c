@@ -168,6 +168,17 @@ typedef struct
   gchar *guard_risk_arg;
 } WyctlServiceCredentialOptions;
 
+typedef struct
+{
+  gchar *subject;
+  gchar *display_name;
+  gchar *tenant;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlServicePrincipalOptions;
+
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlSensitiveText,
     wyctl_sensitive_text_clear);
 
@@ -3318,6 +3329,105 @@ run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
 }
 
 static int
+run_service_principal_create (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServicePrincipalOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Service subject; must be svc:<tenant>:... with <tenant> equal to "
+          "--tenant", "SUBJECT_ID"},
+    {"display-name", 0, 0, G_OPTION_ARG_STRING, &opts.display_name,
+        "Human-readable display name", "NAME"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-principal create");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-principal create argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (opts.subject == NULL || opts.subject[0] == '\0') {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  if (opts.display_name == NULL || opts.display_name[0] == '\0') {
+    g_printerr ("wyctl: missing --display-name\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  g_auto (WylClientServicePrincipal) principal = { 0 };
+  wyrelog_error_t rc = wyl_client_service_principal_create (client,
+      opts.subject, opts.display_name, guard_timestamp, opts.guard_loc_class,
+      guard_risk, &principal);
+  int exit_rc = fact_remote_exit (client, "service-principal create", rc,
+      "service_principal_create_failed");
+  if (exit_rc == 0) {
+    const gchar *subject_id =
+        principal.subject_id != NULL ? principal.subject_id : "-";
+    const gchar *display_name =
+        principal.display_name != NULL ? principal.display_name : "-";
+    const gchar *state = principal.state != NULL ? principal.state : "-";
+    g_print ("subject_id=%s display_name=%s state=%s\n", subject_id,
+        display_name, state);
+  }
+  return exit_rc;
+}
+
+static int
+run_service_principal (const WyctlOptions *global_opts, gint argc, gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing service-principal command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "create") == 0)
+    return run_service_principal_create (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown service-principal command: %s\n", argv[1]);
+  return 2;
+}
+
+static int
 run_service_credential (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
@@ -3394,6 +3504,8 @@ main (int argc, char **argv)
     return run_mfa (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "auth") == 0)
     return run_auth (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "service-principal") == 0)
+    return run_service_principal (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "service-credential") == 0)
     return run_service_credential (&opts, argc - 1, argv + 1);
 
