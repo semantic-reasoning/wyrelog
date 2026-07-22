@@ -255,11 +255,69 @@ with a non-loopback marker for the denial path. Fence uncertainty is represented
 by the canonical `not_committed_terminal` reconciliation outcome; there is no
 separate uncertainty enum.
 
+### Escrow credential handoff wire contract
+
+The escrow issue/rotate handoff is exposed on two of the management routes
+above: issue is `POST /service-principals/{subject}/credentials` and rotate is
+`POST /service-credentials/{id}/rotate`. Both write the one-time secret to an
+owner-only publication file on the daemon host, so both are loopback-only: a
+non-loopback transport is rejected with `403 service_credential_denied` before
+any authentication, state read, or write. The caller must hold
+`wr.service_credential.manage` for the request tenant. See ADR 0001 for the
+design and the durable state machine behind this contract.
+
+The request body is a strict JSON object; every field value is a quoted string
+on the wire. Issue requires `version` (`"1"`), `tenant` (equal to the request
+tenant, and the `{subject}` must be `svc:<tenant>:...`), `request_id`,
+`destination`, and `expires_at_us`. Rotate requires `version`, `request_id`,
+`destination`, and `expires_at_us`; its principal is the retired credential's
+subject. `request_id` is exactly 27 ASCII-alphanumeric characters (a canonical
+KSUID); it is the idempotency key. `destination` names the escrow publication
+target and `expires_at_us` is a quoted decimal count of microseconds since the
+epoch that must parse and be strictly greater than zero. Both `destination` and
+`expires_at_us` are mandatory: the daemon never server-recomputes an expiry.
+
+A successful call returns `200` with a non-secret JSON receipt of the exact
+shape `{state, request_id, credential_id, generation, destination,
+publication_receipt_id, delivered}`. `generation` is a JSON number and
+`delivered` is a JSON boolean; the remaining fields are strings or `null`. The
+credential secret is never placed in the response, an error body, or a log.
+`state` is one of the eight lowercase operation-state names: `prepared`,
+`server_committed`, `publication_planned`, `publication_prepared`,
+`file_published`, `cleanup_required`, `operator_action_required`, and
+`terminal`. `delivered` is `true` only at the `terminal` state whose reason is
+a durable file publication; every operator-action and non-delivery terminal
+outcome reports `delivered` as `false`.
+
+Delivery is at-least-once and idempotent by `request_id`: a repeated
+`request_id` returns the same operation, credential, and receipt and never
+mints a second secret. It is not observably exactly-once. A crash after the
+publication file is durably written but before its receipt is durable can leave
+a correct owner-only file without a durable acknowledgement, so a caller may
+observe the receipt zero or one time per attempt; the durable file and the
+policy authority, not the response, are the source of truth.
+
+The handoff module return code maps onto the HTTP status and error code as
+follows:
+
+| Return code | HTTP status | Error code |
+| --- | --- | --- |
+| `WYRELOG_E_OK` | 200 | (JSON receipt) |
+| `WYRELOG_E_NOT_FOUND` / `WYRELOG_E_BUSY` | 503 | `service_credential_unavailable` |
+| `WYRELOG_E_POLICY` | 409 | `service_credential_conflict` |
+| `WYRELOG_E_INVALID` | 400 | `invalid_service_credential_request` |
+| `WYRELOG_E_AUTH` | 403 | `service_credential_denied` |
+| any other | 500 | `service_credential_failed` |
+
+An unconfigured deployment (no owner-only operation or publication root) reports
+`503 service_credential_unavailable` and touches no state.
+
 ## Private service credential operation retirement
 
 Terminal handoff journal retirement is private library work. It has no daemon
-route, `wyctl` command, public API, timer, or scheduling policy. Public ingress
-and scheduling remain deferred to #517.
+route, `wyctl` command, public API, timer, or scheduling policy. #517 delivered
+the public loopback issue/rotate ingress, but retirement itself stays private
+and operator-driven; automatic retirement scheduling is out of scope.
 
 Eligibility requires an exact version-6 `TERMINAL` snapshot: `FILE_PUBLISHED`
 with no remediation marker or the exact prior `RESUME` marker, or
