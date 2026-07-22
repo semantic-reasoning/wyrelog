@@ -80,14 +80,22 @@ typedef struct
   const gchar *subject_id;
   const gchar *tenant_id;
   const gchar *request_id;
+  const gchar *destination;
+  /* Required: publication expiry in microseconds since the epoch, must be
+   * strictly greater than 0. */
   gint64 expires_at_us;
 } WylClientServiceCredentialIssueRequest;
 
 typedef struct
 {
-  WylClientServiceCredential credential;
-  WylClientSensitiveText credential_secret;
-} WylClientServiceCredentialIssueResult;
+  gchar *state;
+  gchar *request_id;
+  gchar *credential_id;
+  guint64 generation;
+  gchar *destination;
+  gchar *publication_receipt_id;
+  gboolean delivered;
+} WylClientServiceCredentialHandoffReceipt;
 
 typedef struct
 {
@@ -129,17 +137,17 @@ wyrelog_error_t wyl_client_service_credential_revoke (WylClient * client,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredential * out_credential);
 void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
-void wyl_client_service_credential_issue_result_clear
-    (WylClientServiceCredentialIssueResult * value);
+void wyl_client_service_credential_handoff_receipt_clear
+    (WylClientServiceCredentialHandoffReceipt * value);
 wyrelog_error_t wyl_client_service_credential_issue (WylClient * client,
     const WylClientServiceCredentialIssueRequest * request,
     gint64 guard_timestamp, const gchar * guard_loc_class, gint64 guard_risk,
-    WylClientServiceCredentialIssueResult * out_result);
+    WylClientServiceCredentialHandoffReceipt * out_receipt);
 wyrelog_error_t wyl_client_service_credential_rotate (WylClient * client,
     const gchar * credential_id, const gchar * request_id,
-    gint64 expires_at_us, gint64 guard_timestamp,
+    const gchar * destination, gint64 expires_at_us, gint64 guard_timestamp,
     const gchar * guard_loc_class, gint64 guard_risk,
-    WylClientServiceCredentialIssueResult * out_result);
+    WylClientServiceCredentialHandoffReceipt * out_receipt);
 void wyl_client_service_token_result_clear (WylClientServiceTokenResult *
     value);
 wyrelog_error_t wyl_client_service_token_exchange (WylClient * client,
@@ -395,8 +403,8 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
     (WylClientServiceCredentialList, wyl_client_service_credential_list_clear)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
-    (WylClientServiceCredentialIssueResult,
-    wyl_client_service_credential_issue_result_clear)
+    (WylClientServiceCredentialHandoffReceipt,
+    wyl_client_service_credential_handoff_receipt_clear)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
     (WylClientServiceTokenResult, wyl_client_service_token_result_clear)
     G_DEFINE_AUTOPTR_CLEANUP_FUNC

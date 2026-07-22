@@ -149,17 +149,19 @@ static gboolean
 check_service_credential_codecs (void)
 {
   WylClientServiceTokenResult token = { 0 };
-  WylClientServiceCredentialIssueResult issue = { 0 };
+  WylClientServiceCredentialHandoffReceipt receipt = { 0 };
   const gchar *token_json = " { \"access_token\": \"access-1\" } ";
-  const gchar *issue_json =
-      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
-      "\"credential_format_version\":1,\"subject_id\":\"svc:tenant:worker\","
-      "\"tenant_id\":\"tenant-a\",\"generation\":7,\"state\":\"active\","
-      "\"created_by\":\"admin\",\"created_at_us\":1,\"updated_at_us\":2,"
-      "\"expires_at_us\":3,\"last_used_at_us\":-1,\"revoked_by\":null,"
-      "\"revoked_at_us\":0,\"rotated_from_id\":null,"
-      "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-      "abcdefghijklmnopq\"}}";
+  const gchar *receipt_json =
+      "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
+      "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"generation\":7,"
+      "\"destination\":\"issue.json\","
+      "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"delivered\":true}";
+  const gchar *receipt_pending_json =
+      "{\"state\":\"server_committed\","
+      "\"request_id\":\"222222222222222222222222222\","
+      "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+      "\"publication_receipt_id\":null,\"delivered\":false}";
 
   if (wyl_client_service_token_result_decode (token_json, strlen (token_json),
           &token) != WYRELOG_E_OK
@@ -180,20 +182,31 @@ check_service_credential_codecs (void)
       return FALSE;
   }
 
-  wyrelog_error_t issue_decode_rc =
-      wyl_client_service_credential_issue_result_decode (issue_json,
-      strlen (issue_json), &issue);
-  if (issue_decode_rc != WYRELOG_E_OK
-      || g_strcmp0 (issue.credential.credential_id,
+  if (wyl_client_service_credential_handoff_receipt_decode (receipt_json,
+          strlen (receipt_json), &receipt) != WYRELOG_E_OK
+      || g_strcmp0 (receipt.state, "terminal") != 0
+      || g_strcmp0 (receipt.request_id, "111111111111111111111111111") != 0
+      || g_strcmp0 (receipt.credential_id,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
-      || issue.credential.generation != 7
-      || issue.credential_secret.len != 43) {
+      || receipt.generation != 7
+      || g_strcmp0 (receipt.destination, "issue.json") != 0
+      || g_strcmp0 (receipt.publication_receipt_id,
+          "wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0 || !receipt.delivered)
     return FALSE;
-  }
-  wyl_client_service_credential_issue_result_clear (&issue);
-  if (issue.credential.credential_id != NULL
-      || issue.credential_secret.text != NULL)
+  wyl_client_service_credential_handoff_receipt_clear (&receipt);
+  if (receipt.state != NULL || receipt.request_id != NULL
+      || receipt.credential_id != NULL || receipt.destination != NULL
+      || receipt.publication_receipt_id != NULL
+      || receipt.generation != 0 || receipt.delivered)
     return FALSE;
+  if (wyl_client_service_credential_handoff_receipt_decode
+      (receipt_pending_json, strlen (receipt_pending_json),
+          &receipt) != WYRELOG_E_OK
+      || g_strcmp0 (receipt.state, "server_committed") != 0
+      || receipt.credential_id != NULL || receipt.generation != 0
+      || receipt.publication_receipt_id != NULL || receipt.delivered)
+    return FALSE;
+  wyl_client_service_credential_handoff_receipt_clear (&receipt);
 
   WylClientServicePrincipal principal = { 0 };
   WylClientServicePrincipalList principal_list = { 0 };
@@ -260,23 +273,49 @@ check_service_credential_codecs (void)
       || principal_list.items != NULL || principal_list.len != 0)
     return FALSE;
 
-  const gchar *invalid[] = {
+  const gchar *invalid_token[] = {
     "{\"access_token\":\"a\",\"access_token\":\"b\"}",
     "{\"access_token\":\"a\",\"unknown\":1}",
     "{\"access_token\":\"a\"} trailing",
     "{\"access_token\":\"a\\u0000b\"}",
-    "{\"service_credential\":{\"credential_id\":\"x\","
-        "\"generation\":0,\"credential_secret\":\"bad\"}}",
-    "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
-        "\"generation\":01,\"credential_secret\":\"bad\"}}",
   };
-  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++) {
-    if (wyl_client_service_token_result_decode (invalid[i], strlen (invalid[i]),
-            &token) == WYRELOG_E_OK
-        || token.access_token.text != NULL
-        || wyl_client_service_credential_issue_result_decode (invalid[i],
-            strlen (invalid[i]), &issue) == WYRELOG_E_OK
-        || issue.credential_secret.text != NULL)
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_token); i++) {
+    if (wyl_client_service_token_result_decode (invalid_token[i],
+            strlen (invalid_token[i]), &token) == WYRELOG_E_OK
+        || token.access_token.text != NULL)
+      return FALSE;
+  }
+  const gchar *invalid_receipt[] = {
+    /* Missing the delivered field. */
+    "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
+        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+        "\"publication_receipt_id\":null}",
+    /* Duplicate state key. */
+    "{\"state\":\"terminal\",\"state\":\"terminal\","
+        "\"request_id\":\"111111111111111111111111111\",\"credential_id\":null,"
+        "\"generation\":0,\"destination\":\"issue.json\","
+        "\"publication_receipt_id\":null,\"delivered\":true}",
+    /* Trailing junk after the object. */
+    "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
+        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+        "\"publication_receipt_id\":null,\"delivered\":true} trailing",
+    /* Non-boolean delivered value. */
+    "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
+        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+        "\"publication_receipt_id\":null,\"delivered\":\"true\"}",
+    /* Unknown state literal. */
+    "{\"state\":\"bogus\",\"request_id\":\"111111111111111111111111111\","
+        "\"credential_id\":null,\"generation\":0,\"destination\":\"issue.json\","
+        "\"publication_receipt_id\":null,\"delivered\":false}",
+    /* Non-canonical credential_id. */
+    "{\"state\":\"terminal\",\"request_id\":\"111111111111111111111111111\","
+        "\"credential_id\":\"bad\",\"generation\":0,\"destination\":\"issue.json\","
+        "\"publication_receipt_id\":null,\"delivered\":true}",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid_receipt); i++) {
+    if (wyl_client_service_credential_handoff_receipt_decode (invalid_receipt
+            [i], strlen (invalid_receipt[i]), &receipt) == WYRELOG_E_OK
+        || receipt.state != NULL || receipt.delivered)
       return FALSE;
   }
   return TRUE;
@@ -528,7 +567,7 @@ main (void)
   credential = { 0 };
   g_auto (WylClientServiceCredentialList)
   credential_list = { 0 };
-  g_auto (WylClientServiceCredentialIssueResult)
+  g_auto (WylClientServiceCredentialHandoffReceipt)
   issue_result = { 0 };
   http.body = "{\"service_principal\":{\"subject_id\":\"svc:alice:worker\","
       "\"display_name\":\"Worker\",\"state\":\"active\"}}";
@@ -599,26 +638,38 @@ main (void)
     .subject_id = "svc:alice:worker",
     .tenant_id = "__wr_default",
     .request_id = "333333333333333333333333333",
-    .expires_at_us = 0,
+    .destination = "issue.json",
+    .expires_at_us = 4102444800000000,
   };
   http.body =
-      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
-      "\"credential_format_version\":1,\"subject_id\":\"svc:alice:worker\","
-      "\"tenant_id\":\"__wr_default\",\"generation\":1,\"state\":\"active\","
-      "\"created_by\":\"alice\",\"created_at_us\":1,\"updated_at_us\":2,"
-      "\"expires_at_us\":0,\"last_used_at_us\":-1,\"revoked_by\":null,"
-      "\"revoked_at_us\":0,\"rotated_from_id\":null,"
-      "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-      "abcdefghijklmnopq\"}}";
+      "{\"state\":\"terminal\",\"request_id\":\"333333333333333333333333333\","
+      "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"generation\":1,"
+      "\"destination\":\"issue.json\","
+      "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"delivered\":true}";
   wyrelog_error_t issue_rc = wyl_client_service_credential_issue
       (local_client, &issue_request, 123, "public", 49, &issue_result);
-  if (issue_rc != WYRELOG_E_OK) {
+  if (issue_rc != WYRELOG_E_OK
+      || g_strcmp0 (issue_result.state, "terminal") != 0
+      || g_strcmp0 (issue_result.credential_id,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0
+      || issue_result.generation != 1 || !issue_result.delivered) {
     return 240;
   }
+  /*
+   * Regression guard: the request body must carry a QUOTED expires_at_us
+   * (colon-quote) and a destination field.  Asserting the bare substring
+   * "expires_at_us" would be vacuous because the pre-fix builder already
+   * emitted that token as a bare number.
+   */
+  if (strstr (http.last_body, "\"expires_at_us\":\"") == NULL
+      || strstr (http.last_body, "\"destination\"") == NULL
+      || strstr (http.last_body, "\"destination\":\"issue.json\"") == NULL)
+    return 244;
   http.status = 409;
   if (wyl_client_service_credential_issue (local_client, &issue_request,
           123, "public", 49, &issue_result) != WYRELOG_E_POLICY
-      || issue_result.credential_secret.text != NULL)
+      || issue_result.state != NULL || issue_result.credential_id != NULL)
     return 242;
   http.status = 0;
   issue_request.tenant_id = "other-tenant";
@@ -626,24 +677,30 @@ main (void)
           123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
     return 243;
   issue_request.tenant_id = "__wr_default";
+  /* A missing destination must fail closed before any request is sent. */
+  issue_request.destination = NULL;
+  if (wyl_client_service_credential_issue (local_client, &issue_request,
+          123, "public", 49, &issue_result) != WYRELOG_E_INVALID)
+    return 245;
+  issue_request.destination = "issue.json";
   http.body =
-      "{\"service_credential\":{\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
-      "\"credential_format_version\":1,\"subject_id\":\"svc:alice:worker\","
-      "\"tenant_id\":\"__wr_default\",\"generation\":2,\"state\":\"active\","
-      "\"created_by\":\"alice\",\"created_at_us\":1,\"updated_at_us\":2,"
-      "\"expires_at_us\":0,\"last_used_at_us\":-1,\"revoked_by\":null,"
-      "\"revoked_at_us\":0,\"rotated_from_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
-      "\"credential_secret\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-      "abcdefghijklmnopq\"}}";
+      "{\"state\":\"terminal\",\"request_id\":\"444444444444444444444444444\","
+      "\"credential_id\":\"wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv\",\"generation\":2,"
+      "\"destination\":\"issue.json\","
+      "\"publication_receipt_id\":\"wpr_0ujtsYcgvSTl8PAuAdqWYSMnLOv\","
+      "\"delivered\":true}";
   if (wyl_client_service_credential_rotate (local_client,
           "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv",
-          "444444444444444444444444444", 0, 123, "public", 49,
-          &issue_result) != WYRELOG_E_OK
+          "444444444444444444444444444", "issue.json", 4102444800000000,
+          123, "public", 49, &issue_result) != WYRELOG_E_OK
       || g_strcmp0 (http.last_method, "POST") != 0
       || g_strcmp0 (http.last_path,
           "/service-credentials/wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv/rotate") != 0
-      || issue_result.credential.generation != 2
-      || issue_result.credential_secret.len != 43)
+      || strstr (http.last_body, "\"expires_at_us\":\"") == NULL
+      || strstr (http.last_body, "\"destination\":\"issue.json\"") == NULL
+      || issue_result.generation != 2 || !issue_result.delivered
+      || g_strcmp0 (issue_result.credential_id,
+          "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv") != 0)
     return 241;
   if (wyl_client_tenant_select (local_client, "unknown") != WYRELOG_E_INVALID)
     return 90;

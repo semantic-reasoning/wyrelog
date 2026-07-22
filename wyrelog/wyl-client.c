@@ -7,6 +7,7 @@
 #include "wyrelog/wyl-client-codec-private.h"
 #include "wyrelog/wyl-client-url-private.h"
 #include "wyrelog/wyl-common-private.h"
+#include "wyrelog/auth/service-credential-operation-destination-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-request-id-private.h"
@@ -833,23 +834,16 @@ client_secret_transport_is_safe (WylClient *client)
 }
 
 static wyrelog_error_t
-client_decode_secret_result (GBytes *body,
-    WylClientServiceCredentialIssueResult *out_result)
+client_decode_handoff_receipt (GBytes *body,
+    WylClientServiceCredentialHandoffReceipt *out_receipt)
 {
   gsize body_size = 0;
-  const guint8 *body_data = g_bytes_get_data (body, &body_size);
-  guint8 *copy = NULL;
-  wyrelog_error_t rc;
+  const guint8 *body_data =
+      body != NULL ? g_bytes_get_data (body, &body_size) : NULL;
   if (body_data == NULL || body_size == 0)
     return WYRELOG_E_INVALID;
-  copy = g_memdup2 (body_data, body_size);
-  if (copy == NULL)
-    return WYRELOG_E_NOMEM;
-  rc = wyl_client_service_credential_issue_result_decode
-      ((const gchar *) copy, body_size, out_result);
-  sodium_memzero (copy, body_size);
-  g_free (copy);
-  return rc;
+  return wyl_client_service_credential_handoff_receipt_decode
+      ((const gchar *) body_data, body_size, out_receipt);
 }
 
 static wyrelog_error_t
@@ -992,25 +986,29 @@ wyrelog_error_t
 wyl_client_service_credential_issue (WylClient *client,
     const WylClientServiceCredentialIssueRequest *request,
     gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
-    WylClientServiceCredentialIssueResult *out_result)
+    WylClientServiceCredentialHandoffReceipt *out_receipt)
 {
   g_autofree gchar *escaped_subject = NULL;
   g_autoptr (GString) json = NULL;
   g_autofree gchar *path = NULL;
   g_autoptr (GBytes) body = NULL;
   g_autofree gchar *selected_tenant = NULL;
-  if (out_result == NULL || request == NULL
+  if (out_receipt == NULL || request == NULL
       || !client_service_subject_is_valid (request->subject_id)
       || request->tenant_id == NULL || request->tenant_id[0] == '\0'
       || !client_service_request_id_is_valid (request->request_id)
-      || request->expires_at_us < 0
+      || !wyl_service_credential_operation_destination_is_valid
+      (request->destination)
+      || request->expires_at_us <= 0
+      /* The receipt is non-secret, but the daemon still enforces a
+       * loopback-only transport for issue, so keep the client fail-fast. */
       || !client_secret_transport_is_safe (client))
     return WYRELOG_E_INVALID;
   selected_tenant = wyl_client_dup_tenant (client);
   if (selected_tenant == NULL
       || g_strcmp0 (selected_tenant, request->tenant_id) != 0)
     return WYRELOG_E_INVALID;
-  wyl_client_service_credential_issue_result_clear (out_result);
+  wyl_client_service_credential_handoff_receipt_clear (out_receipt);
   escaped_subject = g_uri_escape_string (request->subject_id, NULL, TRUE);
   path = g_strdup_printf ("/service-principals/%s/credentials",
       escaped_subject);
@@ -1020,49 +1018,54 @@ wyl_client_service_credential_issue (WylClient *client,
   append_json_string (json, request->tenant_id);
   g_string_append (json, ",\"request_id\":");
   append_json_string (json, request->request_id);
-  if (request->expires_at_us > 0)
-    g_string_append_printf (json, ",\"expires_at_us\":%" G_GINT64_FORMAT,
-        request->expires_at_us);
-  g_string_append_c (json, '}');
+  g_string_append (json, ",\"destination\":");
+  append_json_string (json, request->destination);
+  g_string_append_printf (json, ",\"expires_at_us\":\"%" G_GINT64_FORMAT "\"}",
+      request->expires_at_us);
   wyrelog_error_t rc = client_service_management_request (client, "POST",
       path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
       NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return client_decode_secret_result (body, out_result);
+  return client_decode_handoff_receipt (body, out_receipt);
 }
 
 wyrelog_error_t
 wyl_client_service_credential_rotate (WylClient *client,
-    const gchar *credential_id, const gchar *request_id, gint64 expires_at_us,
-    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
-    WylClientServiceCredentialIssueResult *out_result)
+    const gchar *credential_id, const gchar *request_id,
+    const gchar *destination, gint64 expires_at_us, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
+    WylClientServiceCredentialHandoffReceipt *out_receipt)
 {
   g_autofree gchar *escaped = NULL;
   g_autofree gchar *path = NULL;
   g_autoptr (GString) json = NULL;
   g_autoptr (GBytes) body = NULL;
-  if (out_result == NULL || !client_service_credential_id_is_valid
+  if (out_receipt == NULL || !client_service_credential_id_is_valid
       (credential_id) || !client_service_request_id_is_valid (request_id)
-      || expires_at_us < 0 || !client_secret_transport_is_safe (client))
+      || !wyl_service_credential_operation_destination_is_valid (destination)
+      || expires_at_us <= 0
+      /* The receipt is non-secret, but the daemon still enforces a
+       * loopback-only transport for rotate, so keep the client fail-fast. */
+      || !client_secret_transport_is_safe (client))
     return WYRELOG_E_INVALID;
-  wyl_client_service_credential_issue_result_clear (out_result);
+  wyl_client_service_credential_handoff_receipt_clear (out_receipt);
   escaped = g_uri_escape_string (credential_id, NULL, TRUE);
   path = g_strdup_printf ("/service-credentials/%s/rotate", escaped);
   json = g_string_new ("{\"version\":\"1\",\"request_id\":");
   if (json == NULL)
     return WYRELOG_E_NOMEM;
   append_json_string (json, request_id);
-  if (expires_at_us > 0)
-    g_string_append_printf (json, ",\"expires_at_us\":%" G_GINT64_FORMAT,
-        expires_at_us);
-  g_string_append_c (json, '}');
+  g_string_append (json, ",\"destination\":");
+  append_json_string (json, destination);
+  g_string_append_printf (json, ",\"expires_at_us\":\"%" G_GINT64_FORMAT "\"}",
+      expires_at_us);
   wyrelog_error_t rc = client_service_management_request (client, "POST",
       path, json->str, guard_timestamp, guard_loc_class, guard_risk, &body,
       NULL);
   if (rc != WYRELOG_E_OK)
     return rc;
-  return client_decode_secret_result (body, out_result);
+  return client_decode_handoff_receipt (body, out_receipt);
 }
 
 wyrelog_error_t

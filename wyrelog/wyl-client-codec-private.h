@@ -9,12 +9,12 @@
 G_BEGIN_DECLS;
 
 void wyl_client_sensitive_text_clear (WylClientSensitiveText * value);
-void wyl_client_service_credential_issue_result_clear
-    (WylClientServiceCredentialIssueResult * value);
+void wyl_client_service_credential_handoff_receipt_clear
+    (WylClientServiceCredentialHandoffReceipt * value);
 
-wyrelog_error_t wyl_client_service_credential_issue_result_decode
+wyrelog_error_t wyl_client_service_credential_handoff_receipt_decode
     (const gchar * document, gsize document_len,
-    WylClientServiceCredentialIssueResult * out_result);
+    WylClientServiceCredentialHandoffReceipt * out_receipt);
 wyrelog_error_t wyl_client_service_token_result_decode
     (const gchar * document, gsize document_len,
     WylClientServiceTokenResult * out_result);
