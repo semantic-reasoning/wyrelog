@@ -12,7 +12,7 @@ REQUIRED = {
     "wyl_client_sensitive_text_clear",
     "wyl_client_service_credential_clear",
     "wyl_client_service_credential_issue",
-    "wyl_client_service_credential_issue_result_clear",
+    "wyl_client_service_credential_handoff_receipt_clear",
     "wyl_client_service_credential_list",
     "wyl_client_service_credential_list_clear",
     "wyl_client_service_credential_get",

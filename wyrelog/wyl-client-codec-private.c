@@ -4,8 +4,10 @@
 #include <sodium.h>
 #include <string.h>
 
+#include "wyrelog/auth/service-credential-operation-destination-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 
 #define WYL_CLIENT_CODEC_MAX_DOCUMENT (16u * 1024u)
 #define WYL_CLIENT_CODEC_MAX_STRING (4096u)
@@ -184,6 +186,55 @@ parse_nullable_string (JsonCursor *cursor, gchar **out)
   return parse_string (cursor, out);
 }
 
+/* Consumes a bare true/false literal.  A trailing non-delimiter (e.g. "truex")
+ * is rejected by the caller's subsequent take(',')/take('}'), which requires a
+ * value separator or object end immediately after the token. */
+static gboolean
+parse_bool (JsonCursor *cursor, gboolean *out)
+{
+  skip_ws (cursor);
+  if (cursor->pos + 4 <= cursor->len
+      && memcmp (cursor->data + cursor->pos, "true", 4) == 0) {
+    cursor->pos += 4;
+    *out = TRUE;
+    return TRUE;
+  }
+  if (cursor->pos + 5 <= cursor->len
+      && memcmp (cursor->data + cursor->pos, "false", 5) == 0) {
+    cursor->pos += 5;
+    *out = FALSE;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+static gboolean
+string_is_request_id (const gchar *value)
+{
+  if (value == NULL || strlen (value) != WYL_REQUEST_ID_STRING_LEN)
+    return FALSE;
+  for (const guchar * p = (const guchar *)value; *p != '\0'; p++)
+    if (!g_ascii_isalnum (*p))
+      return FALSE;
+  return TRUE;
+}
+
+static gboolean
+handoff_state_is_known (const gchar *value)
+{
+  static const gchar *const states[] = {
+    "prepared", "server_committed", "publication_planned",
+    "publication_prepared", "file_published", "cleanup_required",
+    "operator_action_required", "terminal", "unknown"
+  };
+  if (value == NULL)
+    return FALSE;
+  for (gsize i = 0; i < G_N_ELEMENTS (states); i++)
+    if (g_strcmp0 (value, states[i]) == 0)
+      return TRUE;
+  return FALSE;
+}
+
 static gboolean
 string_is_plain_token (const gchar *value)
 {
@@ -230,13 +281,18 @@ wyl_client_sensitive_text_clear (WylClientSensitiveText *value)
   value->len = 0;
 }
 
-void wyl_client_service_credential_issue_result_clear
-    (WylClientServiceCredentialIssueResult * value)
+void wyl_client_service_credential_handoff_receipt_clear
+    (WylClientServiceCredentialHandoffReceipt * value)
 {
   if (value == NULL)
     return;
-  wyl_client_service_credential_clear (&value->credential);
-  wyl_client_sensitive_text_clear (&value->credential_secret);
+  g_clear_pointer (&value->state, g_free);
+  g_clear_pointer (&value->request_id, g_free);
+  g_clear_pointer (&value->credential_id, g_free);
+  g_clear_pointer (&value->destination, g_free);
+  g_clear_pointer (&value->publication_receipt_id, g_free);
+  value->generation = 0;
+  value->delivered = FALSE;
 }
 
 void
@@ -716,36 +772,84 @@ invalid:
 }
 
 wyrelog_error_t
-wyl_client_service_credential_issue_result_decode (const gchar *document,
-    gsize document_len, WylClientServiceCredentialIssueResult *out_result)
+wyl_client_service_credential_handoff_receipt_decode (const gchar *document,
+    gsize document_len, WylClientServiceCredentialHandoffReceipt *out_receipt)
 {
   JsonCursor cursor;
   gchar *key = NULL;
-  gchar *credential_secret = NULL;
-  if (out_result == NULL || !document_init (document, document_len, &cursor)
+  gboolean seen_state = FALSE;
+  gboolean seen_request_id = FALSE;
+  gboolean seen_credential_id = FALSE;
+  gboolean seen_generation = FALSE;
+  gboolean seen_destination = FALSE;
+  gboolean seen_publication_receipt_id = FALSE;
+  gboolean seen_delivered = FALSE;
+  if (out_receipt == NULL || !document_init (document, document_len, &cursor)
       || !take (&cursor, '{')) {
-    if (out_result != NULL)
-      wyl_client_service_credential_issue_result_clear (out_result);
+    if (out_receipt != NULL)
+      wyl_client_service_credential_handoff_receipt_clear (out_receipt);
     return WYRELOG_E_INVALID;
   }
-  wyl_client_service_credential_issue_result_clear (out_result);
-  if (!parse_string (&cursor, &key)
-      || g_strcmp0 (key, "service_credential") != 0 || !take (&cursor, ':')
-      || !parse_credential_object (&cursor, &out_result->credential,
-          &credential_secret)
-      || !take (&cursor, '}') || !document_done (&cursor))
+  wyl_client_service_credential_handoff_receipt_clear (out_receipt);
+  while (TRUE) {
+    g_clear_pointer (&key, g_free);
+    if (!parse_string (&cursor, &key) || !take (&cursor, ':'))
+      goto invalid;
+    if (g_strcmp0 (key, "state") == 0) {
+      if (seen_state || !parse_string (&cursor, &out_receipt->state)
+          || !handoff_state_is_known (out_receipt->state))
+        goto invalid;
+      seen_state = TRUE;
+    } else if (g_strcmp0 (key, "request_id") == 0) {
+      if (seen_request_id || !parse_string (&cursor, &out_receipt->request_id)
+          || !string_is_request_id (out_receipt->request_id))
+        goto invalid;
+      seen_request_id = TRUE;
+    } else if (g_strcmp0 (key, "credential_id") == 0) {
+      if (seen_credential_id
+          || !parse_nullable_string (&cursor, &out_receipt->credential_id)
+          || (out_receipt->credential_id != NULL
+              && !wyl_service_credential_id_is_canonical
+              (out_receipt->credential_id,
+                  strlen (out_receipt->credential_id))))
+        goto invalid;
+      seen_credential_id = TRUE;
+    } else if (g_strcmp0 (key, "generation") == 0) {
+      if (seen_generation || !parse_uint64 (&cursor, &out_receipt->generation))
+        goto invalid;
+      seen_generation = TRUE;
+    } else if (g_strcmp0 (key, "destination") == 0) {
+      if (seen_destination || !parse_string (&cursor, &out_receipt->destination)
+          || !wyl_service_credential_operation_destination_is_valid
+          (out_receipt->destination))
+        goto invalid;
+      seen_destination = TRUE;
+    } else if (g_strcmp0 (key, "publication_receipt_id") == 0) {
+      if (seen_publication_receipt_id
+          || !parse_nullable_string (&cursor,
+              &out_receipt->publication_receipt_id))
+        goto invalid;
+      seen_publication_receipt_id = TRUE;
+    } else if (g_strcmp0 (key, "delivered") == 0) {
+      if (seen_delivered || !parse_bool (&cursor, &out_receipt->delivered))
+        goto invalid;
+      seen_delivered = TRUE;
+    } else {
+      goto invalid;
+    }
+    if (take (&cursor, '}'))
+      break;
+    if (!take (&cursor, ','))
+      goto invalid;
+  }
+  if (!document_done (&cursor) || !seen_state || !seen_request_id
+      || !seen_credential_id || !seen_generation || !seen_destination
+      || !seen_publication_receipt_id || !seen_delivered)
     goto invalid;
-  out_result->credential_secret.text = g_steal_pointer (&credential_secret);
-  out_result->credential_secret.len = strlen
-      (out_result->credential_secret.text);
   g_free (key);
   return WYRELOG_E_OK;
 invalid:
   g_free (key);
-  if (credential_secret != NULL) {
-    sodium_memzero (credential_secret, strlen (credential_secret));
-    g_free (credential_secret);
-  }
-  wyl_client_service_credential_issue_result_clear (out_result);
+  wyl_client_service_credential_handoff_receipt_clear (out_receipt);
   return WYRELOG_E_INVALID;
 }
