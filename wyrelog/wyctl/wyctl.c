@@ -3221,6 +3221,103 @@ run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
 }
 
 static int
+run_service_credential_rotate (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServiceCredentialOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"credential-id", 0, 0, G_OPTION_ARG_STRING, &opts.credential_id,
+        "Credential id to rotate", "CREDENTIAL_ID"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant,
+        "Tenant of the authenticated bearer session", "TENANT"},
+    {"destination", 0, 0, G_OPTION_ARG_STRING, &opts.destination,
+        "Escrow publication destination", "NAME"},
+    {"expires-at-us", 0, 0, G_OPTION_ARG_STRING, &opts.expires_at_us_arg,
+        "Publication expiry, absolute epoch microseconds (> 0)", "US"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+        "Idempotency request id (default: minted)", "ID"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-credential rotate");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-credential rotate argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (opts.credential_id == NULL || opts.credential_id[0] == '\0') {
+    g_printerr ("wyctl: missing --credential-id\n");
+    return 2;
+  }
+  if (opts.destination == NULL || opts.destination[0] == '\0') {
+    g_printerr ("wyctl: missing --destination\n");
+    return 2;
+  }
+  gint64 expires_at_us = 0;
+  if (!parse_nonnegative_int64 (opts.expires_at_us_arg, &expires_at_us) ||
+      expires_at_us <= 0) {
+    g_printerr ("wyctl: invalid --expires-at-us\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
+  const gchar *request_id = service_credential_resolve_request_id
+      (opts.request_id, request_id_buf, sizeof request_id_buf);
+  if (request_id == NULL) {
+    g_printerr ("wyctl: unable to mint request id\n");
+    return 2;
+  }
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  g_auto (WylClientServiceCredentialHandoffReceipt) receipt = { 0 };
+  wyrelog_error_t rc = wyl_client_service_credential_rotate (client,
+      opts.credential_id, request_id, opts.destination, expires_at_us,
+      guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
+  int exit_rc = fact_remote_exit (client, "service-credential rotate", rc,
+      "service_credential_rotate_failed");
+  if (exit_rc == 0)
+    print_service_credential_receipt (&receipt);
+  return exit_rc;
+}
+
+static int
 run_service_credential (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
 {
@@ -3230,6 +3327,8 @@ run_service_credential (const WyctlOptions *global_opts, gint argc,
   }
   if (g_strcmp0 (argv[1], "issue") == 0)
     return run_service_credential_issue (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "rotate") == 0)
+    return run_service_credential_rotate (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-credential command: %s\n", argv[1]);
   return 2;
 }

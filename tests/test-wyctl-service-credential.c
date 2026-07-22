@@ -204,6 +204,103 @@ test_service_credential_issue_help (void)
   g_assert_nonnull (g_strstr_len (stdout_buf, -1, "--expires-at-us"));
 }
 
+static void
+test_service_credential_rotate_missing_flags (void)
+{
+  gchar *missing_credential_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "rotate",
+    "--tenant", "__wr_default",
+    "--destination", "worker.cred",
+    "--expires-at-us", "1893456000000000",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_credential_argv, 2,
+      "wyctl: missing --credential-id");
+
+  gchar *missing_destination_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "rotate",
+    "--credential-id", "cred-1",
+    "--tenant", "__wr_default",
+    "--expires-at-us", "1893456000000000",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_destination_argv, 2,
+      "wyctl: missing --destination");
+
+  gchar *missing_expires_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "rotate",
+    "--credential-id", "cred-1",
+    "--tenant", "__wr_default",
+    "--destination", "worker.cred",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_expires_argv, 2,
+      "wyctl: invalid --expires-at-us");
+
+  gchar *missing_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "rotate",
+    "--credential-id", "cred-1",
+    "--destination", "worker.cred",
+    "--expires-at-us", "1893456000000000",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+}
+
+static void
+test_service_credential_rotate_expires_bounds (void)
+{
+  gchar *zero_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "rotate",
+    "--credential-id", "cred-1",
+    "--tenant", "__wr_default",
+    "--destination", "worker.cred",
+    "--expires-at-us", "0",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (zero_argv, 2, "wyctl: invalid --expires-at-us");
+
+  gchar *negative_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "rotate",
+    "--credential-id", "cred-1",
+    "--tenant", "__wr_default",
+    "--destination", "worker.cred",
+    "--expires-at-us", "-5",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (negative_argv, 2, "wyctl: invalid --expires-at-us");
+}
+
 int
 main (int argc, char **argv)
 {
@@ -216,5 +313,9 @@ main (int argc, char **argv)
       test_service_credential_issue_expires_bounds);
   g_test_add_func ("/wyctl/service-credential/issue-help",
       test_service_credential_issue_help);
+  g_test_add_func ("/wyctl/service-credential/rotate-missing-flags",
+      test_service_credential_rotate_missing_flags);
+  g_test_add_func ("/wyctl/service-credential/rotate-expires-bounds",
+      test_service_credential_rotate_expires_bounds);
   return g_test_run ();
 }
