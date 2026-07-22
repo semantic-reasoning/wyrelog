@@ -1633,6 +1633,20 @@ test('check-service-handoff-delivery-boundary-self-test',
   args : ['--self-test'],
 )
 
+check_service_credential_escrow_issuer = find_program(
+  '../tools/check-service-credential-escrow-issuer.py',
+)
+
+test('check-service-credential-escrow-issuer',
+  check_service_credential_escrow_issuer,
+  args : [meson.project_source_root()],
+)
+
+test('check-service-credential-escrow-issuer-self-test',
+  check_service_credential_escrow_issuer,
+  args : ['--self-test'],
+)
+
 test_login_req = executable('test-login-req',
   'test-login-req.c',
   dependencies : [wyrelog_dep],
