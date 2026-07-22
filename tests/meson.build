@@ -561,6 +561,51 @@ if build_client and host_machine.system() != 'windows'
   test('wyctl-policy-daemon', test_wyctl_policy_daemon,
     depends : wyctl_exe,
   )
+
+  # End-to-end: drives `wyctl service-credential issue` against an in-process
+  # daemon to prove the CLI -> client -> daemon -> auth chain and the rc->exit
+  # mapping. With an authorized operator but no escrow roots the handler passes
+  # auth and returns 503 (exit 5); an ungranted operator is denied (exit 4/6).
+  # The delta proves the bearer token is accepted and authorization enforced.
+  # The delivered=yes escrow receipt is covered by the daemon-http contract and
+  # client smoke, which this harness cannot reproduce (no CVK sealing).
+  test_wyctl_service_credential_daemon_c_args = [
+    '-DWYL_HAS_DAEMON_HTTP',
+    # The bearer session must be bound to a real (alphanumeric) tenant so the
+    # service subject svc:<tenant>:worker is legal, which login cannot express;
+    # the human session/token seeding seams that give such a token are gated
+    # behind WYL_TEST_DAEMON_HTTP.
+    '-DWYL_TEST_DAEMON_HTTP',
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+    '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+  ]
+  test_wyctl_service_credential_daemon_deps = [
+    wyrelog_dep,
+    wyrelog_client_dep,
+    libsoup_dep,
+    sodium_dep,
+    service_session_private_dep,
+  ]
+  if get_option('enable_fact_store').allowed()
+    test_wyctl_service_credential_daemon_c_args += '-DWYL_HAS_FACT_STORE'
+    test_wyctl_service_credential_daemon_deps += duckdb_dep
+  endif
+  test_wyctl_service_credential_daemon_deps += daemon_http_private_dep
+  test_wyctl_service_credential_daemon = executable(
+    'test-wyctl-service-credential-daemon',
+    'test-wyctl-service-credential-daemon.c',
+    '../wyrelog/daemon/auth-registry-private.c',
+    '../wyrelog/daemon/http.c',
+    '../wyrelog/daemon/delta.c',
+    '../wyrelog/daemon/fact-status.c',
+    c_args : test_wyctl_service_credential_daemon_c_args,
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : test_wyctl_service_credential_daemon_deps,
+  )
+
+  test('wyctl-service-credential-daemon', test_wyctl_service_credential_daemon,
+    depends : wyctl_exe,
+  )
 endif
 
 if build_client and host_machine.system() == 'windows'
