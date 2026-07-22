@@ -1,6 +1,9 @@
 # ADR 0001: Service Credential Secret Handoff
 
-Status: accepted
+Status: implemented
+
+Implemented across #510--#517; #517 delivers the loopback issue/rotate ingress
+and the non-secret publication receipt.
 
 Related issues: #475, #506, #508, #515, #516, #517
 
@@ -15,9 +18,9 @@ published, or cause a journal to become a plaintext secret store.
 
 The current credential secret is an opaque, secure-memory object. The policy
 store owns the credential verification key (CVK) through a KeyProvider-sealed,
-provider-bound envelope. The existing `wyctl` publication backend accepts
-sensitive text transiently, but it does not yet provide the recovery contract
-described below.
+provider-bound envelope. At the time of this decision the `wyctl` publication
+backend accepted sensitive text transiently but did not yet provide the
+recovery contract described below.
 
 ## Decision
 
@@ -89,10 +92,12 @@ publication receipt. Exactly-once *bytes* cannot be promised: a crash after a
 filesystem rename and before receipt persistence can leave a correctly written
 file without a durable acknowledgement. Therefore `inspect` and `resync` must
 determine whether a receipt identifies the exact published document, not merely
-whether a path exists. The current `wyctl` publication interface has
-plan/prepare/commit/inspect/resync/cleanup operations, but lacks this complete
-escrow-reference and exact-content recovery guarantee; it is an explicit gap
-to close before an executor is enabled.
+whether a path exists. The `wyctl` publication interface provides
+plan/prepare/commit/inspect/resync/cleanup operations, and inspect and resync
+verify the exact credential id and secret against the receipt-anchored target
+rather than mere path existence. That escrow-reference and exact-content
+recovery guarantee is in place and the executor is enabled, reached through the
+loopback issue/rotate ingress in `wyl_daemon_service_credential_handoff`.
 
 `OPERATOR_ACTION_REQUIRED` is never entered merely for expiry or cancellation:
 those conditions affect only `PREPARED` admission. Cleanup/inspection I/O
@@ -175,8 +180,9 @@ operation begin share its lifecycle-lock namespace, and guarded begin rejects
 reuse whenever that receipt exists. The receipt contains no secret, path,
 ciphertext, or duplicate full credential tuple; it retains only the non-secret
 identifiers, digests, timestamps, and provenance references required to prove
-the deletion. Public ingress and any scheduling policy remain deferred to
-#517.
+the deletion. #517 delivered the public loopback issue/rotate ingress;
+retirement itself remains private operator-driven library work with no timer or
+scheduler.
 
 ## Consequences
 
