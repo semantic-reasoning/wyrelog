@@ -19,6 +19,7 @@
 #include "wyrelog/wyl-id-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
 #include "wyrelog/wyl-permission-scope-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 #include "wyctl-config.h"
 #include "wyctl-token-file.h"
 #include "wyctl-publication-private.h"
@@ -152,6 +153,20 @@ typedef struct
   gchar *credential_file;
   gchar *token_output;
 } WyctlServiceTokenOptions;
+
+typedef struct
+{
+  gchar *subject;
+  gchar *credential_id;
+  gchar *tenant;
+  gchar *destination;
+  gchar *expires_at_us_arg;
+  gchar *request_id;
+  gchar *access_token_file;
+  gchar *guard_timestamp_arg;
+  gchar *guard_loc_class;
+  gchar *guard_risk_arg;
+} WyctlServiceCredentialOptions;
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (WyctlSensitiveText,
     wyctl_sensitive_text_clear);
@@ -3060,6 +3075,165 @@ run_auth (const WyctlOptions *global_opts, gint argc, gchar **argv)
   return 2;
 }
 
+/* Print the non-secret escrow handoff receipt as one key=value line. The
+ * credential material never reaches the CLI: it is published out-of-band to
+ * the owner-only escrow file, so we emit only the receipt fields and a note.
+ * Receipt string fields can be NULL on non-delivered/pending states, so guard
+ * every %s with a "-" placeholder. */
+static void
+print_service_credential_receipt (const
+    WylClientServiceCredentialHandoffReceipt *receipt)
+{
+  const gchar *state = receipt->state != NULL ? receipt->state : "-";
+  const gchar *request_id =
+      receipt->request_id != NULL ? receipt->request_id : "-";
+  const gchar *credential_id =
+      receipt->credential_id != NULL ? receipt->credential_id : "-";
+  const gchar *destination =
+      receipt->destination != NULL ? receipt->destination : "-";
+  const gchar *publication_receipt_id =
+      receipt->publication_receipt_id != NULL ?
+      receipt->publication_receipt_id : "-";
+
+  g_print ("state=%s request_id=%s credential_id=%s generation=%"
+      G_GUINT64_FORMAT " destination=%s publication_receipt_id=%s "
+      "delivered=%s\n", state, request_id, credential_id, receipt->generation,
+      destination, publication_receipt_id, receipt->delivered ? "yes" : "no");
+  g_printerr ("wyctl: one-time secret delivered out-of-band to the owner-only "
+      "escrow publication file; it is never printed here\n");
+}
+
+/* Resolve the request id: use --request-id when given, otherwise mint a fresh
+ * canonical id into |buf| (which must be at least WYL_REQUEST_ID_STRING_BUF
+ * bytes). Returns the id to use, or NULL on mint failure. */
+static const gchar *
+service_credential_resolve_request_id (const gchar *request_id_arg,
+    gchar *buf, gsize buf_len)
+{
+  if (request_id_arg != NULL && request_id_arg[0] != '\0')
+    return request_id_arg;
+  if (wyl_request_id_new (buf, buf_len) != WYRELOG_E_OK)
+    return NULL;
+  return buf;
+}
+
+static int
+run_service_credential_issue (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServiceCredentialOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"subject", 0, 0, G_OPTION_ARG_STRING, &opts.subject,
+        "Service subject; must be svc:<tenant>:... with <tenant> equal to "
+          "--tenant", "SUBJECT_ID"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"destination", 0, 0, G_OPTION_ARG_STRING, &opts.destination,
+        "Escrow publication destination", "NAME"},
+    {"expires-at-us", 0, 0, G_OPTION_ARG_STRING, &opts.expires_at_us_arg,
+        "Publication expiry, absolute epoch microseconds (> 0)", "US"},
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+        "Idempotency request id (default: minted)", "ID"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-credential issue");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-credential issue argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (opts.subject == NULL || opts.subject[0] == '\0') {
+    g_printerr ("wyctl: missing --subject\n");
+    return 2;
+  }
+  if (opts.destination == NULL || opts.destination[0] == '\0') {
+    g_printerr ("wyctl: missing --destination\n");
+    return 2;
+  }
+  gint64 expires_at_us = 0;
+  if (!parse_nonnegative_int64 (opts.expires_at_us_arg, &expires_at_us) ||
+      expires_at_us <= 0) {
+    g_printerr ("wyctl: invalid --expires-at-us\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  gchar request_id_buf[WYL_REQUEST_ID_STRING_BUF];
+  const gchar *request_id = service_credential_resolve_request_id
+      (opts.request_id, request_id_buf, sizeof request_id_buf);
+  if (request_id == NULL) {
+    g_printerr ("wyctl: unable to mint request id\n");
+    return 2;
+  }
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  WylClientServiceCredentialIssueRequest request = {
+    .subject_id = opts.subject,
+    .tenant_id = tenant,
+    .request_id = request_id,
+    .destination = opts.destination,
+    .expires_at_us = expires_at_us,
+  };
+  g_auto (WylClientServiceCredentialHandoffReceipt) receipt = { 0 };
+  wyrelog_error_t rc = wyl_client_service_credential_issue (client, &request,
+      guard_timestamp, opts.guard_loc_class, guard_risk, &receipt);
+  int exit_rc = fact_remote_exit (client, "service-credential issue", rc,
+      "service_credential_issue_failed");
+  if (exit_rc == 0)
+    print_service_credential_receipt (&receipt);
+  return exit_rc;
+}
+
+static int
+run_service_credential (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  if (argc < 2) {
+    g_printerr ("wyctl: missing service-credential command\n");
+    return 2;
+  }
+  if (g_strcmp0 (argv[1], "issue") == 0)
+    return run_service_credential_issue (global_opts, argc - 1, argv + 1);
+  g_printerr ("wyctl: unknown service-credential command: %s\n", argv[1]);
+  return 2;
+}
+
 int
 main (int argc, char **argv)
 {
@@ -3121,6 +3295,8 @@ main (int argc, char **argv)
     return run_mfa (&opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "auth") == 0)
     return run_auth (&opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "service-credential") == 0)
+    return run_service_credential (&opts, argc - 1, argv + 1);
 
   g_printerr ("wyctl: unknown command: %s\n", argv[1]);
   return 2;
