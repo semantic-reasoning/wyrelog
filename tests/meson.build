@@ -1760,6 +1760,20 @@ test('check-service-handoff-delivery-boundary-self-test',
   args : ['--self-test'],
 )
 
+check_wyctl_operation_delegation = find_program(
+  '../tools/check-wyctl-operation-delegation.py',
+)
+
+test('check-wyctl-operation-delegation',
+  check_wyctl_operation_delegation,
+  args : [meson.project_source_root() / 'wyrelog' / 'wyctl' / 'wyctl.c'],
+)
+
+test('check-wyctl-operation-delegation-self-test',
+  check_wyctl_operation_delegation,
+  args : ['--self-test'],
+)
+
 check_service_credential_escrow_issuer = find_program(
   '../tools/check-service-credential-escrow-issuer.py',
 )
