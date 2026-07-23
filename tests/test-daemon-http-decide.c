@@ -6951,6 +6951,46 @@ out:
   return rc_out;
 }
 
+/* Read back the durable record selected by |request_id| and capture the fields
+ * a checkpoint would advance (state, updated_at_us, attempts).  Returns 0 on a
+ * successful load so a caller can assert a record is byte-stable across an
+ * operation that must not have written to it.  Returns non-zero on any load
+ * failure. */
+static gint
+capture_operation_signature (const gchar *operation_root,
+    const gchar *request_id, WylServiceCredentialOperationState *out_state,
+    gint64 *out_updated_at_us, guint32 *out_attempts)
+{
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationRecord record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  gint rc_out = 0;
+  if (wyl_service_credential_operation_storage_open (operation_root, &storage)
+      != WYRELOG_E_OK)
+    return 2130;
+  if (wyl_service_credential_operation_storage_capture_anchor (&storage,
+          &anchor) != WYRELOG_E_OK) {
+    rc_out = 2131;
+    goto out;
+  }
+  if (wyl_service_credential_operation_coordinator_load (&storage, &anchor,
+          request_id, &record) != WYRELOG_E_OK) {
+    rc_out = 2132;
+    goto out;
+  }
+  *out_state = record.state;
+  *out_updated_at_us = record.updated_at_us;
+  *out_attempts = record.attempts;
+out:
+  wyl_service_credential_operation_record_clear (&record);
+  wyl_service_credential_operation_storage_clear (&storage);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  return rc_out;
+}
+
 /* A serialized operation body must never carry any secret-adjacent field. */
 static gboolean
 status_body_leaks_secret (const gchar *body)
@@ -6963,7 +7003,11 @@ status_body_leaks_secret (const gchar *body)
       || strstr (body, "reservation") != NULL
       || strstr (body, "publication_receipt") != NULL
       || strstr (body, "remediation") != NULL
-      || strstr (body, "credential_secret") != NULL;
+      || strstr (body, "credential_secret") != NULL
+      || strstr (body, "subject_id") != NULL
+      || strstr (body, "tenant_id") != NULL
+      || strstr (body, "operation_id") != NULL
+      || strstr (body, "old_credential_id") != NULL;
 }
 
 /* Drives the durable operation status + recover HTTP contract against the
@@ -7086,8 +7130,18 @@ check_service_credential_operation_status_recover (SoupServer *server,
           &body) != 0 || status != 400)
     return 2121;
 
-  /* Recovering another tenant's operation must not reveal it: the tenant-b
-   * issue recovered under tenant-a is a 404, not a leak. */
+  /* Recovering another tenant's operation must not reveal it, AND must not
+   * write to it: the tenant gate runs on a read-only load before any lock or
+   * checkpoint.  Snapshot the tenant-b issue's mutable fields, recover it under
+   * tenant-a (a 404 that is not a leak), then assert the durable record is
+   * byte-stable (state/updated_at_us/attempts unchanged): no checkpoint ran. */
+  WylServiceCredentialOperationState pre_state = 0;
+  gint64 pre_updated_at_us = 0;
+  guint32 pre_attempts = 0;
+  if (capture_operation_signature (operation_root, issue_b_id, &pre_state,
+          &pre_updated_at_us, &pre_attempts) != 0
+      || pre_state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
+    return 2122;
   g_autofree gchar *recover_cross_body = g_strdup_printf
       ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_b_id);
   g_clear_pointer (&body, g_free);
@@ -7095,7 +7149,39 @@ check_service_credential_operation_status_recover (SoupServer *server,
           "/service-credential-operations/recover", tenant_a_query,
           recover_cross_body, &status, &body) != 0 || status != 404
       || (body != NULL && strstr (body, issue_b_id) != NULL))
-    return 2122;
+    return 2123;
+  WylServiceCredentialOperationState post_state = 0;
+  gint64 post_updated_at_us = 0;
+  guint32 post_attempts = 0;
+  if (capture_operation_signature (operation_root, issue_b_id, &post_state,
+          &post_updated_at_us, &post_attempts) != 0
+      || post_state != pre_state || post_updated_at_us != pre_updated_at_us
+      || post_attempts != pre_attempts)
+    return 2124;
+
+  /* A legitimate tenant-b recover of the same operation still classifies as
+   * pending: the cross-tenant attempt neither advanced nor consumed it. */
+  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
+          "human-principal-admin", "tenant-b"))
+    return 2125;
+  g_autofree gchar *tenant_b_query = g_strdup_printf
+      ("session_token=%s&tenant=tenant-b&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0", session_token);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations/recover", tenant_b_query,
+          recover_cross_body, &status, &body) != 0 || status != 200
+      || body == NULL || strstr (body, "\"recovery\":\"pending\"") == NULL
+      || strstr (body, issue_b_id) == NULL || status_body_leaks_secret (body))
+    return 2126;
+
+  /* The recover handler owns ONLY its exact path; a deeper subpath is unknown
+   * and must 404 rather than be served by longest-prefix routing. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations/recover/extra", tenant_a_query,
+          recover_a_body, &status, &body) != 0 || status != 404)
+    return 2127;
 
   return 0;
 }
