@@ -148,6 +148,9 @@ if build_client
   test_daemon_http_decide_c_args = [
     '-DWYL_HAS_DAEMON_HTTP',
     '-DWYL_TEST_DAEMON_HTTP',
+    # Seed durable PREPARED operations directly through the coordinator test
+    # friend so the status/recover HTTP contract has records to enumerate.
+    '-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS',
     '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
     # The four daemon-http-decide variants share one source file with one
     # main() per variant; helpers irrelevant to the active variant remain
