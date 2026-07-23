@@ -84,6 +84,10 @@ typedef struct
   gint fd;
   gchar *stage_basename;
   gchar *final_basename;
+  /* Exact provisioning stages are derived from a durable UUIDv7 operation
+   * record.  Their publication path never trusts a source pathname after the
+   * handle has been acquired. */
+  gboolean exact_provisioning_stage;
 #ifdef G_OS_WIN32
   WylFactGraphWinIdentity identity;
   WylFactGraphWinIdentity graph_identity;
@@ -150,6 +154,19 @@ wyrelog_error_t wyl_fact_graph_directory_secure_file_mode
     (WylFactGraphDirectory * directory, const gchar * basename);
 wyrelog_error_t wyl_fact_graph_directory_stage_create
     (WylFactGraphDirectory * directory, const gchar * final_basename,
+    WylFactGraphStage * out_stage);
+/* Create exactly one durable provisioning stage.  |operation_uuid| must be a
+ * canonical UUIDv7; the locator derives `provision-<uuidv7>.sqlite` and the
+ * fixed `facts.duckdb` final name internally.  This API never generates
+ * identifiers and never reuses an existing entry.  EEXIST is BUSY. */
+wyrelog_error_t wyl_fact_graph_directory_stage_create_exact
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphStage * out_stage);
+/* Reopen only the exact persisted provisioning-stage name.  This never
+ * creates a file; absence is NOT_FOUND.  A returned handle proves current
+ * resolver-relative binding, not pre-crash provenance. */
+wyrelog_error_t wyl_fact_graph_directory_stage_open_exact
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *

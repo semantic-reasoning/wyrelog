@@ -526,6 +526,375 @@ test_posix_resolver_never_overwrites_final_or_replaced_stage (void)
   remove_tree (root);
 }
 
+static const gchar exact_operation_uuid[] =
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
+
+typedef struct
+{
+  const gchar *stage_path;
+  const gchar *backup_path;
+  gboolean fired;
+} ExactStageReplacement;
+
+typedef struct
+{
+  const gchar *final_path;
+  const gchar *backup_path;
+  gboolean fired;
+} ExactFinalReplacement;
+
+typedef struct
+{
+  const gchar *point;
+  gboolean fired;
+} ExactStageFault;
+
+static wyrelog_error_t
+fail_exact_stage_checkpoint_once (const gchar *point, gpointer user_data)
+{
+  ExactStageFault *fault = user_data;
+  if (!fault->fired && g_strcmp0 (point, fault->point) == 0) {
+    fault->fired = TRUE;
+    return WYRELOG_E_IO;
+  }
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+replace_exact_stage_name (const gchar *point, gpointer user_data)
+{
+  ExactStageReplacement *replacement = user_data;
+  if (g_strcmp0 (point, "stage-validated") != 0)
+    return WYRELOG_E_OK;
+  g_assert_false (replacement->fired);
+  replacement->fired = TRUE;
+  g_assert_cmpint (g_rename (replacement->stage_path, replacement->backup_path),
+      ==, 0);
+  g_assert_true (g_file_set_contents (replacement->stage_path, "foreign", -1,
+          NULL));
+  g_assert_cmpint (g_chmod (replacement->stage_path, 0600), ==, 0);
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+replace_exact_final_after_sync (const gchar *point, gpointer user_data)
+{
+  ExactFinalReplacement *replacement = user_data;
+  if (g_strcmp0 (point, "stage-parent-synced") != 0)
+    return WYRELOG_E_OK;
+  g_assert_false (replacement->fired);
+  replacement->fired = TRUE;
+  g_assert_cmpint (g_rename (replacement->final_path, replacement->backup_path),
+      ==, 0);
+  g_assert_true (g_file_set_contents (replacement->final_path, "foreign", -1,
+          NULL));
+  g_assert_cmpint (g_chmod (replacement->final_path, 0600), ==, 0);
+  return WYRELOG_E_OK;
+}
+
+static void
+test_posix_resolver_exact_stage_create_open_publish (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (stage.stage_basename, ==,
+      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite");
+  g_assert_cmpstr (stage.final_basename, ==, "facts.duckdb");
+  g_assert_cmpint (write (stage.fd, "held", 4), ==, 4);
+  g_assert_cmpint (wyl_fact_graph_stage_sync (&stage), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+#ifdef __linux__
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *final_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+  g_autofree gchar *contents = NULL;
+  g_assert_true (g_file_get_contents (final_path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "held");
+
+  /* A post-link crash leaves the precise stage and final aliases.  That is
+   * the only nlink=2 form the exact reopen API accepts. */
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+#else
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_POLICY);
+  g_autofree gchar *final_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+  g_assert_false (g_file_test (final_path, G_FILE_TEST_EXISTS));
+  wyl_fact_graph_stage_clear (&stage);
+#endif
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+}
+
+static void
+test_posix_resolver_exact_stage_rejects_conflicts_and_invalid_ids (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphStage conflict = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  static const gchar *invalid[] = {
+    "", "../01890f47-3c4b-7cc2-b8c4-dc0c0c070544",
+    "01890f47-3c4b-6cc2-b8c4-dc0c0c070544",
+    "01890F47-3C4B-7CC2-B8C4-DC0C0C070544",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (invalid); i++)
+    g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+            invalid[i], &stage), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (write (stage.fd, "first", 5), ==, 5);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          exact_operation_uuid, &conflict), ==, WYRELOG_E_BUSY);
+  gchar buffer[6] = { 0 };
+  g_assert_cmpint (pread (stage.fd, buffer, 5, 0), ==, 5);
+  g_assert_cmpstr (buffer, ==, "first");
+  g_assert_cmpint (wyl_fact_graph_stage_abort (&graph, &stage), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_stage_clear (&conflict);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+}
+
+static void
+test_posix_resolver_exact_stage_adversarial_states (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path =
+      wyl_fact_graph_directory_descriptive_path (&graph);
+  g_autofree gchar *stage_path = g_build_filename (graph_path,
+      "provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite", NULL);
+  g_autofree gchar *final_path = g_build_filename (graph_path, "facts.duckdb",
+      NULL);
+  g_autofree gchar *outside = g_build_filename (root, "outside", NULL);
+  g_assert_true (g_file_set_contents (outside, "outside", -1, NULL));
+  g_assert_cmpint (g_chmod (outside, 0600), ==, 0);
+
+  /* A symlink at the recorded name is rejected and never removed. */
+  g_assert_cmpint (symlink (outside, stage_path), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
+  g_assert_true (g_file_test (stage_path, G_FILE_TEST_IS_SYMLINK));
+  g_assert_cmpint (g_remove (stage_path), ==, 0);
+
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (write (stage.fd, "held", 4), ==, 4);
+  wyl_fact_graph_stage_clear (&stage);
+  g_autofree gchar *alias = g_build_filename (graph_path, "foreign-link",
+      NULL);
+  g_assert_cmpint (link (stage_path, alias), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
+  g_assert_true (g_file_test (alias, G_FILE_TEST_IS_REGULAR));
+  g_assert_cmpint (g_remove (alias), ==, 0);
+
+  /* The one permitted two-link form is the recorded stage plus final. */
+  g_assert_cmpint (link (stage_path, final_path), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+  g_assert_cmpint (link (stage_path, alias), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (g_remove (alias), ==, 0);
+  g_assert_cmpint (g_remove (final_path), ==, 0);
+
+  /* The held descriptor is the only link source.  Replacing its name during
+   * the test seam cannot publish the foreign replacement. */
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_autofree gchar *backup = g_strdup_printf ("%s-held", stage_path);
+  ExactStageReplacement replacement = { stage_path, backup, FALSE };
+  graph.checkpoint = replace_exact_stage_name;
+  graph.checkpoint_data = &replacement;
+#ifdef __linux__
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_OK);
+  g_assert_true (replacement.fired);
+  g_autofree gchar *contents = NULL;
+  g_assert_true (g_file_get_contents (final_path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "held");
+  g_clear_pointer (&contents, g_free);
+  g_assert_true (g_file_get_contents (stage_path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "foreign");
+  g_clear_pointer (&contents, g_free);
+  g_assert_true (g_file_get_contents (backup, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "held");
+#else
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (final_path, G_FILE_TEST_EXISTS));
+  g_assert_true (replacement.fired);
+#endif
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+
+  wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+}
+
+static void
+test_posix_resolver_exact_stage_collision_and_durability (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  g_autofree gchar *final_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (write (stage.fd, "held", 4), ==, 4);
+  g_assert_true (g_file_set_contents (final_path, "foreign", -1, NULL));
+  g_assert_cmpint (g_chmod (final_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_POLICY);
+  g_autofree gchar *contents = NULL;
+  g_assert_true (g_file_get_contents (final_path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "foreign");
+  g_assert_cmpint (g_remove (final_path), ==, 0);
+
+#ifdef __linux__
+  /* A fault after the FD-based link leaves only the known recoverable pair;
+   * retry then reaches the parent-sync seam and likewise cannot claim
+   * completion before the directory sync succeeds. */
+  ExactStageFault fault = { "stage-linked", FALSE };
+  graph.checkpoint = fail_exact_stage_checkpoint_once;
+  graph.checkpoint_data = &fault;
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_IO);
+  g_assert_true (fault.fired);
+  g_clear_pointer (&contents, g_free);
+  g_assert_true (g_file_get_contents (final_path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "held");
+
+  g_autofree gchar *backup = g_strdup_printf ("%s-held", final_path);
+  ExactFinalReplacement replacement = { final_path, backup, FALSE };
+  graph.checkpoint = replace_exact_final_after_sync;
+  graph.checkpoint_data = &replacement;
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_POLICY);
+  g_assert_true (replacement.fired);
+  g_clear_pointer (&contents, g_free);
+  g_assert_true (g_file_get_contents (final_path, &contents, NULL, NULL));
+  g_assert_cmpstr (contents, ==, "foreign");
+  g_assert_cmpint (g_remove (final_path), ==, 0);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_OK);
+#else
+  g_assert_cmpint (wyl_fact_graph_stage_publish (&graph, &stage), ==,
+      WYRELOG_E_POLICY);
+  g_assert_false (g_file_test (final_path, G_FILE_TEST_EXISTS));
+#endif
+  wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+}
+
+static void
+test_posix_resolver_exact_stage_create_sync_failure (void)
+{
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+          &locator, TRUE, &graph), ==, WYRELOG_E_OK);
+  ExactStageFault fault = { "stage-created", FALSE };
+  graph.checkpoint = fail_exact_stage_checkpoint_once;
+  graph.checkpoint_data = &fault;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_IO);
+  g_assert_true (fault.fired);
+  g_assert_cmpint (stage.fd, ==, -1);
+  /* Failure never advertises a durable create, but it also never unlinks the
+   * exact name by a potentially substituted pathname. */
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          exact_operation_uuid, &stage), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+  fault = (ExactStageFault) {
+  "stage-create-parent-synced", FALSE};
+  graph.checkpoint = fail_exact_stage_checkpoint_once;
+  graph.checkpoint_data = &fault;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &stage), ==, WYRELOG_E_IO);
+  g_assert_true (fault.fired);
+  g_assert_cmpint (stage.fd, ==, -1);
+  graph.checkpoint = NULL;
+  graph.checkpoint_data = NULL;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", &stage), ==, WYRELOG_E_OK);
+  wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree (root);
+}
+
 typedef struct
 {
   const gchar *point;
@@ -868,6 +1237,16 @@ main (int argc, char **argv)
       test_posix_resolver_rejects_hardlink_and_aliases);
   g_test_add_func ("/fact-graph-locator/posix/no-overwrite-stage-replacement",
       test_posix_resolver_never_overwrites_final_or_replaced_stage);
+  g_test_add_func ("/fact-graph-locator/posix/exact-stage-create-open-publish",
+      test_posix_resolver_exact_stage_create_open_publish);
+  g_test_add_func ("/fact-graph-locator/posix/exact-stage-conflicts-invalid",
+      test_posix_resolver_exact_stage_rejects_conflicts_and_invalid_ids);
+  g_test_add_func ("/fact-graph-locator/posix/exact-stage-adversarial",
+      test_posix_resolver_exact_stage_adversarial_states);
+  g_test_add_func ("/fact-graph-locator/posix/exact-stage-durability",
+      test_posix_resolver_exact_stage_collision_and_durability);
+  g_test_add_func ("/fact-graph-locator/posix/exact-stage-create-sync-failure",
+      test_posix_resolver_exact_stage_create_sync_failure);
   g_test_add_func ("/fact-graph-locator/posix/publish-retry",
       test_posix_resolver_publish_retries_converge);
   g_test_add_func ("/fact-graph-locator/posix/stage-binding",
