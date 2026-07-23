@@ -7794,26 +7794,6 @@ static const gchar *service_credential_operation_recovery_string
   }
 }
 
-/* Service subject ids are canonical "svc:<tenant>:<...>".  Returns TRUE only
- * when the subject id is well formed and its tenant component exactly equals
- * |tenant|.  A NULL or malformed subject id never matches, so records that
- * cannot be attributed are excluded from a tenant-scoped listing.  This is a
- * pure string comparison; it never consults the policy store. */
-static gboolean
-service_subject_tenant_equals (const gchar *subject_id, const gchar *tenant)
-{
-  if (subject_id == NULL || tenant == NULL || tenant[0] == '\0')
-    return FALSE;
-  if (!g_str_has_prefix (subject_id, "svc:"))
-    return FALSE;
-  const gchar *tenant_start = subject_id + 4;   /* past the leading "svc:" */
-  const gchar *sep = strchr (tenant_start, ':');
-  if (sep == NULL || sep == tenant_start)
-    return FALSE;
-  gsize len = (gsize) (sep - tenant_start);
-  return len == strlen (tenant) && memcmp (tenant_start, tenant, len) == 0;
-}
-
 /* Strict non-secret allow-list serializer shared by the status and recover
  * responses.  It emits ONLY the fields listed below; escrow_id, binding
  * digests, stage_identity/basename, parent_identity, actor_subject_id,
@@ -7899,7 +7879,8 @@ service_credential_operation_status_execute (SoupServer *server,
       for (gsize i = 0; i < list.n_entries; i++) {
         const WylServiceCredentialOperationRecord *record =
             &list.entries[i].record;
-        if (!service_subject_tenant_equals (record->subject_id, tenant))
+        if (!service_credential_subject_matches_tenant (record->subject_id,
+                tenant))
           continue;
         if (!first)
           g_string_append_c (out, ',');
@@ -8063,6 +8044,8 @@ service_credential_operation_recover_execute (SoupServer *server,
       WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
   WylServiceCredentialOperationCoordinatorLock lock =
       WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationRecord probe =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecord record =
       WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
   WylServiceCredentialOperationRecoveryOutcome outcome =
@@ -8076,6 +8059,30 @@ service_credential_operation_recover_execute (SoupServer *server,
     rc = wyl_service_credential_operation_storage_capture_anchor (&storage,
         &anchor);
   }
+
+  /* Gate on the record's owning tenant BEFORE any write.  A read-only load
+   * resolves the operation's tenant without taking the lifecycle lock and
+   * without checkpointing PREPARED->SERVER_COMMITTED, so a cross-tenant or
+   * unknown request_id can never mutate durable state.  Unknown, unreadable
+   * (decode/policy failure), and cross-tenant all collapse to one uniform 404
+   * so the endpoint is not an existence oracle for another tenant. */
+  if (rc == WYRELOG_E_OK) {
+    wyrelog_error_t probe_rc =
+        wyl_service_credential_operation_coordinator_load (&storage, &anchor,
+        request_id, &probe);
+    gboolean tenant_ok = probe_rc == WYRELOG_E_OK
+        && service_credential_subject_matches_tenant (probe.subject_id, tenant);
+    wyl_service_credential_operation_record_clear (&probe);
+    if (!tenant_ok) {
+      set_json_error (msg, 404,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND);
+      if (storage_opened)
+        wyl_service_credential_operation_storage_clear (&storage);
+      wyl_service_credential_operation_root_anchor_clear (&anchor);
+      return FALSE;
+    }
+  }
+
   if (rc == WYRELOG_E_OK) {
     rc = wyl_service_credential_operation_coordinator_lock_acquire (&storage,
         &anchor, request_id, &lock);
@@ -8092,25 +8099,19 @@ service_credential_operation_recover_execute (SoupServer *server,
 
   gboolean served = FALSE;
   if (rc == WYRELOG_E_OK) {
-    if (!service_subject_tenant_equals (record.subject_id, tenant)) {
-      /* Cross-tenant: never reveal another tenant's operation record. */
-      set_json_error (msg, 404,
-          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND);
-    } else {
-      g_autoptr (GString) out = g_string_new (NULL);
-      service_credential_operation_append_record_json (out, &record);
-      /* Splice the classified recovery outcome into the operation object. */
-      g_string_truncate (out, out->len - 1);
-      g_string_append (out, ",\"recovery\":");
-      append_json_string (out,
-          service_credential_operation_recovery_string (outcome));
-      g_string_append_c (out, '}');
-      attach_request_id_header (msg);
-      soup_server_message_set_status (msg, 200, NULL);
-      soup_server_message_set_response (msg, "application/json",
-          SOUP_MEMORY_COPY, out->str, out->len);
-      served = TRUE;
-    }
+    g_autoptr (GString) out = g_string_new (NULL);
+    service_credential_operation_append_record_json (out, &record);
+    /* Splice the classified recovery outcome into the operation object. */
+    g_string_truncate (out, out->len - 1);
+    g_string_append (out, ",\"recovery\":");
+    append_json_string (out,
+        service_credential_operation_recovery_string (outcome));
+    g_string_append_c (out, '}');
+    attach_request_id_header (msg);
+    soup_server_message_set_status (msg, 200, NULL);
+    soup_server_message_set_response (msg, "application/json",
+        SOUP_MEMORY_COPY, out->str, out->len);
+    served = TRUE;
   } else {
     guint status;
     const gchar *err;
@@ -8152,8 +8153,14 @@ service_credential_operation_recover_handler (SoupServer *server,
     SoupServerMessage *msg, const char *path, GHashTable *query,
     gpointer user_data)
 {
-  (void) path;
   WylDaemonHttpContext *ctx = user_data;
+  /* libsoup routes on longest-prefix.  This handler owns ONLY the exact
+   * "/service-credential-operations/recover"; any deeper subpath is unknown
+   * and must 404 rather than be silently served. */
+  if (g_strcmp0 (path, "/service-credential-operations/recover") != 0) {
+    set_json_error (msg, 404, "not_found");
+    return;
+  }
   if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
     set_json_error (msg, 405, "method_not_allowed");
     return;
