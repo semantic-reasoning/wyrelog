@@ -197,6 +197,35 @@ typedef struct
   guint64 generation;
 } WylClientServiceCredentialOperationReconcileResult;
 
+typedef struct
+{
+  /*
+   * One durable service-credential operation record as reported by the
+   * daemon. All owned strings are cleared with the matching helper. The
+   * daemon serializes a strict non-secret allow-list; fields the daemon does
+   * not emit are never populated here.
+   */
+  gchar *request_id;
+  WylClientServiceCredentialOperationReconcileOperation operation;
+  gchar *state;
+  gchar *destination;
+  gchar *successor_credential_id;
+  guint64 expected_generation;
+  guint64 successor_generation;
+  gint64 created_at_us;
+  gint64 updated_at_us;
+  gint64 expires_at_us;
+  /* Set only by the recover call; NULL for status-list entries. */
+  gchar *recovery;
+} WylClientServiceCredentialOperationStatusEntry;
+
+typedef struct
+{
+  /* Owned array of entries. Clear with the matching helper. */
+  WylClientServiceCredentialOperationStatusEntry *entries;
+  gsize n_entries;
+} WylClientServiceCredentialOperationStatusList;
+
 /* Lifecycle */
 wyrelog_error_t wyl_client_new (const gchar * base_url,
     WylClient ** out_client);
@@ -366,6 +395,28 @@ wyrelog_error_t wyl_client_service_credential_operation_reconcile
     const WylClientServiceCredentialOperationReconcileRequest * request,
     WylClientServiceCredentialOperationReconcileResult * out_result);
 
+void wyl_client_service_credential_operation_status_entry_clear
+    (WylClientServiceCredentialOperationStatusEntry * entry);
+void wyl_client_service_credential_operation_status_list_clear
+    (WylClientServiceCredentialOperationStatusList * list);
+/*
+ * Lists the caller tenant's durable service-credential operations. The result
+ * is fully owned by the caller and must be cleared with the matching helper;
+ * an empty operation surface reports zero entries rather than an error.
+ */
+wyrelog_error_t wyl_client_service_credential_operation_status_list
+    (WylClient * client,
+    WylClientServiceCredentialOperationStatusList * out_list);
+/*
+ * Drives server-side recovery for one durable operation identified by its
+ * canonical request id and returns the resulting record, including the
+ * classified recovery outcome. An unknown or cross-tenant id maps to
+ * WYRELOG_E_NOT_FOUND. The entry is fully owned by the caller.
+ */
+wyrelog_error_t wyl_client_service_credential_operation_recover
+    (WylClient * client, const gchar * request_id,
+    WylClientServiceCredentialOperationStatusEntry * out_entry);
+
 gchar *wyl_audit_iter_dup_query_filter (const WylAuditIter * iter);
 gchar *wyl_audit_iter_dup_request_uri (const WylAuditIter * iter);
 WylAuditEvent *wyl_audit_iter_ref_event (const WylAuditIter * iter);
@@ -413,6 +464,12 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylClientDecision, wyl_client_decision_free)
     G_DEFINE_AUTOPTR_CLEANUP_FUNC
     (WylClientServiceCredentialOperationReconcileResult,
     wyl_client_service_credential_operation_reconcile_result_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredentialOperationStatusEntry,
+    wyl_client_service_credential_operation_status_entry_clear)
+    G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
+    (WylClientServiceCredentialOperationStatusList,
+    wyl_client_service_credential_operation_status_list_clear)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
     (WylClientServicePrincipal, wyl_client_service_principal_clear)
     G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC
