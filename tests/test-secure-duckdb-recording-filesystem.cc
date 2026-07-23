@@ -1387,6 +1387,152 @@ test_recording_filesystem_rw_writer_contention (void)
   remove_tree (sandbox);
 }
 
+static void
+test_recording_filesystem_explicit_checkpoint_discovery (void)
+{
+  assert_duckdb_152 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-checkpoint-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (sandbox);
+  const fs::path database = root / "facts.duckdb";
+  const fs::path wal = database.string () + ".wal";
+  const std::string checkpoint = wal.string () + ".checkpoint";
+  const std::string recovery = wal.string () + ".recovery";
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
+    g_assert_false (result->HasError ());
+  }
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder);
+    config.options.checkpoint_on_shutdown = false;
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    auto result = connection.Query ("INSERT INTO facts VALUES (99)");
+    g_assert_false (result->HasError ());
+  }
+  g_assert_true (fs::exists (wal));
+  g_assert_false (fs::exists (checkpoint));
+  g_assert_false (fs::exists (recovery));
+  const ArtifactSet pre_checkpoint = snapshot_artifacts (root);
+  g_assert_cmpuint (pre_checkpoint.files.size (), ==, 2);
+  g_assert_cmpstr (pre_checkpoint.files[0].first.c_str (), ==, "facts.duckdb");
+  g_assert_cmpstr (pre_checkpoint.files[1].first.c_str (), ==, "facts.duckdb.wal");
+
+  auto recorder = std::make_shared<RecorderState> ();
+  size_t checkpoint_begin = 0;
+  size_t checkpoint_end = 0;
+  ArtifactSet post_checkpoint;
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    checkpoint_begin = recorder->events.size ();
+    auto checkpoint_result = connection.Query ("CHECKPOINT");
+    g_assert_false (checkpoint_result->HasError ());
+    checkpoint_end = recorder->events.size ();
+    post_checkpoint = snapshot_artifacts (root);
+    g_assert_false (fs::exists (wal));
+    g_assert_false (fs::exists (checkpoint));
+    g_assert_false (fs::exists (recovery));
+    auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
+    g_assert_false (rows->HasError ());
+    g_assert_cmpuint (rows->RowCount (), ==, 2);
+    g_assert_cmpstr (rows->GetValue (0, 0).ToString ().c_str (), ==, "42");
+    g_assert_cmpstr (rows->GetValue (0, 1).ToString ().c_str (), ==, "99");
+  }
+  g_assert_cmpuint (post_checkpoint.files.size (), ==, 1);
+  g_assert_cmpstr (post_checkpoint.files[0].first.c_str (), ==, "facts.duckdb");
+  g_assert_false (fs::exists (wal));
+  g_assert_false (fs::exists (checkpoint));
+  g_assert_false (fs::exists (recovery));
+  std::vector<std::string> sync_paths;
+  guint checkpoint_noops = 0;
+  guint wal_cleanups = 0;
+  size_t wal_sync = checkpoint_end;
+  size_t checkpoint_noop = checkpoint_end;
+  size_t main_sync_one = checkpoint_end;
+  size_t main_sync_two = checkpoint_end;
+  size_t first_cleanup = checkpoint_end;
+  guint main_syncs = 0;
+  gboolean saw_wal_write = FALSE;
+  guint main_writes = 0;
+  for (size_t i = checkpoint_begin; i < checkpoint_end; i++) {
+    const auto &event = recorder->events[i];
+    assert_source_152_plain_lifecycle_event (event, database);
+    g_assert_true (event.path == database.string () || event.path == wal.string ()
+        || event.path == checkpoint);
+    g_assert_true (event.error_class.empty ());
+    const gboolean expected_mutation = (event.path == wal.string ()
+          && (event.operation == "write" || event.operation == "sync"
+              || event.operation == "try-remove"))
+        || (event.path == checkpoint && event.operation == "try-remove")
+        || (event.path == database.string ()
+            && (event.operation == "write-at" || event.operation == "sync"));
+    if (is_mutation_event (event))
+      g_assert_true (expected_mutation);
+    if (event.path == checkpoint) {
+      g_assert_cmpstr (event.operation.c_str (), ==, "try-remove");
+      g_assert_cmpint (event.outcome, ==, 0);
+      g_assert_cmpuint (event.flags, ==, 0);
+      g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
+      g_assert_true (event.compression == duckdb::FileCompressionType::UNCOMPRESSED);
+      checkpoint_noops++;
+      checkpoint_noop = i;
+    } else if (event.path == wal.string () && event.operation == "try-remove") {
+      g_assert_cmpint (event.outcome, ==, 1);
+      g_assert_cmpuint (wal_cleanups, ==, 0);
+      wal_cleanups++;
+      first_cleanup = i;
+    } else {
+      g_assert_cmpint (event.outcome, ==, -1);
+    }
+    if (event.operation == "sync") {
+      g_assert_cmpuint (event.flags, ==, 0);
+      g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
+      if (event.path == wal.string ())
+        wal_sync = i;
+      else if (event.path == database.string ()) {
+        main_syncs++;
+        if (main_syncs == 1)
+          main_sync_one = i;
+        else if (main_syncs == 2)
+          main_sync_two = i;
+      }
+      sync_paths.push_back (event.path);
+    }
+    if (event.path == wal.string () && event.operation == "write")
+      saw_wal_write = TRUE;
+    if (event.path == database.string () && event.operation == "write-at")
+      main_writes++;
+  }
+  g_assert_cmpuint (checkpoint_noops, ==, 1);
+  g_assert_cmpuint (wal_cleanups, ==, 1);
+  g_assert_cmpuint (sync_paths.size (), ==, 3);
+  g_assert_true (sync_paths[0] == wal.string ());
+  g_assert_true (sync_paths[1] == database.string ());
+  g_assert_true (sync_paths[2] == database.string ());
+  g_assert_true (saw_wal_write);
+  g_assert_cmpuint (main_writes, ==, 3);
+  g_assert_cmpuint (main_syncs, ==, 2);
+  g_assert_cmpuint (wal_sync, <, checkpoint_noop);
+  g_assert_cmpuint (checkpoint_noop, <, main_sync_one);
+  g_assert_cmpuint (main_sync_one, <, main_sync_two);
+  g_assert_cmpuint (main_sync_two, <, first_cleanup);
+  g_assert_cmpuint (first_cleanup + 1, ==, checkpoint_end);
+  assert_source_152_control_events (recorder->controls, 0, 1);
+  remove_tree (sandbox);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1402,5 +1548,7 @@ main (int argc, char **argv)
       test_recording_filesystem_live_wal_read_only_recovery);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/rw-writer-contention",
       test_recording_filesystem_rw_writer_contention);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/explicit-checkpoint-discovery",
+      test_recording_filesystem_explicit_checkpoint_discovery);
   return g_test_run ();
 }
