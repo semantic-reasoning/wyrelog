@@ -870,6 +870,163 @@ main (void)
       reconcile_result.generation != 0)
     return 220;
   http.body = reconcile_issue_response;
+
+  /* Durable operation status-list and recover client APIs. */
+  g_auto (WylClientServiceCredentialOperationStatusList) status_list = { 0 };
+  if (wyl_client_service_credential_operation_status_list (NULL,
+          &status_list) != WYRELOG_E_INVALID)
+    return 250;
+  if (wyl_client_service_credential_operation_status_list (local_client,
+          NULL) != WYRELOG_E_INVALID)
+    return 251;
+
+  http.status = 0;
+  http.body = "{\"version\":1,\"operations\":[]}";
+  if (wyl_client_service_credential_operation_status_list (local_client,
+          &status_list) != WYRELOG_E_OK)
+    return 252;
+  if (status_list.n_entries != 0 || status_list.entries != NULL)
+    return 253;
+  if (g_strcmp0 (http.last_method, "GET") != 0 ||
+      g_strcmp0 (http.last_path, "/service-credential-operations") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      http.last_session_token != NULL || http.last_body != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
+    return 254;
+
+  http.body =
+      "{\"version\":1,\"operations\":["
+      "{\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"issue\",\"state\":\"prepared\","
+      "\"destination\":\"issue.json\",\"successor_credential_id\":null,"
+      "\"expected_generation\":0,\"successor_generation\":0,"
+      "\"created_at_us\":1000,\"updated_at_us\":2000,"
+      "\"expires_at_us\":3000},"
+      "{\"request_id\":\"BCDEFGHIJKLMNOPQRSTUVWXYZ12\","
+      "\"operation\":\"rotate\",\"state\":\"server_committed\","
+      "\"destination\":\"rotate.json\","
+      "\"successor_credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"expected_generation\":7,\"successor_generation\":8,"
+      "\"created_at_us\":1100,\"updated_at_us\":2100,"
+      "\"expires_at_us\":3100}]}";
+  if (wyl_client_service_credential_operation_status_list (local_client,
+          &status_list) != WYRELOG_E_OK)
+    return 255;
+  if (status_list.n_entries != 2)
+    return 256;
+  {
+    const WylClientServiceCredentialOperationStatusEntry *e0 =
+        &status_list.entries[0];
+    const WylClientServiceCredentialOperationStatusEntry *e1 =
+        &status_list.entries[1];
+    if (g_strcmp0 (e0->request_id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+        e0->operation != WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE
+        || g_strcmp0 (e0->state, "prepared") != 0 ||
+        g_strcmp0 (e0->destination, "issue.json") != 0 ||
+        e0->successor_credential_id != NULL ||
+        e0->expected_generation != 0 || e0->successor_generation != 0 ||
+        e0->created_at_us != 1000 || e0->updated_at_us != 2000 ||
+        e0->expires_at_us != 3000 || e0->recovery != NULL)
+      return 257;
+    if (g_strcmp0 (e1->request_id, "BCDEFGHIJKLMNOPQRSTUVWXYZ12") != 0 ||
+        e1->operation !=
+        WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE ||
+        g_strcmp0 (e1->state, "server_committed") != 0 ||
+        g_strcmp0 (e1->destination, "rotate.json") != 0 ||
+        g_strcmp0 (e1->successor_credential_id,
+            "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+        e1->expected_generation != 7 || e1->successor_generation != 8 ||
+        e1->created_at_us != 1100 || e1->updated_at_us != 2100 ||
+        e1->expires_at_us != 3100 || e1->recovery != NULL)
+      return 258;
+  }
+
+  /* A malformed entry (unknown operation kind) fails closed as WYRELOG_E_IO
+   * and leaves the caller's list empty. */
+  http.body =
+      "{\"version\":1,\"operations\":["
+      "{\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"delete\",\"state\":\"prepared\","
+      "\"destination\":\"issue.json\",\"successor_credential_id\":null,"
+      "\"expected_generation\":0,\"successor_generation\":0,"
+      "\"created_at_us\":1000,\"updated_at_us\":2000,"
+      "\"expires_at_us\":3000}]}";
+  if (wyl_client_service_credential_operation_status_list (local_client,
+          &status_list) != WYRELOG_E_IO)
+    return 259;
+  if (status_list.n_entries != 0 || status_list.entries != NULL)
+    return 260;
+
+  /* Non-200 status maps like reconcile: 400 -> INVALID. */
+  http.status = 400;
+  http.body = "{\"error\":\"invalid_service_credential_operation_status\"}";
+  if (wyl_client_service_credential_operation_status_list (local_client,
+          &status_list) != WYRELOG_E_INVALID)
+    return 261;
+  if (status_list.n_entries != 0 || status_list.entries != NULL)
+    return 262;
+  http.status = 0;
+
+  g_auto (WylClientServiceCredentialOperationStatusEntry) recovered = { 0 };
+  if (wyl_client_service_credential_operation_recover (NULL,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", &recovered) != WYRELOG_E_INVALID)
+    return 263;
+  if (wyl_client_service_credential_operation_recover (local_client, NULL,
+          &recovered) != WYRELOG_E_INVALID)
+    return 264;
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "not-canonical", &recovered) != WYRELOG_E_INVALID)
+    return 265;
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", NULL) != WYRELOG_E_INVALID)
+    return 266;
+
+  http.body =
+      "{\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"operation\":\"rotate\",\"state\":\"server_committed\","
+      "\"destination\":\"rotate.json\","
+      "\"successor_credential_id\":\"wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
+      "\"expected_generation\":1,\"successor_generation\":2,"
+      "\"created_at_us\":10,\"updated_at_us\":20,\"expires_at_us\":30,"
+      "\"recovery\":\"server_committed\"}";
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", &recovered) != WYRELOG_E_OK)
+    return 267;
+  if (g_strcmp0 (recovered.request_id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+      recovered.operation !=
+      WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE ||
+      g_strcmp0 (recovered.state, "server_committed") != 0 ||
+      g_strcmp0 (recovered.destination, "rotate.json") != 0 ||
+      g_strcmp0 (recovered.successor_credential_id,
+          "wlc_ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
+      recovered.expected_generation != 1 ||
+      recovered.successor_generation != 2 || recovered.created_at_us != 10 ||
+      recovered.updated_at_us != 20 || recovered.expires_at_us != 30 ||
+      g_strcmp0 (recovered.recovery, "server_committed") != 0)
+    return 268;
+  if (g_strcmp0 (http.last_method, "POST") != 0 ||
+      g_strcmp0 (http.last_path,
+          "/service-credential-operations/recover") != 0 ||
+      g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
+      http.last_session_token != NULL ||
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
+      g_strcmp0 (http.last_body,
+          "{\"version\":\"1\",\"request_id\":"
+          "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}") != 0)
+    return 269;
+  wyl_client_service_credential_operation_status_entry_clear (&recovered);
+
+  /* An unknown or cross-tenant id maps to 404 -> NOT_FOUND. */
+  http.status = 404;
+  http.body = "{\"error\":\"service_credential_operation_recover_not_found\"}";
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", &recovered) != WYRELOG_E_NOT_FOUND)
+    return 270;
+  if (recovered.request_id != NULL || recovered.recovery != NULL)
+    return 271;
+  http.status = 0;
+
+  http.body = reconcile_issue_response;
   if (wyl_client_set_bearer_credentials (NULL, "access-ctl",
           "__wr_default") != WYRELOG_E_INVALID)
     return 192;
