@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-locator-private.h"
+#include "wyl-id-private.h"
 
 #include <string.h>
 
@@ -247,6 +248,55 @@ name_is_safe (const gchar *name)
   return name != NULL && name[0] != '\0' && strcmp (name, ".") != 0
       && strcmp (name, "..") != 0 && strchr (name, '/') == NULL
       && strchr (name, '\\') == NULL;
+}
+
+static gboolean
+provisioning_stage_name_is_canonical (const gchar *name)
+{
+  static const gchar prefix[] = "provision-";
+  static const gchar suffix[] = ".sqlite";
+  if (!name_is_safe (name) || !g_str_has_prefix (name, prefix)
+      || !g_str_has_suffix (name, suffix))
+    return FALSE;
+  gsize name_len = strlen (name);
+  gsize prefix_len = sizeof prefix - 1;
+  gsize suffix_len = sizeof suffix - 1;
+  if (name_len != prefix_len + WYL_ID_STRING_LEN + suffix_len)
+    return FALSE;
+  gchar uuid[WYL_ID_STRING_BUF];
+  memcpy (uuid, name + prefix_len, WYL_ID_STRING_LEN);
+  uuid[WYL_ID_STRING_LEN] = '\0';
+  wyl_id_t id;
+  if (wyl_id_parse (uuid, &id) != WYRELOG_E_OK)
+    return FALSE;
+  gchar canonical[WYL_ID_STRING_BUF];
+  return wyl_id_format (&id, canonical, sizeof canonical) == WYRELOG_E_OK
+      && memcmp (canonical, uuid, WYL_ID_STRING_LEN) == 0;
+}
+
+static wyrelog_error_t
+provisioning_stage_name_from_operation (const gchar *operation_uuid,
+    gchar **out_stage_basename)
+{
+  if (out_stage_basename != NULL)
+    *out_stage_basename = NULL;
+  if (operation_uuid == NULL || out_stage_basename == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_id_t id;
+  gchar canonical[WYL_ID_STRING_BUF];
+  if (wyl_id_parse (operation_uuid, &id) != WYRELOG_E_OK
+      || wyl_id_format (&id, canonical, sizeof canonical) != WYRELOG_E_OK
+      || g_strcmp0 (operation_uuid, canonical) != 0)
+    return WYRELOG_E_INVALID;
+  gchar *name = g_strdup_printf ("provision-%s.sqlite", canonical);
+  if (name == NULL)
+    return WYRELOG_E_NOMEM;
+  if (!provisioning_stage_name_is_canonical (name)) {
+    g_free (name);
+    return WYRELOG_E_INTERNAL;
+  }
+  *out_stage_basename = name;
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -908,6 +958,142 @@ wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+stage_names_validate (WylFactGraphDirectory *directory,
+    const gchar *stage_basename, const gchar *final_basename)
+{
+  if (directory == NULL || !provisioning_stage_name_is_canonical
+      (stage_basename) || !name_is_safe (final_basename)
+      || g_strcmp0 (stage_basename, final_basename) == 0)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = validate_name_length (directory->graph_fd, final_basename);
+  return rc;
+}
+
+static wyrelog_error_t
+stage_populate_exact (WylFactGraphDirectory *directory, gint fd,
+    const gchar *stage_basename, const gchar *final_basename,
+    gboolean allow_published_link, WylFactGraphStage *out_stage)
+{
+  guint64 device = 0;
+  guint64 inode = 0;
+  wyrelog_error_t rc = validate_fd (fd, FALSE, 0600, &device, &inode);
+  struct stat named;
+  if (rc == WYRELOG_E_OK && (fstat (fd, &named) != 0
+          || (named.st_nlink != 1 && (!allow_published_link
+                  || named.st_nlink != 2))))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK
+      && (fstatat (directory->graph_fd, stage_basename, &named,
+              AT_SYMLINK_NOFOLLOW) != 0
+          || !stat_matches (&named, device, inode, FALSE, 0600)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && named.st_nlink == 2
+      && (fstatat (directory->graph_fd, final_basename, &named,
+              AT_SYMLINK_NOFOLLOW) != 0
+          || !stat_matches (&named, device, inode, FALSE, 0600)))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  out_stage->stage_basename = try_strdup (stage_basename);
+  out_stage->final_basename = try_strdup (final_basename);
+  if (out_stage->stage_basename == NULL || out_stage->final_basename == NULL) {
+    g_clear_pointer (&out_stage->stage_basename, g_free);
+    g_clear_pointer (&out_stage->final_basename, g_free);
+    return WYRELOG_E_NOMEM;
+  }
+  out_stage->fd = fd;
+  out_stage->device = device;
+  out_stage->inode = inode;
+  out_stage->graph_device = directory->graph_device;
+  out_stage->graph_inode = directory->graph_inode;
+  out_stage->exact_provisioning_stage = TRUE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
+    const gchar *operation_uuid, WylFactGraphStage *out_stage)
+{
+  if (out_stage == NULL)
+    return WYRELOG_E_INVALID;
+  *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  g_autofree gchar *stage_basename = NULL;
+  const gchar *final_basename = "facts.duckdb";
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+      &stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = stage_names_validate (directory, stage_basename, final_basename);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  gint fd = openat (directory->graph_fd, stage_basename,
+      O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return errno == EEXIST ? WYRELOG_E_BUSY : errno_to_resolver_error (errno);
+  rc = stage_populate_exact (directory, fd, stage_basename, final_basename,
+      FALSE, out_stage);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-created", directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-create-parent-synced",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    return WYRELOG_E_OK;
+  /* Do not unlink on a failed post-create check.  A pathname can be swapped
+   * between validation and unlink; retaining a known name is fail-closed. */
+  if (out_stage->fd >= 0)
+    wyl_fact_graph_stage_clear (out_stage);
+  else
+    close (fd);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
+    const gchar *operation_uuid, WylFactGraphStage *out_stage)
+{
+  if (out_stage == NULL)
+    return WYRELOG_E_INVALID;
+  *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  g_autofree gchar *stage_basename = NULL;
+  const gchar *final_basename = "facts.duckdb";
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+      &stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = stage_names_validate (directory, stage_basename, final_basename);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  struct stat before;
+  if (fstatat (directory->graph_fd, stage_basename, &before,
+          AT_SYMLINK_NOFOLLOW) != 0)
+    return errno_to_resolver_error (errno);
+  if (!S_ISREG (before.st_mode) || (before.st_nlink != 1
+          && before.st_nlink != 2))
+    return WYRELOG_E_POLICY;
+  gint fd = openat (directory->graph_fd, stage_basename,
+      O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0)
+    return errno_to_resolver_error (errno);
+  if (directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-opened", directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = stage_populate_exact (directory, fd, stage_basename, final_basename,
+        TRUE, out_stage);
+  if (rc != WYRELOG_E_OK)
+    close (fd);
+  return rc;
+}
+
 wyrelog_error_t
 wyl_fact_graph_stage_sync (WylFactGraphStage *stage)
 {
@@ -956,6 +1142,99 @@ stage_mark_complete (WylFactGraphStage *stage)
   stage->inode = 0;
   stage->graph_device = 0;
   stage->graph_inode = 0;
+  stage->exact_provisioning_stage = FALSE;
+}
+
+/* Link the held stage descriptor, never the mutable stage pathname.  This is
+ * deliberately Linux-only: /proc/self/fd is the verified platform primitive
+ * used to name the already-open descriptor while linkat keeps the destination
+ * resolver-relative and no-replace.  A non-Linux POSIX build (or a Linux
+ * system without a usable procfs fd view) fails closed; it must not substitute
+ * a name-after-validation link. */
+static wyrelog_error_t
+link_held_stage_no_overwrite (WylFactGraphDirectory *directory,
+    WylFactGraphStage *stage)
+{
+#ifdef __linux__
+  g_autofree gchar *source = g_strdup_printf ("/proc/self/fd/%d", stage->fd);
+  if (source == NULL)
+    return WYRELOG_E_NOMEM;
+  if (linkat (AT_FDCWD, source, directory->graph_fd, stage->final_basename,
+          AT_SYMLINK_FOLLOW) != 0) {
+    switch (errno) {
+      case EEXIST:
+      case EACCES:
+      case EPERM:
+      case ENOENT:
+      case ENOTDIR:
+      case ELOOP:
+      case EXDEV:
+      case EOPNOTSUPP:
+        return WYRELOG_E_POLICY;
+      default:
+        return WYRELOG_E_IO;
+    }
+  }
+  return WYRELOG_E_OK;
+#else
+  (void) directory;
+  (void) stage;
+  return WYRELOG_E_POLICY;
+#endif
+}
+
+static wyrelog_error_t
+exact_stage_publish (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
+{
+  wyrelog_error_t rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_stage_sync (stage);
+  gboolean stage_present = FALSE;
+  gboolean stage_exact = FALSE;
+  gboolean final_present = FALSE;
+  gboolean final_exact = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = named_stage_state (directory, stage->stage_basename, stage,
+        &stage_present, &stage_exact);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-validated", directory->checkpoint_data);
+  /* A lost stage name does not make the held descriptor unsafe, but checking
+   * here detects deterministic replacement races before any namespace
+   * mutation.  A later replacement cannot redirect the FD-based link. */
+  if (rc == WYRELOG_E_OK)
+    rc = named_stage_state (directory, stage->stage_basename, stage,
+        &stage_present, &stage_exact);
+  if (rc == WYRELOG_E_OK)
+    rc = named_stage_state (directory, stage->final_basename, stage,
+        &final_present, &final_exact);
+  if (rc == WYRELOG_E_OK && final_present && !final_exact)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && !final_present)
+    rc = link_held_stage_no_overwrite (directory, stage);
+  if (rc == WYRELOG_E_OK && !final_present && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-linked", directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = named_stage_state (directory, stage->final_basename, stage,
+        &final_present, &final_exact);
+  if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && fsync (directory->graph_fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-parent-synced",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = named_stage_state (directory, stage->final_basename, stage,
+        &final_present, &final_exact);
+  if (rc == WYRELOG_E_OK && (!final_present || !final_exact))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  /* Keep the recorded stage hard link.  POSIX offers no fd-relative unlink;
+   * deleting by its mutable name could remove an attacker replacement. */
+  if (rc == WYRELOG_E_OK)
+    stage_mark_complete (stage);
+  return rc;
 }
 
 wyrelog_error_t
@@ -964,6 +1243,8 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
 {
   if (directory == NULL || !stage_is_bound (directory, stage))
     return WYRELOG_E_INVALID;
+  if (stage->exact_provisioning_stage)
+    return exact_stage_publish (directory, stage);
   wyrelog_error_t rc = directory_revalidate (directory);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_graph_stage_sync (stage);
@@ -1023,6 +1304,11 @@ wyl_fact_graph_stage_abort (WylFactGraphDirectory *directory,
 {
   if (directory == NULL || !stage_is_bound (directory, stage))
     return WYRELOG_E_INVALID;
+  /* Do not unlink an exact persisted stage by a name that may have been
+   * replaced after validation.  The coordinator can degrade and retain this
+   * known artifact; it must never clean up unknown bytes. */
+  if (stage->exact_provisioning_stage)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t rc = directory_revalidate (directory);
   gboolean stage_present = FALSE;
   gboolean stage_exact = FALSE;
