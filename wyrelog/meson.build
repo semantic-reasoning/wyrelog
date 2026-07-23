@@ -105,6 +105,7 @@ wyrelog_log_max = wyrelog_log_levels[get_option('wyrelog_log_max_level')]
 wyrelog_c_args = [
   '-DWYL_LOG_MAX_LEVEL=' + wyrelog_log_max.to_string(),
 ]
+wyrelog_override_options = []
 if host_machine.system() == 'windows'
   wyrelog_c_args += ['-D_WIN32_WINNT=0x0602']
 endif
@@ -126,6 +127,15 @@ endif
 if get_option('enable_fact_store').allowed()
   wyrelog_c_args += '-DWYL_HAS_FACT_STORE'
 endif
+if get_option('enable_secure_duckdb_bridge').enabled()
+  if host_machine.system() == 'windows'
+    wyrelog_sources += files('fact/secure-duckdb-bridge-windows-private.c')
+  else
+    wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc')
+    wyrelog_override_options += 'cpp_std=c++17'
+  endif
+  wyrelog_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
+endif
 if get_option('require_template_manifest')
   wyrelog_c_args += '-DWYL_REQUIRE_TEMPLATE_MANIFEST'
 endif
@@ -139,6 +149,7 @@ libwyrelog = library('wyrelog',
   include_directories : wyrelog_inc,
   dependencies : wyrelog_deps,
   c_args : wyrelog_c_args,
+  override_options : wyrelog_override_options,
   install : true,
   soversion : '0',
 )

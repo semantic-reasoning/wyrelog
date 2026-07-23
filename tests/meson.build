@@ -787,6 +787,15 @@ if get_option('enable_fact_store').allowed()
   test('fact-runtime', test_fact_runtime, timeout : 60)
 endif
 
+if get_option('enable_secure_duckdb_bridge').enabled()
+  test_secure_duckdb_bridge = executable('test-secure-duckdb-bridge',
+    'test-secure-duckdb-bridge.c',
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, duckdb_dep],
+  )
+  test('secure-duckdb-bridge', test_secure_duckdb_bridge)
+endif
+
 test_policy_store_toctou = executable('test-policy-store-toctou',
   'test-policy-store-toctou.c',
   dependencies : [wyrelog_dep, sqlite_dep, sodium_dep],

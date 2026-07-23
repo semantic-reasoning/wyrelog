@@ -116,6 +116,22 @@ jobs:
             -Denable_audit=enabled -Dduckdb_source=prebuilt
           meson compile -C build-fact wyrelogd
 
+      - name: Build secure DuckDB bridge from pinned source
+        if: matrix.duckdb == 'subproject'
+        run: |
+          meson setup build-secure-duckdb \
+            -Denable_fact_store=enabled \
+            -Dduckdb_source=subproject \
+            -Denable_secure_duckdb_bridge=enabled
+          meson test -C build-secure-duckdb secure-duckdb-bridge --print-errorlogs
+          if meson setup build-secure-duckdb-prebuilt \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=prebuilt \
+              -Denable_secure_duckdb_bridge=enabled; then
+            echo 'secure DuckDB bridge unexpectedly accepted prebuilt DuckDB'
+            exit 1
+          fi
+
       - name: Show sccache statistics
         if: always()
         run: |
@@ -141,9 +157,14 @@ jobs:
       matrix:
         include:
           - fact_store: disabled
+            secure_bridge: disabled
             job_suffix: ''
           - fact_store: enabled
+            secure_bridge: disabled
             job_suffix: -fact
+          - fact_store: enabled
+            secure_bridge: enabled
+            job_suffix: -secure-bridge
     env:
       SCCACHE_GHA_ENABLED: "true"
       # Stays the checkout even though vcpkg no longer lives there: this only
@@ -302,7 +323,7 @@ jobs:
             set "CXX=clang-cl"
             echo Windows compiler mode: native clang-cl
           )
-          meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Denable_fact_store=${{ matrix.fact_store }} -Dduckdb_source=prebuilt
+          meson setup builddir -Denable_tpm=disabled -Denable_client=enabled -Ddefault_library=static -Denable_audit=enabled -Denable_fact_store=${{ matrix.fact_store }} -Denable_secure_duckdb_bridge=${{ matrix.secure_bridge }} -Dduckdb_source=prebuilt
           if "%WYRELOG_USE_SCCACHE%"=="1" (
             ninja -C builddir -t commands | findstr /I /C:"sccache" >NUL
             if errorlevel 1 exit /b 1
