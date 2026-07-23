@@ -1483,6 +1483,26 @@ test_service_credential_operation_storage_enumerate = executable('test-service-c
 
 test('service-credential-operation-storage-enumerate', test_service_credential_operation_storage_enumerate)
 
+test_service_credential_operation_coordinator_status = executable('test-service-credential-operation-coordinator-status',
+  [
+    'test-service-credential-operation-coordinator-status.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-status-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-journal-private.c',
+    '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
+  c_args : ['-DWYL_SERVICE_CREDENTIAL_OPERATION_TEST_FRIENDS'],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+test('service-credential-operation-coordinator-status',
+  test_service_credential_operation_coordinator_status,
+  is_parallel : host_machine.system() != 'windows',
+  timeout : 30,
+)
+
 # Production OS-dispatch publication backend vtable adapter. Kept outside the
 # `build_client and host_machine.system() != 'windows'` guard on purpose: the
 # wyctl publication tests are off on Windows (and the windows variant sits in an
