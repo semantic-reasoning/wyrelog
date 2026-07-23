@@ -188,6 +188,66 @@ wyrelog_error_t wyl_policy_store_reconcile_journal_transition
     WylPolicyFactReconcileJournalState target_state, guint64 expected_attempt,
     WylPolicyAuthorityMutationResult * out_result);
 
+/* Durable ownership record for a graph provisioning attempt.  The operation
+ * UUID is minted by the store with libchronoid UUIDv7; callers never select
+ * it.  Recovery addresses only the canonical persisted UUID. */
+typedef enum
+{
+  WYL_POLICY_GRAPH_PROVISIONING_RESERVED,
+  WYL_POLICY_GRAPH_PROVISIONING_STAGED,
+  WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED,
+  WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
+  WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+  WYL_POLICY_GRAPH_PROVISIONING_DEGRADED,
+} WylPolicyGraphProvisioningPhase;
+
+typedef struct
+{
+  const gchar *tenant_id;
+  const gchar *graph_id;
+  const gchar *store_uuid;
+  guint64 format_version;
+  guint64 path_encoding_version;
+  guint64 expected_lifecycle_generation;
+  guint64 expected_reconciliation_generation;
+} WylPolicyGraphProvisioningInput;
+
+typedef struct
+{
+  gchar *op_uuid;
+  gchar *tenant_id;
+  gchar *graph_id;
+  gchar *store_uuid;
+  gchar *stage_basename;
+  guint64 expected_lifecycle_generation;
+  guint64 expected_reconciliation_generation;
+  WylPolicyGraphProvisioningPhase phase;
+  guint64 attempt;
+  gint64 created_at;
+  gint64 updated_at;
+} WylPolicyGraphProvisioningRecord;
+
+void wyl_policy_graph_provisioning_record_free
+    (WylPolicyGraphProvisioningRecord * record);
+const gchar *wyl_policy_graph_provisioning_phase_name
+    (WylPolicyGraphProvisioningPhase phase);
+wyrelog_error_t wyl_policy_store_graph_provisioning_prepare
+    (wyl_policy_store_t * store, const WylPolicyGraphProvisioningInput * input,
+    WylPolicyGraphProvisioningRecord ** out_record,
+    WylPolicyAuthorityMutationResult * out_result);
+wyrelog_error_t wyl_policy_store_graph_provisioning_read
+    (wyl_policy_store_t * store, const gchar * op_uuid,
+    WylPolicyGraphProvisioningRecord ** out_record);
+wyrelog_error_t wyl_policy_store_graph_provisioning_list
+    (wyl_policy_store_t * store, const gchar * tenant_id,
+    GPtrArray ** out_records);
+wyrelog_error_t wyl_policy_store_graph_provisioning_transition
+    (wyl_policy_store_t * store, const gchar * op_uuid,
+    WylPolicyGraphProvisioningPhase expected_phase,
+    WylPolicyGraphProvisioningPhase target_phase, guint64 expected_attempt,
+    WylPolicyGraphErrorClass degraded_error_class,
+    WylPolicyAuthorityMutationResult * out_result);
+
 typedef struct
 {
   gchar *tenant_id;

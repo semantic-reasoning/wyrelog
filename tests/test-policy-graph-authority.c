@@ -1624,6 +1624,193 @@ test_reconcile_evidence_prepare_rolls_back (void)
           "SELECT count(*) FROM fact_reconcile_journal;"), ==, 0);
 }
 
+static void
+test_graph_provisioning_private_api (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-provision-api", "graph-provision-api", FALSE);
+  WylPolicyGraphProvisioningInput input = {
+    .tenant_id = "tenant-provision-api",
+    .graph_id = "graph-provision-api",
+    .store_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070601",
+    .format_version = 1,
+    .path_encoding_version = 1,
+    .expected_lifecycle_generation = 0,
+    .expected_reconciliation_generation = 0,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_nonnull (record);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_RESERVED);
+  g_assert_cmpuint (record->expected_lifecycle_generation, ==, 1);
+  g_assert_cmpuint (record->attempt, ==, 0);
+  g_assert_true (g_str_has_prefix (record->stage_basename, "provision-"));
+  g_assert_true (g_str_has_suffix (record->stage_basename, ".sqlite"));
+  gchar *op_uuid = g_strdup (record->op_uuid);
+  wyl_policy_graph_provisioning_record_free (record);
+  record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+  g_assert_cmpstr (record->op_uuid, ==, op_uuid);
+  wyl_policy_graph_provisioning_record_free (record);
+  record = NULL;
+
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+          &record), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (record->op_uuid, ==, op_uuid);
+  wyl_policy_graph_provisioning_record_free (record);
+  record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
+          "01890F47-3C4B-7CC2-B8C4-DC0C0C070601", &record), ==,
+      WYRELOG_E_INVALID);
+
+  const WylPolicyGraphProvisioningPhase phases[] = {
+    WYL_POLICY_GRAPH_PROVISIONING_RESERVED,
+    WYL_POLICY_GRAPH_PROVISIONING_STAGED,
+    WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED,
+    WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
+    WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+  };
+  for (gsize i = 0; i + 1 < G_N_ELEMENTS (phases); i++) {
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+            op_uuid, phases[i], phases[i + 1], 0,
+            WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+    g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  }
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+          op_uuid, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
+          WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+  g_autofree gchar *lifecycle_state = scalar_text (db,
+      "SELECT lifecycle_state FROM fact_graphs "
+      "WHERE tenant_id='tenant-provision-api' AND graph_id='graph-provision-api';");
+  g_assert_cmpstr (lifecycle_state, ==, "active");
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision-api", "graph-provision-api",
+          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
+          2, 0, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+          op_uuid, WYL_POLICY_GRAPH_PROVISIONING_ACTIVE,
+          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
+          WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (result, ==, WYL_POLICY_AUTHORITY_MUTATION_STALE);
+  g_free (op_uuid);
+}
+
+static void
+test_graph_provisioning_blob_phase_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-provision-blob", "graph-provision-blob", FALSE);
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+          "tenant-provision-blob", "graph-provision-blob",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070611", 1, 1, 0, 0,
+          &result), ==, WYRELOG_E_OK);
+  exec_ok (db, "DROP TRIGGER fact_graph_provisioning_insert_guard;"
+      "PRAGMA ignore_check_constraints=ON;"
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c070610','tenant-provision-blob',"
+      "'graph-provision-blob','01890f47-3c4b-7cc2-b8c4-dc0c0c070611',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070610.sqlite',1,0,"
+      "CAST('reserved' AS BLOB),0,1,1);");
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store,
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070610", &record), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (record);
+}
+
+static void
+test_graph_provisioning_prepare_rolls_back_reservation (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-provision-fault", "graph-provision-fault", FALSE);
+  WylPolicyGraphProvisioningInput input = {
+    .tenant_id = "tenant-provision-fault",.graph_id = "graph-provision-fault",
+    .store_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070621",
+    .format_version = 1,.path_encoding_version = 1,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  wyl_policy_store_graph_authority_mutation_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_IO);
+  g_assert_null (record);
+  g_assert_cmpint (scalar_int64 (db, "SELECT count(*) FROM "
+          "fact_graph_provisioning;"), ==, 0);
+  g_assert_cmpstr (scalar_text (db, "SELECT lifecycle_state FROM fact_graphs "
+          "WHERE tenant_id='tenant-provision-fault' AND graph_id='graph-provision-fault';"),
+      ==, "legacy_unclassified");
+}
+
+static void
+test_graph_provisioning_terminal_rolls_back (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-provision-terminal", "graph-provision-terminal",
+      FALSE);
+  WylPolicyGraphProvisioningInput input = {
+    .tenant_id = "tenant-provision-terminal",
+    .graph_id = "graph-provision-terminal",
+    .store_uuid = "01890f47-3c4b-7cc2-b8c4-dc0c0c070631",
+    .format_version = 1,.path_encoding_version = 1,
+  };
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  WylPolicyAuthorityMutationResult result;
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_prepare (store, &input,
+          &record, &result), ==, WYRELOG_E_OK);
+  gchar *op_uuid = g_strdup (record->op_uuid);
+  wyl_policy_graph_provisioning_record_free (record);
+  const WylPolicyGraphProvisioningPhase phases[] = {
+    WYL_POLICY_GRAPH_PROVISIONING_RESERVED,
+    WYL_POLICY_GRAPH_PROVISIONING_STAGED,
+    WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED,
+    WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
+  };
+  for (gsize i = 0; i + 1 < G_N_ELEMENTS (phases); i++)
+    g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+            op_uuid, phases[i], phases[i + 1], 0,
+            WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_OK);
+  wyl_policy_store_graph_authority_mutation_fail_once (store,
+      WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_transition (store,
+          op_uuid, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED,
+          WYL_POLICY_GRAPH_PROVISIONING_ACTIVE, 0,
+          WYL_POLICY_GRAPH_ERROR_NONE, &result), ==, WYRELOG_E_IO);
+  g_assert_cmpstr (scalar_text (db, "SELECT lifecycle_state FROM fact_graphs "
+          "WHERE tenant_id='tenant-provision-terminal' AND graph_id='graph-provision-terminal';"),
+      ==, "provisioning");
+  g_assert_cmpint (wyl_policy_store_graph_provisioning_read (store, op_uuid,
+          &record), ==, WYRELOG_E_OK);
+  g_assert_cmpint (record->phase, ==, WYL_POLICY_GRAPH_PROVISIONING_VERIFIED);
+  wyl_policy_graph_provisioning_record_free (record);
+  g_free (op_uuid);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1638,6 +1825,14 @@ main (int argc, char **argv)
       test_malformed_provisioning_schema_fails_closed);
   g_test_add_func ("/policy/graph-authority/provisioning-trigger-verified",
       test_provisioning_immutable_trigger_is_verified);
+  g_test_add_func ("/policy/graph-authority/provisioning-private-api",
+      test_graph_provisioning_private_api);
+  g_test_add_func ("/policy/graph-authority/provisioning-blob-phase",
+      test_graph_provisioning_blob_phase_fails_closed);
+  g_test_add_func ("/policy/graph-authority/provisioning-prepare-rollback",
+      test_graph_provisioning_prepare_rolls_back_reservation);
+  g_test_add_func ("/policy/graph-authority/provisioning-terminal-rollback",
+      test_graph_provisioning_terminal_rolls_back);
   g_test_add_func ("/policy/graph-authority/dangling-provisioning-record",
       test_dangling_provisioning_record_fails_closed);
   g_test_add_func ("/policy/graph-authority/pre-537-idempotent",
