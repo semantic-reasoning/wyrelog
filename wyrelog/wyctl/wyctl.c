@@ -3763,6 +3763,194 @@ run_service_credential_revoke (const WyctlOptions *global_opts, gint argc,
   return exit_rc;
 }
 
+/* Display map over the #475 client reconcile-operation enum. This is a
+ * read-only view over an existing client enum, not a new domain state
+ * machine; unknown values render as "-". */
+static const gchar *service_credential_operation_string
+    (WylClientServiceCredentialOperationReconcileOperation op)
+{
+  switch (op) {
+    case WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ISSUE:
+      return "issue";
+    case WYL_CLIENT_SERVICE_CREDENTIAL_OPERATION_RECONCILE_ROTATE:
+      return "rotate";
+    default:
+      return "-";
+  }
+}
+
+/* Print one non-secret durable service-credential operation record as a single
+ * key=value line. Every field is drawn from the daemon's strict non-secret
+ * allow-list, so no secret warning is needed. String fields may be NULL and
+ * are guarded with "-"; operation is an enum rendered via the display map and
+ * is never NULL-guarded. The recovery field is emitted only when
+ * |with_recovery| is TRUE (status-list entries never carry it). */
+static void
+    print_service_credential_operation_row
+    (const WylClientServiceCredentialOperationStatusEntry * e,
+    gboolean with_recovery)
+{
+  const gchar *request_id = e->request_id != NULL ? e->request_id : "-";
+  const gchar *state = e->state != NULL ? e->state : "-";
+  const gchar *destination = e->destination != NULL ? e->destination : "-";
+  const gchar *successor_credential_id =
+      e->successor_credential_id != NULL ? e->successor_credential_id : "-";
+
+  g_print ("request_id=%s operation=%s state=%s destination=%s"
+      " successor_credential_id=%s expected_generation=%" G_GUINT64_FORMAT
+      " successor_generation=%" G_GUINT64_FORMAT " created_at_us=%"
+      G_GINT64_FORMAT " updated_at_us=%" G_GINT64_FORMAT " expires_at_us=%"
+      G_GINT64_FORMAT, request_id,
+      service_credential_operation_string (e->operation), state, destination,
+      successor_credential_id, e->expected_generation, e->successor_generation,
+      e->created_at_us, e->updated_at_us, e->expires_at_us);
+  if (with_recovery) {
+    const gchar *recovery = e->recovery != NULL ? e->recovery : "-";
+    g_print (" recovery=%s", recovery);
+  }
+  g_print ("\n");
+}
+
+static int
+run_service_credential_recover (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServiceCredentialOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"request-id", 0, 0, G_OPTION_ARG_STRING, &opts.request_id,
+        "Durable operation request id to recover", "ID"},
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-credential recover");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-credential recover argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  if (opts.request_id == NULL || opts.request_id[0] == '\0') {
+    g_printerr ("wyctl: missing --request-id\n");
+    return 2;
+  }
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  g_auto (WylClientServiceCredentialOperationStatusEntry) entry = { 0 };
+  wyrelog_error_t rc = wyl_client_service_credential_operation_recover (client,
+      opts.request_id, guard_timestamp, opts.guard_loc_class, guard_risk,
+      &entry);
+  int exit_rc = fact_remote_exit (client, "service-credential recover", rc,
+      "service_credential_recover_failed");
+  if (exit_rc == 0)
+    print_service_credential_operation_row (&entry, TRUE);
+  return exit_rc;
+}
+
+static int
+run_service_credential_status (const WyctlOptions *global_opts, gint argc,
+    gchar **argv)
+{
+  WyctlServiceCredentialOptions opts = { 0 };
+  GOptionEntry entries[] = {
+    {"tenant", 0, 0, G_OPTION_ARG_STRING, &opts.tenant, "Tenant", "TENANT"},
+    {"access-token-file", 0, 0, G_OPTION_ARG_STRING, &opts.access_token_file,
+        "Bearer access token file", "PATH"},
+    {"guard-timestamp", 0, 0, G_OPTION_ARG_STRING,
+        &opts.guard_timestamp_arg, "Guard timestamp", "US"},
+    {"guard-loc-class", 0, 0, G_OPTION_ARG_STRING, &opts.guard_loc_class,
+        "Guard location class", "CLASS"},
+    {"guard-risk", 0, 0, G_OPTION_ARG_STRING, &opts.guard_risk_arg,
+        "Guard risk score", "N"},
+    {NULL}
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GOptionContext) context =
+      g_option_context_new ("- wyrelog service-credential status");
+  g_option_context_add_main_entries (context, entries, NULL);
+  if (!g_option_context_parse (context, &argc, &argv, &error)) {
+    g_printerr ("wyctl: %s\n", error->message);
+    return 2;
+  }
+  if (argc > 1) {
+    g_printerr ("wyctl: unexpected service-credential status argument: %s\n",
+        argv[1]);
+    return 2;
+  }
+
+  g_autofree gchar *daemon_url =
+      wyctl_resolve_string_option (global_opts->daemon_url,
+      global_opts->settings, "daemon-url");
+  g_autofree gchar *timeout_ms_arg =
+      wyctl_resolve_uint_option_as_string (global_opts->timeout_ms_arg,
+      global_opts->settings, "default-timeout-ms");
+  g_autofree gchar *tenant = wyctl_resolve_string_option (opts.tenant,
+      global_opts->settings, "default-tenant");
+  g_autofree gchar *access_token_file =
+      wyctl_resolve_string_option (opts.access_token_file,
+      global_opts->settings, "access-token-file");
+
+  gint64 guard_timestamp = 0;
+  gint64 guard_risk = 0;
+  if (!parse_guard_options (opts.guard_timestamp_arg, opts.guard_loc_class,
+          opts.guard_risk_arg, &guard_timestamp, &guard_risk))
+    return 2;
+
+  g_autoptr (WylClient) client = NULL;
+  int client_rc = create_fact_client (daemon_url, timeout_ms_arg, tenant,
+      access_token_file, &client);
+  if (client_rc != 0)
+    return client_rc;
+
+  g_auto (WylClientServiceCredentialOperationStatusList) list = { 0 };
+  wyrelog_error_t rc =
+      wyl_client_service_credential_operation_status_list (client,
+      guard_timestamp, opts.guard_loc_class, guard_risk, &list);
+  int exit_rc = fact_remote_exit (client, "service-credential status", rc,
+      "service_credential_status_failed");
+  if (exit_rc == 0) {
+    for (gsize i = 0; i < list.n_entries; i++)
+      print_service_credential_operation_row (&list.entries[i], FALSE);
+  }
+  return exit_rc;
+}
+
 static int
 run_service_credential (const WyctlOptions *global_opts, gint argc,
     gchar **argv)
@@ -3779,6 +3967,10 @@ run_service_credential (const WyctlOptions *global_opts, gint argc,
     return run_service_credential_list (global_opts, argc - 1, argv + 1);
   if (g_strcmp0 (argv[1], "revoke") == 0)
     return run_service_credential_revoke (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "recover") == 0)
+    return run_service_credential_recover (global_opts, argc - 1, argv + 1);
+  if (g_strcmp0 (argv[1], "status") == 0)
+    return run_service_credential_status (global_opts, argc - 1, argv + 1);
   g_printerr ("wyctl: unknown service-credential command: %s\n", argv[1]);
   return 2;
 }
