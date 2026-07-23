@@ -868,6 +868,16 @@ if get_option('enable_secure_duckdb_bridge').enabled()
     dependencies : [wyrelog_dep, duckdb_dep],
   )
   test('secure-duckdb-bridge', test_secure_duckdb_bridge)
+  if host_machine.system() != 'windows'
+    test_secure_duckdb_recording_filesystem = executable(
+      'test-secure-duckdb-recording-filesystem',
+      'test-secure-duckdb-recording-filesystem.cc',
+      dependencies : [glib_dep, duckdb_dep],
+      override_options : ['cpp_std=c++17'],
+    )
+    test('secure-duckdb-recording-filesystem',
+      test_secure_duckdb_recording_filesystem)
+  endif
 endif
 
 test_policy_store_toctou = executable('test-policy-store-toctou',
