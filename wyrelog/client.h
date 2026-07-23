@@ -402,19 +402,25 @@ void wyl_client_service_credential_operation_status_list_clear
 /*
  * Lists the caller tenant's durable service-credential operations. The result
  * is fully owned by the caller and must be cleared with the matching helper;
- * an empty operation surface reports zero entries rather than an error.
+ * an empty operation surface reports zero entries rather than an error. The
+ * guarded-session context (guard_timestamp, guard_loc_class, guard_risk) is
+ * required and is validated locally before any request is sent.
  */
 wyrelog_error_t wyl_client_service_credential_operation_status_list
-    (WylClient * client,
+    (WylClient * client, gint64 guard_timestamp, const gchar * guard_loc_class,
+    gint64 guard_risk,
     WylClientServiceCredentialOperationStatusList * out_list);
 /*
  * Drives server-side recovery for one durable operation identified by its
  * canonical request id and returns the resulting record, including the
  * classified recovery outcome. An unknown or cross-tenant id maps to
- * WYRELOG_E_NOT_FOUND. The entry is fully owned by the caller.
+ * WYRELOG_E_NOT_FOUND. The entry is fully owned by the caller. The
+ * guarded-session context (guard_timestamp, guard_loc_class, guard_risk) is
+ * required and is validated locally before any request is sent.
  */
 wyrelog_error_t wyl_client_service_credential_operation_recover
-    (WylClient * client, const gchar * request_id,
+    (WylClient * client, const gchar * request_id, gint64 guard_timestamp,
+    const gchar * guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry * out_entry);
 
 gchar *wyl_audit_iter_dup_query_filter (const WylAuditIter * iter);

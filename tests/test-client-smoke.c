@@ -873,17 +873,32 @@ main (void)
 
   /* Durable operation status-list and recover client APIs. */
   g_auto (WylClientServiceCredentialOperationStatusList) status_list = { 0 };
-  if (wyl_client_service_credential_operation_status_list (NULL,
-          &status_list) != WYRELOG_E_INVALID)
+  if (wyl_client_service_credential_operation_status_list (NULL, 123, "public",
+          69, &status_list) != WYRELOG_E_INVALID)
     return 250;
-  if (wyl_client_service_credential_operation_status_list (local_client,
-          NULL) != WYRELOG_E_INVALID)
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, NULL) != WYRELOG_E_INVALID)
     return 251;
+
+  /* Invalid guard context is rejected locally with no request sent. */
+  g_free (http.last_path);
+  http.last_path = g_strdup ("__unset__");
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 101, &status_list) != WYRELOG_E_INVALID)
+    return 272;
+  if (wyl_client_service_credential_operation_status_list (local_client, -1,
+          "public", 69, &status_list) != WYRELOG_E_INVALID)
+    return 273;
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "not-a-loc-class", 69, &status_list) != WYRELOG_E_INVALID)
+    return 274;
+  if (g_strcmp0 (http.last_path, "__unset__") != 0)
+    return 275;
 
   http.status = 0;
   http.body = "{\"version\":1,\"operations\":[]}";
-  if (wyl_client_service_credential_operation_status_list (local_client,
-          &status_list) != WYRELOG_E_OK)
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, &status_list) != WYRELOG_E_OK)
     return 252;
   if (status_list.n_entries != 0 || status_list.entries != NULL)
     return 253;
@@ -891,7 +906,10 @@ main (void)
       g_strcmp0 (http.last_path, "/service-credential-operations") != 0 ||
       g_strcmp0 (http.last_tenant, "__wr_default") != 0 ||
       http.last_session_token != NULL || http.last_body != NULL ||
-      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0)
+      g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
+      g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
+      g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "69") != 0)
     return 254;
 
   http.body =
@@ -909,8 +927,8 @@ main (void)
       "\"expected_generation\":7,\"successor_generation\":8,"
       "\"created_at_us\":1100,\"updated_at_us\":2100,"
       "\"expires_at_us\":3100}]}";
-  if (wyl_client_service_credential_operation_status_list (local_client,
-          &status_list) != WYRELOG_E_OK)
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, &status_list) != WYRELOG_E_OK)
     return 255;
   if (status_list.n_entries != 2)
     return 256;
@@ -951,8 +969,8 @@ main (void)
       "\"expected_generation\":0,\"successor_generation\":0,"
       "\"created_at_us\":1000,\"updated_at_us\":2000,"
       "\"expires_at_us\":3000}]}";
-  if (wyl_client_service_credential_operation_status_list (local_client,
-          &status_list) != WYRELOG_E_IO)
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, &status_list) != WYRELOG_E_IO)
     return 259;
   if (status_list.n_entries != 0 || status_list.entries != NULL)
     return 260;
@@ -960,8 +978,8 @@ main (void)
   /* Non-200 status maps like reconcile: 400 -> INVALID. */
   http.status = 400;
   http.body = "{\"error\":\"invalid_service_credential_operation_status\"}";
-  if (wyl_client_service_credential_operation_status_list (local_client,
-          &status_list) != WYRELOG_E_INVALID)
+  if (wyl_client_service_credential_operation_status_list (local_client, 123,
+          "public", 69, &status_list) != WYRELOG_E_INVALID)
     return 261;
   if (status_list.n_entries != 0 || status_list.entries != NULL)
     return 262;
@@ -969,17 +987,33 @@ main (void)
 
   g_auto (WylClientServiceCredentialOperationStatusEntry) recovered = { 0 };
   if (wyl_client_service_credential_operation_recover (NULL,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", &recovered) != WYRELOG_E_INVALID)
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+          &recovered) != WYRELOG_E_INVALID)
     return 263;
   if (wyl_client_service_credential_operation_recover (local_client, NULL,
-          &recovered) != WYRELOG_E_INVALID)
+          123, "public", 69, &recovered) != WYRELOG_E_INVALID)
     return 264;
   if (wyl_client_service_credential_operation_recover (local_client,
-          "not-canonical", &recovered) != WYRELOG_E_INVALID)
+          "not-canonical", 123, "public", 69, &recovered) != WYRELOG_E_INVALID)
     return 265;
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", NULL) != WYRELOG_E_INVALID)
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+          NULL) != WYRELOG_E_INVALID)
     return 266;
+
+  /* Invalid guard context is rejected locally with no request sent. */
+  g_free (http.last_path);
+  http.last_path = g_strdup ("__unset__");
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 101,
+          &recovered) != WYRELOG_E_INVALID)
+    return 276;
+  if (wyl_client_service_credential_operation_recover (local_client,
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "not-a-loc-class", 69,
+          &recovered) != WYRELOG_E_INVALID)
+    return 277;
+  if (g_strcmp0 (http.last_path, "__unset__") != 0)
+    return 278;
 
   http.body =
       "{\"request_id\":\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\","
@@ -990,7 +1024,8 @@ main (void)
       "\"created_at_us\":10,\"updated_at_us\":20,\"expires_at_us\":30,"
       "\"recovery\":\"server_committed\"}";
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", &recovered) != WYRELOG_E_OK)
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+          &recovered) != WYRELOG_E_OK)
     return 267;
   if (g_strcmp0 (recovered.request_id, "ABCDEFGHIJKLMNOPQRSTUVWXYZ1") != 0 ||
       recovered.operation !=
@@ -1012,7 +1047,10 @@ main (void)
       g_strcmp0 (http.last_authorization, "Bearer access-2") != 0 ||
       g_strcmp0 (http.last_body,
           "{\"version\":\"1\",\"request_id\":"
-          "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}") != 0)
+          "\"ABCDEFGHIJKLMNOPQRSTUVWXYZ1\"}") != 0 ||
+      g_strcmp0 (http.last_guard_timestamp, "123") != 0 ||
+      g_strcmp0 (http.last_guard_loc_class, "public") != 0 ||
+      g_strcmp0 (http.last_guard_risk, "69") != 0)
     return 269;
   wyl_client_service_credential_operation_status_entry_clear (&recovered);
 
@@ -1020,7 +1058,8 @@ main (void)
   http.status = 404;
   http.body = "{\"error\":\"service_credential_operation_recover_not_found\"}";
   if (wyl_client_service_credential_operation_recover (local_client,
-          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", &recovered) != WYRELOG_E_NOT_FOUND)
+          "ABCDEFGHIJKLMNOPQRSTUVWXYZ1", 123, "public", 69,
+          &recovered) != WYRELOG_E_NOT_FOUND)
     return 270;
   if (recovered.request_id != NULL || recovered.recovery != NULL)
     return 271;
