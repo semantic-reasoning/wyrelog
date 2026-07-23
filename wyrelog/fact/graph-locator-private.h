@@ -168,6 +168,13 @@ wyrelog_error_t wyl_fact_graph_directory_stage_create_exact
 wyrelog_error_t wyl_fact_graph_directory_stage_open_exact
     (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);
+/* Open the intentionally retained `stage + facts.duckdb` provisioning pair.
+ * The operation UUID is canonical UUIDv7 and derives both names internally.
+ * This is read-only and accepts only a secure nlink=2 pair whose two names
+ * identify the same file; callers must still validate the held DB identity. */
+wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_exact
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphRegularFile * out_final);
 wyrelog_error_t wyl_fact_graph_stage_sync (WylFactGraphStage * stage);
 wyrelog_error_t wyl_fact_graph_stage_publish (WylFactGraphDirectory *
     directory, WylFactGraphStage * stage);

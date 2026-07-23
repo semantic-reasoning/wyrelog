@@ -1629,6 +1629,20 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   return rc;
 }
 
+/* The retained POSIX hard-link pair has no equivalent Windows contract yet.
+ * Keep the cross-platform declaration fail-closed until it does. */
+wyrelog_error_t
+    wyl_fact_graph_directory_open_provisioned_final_exact
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    WylFactGraphRegularFile * out_final)
+{
+  if (out_final != NULL)
+    *out_final = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  (void) directory;
+  (void) operation_uuid;
+  return WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
     const gchar *final_basename, WylFactGraphStage *out_stage)
