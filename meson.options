@@ -66,6 +66,14 @@ option('duckdb_source',
               + 'amalgamation on every push.'
 )
 
+option('enable_secure_duckdb_bridge',
+  type : 'feature',
+  value : 'disabled',
+  description : 'Build the experimental, source-pinned C++ DuckDB lifecycle '
+              + 'bridge. Requires enable_fact_store=enabled and '
+              + 'duckdb_source=subproject; it has no artifact or VFS authority.'
+)
+
 option('wyrelog_log_max_level',
   type : 'combo',
   choices : ['none', 'error', 'warn', 'info', 'debug', 'trace'],

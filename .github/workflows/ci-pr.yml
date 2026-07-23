@@ -98,6 +98,22 @@ jobs:
             -Denable_audit=enabled -Dduckdb_source=prebuilt
           meson compile -C build-fact wyrelogd
 
+      - name: Build secure DuckDB bridge from pinned source
+        if: runner.os == 'macOS'
+        run: |
+          meson setup build-secure-duckdb \
+            -Denable_fact_store=enabled \
+            -Dduckdb_source=subproject \
+            -Denable_secure_duckdb_bridge=enabled
+          meson test -C build-secure-duckdb secure-duckdb-bridge --print-errorlogs
+          if meson setup build-secure-duckdb-prebuilt \
+              -Denable_fact_store=enabled \
+              -Dduckdb_source=prebuilt \
+              -Denable_secure_duckdb_bridge=enabled; then
+            echo 'secure DuckDB bridge unexpectedly accepted prebuilt DuckDB'
+            exit 1
+          fi
+
       - name: Show sccache statistics
         if: always()
         run: |
