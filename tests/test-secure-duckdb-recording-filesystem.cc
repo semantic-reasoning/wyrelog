@@ -12,10 +12,12 @@
 
 #include <duckdb.hpp>
 
+#include <algorithm>
 #include <filesystem>
 #include <cstdio>
 #include <cerrno>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -37,6 +39,7 @@ struct Event {
   duckdb::FileLockType lock = duckdb::FileLockType::NO_LOCK;
   duckdb::FileCompressionType compression = duckdb::FileCompressionType::UNCOMPRESSED;
   int outcome = -1;
+  std::string error_class;
 };
 
 struct ControlEvent {
@@ -90,12 +93,20 @@ public:
     if (flags.Compression () != duckdb::FileCompressionType::AUTO_DETECT
         && flags.Compression () != duckdb::FileCompressionType::UNCOMPRESSED)
       reject ("compressed file access is not permitted");
-    record ("open", checked, flags);
-    auto inner = local_->OpenFile (checked.string (), flags, nullptr);
-    if (!inner)
-      return nullptr;
-    return duckdb::make_uniq<RecordingFileHandle> (*this, checked.string (),
-        flags, std::move (inner));
+    try {
+      auto inner = local_->OpenFile (checked.string (), flags, nullptr);
+      record ("open", checked, flags);
+      if (!inner)
+        return nullptr;
+      return duckdb::make_uniq<RecordingFileHandle> (*this, checked.string (),
+          flags, std::move (inner));
+    } catch (const duckdb::IOException &) {
+      record ("open", checked, flags, 0, "IOException");
+      throw;
+    } catch (const duckdb::Exception &) {
+      record ("open", checked, flags, 0, "DuckDBException");
+      throw;
+    }
   }
 
   void Read (duckdb::FileHandle &handle, void *buffer, int64_t bytes,
@@ -465,10 +476,11 @@ private:
   }
 
   void record (const std::string &operation, const fs::path &path,
-      duckdb::FileOpenFlags flags = {}, int outcome = -1)
+      duckdb::FileOpenFlags flags = {}, int outcome = -1,
+      std::string error_class = {})
   {
     recorder_->events.push_back ({ operation, path.string (), flags.GetFlagsInternal (),
-        flags.Lock (), flags.Compression (), outcome });
+        flags.Lock (), flags.Compression (), outcome, std::move (error_class) });
   }
   void record (const std::string &operation, const std::string &path)
   {
@@ -644,6 +656,132 @@ assert_same_file (const FileIdentity &before, const FileIdentity &after)
   g_assert_cmpstr (after.digest.c_str (), ==, before.digest.c_str ());
 }
 
+struct ArtifactSet {
+  std::vector<std::pair<std::string, FileIdentity>> files;
+};
+
+static ArtifactSet
+snapshot_artifacts (const fs::path &root)
+{
+  ArtifactSet artifacts;
+  for (const auto &entry : fs::directory_iterator (root)) {
+    g_assert_true (entry.is_regular_file ());
+    artifacts.files.push_back ({ entry.path ().filename ().string (),
+        snapshot_file (entry.path ()) });
+  }
+  std::sort (artifacts.files.begin (), artifacts.files.end (),
+      [] (const auto &left, const auto &right) { return left.first < right.first; });
+  return artifacts;
+}
+
+static void
+assert_same_artifacts (const ArtifactSet &before, const ArtifactSet &after)
+{
+  g_assert_cmpuint (after.files.size (), ==, before.files.size ());
+  for (size_t i = 0; i < before.files.size (); i++) {
+    g_assert_cmpstr (after.files[i].first.c_str (), ==, before.files[i].first.c_str ());
+    assert_same_file (before.files[i].second, after.files[i].second);
+  }
+}
+
+struct TimedLine {
+  GMainLoop *loop;
+  GCancellable *cancellable;
+  gchar *line = NULL;
+  GError *error = NULL;
+  gboolean complete = FALSE;
+  gboolean timed_out = FALSE;
+};
+
+static gboolean
+timed_line_timeout (gpointer user_data)
+{
+  auto *state = static_cast<TimedLine *> (user_data);
+  state->timed_out = TRUE;
+  g_cancellable_cancel (state->cancellable);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+timed_line_finished (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  auto *state = static_cast<TimedLine *> (user_data);
+  gsize length = 0;
+  state->line = g_data_input_stream_read_line_finish (
+      G_DATA_INPUT_STREAM (source), result, &length, &state->error);
+  state->complete = TRUE;
+  g_main_loop_quit (state->loop);
+}
+
+static gchar *
+read_line_with_timeout (GDataInputStream *stream, guint timeout_ms)
+{
+  g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  TimedLine state { loop, cancellable };
+  const guint timeout_id = g_timeout_add (timeout_ms, timed_line_timeout, &state);
+  g_data_input_stream_read_line_async (stream, G_PRIORITY_DEFAULT,
+      cancellable, timed_line_finished, &state);
+  g_main_loop_run (loop);
+  if (!state.timed_out)
+    g_source_remove (timeout_id);
+  g_assert_true (state.complete);
+  g_assert_false (state.timed_out);
+  g_assert_no_error (state.error);
+  g_assert_nonnull (state.line);
+  return state.line;
+}
+
+struct TimedWait {
+  GMainLoop *loop;
+  GCancellable *cancellable;
+  GError *error = NULL;
+  gboolean complete = FALSE;
+  gboolean succeeded = FALSE;
+  gboolean timed_out = FALSE;
+};
+
+static gboolean
+timed_wait_timeout (gpointer user_data)
+{
+  auto *state = static_cast<TimedWait *> (user_data);
+  state->timed_out = TRUE;
+  g_cancellable_cancel (state->cancellable);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+timed_wait_finished (GObject *source, GAsyncResult *result, gpointer user_data)
+{
+  auto *state = static_cast<TimedWait *> (user_data);
+  state->succeeded = g_subprocess_wait_check_finish (G_SUBPROCESS (source), result,
+      &state->error);
+  state->complete = TRUE;
+  g_main_loop_quit (state->loop);
+}
+
+static void
+wait_check_with_timeout (GSubprocess *process, guint timeout_ms)
+{
+  g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  TimedWait state { loop, cancellable };
+  const guint timeout_id = g_timeout_add (timeout_ms, timed_wait_timeout, &state);
+  g_subprocess_wait_check_async (process, cancellable, timed_wait_finished, &state);
+  g_main_loop_run (loop);
+  if (!state.timed_out)
+    g_source_remove (timeout_id);
+  g_assert_true (state.complete);
+  if (state.timed_out) {
+    g_clear_error (&state.error);
+    g_subprocess_force_exit (process);
+    g_assert_true (g_subprocess_wait (process, NULL, NULL));
+    g_error ("holder did not exit after RELEASE within %u ms", timeout_ms);
+  }
+  g_assert_no_error (state.error);
+  g_assert_true (state.succeeded);
+}
+
 static void
 configure_test_database (duckdb::DBConfig *config, const fs::path &root,
     std::shared_ptr<RecorderState> recorder)
@@ -659,6 +797,8 @@ assert_duckdb_152 (void)
 {
   g_assert_cmpstr (duckdb_library_version (), ==, "v1.5.2");
 }
+
+static gboolean is_mutation_event (const Event &event);
 
 static int
 crash_writer_child (const gchar *sandbox)
@@ -676,10 +816,10 @@ crash_writer_child (const gchar *sandbox)
   if (result->HasError () || !fs::exists (database.string () + ".wal"))
     _exit (91);
   for (const auto &event : recorder->events) {
-    if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\n",
+    if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
             event.operation.c_str (), event.path.c_str (),
             (unsigned long long) event.flags, (unsigned) event.lock,
-            (unsigned) event.compression, event.outcome) < 0)
+            (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
       _exit (92);
   }
   for (const auto &control : recorder->controls) {
@@ -692,7 +832,63 @@ crash_writer_child (const gchar *sandbox)
   _exit (0);
 }
 
-static gboolean is_mutation_event (const Event &event);
+static void
+write_trace_or_exit (const RecorderState &recorder, int error_code)
+{
+  for (const auto &event : recorder.events) {
+    if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
+            event.operation.c_str (), event.path.c_str (),
+            (unsigned long long) event.flags, (unsigned) event.lock,
+            (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
+      _exit (error_code);
+  }
+  for (const auto &control : recorder.controls) {
+    if (dprintf (STDOUT_FILENO, "C\t%s\t%s\n", control.operation.c_str (),
+            control.path.c_str ()) < 0)
+      _exit (error_code);
+  }
+  if (dprintf (STDOUT_FILENO, "END\n") < 0)
+    _exit (error_code);
+}
+
+static int
+hold_writer_child (const gchar *sandbox)
+{
+  if (g_strcmp0 (duckdb_library_version (), "v1.5.2") != 0)
+    _exit (100);
+  const fs::path root = fs::canonical (sandbox);
+  const fs::path database = root / "facts.duckdb";
+  auto recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    const size_t ready_event_count = recorder->events.size ();
+    guint main_write_locks = 0;
+    for (const auto &event : recorder->events) {
+      if (event.operation == "open" && event.path == database.string ()
+          && event.flags == 2307
+          && event.lock == duckdb::FileLockType::WRITE_LOCK
+          && event.outcome == -1 && event.error_class.empty ())
+        main_write_locks++;
+    }
+    if (main_write_locks != 1)
+      _exit (105);
+    if (dprintf (STDOUT_FILENO, "READY\n") < 0)
+      _exit (101);
+    char command[16] = {};
+    if (fgets (command, sizeof command, stdin) == NULL
+        || strcmp (command, "RELEASE\n") != 0)
+      _exit (102);
+    if (recorder->events.size () != ready_event_count)
+      _exit (104);
+    for (size_t i = 0; i < ready_event_count; i++)
+      if (recorder->events[i].outcome != -1 || !recorder->events[i].error_class.empty ())
+        _exit (104);
+  }
+  write_trace_or_exit (*recorder, 103);
+  _exit (0);
+}
 
 static void
 parse_child_trace (const gchar *output, std::vector<Event> *events,
@@ -719,7 +915,8 @@ parse_child_trace (const gchar *output, std::vector<Event> *events,
       g_assert_nonnull (fields[4]);
       g_assert_nonnull (fields[5]);
       g_assert_nonnull (fields[6]);
-      g_assert_null (fields[7]);
+      g_assert_nonnull (fields[7]);
+      g_assert_null (fields[8]);
       char *end = NULL;
       errno = 0;
       const auto flags = strtoull (fields[3], &end, 10);
@@ -741,7 +938,7 @@ parse_child_trace (const gchar *output, std::vector<Event> *events,
       g_assert_cmpint (outcome, <=, 1);
       events->push_back ({ fields[1], fields[2], (duckdb::idx_t) flags,
           (duckdb::FileLockType) lock, (duckdb::FileCompressionType) compression,
-          (int) outcome });
+          (int) outcome, fields[7] });
     } else if (g_strcmp0 (fields[0], "C") == 0) {
       g_assert_nonnull (fields[1]);
       g_assert_nonnull (fields[2]);
@@ -1052,16 +1249,158 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   remove_tree (sandbox);
 }
 
+static void
+test_recording_filesystem_rw_writer_contention (void)
+{
+  assert_duckdb_152 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-writer-lock-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (sandbox);
+  const fs::path database = root / "facts.duckdb";
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
+    g_assert_false (result->HasError ());
+  }
+  const ArtifactSet seeded = snapshot_artifacts (root);
+  g_assert_cmpuint (seeded.files.size (), ==, 1);
+  g_assert_cmpstr (seeded.files[0].first.c_str (), ==, "facts.duckdb");
+
+  const gchar *argv[] = { self_path, "--hold-writer", root.c_str (), NULL };
+  g_autoptr (GSubprocess) holder = g_subprocess_newv (argv,
+      (GSubprocessFlags) (G_SUBPROCESS_FLAGS_STDIN_PIPE
+          | G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE),
+      &error);
+  g_assert_no_error (error);
+  g_autoptr (GDataInputStream) holder_stdout = g_data_input_stream_new (
+      g_subprocess_get_stdout_pipe (holder));
+  g_autofree gchar *ready = read_line_with_timeout (holder_stdout, 5000);
+  g_assert_cmpstr (ready, ==, "READY");
+  assert_same_artifacts (seeded, snapshot_artifacts (root));
+
+  auto contender_recorder = std::make_shared<RecorderState> ();
+  gboolean contender_opened = FALSE;
+  g_autofree gchar *contender_error = NULL;
+  try {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, contender_recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    contender_opened = TRUE;
+  } catch (const duckdb::IOException &exception) {
+    contender_error = g_strdup (exception.what ());
+  } catch (const duckdb::Exception &exception) {
+    contender_error = g_strdup (exception.what ());
+  }
+  g_assert_false (contender_opened);
+  g_assert_nonnull (contender_error);
+  g_assert_true (g_str_has_prefix (contender_error,
+      "{\"exception_type\":\"IO\",\"exception_message\":\"Could not set lock on file \\\""));
+  guint failed_main_write_locks = 0;
+  const std::string main_path = database.string ();
+  for (const auto &event : contender_recorder->events) {
+    if (event.path != main_path)
+      g_error ("unexpected contender path: %s", event.path.c_str ());
+    g_assert_true (event.outcome == -1 || event.outcome == 0);
+    g_assert_false (is_mutation_event (event));
+    if (has_operation (event, "open")) {
+      const gboolean allowed_preflight = (event.flags == 129
+          && event.lock == duckdb::FileLockType::NO_LOCK)
+          || (event.flags == 2307 && event.lock == duckdb::FileLockType::WRITE_LOCK);
+      g_assert_true (allowed_preflight);
+      if (event.flags == 2307 && event.lock == duckdb::FileLockType::WRITE_LOCK) {
+        g_assert_cmpint (event.outcome, ==, 0);
+        g_assert_cmpstr (event.error_class.c_str (), ==, "IOException");
+        failed_main_write_locks++;
+      } else {
+        g_assert_cmpint (event.outcome, ==, -1);
+        g_assert_true (event.error_class.empty ());
+      }
+    } else {
+      g_assert_cmpint (event.outcome, ==, -1);
+      g_assert_true (event.error_class.empty ());
+      g_assert_true (has_operation (event, "close") || has_operation (event, "read")
+          || has_operation (event, "read-at") || has_operation (event, "size")
+          || has_operation (event, "exists") || has_operation (event, "canonicalize")
+          || has_operation (event, "separator") || has_operation (event, "on-disk"));
+    }
+  }
+  g_assert_cmpuint (failed_main_write_locks, ==, 1);
+  assert_source_152_control_events (contender_recorder->controls, 0, 1);
+  assert_same_artifacts (seeded, snapshot_artifacts (root));
+
+  gsize written = 0;
+  g_assert_true (g_output_stream_write_all (g_subprocess_get_stdin_pipe (holder),
+          "RELEASE\n", 8, &written, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_cmpuint (written, ==, 8);
+  g_assert_true (g_output_stream_close (g_subprocess_get_stdin_pipe (holder), NULL, &error));
+  g_assert_no_error (error);
+  wait_check_with_timeout (holder, 5000);
+  GString *trace_text = g_string_new (NULL);
+  while (TRUE) {
+    gsize line_length = 0;
+    g_autofree gchar *line = g_data_input_stream_read_line (holder_stdout,
+        &line_length, NULL, &error);
+    g_assert_no_error (error);
+    if (line == NULL)
+      break;
+    g_string_append_len (trace_text, line, line_length);
+    g_string_append_c (trace_text, '\n');
+  }
+  std::vector<Event> holder_events;
+  std::vector<ControlEvent> holder_controls;
+  parse_child_trace (trace_text->str, &holder_events, &holder_controls);
+  g_string_free (trace_text, TRUE);
+  guint holder_main_write_locks = 0;
+  for (const auto &event : holder_events) {
+    assert_source_152_plain_lifecycle_event (event, database);
+    assert_live_wal_path (event, database);
+    g_assert_cmpint (event.outcome, ==, -1);
+    g_assert_true (event.error_class.empty ());
+    g_assert_false (is_mutation_event (event));
+    if (event.operation == "open" && event.path == database.string ()
+        && event.flags == 2307 && event.lock == duckdb::FileLockType::WRITE_LOCK)
+      holder_main_write_locks++;
+  }
+  g_assert_cmpuint (holder_main_write_locks, ==, 1);
+  assert_source_152_control_events (holder_controls, 0, 1);
+  assert_same_artifacts (seeded, snapshot_artifacts (root));
+
+  auto restored_recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, restored_recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    auto write = connection.Query ("INSERT INTO facts VALUES (77)");
+    g_assert_false (write->HasError ());
+    auto read = connection.Query ("SELECT value FROM facts WHERE value = 77");
+    g_assert_false (read->HasError ());
+    g_assert_cmpuint (read->RowCount (), ==, 1);
+  }
+  remove_tree (sandbox);
+}
+
 int
 main (int argc, char **argv)
 {
   if (argc == 3 && g_strcmp0 (argv[1], "--crash-writer") == 0)
     return crash_writer_child (argv[2]);
+  if (argc == 3 && g_strcmp0 (argv[1], "--hold-writer") == 0)
+    return hold_writer_child (argv[2]);
   self_path = argv[0];
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/persistent-db",
       test_recording_filesystem_persistent_database);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery",
       test_recording_filesystem_live_wal_read_only_recovery);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/rw-writer-contention",
+      test_recording_filesystem_rw_writer_contention);
   return g_test_run ();
 }
