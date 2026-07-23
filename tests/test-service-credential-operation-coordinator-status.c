@@ -216,6 +216,78 @@ test_status_backend (void)
   wyl_service_credential_operation_root_anchor_clear (&anchor);
   wyl_service_credential_operation_storage_clear (&storage);
 }
+
+/* A single corrupt/undecodable durable record must never blind the listing:
+ * enumerate yields its id (correctly "op-<valid-id>" named) but load fails
+ * closed with a non-NOT_FOUND error.  The listing must skip it and still return
+ * every good record without erroring, so one tenant's bad record cannot deny
+ * another tenant a read-only diagnostic listing. */
+static void
+test_status_skips_unreadable (void)
+{
+  g_autofree gchar *base = g_dir_make_tmp ("wyl-status-corrupt-XXXXXX", NULL);
+  g_autofree gchar *root = g_build_filename (base, "state", NULL);
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  gchar ids[3][WYL_REQUEST_ID_STRING_BUF];
+  gchar corrupt_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_nonnull (base);
+  g_assert_cmpint (wyl_service_credential_operation_storage_open (root,
+          &storage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_credential_operation_storage_capture_anchor
+      (&storage, &anchor), ==, WYRELOG_E_OK);
+
+  /* Seed N=3 good PREPARED operations. */
+  for (gsize i = 0; i < G_N_ELEMENTS (ids); i++) {
+    g_assert_cmpint (wyl_request_id_new (ids[i], sizeof ids[i]), ==,
+        WYRELOG_E_OK);
+    begin_prepared_issue (&storage, &anchor, ids[i]);
+  }
+
+  /* Write one correctly-named "op-<valid-id>" child holding undecodable bytes,
+   * so enumerate returns its id but load fails (fail-closed WYRELOG_E_POLICY,
+   * never NOT_FOUND). */
+  g_assert_cmpint (wyl_request_id_new (corrupt_id, sizeof corrupt_id), ==,
+      WYRELOG_E_OK);
+  g_autofree gchar *corrupt_name = g_strconcat ("op-", corrupt_id, NULL);
+  g_autofree gchar *corrupt_path = g_build_filename (storage.root_path,
+      corrupt_name, NULL);
+  const gchar garbage[] = "this is not a decodable operation record";
+  g_assert_true (g_file_set_contents (corrupt_path, garbage,
+          (gssize) (sizeof garbage - 1), NULL));
+
+  /* Direct load of the corrupt child fails, and not as NOT_FOUND: the child
+   * exists, its bytes just do not decode. */
+  {
+    WylServiceCredentialOperationRecord probe =
+        WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+    wyrelog_error_t probe_rc =
+        wyl_service_credential_operation_coordinator_load (&storage, &anchor,
+        corrupt_id, &probe);
+    g_assert_cmpint (probe_rc, !=, WYRELOG_E_OK);
+    g_assert_cmpint (probe_rc, !=, WYRELOG_E_NOT_FOUND);
+    wyl_service_credential_operation_record_clear (&probe);
+  }
+
+  /* The listing returns exactly the good records and does NOT error; the
+   * corrupt id is absent. */
+  {
+    WylServiceCredentialOperationStatusList list = { 0 };
+    g_assert_cmpint (wyl_service_credential_operation_coordinator_status_list
+        (&storage, &anchor, NULL, &list), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (list.n_entries, ==, G_N_ELEMENTS (ids));
+    for (gsize i = 0; i < list.n_entries; i++) {
+      g_assert_nonnull (list.entries[i].record.request_id);
+      g_assert_cmpstr (list.entries[i].record.request_id, !=, corrupt_id);
+    }
+    wyl_service_credential_operation_status_list_clear (&list);
+  }
+
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  wyl_service_credential_operation_storage_clear (&storage);
+}
 #endif
 
 int
@@ -226,6 +298,8 @@ main (int argc, char **argv)
       test_status_null_arguments);
 #ifndef G_OS_WIN32
   g_test_add_func ("/operation-status/backend", test_status_backend);
+  g_test_add_func ("/operation-status/skips-unreadable",
+      test_status_skips_unreadable);
 #endif
   return g_test_run ();
 }
