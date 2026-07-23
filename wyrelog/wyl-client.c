@@ -2539,17 +2539,24 @@ fail:
   return FALSE;
 }
 
-/* Builds a guard-free service-credential-operations request that mirrors the
+/* Builds a guarded service-credential-operations request that mirrors the
  * reconcile transport: same tenant source, same bearer/session token
  * fallback, same URI shape.  |suffix| is "" for the collection or "/recover"
- * for the recovery action. */
+ * for the recovery action.  The guarded-session context is validated by the
+ * public callers and appended to the query so the daemon's guarded-session
+ * authorization accepts the request. */
 static wyrelog_error_t
 client_service_credential_operations_message_new (WylClient *client,
-    const gchar *suffix, const gchar *method, SoupMessage **out_message)
+    const gchar *suffix, const gchar *method, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk, SoupMessage **out_message)
 {
   if (out_message == NULL)
     return WYRELOG_E_INVALID;
   *out_message = NULL;
+
+  if (guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
+      guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
+    return WYRELOG_E_INVALID;
 
   g_autofree gchar *base_url = wyl_client_dup_base_url (client);
   if (base_url == NULL)
@@ -2569,16 +2576,23 @@ client_service_credential_operations_message_new (WylClient *client,
     return WYRELOG_E_INVALID;
 
   g_autofree gchar *escaped_tenant = g_uri_escape_string (tenant, NULL, TRUE);
+  g_autofree gchar *escaped_loc =
+      g_uri_escape_string (guard_loc_class, NULL, TRUE);
   g_autofree gchar *uri = NULL;
   if (has_access) {
-    uri = g_strdup_printf ("%s/service-credential-operations%s?tenant=%s",
-        base_url, suffix, escaped_tenant);
+    uri = g_strdup_printf ("%s/service-credential-operations%s?tenant=%s"
+        "&guard_timestamp=%" G_GINT64_FORMAT
+        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+        base_url, suffix, escaped_tenant, guard_timestamp, escaped_loc,
+        guard_risk);
   } else {
     g_autofree gchar *escaped_session =
         g_uri_escape_string (session_token, NULL, TRUE);
     uri = g_strdup_printf ("%s/service-credential-operations%s"
-        "?tenant=%s&session_token=%s", base_url, suffix, escaped_tenant,
-        escaped_session);
+        "?tenant=%s&session_token=%s&guard_timestamp=%" G_GINT64_FORMAT
+        "&guard_loc_class=%s&guard_risk=%" G_GINT64_FORMAT,
+        base_url, suffix, escaped_tenant, escaped_session, guard_timestamp,
+        escaped_loc, guard_risk);
   }
 
   g_autoptr (SoupMessage) message = soup_message_new (method, uri);
@@ -2596,16 +2610,20 @@ client_service_credential_operations_message_new (WylClient *client,
 
 wyrelog_error_t
 wyl_client_service_credential_operation_status_list (WylClient *client,
+    gint64 guard_timestamp, const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusList *out_list)
 {
   if (out_list != NULL)
     wyl_client_service_credential_operation_status_list_clear (out_list);
-  if (client == NULL || !WYL_IS_CLIENT (client) || out_list == NULL)
+  if (client == NULL || !WYL_IS_CLIENT (client) || out_list == NULL ||
+      guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
+      guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
     return WYRELOG_E_INVALID;
 
   g_autoptr (SoupMessage) message = NULL;
   wyrelog_error_t rc = client_service_credential_operations_message_new
-      (client, "", "GET", &message);
+      (client, "", "GET", guard_timestamp, guard_loc_class, guard_risk,
+      &message);
   if (rc != WYRELOG_E_OK)
     return rc;
 
@@ -2637,18 +2655,22 @@ wyl_client_service_credential_operation_status_list (WylClient *client,
 
 wyrelog_error_t
 wyl_client_service_credential_operation_recover (WylClient *client,
-    const gchar *request_id,
+    const gchar *request_id, gint64 guard_timestamp,
+    const gchar *guard_loc_class, gint64 guard_risk,
     WylClientServiceCredentialOperationStatusEntry *out_entry)
 {
   if (out_entry != NULL)
     wyl_client_service_credential_operation_status_entry_clear (out_entry);
   if (client == NULL || !WYL_IS_CLIENT (client) || out_entry == NULL ||
-      !client_reconcile_request_id_is_canonical (request_id))
+      !client_reconcile_request_id_is_canonical (request_id) ||
+      guard_timestamp < 0 || guard_loc_class == NULL || guard_risk < 0 ||
+      guard_risk > 100 || !wyl_guard_loc_class_is_valid (guard_loc_class))
     return WYRELOG_E_INVALID;
 
   g_autoptr (SoupMessage) message = NULL;
   wyrelog_error_t rc = client_service_credential_operations_message_new
-      (client, "/recover", "POST", &message);
+      (client, "/recover", "POST", guard_timestamp, guard_loc_class,
+      guard_risk, &message);
   if (rc != WYRELOG_E_OK)
     return rc;
 
