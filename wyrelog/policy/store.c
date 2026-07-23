@@ -10736,6 +10736,8 @@ graph_authority_sqlite_error (int sqlite_rc)
   int primary = sqlite_rc & 0xff;
   if (primary == SQLITE_BUSY || primary == SQLITE_LOCKED)
     return WYRELOG_E_BUSY;
+  if (primary == SQLITE_CONSTRAINT)
+    return WYRELOG_E_POLICY;
   return WYRELOG_E_IO;
 }
 
@@ -10834,29 +10836,17 @@ authority_update_step (wyl_policy_store_t *store, sqlite3_stmt *stmt,
   return graph_authority_sqlite_error (extended);
 }
 
-wyrelog_error_t
-wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
+/* Caller holds graph_authority_mutex and an active mutation frame. */
+static wyrelog_error_t
+reserve_graph_authority_locked (wyl_policy_store_t *store,
     const gchar *tenant_id, const gchar *graph_id, const gchar *store_uuid,
     guint64 format_version, guint64 path_encoding_version,
     guint64 expected_lifecycle_generation,
     guint64 expected_reconciliation_generation,
     WylPolicyAuthorityMutationResult *out_result)
 {
-  if (store == NULL || store->db == NULL || out_result == NULL
-      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
-      || !fact_graph_customer_name_is_valid (graph_id)
-      || !graph_store_uuid_is_canonical (store_uuid) || format_version == 0
-      || format_version > G_MAXINT64 || path_encoding_version == 0
-      || path_encoding_version > G_MAXINT64
-      || expected_lifecycle_generation > G_MAXINT64
-      || expected_reconciliation_generation > G_MAXINT64)
-    return WYRELOG_E_INVALID;
-  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
   gboolean applied = FALSE;
-  GraphAuthorityMutationFrame frame;
-  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  wyrelog_error_t rc;
   sqlite3_stmt *stmt = NULL;
   rc = prepare_stmt (store->db,
       "UPDATE fact_graphs SET store_uuid=?,format_version=?,"
@@ -10889,7 +10879,7 @@ wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
     rc = graph_authority_mutation_checkpoint (store,
         WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_AFTER_UPDATE);
   if (rc != WYRELOG_E_OK)
-    return graph_authority_mutation_complete (store, &frame, rc);
+    return rc;
   if (applied) {
     *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
   } else {
@@ -10900,6 +10890,34 @@ wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
         1, 0, expected_lifecycle_generation < G_MAXINT64, store_uuid,
         format_version, path_encoding_version, out_result);
   }
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_reserve_graph_authority (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id, const gchar *store_uuid,
+    guint64 format_version, guint64 path_encoding_version,
+    guint64 expected_lifecycle_generation,
+    guint64 expected_reconciliation_generation,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !graph_store_uuid_is_canonical (store_uuid) || format_version == 0
+      || format_version > G_MAXINT64 || path_encoding_version == 0
+      || path_encoding_version > G_MAXINT64
+      || expected_lifecycle_generation > G_MAXINT64
+      || expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = reserve_graph_authority_locked (store, tenant_id, graph_id, store_uuid,
+      format_version, path_encoding_version, expected_lifecycle_generation,
+      expected_reconciliation_generation, out_result);
   if (rc == WYRELOG_E_OK)
     rc = graph_authority_mutation_checkpoint (store,
         WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
@@ -11788,8 +11806,479 @@ wyl_policy_store_reconcile_journal_transition (wyl_policy_store_t *store,
   return graph_authority_mutation_complete (store, &frame, rc);
 }
 
+static const gchar *
+graph_provisioning_phase_name (WylPolicyGraphProvisioningPhase phase)
+{
+  static const gchar *const names[] = {
+    "reserved", "staged", "published", "verified", "active", "degraded"
+  };
+  return phase >= 0 && phase < G_N_ELEMENTS (names) ? names[phase] : NULL;
+}
+
+const gchar *
+wyl_policy_graph_provisioning_phase_name (WylPolicyGraphProvisioningPhase phase)
+{
+  return graph_provisioning_phase_name (phase);
+}
+
+static gboolean
+graph_provisioning_phase_parse (const gchar *value,
+    WylPolicyGraphProvisioningPhase *out_phase)
+{
+  for (gint i = 0; i < 6; i++) {
+    if (g_strcmp0 (value, graph_provisioning_phase_name (i)) == 0) {
+      *out_phase = (WylPolicyGraphProvisioningPhase) i;
+      return TRUE;
+    }
+  }
+  return FALSE;
+}
+
+static gboolean
+graph_provisioning_uuid_is_canonical (const gchar *value)
+{
+  wyl_id_t parsed;
+  gchar canonical[WYL_ID_STRING_BUF];
+  return value != NULL && wyl_id_parse (value, &parsed) == WYRELOG_E_OK
+      && wyl_id_format (&parsed, canonical, sizeof canonical) == WYRELOG_E_OK
+      && g_strcmp0 (value, canonical) == 0 && canonical[14] == '7';
+}
+
+static wyrelog_error_t
+graph_provisioning_uuid_new (gchar out_uuid[WYL_ID_STRING_BUF])
+{
+  wyl_id_t id;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_id_format (&id, out_uuid, WYL_ID_STRING_BUF);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!graph_provisioning_uuid_is_canonical (out_uuid))
+    return WYRELOG_E_INTERNAL;
+  return WYRELOG_E_OK;
+}
+
+void
+wyl_policy_graph_provisioning_record_free (WylPolicyGraphProvisioningRecord *r)
+{
+  if (r == NULL)
+    return;
+  g_free (r->op_uuid);
+  g_free (r->tenant_id);
+  g_free (r->graph_id);
+  g_free (r->store_uuid);
+  g_free (r->stage_basename);
+  g_free (r);
+}
+
+static wyrelog_error_t
+graph_provisioning_record_from_row (sqlite3_stmt *stmt,
+    WylPolicyGraphProvisioningRecord **out_record)
+{
+  *out_record = NULL;
+  for (gint i = 0; i < 5; i++)
+    if (sqlite3_column_type (stmt, i) != SQLITE_TEXT)
+      return WYRELOG_E_POLICY;
+  if (sqlite3_column_type (stmt, 7) != SQLITE_TEXT)
+    return WYRELOG_E_POLICY;
+  const gint integer_columns[] = { 5, 6, 8, 9, 10 };
+  for (gsize i = 0; i < G_N_ELEMENTS (integer_columns); i++)
+    if (sqlite3_column_type (stmt, integer_columns[i]) != SQLITE_INTEGER
+        || sqlite3_column_int64 (stmt, integer_columns[i]) < 0)
+      return WYRELOG_E_POLICY;
+  const gchar *op_uuid = (const gchar *) sqlite3_column_text (stmt, 0);
+  const gchar *tenant_id = (const gchar *) sqlite3_column_text (stmt, 1);
+  const gchar *graph_id = (const gchar *) sqlite3_column_text (stmt, 2);
+  const gchar *store_uuid = (const gchar *) sqlite3_column_text (stmt, 3);
+  const gchar *stage_basename = (const gchar *) sqlite3_column_text (stmt, 4);
+  const gchar *phase_name = (const gchar *) sqlite3_column_text (stmt, 7);
+  WylPolicyGraphProvisioningPhase phase;
+  gint64 lifecycle = sqlite3_column_int64 (stmt, 5);
+  gint64 reconciliation = sqlite3_column_int64 (stmt, 6);
+  gint64 attempt = sqlite3_column_int64 (stmt, 8);
+  gint64 created_at = sqlite3_column_int64 (stmt, 9);
+  gint64 updated_at = sqlite3_column_int64 (stmt, 10);
+  g_autofree gchar *expected_stage = g_strdup_printf ("provision-%s.sqlite",
+      op_uuid);
+  if (!graph_provisioning_uuid_is_canonical (op_uuid)
+      || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || !fact_graph_customer_name_is_valid (graph_id)
+      || !graph_store_uuid_is_canonical (store_uuid)
+      || g_strcmp0 (stage_basename, expected_stage) != 0
+      || !graph_provisioning_phase_parse (phase_name, &phase)
+      || lifecycle < 0 || reconciliation < 0 || attempt < 0 || created_at < 0
+      || updated_at < created_at)
+    return WYRELOG_E_POLICY;
+  WylPolicyGraphProvisioningRecord *r =
+      g_new0 (WylPolicyGraphProvisioningRecord,
+      1);
+  r->op_uuid = g_strdup (op_uuid);
+  r->tenant_id = g_strdup (tenant_id);
+  r->graph_id = g_strdup (graph_id);
+  r->store_uuid = g_strdup (store_uuid);
+  r->stage_basename = g_strdup (stage_basename);
+  r->expected_lifecycle_generation = (guint64) lifecycle;
+  r->expected_reconciliation_generation = (guint64) reconciliation;
+  r->phase = phase;
+  r->attempt = (guint64) attempt;
+  r->created_at = created_at;
+  r->updated_at = updated_at;
+  *out_record = r;
+  return WYRELOG_E_OK;
+}
+
+#define GRAPH_PROVISIONING_SELECT_COLUMNS \
+  "op_uuid,tenant_id,graph_id,store_uuid,stage_basename," \
+  "expected_lifecycle_generation,expected_reconciliation_generation," \
+  "phase,attempt,created_at,updated_at"
+
+static wyrelog_error_t
+graph_provisioning_read_locked (wyl_policy_store_t *store,
+    const gchar *op_uuid, WylPolicyGraphProvisioningRecord **out_record)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
+      " FROM fact_graph_provisioning WHERE op_uuid=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, op_uuid);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = graph_provisioning_record_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step ==
+        SQLITE_DONE ? WYRELOG_E_NOT_FOUND :
+        graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+static wyrelog_error_t
+graph_provisioning_read_for_graph_locked (wyl_policy_store_t *store,
+    const gchar *tenant_id, const gchar *graph_id,
+    WylPolicyGraphProvisioningRecord **out_record)
+{
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db,
+      "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
+      " FROM fact_graph_provisioning WHERE tenant_id=? AND graph_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, graph_id);
+  int step = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step == SQLITE_ROW)
+    rc = graph_provisioning_record_from_row (stmt, out_record);
+  else if (rc == WYRELOG_E_OK)
+    rc = step ==
+        SQLITE_DONE ? WYRELOG_E_NOT_FOUND :
+        graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (stmt);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_read (wyl_policy_store_t *store,
+    const gchar *op_uuid, WylPolicyGraphProvisioningRecord **out_record)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (store == NULL || store->db == NULL || out_record == NULL
+      || !graph_provisioning_uuid_is_canonical (op_uuid))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  wyrelog_error_t rc = graph_provisioning_read_locked (store, op_uuid,
+      out_record);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_list (wyl_policy_store_t *store,
+    const gchar *tenant_id, GPtrArray **out_records)
+{
+  if (out_records != NULL)
+    *out_records = NULL;
+  if (store == NULL || store->db == NULL || out_records == NULL
+      || (tenant_id != NULL
+          && !wyl_policy_store_tenant_id_is_valid (tenant_id)))
+    return WYRELOG_E_INVALID;
+  g_rec_mutex_lock (&store->graph_authority_mutex);
+  const gchar *sql = tenant_id == NULL ?
+      "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
+      " FROM fact_graph_provisioning ORDER BY tenant_id,graph_id,op_uuid;" :
+      "SELECT " GRAPH_PROVISIONING_SELECT_COLUMNS
+      " FROM fact_graph_provisioning WHERE tenant_id=? ORDER BY graph_id,op_uuid;";
+  GPtrArray *records = g_ptr_array_new_with_free_func ((GDestroyNotify)
+      wyl_policy_graph_provisioning_record_free);
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK && tenant_id != NULL)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step = SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && (step = sqlite3_step (stmt)) == SQLITE_ROW) {
+    WylPolicyGraphProvisioningRecord *record = NULL;
+    rc = graph_provisioning_record_from_row (stmt, &record);
+    if (rc == WYRELOG_E_OK)
+      g_ptr_array_add (records, record);
+  }
+  if (rc == WYRELOG_E_OK && step != SQLITE_DONE)
+    rc = graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    *out_records = records;
+  else
+    g_ptr_array_unref (records);
+  g_rec_mutex_unlock (&store->graph_authority_mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_prepare (wyl_policy_store_t *store,
+    const WylPolicyGraphProvisioningInput *input,
+    WylPolicyGraphProvisioningRecord **out_record,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (out_record != NULL)
+    *out_record = NULL;
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (store == NULL || store->db == NULL || input == NULL || out_record == NULL
+      || out_result == NULL
+      || !wyl_policy_store_tenant_id_is_valid (input->tenant_id)
+      || !fact_graph_customer_name_is_valid (input->graph_id)
+      || !graph_store_uuid_is_canonical (input->store_uuid)
+      || input->format_version == 0 || input->format_version > G_MAXINT64
+      || input->path_encoding_version == 0
+      || input->path_encoding_version > G_MAXINT64
+      || input->expected_lifecycle_generation >= G_MAXINT64
+      || input->expected_reconciliation_generation > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyAuthorityMutationResult reserve_result;
+  rc = reserve_graph_authority_locked (store, input->tenant_id, input->graph_id,
+      input->store_uuid, input->format_version, input->path_encoding_version,
+      input->expected_lifecycle_generation,
+      input->expected_reconciliation_generation, &reserve_result);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (reserve_result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
+    if (reserve_result != WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY) {
+      *out_result = reserve_result;
+      return graph_authority_mutation_complete (store, &frame, WYRELOG_E_OK);
+    }
+    WylPolicyGraphProvisioningRecord *existing = NULL;
+    rc = graph_provisioning_read_for_graph_locked (store, input->tenant_id,
+        input->graph_id, &existing);
+    gboolean exact = rc == WYRELOG_E_OK
+        && g_strcmp0 (existing->store_uuid, input->store_uuid) == 0
+        && existing->expected_lifecycle_generation
+        == input->expected_lifecycle_generation + 1
+        && existing->expected_reconciliation_generation
+        == input->expected_reconciliation_generation;
+    if (rc == WYRELOG_E_OK && exact) {
+      rc = graph_authority_mutation_complete (store, &frame, WYRELOG_E_OK);
+      if (rc == WYRELOG_E_OK) {
+        *out_record = existing;
+        *out_result = WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY;
+      } else
+        wyl_policy_graph_provisioning_record_free (existing);
+      return rc;
+    }
+    wyl_policy_graph_provisioning_record_free (existing);
+    return graph_authority_mutation_complete (store, &frame,
+        rc == WYRELOG_E_OK
+        || rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc);
+  }
+  gchar op_uuid[WYL_ID_STRING_BUF];
+  rc = graph_provisioning_uuid_new (op_uuid);
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  g_autofree gchar *stage = g_strdup_printf ("provision-%s.sqlite", op_uuid);
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db, "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES (?,?,?,?,?,?,?,'reserved',0,"
+      "unixepoch(),unixepoch());", &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1, op_uuid) != WYRELOG_E_OK
+          || bind_text (stmt, 2, input->tenant_id) != WYRELOG_E_OK
+          || bind_text (stmt, 3, input->graph_id) != WYRELOG_E_OK
+          || bind_text (stmt, 4, input->store_uuid) != WYRELOG_E_OK
+          || bind_text (stmt, 5, stage) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 6, (sqlite3_int64)
+              input->expected_lifecycle_generation + 1) != SQLITE_OK
+          || sqlite3_bind_int64 (stmt, 7, (sqlite3_int64)
+              input->expected_reconciliation_generation) != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_DONE || sqlite3_changes (store->db) != 1) {
+      rc = (sqlite3_extended_errcode (store->db) & 0xff) == SQLITE_CONSTRAINT
+          ? WYRELOG_E_POLICY :
+          graph_authority_sqlite_error (sqlite3_extended_errcode (store->db));
+    }
+  }
+  sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = graph_authority_mutation_checkpoint (store,
+        WYL_POLICY_GRAPH_AUTHORITY_MUTATION_FAIL_BEFORE_FINISH);
+  rc = graph_authority_mutation_complete (store, &frame, rc);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  return wyl_policy_store_graph_provisioning_read (store, op_uuid, out_record);
+}
+
+static gboolean
+graph_provisioning_transition_is_legal (WylPolicyGraphProvisioningPhase from,
+    WylPolicyGraphProvisioningPhase to)
+{
+  return (from == WYL_POLICY_GRAPH_PROVISIONING_RESERVED
+      && to == WYL_POLICY_GRAPH_PROVISIONING_STAGED)
+      || (from == WYL_POLICY_GRAPH_PROVISIONING_STAGED
+      && to == WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED)
+      || (from == WYL_POLICY_GRAPH_PROVISIONING_PUBLISHED
+      && to == WYL_POLICY_GRAPH_PROVISIONING_VERIFIED)
+      || (from == WYL_POLICY_GRAPH_PROVISIONING_VERIFIED
+      && to == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE);
+}
+
+wyrelog_error_t
+wyl_policy_store_graph_provisioning_transition (wyl_policy_store_t *store,
+    const gchar *op_uuid, WylPolicyGraphProvisioningPhase expected_phase,
+    WylPolicyGraphProvisioningPhase target_phase, guint64 expected_attempt,
+    WylPolicyGraphErrorClass degraded_error_class,
+    WylPolicyAuthorityMutationResult *out_result)
+{
+  if (out_result != NULL)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_ILLEGAL_TRANSITION;
+  if (store == NULL || store->db == NULL || out_result == NULL
+      || !graph_provisioning_uuid_is_canonical (op_uuid) || expected_phase < 0
+      || expected_phase >= 6 || target_phase < 0 || target_phase >= 6
+      || expected_attempt > G_MAXINT64)
+    return WYRELOG_E_INVALID;
+  if (expected_phase == target_phase) {
+    GraphAuthorityMutationFrame frame;
+    wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    WylPolicyGraphProvisioningRecord *record = NULL;
+    rc = graph_provisioning_read_locked (store, op_uuid, &record);
+    if (rc == WYRELOG_E_NOT_FOUND)
+      *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    else if (rc != WYRELOG_E_OK)
+      return graph_authority_mutation_complete (store, &frame, rc);
+    else {
+      gboolean matches = record->phase == expected_phase
+          && record->attempt == expected_attempt;
+      if (matches && (expected_phase == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+              || expected_phase == WYL_POLICY_GRAPH_PROVISIONING_DEGRADED)) {
+        WylPolicyGraphAuthorityRecord *authority = NULL;
+        wyrelog_error_t authority_rc =
+            wyl_policy_store_read_graph_authority (store,
+            record->tenant_id, record->graph_id, &authority);
+        matches = authority_rc == WYRELOG_E_OK
+            && authority->lifecycle_generation
+            == record->expected_lifecycle_generation + 1
+            && authority->reconciliation_generation
+            == record->expected_reconciliation_generation
+            && authority->lifecycle_state
+            == (expected_phase == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+            ? WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE
+            : WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED);
+        wyl_policy_graph_authority_record_free (authority);
+        if (authority_rc != WYRELOG_E_OK) {
+          wyl_policy_graph_provisioning_record_free (record);
+          return graph_authority_mutation_complete (store, &frame,
+              authority_rc);
+        }
+      }
+      *out_result = matches ? WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY
+          : WYL_POLICY_AUTHORITY_MUTATION_STALE;
+      wyl_policy_graph_provisioning_record_free (record);
+    }
+    return graph_authority_mutation_complete (store, &frame, WYRELOG_E_OK);
+  }
+  gboolean terminal = target_phase == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+      || target_phase == WYL_POLICY_GRAPH_PROVISIONING_DEGRADED;
+  gboolean legal = graph_provisioning_transition_is_legal (expected_phase,
+      target_phase) || (target_phase == WYL_POLICY_GRAPH_PROVISIONING_DEGRADED
+      && expected_phase >= WYL_POLICY_GRAPH_PROVISIONING_RESERVED
+      && expected_phase <= WYL_POLICY_GRAPH_PROVISIONING_VERIFIED);
+  if (!legal || (target_phase == WYL_POLICY_GRAPH_PROVISIONING_DEGRADED
+          && degraded_error_class == WYL_POLICY_GRAPH_ERROR_NONE)
+      || (target_phase != WYL_POLICY_GRAPH_PROVISIONING_DEGRADED
+          && degraded_error_class != WYL_POLICY_GRAPH_ERROR_NONE))
+    return WYRELOG_E_OK;
+  GraphAuthorityMutationFrame frame;
+  wyrelog_error_t rc = graph_authority_mutation_begin (store, &frame);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylPolicyGraphProvisioningRecord *record = NULL;
+  rc = graph_provisioning_read_locked (store, op_uuid, &record);
+  if (rc == WYRELOG_E_NOT_FOUND) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_NOT_FOUND;
+    return graph_authority_mutation_complete (store, &frame, WYRELOG_E_OK);
+  }
+  if (rc != WYRELOG_E_OK)
+    return graph_authority_mutation_complete (store, &frame, rc);
+  if (record->phase != expected_phase || record->attempt != expected_attempt) {
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_STALE;
+    wyl_policy_graph_provisioning_record_free (record);
+    return graph_authority_mutation_complete (store, &frame, WYRELOG_E_OK);
+  }
+  if (terminal) {
+    WylPolicyAuthorityMutationResult authority_result;
+    rc = wyl_policy_store_transition_graph_authority (store, record->tenant_id,
+        record->graph_id, WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+        target_phase == WYL_POLICY_GRAPH_PROVISIONING_ACTIVE
+        ? WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE :
+        WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, degraded_error_class,
+        record->expected_lifecycle_generation,
+        record->expected_reconciliation_generation, &authority_result);
+    if (rc != WYRELOG_E_OK
+        || authority_result != WYL_POLICY_AUTHORITY_MUTATION_APPLIED) {
+      wyl_policy_graph_provisioning_record_free (record);
+      if (rc == WYRELOG_E_OK)
+        *out_result = authority_result;
+      return graph_authority_mutation_complete (store, &frame, rc);
+    }
+  }
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db, "UPDATE fact_graph_provisioning SET "
+      "phase=?,updated_at=unixepoch() WHERE op_uuid=? AND phase=? AND attempt=?;",
+      &stmt);
+  if (rc == WYRELOG_E_OK && (bind_text (stmt, 1,
+              graph_provisioning_phase_name (target_phase)) != WYRELOG_E_OK
+          || bind_text (stmt, 2, op_uuid) != WYRELOG_E_OK || bind_text (stmt, 3,
+              graph_provisioning_phase_name (expected_phase)) != WYRELOG_E_OK
+          || sqlite3_bind_int64 (stmt, 4, (sqlite3_int64) expected_attempt)
+          != SQLITE_OK))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK) {
+    int step = sqlite3_step (stmt);
+    if (step != SQLITE_DONE || sqlite3_changes (store->db) != 1) {
+      int extended = sqlite3_extended_errcode (store->db);
+      rc = step == SQLITE_DONE ? WYRELOG_E_POLICY
+          : (extended & 0xff) == SQLITE_CONSTRAINT ? WYRELOG_E_POLICY
+          : graph_authority_sqlite_error (extended);
+    }
+  }
+  sqlite3_finalize (stmt);
+  wyl_policy_graph_provisioning_record_free (record);
+  if (rc == WYRELOG_E_OK)
+    *out_result = WYL_POLICY_AUTHORITY_MUTATION_APPLIED;
+  return graph_authority_mutation_complete (store, &frame, rc);
+}
+
 #undef TENANT_AUTHORITY_SELECT_COLUMNS
 #undef GRAPH_AUTHORITY_SELECT_COLUMNS
+#undef GRAPH_PROVISIONING_SELECT_COLUMNS
 
 void wyl_policy_fact_relation_schema_columns_free
     (wyl_policy_fact_relation_schema_column_info_t * columns, gsize n_columns)
