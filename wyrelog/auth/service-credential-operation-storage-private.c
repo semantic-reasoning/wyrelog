@@ -3,6 +3,7 @@
 #define _GNU_SOURCE
 #endif
 #include "auth/service-credential-operation-storage-private.h"
+#include "auth/service-credential-operation-coordinator-private.h"
 
 #include <errno.h>
 #include <glib/gstdio.h>
@@ -12,6 +13,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/file.h>
+#include <dirent.h>
 #else
 #include <windows.h>
 #include <aclapi.h>
@@ -1130,5 +1132,68 @@ void wyl_service_credential_operation_child_unlock
     flock (fd, LOCK_UN);
     close (fd);
   }
+}
+
+wyrelog_error_t
+    wyl_service_credential_operation_storage_enumerate_request_ids
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    GCancellable * cancellable, GPtrArray ** out_request_ids)
+{
+  g_autoptr (GPtrArray) ids = NULL;
+  DIR *dir;
+  gint dir_fd;
+  if (storage == NULL || anchor == NULL || out_request_ids == NULL
+      || !anchor->initialized || storage->root_fd < 0)
+    return WYRELOG_E_INVALID;
+  if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  /* Enumerate handle-relative from the pinned root.  Duplicate the anchor fd
+   * so closedir() releases only this walk and never the storage's own fd. */
+  dir_fd = dup (storage->root_fd);
+  if (dir_fd < 0)
+    return WYRELOG_E_IO;
+  dir = fdopendir (dir_fd);
+  if (dir == NULL) {
+    close (dir_fd);
+    return WYRELOG_E_IO;
+  }
+  /* dup() shares the open file description, hence the directory read offset,
+   * with the anchor fd.  A prior walk may have advanced it to end-of-stream,
+   * so rewind before reading to always start from the first entry. */
+  rewinddir (dir);
+  ids = g_ptr_array_new_with_free_func (g_free);
+  for (;;) {
+    struct dirent *entry;
+    const gchar *request_id;
+    if (g_cancellable_is_cancelled (cancellable)) {
+      closedir (dir);
+      return WYRELOG_E_CANCELLED;
+    }
+    errno = 0;
+    entry = readdir (dir);
+    if (entry == NULL) {
+      if (errno != 0) {
+        closedir (dir);
+        return WYRELOG_E_IO;
+      }
+      break;
+    }
+    /* Identity only: match the "op-" record prefix, validate the canonical
+     * request id suffix, and skip everything else (lifecycle-*, .lock-*,
+     * .replace-*, "." / ".." and any foreign name).  No record bytes are read
+     * and no operation state is inferred. */
+    if (!g_str_has_prefix (entry->d_name, "op-"))
+      continue;
+    request_id = entry->d_name + 3;
+    if (!wyl_service_credential_operation_coordinator_request_id_is_valid
+        (request_id))
+      continue;
+    g_ptr_array_add (ids, g_strdup (request_id));
+  }
+  closedir (dir);
+  *out_request_ids = g_steal_pointer (&ids);
+  return WYRELOG_E_OK;
 }
 #endif
