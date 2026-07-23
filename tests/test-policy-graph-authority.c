@@ -137,6 +137,9 @@ test_fresh_schema_is_legacy_unclassified (void)
     assert_column (db, "tenants", tenant_columns[i]);
   for (gsize i = 0; i < G_N_ELEMENTS (graph_columns); i++)
     assert_column (db, "fact_graphs", graph_columns[i]);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM sqlite_master WHERE type='table' "
+          "AND name='fact_graph_provisioning';"), ==, 1);
 
   insert_graph (db, "tenant-fresh", "graph-fresh", FALSE);
   g_autofree gchar *tenant_state = scalar_text (db,
@@ -150,6 +153,228 @@ test_fresh_schema_is_legacy_unclassified (void)
           "SELECT lifecycle_generation + reconciliation_generation "
           "FROM fact_graphs WHERE tenant_id='tenant-fresh' "
           "AND graph_id='graph-fresh';"), ==, 0);
+}
+
+static void
+test_provisioning_schema_is_fail_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-provision", "graph-provision", FALSE);
+  WylPolicyAuthorityMutationResult mutation;
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+          "tenant-provision", "graph-provision",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070545", 1, 1, 0, 0,
+          &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  exec_ok (db,
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c070544','tenant-provision',"
+      "'graph-provision','01890f47-3c4b-7cc2-b8c4-dc0c0c070545',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070544.sqlite',1,0,"
+      "'reserved',0,1,1);");
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM fact_graph_provisioning WHERE op_uuid="
+          "'01890f47-3c4b-7cc2-b8c4-dc0c0c070544';"), ==, 1);
+  exec_rejected (db,
+      "UPDATE fact_graph_provisioning SET stage_basename='foreign.sqlite';");
+  exec_rejected (db,
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c070546','tenant-provision',"
+      "'graph-other','01890f47-3c4b-7cc2-b8c4-dc0c0c070547','../foreign',"
+      "0,0,'reserved',0,1,1);");
+  insert_graph (db, "tenant-invalid-variant", "graph-invalid-variant", FALSE);
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+          "tenant-invalid-variant", "graph-invalid-variant",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070549", 1, 1, 0, 0,
+          &mutation), ==, WYRELOG_E_OK);
+  exec_rejected (db,
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-78c4-dc0c0c070548','tenant-invalid-variant',"
+      "'graph-invalid-variant','01890f47-3c4b-7cc2-b8c4-dc0c0c070549',"
+      "'provision-01890f47-3c4b-7cc2-78c4-dc0c0c070548.sqlite',"
+      "1,0,'reserved',0,1,1);");
+  exec_rejected (db, "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c070552','tenant-provision',"
+      "'graph-provision','01890f47-3c4b-7cc2-b8c4-dc0c0c070545',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070552.sqlite',0,0,"
+      "'reserved',0,1,1);");
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET phase='staged',updated_at=2;");
+  exec_rejected (db,
+      "UPDATE fact_graph_provisioning SET phase='verified',updated_at=3;");
+  exec_rejected (db,
+      "UPDATE fact_graph_provisioning SET phase='reserved',updated_at=3;");
+  exec_ok (db, "UPDATE fact_graph_provisioning SET attempt=1,updated_at=3;");
+  exec_rejected (db,
+      "UPDATE fact_graph_provisioning SET attempt=0,updated_at=4;");
+  exec_rejected (db,
+      "UPDATE fact_graph_provisioning SET phase='published',"
+      "attempt=2,updated_at=4;");
+  exec_rejected (db, "UPDATE fact_graph_provisioning SET updated_at=2;");
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET phase='published',updated_at=4;");
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET phase='verified',updated_at=5;");
+  exec_rejected (db,
+      "UPDATE fact_graph_provisioning SET phase='active',updated_at=6;");
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision", "graph-provision",
+          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+          &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  /* A direct graph transition leaves a detectable stranded operation until
+   * recovery advances the operation's terminal phase. */
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET phase='active',updated_at=6;");
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET phase='active',updated_at=7;");
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision", "graph-provision",
+          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE, 1, 0,
+          &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==,
+      WYL_POLICY_AUTHORITY_MUTATION_UNCHANGED_REPLAY);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision", "graph-provision",
+          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+          WYL_POLICY_GRAPH_LIFECYCLE_SEALED, WYL_POLICY_GRAPH_ERROR_NONE,
+          2, 0, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision", "graph-provision",
+          WYL_POLICY_GRAPH_LIFECYCLE_SEALED,
+          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE, WYL_POLICY_GRAPH_ERROR_NONE,
+          3, 0, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision", "graph-provision",
+          WYL_POLICY_GRAPH_LIFECYCLE_ACTIVE,
+          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
+          4, 0, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_reconcile_graph_authority (store,
+          "tenant-provision", "graph-provision", 5, 0, &mutation), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+}
+
+static void
+test_provisioning_degraded_terminal_coupling (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  WylPolicyAuthorityMutationResult mutation;
+  insert_graph (db, "tenant-provision-degraded", "graph-provision-degraded",
+      FALSE);
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+          "tenant-provision-degraded", "graph-provision-degraded",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070553", 1, 1, 0, 0,
+          &mutation), ==, WYRELOG_E_OK);
+  exec_ok (db,
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c070554','tenant-provision-degraded',"
+      "'graph-provision-degraded','01890f47-3c4b-7cc2-b8c4-dc0c0c070553',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070554.sqlite',"
+      "1,0,'reserved',0,1,1);");
+  g_assert_cmpint (wyl_policy_store_transition_graph_authority (store,
+          "tenant-provision-degraded", "graph-provision-degraded",
+          WYL_POLICY_GRAPH_LIFECYCLE_PROVISIONING,
+          WYL_POLICY_GRAPH_LIFECYCLE_DEGRADED, WYL_POLICY_GRAPH_ERROR_OPEN,
+          1, 0, &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation, ==, WYL_POLICY_AUTHORITY_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  exec_ok (db,
+      "UPDATE fact_graph_provisioning SET phase='degraded',updated_at=2;");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+}
+
+static void
+test_dangling_provisioning_record_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  insert_graph (db, "tenant-dangling", "graph-dangling", FALSE);
+  WylPolicyAuthorityMutationResult mutation;
+  g_assert_cmpint (wyl_policy_store_reserve_graph_authority (store,
+          "tenant-dangling", "graph-dangling",
+          "01890f47-3c4b-7cc2-b8c4-dc0c0c070551", 1, 1, 0, 0,
+          &mutation), ==, WYRELOG_E_OK);
+  exec_ok (db,
+      "INSERT INTO fact_graph_provisioning "
+      "(op_uuid,tenant_id,graph_id,store_uuid,stage_basename,"
+      "expected_lifecycle_generation,expected_reconciliation_generation,"
+      "phase,attempt,created_at,updated_at) VALUES "
+      "('01890f47-3c4b-7cc2-b8c4-dc0c0c070550','tenant-dangling',"
+      "'graph-dangling','01890f47-3c4b-7cc2-b8c4-dc0c0c070551',"
+      "'provision-01890f47-3c4b-7cc2-b8c4-dc0c0c070550.sqlite',"
+      "1,0,'reserved',0,1,1);"
+      "PRAGMA foreign_keys=OFF;"
+      "DELETE FROM fact_graphs WHERE tenant_id='tenant-dangling' "
+      "AND graph_id='graph-dangling';" "PRAGMA foreign_keys=ON;");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+}
+
+static void
+test_malformed_provisioning_schema_fails_closed (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "CREATE TABLE fact_graph_provisioning (op_uuid TEXT PRIMARY KEY,"
+      "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,store_uuid TEXT NOT NULL,"
+      "stage_basename TEXT NOT NULL,expected_lifecycle_generation INTEGER NOT NULL,"
+      "expected_reconciliation_generation INTEGER NOT NULL,phase TEXT NOT NULL,"
+      "attempt INTEGER NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL);");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (scalar_int64 (db,
+          "SELECT count(*) FROM sqlite_master WHERE type='table' AND "
+          "name='fact_graph_provisioning';"), ==, 1);
+}
+
+static void
+test_provisioning_immutable_trigger_is_verified (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  g_assert_cmpint (wyl_policy_store_open (NULL, &store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==, WYRELOG_E_OK);
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  exec_ok (db,
+      "DROP TRIGGER fact_graph_provisioning_immutable;"
+      "CREATE TRIGGER fact_graph_provisioning_immutable "
+      "BEFORE UPDATE ON fact_graph_provisioning BEGIN SELECT 1; END;");
+  g_assert_cmpint (wyl_policy_store_create_schema (store), ==,
+      WYRELOG_E_POLICY);
 }
 
 static void
@@ -1405,6 +1630,16 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/policy/graph-authority/fresh-schema",
       test_fresh_schema_is_legacy_unclassified);
+  g_test_add_func ("/policy/graph-authority/provisioning-schema-fails-closed",
+      test_provisioning_schema_is_fail_closed);
+  g_test_add_func ("/policy/graph-authority/provisioning-degraded-terminal",
+      test_provisioning_degraded_terminal_coupling);
+  g_test_add_func ("/policy/graph-authority/malformed-provisioning-schema",
+      test_malformed_provisioning_schema_fails_closed);
+  g_test_add_func ("/policy/graph-authority/provisioning-trigger-verified",
+      test_provisioning_immutable_trigger_is_verified);
+  g_test_add_func ("/policy/graph-authority/dangling-provisioning-record",
+      test_dangling_provisioning_record_fails_closed);
   g_test_add_func ("/policy/graph-authority/pre-537-idempotent",
       test_pre_537_rows_migrate_idempotently);
   g_test_add_func ("/policy/graph-authority/identity-state-constraints",

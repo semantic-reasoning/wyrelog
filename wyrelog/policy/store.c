@@ -8065,6 +8065,113 @@ static const gchar fact_reconcile_evidence_immutable_trigger_sql[] =
     "source_digest ON fact_reconcile_journal BEGIN "
     "SELECT RAISE(ABORT,'reconciliation artifact evidence is immutable'); END";
 
+/* A provisioning operation owns exactly one deterministic, single-component
+ * staging file.  Its identity is intentionally immutable: recovery may only
+ * resume an artifact which this durable record names. */
+static const gchar fact_graph_provisioning_table_sql[] =
+    "CREATE TABLE IF NOT EXISTS fact_graph_provisioning ("
+    "op_uuid TEXT PRIMARY KEY CHECK (typeof(op_uuid)='text' AND "
+    "length(op_uuid)=36 AND substr(op_uuid,9,1)='-' AND "
+    "substr(op_uuid,14,1)='-' AND substr(op_uuid,19,1)='-' AND "
+    "substr(op_uuid,24,1)='-' AND substr(op_uuid,15,1)='7' AND "
+    "substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+    "length(replace(op_uuid,'-',''))=32 AND "
+    "op_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "tenant_id TEXT NOT NULL,graph_id TEXT NOT NULL,"
+    "store_uuid TEXT NOT NULL CHECK (typeof(store_uuid)='text' AND "
+    "length(store_uuid)=36 AND substr(store_uuid,9,1)='-' AND "
+    "substr(store_uuid,14,1)='-' AND substr(store_uuid,19,1)='-' AND "
+    "substr(store_uuid,24,1)='-' AND length(replace(store_uuid,'-',''))=32 "
+    "AND store_uuid NOT GLOB '*[^0-9a-f-]*'),"
+    "stage_basename TEXT NOT NULL CHECK (typeof(stage_basename)='text' AND "
+    "stage_basename='provision-' || op_uuid || '.sqlite'),"
+    "expected_lifecycle_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_lifecycle_generation)='integer' AND "
+    "expected_lifecycle_generation BETWEEN 0 AND 9223372036854775807),"
+    "expected_reconciliation_generation INTEGER NOT NULL CHECK "
+    "(typeof(expected_reconciliation_generation)='integer' AND "
+    "expected_reconciliation_generation BETWEEN 0 AND 9223372036854775807),"
+    "phase TEXT NOT NULL CHECK (phase IN "
+    "('reserved','staged','published','verified','active','degraded')) ,"
+    "attempt INTEGER NOT NULL DEFAULT 0 CHECK (typeof(attempt)='integer' AND "
+    "attempt BETWEEN 0 AND 9223372036854775807),"
+    "created_at INTEGER NOT NULL CHECK (typeof(created_at)='integer' AND "
+    "created_at BETWEEN 0 AND 9223372036854775807),"
+    "updated_at INTEGER NOT NULL CHECK (typeof(updated_at)='integer' AND "
+    "updated_at BETWEEN 0 AND 9223372036854775807),"
+    "CHECK(updated_at>=created_at),"
+    "UNIQUE(tenant_id,graph_id),UNIQUE(stage_basename),"
+    "FOREIGN KEY(tenant_id,graph_id) REFERENCES fact_graphs(tenant_id,graph_id)"
+    ")";
+
+static const gchar fact_graph_provisioning_immutable_trigger_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_immutable "
+    "BEFORE UPDATE ON fact_graph_provisioning WHEN "
+    "NEW.op_uuid IS NOT OLD.op_uuid OR NEW.tenant_id IS NOT OLD.tenant_id "
+    "OR NEW.graph_id IS NOT OLD.graph_id OR NEW.store_uuid IS NOT OLD.store_uuid "
+    "OR NEW.stage_basename IS NOT OLD.stage_basename OR "
+    "NEW.expected_lifecycle_generation IS NOT OLD.expected_lifecycle_generation "
+    "OR NEW.expected_reconciliation_generation IS NOT OLD.expected_reconciliation_generation "
+    "OR NEW.created_at IS NOT OLD.created_at "
+    "BEGIN SELECT RAISE(ABORT,'immutable graph provisioning identity'); END";
+
+static const gchar fact_graph_provisioning_insert_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_insert_guard "
+    "BEFORE INSERT ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
+static const gchar fact_graph_provisioning_update_guard_sql[] =
+    "CREATE TRIGGER IF NOT EXISTS fact_graph_provisioning_update_guard "
+    "BEFORE UPDATE ON fact_graph_provisioning BEGIN "
+    "SELECT CASE WHEN NEW.updated_at<OLD.updated_at "
+    "THEN RAISE(ABORT,'provisioning updated_at regression') END; "
+    "SELECT CASE WHEN NEW.attempt<OLD.attempt OR NEW.attempt>OLD.attempt+1 "
+    "OR (NEW.attempt!=OLD.attempt AND NEW.phase!=OLD.phase) "
+    "THEN RAISE(ABORT,'invalid provisioning retry attempt') END; "
+    "SELECT CASE WHEN NOT (NEW.phase=OLD.phase OR "
+    "(OLD.phase='reserved' AND NEW.phase IN ('staged','degraded')) OR "
+    "(OLD.phase='staged' AND NEW.phase IN ('published','degraded')) OR "
+    "(OLD.phase='published' AND NEW.phase IN ('verified','degraded')) OR "
+    "(OLD.phase='verified' AND NEW.phase IN ('active','degraded'))) "
+    "THEN RAISE(ABORT,'illegal provisioning phase transition') END; "
+    "SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+    "WHERE g.tenant_id=NEW.tenant_id AND g.graph_id=NEW.graph_id AND "
+    "g.store_uuid=NEW.store_uuid AND "
+    "((NEW.phase IN ('reserved','staged','published','verified') AND "
+    "g.lifecycle_state='provisioning' AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation) OR "
+    /* Terminal records are historical evidence.  Their identity stays
+     * immutable, but later normal graph transitions must not invalidate
+     * completed provisioning.  A terminal phase transition itself remains
+     * exact; only same-phase preservation uses this monotonic predicate. */
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase=NEW.phase AND g.lifecycle_state!='legacy_unclassified' AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation>=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation>=NEW.expected_reconciliation_generation) OR "
+    "((NEW.phase='active' OR NEW.phase='degraded') AND "
+    "OLD.phase!=NEW.phase AND "
+    "NEW.expected_lifecycle_generation<9223372036854775807 AND "
+    "g.lifecycle_generation=NEW.expected_lifecycle_generation+1 AND "
+    "g.reconciliation_generation=NEW.expected_reconciliation_generation AND "
+    "((NEW.phase='active' AND g.lifecycle_state='active') OR "
+    "(NEW.phase='degraded' AND g.lifecycle_state='degraded'))))) "
+    "THEN RAISE(ABORT,'provisioning authority mismatch') END; END";
+
 static const gchar tenant_authority_insert_guard_sql[] =
     "CREATE TRIGGER IF NOT EXISTS tenant_authority_insert_guard "
     "BEFORE INSERT ON tenants BEGIN "
@@ -8513,6 +8620,42 @@ validate_graph_authority_rows (sqlite3 *db)
         "(lifecycle_state='sealed' AND sealed=1) OR "
         "(lifecycle_state IN ('provisioning','active','degraded') AND "
         " sealed=0)));",
+    "SELECT EXISTS(SELECT 1 FROM fact_graph_provisioning WHERE "
+        "typeof(op_uuid)!='text' OR NOT (length(op_uuid)=36 AND "
+        "substr(op_uuid,9,1)='-' AND substr(op_uuid,14,1)='-' AND "
+        "substr(op_uuid,19,1)='-' AND substr(op_uuid,24,1)='-' AND "
+        "substr(op_uuid,15,1)='7' AND substr(op_uuid,20,1) IN ('8','9','a','b') AND "
+        "length(replace(op_uuid,'-',''))=32 "
+        "AND op_uuid NOT GLOB '*[^0-9a-f-]*') OR "
+        "typeof(store_uuid)!='text' OR NOT (length(store_uuid)=36 AND "
+        "substr(store_uuid,9,1)='-' AND substr(store_uuid,14,1)='-' AND "
+        "substr(store_uuid,19,1)='-' AND substr(store_uuid,24,1)='-' AND "
+        "length(replace(store_uuid,'-',''))=32 AND "
+        "store_uuid NOT GLOB '*[^0-9a-f-]*') OR "
+        "typeof(stage_basename)!='text' OR "
+        "stage_basename!='provision-' || op_uuid || '.sqlite' OR "
+        "typeof(expected_lifecycle_generation)!='integer' OR "
+        "expected_lifecycle_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "typeof(expected_reconciliation_generation)!='integer' OR "
+        "expected_reconciliation_generation NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "phase NOT IN ('reserved','staged','published','verified','active','degraded') OR "
+        "typeof(attempt)!='integer' OR attempt NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "typeof(created_at)!='integer' OR created_at NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "typeof(updated_at)!='integer' OR updated_at NOT BETWEEN 0 AND 9223372036854775807 OR "
+        "updated_at<created_at OR NOT EXISTS (SELECT 1 FROM fact_graphs AS g "
+        "JOIN tenants AS t ON t.tenant_id=g.tenant_id WHERE "
+        "g.tenant_id=fact_graph_provisioning.tenant_id AND "
+        "g.graph_id=fact_graph_provisioning.graph_id AND "
+        "g.store_uuid=fact_graph_provisioning.store_uuid AND "
+        "((fact_graph_provisioning.phase IN ('reserved','staged','published','verified') "
+        "AND g.lifecycle_state='provisioning' AND "
+        "g.lifecycle_generation=fact_graph_provisioning.expected_lifecycle_generation AND "
+        "g.reconciliation_generation=fact_graph_provisioning.expected_reconciliation_generation) OR "
+        "((fact_graph_provisioning.phase='active' OR fact_graph_provisioning.phase='degraded') "
+        "AND g.lifecycle_state!='legacy_unclassified' AND "
+        "fact_graph_provisioning.expected_lifecycle_generation<9223372036854775807 AND "
+        "g.lifecycle_generation>=fact_graph_provisioning.expected_lifecycle_generation+1 AND "
+        "g.reconciliation_generation>=fact_graph_provisioning.expected_reconciliation_generation))));",
   };
   for (gsize i = 0; i < G_N_ELEMENTS (validation_queries); i++) {
     sqlite3_stmt *stmt = NULL;
@@ -8557,6 +8700,7 @@ validate_graph_authority_schema (sqlite3 *db)
     const gchar *name;
     const gchar *sql;
   } objects[] = {
+    {"table", "fact_graph_provisioning", fact_graph_provisioning_table_sql},
     {"index", "idx_fact_graphs_store_uuid", graph_authority_uuid_index_sql},
     {"trigger", "tenant_authority_insert_guard",
         tenant_authority_insert_guard_sql},
@@ -8568,6 +8712,12 @@ validate_graph_authority_schema (sqlite3 *db)
         graph_authority_update_guard_sql},
     {"trigger", "fact_reconcile_evidence_immutable",
         fact_reconcile_evidence_immutable_trigger_sql},
+    {"trigger", "fact_graph_provisioning_immutable",
+        fact_graph_provisioning_immutable_trigger_sql},
+    {"trigger", "fact_graph_provisioning_insert_guard",
+        fact_graph_provisioning_insert_guard_sql},
+    {"trigger", "fact_graph_provisioning_update_guard",
+        fact_graph_provisioning_update_guard_sql},
   };
   for (gsize i = 0; i < G_N_ELEMENTS (objects); i++) {
     wyrelog_error_t rc = graph_authority_object_matches (db, objects[i].type,
@@ -8616,6 +8766,15 @@ migrate_graph_authority_schema (wyl_policy_store_t *store)
 {
   sqlite3 *db = store->db;
   wyrelog_error_t rc;
+  rc = exec_sql (db, fact_graph_provisioning_table_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_immutable_trigger_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_insert_guard_sql);
+  if (rc == WYRELOG_E_OK)
+    rc = exec_sql (db, fact_graph_provisioning_update_guard_sql);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   for (gsize i = 0; i < G_N_ELEMENTS (graph_authority_columns); i++) {
     gboolean exists = FALSE, matches = FALSE;
     rc = graph_authority_column_status (db,
