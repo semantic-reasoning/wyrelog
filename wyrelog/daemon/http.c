@@ -33,6 +33,11 @@
 #include "wyrelog/fact/query-private.h"
 #include "wyrelog/fact/schema-private.h"
 #include "wyrelog/fact/store-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-recovery-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-status-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-storage-private.h"
+#include "wyrelog/auth/service-credential-operation-storage-private.h"
 #endif
 #include "wyrelog/wyl-common-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -90,6 +95,28 @@
   "service_credential_operation_reconcile_failed"
 #define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECONCILE_UNAVAILABLE \
   "service_credential_operation_reconcile_unavailable"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_AUTH_REQUIRED \
+  "service_credential_operation_status_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_INVALID \
+  "invalid_service_credential_operation_status_request"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_DENIED \
+  "service_credential_operation_status_denied"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED \
+  "service_credential_operation_status_failed"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_UNAVAILABLE \
+  "service_credential_operation_status_unavailable"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_AUTH_REQUIRED \
+  "service_credential_operation_recover_auth_required"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID \
+  "invalid_service_credential_operation_recover_request"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED \
+  "service_credential_operation_recover_denied"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED \
+  "service_credential_operation_recover_failed"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_UNAVAILABLE \
+  "service_credential_operation_recover_unavailable"
+#define WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND \
+  "service_credential_operation_recover_not_found"
 #define WYL_DAEMON_ERR_SERVICE_TOKEN_INVALID \
   "invalid_service_token_request"
 #define WYL_DAEMON_ERR_SERVICE_TOKEN_DENIED \
@@ -7713,6 +7740,426 @@ service_credential_operation_reconcile_handler (SoupServer *server,
   (void) service_credential_operation_reconcile_execute (server, msg, query,
       ctx);
 }
+
+/* Stable wire strings for the durable operation state and kind.  Status output
+ * reports each record's authoritative .state field; it never infers state from
+ * filesystem layout. */
+static const gchar *service_credential_operation_state_string
+    (WylServiceCredentialOperationState state)
+{
+  switch (state) {
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED:
+      return "prepared";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_SERVER_COMMITTED:
+      return "server_committed";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PLANNED:
+      return "publication_planned";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_PUBLICATION_PREPARED:
+      return "publication_prepared";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_FILE_PUBLISHED:
+      return "file_published";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_CLEANUP_REQUIRED:
+      return "cleanup_required";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_OPERATOR_ACTION_REQUIRED:
+      return "operator_action_required";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_TERMINAL:
+      return "terminal";
+    default:
+      return "unknown";
+  }
+}
+
+static const gchar *service_credential_operation_kind_string
+    (WylServiceCredentialOperationKind kind)
+{
+  return kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ? "rotate" : "issue";
+}
+
+static const gchar *service_credential_operation_recovery_string
+    (WylServiceCredentialOperationRecoveryOutcome outcome)
+{
+  switch (outcome) {
+    case WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING:
+      return "pending";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_TERMINAL_NO_COMMIT:
+      return "terminal_no_commit";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_CONFLICT:
+      return "conflict";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED:
+      return "server_committed";
+    case WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_SERVER_COMMITTED_REPLAY:
+      return "server_committed_replay";
+    default:
+      return "unknown";
+  }
+}
+
+/* Service subject ids are canonical "svc:<tenant>:<...>".  Returns TRUE only
+ * when the subject id is well formed and its tenant component exactly equals
+ * |tenant|.  A NULL or malformed subject id never matches, so records that
+ * cannot be attributed are excluded from a tenant-scoped listing.  This is a
+ * pure string comparison; it never consults the policy store. */
+static gboolean
+service_subject_tenant_equals (const gchar *subject_id, const gchar *tenant)
+{
+  if (subject_id == NULL || tenant == NULL || tenant[0] == '\0')
+    return FALSE;
+  if (!g_str_has_prefix (subject_id, "svc:"))
+    return FALSE;
+  const gchar *tenant_start = subject_id + 4;   /* past the leading "svc:" */
+  const gchar *sep = strchr (tenant_start, ':');
+  if (sep == NULL || sep == tenant_start)
+    return FALSE;
+  gsize len = (gsize) (sep - tenant_start);
+  return len == strlen (tenant) && memcmp (tenant_start, tenant, len) == 0;
+}
+
+/* Strict non-secret allow-list serializer shared by the status and recover
+ * responses.  It emits ONLY the fields listed below; escrow_id, binding
+ * digests, stage_identity/basename, parent_identity, actor_subject_id,
+ * reservation_id, publication_receipt_id and every remediation field are
+ * deliberately never serialized. */
+static void
+service_credential_operation_append_record_json (GString *body,
+    const WylServiceCredentialOperationRecord *record)
+{
+  g_string_append (body, "{\"request_id\":");
+  append_json_string (body, record->request_id);
+  g_string_append (body, ",\"operation\":");
+  append_json_string (body,
+      service_credential_operation_kind_string (record->kind));
+  g_string_append (body, ",\"state\":");
+  append_json_string (body,
+      service_credential_operation_state_string (record->state));
+  g_string_append (body, ",\"destination\":");
+  append_json_string (body, record->destination);
+  g_string_append (body, ",\"successor_credential_id\":");
+  if (record->successor_credential_id != NULL
+      && record->successor_credential_id[0] != '\0')
+    append_json_string (body, record->successor_credential_id);
+  else
+    g_string_append (body, "null");
+  g_string_append_printf (body,
+      ",\"expected_generation\":%" G_GUINT64_FORMAT
+      ",\"successor_generation\":%" G_GUINT64_FORMAT
+      ",\"created_at_us\":%" G_GINT64_FORMAT
+      ",\"updated_at_us\":%" G_GINT64_FORMAT
+      ",\"expires_at_us\":%" G_GINT64_FORMAT "}",
+      record->expected_generation, record->successor_generation,
+      record->created_at_us, record->updated_at_us, record->expires_at_us);
+}
+
+static gboolean
+service_credential_operation_status_execute (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx)
+{
+  if (ctx->profile != WYL_DAEMON_PROFILE_SYSTEM) {
+    set_json_error (msg, 403,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_DENIED);
+    return FALSE;
+  }
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.service_credential.manage", NULL,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED, NULL))
+    return FALSE;
+
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  if (tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_INVALID);
+    return FALSE;
+  }
+
+  g_autoptr (GString) out = g_string_new ("{\"version\":1,\"operations\":[");
+
+  /* An unconfigured operation surface lists nothing rather than erroring: an
+   * opt-out deployment has no durable operations to report. */
+  if (ctx->operation_root != NULL && ctx->operation_root[0] != '\0') {
+    WylServiceCredentialOperationStorage storage =
+        WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+    WylServiceCredentialOperationRootAnchor anchor =
+        WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+    WylServiceCredentialOperationStatusList list = { 0 };
+    gboolean storage_opened = FALSE;
+    wyrelog_error_t rc = wyl_service_credential_operation_storage_open
+        (ctx->operation_root, &storage);
+    if (rc == WYRELOG_E_OK) {
+      storage_opened = TRUE;
+      rc = wyl_service_credential_operation_storage_capture_anchor (&storage,
+          &anchor);
+    }
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_credential_operation_coordinator_status_list (&storage,
+          &anchor, NULL, &list);
+    if (rc == WYRELOG_E_OK) {
+      gboolean first = TRUE;
+      for (gsize i = 0; i < list.n_entries; i++) {
+        const WylServiceCredentialOperationRecord *record =
+            &list.entries[i].record;
+        if (!service_subject_tenant_equals (record->subject_id, tenant))
+          continue;
+        if (!first)
+          g_string_append_c (out, ',');
+        first = FALSE;
+        service_credential_operation_append_record_json (out, record);
+      }
+    }
+    wyl_service_credential_operation_status_list_clear (&list);
+    if (storage_opened)
+      wyl_service_credential_operation_storage_clear (&storage);
+    wyl_service_credential_operation_root_anchor_clear (&anchor);
+    if (rc != WYRELOG_E_OK) {
+      guint status;
+      const gchar *err;
+      switch (rc) {
+        case WYRELOG_E_CANCELLED:
+        case WYRELOG_E_BUSY:
+          status = 503;
+          err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_UNAVAILABLE;
+          break;
+        case WYRELOG_E_INVALID:
+          status = 400;
+          err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_INVALID;
+          break;
+        default:
+          status = 500;
+          err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_STATUS_FAILED;
+          break;
+      }
+      set_json_error (msg, status, err);
+      return FALSE;
+    }
+  }
+
+  g_string_append (out, "]}");
+  attach_request_id_header (msg);
+  soup_server_message_set_status (msg, 200, NULL);
+  soup_server_message_set_response (msg, "application/json", SOUP_MEMORY_COPY,
+      out->str, out->len);
+  return TRUE;
+}
+
+static void
+service_credential_operation_status_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  WylDaemonHttpContext *ctx = user_data;
+  /* libsoup routes on longest-prefix.  The bare collection handler owns ONLY
+   * "/service-credential-operations": "/reconcile" and "/recover" carry their
+   * own more-specific handlers, so anything else under this prefix is unknown
+   * and must 404 rather than be silently served. */
+  if (g_strcmp0 (path, "/service-credential-operations") != 0) {
+    set_json_error (msg, 404, "not_found");
+    return;
+  }
+  if (g_strcmp0 (soup_server_message_get_method (msg), "GET") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  (void) service_credential_operation_status_execute (server, msg, query, ctx);
+}
+
+/* Parses {"version":"1","request_id":"<canonical id>"}.  The request_id string
+ * is returned unvalidated; the caller applies the canonical KSUID check. */
+static gboolean
+service_credential_operation_recover_parse_request (const gchar *json,
+    gchar **out_request_id)
+{
+  if (json == NULL || out_request_id == NULL)
+    return FALSE;
+  *out_request_id = NULL;
+  const gchar *p = skip_ascii_spaces (json);
+  if (*p++ != '{')
+    return FALSE;
+
+  g_autofree gchar *key = NULL;
+  g_autofree gchar *version = NULL;
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &key)
+      || g_strcmp0 (key, "version") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ':')
+    return FALSE;
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &version)
+      || g_strcmp0 (version, "1") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ',')
+    return FALSE;
+
+  g_clear_pointer (&key, g_free);
+  g_autofree gchar *request_id = NULL;
+  if (!service_credential_operation_reconcile_parse_json_string (&p, &key)
+      || g_strcmp0 (key, "request_id") != 0)
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != ':')
+    return FALSE;
+  if (!service_credential_operation_reconcile_parse_json_string (&p,
+          &request_id))
+    return FALSE;
+  p = skip_ascii_spaces (p);
+  if (*p++ != '}')
+    return FALSE;
+  if (*skip_ascii_spaces (p) != '\0')
+    return FALSE;
+  *out_request_id = g_steal_pointer (&request_id);
+  return TRUE;
+}
+
+static gboolean
+service_credential_operation_recover_execute (SoupServer *server,
+    SoupServerMessage *msg, GHashTable *query, WylDaemonHttpContext *ctx)
+{
+  if (ctx->profile != WYL_DAEMON_PROFILE_SYSTEM) {
+    set_json_error (msg, 403,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED);
+    return FALSE;
+  }
+  if (!authorize_guarded_session_action (server, msg, query, ctx,
+          "wr.service_credential.manage", NULL,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_AUTH_REQUIRED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED, NULL))
+    return FALSE;
+
+  const gchar *tenant = lookup_required_query_string (query, "tenant");
+  if (tenant == NULL || !wyl_policy_store_tenant_id_is_valid (tenant)) {
+    set_json_error (msg, 400,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID);
+    return FALSE;
+  }
+
+  g_autofree gchar *body = NULL;
+  if (!request_body_dup (msg, 4096, &body)) {
+    set_json_error (msg, 400,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID);
+    return FALSE;
+  }
+  g_autofree gchar *request_id = NULL;
+  if (!service_credential_operation_recover_parse_request (body, &request_id)
+      || !wyl_service_credential_operation_coordinator_request_id_is_valid
+      (request_id)) {
+    set_json_error (msg, 400,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID);
+    return FALSE;
+  }
+
+  /* An unconfigured operation surface has nothing to recover. */
+  if (ctx->operation_root == NULL || ctx->operation_root[0] == '\0') {
+    set_json_error (msg, 404,
+        WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND);
+    return FALSE;
+  }
+
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationCoordinatorLock lock =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_LOCK_INIT;
+  WylServiceCredentialOperationRecord record =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationRecoveryOutcome outcome =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECOVERY_PENDING;
+  gboolean storage_opened = FALSE;
+  gboolean lock_acquired = FALSE;
+  wyrelog_error_t rc = wyl_service_credential_operation_storage_open
+      (ctx->operation_root, &storage);
+  if (rc == WYRELOG_E_OK) {
+    storage_opened = TRUE;
+    rc = wyl_service_credential_operation_storage_capture_anchor (&storage,
+        &anchor);
+  }
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_service_credential_operation_coordinator_lock_acquire (&storage,
+        &anchor, request_id, &lock);
+    if (rc == WYRELOG_E_OK)
+      lock_acquired = TRUE;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_credential_operation_coordinator_recover (&storage,
+        &anchor, wyl_handle_get_policy_store (ctx->handle), NULL, request_id,
+        g_get_real_time (), &outcome, &record);
+  if (lock_acquired)
+    wyl_service_credential_operation_coordinator_lock_release (&storage,
+        &anchor, &lock);
+
+  gboolean served = FALSE;
+  if (rc == WYRELOG_E_OK) {
+    if (!service_subject_tenant_equals (record.subject_id, tenant)) {
+      /* Cross-tenant: never reveal another tenant's operation record. */
+      set_json_error (msg, 404,
+          WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND);
+    } else {
+      g_autoptr (GString) out = g_string_new (NULL);
+      service_credential_operation_append_record_json (out, &record);
+      /* Splice the classified recovery outcome into the operation object. */
+      g_string_truncate (out, out->len - 1);
+      g_string_append (out, ",\"recovery\":");
+      append_json_string (out,
+          service_credential_operation_recovery_string (outcome));
+      g_string_append_c (out, '}');
+      attach_request_id_header (msg);
+      soup_server_message_set_status (msg, 200, NULL);
+      soup_server_message_set_response (msg, "application/json",
+          SOUP_MEMORY_COPY, out->str, out->len);
+      served = TRUE;
+    }
+  } else {
+    guint status;
+    const gchar *err;
+    switch (rc) {
+      case WYRELOG_E_NOT_FOUND:
+        status = 404;
+        err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_NOT_FOUND;
+        break;
+      case WYRELOG_E_INVALID:
+        status = 400;
+        err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_INVALID;
+        break;
+      case WYRELOG_E_POLICY:
+        status = 403;
+        err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_DENIED;
+        break;
+      case WYRELOG_E_CANCELLED:
+      case WYRELOG_E_BUSY:
+        status = 503;
+        err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_UNAVAILABLE;
+        break;
+      default:
+        status = 500;
+        err = WYL_DAEMON_ERR_SERVICE_CREDENTIAL_OPERATION_RECOVER_FAILED;
+        break;
+    }
+    set_json_error (msg, status, err);
+  }
+
+  wyl_service_credential_operation_record_clear (&record);
+  if (storage_opened)
+    wyl_service_credential_operation_storage_clear (&storage);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  return served;
+}
+
+static void
+service_credential_operation_recover_handler (SoupServer *server,
+    SoupServerMessage *msg, const char *path, GHashTable *query,
+    gpointer user_data)
+{
+  (void) path;
+  WylDaemonHttpContext *ctx = user_data;
+  if (g_strcmp0 (soup_server_message_get_method (msg), "POST") != 0) {
+    set_json_error (msg, 405, "method_not_allowed");
+    return;
+  }
+  (void) service_credential_operation_recover_execute (server, msg, query, ctx);
+}
 #endif /* WYL_HAS_FACT_STORE */
 
 static void
@@ -9121,8 +9568,12 @@ wyl_daemon_start_http_server_with_runtime (const WylDaemonOptions *opts,
   soup_server_add_handler (server, "/service-credentials",
       service_credential_management_handler, ctx, NULL);
 #ifdef WYL_HAS_FACT_STORE
+  soup_server_add_handler (server, "/service-credential-operations",
+      service_credential_operation_status_handler, ctx, NULL);
   soup_server_add_handler (server, "/service-credential-operations/reconcile",
       service_credential_operation_reconcile_handler, ctx, NULL);
+  soup_server_add_handler (server, "/service-credential-operations/recover",
+      service_credential_operation_recover_handler, ctx, NULL);
 #endif
 #ifdef WYL_HAS_AUDIT
   soup_server_add_handler (server, "/auth/service-token",

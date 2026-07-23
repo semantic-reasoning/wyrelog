@@ -25,6 +25,11 @@
 #include "daemon/service-credential-handoff-private.h"
 #include "../wyrelog/wyctl/wyctl-publication-private.h"
 #include "test-service-credential-operation-root.h"
+#ifdef WYL_HAS_FACT_STORE
+#include "wyrelog/auth/service-credential-operation-coordinator-private.h"
+#include "wyrelog/auth/service-credential-operation-coordinator-storage-private.h"
+#include "wyrelog/auth/service-credential-operation-storage-private.h"
+#endif
 
 #ifndef WYL_TEST_TEMPLATE_DIR
 #error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
@@ -6499,6 +6504,23 @@ check_service_profile_reconcile_denied (WylHandle *handle)
   g_autofree gchar *body = NULL;
   gint rc = base_url == NULL ? 1947 : send_raw_reconcile (session, "POST",
       base_url, NULL, "{}", &status, &body);
+  /* The status and recover endpoints deny a non-SYSTEM profile the same way,
+   * before any body or session is inspected. */
+  guint status_status = 0;
+  guint recover_status = 0;
+  g_autofree gchar *status_body = NULL;
+  g_autofree gchar *recover_body = NULL;
+  if (rc == 0 && status == 403) {
+    if (send_raw_service_principal_full (session, "GET", base_url,
+            "/service-credential-operations", "tenant=tenant-a", NULL,
+            &status_status, &status_body) != 0 || status_status != 403)
+      rc = 1949;
+    else if (send_raw_service_principal_full (session, "POST", base_url,
+            "/service-credential-operations/recover", "tenant=tenant-a",
+            "{\"version\":\"1\",\"request_id\":\"111111111111111111111111111\"}",
+            &recover_status, &recover_body) != 0 || recover_status != 403)
+      rc = 1950;
+  }
   g_main_loop_quit (http.loop);
   g_thread_join (thread);
   soup_server_disconnect (http.server);
@@ -6870,6 +6892,214 @@ sp_body_leaks_root (const gchar *body, const gchar *r1, const gchar *r2,
       || (r2 != NULL && strstr (body, r2) != NULL)
       || (r3 != NULL && strstr (body, r3) != NULL);
 }
+
+#ifdef WYL_HAS_FACT_STORE
+/* Canonical service credential id used as the immutable rotate target of a
+ * seeded PREPARED rotate operation.  Its bytes are never resolved: the record
+ * only needs a canonical old_credential_id so recover can classify it. */
+static const gchar *const STATUS_ROTATE_OLD_CREDENTIAL_ID =
+    "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv";
+
+/* Seed one PREPARED durable operation straight into |operation_root| via the
+ * coordinator test friend.  This is deterministic and lets the status/recover
+ * HTTP contract assert tenant scoping (via subject_id) and recover
+ * classification without racing a live handoff.  Returns 0 on success. */
+static gint
+seed_prepared_operation (const gchar *operation_root, const gchar *request_id,
+    WylServiceCredentialOperationKind kind, const gchar *subject_id,
+    const gchar *tenant_id, const gchar *old_credential_id)
+{
+  WylServiceCredentialOperationStorage storage =
+      WYL_SERVICE_CREDENTIAL_OPERATION_STORAGE_INIT;
+  WylServiceCredentialOperationRootAnchor anchor =
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROOT_ANCHOR_INIT;
+  WylServiceCredentialOperationRecord begun =
+      WYL_SERVICE_CREDENTIAL_OPERATION_RECORD_INIT;
+  WylServiceCredentialOperationCoordinatorRequest request =
+      WYL_SERVICE_CREDENTIAL_OPERATION_COORDINATOR_REQUEST_INIT;
+  gint rc_out = 0;
+  if (wyl_service_credential_operation_storage_open (operation_root, &storage)
+      != WYRELOG_E_OK)
+    return 2101;
+  if (wyl_service_credential_operation_storage_capture_anchor (&storage,
+          &anchor) != WYRELOG_E_OK) {
+    rc_out = 2102;
+    goto out;
+  }
+  request.kind = kind;
+  request.request_id = (gchar *) request_id;
+  request.subject_id = (gchar *) subject_id;
+  request.tenant_id = (gchar *) tenant_id;
+  request.destination = (gchar *) "credential";
+  request.parent_identity = (gchar *) "parent";
+  request.actor_subject_id = (gchar *) "admin";
+  request.old_credential_id = (gchar *) old_credential_id;
+  request.escrow_id = (gchar *) "01890f47-3c4b-7cc2-b8c4-dc0c0c073991";
+  memset (request.escrow_binding_digest, 0x31,
+      sizeof request.escrow_binding_digest);
+  request.expires_at_us = 1;
+  request.expected_generation =
+      kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE ? 1 : 0;
+  if (wyl_service_credential_operation_coordinator_begin_or_replay_for_test
+      (&storage, &anchor, &request, 1, NULL, &begun) != WYRELOG_E_OK
+      || begun.state != WYL_SERVICE_CREDENTIAL_OPERATION_PREPARED)
+    rc_out = 2103;
+out:
+  wyl_service_credential_operation_record_clear (&begun);
+  wyl_service_credential_operation_storage_clear (&storage);
+  wyl_service_credential_operation_root_anchor_clear (&anchor);
+  return rc_out;
+}
+
+/* A serialized operation body must never carry any secret-adjacent field. */
+static gboolean
+status_body_leaks_secret (const gchar *body)
+{
+  return strstr (body, "escrow") != NULL
+      || strstr (body, "binding") != NULL
+      || strstr (body, "stage_") != NULL
+      || strstr (body, "parent_identity") != NULL
+      || strstr (body, "actor_subject") != NULL
+      || strstr (body, "reservation") != NULL
+      || strstr (body, "publication_receipt") != NULL
+      || strstr (body, "remediation") != NULL
+      || strstr (body, "credential_secret") != NULL;
+}
+
+/* Drives the durable operation status + recover HTTP contract against the
+ * SYSTEM-profile handoff server.  Seeds three PREPARED operations (a tenant-a
+ * issue, a tenant-b issue, and a tenant-a rotate whose tenant_id is NULL but
+ * whose subject_id attributes it to tenant-a) and asserts tenant scoping,
+ * non-secret output, and recover classification.  Returns 0 on success. */
+static gint
+check_service_credential_operation_status_recover (SoupServer *server,
+    SoupSession *session, const gchar *base_url, const gchar *session_token,
+    const gchar *operation_root)
+{
+  if (operation_root == NULL)
+    return 2110;
+
+  gchar issue_a_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar issue_b_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar rotate_a_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (issue_a_id, sizeof issue_a_id) != WYRELOG_E_OK
+      || wyl_request_id_new (issue_b_id, sizeof issue_b_id) != WYRELOG_E_OK
+      || wyl_request_id_new (rotate_a_id, sizeof rotate_a_id) != WYRELOG_E_OK)
+    return 2111;
+
+  gint seed_rc = seed_prepared_operation (operation_root, issue_a_id,
+      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-a:worker", "tenant-a",
+      NULL);
+  if (seed_rc != 0)
+    return seed_rc;
+  seed_rc = seed_prepared_operation (operation_root, issue_b_id,
+      WYL_SERVICE_CREDENTIAL_OPERATION_ISSUE, "svc:tenant-b:worker", "tenant-b",
+      NULL);
+  if (seed_rc != 0)
+    return seed_rc;
+  seed_rc = seed_prepared_operation (operation_root, rotate_a_id,
+      WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE, "svc:tenant-a:worker", NULL,
+      STATUS_ROTATE_OLD_CREDENTIAL_ID);
+  if (seed_rc != 0)
+    return seed_rc;
+
+  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
+          "human-principal-admin", "tenant-a"))
+    return 2112;
+  g_autofree gchar *tenant_a_query = g_strdup_printf
+      ("session_token=%s&tenant=tenant-a&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0", session_token);
+
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+
+  /* Status listing for tenant-a: the tenant-a issue and the rotate (attributed
+   * by subject_id though its tenant_id is NULL) appear; the tenant-b issue does
+   * not.  The output must carry no secret-adjacent field. */
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/service-credential-operations", tenant_a_query, NULL, &status,
+          &body) != 0 || status != 200 || body == NULL
+      || strstr (body, issue_a_id) == NULL
+      || strstr (body, rotate_a_id) == NULL
+      || strstr (body, issue_b_id) != NULL
+      || strstr (body, "\"operation\":\"issue\"") == NULL
+      || strstr (body, "\"operation\":\"rotate\"") == NULL
+      || strstr (body, "\"state\":\"prepared\"") == NULL
+      || status_body_leaks_secret (body))
+    return 2113;
+
+  /* A tenant with no operations of its own lists an empty array, not an
+   * error. */
+  g_clear_pointer (&body, g_free);
+  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
+          "human-principal-admin", "__wr_default"))
+    return 2114;
+  g_autofree gchar *default_query = g_strdup_printf
+      ("session_token=%s&tenant=__wr_default&guard_timestamp=1&"
+      "guard_loc_class=trusted&guard_risk=0", session_token);
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/service-credential-operations", default_query, NULL, &status,
+          &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"operations\":[]") == NULL)
+    return 2115;
+
+  /* The bare status collection rejects a POST; it must not shadow the recover
+   * or reconcile sibling handlers. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations", default_query, "{}", &status,
+          &body) != 0 || status != 405)
+    return 2116;
+
+  /* Recover the tenant-a issue: no server-side commit evidence exists yet, so
+   * it classifies as pending and returns 200. */
+  if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
+          "human-principal-admin", "tenant-a"))
+    return 2117;
+  g_autofree gchar *recover_a_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_a_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations/recover", tenant_a_query,
+          recover_a_body, &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"recovery\":\"pending\"") == NULL
+      || strstr (body, issue_a_id) == NULL || status_body_leaks_secret (body))
+    return 2118;
+
+  /* An unknown request id is a 404. */
+  gchar unknown_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (unknown_id, sizeof unknown_id) != WYRELOG_E_OK)
+    return 2119;
+  g_autofree gchar *recover_unknown_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", unknown_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations/recover", tenant_a_query,
+          recover_unknown_body, &status, &body) != 0 || status != 404)
+    return 2120;
+
+  /* A malformed request id is a 400. */
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations/recover", tenant_a_query,
+          "{\"version\":\"1\",\"request_id\":\"not-canonical\"}", &status,
+          &body) != 0 || status != 400)
+    return 2121;
+
+  /* Recovering another tenant's operation must not reveal it: the tenant-b
+   * issue recovered under tenant-a is a 404, not a leak. */
+  g_autofree gchar *recover_cross_body = g_strdup_printf
+      ("{\"version\":\"1\",\"request_id\":\"%s\"}", issue_b_id);
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-credential-operations/recover", tenant_a_query,
+          recover_cross_body, &status, &body) != 0 || status != 404
+      || (body != NULL && strstr (body, issue_b_id) != NULL))
+    return 2122;
+
+  return 0;
+}
+#endif /* WYL_HAS_FACT_STORE */
 
 static gint
 check_service_principal_management_contract (void)
@@ -7468,6 +7698,17 @@ check_service_principal_management_contract (void)
     rc = 1983;
     goto cleanup;
   }
+
+#ifdef WYL_HAS_FACT_STORE
+  {
+    gint status_recover_rc = check_service_credential_operation_status_recover
+        (http.server, session, base_url, session_token, operation_root);
+    if (status_recover_rc != 0) {
+      rc = status_recover_rc;
+      goto cleanup;
+    }
+  }
+#endif
 
 cleanup:
   g_free (publication.staged_secret);
