@@ -39,10 +39,14 @@ wyrelog_error_t
     }
     rc = wyl_service_credential_operation_coordinator_load (storage, anchor,
         g_ptr_array_index (ids, i), &entry.record);
-    if (rc == WYRELOG_E_NOT_FOUND)
-      continue;
-    if (rc != WYRELOG_E_OK)
+    if (rc == WYRELOG_E_CANCELLED)
       goto fail;
+    /* Skip ANY unreadable record (purged NOT_FOUND, or a malformed/undecodable
+     * record surfacing e.g. WYRELOG_E_POLICY): a diagnostic listing stays
+     * available and one bad record never blinds the rest.  load() leaves
+     * entry.record untouched on failure, so nothing needs clearing here. */
+    if (rc != WYRELOG_E_OK)
+      continue;
     g_array_append_val (entries, entry);
   }
   g_ptr_array_unref (ids);
