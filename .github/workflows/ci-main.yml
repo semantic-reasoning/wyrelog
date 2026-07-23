@@ -123,7 +123,8 @@ jobs:
             -Denable_fact_store=enabled \
             -Dduckdb_source=subproject \
             -Denable_secure_duckdb_bridge=enabled
-          meson test -C build-secure-duckdb secure-duckdb-bridge --print-errorlogs
+          meson test -C build-secure-duckdb secure-duckdb-bridge \
+            secure-duckdb-recording-filesystem --print-errorlogs
           if meson setup build-secure-duckdb-prebuilt \
               -Denable_fact_store=enabled \
               -Dduckdb_source=prebuilt \
