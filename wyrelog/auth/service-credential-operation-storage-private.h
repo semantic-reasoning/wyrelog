@@ -2,6 +2,7 @@
 #pragma once
 
 #include <glib.h>
+#include <gio/gio.h>
 
 #include "wyrelog/error.h"
 
@@ -87,6 +88,19 @@ wyrelog_error_t wyl_service_credential_operation_storage_capture_anchor
 gboolean wyl_service_credential_operation_storage_anchor_matches
     (const WylServiceCredentialOperationStorage * storage,
     const WylServiceCredentialOperationRootAnchor * anchor);
+
+/* Yields IDENTITY ONLY: request_id strings parsed from "op-<request_id>" child
+ * names of the operations root. Reads no record bytes and infers no operation
+ * state. Skips lifecycle-* / .lock-* / .replace-* / "." / ".." and any child
+ * whose suffix is not a valid canonical request id. Order is unspecified.
+ * On success *out_request_ids is a new GPtrArray with g_free element-free
+ * containing owned gchar* request ids (possibly empty). On ANY failure
+ * *out_request_ids is left unchanged and no array is allocated. Cancelled
+ * mid-walk -> WYRELOG_E_CANCELLED. */
+wyrelog_error_t wyl_service_credential_operation_storage_enumerate_request_ids
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    GCancellable * cancellable, GPtrArray ** out_request_ids);
 
 typedef void (*WylServiceCredentialOperationBeforeExactDeleteHookForTest)
   (gpointer user_data);

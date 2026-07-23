@@ -30,6 +30,8 @@ wyrelog_error_string (wyrelog_error_t err)
           "armed at runtime";
     case WYRELOG_E_BUSY:
       return "resource is busy";
+    case WYRELOG_E_CANCELLED:
+      return "operation cancelled by caller";
   }
   return "unknown error";
 }

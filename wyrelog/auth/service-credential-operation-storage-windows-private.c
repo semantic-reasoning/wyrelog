@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "auth/service-credential-operation-storage-windows-private.h"
+#include "auth/service-credential-operation-coordinator-private.h"
 
 #ifdef G_OS_WIN32
 #include <sodium.h>
@@ -870,5 +871,61 @@ wyl_win_child_unlock (const WylServiceCredentialOperationStorage *storage,
    * an old-inode/new-inode split brain while another waiter owns the old
    * object.  Closing is the only release operation. */
   CloseHandle (handle);
+}
+
+/* Handle-relative directory enumeration.  This module has no existing
+ * directory iterator to copy, so the pinned root HANDLE is walked with
+ * GetFileInformationByHandleEx (FileIdBothDirectoryRestartInfo primes the
+ * scan, FileIdBothDirectoryInfo drains it).  FindFirstFileW on
+ * storage->root_path is deliberately NOT used: reopening the root by path
+ * would reintroduce the symlink/junction race the anchored-handle model
+ * exists to prevent.  Identity only -- the "op-" child names are decoded to
+ * UTF-8 and their request-id suffix validated; no record bytes are read and
+ * no operation state is inferred.  The buffer is gint64-typed so the
+ * variable-length FILE_ID_BOTH_DIR_INFO records stay 8-byte aligned. */
+wyrelog_error_t
+    wyl_service_credential_operation_storage_enumerate_request_ids
+    (const WylServiceCredentialOperationStorage * storage,
+    const WylServiceCredentialOperationRootAnchor * anchor,
+    GCancellable * cancellable, GPtrArray ** out_request_ids)
+{
+  g_autoptr (GPtrArray) ids = NULL;
+  gint64 buffer[8192];
+  FILE_INFO_BY_HANDLE_CLASS info_class = FileIdBothDirectoryRestartInfo;
+  if (storage == NULL || anchor == NULL || out_request_ids == NULL
+      || !anchor->initialized
+      || storage->root_handle == INVALID_HANDLE_VALUE
+      || storage->root_handle == NULL)
+    return WYRELOG_E_INVALID;
+  if (!wyl_service_credential_operation_storage_anchor_matches (storage,
+          anchor))
+    return WYRELOG_E_POLICY;
+  ids = g_ptr_array_new_with_free_func (g_free);
+  for (;;) {
+    if (g_cancellable_is_cancelled (cancellable))
+      return WYRELOG_E_CANCELLED;
+    if (!GetFileInformationByHandleEx (storage->root_handle, info_class,
+            buffer, sizeof buffer)) {
+      if (GetLastError () == ERROR_NO_MORE_FILES)
+        break;
+      return WYRELOG_E_IO;
+    }
+    info_class = FileIdBothDirectoryInfo;
+    for (FILE_ID_BOTH_DIR_INFO * entry = (FILE_ID_BOTH_DIR_INFO *) buffer;;) {
+      glong units = (glong) (entry->FileNameLength / sizeof (WCHAR));
+      g_autofree gchar *name = g_utf16_to_utf8 ((const gunichar2 *)
+          entry->FileName, units, NULL, NULL, NULL);
+      if (name != NULL && g_str_has_prefix (name, "op-")
+          && wyl_service_credential_operation_coordinator_request_id_is_valid
+          (name + 3))
+        g_ptr_array_add (ids, g_strdup (name + 3));
+      if (entry->NextEntryOffset == 0)
+        break;
+      entry = (FILE_ID_BOTH_DIR_INFO *) ((guint8 *) entry
+          + entry->NextEntryOffset);
+    }
+  }
+  *out_request_ids = g_steal_pointer (&ids);
+  return WYRELOG_E_OK;
 }
 #endif

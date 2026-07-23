@@ -54,6 +54,15 @@ typedef enum wyrelog_error_t
    * closes; other filesystem and locking failures remain WYRELOG_E_IO.
    */
   WYRELOG_E_BUSY = -11,
+  /*
+   * A cooperatively cancellable operation observed its GCancellable in the
+   * cancelled state and stopped before completing. No output is produced and
+   * any partially built result is discarded. Distinct from WYRELOG_E_IO
+   * (genuine device or filesystem failure) and WYRELOG_E_INVALID
+   * (argument-shape failure) so callers can treat caller-requested
+   * cancellation as an expected, retryable outcome.
+   */
+  WYRELOG_E_CANCELLED = -12,
 } wyrelog_error_t;
 
 const gchar *wyrelog_error_string (wyrelog_error_t err);

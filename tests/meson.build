@@ -1471,6 +1471,18 @@ test_service_credential_operation_storage = executable('test-service-credential-
 
 test('service-credential-operation-storage', test_service_credential_operation_storage)
 
+test_service_credential_operation_storage_enumerate = executable('test-service-credential-operation-storage-enumerate',
+  [
+    'test-service-credential-operation-storage-enumerate.c',
+    '../wyrelog/auth/service-credential-operation-storage-private.c',
+    '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+  ],
+  include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+  dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],
+)
+
+test('service-credential-operation-storage-enumerate', test_service_credential_operation_storage_enumerate)
+
 # Production OS-dispatch publication backend vtable adapter. Kept outside the
 # `build_client and host_machine.system() != 'windows'` guard on purpose: the
 # wyctl publication tests are off on Windows (and the windows variant sits in an
