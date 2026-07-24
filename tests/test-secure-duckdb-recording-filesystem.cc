@@ -5,6 +5,8 @@
  * per-test directory.  In particular it does not register or route DuckDB
  * subsystems: protocol, compression, subsystem, and ambient-path requests are
  * rejected before they can reach LocalFileSystem.
+ * The fixture is source/version pinned; changing DuckDB requires deliberate
+ * fixture regeneration and review.
  */
 #include <glib.h>
 #include <glib/gstdio.h>
@@ -587,7 +589,7 @@ has_operation (const Event &event, const gchar *operation)
 }
 
 static void
-assert_source_152_plain_lifecycle_event (const Event &event,
+assert_source_155_plain_lifecycle_event (const Event &event,
     const fs::path &database)
 {
   const std::string main_path = database.string ();
@@ -1185,7 +1187,7 @@ test_recording_filesystem_persistent_database (void)
   gboolean saw_wal_sync_before_close = false;
   for (size_t i = event_baseline; i < recorder->events.size (); i++) {
     const auto &event = recorder->events[i];
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     const gboolean is_main = event.path == database.string ();
     const gboolean is_wal = event.path == database.string () + ".wal";
     saw_main_open = saw_main_open || (is_main && has_operation (event, "open"));
@@ -1261,7 +1263,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   gboolean child_checkpoint_noop = FALSE;
   const std::string checkpoint = wal.string () + ".checkpoint";
   for (const auto &event : child_events) {
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     if (event.path == checkpoint) {
       g_assert_cmpstr (event.operation.c_str (), ==, "try-remove");
       g_assert_cmpint (event.outcome, ==, 0);
@@ -1337,7 +1339,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   gboolean recovery_wal_remove_after_sync = FALSE;
   gboolean recovery_checkpoint_noop = FALSE;
   for (const auto &event : recovery_recorder->events) {
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     if (event.path == checkpoint) {
       g_assert_cmpstr (event.operation.c_str (), ==, "try-remove");
       g_assert_cmpint (event.outcome, ==, 0);
@@ -1493,7 +1495,7 @@ test_recording_filesystem_rw_writer_contention (void)
   g_string_free (trace_text, TRUE);
   guint holder_main_write_locks = 0;
   for (const auto &event : holder_events) {
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     assert_live_wal_path (event, database);
     g_assert_cmpint (event.outcome, ==, -1);
     g_assert_true (event.error_class.empty ());
@@ -1602,7 +1604,7 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   guint main_writes = 0;
   for (size_t i = checkpoint_begin; i < checkpoint_end; i++) {
     const auto &event = recorder->events[i];
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     g_assert_true (event.path == database.string () || event.path == wal.string ()
         || event.path == checkpoint);
     g_assert_true (event.error_class.empty ());
@@ -1722,7 +1724,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   guint main_writes = 0;
   guint checkpoint_stage = 0;
   for (const auto &event : events) {
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     g_assert_true (event.error_class.empty ());
     if (event.operation == "sync" && event.path == wal.string ()) {
       g_assert_cmpuint (checkpoint_stage, ==, 0);
@@ -1780,7 +1782,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   gboolean recovery_wal_read = FALSE;
   gboolean recovery_wal_cleanup = FALSE;
   for (const auto &event : recovery_recorder->events) {
-    assert_source_152_plain_lifecycle_event (event, database);
+    assert_source_155_plain_lifecycle_event (event, database);
     g_assert_true (event.error_class.empty ());
     recovery_wal_open = recovery_wal_open || (event.path == wal.string ()
         && event.operation == "open");
