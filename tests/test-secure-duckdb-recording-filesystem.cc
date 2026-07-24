@@ -1208,6 +1208,43 @@ test_recording_filesystem_persistent_database (void)
   remove_tree (sandbox);
 }
 
+static void
+test_recording_filesystem_temporary_spill_cleanup (void)
+{
+  assert_duckdb_155 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-temp-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (sandbox);
+  const fs::path root = fs::canonical (sandbox);
+  const fs::path temp = root / "tmp";
+  g_assert_true (fs::create_directory (temp));
+  auto recorder = std::make_shared<RecorderState> ();
+  duckdb::DBConfig config;
+  configure_test_database (&config, root, recorder);
+  duckdb::DuckDB db (nullptr, &config);
+  duckdb::Connection connection (db);
+  auto setup = connection.Query ("SET memory_limit='1MB'; SET temp_directory='" + temp.string ()
+      + "';");
+  g_assert_false (setup->HasError ());
+  auto result = connection.Query (
+      "SELECT i FROM range(1000000) t(i) ORDER BY hash(i) DESC LIMIT 10");
+  g_assert_false (result->HasError ());
+  g_assert_cmpuint (result->RowCount (), ==, 10);
+  gboolean saw_temp = FALSE;
+  for (const auto &event : recorder->events) {
+    const fs::path path = event.path;
+    const std::string path_string = path.string ();
+    const std::string root_prefix = root.string () + "/";
+    const std::string temp_prefix = temp.string () + "/";
+    g_assert_true (path == root || path_string.rfind (root_prefix, 0) == 0);
+    if (path_string.rfind (temp_prefix, 0) == 0)
+      saw_temp = TRUE;
+  }
+  g_assert_true (saw_temp);
+  remove_tree (sandbox);
+}
+
 static gboolean
 is_mutation_event (const Event &event)
 {
@@ -1825,6 +1862,8 @@ main (int argc, char **argv)
 #else
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/persistent-db",
       test_recording_filesystem_persistent_database);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/temporary-spill-cleanup",
+      test_recording_filesystem_temporary_spill_cleanup);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/live-wal-read-only-recovery",
       test_recording_filesystem_live_wal_read_only_recovery);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/rw-writer-contention",
