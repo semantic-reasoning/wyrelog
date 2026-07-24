@@ -1343,6 +1343,15 @@ test_fact_schema = executable('test-fact-schema',
 test('fact-schema', test_fact_schema)
 
 if get_option('enable_fact_store').allowed()
+  test_fact_provisioning = executable('test-fact-provisioning',
+    'test-fact-provisioning.c',
+    'fact-test-support.c',
+    c_args : fact_test_support_c_args,
+    include_directories : include_directories('../wyrelog'),
+    dependencies : [wyrelog_dep, sqlite_dep] + fact_test_support_deps,
+  )
+  test('fact-provisioning', test_fact_provisioning)
+
   test_fact_store_identity_core = executable('test-fact-store-identity-core',
     'test-fact-store-identity-core.c',
     '../wyrelog/fact/store-identity-private.c',
