@@ -31,7 +31,7 @@ if enable_secure_duckdb_bridge_opt.enabled()
     error('enable_secure_duckdb_bridge requires enable_fact_store=enabled')
   endif
   if host_machine.system() != 'windows' and get_option('duckdb_source') != 'subproject'
-    error('enable_secure_duckdb_bridge requires duckdb_source=subproject (pinned DuckDB 1.5.2 source)')
+    error('enable_secure_duckdb_bridge requires duckdb_source=subproject (pinned DuckDB 1.5.5 source)')
   endif
   if host_machine.system() != 'windows'
     add_languages('cpp', required : true, native : false)
@@ -73,13 +73,13 @@ if enable_audit_opt.allowed() or enable_fact_store_opt.allowed()
     if enable_secure_duckdb_bridge_opt.enabled()
       # The secure bridge is coupled to the pinned DuckDB C++ API.  Bypass
       # generic dependency discovery so it can only use this exact source
-      # subproject (currently v1.5.2), never a system lookalike.
+      # subproject (currently v1.5.5), never a system lookalike.
       duckdb_subproject = subproject('duckdb-amalgamated', required : true)
       duckdb_dep = duckdb_subproject.get_variable('duckdb_dep')
       # Meson 1.1 lacks SubprojectHolder.project_version(); the declared
       # subproject dependency carries that same project version.
-      if duckdb_dep.version() != '1.5.2'
-        error('enable_secure_duckdb_bridge requires DuckDB source subproject version 1.5.2')
+      if duckdb_dep.version() != '1.5.5'
+        error('enable_secure_duckdb_bridge requires DuckDB source subproject version 1.5.5')
       endif
     else
       duckdb_dep = dependency('duckdb-amalgamated',

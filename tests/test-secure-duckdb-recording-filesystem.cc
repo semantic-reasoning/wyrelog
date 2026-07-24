@@ -30,7 +30,7 @@ static const gchar *self_path;
 
 namespace fs = std::filesystem;
 
-static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.2");
+static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5");
 
 struct Event {
   std::string operation;
@@ -259,7 +259,7 @@ public:
       duckdb::optional_ptr<duckdb::FileOpener> opener) override
   {
     (void) opener;
-    // DuckDB 1.5.2 asks this exact Linux cgroup probe while sizing its block
+    // DuckDB 1.5.5 asks this exact Linux cgroup probe while sizing its block
     // allocator. Record the denied probe separately from filesystem events;
     // it is never forwarded to LocalFileSystem.
     if (path == "/proc/self/cgroup") {
@@ -632,12 +632,12 @@ assert_source_152_plain_lifecycle_event (const Event &event,
 }
 
 static void
-assert_source_152_control_events (const std::vector<ControlEvent> &controls,
+assert_source_155_control_events (const std::vector<ControlEvent> &controls,
     size_t baseline, guint database_opens)
 {
 #ifdef __linux__
   // DBConfig queries this once for default memory and once for its block
-  // allocator in each of the two DuckDB 1.5.2 lifecycles above.
+  // allocator in each of the two DuckDB 1.5.5 lifecycles above.
   g_assert_cmpuint (controls.size (), ==, baseline + 2 * database_opens);
   for (size_t i = baseline; i < controls.size (); i++) {
     g_assert_cmpstr (controls[i].operation.c_str (), ==, "deny-host-exists");
@@ -884,9 +884,9 @@ configure_test_database (duckdb::DBConfig *config, const fs::path &root,
 }
 
 static void
-assert_duckdb_152 (void)
+assert_duckdb_155 (void)
 {
-  g_assert_cmpstr (duckdb_library_version (), ==, "v1.5.2");
+  g_assert_cmpstr (duckdb_library_version (), ==, "v1.5.5");
 }
 
 static gboolean is_mutation_event (const Event &event);
@@ -894,7 +894,7 @@ static gboolean is_mutation_event (const Event &event);
 static int
 crash_writer_child (const gchar *sandbox)
 {
-  if (g_strcmp0 (duckdb_library_version (), "v1.5.2") != 0)
+  if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
     _exit (90);
   const fs::path root = fs::canonical (sandbox);
   const fs::path database = root / "facts.duckdb";
@@ -967,7 +967,7 @@ write_checkpoint_trace_or_exit (const RecorderState &recorder, int error_code)
 static int
 hold_writer_child (const gchar *sandbox)
 {
-  if (g_strcmp0 (duckdb_library_version (), "v1.5.2") != 0)
+  if (g_strcmp0 (duckdb_library_version (), "v1.5.5") != 0)
     _exit (100);
   const fs::path root = fs::canonical (sandbox);
   const fs::path database = root / "facts.duckdb";
@@ -1123,7 +1123,7 @@ assert_read_only_live_wal_trace (const RecorderState &recorder,
 static void
 test_recording_filesystem_persistent_database (void)
 {
-  assert_duckdb_152 ();
+  assert_duckdb_155 ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-recording-XXXXXX", &error);
   g_assert_no_error (error);
@@ -1201,7 +1201,7 @@ test_recording_filesystem_persistent_database (void)
   }
   g_assert_true (saw_main_open && saw_wal_open);
   g_assert_true (saw_main_close && saw_wal_close);
-  assert_source_152_control_events (recorder->controls, control_baseline, 2);
+  assert_source_155_control_events (recorder->controls, control_baseline, 2);
 
   remove_tree (sandbox);
 }
@@ -1221,7 +1221,7 @@ is_mutation_event (const Event &event)
 static void
 test_recording_filesystem_live_wal_read_only_recovery (void)
 {
-  assert_duckdb_152 ();
+  assert_duckdb_155 ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-live-wal-XXXXXX", &error);
   g_assert_no_error (error);
@@ -1281,7 +1281,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   }
   g_assert_true (child_wal_open && child_wal_write && child_wal_sync);
   g_assert_false (child_checkpoint_noop);
-  assert_source_152_control_events (child_controls, 0, 1);
+  assert_source_155_control_events (child_controls, 0, 1);
   g_assert_true (fs::exists (wal));
   g_assert_false (fs::exists (checkpoint));
   const FileIdentity main_before_ro = snapshot_file (database);
@@ -1308,7 +1308,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
     read_only_error = g_strdup (exception.what ());
   }
   assert_read_only_live_wal_trace (*read_only_recorder, database);
-  assert_source_152_control_events (read_only_recorder->controls, 0, 1);
+  assert_source_155_control_events (read_only_recorder->controls, 0, 1);
   assert_same_file (main_before_ro, snapshot_file (database));
   assert_same_file (wal_before_ro, snapshot_file (wal));
   g_assert_true (read_only_opened);
@@ -1376,7 +1376,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
   g_assert_true (recovery_checkpoint_noop);
   g_assert_true (recovery_main_write && recovery_main_sync_after_write
       && recovery_wal_remove_after_sync);
-  assert_source_152_control_events (recovery_recorder->controls, 0, 1);
+  assert_source_155_control_events (recovery_recorder->controls, 0, 1);
   g_assert_false (fs::exists (wal));
   g_assert_false (fs::exists (database.string () + ".wal.checkpoint"));
   g_assert_false (fs::exists (database.string () + ".wal.recovery"));
@@ -1386,7 +1386,7 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
 static void
 test_recording_filesystem_rw_writer_contention (void)
 {
-  assert_duckdb_152 ();
+  assert_duckdb_155 ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-writer-lock-XXXXXX", &error);
   g_assert_no_error (error);
@@ -1465,7 +1465,7 @@ test_recording_filesystem_rw_writer_contention (void)
     }
   }
   g_assert_cmpuint (failed_main_write_locks, ==, 1);
-  assert_source_152_control_events (contender_recorder->controls, 0, 1);
+  assert_source_155_control_events (contender_recorder->controls, 0, 1);
   assert_same_artifacts (seeded, snapshot_artifacts (root));
 
   gsize written = 0;
@@ -1503,7 +1503,7 @@ test_recording_filesystem_rw_writer_contention (void)
       holder_main_write_locks++;
   }
   g_assert_cmpuint (holder_main_write_locks, ==, 1);
-  assert_source_152_control_events (holder_controls, 0, 1);
+  assert_source_155_control_events (holder_controls, 0, 1);
   assert_same_artifacts (seeded, snapshot_artifacts (root));
 
   auto restored_recorder = std::make_shared<RecorderState> ();
@@ -1524,7 +1524,7 @@ test_recording_filesystem_rw_writer_contention (void)
 static void
 test_recording_filesystem_explicit_checkpoint_discovery (void)
 {
-  assert_duckdb_152 ();
+  assert_duckdb_155 ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-checkpoint-XXXXXX", &error);
   g_assert_no_error (error);
@@ -1663,14 +1663,14 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   g_assert_cmpuint (main_sync_one, <, main_sync_two);
   g_assert_cmpuint (main_sync_two, <, first_cleanup);
   g_assert_cmpuint (first_cleanup + 1, ==, checkpoint_end);
-  assert_source_152_control_events (recorder->controls, 0, 1);
+  assert_source_155_control_events (recorder->controls, 0, 1);
   remove_tree (sandbox);
 }
 
 static void
 test_recording_filesystem_checkpoint_crash_phase_a (void)
 {
-  assert_duckdb_152 ();
+  assert_duckdb_155 ();
   g_autoptr (GError) error = NULL;
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-checkpoint-crash-XXXXXX", &error);
   g_assert_no_error (error);
@@ -1793,7 +1793,7 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
   }
   g_assert_true (recovery_wal_open && recovery_wal_read);
   g_assert_true (recovery_wal_cleanup);
-  assert_source_152_control_events (recovery_recorder->controls, 0, 1);
+  assert_source_155_control_events (recovery_recorder->controls, 0, 1);
   const ArtifactSet recovered = snapshot_artifacts (root);
   g_assert_cmpuint (recovered.files.size (), ==, 1);
   g_assert_cmpstr (recovered.files[0].first.c_str (), ==, "facts.duckdb");
