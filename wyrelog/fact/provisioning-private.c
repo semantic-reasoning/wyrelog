@@ -4,6 +4,11 @@
 #include "wyl-id-private.h"
 
 #include <string.h>
+#ifndef G_OS_WIN32
+#include <unistd.h>
+#else
+#include <io.h>
+#endif
 
 static gboolean
 canonical_uuid (const gchar *value)
@@ -85,10 +90,18 @@ wyl_fact_graph_provisioning_stage_prepare (const gchar *fact_root,
   }
 
   /* A two-link stage is already a published pair, never a STAGED retry. */
+#ifndef G_OS_WIN32
   WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
   rc = wyl_fact_graph_directory_open_provisioned_final_exact
       (&out_stage->directory, record->op_uuid, &final);
   wyl_fact_graph_regular_file_clear (&final);
+#else
+  gint final_fd = -1;
+  rc = wyl_fact_graph_directory_open_file (&out_stage->directory,
+      "facts.duckdb", FALSE, &final_fd);
+  if (final_fd >= 0)
+    _close (final_fd);
+#endif
   if (rc == WYRELOG_E_OK) {
     wyl_fact_graph_provisioning_stage_clear (out_stage);
     return WYRELOG_E_POLICY;
