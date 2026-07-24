@@ -7047,6 +7047,16 @@ check_service_credential_operation_status_recover (SoupServer *server,
   if (seed_rc != 0)
     return seed_rc;
 
+  /* The seeds above write durable operation files directly, bypassing the
+   * authenticated path that would normally register a tenant.  tenant-a is
+   * already an active policy-store entry, but tenant-b is not, yet the check
+   * below issues a legitimate tenant-b recover.  Session token auth rejects a
+   * session whose tenant is not active, so register tenant-b symmetrically
+   * with tenant-a to keep that recover from being 401'd. */
+  if (wyl_daemon_http_configure_tenant_for_test (server, "tenant-b", TRUE,
+          FALSE) != WYRELOG_E_OK)
+    return 2128;
+
   if (!wyl_daemon_http_seed_human_session_for_test (server, session_token,
           "human-principal-admin", "tenant-a"))
     return 2112;
