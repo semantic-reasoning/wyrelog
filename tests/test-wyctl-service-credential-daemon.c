@@ -71,6 +71,11 @@
  * handoff (which then fails closed on the missing roots). */
 #define WYL_TEST_FUTURE_EXPIRY_US "1893456000000000"
 
+/* A canonical 27-char alphanumeric request id (WYL_REQUEST_ID_STRING_LEN). It
+ * passes the client's is-canonical gate so the recover request reaches the
+ * daemon; the unconfigured operation surface then returns 404 NOT_FOUND. */
+#define WYL_TEST_RECOVER_REQUEST_ID "abcdefghijklmnopqrstuvwxyz0"
+
 typedef struct
 {
   SoupServer *server;
@@ -305,6 +310,76 @@ main (void)
   const int denied_ok[] = { 4 };
   assert_wyctl_exit_no_secret (issue_denied_argv, denied_ok,
       G_N_ELEMENTS (denied_ok));
+
+  /*
+   * (c)/(d) Delegation surface: `service-credential status` and
+   * `service-credential recover` drive the #475 client end to end against the
+   * live daemon and map the daemon's rc onto the documented exit codes without
+   * ever printing stdout or leaking a secret. Both are guarded management
+   * commands, so each invocation supplies the guard context (--guard-timestamp
+   * / --guard-loc-class / --guard-risk) the CLI now requires -- the same guard
+   * values as the authorized issue leg above, so the armed manage grant makes
+   * the daemon's guarded decision ALLOW rather than reject at the guard gate.
+   *
+   * The reachable exit depends on the build profile of the in-process daemon,
+   * which the shared WYL_HAS_FACT_STORE macro also selects here:
+   *
+   *  - Fact-store DISABLED (this leg): the /service-credential-operations
+   *    routes are compiled out of daemon/http.c (they live under
+   *    #ifdef WYL_HAS_FACT_STORE), so every request 404s at the default
+   *    handler -> E_NOT_FOUND -> wyctl exit 5 for both verbs.
+   *
+   *  - Fact-store ENABLED: the routes exist, the guard params are present, and
+   *    the authorized operator holds the armed wr.service_credential.manage
+   *    grant, so authorization ALLOWs (profile==SYSTEM precheck passes on this
+   *    harness). This harness configures NO operation_root, so the two verbs
+   *    diverge on the unconfigured surface: status lists an empty operation set
+   *    -> 200 -> E_OK -> wyctl exit 0 (empty stdout, nothing to print); recover
+   *    has nothing to recover for the (canonical) request id -> 404 NOT_FOUND
+   *    -> E_NOT_FOUND -> wyctl exit 5.
+   *
+   * Either way the CLI wiring, guard pass-through, and rc->exit mapping are
+   * exercised. The fully seeded auth-delta (allow / deny / bad-bearer) and the
+   * populated operation-surface happy paths for these endpoints are covered at
+   * the HTTP layer by test-daemon-http-decide.c, which drives the guarded
+   * routes directly with a configured operation_root.
+   */
+#ifdef WYL_HAS_FACT_STORE
+  const int status_ok[] = { 0 };
+  const int recover_ok[] = { 5 };
+#else
+  const int status_ok[] = { 5 };
+  const int recover_ok[] = { 5 };
+#endif
+
+  gchar *status_authorized_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", base_url,
+    "service-credential", "status",
+    "--tenant", WYL_TEST_SERVICE_TENANT,
+    "--access-token-file", authorized_token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_wyctl_exit_no_secret (status_authorized_argv, status_ok,
+      G_N_ELEMENTS (status_ok));
+
+  gchar *recover_authorized_argv[] = {
+    (gchar *) WYL_TEST_WYCTL_PATH,
+    "--daemon-url", base_url,
+    "service-credential", "recover",
+    "--request-id", WYL_TEST_RECOVER_REQUEST_ID,
+    "--tenant", WYL_TEST_SERVICE_TENANT,
+    "--access-token-file", authorized_token_path,
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_wyctl_exit_no_secret (recover_authorized_argv, recover_ok,
+      G_N_ELEMENTS (recover_ok));
 
   g_unlink (authorized_token_path);
   g_unlink (denied_token_path);

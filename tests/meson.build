@@ -492,6 +492,20 @@ if build_client and host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  test_wyctl_service_principal = executable('test-wyctl-service-principal',
+    'test-wyctl-service-principal.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    dependencies : [glib_dep, gio_dep],
+  )
+
+  test('wyctl-service-principal', test_wyctl_service_principal,
+    depends : [wyctl_exe, wyctl_gschemas_compiled],
+    env : wyctl_gsettings_test_env,
+    timeout : 60,
+  )
+
   test_wyctl_mfa = executable('test-wyctl-mfa',
     'test-wyctl-mfa.c',
     c_args : [
@@ -1743,6 +1757,20 @@ test('check-service-handoff-delivery-boundary',
 
 test('check-service-handoff-delivery-boundary-self-test',
   check_service_handoff_delivery_boundary,
+  args : ['--self-test'],
+)
+
+check_wyctl_operation_delegation = find_program(
+  '../tools/check-wyctl-operation-delegation.py',
+)
+
+test('check-wyctl-operation-delegation',
+  check_wyctl_operation_delegation,
+  args : [meson.project_source_root() / 'wyrelog' / 'wyctl' / 'wyctl.c'],
+)
+
+test('check-wyctl-operation-delegation-self-test',
+  check_wyctl_operation_delegation,
   args : ['--self-test'],
 )
 

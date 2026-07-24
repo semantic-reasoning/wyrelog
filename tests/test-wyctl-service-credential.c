@@ -71,6 +71,214 @@ test_service_credential_dispatch (void)
 }
 
 static void
+test_service_credential_recover_missing_flags (void)
+{
+  /* No --request-id: the CLI must reject before the client is built. The
+   * request-id check runs before guard parsing, so this fires even with valid
+   * guards present. A marker distinguishes this from the top-level "unknown
+   * command" fall-through. */
+  gchar *missing_request_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "recover",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_request_argv, 2,
+      "wyctl: missing --request-id");
+
+  /* --request-id and valid guards present but no --tenant: recover, like every
+   * management command, requires a guard context, so the guard flags must be
+   * supplied to reach the missing-tenant diagnostic from create_fact_client
+   * with exit 2. */
+  gchar *missing_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "recover",
+    "--request-id", "req-1",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+}
+
+static void
+test_service_credential_recover_guard_validation (void)
+{
+  /* recover is a guarded management command: the guard context is mandatory
+   * and parsed after the --request-id check. Missing guard flags and an
+   * invalid guard loc-class both reject with exit 2 before the client is
+   * built. */
+  gchar *missing_guard_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "recover",
+    "--request-id", "req-1",
+    "--tenant", "__wr_default",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_guard_argv, 2,
+      "wyctl: invalid --guard-timestamp");
+
+  gchar *bad_loc_class_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "recover",
+    "--request-id", "req-1",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "not-a-class",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (bad_loc_class_argv, 2,
+      "wyctl: invalid --guard-loc-class");
+}
+
+static void
+test_service_credential_status_missing_flags (void)
+{
+  /* status has no required verb flags of its own, but is a guarded management
+   * command: with valid guards present, a missing --tenant is the first
+   * rejection, surfaced from create_fact_client with exit 2. The marker proves
+   * status is a recognized verb (not the top-level fall-through). */
+  gchar *missing_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "status",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+}
+
+static void
+test_service_credential_status_guard_validation (void)
+{
+  /* status carries no verb-specific required flags, so the guard context is
+   * the first validation after the trailing-arg check. Missing guard flags and
+   * an invalid guard loc-class both reject with exit 2 before the client is
+   * built. */
+  gchar *missing_guard_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "status",
+    "--tenant", "__wr_default",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_guard_argv, 2,
+      "wyctl: invalid --guard-timestamp");
+
+  gchar *bad_loc_class_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "status",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "not-a-class",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (bad_loc_class_argv, 2,
+      "wyctl: invalid --guard-loc-class");
+}
+
+static void
+test_service_credential_status_trailing_arg (void)
+{
+  gchar *trailing_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "status",
+    "--tenant", "__wr_default",
+    "bogus-positional",
+    NULL,
+  };
+  assert_exit_and_stderr (trailing_argv, 2,
+      "wyctl: unexpected service-credential status argument: bogus-positional");
+}
+
+static void
+test_service_credential_recover_trailing_arg (void)
+{
+  gchar *trailing_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "recover",
+    "--request-id", "req-1",
+    "--tenant", "__wr_default",
+    "bogus-positional",
+    NULL,
+  };
+  assert_exit_and_stderr (trailing_argv, 2,
+      "wyctl: unexpected service-credential recover argument: bogus-positional");
+}
+
+static void
+test_service_credential_list_missing_flags (void)
+{
+  gchar *missing_subject_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "list",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_subject_argv, 2, "wyctl: missing --subject");
+
+  gchar *missing_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "list",
+    "--subject", "svc:__wr_default:worker",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+}
+
+static void
+test_service_credential_revoke_missing_flags (void)
+{
+  gchar *missing_credential_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "revoke",
+    "--tenant", "__wr_default",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_credential_argv, 2,
+      "wyctl: missing --credential-id");
+
+  gchar *missing_tenant_argv[] = {
+    WYL_TEST_WYCTL_PATH,
+    "--daemon-url", "http://127.0.0.1:1",
+    "service-credential", "revoke",
+    "--credential-id", "cred-1",
+    "--guard-timestamp", "123",
+    "--guard-loc-class", "public",
+    "--guard-risk", "10",
+    NULL,
+  };
+  assert_exit_and_stderr (missing_tenant_argv, 2, "wyctl: missing --tenant");
+}
+
+static void
 test_service_credential_issue_missing_flags (void)
 {
   gchar *missing_subject_argv[] = {
@@ -307,6 +515,22 @@ main (int argc, char **argv)
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/wyctl/service-credential/dispatch",
       test_service_credential_dispatch);
+  g_test_add_func ("/wyctl/service-credential/list-missing-flags",
+      test_service_credential_list_missing_flags);
+  g_test_add_func ("/wyctl/service-credential/revoke-missing-flags",
+      test_service_credential_revoke_missing_flags);
+  g_test_add_func ("/wyctl/service-credential/recover-missing-flags",
+      test_service_credential_recover_missing_flags);
+  g_test_add_func ("/wyctl/service-credential/recover-guard-validation",
+      test_service_credential_recover_guard_validation);
+  g_test_add_func ("/wyctl/service-credential/recover-trailing-arg",
+      test_service_credential_recover_trailing_arg);
+  g_test_add_func ("/wyctl/service-credential/status-missing-flags",
+      test_service_credential_status_missing_flags);
+  g_test_add_func ("/wyctl/service-credential/status-guard-validation",
+      test_service_credential_status_guard_validation);
+  g_test_add_func ("/wyctl/service-credential/status-trailing-arg",
+      test_service_credential_status_trailing_arg);
   g_test_add_func ("/wyctl/service-credential/issue-missing-flags",
       test_service_credential_issue_missing_flags);
   g_test_add_func ("/wyctl/service-credential/issue-expires-bounds",
