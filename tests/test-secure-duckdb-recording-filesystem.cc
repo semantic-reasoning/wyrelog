@@ -52,7 +52,16 @@ struct RecorderState {
   std::vector<ControlEvent> controls;
   guint rejected = 0;
   guint subsystem_attempts = 0;
+  gboolean checkpoint_fault_armed = FALSE;
+  guint checkpoint_fault_stage = 0;
+  guint checkpoint_fault_fires = 0;
+  std::string checkpoint_main;
+  std::string checkpoint_wal;
 };
+
+static void write_trace_or_exit (const RecorderState &recorder, int error_code);
+static void write_checkpoint_trace_or_exit (const RecorderState &recorder,
+    int error_code);
 
 class RecordingFileSystem;
 
@@ -289,6 +298,9 @@ public:
     const auto checked = check_path (path);
     const auto removed = local_->TryRemoveFile (checked.string (), nullptr);
     record ("try-remove", checked, {}, removed ? 1 : 0);
+    if (recorder_->checkpoint_fault_armed && recorder_->checkpoint_fault_stage == 1
+        && checked.string () == recorder_->checkpoint_wal + ".checkpoint" && !removed)
+      recorder_->checkpoint_fault_stage = 2;
     return removed;
   }
 
@@ -309,8 +321,27 @@ public:
   void FileSync (duckdb::FileHandle &handle) override
   {
     auto &recording = unwrap (handle);
-    record ("sync", recording.GetPath ());
+    /* Inject only after the OS reports this file's sync complete. */
     local_->FileSync (*recording.inner);
+    record ("sync", recording.GetPath ());
+    if (!recorder_->checkpoint_fault_armed)
+      return;
+    if (recording.GetPath () == recorder_->checkpoint_wal
+        && recorder_->checkpoint_fault_stage == 0) {
+      recorder_->checkpoint_fault_stage = 1;
+      return;
+    }
+    if (recording.GetPath () == recorder_->checkpoint_main
+        && recorder_->checkpoint_fault_stage == 2) {
+      recorder_->checkpoint_fault_stage = 3;
+      return;
+    }
+    if (recording.GetPath () == recorder_->checkpoint_main
+        && recorder_->checkpoint_fault_stage == 3) {
+      recorder_->checkpoint_fault_fires++;
+      write_checkpoint_trace_or_exit (*recorder_, 110);
+      _exit (109);
+    }
   }
 
   duckdb::string PathSeparator (const duckdb::string &path) override
@@ -782,6 +813,66 @@ wait_check_with_timeout (GSubprocess *process, guint timeout_ms)
   g_assert_true (state.succeeded);
 }
 
+struct TimedCommunicate {
+  GMainLoop *loop;
+  GCancellable *cancellable;
+  GSubprocess *process;
+  GError *error = NULL;
+  gchar *stdout_buf = NULL;
+  gboolean complete = FALSE;
+  gboolean succeeded = FALSE;
+  gboolean timed_out = FALSE;
+};
+
+static gboolean
+timed_communicate_timeout (gpointer user_data)
+{
+  auto *state = static_cast<TimedCommunicate *> (user_data);
+  state->timed_out = TRUE;
+  /* A cancelled communicate leaves a live fault-injection child running. */
+  g_subprocess_force_exit (state->process);
+  g_cancellable_cancel (state->cancellable);
+  return G_SOURCE_REMOVE;
+}
+
+static void
+timed_communicate_finished (GObject *source, GAsyncResult *result,
+    gpointer user_data)
+{
+  auto *state = static_cast<TimedCommunicate *> (user_data);
+  state->succeeded = g_subprocess_communicate_utf8_finish (
+      G_SUBPROCESS (source), result, &state->stdout_buf, NULL, &state->error);
+  state->complete = TRUE;
+  g_main_loop_quit (state->loop);
+}
+
+static gchar *
+communicate_utf8_with_timeout (GSubprocess *process, guint timeout_ms)
+{
+  g_autoptr (GMainLoop) loop = g_main_loop_new (NULL, FALSE);
+  g_autoptr (GCancellable) cancellable = g_cancellable_new ();
+  TimedCommunicate state { loop, cancellable, process };
+  const guint timeout_id = g_timeout_add (timeout_ms, timed_communicate_timeout,
+      &state);
+  g_subprocess_communicate_utf8_async (process, NULL, cancellable,
+      timed_communicate_finished, &state);
+  g_main_loop_run (loop);
+  if (!state.timed_out)
+    g_source_remove (timeout_id);
+  g_assert_true (state.complete);
+  if (state.timed_out) {
+    g_clear_error (&state.error);
+    g_free (state.stdout_buf);
+    g_autoptr (GError) reap_error = NULL;
+    g_assert_true (g_subprocess_wait (process, NULL, &reap_error));
+    g_assert_no_error (reap_error);
+    g_error ("fault-injection child did not finish within %u ms", timeout_ms);
+  }
+  g_assert_no_error (state.error);
+  g_assert_true (state.succeeded);
+  return state.stdout_buf;
+}
+
 static void
 configure_test_database (duckdb::DBConfig *config, const fs::path &root,
     std::shared_ptr<RecorderState> recorder)
@@ -848,6 +939,28 @@ write_trace_or_exit (const RecorderState &recorder, int error_code)
       _exit (error_code);
   }
   if (dprintf (STDOUT_FILENO, "END\n") < 0)
+  _exit (error_code);
+}
+
+static void
+write_checkpoint_trace_or_exit (const RecorderState &recorder, int error_code)
+{
+  /* Keep the marker adjacent to the final recorded main-file sync. */
+  for (const auto &control : recorder.controls) {
+    if (dprintf (STDOUT_FILENO, "C\t%s\t%s\n", control.operation.c_str (),
+            control.path.c_str ()) < 0)
+      _exit (error_code);
+  }
+  for (const auto &event : recorder.events) {
+    if (dprintf (STDOUT_FILENO, "E\t%s\t%s\t%llu\t%u\t%u\t%d\t%s\n",
+            event.operation.c_str (), event.path.c_str (),
+            (unsigned long long) event.flags, (unsigned) event.lock,
+            (unsigned) event.compression, event.outcome, event.error_class.c_str ()) < 0)
+      _exit (error_code);
+  }
+  if (dprintf (STDOUT_FILENO, "MARKER\tcheckpoint-main-sync-2\t%s\t2\n",
+          recorder.checkpoint_main.c_str ()) < 0
+      || dprintf (STDOUT_FILENO, "END\n") < 0)
     _exit (error_code);
 }
 
@@ -890,16 +1003,37 @@ hold_writer_child (const gchar *sandbox)
   _exit (0);
 }
 
+static int
+checkpoint_crash_child (const gchar *sandbox)
+{
+  const fs::path root = fs::canonical (sandbox);
+  const fs::path database = root / "facts.duckdb";
+  auto recorder = std::make_shared<RecorderState> ();
+  duckdb::DBConfig config;
+  configure_test_database (&config, root, recorder);
+  duckdb::DuckDB db (database.string (), &config);
+  duckdb::Connection connection (db);
+  recorder->checkpoint_main = database.string ();
+  recorder->checkpoint_wal = database.string () + ".wal";
+  recorder->checkpoint_fault_armed = TRUE;
+  auto result = connection.Query ("CHECKPOINT");
+  if (result->HasError () || recorder->checkpoint_fault_fires != 1)
+    _exit (111);
+  _exit (112);
+}
+
 static void
 parse_child_trace (const gchar *output, std::vector<Event> *events,
     std::vector<ControlEvent> *controls)
 {
+  g_assert_true (g_str_has_suffix (output, "\n"));
   g_auto (GStrv) lines = g_strsplit (output, "\n", -1);
   gboolean ended = FALSE;
   for (guint i = 0; lines[i] != NULL; i++) {
     if (lines[i][0] == '\0') {
-      g_assert_true (ended || lines[i + 1] == NULL);
-      continue;
+      g_assert_true (ended);
+      g_assert_null (lines[i + 1]);
+      break;
     }
     if (g_strcmp0 (lines[i], "END") == 0) {
       g_assert_false (ended);
@@ -1533,6 +1667,142 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
   remove_tree (sandbox);
 }
 
+static void
+test_recording_filesystem_checkpoint_crash_phase_a (void)
+{
+  assert_duckdb_152 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-checkpoint-crash-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (sandbox);
+  const fs::path database = root / "facts.duckdb";
+  const fs::path wal = database.string () + ".wal";
+  {
+    auto state = std::make_shared<RecorderState> (); duckdb::DBConfig config;
+    configure_test_database (&config, root, state); duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection c (db); g_assert_false (c.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)")->HasError ());
+  }
+  {
+    auto state = std::make_shared<RecorderState> (); duckdb::DBConfig config;
+    configure_test_database (&config, root, state); config.options.checkpoint_on_shutdown = false;
+    duckdb::DuckDB db (database.string (), &config); duckdb::Connection c (db);
+    g_assert_false (c.Query ("INSERT INTO facts VALUES (99)")->HasError ());
+  }
+  g_assert_true (fs::exists (wal));
+  const gchar *argv[] = { self_path, "--checkpoint-crash", root.c_str (), NULL };
+  g_autoptr (GSubprocess) child = g_subprocess_newv (argv,
+      (GSubprocessFlags) (G_SUBPROCESS_FLAGS_STDOUT_PIPE | G_SUBPROCESS_FLAGS_STDERR_SILENCE), &error);
+  g_assert_no_error (error);
+  g_autofree gchar *output = communicate_utf8_with_timeout (child, 5000);
+  g_assert_cmpint (g_subprocess_get_exit_status (child), ==, 109);
+  g_auto (GStrv) lines = g_strsplit (output, "\n", -1);
+  guint line_count = 0;
+  while (lines[line_count] != NULL)
+    line_count++;
+  g_assert_cmpuint (line_count, >=, 3);
+  g_assert_cmpstr (lines[line_count - 1], ==, "");
+  g_assert_cmpstr (lines[line_count - 2], ==, "END");
+  const std::string database_path = database.string ();
+  const std::string expected_marker = std::string ("MARKER\tcheckpoint-main-sync-2\t")
+      + database_path + "\t2";
+  g_assert_cmpstr (lines[line_count - 3], ==, expected_marker.c_str ());
+  GString *trace = g_string_new (NULL);
+  for (guint i = 0; i + 3 < line_count; i++) {
+    g_string_append (trace, lines[i]);
+    g_string_append_c (trace, '\n');
+  }
+  g_string_append (trace, "END\n");
+  std::vector<Event> events; std::vector<ControlEvent> controls;
+  parse_child_trace (trace->str, &events, &controls);
+  g_string_free (trace, TRUE);
+  guint wal_sync = 0;
+  guint main_sync = 0;
+  guint checkpoint_noop = 0;
+  guint wal_writes = 0;
+  guint main_writes = 0;
+  guint checkpoint_stage = 0;
+  for (const auto &event : events) {
+    assert_source_152_plain_lifecycle_event (event, database);
+    g_assert_true (event.error_class.empty ());
+    if (event.operation == "sync" && event.path == wal.string ()) {
+      g_assert_cmpuint (checkpoint_stage, ==, 0);
+      checkpoint_stage = 1;
+      wal_sync++;
+    }
+    if (event.operation == "try-remove"
+        && event.path == database.string () + ".wal.checkpoint") {
+      g_assert_cmpint (event.outcome, ==, 0);
+      g_assert_cmpuint (checkpoint_stage, ==, 1);
+      checkpoint_stage = 2;
+      checkpoint_noop++;
+    }
+    if (event.operation == "sync" && event.path == database.string ()) {
+      g_assert_cmpuint (checkpoint_stage, >=, 2);
+      g_assert_cmpuint (checkpoint_stage, <, 4);
+      checkpoint_stage++;
+      main_sync++;
+    }
+    if (event.operation == "write" && event.path == wal.string ())
+      wal_writes++;
+    if (event.operation == "write-at" && event.path == database.string ())
+      main_writes++;
+    g_assert_false (event.operation == "try-remove" && event.path == wal.string ());
+  }
+  g_assert_cmpuint (wal_sync, ==, 1);
+  g_assert_cmpuint (main_sync, ==, 2);
+  g_assert_cmpuint (checkpoint_noop, ==, 1);
+  g_assert_cmpuint (checkpoint_stage, ==, 4);
+  g_assert_false (events.empty ());
+  g_assert_cmpstr (events.back ().operation.c_str (), ==, "sync");
+  g_assert_cmpstr (events.back ().path.c_str (), ==, database_path.c_str ());
+  g_assert_cmpuint (wal_writes, ==, 1);
+  g_assert_cmpuint (main_writes, ==, 3);
+  const ArtifactSet artifacts = snapshot_artifacts (root);
+  g_assert_cmpuint (artifacts.files.size (), ==, 2);
+  g_assert_cmpstr (artifacts.files[0].first.c_str (), ==, "facts.duckdb");
+  g_assert_cmpstr (artifacts.files[1].first.c_str (), ==, "facts.duckdb.wal");
+  g_assert_false (fs::exists (database.string () + ".wal.checkpoint"));
+  g_assert_false (fs::exists (database.string () + ".wal.recovery"));
+
+  auto recovery_recorder = std::make_shared<RecorderState> ();
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recovery_recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    auto result = connection.Query ("SELECT value FROM facts ORDER BY value");
+    g_assert_false (result->HasError ());
+    g_assert_cmpuint (result->RowCount (), ==, 2);
+    g_assert_cmpstr (result->GetValue (0, 0).ToString ().c_str (), ==, "42");
+    g_assert_cmpstr (result->GetValue (0, 1).ToString ().c_str (), ==, "99");
+  }
+  gboolean recovery_wal_open = FALSE;
+  gboolean recovery_wal_read = FALSE;
+  gboolean recovery_wal_cleanup = FALSE;
+  for (const auto &event : recovery_recorder->events) {
+    assert_source_152_plain_lifecycle_event (event, database);
+    g_assert_true (event.error_class.empty ());
+    recovery_wal_open = recovery_wal_open || (event.path == wal.string ()
+        && event.operation == "open");
+    recovery_wal_read = recovery_wal_read || (event.path == wal.string ()
+        && (event.operation == "read" || event.operation == "read-at"));
+    if (event.path == wal.string () && event.operation == "try-remove"
+        && event.outcome == 1) {
+      recovery_wal_cleanup = TRUE;
+    }
+  }
+  g_assert_true (recovery_wal_open && recovery_wal_read);
+  g_assert_true (recovery_wal_cleanup);
+  assert_source_152_control_events (recovery_recorder->controls, 0, 1);
+  const ArtifactSet recovered = snapshot_artifacts (root);
+  g_assert_cmpuint (recovered.files.size (), ==, 1);
+  g_assert_cmpstr (recovered.files[0].first.c_str (), ==, "facts.duckdb");
+  g_assert_false (fs::exists (wal));
+  g_assert_false (fs::exists (database.string () + ".wal.checkpoint"));
+  g_assert_false (fs::exists (database.string () + ".wal.recovery"));
+  remove_tree (sandbox);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1540,6 +1810,8 @@ main (int argc, char **argv)
     return crash_writer_child (argv[2]);
   if (argc == 3 && g_strcmp0 (argv[1], "--hold-writer") == 0)
     return hold_writer_child (argv[2]);
+  if (argc == 3 && g_strcmp0 (argv[1], "--checkpoint-crash") == 0)
+    return checkpoint_crash_child (argv[2]);
   self_path = argv[0];
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/persistent-db",
@@ -1550,5 +1822,7 @@ main (int argc, char **argv)
       test_recording_filesystem_rw_writer_contention);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/explicit-checkpoint-discovery",
       test_recording_filesystem_explicit_checkpoint_discovery);
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/checkpoint-crash-phase-a",
+      test_recording_filesystem_checkpoint_crash_phase_a);
   return g_test_run ();
 }
