@@ -7,8 +7,8 @@
 
 #include <duckdb.hpp>
 
-static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.2",
-    "secure DuckDB bridge requires DuckDB v1.5.2 headers");
+static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5",
+    "secure DuckDB bridge requires DuckDB v1.5.5 headers");
 
 struct WylSecureDuckdbBridge
 {
@@ -22,7 +22,7 @@ bridge_query_health (WylSecureDuckdbBridge *self)
   if (self == nullptr)
     return WYRELOG_E_POLICY;
   if (self->connection == nullptr
-      || std::strcmp (duckdb_library_version (), "v1.5.2") != 0)
+      || std::strcmp (duckdb_library_version (), "v1.5.5") != 0)
     return WYRELOG_E_POLICY;
   try {
     auto result = self->connection->Query ("SELECT 1");

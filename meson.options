@@ -57,7 +57,7 @@ option('duckdb_source',
               + '"prebuilt" downloads the upstream-published library '
               + 'binary for the host platform (fast: ~30 MB download '
               + 'and zero compile). "subproject" downloads the '
-              + 'upstream amalgamated source release at v1.5.2 and '
+              + 'upstream amalgamated source release at v1.5.5 and '
               + 'compiles the single 25 MB duckdb.cpp translation unit '
               + 'in tree (slow: multi-minute single-TU compile). '
               + 'Default is prebuilt; main-branch CI runs the '

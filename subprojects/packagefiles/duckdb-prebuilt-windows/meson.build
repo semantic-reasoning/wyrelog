@@ -1,5 +1,5 @@
 project('duckdb-prebuilt-windows', 'c',
-  version : '1.5.2',
+  version : '1.5.5',
   license : 'MIT',
 )
 
