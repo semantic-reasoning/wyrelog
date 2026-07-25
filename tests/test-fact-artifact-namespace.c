@@ -1,15 +1,32 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #ifndef G_OS_WIN32
 #define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 #endif
 #include <glib.h>
 #include <glib/gstdio.h>
 #ifndef G_OS_WIN32
 #include <fcntl.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+
+#ifndef G_OS_WIN32
+static gchar *
+make_root (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *created = g_dir_make_tmp ("wyl-namespace-XXXXXX", &error);
+  g_assert_no_error (error);
+  g_assert_nonnull (created);
+  gchar *root = realpath (created, NULL);
+  g_assert_nonnull (root);
+  g_assert_cmpint (g_chmod (root, 0700), ==, 0);
+  return root;
+}
+#endif
 
 static void
 test_namespace (void)
@@ -22,7 +39,7 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &n), ==,
       WYRELOG_E_POLICY);
 #else
-  gchar *root = g_dir_make_tmp ("wyl-namespace-XXXXXX", NULL);
+  gchar *root = make_root ();
   g_assert_nonnull (root);
   g_assert_cmpint (wyl_fact_graph_resolver_open (root, &r), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_locator_init (&l, "tenant", "graph"), ==,
