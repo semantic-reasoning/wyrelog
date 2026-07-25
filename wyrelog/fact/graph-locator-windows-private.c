@@ -1643,6 +1643,32 @@ wyrelog_error_t
   return WYRELOG_E_POLICY;
 }
 
+/* Exact-name recovery is intentionally fail-closed on Windows until the
+ * native reparse-point, hard-link, and ACL identity contract is implemented.
+ * Keep the cross-platform symbols defined so callers cannot fall back to the
+ * random-name staging primitive by accident. */
+wyrelog_error_t
+wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
+    const gchar *operation_uuid, WylFactGraphStage *out_stage)
+{
+  if (out_stage != NULL)
+    *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  (void) directory;
+  (void) operation_uuid;
+  return out_stage == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
+    const gchar *operation_uuid, WylFactGraphStage *out_stage)
+{
+  if (out_stage != NULL)
+    *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  (void) directory;
+  (void) operation_uuid;
+  return out_stage == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
 wyrelog_error_t
 wyl_fact_graph_directory_stage_create (WylFactGraphDirectory *directory,
     const gchar *final_basename, WylFactGraphStage *out_stage)
