@@ -363,7 +363,7 @@ wyl_fact_artifact_namespace_open_temp (WylFactArtifactNamespace *n,
   g_autofree gchar *name = g_strdup_printf ("tmp-%s", token);
   gint flags = (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW;
   if (create)
-    flags |= O_CREAT;
+    flags |= O_CREAT | O_EXCL;
   gint fd = openat (n->fd, name, flags, 0600);
   if (fd < 0)
     return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;

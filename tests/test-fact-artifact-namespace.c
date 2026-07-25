@@ -40,6 +40,8 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "spill-1", TRUE,
           TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "spill-1", TRUE,
+          TRUE, &fd), ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "../escape", TRUE,
           TRUE, &fd), ==, WYRELOG_E_INVALID);
   g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path (&d);
