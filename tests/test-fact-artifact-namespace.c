@@ -1,8 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#ifndef G_OS_WIN32
+#define _POSIX_C_SOURCE 200809L
+#endif
 #include <glib.h>
 #include <glib/gstdio.h>
 #ifndef G_OS_WIN32
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 #include "fact/graph-artifact-namespace-private.h"
@@ -38,6 +42,23 @@ test_namespace (void)
   close (fd);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "../escape", TRUE,
           TRUE, &fd), ==, WYRELOG_E_INVALID);
+  g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path (&d);
+  g_autofree gchar *wal_path =
+      g_build_filename (graph_path, "facts.duckdb.wal", NULL);
+  g_assert_cmpint (mkdir (wal_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
+          WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (rmdir (wal_path), ==, 0);
+  g_assert_cmpint (symlink ("facts.duckdb", wal_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
+          WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_IO);
+  g_assert_cmpint (unlink (wal_path), ==, 0);
+  g_autofree gchar *main_path =
+      g_build_filename (graph_path, "facts.duckdb", NULL);
+  g_assert_cmpint (link (main_path, wal_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
+          WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlink (wal_path), ==, 0);
   g_assert_cmpint (wyl_fact_artifact_namespace_sync_directory (n), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
