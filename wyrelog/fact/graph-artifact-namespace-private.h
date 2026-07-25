@@ -33,5 +33,17 @@ wyrelog_error_t wyl_fact_artifact_namespace_sync
     (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_namespace_lock
     (WylFactArtifactNamespace * namespace_, gboolean exclusive, gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_namespace_bind_main
+    (WylFactArtifactNamespace * namespace_);
+wyrelog_error_t wyl_fact_artifact_namespace_revalidate_main
+    (WylFactArtifactNamespace * namespace_);
+wyrelog_error_t wyl_fact_artifact_namespace_open_temp
+    (WylFactArtifactNamespace * namespace_, const gchar * token,
+    gboolean create, gboolean writable, gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_namespace_rename
+    (WylFactArtifactNamespace * namespace_, WylFactArtifactName source,
+    WylFactArtifactName destination);
+wyrelog_error_t wyl_fact_artifact_namespace_sync_directory
+    (WylFactArtifactNamespace * namespace_);
 
 G_END_DECLS
