@@ -740,6 +740,13 @@ test_fact_graph_locator = executable('test-fact-graph-locator',
 
 test('fact-graph-locator', test_fact_graph_locator)
 
+test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
+  'test-fact-artifact-namespace.c',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('fact-artifact-namespace', test_fact_artifact_namespace)
+
 subprocess_test_env = environment()
 if host_machine.system() == 'windows'
   glib_genmarshal = glib_dep.get_variable(
