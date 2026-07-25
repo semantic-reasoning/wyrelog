@@ -3,6 +3,7 @@
 #define _POSIX_C_SOURCE 200809L
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#include <string.h>
 
 #ifdef G_OS_WIN32
 struct WylFactArtifactNamespace
@@ -224,6 +225,12 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
   gint fd = openat (n->fd, name_for (a), flags, 0600);
   if (fd < 0)
     return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  struct stat s;
+  if (fstat (fd, &s) != 0 || !S_ISREG (s.st_mode) || s.st_nlink != 1
+      || check (n) != WYRELOG_E_OK) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
   *o = fd;
   return WYRELOG_E_OK;
 }
