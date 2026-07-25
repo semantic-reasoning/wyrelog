@@ -48,6 +48,10 @@ test_namespace (void)
   g_assert_cmpint (mkdir (wal_path, 0700), ==, 0);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
           WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_namespace_unlink (n,
+          WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_namespace_rename (n,
+          WYL_FACT_ARTIFACT_MAIN, WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (rmdir (wal_path), ==, 0);
   g_assert_cmpint (symlink ("facts.duckdb", wal_path), ==, 0);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
@@ -58,6 +62,8 @@ test_namespace (void)
   g_assert_cmpint (link (main_path, wal_path), ==, 0);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
           WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_namespace_unlink (n,
+          WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (unlink (wal_path), ==, 0);
   g_assert_cmpint (wyl_fact_artifact_namespace_sync_directory (n), ==,
       WYRELOG_E_OK);
