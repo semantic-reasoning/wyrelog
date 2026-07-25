@@ -30,6 +30,16 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
           WYL_FACT_ARTIFACT_MAIN, TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
+  g_assert_cmpint (wyl_fact_artifact_namespace_bind_main (n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate_main (n), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "spill-1", TRUE,
+          TRUE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "../escape", TRUE,
+          TRUE, &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_namespace_sync_directory (n), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
           (WylFactArtifactName) 99, FALSE, FALSE, &fd), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_artifact_namespace_lock (n, TRUE, &fd), ==,
