@@ -233,7 +233,7 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
     return r;
   gint flags = (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW;
   if (create)
-    flags |= O_CREAT;
+    flags |= O_CREAT | O_EXCL;
   gint fd = openat (n->fd, name_for (a), flags, 0600);
   if (fd < 0)
     return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
@@ -287,11 +287,18 @@ wyl_fact_artifact_namespace_lock (WylFactArtifactNamespace *n, gboolean ex,
   wyrelog_error_t r =
       wyl_fact_artifact_namespace_open_file (n, WYL_FACT_ARTIFACT_LOCK, TRUE,
       TRUE, &fd);
+  if (r == WYRELOG_E_IO)
+    r = wyl_fact_artifact_namespace_open_file (n, WYL_FACT_ARTIFACT_LOCK,
+        FALSE, TRUE, &fd);
   if (r)
     return r;
   if (flock (fd, (ex ? LOCK_EX : LOCK_SH) | LOCK_NB)) {
     close (fd);
     return errno == EWOULDBLOCK ? WYRELOG_E_BUSY : WYRELOG_E_IO;
+  }
+  if (check (n) != WYRELOG_E_OK) {
+    close (fd);
+    return WYRELOG_E_POLICY;
   }
   *o = fd;
   return WYRELOG_E_OK;
