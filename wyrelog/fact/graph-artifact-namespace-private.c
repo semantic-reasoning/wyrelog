@@ -156,6 +156,18 @@ valid (WylFactArtifactName n)
 }
 
 static wyrelog_error_t
+named_regular (WylFactArtifactNamespace *n, const gchar *name,
+    gboolean allow_missing)
+{
+  struct stat s;
+  if (fstatat (n->fd, name, &s, AT_SYMLINK_NOFOLLOW) != 0)
+    return allow_missing && errno == ENOENT ? WYRELOG_E_OK :
+        (errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO);
+  return S_ISREG (s.st_mode) && s.st_nlink == 1 ? WYRELOG_E_OK :
+      WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
 check (WylFactArtifactNamespace *n)
 {
   struct stat s;
@@ -244,9 +256,11 @@ wyl_fact_artifact_namespace_unlink (WylFactArtifactNamespace *n,
   wyrelog_error_t r = check (n);
   if (r)
     return r;
+  r = named_regular (n, name_for (a), FALSE);
+  if (r != WYRELOG_E_OK)
+    return r;
   return unlinkat (n->fd, name_for (a),
-      0) == 0 ? WYRELOG_E_OK : (errno ==
-      ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO);
+      0) == 0 && check (n) == WYRELOG_E_OK ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
 wyrelog_error_t
@@ -364,6 +378,12 @@ wyl_fact_artifact_namespace_rename (WylFactArtifactNamespace *n,
     return WYRELOG_E_INVALID;
   if (check (n) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
+  wyrelog_error_t r = named_regular (n, name_for (source), FALSE);
+  if (r != WYRELOG_E_OK)
+    return r;
+  r = named_regular (n, name_for (destination), TRUE);
+  if (r != WYRELOG_E_OK)
+    return r;
   if (renameat (n->fd, name_for (source), n->fd, name_for (destination)) != 0)
     return WYRELOG_E_IO;
   return fsync (n->fd) == 0 && check (n) == WYRELOG_E_OK
