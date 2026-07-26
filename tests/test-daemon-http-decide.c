@@ -2887,6 +2887,8 @@ typedef struct
   GCond changed;
   SoupServer *server;
   const gchar *request_id;
+  const gchar *tenant_id;
+  gboolean tenant_mutation;
   gboolean acquired;
   gboolean release;
   wyrelog_error_t rc;
@@ -2908,9 +2910,13 @@ static gpointer
 compound_disable_thread (gpointer data)
 {
   CompoundDisableRace *race = data;
-  race->rc = wyl_daemon_http_disable_service_principal_for_test
-      (race->server, "svc:resolver:test", race->request_id,
-      compound_disable_after_write_acquired, race);
+  if (race->tenant_mutation)
+    race->rc = wyl_daemon_http_seal_tenant_for_test (race->server,
+        race->tenant_id, compound_disable_after_write_acquired, race);
+  else
+    race->rc = wyl_daemon_http_disable_service_principal_for_test
+        (race->server, "svc:resolver:test", race->request_id,
+        compound_disable_after_write_acquired, race);
   return NULL;
 }
 
@@ -3132,8 +3138,17 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
 
+  gboolean changed = FALSE;
+  if (!ok || wyl_daemon_http_service_registry_transition_for_test (server,
+          active.sid, active.jti, active.credential, 9,
+          "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
+      || !changed || !service_resolver_expect (server, &active,
+          active.token, FALSE))
+    return FALSE;
+
   g_auto (ServiceResolverFixture) pending = { 0 };
-  gboolean changed = TRUE;
+  changed = TRUE;
   if (!ok || !service_resolver_fixture_init (server, &pending,
           WYL_SERVICE_AUTH_PENDING, 0)
       || wyl_daemon_http_disable_service_principal_for_test (server,
@@ -3142,6 +3157,71 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
       || wyl_daemon_http_service_registry_transition_for_test (server,
           pending.sid, pending.jti, pending.credential, 9,
           "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
+      || changed || !service_resolver_expect (server, &pending,
+          pending.token, FALSE))
+    return FALSE;
+  return TRUE;
+}
+
+static gboolean
+check_compound_tenant_real_resolver_and_activation (SoupServer *server)
+{
+  const gchar *tenant = "tenant-compound";
+  if (wyl_daemon_http_configure_tenant_for_test (server, tenant, TRUE,
+          FALSE) != WYRELOG_E_OK)
+    return FALSE;
+  g_auto (ServiceResolverFixture) active = { 0 };
+  if (!service_resolver_fixture_init_tenant (server, &active,
+          WYL_SERVICE_AUTH_ACTIVE, 0, tenant)
+      || !service_resolver_expect (server, &active, active.token, TRUE))
+    return FALSE;
+  CompoundDisableRace race = {
+    .server = server,
+    .tenant_id = tenant,
+    .tenant_mutation = TRUE,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GThread) mutation = g_thread_new ("compound-tenant-seal",
+      compound_disable_thread, &race);
+  gboolean ok = compound_disable_wait_acquired (&race);
+  ServiceResolverCall later = {
+    .server = server,
+    .fixture = &active,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_autoptr (GThread) resolver = NULL;
+  if (ok) {
+    resolver = g_thread_new ("compound-tenant-later-resolver",
+        service_resolver_call_thread, &later);
+    ok = service_resolver_wait_reader_queued (server);
+  }
+  g_mutex_lock (&race.mutex);
+  race.release = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&mutation));
+  if (resolver != NULL)
+    g_thread_join (g_steal_pointer (&resolver));
+  ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL;
+  g_free (later.sid);
+  g_free (later.actor);
+  g_free (later.tenant);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+
+  g_auto (ServiceResolverFixture) pending = { 0 };
+  gboolean changed = TRUE;
+  if (!ok || !service_resolver_fixture_init_tenant (server, &pending,
+          WYL_SERVICE_AUTH_PENDING, 0, tenant)
+      || wyl_daemon_http_seal_tenant_for_test (server, tenant, NULL,
+          NULL) != WYRELOG_E_OK
+      || wyl_daemon_http_service_registry_transition_for_test (server,
+          pending.sid, pending.jti, pending.credential, 9,
+          "svc:resolver:test", tenant,
           WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
       || changed || !service_resolver_expect (server, &pending,
           pending.token, FALSE))
@@ -3901,8 +3981,10 @@ check_service_bearer_resolver_contract (SoupServer *server)
     return 2148;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
     return 2149;
-  if (!check_compound_disable_real_resolver_and_activation (server))
+  if (!check_compound_tenant_real_resolver_and_activation (server))
     return 2150;
+  if (!check_compound_disable_real_resolver_and_activation (server))
+    return 2151;
   return 0;
 }
 

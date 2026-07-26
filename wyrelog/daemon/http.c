@@ -1474,6 +1474,24 @@ wyl_daemon_http_get_handle_for_test (SoupServer *server)
   return ctx != NULL ? ctx->handle : NULL;
 }
 
+wyrelog_error_t
+wyl_daemon_http_seal_tenant_for_test (SoupServer *server,
+    const gchar *tenant_id, void (*after_write_acquired) (gpointer data),
+    gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_tenant_seal_runtime_t runtime = {
+    .registry = ctx->service_auth_registry,
+    .after_write_acquired = after_write_acquired,
+    .data = data,
+  };
+  gboolean changed = FALSE;
+  return wyl_tenant_set_sealed_with_runtime (ctx->handle, tenant_id, TRUE,
+      &runtime, &changed);
+}
+
 void
 wyl_daemon_http_set_service_resolver_checkpoint_for_test (SoupServer *server,
     WylDaemonServiceResolverCheckpoint checkpoint, gpointer data)

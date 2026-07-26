@@ -483,7 +483,7 @@ static void
 test_zero_survivor_global_corruption_matrix (void)
 {
   for (guint corruption = WYL_SERVICE_AUTH_CORRUPT_PRINCIPAL_MEMBER;
-      corruption <= WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER;
+      corruption <= WYL_SERVICE_AUTH_CORRUPT_OWNING_SESSION_LINK;
       corruption++) {
     WylServiceAuthRegistry *registry = new_registry ();
     WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);

@@ -235,6 +235,7 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistryWriteParticipant,
        WYL_SERVICE_AUTH_CORRUPT_JTI_INDEX,
        WYL_SERVICE_AUTH_CORRUPT_STATE,
        WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER,
+       WYL_SERVICE_AUTH_CORRUPT_OWNING_SESSION_LINK,
      } WylServiceAuthRegistryCorruption;
      gboolean wyl_service_auth_registry_check_invariants_for_test
          (WylServiceAuthRegistry *registry);
