@@ -122,6 +122,9 @@ test_mutation_leases (void)
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (writer,
           WYL_FACT_ARTIFACT_MAIN, TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (writer,
+          "reader-temp", TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (writer,
           WYL_FACT_ARTIFACT_LOCK), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_rename (writer,
@@ -132,8 +135,18 @@ test_mutation_leases (void)
       WYRELOG_E_POLICY);
   wyl_fact_artifact_mutation_lease_free (writer);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
+          WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_temp (n, "reader-temp",
+          FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard (n,
+          &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (reader_a,
           WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (reader_a,
+          "reader-temp", FALSE, TRUE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_mutation_lease_free (reader_a);
 
   /* A lease retains its namespace even when the caller releases its handle. */
   WylFactArtifactNamespace *lifetime = NULL;
