@@ -112,6 +112,39 @@ wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
 }
 
 wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_temp_binding (WylFactArtifactMutationLease
+    *l, const gchar *t, gboolean c, gboolean w, WylFactArtifactTempBinding **b,
+    gint *o)
+{
+  (void) l;
+  (void) t;
+  (void) c;
+  (void) w;
+  if (b)
+    *b = NULL;
+  if (o)
+    *o = -1;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_open (WylFactArtifactTempBinding *b,
+    gboolean w, gint *o)
+{
+  (void) b;
+  (void) w;
+  if (o)
+    *o = -1;
+  return closed ();
+}
+
+void
+wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *b)
+{
+  (void) b;
+}
+
+wyrelog_error_t
 wyl_fact_artifact_mutation_lease_unlink (WylFactArtifactMutationLease *l,
     WylFactArtifactName a)
 {
@@ -243,12 +276,21 @@ struct WylFactArtifactLockDomain
 };
 struct WylFactArtifactMutationLease
 {
+  gint references;
   WylFactArtifactNamespace *namespace_;
   GMutex mutex;
   gint lock_fd;
   guint64 directory_device, directory_inode;
   guint64 lock_device, lock_inode;
   gboolean exclusive;
+};
+struct WylFactArtifactTempBinding
+{
+  WylFactArtifactMutationLease *lease;
+  gchar *token;
+  gint pin_fd;
+  guint64 device, inode;
+  gboolean creator;
 };
 static const gchar *names[] =
     { "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
@@ -610,6 +652,7 @@ acquire_lease (WylFactArtifactNamespace *n, gboolean exclusive,
   }
   WylFactArtifactMutationLease *lease =
       g_new0 (WylFactArtifactMutationLease, 1);
+  lease->references = 1;
   lease->namespace_ = namespace_ref (n);
   g_mutex_init (&lease->mutex);
   lease->lock_fd = fd;
@@ -670,11 +713,20 @@ wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *l)
 {
   if (!l)
     return;
+  if (!g_atomic_int_dec_and_test (&l->references))
+    return;
   g_mutex_clear (&l->mutex);
   if (l->lock_fd >= 0)
     close (l->lock_fd);
   namespace_unref (l->namespace_);
   g_free (l);
+}
+
+static WylFactArtifactMutationLease *
+mutation_lease_ref (WylFactArtifactMutationLease *l)
+{
+  g_atomic_int_inc (&l->references);
+  return l;
 }
 
 wyrelog_error_t
@@ -949,6 +1001,127 @@ wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
     }
   }
   g_mutex_unlock (&l->mutex);
+  return r;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_open_temp_binding (WylFactArtifactMutationLease
+    *l, const gchar *token, gboolean create, gboolean writable,
+    WylFactArtifactTempBinding **out_binding, gint *out_fd)
+{
+  if (out_binding)
+    *out_binding = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (!l || !out_binding || !out_fd)
+    return WYRELOG_E_INVALID;
+  if (!l->exclusive && (create || writable))
+    return WYRELOG_E_POLICY;
+
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  if (r != WYRELOG_E_OK)
+    goto done;
+  r = open_temp_unchecked (l->namespace_, token, create, writable, out_fd);
+  if (r != WYRELOG_E_OK)
+    goto done;
+
+  struct stat s;
+  gint pin_fd = dup (*out_fd);
+  if (pin_fd < 0 || fcntl (pin_fd, F_SETFD, FD_CLOEXEC) != 0
+      || fstat (pin_fd, &s) != 0 || !S_ISREG (s.st_mode) || s.st_nlink != 1) {
+    if (pin_fd >= 0)
+      close (pin_fd);
+    r = WYRELOG_E_IO;
+    goto fail_fd;
+  }
+  WylFactArtifactTempBinding *binding = g_new0 (WylFactArtifactTempBinding, 1);
+  binding->token = g_strdup (token);
+  if (!binding->token) {
+    close (pin_fd);
+    g_free (binding);
+    r = WYRELOG_E_NOMEM;
+    goto fail_fd;
+  }
+  binding->lease = mutation_lease_ref (l);
+  binding->pin_fd = pin_fd;
+  binding->device = s.st_dev;
+  binding->inode = s.st_ino;
+  binding->creator = create;
+  if (create)
+    r = post_mutation_check_unlocked (l, WYRELOG_E_OK);
+  if (r != WYRELOG_E_OK) {
+    wyl_fact_artifact_temp_binding_free (binding);
+    goto fail_fd;
+  }
+  *out_binding = binding;
+  goto done;
+
+fail_fd:
+  close (*out_fd);
+  *out_fd = -1;
+done:
+  g_mutex_unlock (&l->mutex);
+  return r;
+}
+
+void
+wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *binding)
+{
+  if (!binding)
+    return;
+  if (binding->pin_fd >= 0)
+    close (binding->pin_fd);
+  wyl_fact_artifact_mutation_lease_free (binding->lease);
+  g_free (binding->token);
+  g_free (binding);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_open (WylFactArtifactTempBinding *binding,
+    gboolean writable, gint *out_fd)
+{
+  if (out_fd)
+    *out_fd = -1;
+  if (!binding || !out_fd)
+    return WYRELOG_E_INVALID;
+  if (!binding->creator || (writable && !binding->lease->exclusive))
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = binding->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  if (r != WYRELOG_E_OK)
+    goto done;
+  struct stat named, pinned;
+  g_autofree gchar *name = g_strdup_printf ("tmp-%s", binding->token);
+  if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) != 0
+      || !S_ISREG (named.st_mode) || named.st_nlink != 1
+      || (guint64) named.st_dev != binding->device
+      || (guint64) named.st_ino != binding->inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  gint flags = (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW;
+  gint fd = openat (lease->namespace_->fd, name, flags);
+  if (fd < 0) {
+    r = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+    goto done;
+  }
+  struct stat opened;
+  if (fstat (fd, &opened) != 0 || !S_ISREG (opened.st_mode)
+      || opened.st_nlink != 1 || (guint64) opened.st_dev != binding->device
+      || (guint64) opened.st_ino != binding->inode) {
+    close (fd);
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  *out_fd = fd;
+  r = WYRELOG_E_OK;
+done:
+  g_mutex_unlock (&lease->mutex);
   return r;
 }
 

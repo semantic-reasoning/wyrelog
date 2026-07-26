@@ -7,6 +7,7 @@
 
 G_BEGIN_DECLS typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
+typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
 
 /* Only these names are part of the authority.  Callers cannot supply a path. */
 typedef enum
@@ -66,6 +67,19 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp
     (WylFactArtifactMutationLease *, const gchar * token,
     gboolean create, gboolean writable, gint * out_fd);
+/* Binds tmp-<token> to the exact regular file opened through an existing
+ * lease.  The binding retains the lease until _free, so its directory/lock
+ * authority cannot disappear while later lifecycle operations use it.  The
+ * caller owns both the binding and out_fd. */
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp_binding
+    (WylFactArtifactMutationLease *, const gchar * token,
+    gboolean create, gboolean writable,
+    WylFactArtifactTempBinding ** out_binding, gint * out_fd);
+/* Reopens only the file identity captured by binding.  A non-creator binding
+ * is read-only even when it retained an exclusive lease. */
+wyrelog_error_t wyl_fact_artifact_temp_binding_open
+    (WylFactArtifactTempBinding *, gboolean writable, gint * out_fd);
+void wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
     (WylFactArtifactMutationLease *, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_rename
