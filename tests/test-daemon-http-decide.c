@@ -4110,6 +4110,18 @@ check_service_bearer_resolver_contract (SoupServer *server)
     if (!service_resolver_fixture_init (server, &fixture, state, 0)
         || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
       return 2120 + state;
+    /* A deliberately PENDING test tuple models an interrupted publication.
+     * It has served its resolver assertion; remove it so later real exchanges
+     * can correctly treat any remaining PENDING tuple as an invariant breach. */
+    if (state == WYL_SERVICE_AUTH_PENDING) {
+      gboolean removed_pending = FALSE;
+      if (wyl_daemon_http_service_registry_transition_for_test (server,
+              fixture.sid, fixture.jti, fixture.credential, 9,
+              "svc:resolver:test", "__wr_default",
+              WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &removed_pending)
+          != WYRELOG_E_OK || !removed_pending)
+        return 2123;
+    }
   }
   for (guint mismatch = 1; mismatch <= 6; mismatch++) {
     g_auto (ServiceResolverFixture) fixture = { 0 };
