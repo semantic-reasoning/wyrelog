@@ -778,21 +778,23 @@ wyl_service_credential_revoke_with_runtime (WylHandle *handle,
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
-  if (rc == WYRELOG_E_OK && runtime != NULL) {
-    mutation.invalidate_credential = runtime->invalidate_credential;
-    mutation.invalidation_data = runtime->invalidation_data;
-  }
+  if (rc == WYRELOG_E_OK && runtime != NULL)
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
   wyl_policy_service_credential_info_t stored = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_revoke_service_credential_core
         (mutation.transaction, mutation.store, credential_id,
         actor_subject_id, request_id, &stored);
-  if (rc == WYRELOG_E_OK && mutation.invalidate_credential != NULL
-      && stored.generation > 0) {
-    mutation.invalidation_credential_id = stored.credential_id;
-    mutation.invalidation_generation = stored.generation - 1;
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
+      && stored.generation > 1) {
+    rc = wyl_service_auth_selector_init_credential_generation
+        (&mutation.invalidation_selector, stored.credential_id,
+        stored.generation - 1);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK)
@@ -1305,18 +1307,15 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     wyl_service_credential_issue_result_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
-  if (runtime != NULL && runtime->invalidate_credential != NULL
+  if (runtime != NULL && runtime->registry != NULL
       && runtime->old_credential_generation == 0)
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
-  if (rc == WYRELOG_E_OK && runtime != NULL) {
-    mutation.invalidate_credential = runtime->invalidate_credential;
-    mutation.invalidation_data = runtime->invalidation_data;
-    mutation.invalidation_credential_id = old_credential_id;
-    mutation.invalidation_generation = runtime->old_credential_generation;
-  }
+  if (rc == WYRELOG_E_OK && runtime != NULL)
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
   wyl_policy_service_credential_info_t stored = { 0 };
+  WylPolicyServiceCredentialPredecessor predecessor = { 0 };
   wyl_service_credential_secret_t *secret = NULL;
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
@@ -1340,6 +1339,8 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_reconcile_operation_fence (&mutation,
         WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,
@@ -1352,7 +1353,13 @@ wyl_service_credential_rotate_with_runtime (WylHandle *handle,
         runtime != NULL ? runtime->data : NULL,
         runtime != NULL ? runtime->credential_runtime : NULL,
         runtime != NULL ? runtime->old_credential_generation : 0, cvk, cvk_len,
-        &stored, &secret);
+        &stored, &secret, &predecessor);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+    rc = wyl_service_auth_selector_init_credential_generation
+        (&mutation.invalidation_selector, predecessor.credential_id,
+        predecessor.generation);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
+  }
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK) {
     copy_credential (&stored, &out->credential);
@@ -1392,10 +1399,13 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_credential_info_t stored = { 0 };
+  WylPolicyServiceCredentialPredecessor predecessor = { 0 };
   wyl_policy_service_handoff_escrow_info_t escrow = { 0 };
   const guint8 *cvk = NULL;
   gsize cvk_len = 0;
   gboolean replay = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_authorize (&mutation, runtime->authorization,
         actor_subject_id);
@@ -1403,12 +1413,6 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
     rc = service_mutation_precheck_handoff_fence (&mutation,
         WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,
         old_credential_id, &replay);
-  if (rc == WYRELOG_E_OK && !replay) {
-    mutation.invalidate_credential = runtime->invalidate_credential;
-    mutation.invalidation_data = runtime->invalidation_data;
-    mutation.invalidation_credential_id = old_credential_id;
-    mutation.invalidation_generation = runtime->old_credential_generation;
-  }
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_materialize_service_cvk_existing (mutation.store,
         &cvk, &cvk_len);
@@ -1416,6 +1420,8 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK && !replay)
     rc = service_mutation_reconcile_operation_fence (&mutation,
         WYL_SERVICE_CREDENTIAL_FENCE_OP_ROTATE, request_id, NULL, NULL,
@@ -1428,7 +1434,13 @@ wyl_service_credential_rotate_handoff_checked_with_runtime (WylHandle *handle,
         actor_subject_id, request_id, new_expires_at_us, runtime->now_us,
         runtime->data, runtime->credential_runtime,
         runtime->old_credential_generation, cvk, cvk_len, &policy_handoff,
-        &stored, &escrow);
+        &stored, &escrow, &predecessor);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+    rc = wyl_service_auth_selector_init_credential_generation
+        (&mutation.invalidation_selector, predecessor.credential_id,
+        predecessor.generation);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
+  }
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK) {
     copy_credential (&stored, &out->credential);

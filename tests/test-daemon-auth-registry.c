@@ -494,8 +494,9 @@ test_zero_survivor_global_corruption_matrix (void)
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
         WYRELOG_E_OK);
     WylServiceAuthSelector selector = { 0 };
-    g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
-            first.principal), ==, WYRELOG_E_OK);
+    g_assert_cmpint
+        (wyl_service_auth_selector_init_credential_generation (&selector,
+            first.credential_id, first.generation), ==, WYRELOG_E_OK);
     g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry,
             &first, (WylServiceAuthRegistryCorruption) corruption));
     WylServiceAuthRevokeResult result = { 9, 9 };

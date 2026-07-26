@@ -136,10 +136,9 @@ typedef struct
   gint64 (*now_us) (gpointer data);
   const wyl_service_credential_runtime_t *credential_runtime;
   gpointer data;
-  /* Invoked after the authority commit and before lease release. */
-    wyrelog_error_t (*invalidate_credential) (gpointer data,
-      const gchar * credential_id, guint64 generation);
-  gpointer invalidation_data;
+  /* Borrowed for the complete call.  When non-NULL, retired-generation
+   * invalidation is compounded under the mutation's existing WRITE lease. */
+  WylServiceAuthRegistry *registry;
   /* The observed active generation used by the authoritative rotate CAS.
    * Zero preserves callers that have no externally observed generation. */
   guint64 old_credential_generation;
@@ -148,10 +147,8 @@ typedef struct
 
 typedef struct
 {
-  /* Invoked after the authority commit and before lease release. */
-  wyrelog_error_t (*invalidate_credential) (gpointer data,
-      const gchar * credential_id, guint64 generation);
-  gpointer invalidation_data;
+  /* Borrowed for the complete call. */
+  WylServiceAuthRegistry *registry;
 } wyl_service_credential_revoke_runtime_t;
 
 typedef struct
