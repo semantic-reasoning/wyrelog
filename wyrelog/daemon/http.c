@@ -325,6 +325,10 @@ typedef struct _WylDaemonHttpContext
   WylDaemonRefreshFault refresh_fault;
   WylDaemonServicePublicationFault service_publication_fault;
   gchar *last_service_publication_token;
+  WylSession *last_service_publication_session;
+  guint service_response_wipe_count;
+  gboolean service_response_last_canary_seen;
+  gboolean service_response_last_all_zero;
   GPtrArray *refresh_generated_ids;
   WylHumanRefreshTestLatch refresh_latch;
   /* Test-only escrow publication backend injection. When set, the service
@@ -335,6 +339,47 @@ typedef struct _WylDaemonHttpContext
   gpointer publication_override_data;
 #endif
 } WylDaemonHttpContext;
+
+typedef struct
+{
+  WylDaemonHttpContext *ctx;
+  gchar *text;
+  gsize len;
+} WylSensitiveServiceTokenResponse;
+
+static void
+    wyl_sensitive_service_token_response_free
+    (WylSensitiveServiceTokenResponse * response)
+{
+  if (response == NULL)
+    return;
+  if (response->text != NULL) {
+#ifdef WYL_TEST_DAEMON_HTTP
+    static const gchar canary[] = "{\"access_token\":";
+    gboolean canary_seen = response->len >= sizeof canary - 1
+        && memcmp (response->text, canary, sizeof canary - 1) == 0;
+#endif
+    sodium_memzero (response->text, response->len);
+#ifdef WYL_TEST_DAEMON_HTTP
+    gboolean all_zero = TRUE;
+    for (gsize i = 0; i < response->len; i++)
+      all_zero = all_zero && response->text[i] == '\0';
+    if (response->ctx != NULL) {
+      WylDaemonHttpContext *ctx = response->ctx;
+      g_mutex_lock (&ctx->lock);
+      ctx->service_response_wipe_count++;
+      ctx->service_response_last_canary_seen = canary_seen;
+      ctx->service_response_last_all_zero = all_zero;
+      g_mutex_unlock (&ctx->lock);
+    }
+#endif
+    g_free (response->text);
+  }
+  g_free (response);
+}
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylSensitiveServiceTokenResponse,
+    wyl_sensitive_service_token_response_free);
 
 typedef struct
 {
@@ -1866,6 +1911,44 @@ wyl_daemon_http_service_publication_counts_for_test (SoupServer *server,
   *out_access_tokens = g_hash_table_size (ctx->access_tokens_by_jti);
   g_mutex_unlock (&ctx->lock);
 }
+
+void
+wyl_daemon_http_service_response_wipe_snapshot_for_test (SoupServer *server,
+    guint *out_count, gboolean *out_canary_seen, gboolean *out_all_zero)
+{
+  if (out_count != NULL)
+    *out_count = 0;
+  if (out_canary_seen != NULL)
+    *out_canary_seen = FALSE;
+  if (out_all_zero != NULL)
+    *out_all_zero = FALSE;
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || out_count == NULL || out_canary_seen == NULL
+      || out_all_zero == NULL)
+    return;
+  g_mutex_lock (&ctx->lock);
+  *out_count = ctx->service_response_wipe_count;
+  *out_canary_seen = ctx->service_response_last_canary_seen;
+  *out_all_zero = ctx->service_response_last_all_zero;
+  g_mutex_unlock (&ctx->lock);
+}
+
+gboolean
+    wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
+    (SoupServer * server, const gchar * session_id)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || session_id == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  WylSession *current = g_hash_table_lookup (ctx->sessions_by_token,
+      session_id);
+  gboolean matches = current != NULL
+      && current == ctx->last_service_publication_session
+      && g_strcmp0 (current->service_subject_id, "svc:exchange:mutated") == 0;
+  g_mutex_unlock (&ctx->lock);
+  return matches;
+}
 #endif
 
 gboolean
@@ -2098,14 +2181,24 @@ build_login_json (const gchar *session_token, const gchar *username,
   return g_string_free (g_steal_pointer (&json), FALSE);
 }
 
-static gchar *
-build_service_token_json (const gchar *access_token)
+#ifdef WYL_HAS_AUDIT
+static WylSensitiveServiceTokenResponse *
+build_service_token_response (WylDaemonHttpContext *ctx,
+    const gchar *access_token)
 {
+  WylSensitiveServiceTokenResponse *response =
+      g_try_new0 (WylSensitiveServiceTokenResponse, 1);
+  if (response == NULL)
+    return NULL;
+  response->ctx = ctx;
   g_autoptr (GString) json = g_string_new ("{\"access_token\":");
   append_json_string (json, access_token);
   g_string_append_c (json, '}');
-  return g_string_free (g_steal_pointer (&json), FALSE);
+  response->text = g_string_free (g_steal_pointer (&json), FALSE);
+  response->len = strlen (response->text);
+  return response;
 }
+#endif
 
 #ifndef WYL_TEST_DAEMON_HTTP
 typedef struct
@@ -2254,6 +2347,9 @@ service_live_publication_insert (WylDaemonHttpContext *ctx,
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK) {
     *out_published_session = candidate->session_value;
+#ifdef WYL_TEST_DAEMON_HTTP
+    ctx->last_service_publication_session = candidate->session_value;
+#endif
     g_hash_table_insert (ctx->sessions_by_token,
         g_steal_pointer (&candidate->session_key),
         g_steal_pointer (&candidate->session_value));
@@ -2275,9 +2371,19 @@ service_live_publication_insert (WylDaemonHttpContext *ctx,
             WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH,
             FALSE)
         || service_publication_fault_is_locked (ctx,
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION,
+            FALSE)
+        || service_publication_fault_is_locked (ctx,
             WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH,
             FALSE))
       rc = WYRELOG_E_INTERNAL;
+    if (service_publication_fault_is_locked (ctx,
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION,
+            FALSE)) {
+      g_free ((*out_published_session)->service_subject_id);
+      (*out_published_session)->service_subject_id =
+          g_strdup ("svc:exchange:mutated");
+    }
 #endif
   }
   return service_publication_context_unlock (ctx, rc);
@@ -2292,7 +2398,8 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
   gpointer session_value = NULL;
   gpointer access_key = NULL;
   gpointer access_value = NULL;
-  gboolean exact = TRUE;
+  gboolean session_exact = TRUE;
+  gboolean access_exact = TRUE;
   if (service_publication_context_lock (ctx) != WYRELOG_E_OK)
     return FALSE;
   if (published_session != NULL) {
@@ -2304,10 +2411,11 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
 #else
     gboolean mismatch = FALSE;
 #endif
-    if (mismatch || current != published_session
-        || !g_hash_table_steal_extended (ctx->sessions_by_token,
-            view->session_id, &session_key, &session_value))
-      exact = FALSE;
+    session_exact = !mismatch && current == published_session
+        && wyl_session_matches_service_tuple_private (current,
+        view->session_id, view->jti, view->principal, view->tenant,
+        view->credential_id, view->generation, view->issued_at,
+        view->expires_at);
   }
   if (published_access != NULL) {
     WylAccessTokenState *current = g_hash_table_lookup
@@ -2318,11 +2426,21 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
 #else
     gboolean mismatch = FALSE;
 #endif
-    if (mismatch || current != published_access
-        || !service_access_state_matches_view (current, view)
-        || !g_hash_table_steal_extended (ctx->access_tokens_by_jti, view->jti,
-            &access_key, &access_value))
-      exact = FALSE;
+    access_exact = !mismatch && current == published_access
+        && service_access_state_matches_view (current, view);
+  }
+  gboolean exact = session_exact && access_exact;
+  if (exact && published_session != NULL
+      && !g_hash_table_steal_extended (ctx->sessions_by_token,
+          view->session_id, &session_key, &session_value))
+    exact = FALSE;
+  if (exact && published_access != NULL
+      && !g_hash_table_steal_extended (ctx->access_tokens_by_jti, view->jti,
+          &access_key, &access_value)) {
+    /* Both prechecks passed under the same lock. A failed second steal is an
+     * impossible hash-table invariant; keep the first stolen value alive
+     * outside the table and fail-stop the authority. */
+    exact = FALSE;
   }
   if (service_publication_context_unlock (ctx, WYRELOG_E_OK) != WYRELOG_E_OK)
     exact = FALSE;
@@ -2434,7 +2552,7 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
   g_auto (WylServiceLivePublicationCandidate) candidate = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = service_live_publication_candidate_prepare (&view, &candidate);
-  g_autofree gchar *response = NULL;
+  g_autoptr (WylSensitiveServiceTokenResponse) response = NULL;
 #ifdef WYL_TEST_DAEMON_HTTP
   if (rc == WYRELOG_E_OK) {
     g_autofree gchar *observed = g_strdup (view.access_token);
@@ -2455,7 +2573,7 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
   }
 #endif
   if (rc == WYRELOG_E_OK)
-    response = build_service_token_json (view.access_token);
+    response = build_service_token_response (ctx, view.access_token);
   if (rc == WYRELOG_E_OK && response == NULL)
     rc = WYRELOG_E_NOMEM;
   if (rc != WYRELOG_E_OK) {
@@ -2510,7 +2628,8 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
   if (response_lost)
     return WYRELOG_E_IO;
 #endif
-  *out_body = g_steal_pointer (&response);
+  *out_body = g_steal_pointer (&response->text);
+  response->len = 0;
   return WYRELOG_E_OK;
 }
 

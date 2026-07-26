@@ -155,3 +155,26 @@ wyl_session_get_service_expires_at_seconds_private (const WylSession *session)
   return WYL_IS_SESSION ((gpointer) session) ?
       session->service_expires_at_seconds : -1;
 }
+
+gboolean
+wyl_session_matches_service_tuple_private (const WylSession *session,
+    const gchar *session_id, const gchar *jti, const gchar *subject_id,
+    const gchar *tenant_id, const gchar *credential_id,
+    guint64 credential_generation, gint64 issued_at_seconds,
+    gint64 expires_at_seconds)
+{
+  gchar encoded[WYL_ID_STRING_BUF];
+  return WYL_IS_SESSION ((gpointer) session)
+      && session->state == WYL_SESSION_STATE_ACTIVE
+      && session->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      && session_id != NULL
+      && wyl_id_format (&session->id, encoded, sizeof encoded) == WYRELOG_E_OK
+      && strcmp (encoded, session_id) == 0
+      && g_strcmp0 (session->service_jti, jti) == 0
+      && g_strcmp0 (session->service_subject_id, subject_id) == 0
+      && g_strcmp0 (session->tenant, tenant_id) == 0
+      && g_strcmp0 (session->service_credential_id, credential_id) == 0
+      && session->service_credential_generation == credential_generation
+      && session->service_issued_at_seconds == issued_at_seconds
+      && session->service_expires_at_seconds == expires_at_seconds;
+}
