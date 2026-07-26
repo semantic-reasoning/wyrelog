@@ -870,6 +870,8 @@ entry_indexes_consistent_locked (WylServiceAuthRegistry *registry,
       && g_hash_table_contains (tenant->members, entry);
 }
 
+static gboolean registry_consistent_locked (WylServiceAuthRegistry * registry);
+
 /* Maintenance holds the service WRITE lease, so this bounded all-entry scan
  * is the invariant gate before it may retire even one due pair. */
 static gboolean
@@ -878,7 +880,7 @@ registry_maintenance_consistent_locked (WylServiceAuthRegistry *registry)
   gsize size = g_hash_table_size (registry->by_session);
 
   if (size > WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES
-      || (gsize) g_sequence_get_length (registry->by_expiry) != size)
+      || !registry_consistent_locked (registry))
     return FALSE;
   for (GSequenceIter * iter = g_sequence_get_begin_iter (registry->by_expiry);
       !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
@@ -1263,7 +1265,8 @@ wyl_service_auth_registry_remove_exact (WylServiceAuthRegistry *registry,
   /* Validate the complete immutable entry before mutating any one index.
    * Due cleanup calls this API with a snapshot; a malformed selector bucket
    * must therefore fail closed, with no partial removal. */
-  if (!entry_indexes_consistent_locked (registry, by_session)) {
+  if (!entry_indexes_consistent_locked (registry, by_session)
+      || !registry_consistent_locked (registry)) {
     g_mutex_unlock (&registry->mutex);
     return WYRELOG_E_POLICY;
   }
