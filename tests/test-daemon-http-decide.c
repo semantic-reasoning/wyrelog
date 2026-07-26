@@ -2387,11 +2387,16 @@ check_service_access_token_state_contract (SoupServer *server,
           &human_snapshot)
       || human_snapshot.auth_method != WYL_SESSION_AUTH_METHOD_HUMAN
       || human_snapshot.credential_id != NULL
-      || human_snapshot.credential_generation != 0) {
+      || human_snapshot.credential_generation != 0
+      || human_snapshot.issued_at != 100) {
     wyl_daemon_access_token_snapshot_clear (&human_snapshot);
     return 1959;
   }
   wyl_daemon_access_token_snapshot_clear (&human_snapshot);
+  if (wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
+          human_sid, "human-state", "tenant-state", 101, 500, NULL, NULL, 0,
+          499))
+    return 1963;
   if (wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
           human_sid, "human-state", "tenant-state", 100, 500,
           "service_credential", credential, 7, 499))
