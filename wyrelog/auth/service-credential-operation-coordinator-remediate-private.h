@@ -30,9 +30,7 @@ typedef struct
   GCancellable *cancellable;
   void (*after_authorization) (gpointer data);
   gpointer authorization_checkpoint_data;
-    wyrelog_error_t (*invalidate_credential) (gpointer data,
-      const gchar * credential_id, guint64 generation);
-  gpointer invalidation_data;
+  WylServiceAuthRegistry *registry;
 } WylServiceCredentialOperationHandoffRemediationRuntime;
 
 typedef struct

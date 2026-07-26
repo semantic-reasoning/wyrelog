@@ -20,11 +20,6 @@ typedef struct
   WylServiceAuthorityTransaction *transaction;
   WylServiceAuthorityCommitEvidence *evidence;
   gboolean owns_handle_pin;
-    wyrelog_error_t (*invalidate_credential) (gpointer data,
-      const gchar * credential_id, guint64 generation);
-  gpointer invalidation_data;
-  const gchar *invalidation_credential_id;
-  guint64 invalidation_generation;
   WylServiceAuthRegistryWriteParticipant *registry_participant;
   WylServiceAuthSelector invalidation_selector;
   gboolean has_invalidation_selector;
@@ -191,18 +186,6 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     }
     wyl_policy_store_service_authority_transaction_free (mutation->transaction);
     mutation->transaction = NULL;
-  }
-  if (outcome == SERVICE_MUTATION_COMMITTED
-      && mutation->invalidate_credential != NULL) {
-    wyrelog_error_t invalidate =
-        mutation->invalidate_credential (mutation->invalidation_data,
-        mutation->invalidation_credential_id,
-        mutation->invalidation_generation);
-    if (result == WYRELOG_E_OK)
-      result = invalidate;
-    if (invalidate != WYRELOG_E_OK && mutation->lease != NULL)
-      (void) wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
-          mutation->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
   }
   if (mutation->before_invalidation != NULL)
     mutation->before_invalidation (mutation->lease, mutation->fault_data);
@@ -1064,14 +1047,21 @@ wyl_service_credential_handoff_remediate_exact (WylHandle *handle,
   if (out_result != NULL)
     wyl_service_credential_handoff_remediation_result_clear (out_result);
   if (handle == NULL || input == NULL || runtime == NULL
+      || runtime->registry == NULL
       || runtime->authorization == NULL
       || runtime->authorization->authorize == NULL || out_result == NULL)
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
-  if (rc == WYRELOG_E_OK) {
-    mutation.invalidate_credential = runtime->invalidate_credential;
-    mutation.invalidation_data = runtime->invalidation_data;
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
+  if (rc == WYRELOG_E_OK
+      && input->action == WYL_SERVICE_HANDOFF_REMEDIATION_REVOKE_AND_WIPE) {
+    rc = wyl_service_auth_selector_init_credential_generation
+        (&mutation.invalidation_selector,
+        input->tuple.successor_credential_id,
+        input->tuple.successor_issuance_generation);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   WylPolicyServiceHandoffRemediationInput stored_input = {
     .remediation_request_id = input->remediation_request_id,
@@ -1105,14 +1095,18 @@ wyl_service_credential_handoff_remediate_exact (WylHandle *handle,
         input->current_actor_subject_id);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_remediate_service_handoff_exact_core
         (mutation.transaction, mutation.store, &stored_input, &stored);
-  if (rc == WYRELOG_E_OK && mutation.invalidate_credential != NULL
-      && stored.invalidation_generation > 0) {
-    mutation.invalidation_credential_id = input->tuple.successor_credential_id;
-    mutation.invalidation_generation = stored.invalidation_generation;
-  }
+  if (rc == WYRELOG_E_OK
+      && ((mutation.has_invalidation_selector
+              && stored.invalidation_generation !=
+              input->tuple.successor_issuance_generation)
+          || (!mutation.has_invalidation_selector
+              && stored.invalidation_generation != 0)))
+    rc = WYRELOG_E_POLICY;
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK) {
     out_result->replayed = stored.replayed;
@@ -1262,28 +1256,33 @@ wyl_service_credential_handoff_resolve_remediation (WylHandle *handle,
     wyl_service_credential_handoff_remediation_result_clear (out_result);
   if (handle == NULL || remediation_request_id == NULL
       || current_actor_subject_id == NULL || runtime == NULL
+      || runtime->registry == NULL
       || runtime->authorization == NULL
       || runtime->authorization->authorize == NULL || out_result == NULL)
     return WYRELOG_E_INVALID;
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   if (rc == WYRELOG_E_OK) {
-    mutation.invalidate_credential = runtime->invalidate_credential;
-    mutation.invalidation_data = runtime->invalidation_data;
-    rc = service_mutation_authorize (&mutation, runtime->authorization,
-        current_actor_subject_id);
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
+    if (rc == WYRELOG_E_OK)
+      rc = service_mutation_authorize (&mutation, runtime->authorization,
+          current_actor_subject_id);
   }
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
   WylPolicyServiceHandoffRemediationResult stored = { 0 };
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_resolve_service_handoff_remediation_core
         (mutation.transaction, mutation.store, remediation_request_id,
         current_actor_subject_id, &stored);
-  if (rc == WYRELOG_E_OK && mutation.invalidate_credential != NULL
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL
       && stored.invalidation_generation > 0) {
-    mutation.invalidation_credential_id = stored.successor_credential_id;
-    mutation.invalidation_generation = stored.invalidation_generation;
+    rc = wyl_service_auth_selector_init_credential_generation
+        (&mutation.invalidation_selector, stored.successor_credential_id,
+        stored.invalidation_generation);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
   }
   rc = service_mutation_finish (&mutation, rc);
   if (rc == WYRELOG_E_OK)

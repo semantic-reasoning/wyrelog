@@ -10,6 +10,22 @@ ROOT = Path(__file__).resolve().parents[1]
 HTTP = ROOT / "wyrelog" / "daemon" / "http.c"
 EXCHANGE = ROOT / "wyrelog" / "auth" / "service-exchange-private.c"
 HEADER = ROOT / "wyrelog" / "daemon" / "auth-registry-private.h"
+DOMAIN = ROOT / "wyrelog" / "auth" / "service-credential-domain.c"
+DOMAIN_HEADER = (
+    ROOT / "wyrelog" / "auth" / "service-credential-domain-private.h"
+)
+REMEDIATION_COORDINATOR = (
+    ROOT
+    / "wyrelog"
+    / "auth"
+    / "service-credential-operation-coordinator-remediate-private.c"
+)
+REMEDIATION_COORDINATOR_HEADER = (
+    ROOT
+    / "wyrelog"
+    / "auth"
+    / "service-credential-operation-coordinator-remediate-private.h"
+)
 
 
 def without_test_blocks(source: str) -> str:
@@ -65,6 +81,34 @@ def main() -> int:
     )
     if any(symbol not in header for symbol in required_header):
         print("typed coordination participant API is incomplete",
+              file=sys.stderr)
+        return 1
+    remediation_sources = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in (
+            DOMAIN,
+            DOMAIN_HEADER,
+            REMEDIATION_COORDINATOR,
+            REMEDIATION_COORDINATOR_HEADER,
+        )
+    )
+    legacy_remediation = (
+        "invalidate_credential",
+        "invalidation_data",
+    )
+    if any(symbol in remediation_sources for symbol in legacy_remediation):
+        print("legacy post-commit remediation callback remains",
+              file=sys.stderr)
+        return 1
+    required_remediation = (
+        "service_mutation_prepare_registry",
+        "service_mutation_prepare_commit_evidence",
+        "wyl_service_auth_selector_init_credential_generation",
+        "runtime->registry == NULL",
+        ".registry = runtime->registry",
+    )
+    if any(symbol not in remediation_sources for symbol in required_remediation):
+        print("handoff remediation is not registry capability-bound",
               file=sys.stderr)
         return 1
     return 0
