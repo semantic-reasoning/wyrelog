@@ -545,6 +545,8 @@ test_mutation_leases (void)
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (binding), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (binding, "next"), ==,
+      WYRELOG_E_POLICY);
 }
 #endif
 
@@ -599,6 +601,8 @@ test_namespace (void)
           &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (read_binding), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (read_binding,
+          "read-moved"), ==, WYRELOG_E_POLICY);
   wyl_fact_artifact_temp_binding_free (read_binding);
   WylFactArtifactTempBinding *unlink_binding = NULL;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
@@ -626,6 +630,57 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
           "unlink-fault", FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
   wyl_fact_artifact_temp_binding_free (fault_binding);
+  WylFactArtifactTempBinding *rename_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "rename-source", TRUE, TRUE, &rename_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_binding,
+          "rename-source"), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_binding,
+          "rename-destination"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (rename_binding, TRUE,
+          &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
+          "rename-source", FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (rename_binding), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (rename_binding);
+  WylFactArtifactTempBinding *overwrite_source = NULL;
+  WylFactArtifactTempBinding *overwrite_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "overwrite-source", TRUE, TRUE, &overwrite_source, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "overwrite-destination", TRUE, TRUE, &overwrite_destination, &fd),
+      ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (overwrite_source,
+          "overwrite-destination"), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (overwrite_source),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink
+      (overwrite_destination), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (overwrite_source);
+  wyl_fact_artifact_temp_binding_free (overwrite_destination);
+  WylFactArtifactTempBinding *rename_fault = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "rename-fault-source", TRUE, TRUE, &rename_fault, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_fault,
+          "rename-fault-destination"), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (rename_fault, FALSE,
+          &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
+          "rename-fault-source", FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (rename_fault), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (rename_fault);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,

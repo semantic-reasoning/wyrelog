@@ -26,6 +26,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC,
 } WylFactArtifactNamespaceTestFault;
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
@@ -85,6 +86,12 @@ wyrelog_error_t wyl_fact_artifact_temp_binding_open
  * post-mutation check reports an error. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_unlink
     (WylFactArtifactTempBinding *);
+/* Renames an owner binding only within its held namespace.  The destination
+ * must be a distinct valid temporary token and must not exist.  After a
+ * successful rename the binding names the destination even if durability or
+ * post-mutation validation reports an error. */
+wyrelog_error_t wyl_fact_artifact_temp_binding_rename
+    (WylFactArtifactTempBinding *, const gchar * destination_token);
 void wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
     (WylFactArtifactMutationLease *, WylFactArtifactName name);
