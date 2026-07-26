@@ -134,7 +134,8 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   if host_machine.system() == 'windows'
     wyrelog_sources += files('fact/secure-duckdb-bridge-windows-private.c')
   else
-    wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc')
+    wyrelog_sources += files('fact/secure-duckdb-bridge-private.cc',
+      'fact/secure-duckdb-file-handle-private.cc')
     wyrelog_override_options += 'cpp_std=c++17'
   endif
   wyrelog_c_args += '-DWYL_HAS_SECURE_DUCKDB_BRIDGE'
