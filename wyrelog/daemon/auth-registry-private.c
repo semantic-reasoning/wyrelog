@@ -1144,6 +1144,69 @@ gboolean
 
 #ifdef WYL_AUTH_REGISTRY_TESTING
 gboolean
+wyl_service_auth_registry_corrupt_for_test (WylServiceAuthRegistry *registry,
+    const WylServiceAuthReservation *reservation,
+    WylServiceAuthRegistryCorruption corruption)
+{
+  if (registry == NULL || !reservation_is_valid (reservation))
+    return FALSE;
+  g_mutex_lock (&registry->mutex);
+  ServiceAuthEntry *entry = g_hash_table_lookup (registry->by_session,
+      reservation->session_id);
+  gboolean changed = FALSE;
+  if (entry == NULL)
+    goto out;
+  ServiceAuthBucket credential_key = {
+    .selector = entry->reservation.credential_id,
+    .generation = entry->reservation.generation,
+  };
+  ServiceAuthBucket *bucket = NULL;
+  switch (corruption) {
+    case WYL_SERVICE_AUTH_CORRUPT_PRINCIPAL_MEMBER:
+      bucket = g_hash_table_lookup (registry->by_principal,
+          entry->reservation.principal);
+      changed = bucket != NULL && g_hash_table_remove (bucket->members, entry);
+      break;
+    case WYL_SERVICE_AUTH_CORRUPT_TENANT_MEMBER:
+      bucket = g_hash_table_lookup (registry->by_tenant,
+          entry->reservation.tenant);
+      changed = bucket != NULL && g_hash_table_remove (bucket->members, entry);
+      break;
+    case WYL_SERVICE_AUTH_CORRUPT_CREDENTIAL_MEMBER:
+      bucket = g_hash_table_lookup (registry->by_credential_generation,
+          &credential_key);
+      changed = bucket != NULL && g_hash_table_remove (bucket->members, entry);
+      break;
+    case WYL_SERVICE_AUTH_CORRUPT_JTI_INDEX:
+      changed = g_hash_table_remove (registry->by_jti, entry->reservation.jti);
+      break;
+    case WYL_SERVICE_AUTH_CORRUPT_STATE:
+      entry->state = (WylServiceAuthState) 99;
+      changed = TRUE;
+      break;
+    case WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER:{
+      GHashTableIter iter;
+      gpointer value;
+      g_hash_table_iter_init (&iter, registry->by_principal);
+      while (g_hash_table_iter_next (&iter, NULL, &value)) {
+        ServiceAuthBucket *candidate = value;
+        if (strcmp (candidate->selector, entry->reservation.principal) != 0) {
+          g_hash_table_insert (candidate->members, entry, entry);
+          changed = TRUE;
+          break;
+        }
+      }
+      break;
+    }
+    default:
+      break;
+  }
+out:
+  g_mutex_unlock (&registry->mutex);
+  return changed;
+}
+
+gboolean
     wyl_service_auth_registry_check_invariants_for_test
     (WylServiceAuthRegistry * registry) {
   if (registry == NULL)

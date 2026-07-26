@@ -227,6 +227,15 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistryWriteParticipant,
     wyl_service_auth_registry_write_participant_free)
 /* Test-only observations.  They never expose or mutate stored entries. */
 #ifdef WYL_AUTH_REGISTRY_TESTING
+     typedef enum
+     {
+       WYL_SERVICE_AUTH_CORRUPT_PRINCIPAL_MEMBER = 1,
+       WYL_SERVICE_AUTH_CORRUPT_TENANT_MEMBER,
+       WYL_SERVICE_AUTH_CORRUPT_CREDENTIAL_MEMBER,
+       WYL_SERVICE_AUTH_CORRUPT_JTI_INDEX,
+       WYL_SERVICE_AUTH_CORRUPT_STATE,
+       WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER,
+     } WylServiceAuthRegistryCorruption;
      gboolean wyl_service_auth_registry_check_invariants_for_test
          (WylServiceAuthRegistry *registry);
      gsize wyl_service_auth_registry_size_for_test
@@ -234,6 +243,10 @@ G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistryWriteParticipant,
      gboolean wyl_service_auth_registry_corrupt_selector_index_for_test
          (WylServiceAuthRegistry *registry,
     const WylServiceAuthSelector *selector);
+     gboolean wyl_service_auth_registry_corrupt_for_test
+         (WylServiceAuthRegistry *registry,
+    const WylServiceAuthReservation *reservation,
+    WylServiceAuthRegistryCorruption corruption);
 #endif
 
 G_END_DECLS;

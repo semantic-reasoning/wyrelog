@@ -479,6 +479,34 @@ test_zero_survivor_selector_and_corruption (void)
   wyl_service_auth_registry_unref (registry);
 }
 
+static void
+test_zero_survivor_global_corruption_matrix (void)
+{
+  for (guint corruption = WYL_SERVICE_AUTH_CORRUPT_PRINCIPAL_MEMBER;
+      corruption <= WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER;
+      corruption++) {
+    WylServiceAuthRegistry *registry = new_registry ();
+    WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
+    WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
+    second.principal = (gchar *) "svc:tenant-a:other";
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
+        WYRELOG_E_OK);
+    WylServiceAuthSelector selector = { 0 };
+    g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
+            first.principal), ==, WYRELOG_E_OK);
+    g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry,
+            &first, (WylServiceAuthRegistryCorruption) corruption));
+    WylServiceAuthRevokeResult result = { 9, 9 };
+    g_assert_cmpint
+        (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+            &selector, &result), ==, WYRELOG_E_POLICY);
+    assert_revoke_result (&result, 0, 0);
+    wyl_service_auth_registry_unref (registry);
+  }
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -1067,6 +1095,8 @@ main (int argc, char **argv)
       test_indexed_remove_ordering);
   g_test_add_func ("/daemon/auth-registry/zero-survivor-selector-corruption",
       test_zero_survivor_selector_and_corruption);
+  g_test_add_func ("/daemon/auth-registry/zero-survivor-corruption-matrix",
+      test_zero_survivor_global_corruption_matrix);
   g_test_add_func ("/daemon/auth-registry/allocation-cleanup",
       test_allocation_failures_and_cleanup);
   g_test_add_func ("/daemon/auth-registry/counted-clear-reuse",
