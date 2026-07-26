@@ -235,6 +235,9 @@ void wyl_service_auth_registry_maintenance_participant_free
     (WylServiceAuthRegistryMaintenanceParticipant * participant);
 wyrelog_error_t wyl_service_auth_registry_maintenance_participant_clear
     (WylServiceAuthRegistryMaintenanceParticipant * participant);
+wyrelog_error_t wyl_service_auth_registry_maintenance_participant_remove_exact
+    (WylServiceAuthRegistryMaintenanceParticipant * participant,
+    const WylServiceAuthReservation * reservation, gboolean * out_removed);
 
 wyrelog_error_t wyl_service_auth_registry_lookup
     (WylServiceAuthRegistry * registry, const gchar * session_id,
