@@ -5198,6 +5198,98 @@ send_raw_service_principal_full (SoupSession *session, const gchar *method,
   return 0;
 }
 
+#ifdef WYL_HAS_AUDIT
+typedef enum
+{
+  ACTUAL_ROUTE_DISABLE_PRINCIPAL,
+  ACTUAL_ROUTE_SEAL_TENANT,
+} ActualRetirementRoute;
+
+typedef struct
+{
+  ActualRetirementRoute route;
+  const gchar *base_url;
+  const gchar *path;
+  const gchar *query;
+  gint rc;
+  guint status;
+  gchar *body;
+} ActualRouteCall;
+
+static gpointer
+actual_route_call_thread (gpointer data)
+{
+  ActualRouteCall *call = data;
+  g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
+  if (call->route == ACTUAL_ROUTE_DISABLE_PRINCIPAL)
+    call->rc = send_raw_service_principal_full (session, "POST",
+        call->base_url, call->path, call->query, NULL, &call->status,
+        &call->body);
+  else
+    call->rc = send_raw_policy_mutation (session, "POST", call->base_url,
+        call->path, call->query, &call->status, &call->body);
+  return NULL;
+}
+
+static gboolean
+actual_http_route_retirement_race (SoupServer *server, const gchar *base_url,
+    const gchar *path, const gchar *query, ActualRetirementRoute route,
+    const ActualServiceTokens *tokens, const gchar *subject,
+    const gchar *tenant)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  WylServiceAuthReadLease *held = NULL;
+  if (handle == NULL || tokens == NULL
+      || wyl_service_auth_authority_acquire_read
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &held) != WYRELOG_E_OK)
+    return FALSE;
+  ActualRouteCall call = {
+    .route = route,
+    .base_url = base_url,
+    .path = path,
+    .query = query,
+    .rc = -1,
+  };
+  g_autoptr (GThread) mutation = g_thread_new ("actual-http-retirement",
+      actual_route_call_thread, &call);
+  gboolean ok = service_resolver_wait_writer_queued (server);
+  ServiceResolverCall later = {
+    .server = server,
+    .token = tokens->token_a,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_autoptr (GThread) resolver = NULL;
+  if (ok) {
+    resolver = g_thread_new ("actual-http-later-resolver",
+        service_resolver_call_thread, &later);
+    ok = service_resolver_wait_writer_and_reader (server);
+  }
+  wyrelog_error_t release_rc = wyl_service_auth_read_lease_release (held);
+  wyl_service_auth_read_lease_free (held);
+  if (mutation != NULL)
+    g_thread_join (g_steal_pointer (&mutation));
+  if (resolver != NULL)
+    g_thread_join (g_steal_pointer (&resolver));
+  ok = ok && release_rc == WYRELOG_E_OK && call.rc == 0 && call.status == 200
+      && call.body != NULL
+      && (route == ACTUAL_ROUTE_DISABLE_PRINCIPAL
+      ? strstr (call.body, "\"state\":\"disabled\"") != NULL
+      : strstr (call.body, "\"changed\":true") != NULL)
+      && later.rc == WYRELOG_E_POLICY
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL
+      && actual_service_token_expect (server, tokens->token_a, subject, tenant,
+      FALSE)
+      && actual_service_token_expect (server, tokens->token_b, subject, tenant,
+      FALSE);
+  g_free (later.sid);
+  g_free (later.actor);
+  g_free (later.tenant);
+  g_free (call.body);
+  return ok;
+}
+#endif
+
 #ifdef WYL_HAS_FACT_STORE
 static gint
 send_raw_reconcile_full (SoupSession *session, const gchar *method,
@@ -8143,6 +8235,10 @@ check_service_principal_management_contract (void)
   guint issue_commit_calls = 0;
   guint rotate_stage_calls = 0;
   guint rotate_commit_calls = 0;
+#ifdef WYL_HAS_AUDIT
+  g_auto (ActualServiceTokens) principal_route_tokens = { 0 };
+  g_auto (ActualServiceTokens) tenant_route_tokens = { 0 };
+#endif
   const gchar *create_body =
       "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"Worker\"}";
   gint rc = 0;
@@ -8263,6 +8359,12 @@ check_service_principal_management_contract (void)
           session_token) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (policy_store,
           "human-principal-admin", "wr.service_credential.manage",
+          session_token, "armed") != WYRELOG_E_OK
+      || wyl_policy_store_grant_direct_permission (policy_store,
+          "human-principal-admin", "wr.tenant.manage",
+          session_token) != WYRELOG_E_OK
+      || wyl_policy_store_set_permission_state (policy_store,
+          "human-principal-admin", "wr.tenant.manage",
           session_token, "armed") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
     rc = 1989;
@@ -8681,6 +8783,44 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
 
+#ifdef WYL_HAS_AUDIT
+  if (!actual_service_tokens_init (http.server, "svc:tenant-a:worker",
+          "tenant-a", "http-route-disable-token", &principal_route_tokens)) {
+    rc = 2160;
+    goto cleanup;
+  }
+  tenant_created = FALSE;
+  wyl_service_principal_t tenant_route_principal = { 0 };
+  if (wyl_policy_store_create_tenant (policy_store, "tenant-route",
+          &tenant_created) != WYRELOG_E_OK || !tenant_created
+      || wyl_service_principal_create (handle, "svc:tenant-route:worker",
+          "Tenant route worker", "human-principal-admin",
+          "http-route-tenant-principal",
+          &tenant_route_principal) != WYRELOG_E_OK
+      || !actual_service_tokens_init (http.server,
+          "svc:tenant-route:worker", "tenant-route",
+          "http-route-tenant-token", &tenant_route_tokens)) {
+    wyl_service_principal_clear (&tenant_route_principal);
+    rc = 2161;
+    goto cleanup;
+  }
+  wyl_service_principal_clear (&tenant_route_principal);
+  g_autofree gchar *tenant_route_query = g_strdup_printf
+      ("name=tenant-route&%s", query);
+  if (!actual_http_route_retirement_race (http.server, base_url,
+          "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
+          &tenant_route_tokens, "svc:tenant-route:worker", "tenant-route")) {
+    rc = 2162;
+    goto cleanup;
+  }
+  if (!actual_http_route_retirement_race (http.server, base_url,
+          "/service-principals/svc:tenant-a:worker/disable", query,
+          ACTUAL_ROUTE_DISABLE_PRINCIPAL, &principal_route_tokens,
+          "svc:tenant-a:worker", "tenant-a")) {
+    rc = 2163;
+    goto cleanup;
+  }
+#else
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "POST", base_url,
           "/service-principals/svc:tenant-a:worker/disable", query,
@@ -8693,6 +8833,7 @@ check_service_principal_management_contract (void)
     rc = 1982;
     goto cleanup;
   }
+#endif
 
   g_clear_pointer (&body, g_free);
   if (send_raw_service_principal_full (session, "GET", base_url,
