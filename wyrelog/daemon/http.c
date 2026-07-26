@@ -1513,11 +1513,26 @@ wyl_daemon_http_revoke_service_credential_for_test (SoupServer *server,
   return rc;
 }
 
-WylServiceAuthRegistry *
-wyl_daemon_http_get_service_registry_for_test (SoupServer *server)
+wyrelog_error_t
+wyl_daemon_http_rotate_service_credential_for_test (SoupServer *server,
+    const gchar *credential_id, guint64 credential_generation,
+    const gchar *request_id,
+    void (*after_write_acquired) (gpointer data), gpointer data)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
-  return ctx != NULL ? ctx->service_auth_registry : NULL;
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_service_credential_rotate_runtime_t runtime = {
+    .registry = ctx->service_auth_registry,
+    .after_write_acquired = after_write_acquired,
+    .data = data,
+    .old_credential_generation = credential_generation,
+  };
+  wyl_service_credential_issue_result_t rotated = { 0 };
+  wyrelog_error_t rc = wyl_service_credential_rotate_with_runtime
+      (ctx->handle, credential_id, "admin", request_id, 0, &runtime, &rotated);
+  wyl_service_credential_issue_result_clear (&rotated);
+  return rc;
 }
 
 void

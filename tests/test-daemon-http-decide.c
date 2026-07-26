@@ -2902,6 +2902,73 @@ typedef struct
   gchar *tenant;
 } ServiceResolverRace;
 
+#ifdef WYL_HAS_AUDIT
+typedef struct
+{
+  wyl_service_credential_issue_result_t issued;
+  gchar *token_a;
+  gchar *token_b;
+} ActualServiceTokens;
+
+static void
+actual_service_tokens_clear (ActualServiceTokens *tokens)
+{
+  if (tokens == NULL)
+    return;
+  wyl_service_credential_issue_result_clear (&tokens->issued);
+  g_clear_pointer (&tokens->token_a, g_free);
+  g_clear_pointer (&tokens->token_b, g_free);
+}
+
+G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ActualServiceTokens,
+    actual_service_tokens_clear);
+
+static gboolean
+actual_service_tokens_init (SoupServer *server, const gchar *subject,
+    const gchar *tenant, const gchar *request_id, ActualServiceTokens *tokens)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  if (handle == NULL || tokens == NULL
+      || wyl_service_credential_issue (handle, subject, tenant, "admin",
+          request_id, 0, &tokens->issued) != WYRELOG_E_OK)
+    return FALSE;
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (tokens->issued.secret, &secret_len);
+  g_autofree gchar *body_a = NULL;
+  g_autofree gchar *body_b = NULL;
+  if (secret == NULL || secret_len == 0
+      || wyl_daemon_http_publish_service_token_for_test (server,
+          tokens->issued.credential.credential_id, secret, secret_len,
+          &body_a) != WYRELOG_E_OK
+      || wyl_daemon_http_publish_service_token_for_test (server,
+          tokens->issued.credential.credential_id, secret, secret_len,
+          &body_b) != WYRELOG_E_OK)
+    return FALSE;
+  tokens->token_a = extract_json_string (body_a, "access_token");
+  tokens->token_b = extract_json_string (body_b, "access_token");
+  return tokens->token_a != NULL && tokens->token_b != NULL
+      && g_strcmp0 (tokens->token_a, tokens->token_b) != 0;
+}
+
+static gboolean
+actual_service_token_expect (SoupServer *server, const gchar *token,
+    const gchar *subject, const gchar *tenant, gboolean success)
+{
+  g_autofree gchar *sid = NULL;
+  g_autofree gchar *actor = NULL;
+  g_autofree gchar *resolved_tenant = NULL;
+  wyrelog_error_t rc = wyl_daemon_http_resolve_bearer_for_test (server, token,
+      &sid, &actor, &resolved_tenant);
+  if (!success)
+    return rc == WYRELOG_E_POLICY && sid == NULL && actor == NULL
+        && resolved_tenant == NULL;
+  return rc == WYRELOG_E_OK && sid != NULL
+      && g_strcmp0 (actor, subject) == 0
+      && g_strcmp0 (resolved_tenant, tenant) == 0;
+}
+#endif
+
 typedef struct
 {
   GMutex mutex;
@@ -2935,17 +3002,9 @@ compound_disable_thread (gpointer data)
 {
   CompoundDisableRace *race = data;
   if (race->credential_id != NULL && race->credential_rotate) {
-    wyl_service_credential_rotate_runtime_t runtime = {
-      .registry = wyl_daemon_http_get_service_registry_for_test (race->server),
-      .after_write_acquired = compound_disable_after_write_acquired,
-      .data = race,
-      .old_credential_generation = race->credential_generation,
-    };
-    wyl_service_credential_issue_result_t rotated = { 0 };
-    race->rc = wyl_service_credential_rotate_with_runtime
-        (wyl_daemon_http_get_handle_for_test (race->server),
-        race->credential_id, "admin", race->request_id, 0, &runtime, &rotated);
-    wyl_service_credential_issue_result_clear (&rotated);
+    race->rc = wyl_daemon_http_rotate_service_credential_for_test
+        (race->server, race->credential_id, race->credential_generation,
+        race->request_id, compound_disable_after_write_acquired, race);
   } else if (race->credential_id != NULL)
     race->rc = wyl_daemon_http_revoke_service_credential_for_test
         (race->server, race->credential_id, race->request_id,
@@ -3118,7 +3177,7 @@ compound_disable_wait_acquired (CompoundDisableRace *race)
 typedef struct
 {
   SoupServer *server;
-  const ServiceResolverFixture *fixture;
+  const gchar *token;
   wyrelog_error_t rc;
   gchar *sid;
   gchar *actor;
@@ -3130,17 +3189,21 @@ service_resolver_call_thread (gpointer data)
 {
   ServiceResolverCall *call = data;
   call->rc = wyl_daemon_http_resolve_bearer_for_test (call->server,
-      call->fixture->token, &call->sid, &call->actor, &call->tenant);
+      call->token, &call->sid, &call->actor, &call->tenant);
   return NULL;
 }
 
+#ifdef WYL_HAS_AUDIT
 static gboolean
 check_compound_disable_real_resolver_and_activation (SoupServer *server)
 {
-  g_auto (ServiceResolverFixture) active = { 0 };
-  if (!service_resolver_fixture_init (server, &active,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
-      || !service_resolver_expect (server, &active, active.token, TRUE))
+  g_auto (ActualServiceTokens) active = { 0 };
+  if (!actual_service_tokens_init (server, "svc:resolver:test",
+          "__wr_default", "resolver-compound-disable-credential", &active)
+      || !actual_service_token_expect (server, active.token_a,
+          "svc:resolver:test", "__wr_default", TRUE)
+      || !actual_service_token_expect (server, active.token_b,
+          "svc:resolver:test", "__wr_default", TRUE))
     return FALSE;
   CompoundDisableRace race = {
     .server = server,
@@ -3154,7 +3217,7 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   gboolean ok = compound_disable_wait_acquired (&race);
   ServiceResolverCall later = {
     .server = server,
-    .fixture = &active,
+    .token = active.token_a,
     .rc = WYRELOG_E_INTERNAL,
   };
   g_autoptr (GThread) resolver = NULL;
@@ -3171,24 +3234,19 @@ check_compound_disable_real_resolver_and_activation (SoupServer *server)
   if (resolver != NULL)
     g_thread_join (g_steal_pointer (&resolver));
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
-      && later.sid == NULL && later.actor == NULL && later.tenant == NULL;
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL
+      && actual_service_token_expect (server, active.token_a,
+      "svc:resolver:test", "__wr_default", FALSE)
+      && actual_service_token_expect (server, active.token_b,
+      "svc:resolver:test", "__wr_default", FALSE);
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
 
-  gboolean changed = FALSE;
-  if (!ok || wyl_daemon_http_service_registry_transition_for_test (server,
-          active.sid, active.jti, active.credential, 9,
-          "svc:resolver:test", "__wr_default",
-          WYL_DAEMON_SERVICE_REGISTRY_REMOVE, &changed) != WYRELOG_E_OK
-      || !changed || !service_resolver_expect (server, &active,
-          active.token, FALSE))
-    return FALSE;
-
   g_auto (ServiceResolverFixture) pending = { 0 };
-  changed = TRUE;
+  gboolean changed = TRUE;
   if (!ok || !service_resolver_fixture_init (server, &pending,
           WYL_SERVICE_AUTH_PENDING, 0)
       || wyl_daemon_http_disable_service_principal_for_test (server,
@@ -3211,10 +3269,13 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   if (wyl_daemon_http_configure_tenant_for_test (server, tenant, TRUE,
           FALSE) != WYRELOG_E_OK)
     return FALSE;
-  g_auto (ServiceResolverFixture) active = { 0 };
-  if (!service_resolver_fixture_init_tenant (server, &active,
-          WYL_SERVICE_AUTH_ACTIVE, 0, tenant)
-      || !service_resolver_expect (server, &active, active.token, TRUE))
+  g_auto (ActualServiceTokens) active = { 0 };
+  if (!actual_service_tokens_init (server, "svc:resolver:test", tenant,
+          "resolver-compound-tenant-credential", &active)
+      || !actual_service_token_expect (server, active.token_a,
+          "svc:resolver:test", tenant, TRUE)
+      || !actual_service_token_expect (server, active.token_b,
+          "svc:resolver:test", tenant, TRUE))
     return FALSE;
   CompoundDisableRace race = {
     .server = server,
@@ -3229,7 +3290,7 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   gboolean ok = compound_disable_wait_acquired (&race);
   ServiceResolverCall later = {
     .server = server,
-    .fixture = &active,
+    .token = active.token_a,
     .rc = WYRELOG_E_INTERNAL,
   };
   g_autoptr (GThread) resolver = NULL;
@@ -3246,7 +3307,11 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   if (resolver != NULL)
     g_thread_join (g_steal_pointer (&resolver));
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
-      && later.sid == NULL && later.actor == NULL && later.tenant == NULL;
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL
+      && actual_service_token_expect (server, active.token_a,
+      "svc:resolver:test", tenant, FALSE)
+      && actual_service_token_expect (server, active.token_b,
+      "svc:resolver:test", tenant, FALSE);
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
@@ -3273,29 +3338,27 @@ static gboolean
 check_compound_credential_real_resolver_operation (SoupServer *server,
     gboolean rotate)
 {
-  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
-  wyl_service_credential_issue_result_t issued = { 0 };
-  if (handle == NULL
-      || wyl_service_credential_issue (handle, "svc:resolver:test",
-          "__wr_default", "admin",
-          rotate ? "resolver-credential-rotate-issue" :
-          "resolver-credential-revoke-issue", 0, &issued) != WYRELOG_E_OK)
+  g_auto (ActualServiceTokens) active = { 0 };
+  if (!actual_service_tokens_init (server, "svc:resolver:test",
+          "__wr_default", rotate ? "resolver-credential-rotate-issue" :
+          "resolver-credential-revoke-issue", &active)
+      || !actual_service_token_expect (server, active.token_a,
+          "svc:resolver:test", "__wr_default", TRUE)
+      || !actual_service_token_expect (server, active.token_b,
+          "svc:resolver:test", "__wr_default", TRUE))
     return FALSE;
-  g_auto (ServiceResolverFixture) active = { 0 };
-  gboolean ok = service_resolver_fixture_init_tenant_credential (server,
-      &active, WYL_SERVICE_AUTH_ACTIVE, 0, "__wr_default",
-      issued.credential.credential_id, issued.credential.generation)
-      && service_resolver_expect (server, &active, active.token, TRUE);
+  gboolean ok = TRUE;
   g_auto (ServiceResolverFixture) pending = { 0 };
   ok = ok && service_resolver_fixture_init_tenant_credential (server,
       &pending, WYL_SERVICE_AUTH_PENDING, 0, "__wr_default",
-      issued.credential.credential_id, issued.credential.generation);
+      active.issued.credential.credential_id,
+      active.issued.credential.generation);
   CompoundDisableRace race = {
     .server = server,
     .request_id = rotate ? "resolver-credential-rotate" :
         "resolver-credential-revoke",
-    .credential_id = issued.credential.credential_id,
-    .credential_generation = issued.credential.generation,
+    .credential_id = active.issued.credential.credential_id,
+    .credential_generation = active.issued.credential.generation,
     .credential_rotate = rotate,
     .rc = WYRELOG_E_INTERNAL,
   };
@@ -3304,7 +3367,7 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
   g_autoptr (GThread) mutation = NULL;
   ServiceResolverCall later = {
     .server = server,
-    .fixture = &active,
+    .token = active.token_a,
     .rc = WYRELOG_E_INTERNAL,
   };
   g_autoptr (GThread) resolver = NULL;
@@ -3327,12 +3390,16 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
   if (resolver != NULL)
     g_thread_join (g_steal_pointer (&resolver));
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
-      && later.sid == NULL && later.actor == NULL && later.tenant == NULL;
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL
+      && actual_service_token_expect (server, active.token_a,
+      "svc:resolver:test", "__wr_default", FALSE)
+      && actual_service_token_expect (server, active.token_b,
+      "svc:resolver:test", "__wr_default", FALSE);
   gboolean changed = TRUE;
   ok = ok
       && wyl_daemon_http_service_registry_transition_for_test (server,
       pending.sid, pending.jti, pending.credential,
-      issued.credential.generation, "svc:resolver:test", "__wr_default",
+      active.issued.credential.generation, "svc:resolver:test", "__wr_default",
       WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) == WYRELOG_E_POLICY
       && !changed
       && service_resolver_expect (server, &pending, pending.token, FALSE);
@@ -3341,7 +3408,6 @@ check_compound_credential_real_resolver_operation (SoupServer *server,
   g_free (later.tenant);
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
-  wyl_service_credential_issue_result_clear (&issued);
   return ok;
 }
 
@@ -3351,6 +3417,7 @@ check_compound_credential_real_resolver (SoupServer *server)
   return check_compound_credential_real_resolver_operation (server, FALSE)
       && check_compound_credential_real_resolver_operation (server, TRUE);
 }
+#endif
 
 static gboolean
 service_resolver_wait_writer_queued (SoupServer *server)
@@ -3570,7 +3637,7 @@ check_service_resolver_writer_preference (SoupServer *server,
     .mutation_rc = WYRELOG_E_INTERNAL,
   };
   ServiceResolverCall later = {
-    .server = server,.fixture = fixture,.rc = WYRELOG_E_INTERNAL,
+    .server = server,.token = fixture->token,.rc = WYRELOG_E_INTERNAL,
   };
   g_mutex_init (&race.mutex);
   g_cond_init (&race.changed);
@@ -3777,7 +3844,7 @@ check_service_resolver_prelatched_unavailable (void)
       || !wyl_daemon_http_seed_human_session_for_test (server, sid,
           "human-after-latch", "__wr_default")
       || !wyl_daemon_http_store_human_access_token_for_test (server, jti, sid,
-          "human-after-latch", "__wr_default", key_id, now + 300)
+          "human-after-latch", "__wr_default", key_id, now, now + 300)
       || wyl_daemon_http_copy_access_token_secret (server, secret,
           sizeof secret) != WYRELOG_E_OK)
     return FALSE;
@@ -4104,16 +4171,18 @@ check_service_bearer_resolver_contract (SoupServer *server)
     return 2148;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
     return 2149;
-#if !defined(WYL_TEST_VARIANT_SERVICE)
+#if defined(WYL_HAS_AUDIT) && !defined(WYL_TEST_VARIANT_SERVICE)
   /* The service variant deliberately forbids plaintext credential issuance
    * and covers production escrow rotation separately. */
   if (!check_compound_credential_real_resolver (server))
     return 2150;
 #endif
+#ifdef WYL_HAS_AUDIT
   if (!check_compound_tenant_real_resolver_and_activation (server))
     return 2151;
   if (!check_compound_disable_real_resolver_and_activation (server))
     return 2152;
+#endif
   return 0;
 }
 
@@ -8056,9 +8125,11 @@ check_service_principal_management_contract (void)
   g_autofree gchar *http_credential_id = NULL;
   g_autofree gchar *rotate_successor_id = NULL;
   g_autofree gchar *http_exchange_body = NULL;
+#ifdef WYL_HAS_AUDIT
   g_autofree gchar *denied_body = NULL;
   guint denied_status = 0;
   guint denied_retry_after = 0;
+#endif
   g_autofree gchar *handoff_dir = NULL;
   g_autofree gchar *operation_root = NULL;
   g_autofree gchar *publication_root = NULL;
