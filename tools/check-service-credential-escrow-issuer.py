@@ -79,11 +79,45 @@ RECEIPT_KEY_ALLOWLIST = frozenset({
 HANDOFF_MODULE = "service-credential-handoff-private.c"
 
 
+def block_comment_state(line: str, active: bool) -> bool:
+    """Return whether a C block comment remains open after this source line."""
+    index = 0
+    while index < len(line):
+        if active:
+            end = line.find("*/", index)
+            if end < 0:
+                return True
+            active = False
+            index = end + 2
+            continue
+        if line.startswith("//", index):
+            return False
+        if line.startswith("/*", index):
+            active = True
+            index += 2
+            continue
+        if line[index] in {'"', "'"}:
+            quote = line[index]
+            index += 1
+            while index < len(line):
+                if line[index] == "\\":
+                    index += 2
+                elif line[index] == quote:
+                    index += 1
+                    break
+                else:
+                    index += 1
+            continue
+        index += 1
+    return active
+
+
 def production_view(text: str) -> str | None:
     """Remove only positive WYL_TEST_DAEMON_HTTP arms, preserving line count."""
     output: list[str] = []
     stack: list[dict[str, object]] = []
     keep = True
+    in_block_comment = False
     positive = re.compile(
         r"^\s*#\s*(?:ifdef\s+WYL_TEST_DAEMON_HTTP|"
         r"if\s+defined\s*\(\s*WYL_TEST_DAEMON_HTTP\s*\))\s*$")
@@ -95,6 +129,11 @@ def production_view(text: str) -> str | None:
     closing = re.compile(r"^\s*#\s*endif\b")
 
     for line in text.splitlines():
+        line_starts_in_comment = in_block_comment
+        in_block_comment = block_comment_state(line, in_block_comment)
+        if line_starts_in_comment:
+            output.append(line if keep else "")
+            continue
         parent_keep = keep
         if opening.match(line):
             test_branch: bool | None = None
@@ -143,7 +182,7 @@ def production_view(text: str) -> str | None:
                 line if frame["test_branch"] is None and keep else "")
             continue
         output.append(line if keep else "")
-    if stack:
+    if stack or in_block_comment:
         return None
     return "\n".join(output)
 
@@ -261,6 +300,18 @@ def self_test() -> int:
     if nested_production is None or a1_violations(nested_production):
         return 1
     if production_view("#ifdef WYL_TEST_DAEMON_HTTP\n") is not None:
+        return 1
+    commented_directives = (
+        "/*\n"
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "*/\n"
+        "wyl_service_credential_rotate_with_runtime (h, &r);\n"
+        "/*\n"
+        "#endif\n"
+        "*/")
+    commented_production = production_view(commented_directives)
+    if (commented_production is None
+            or not a1_violations(commented_production)):
         return 1
 
     # A2: the escaped response spelling fails; the bare input field passes.
