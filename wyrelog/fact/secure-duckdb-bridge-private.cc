@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/secure-duckdb-bridge-private.h"
+#include "fact/secure-duckdb-filesystem-contract-private.h"
 
 #include <cstring>
 #include <memory>
