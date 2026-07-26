@@ -39,6 +39,13 @@ wyl_daemon_http_resolve_bearer_for_test(void) {
 }
 '''
 
+BASE_WITH_REGISTRY_TEST_SEAM = BASE + r'''
+wyrelog_error_t
+wyl_daemon_http_lookup_service_registry_for_test(void) {
+  return wyl_service_auth_registry_lookup();
+}
+'''
+
 
 def main() -> int:
     guard = sys.argv[1]
@@ -75,9 +82,15 @@ def main() -> int:
     ]
     if len(mutants) != 26:
         return 3
-    if run(guard, BASE) != 0:
+    if run(guard, BASE) != 0 or run(guard, BASE_WITH_REGISTRY_TEST_SEAM) != 0:
         return 1
-    return 0 if all(run(guard, mutant) != 0 for mutant in mutants) else 2
+    seam_mutant = BASE_WITH_REGISTRY_TEST_SEAM + (
+        "\nstatic void elsewhere(void) { wyl_service_auth_registry_lookup(); }\n"
+    )
+    return 0 if (
+        all(run(guard, mutant) != 0 for mutant in mutants)
+        and run(guard, seam_mutant) != 0
+    ) else 2
 
 
 if __name__ == "__main__":

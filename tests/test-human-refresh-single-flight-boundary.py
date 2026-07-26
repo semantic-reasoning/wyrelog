@@ -258,8 +258,8 @@ def main() -> int:
         ("state == claim.predecessor_state", "state != claim.predecessor_state"),
         ("committed_at < access->state->expires_at", "TRUE"),
         ("committed_at < refresh->state->expires_at", "TRUE"),
-        ("g_hash_table_insert (ctx->access_tokens_by_jti",
-         "g_hash_table_replace (ctx->access_tokens_by_jti"),
+        ("g_hash_table_insert (ctx->access_tokens_by_jti, access_key, access_state);",
+         "g_hash_table_replace (ctx->access_tokens_by_jti, access_key, access_state);"),
         ("state->successor = committed;", ""),
         ("wyl_sensitive_string_free (state->token);", "g_free (state->token);"),
     )

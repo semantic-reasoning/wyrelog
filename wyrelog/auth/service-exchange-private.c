@@ -300,12 +300,15 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
-    wyl_service_exchange_publication_ticket_abort
-    (WylServiceExchangePublicationTicket * ticket) {
+    wyl_service_exchange_publication_ticket_abort_fail_stop
+    (WylServiceExchangePublicationTicket * ticket,
+    WylServiceAuthUnavailableReason reason) {
   if (ticket == NULL || ticket->lease == NULL
       || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ACTIVE
       || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_TERMINAL
-      || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ABORTED)
+      || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ABORTED
+      || reason < WYL_SERVICE_AUTH_UNAVAILABLE_NONE
+      || reason > WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT)
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = publication_ticket_validate (ticket);
   if (ticket->state == WYL_SERVICE_EXCHANGE_TICKET_PENDING
@@ -321,6 +324,12 @@ wyrelog_error_t
           ticket->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
     }
   }
+  if (reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE) {
+    wyrelog_error_t latch_rc = wyl_service_auth_write_lease_mark_unavailable
+        (ticket->lease, ticket->handle, reason);
+    if (rc == WYRELOG_E_OK)
+      rc = latch_rc;
+  }
   wyrelog_error_t release_rc =
       wyl_service_auth_write_lease_release_terminal (&ticket->lease);
   if (rc == WYRELOG_E_OK)
@@ -328,6 +337,13 @@ wyrelog_error_t
   if (ticket->lease == NULL)
     ticket->state = WYL_SERVICE_EXCHANGE_TICKET_ABORTED;
   return rc;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_abort
+    (WylServiceExchangePublicationTicket * ticket) {
+  return wyl_service_exchange_publication_ticket_abort_fail_stop (ticket,
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
 }
 
 WylServiceExchangeTicketState
@@ -342,6 +358,14 @@ void wyl_service_exchange_publication_ticket_test_corrupt_lease_serial
 {
   if (ticket != NULL)
     wyl_service_auth_write_lease_test_corrupt_serial (ticket->lease);
+}
+
+void wyl_service_exchange_publication_ticket_test_fail_terminal_release
+    (WylServiceExchangePublicationTicket * ticket)
+{
+  if (ticket != NULL)
+    wyl_service_auth_write_lease_test_fail_terminal_prevalidation
+        (ticket->lease);
 }
 
 void wyl_service_exchange_publication_ticket_free

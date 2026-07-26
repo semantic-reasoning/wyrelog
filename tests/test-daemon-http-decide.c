@@ -6557,8 +6557,8 @@ issue_service_token_credential (WylHandle *handle, const gchar *subject_id,
 }
 
 static gint
-check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
-    const gchar *base_url)
+check_service_token_exchange_contract_on_server (SoupServer *server,
+    WylHandle *handle, const gchar *base_url)
 {
   prepare_service_token_subject (handle, "svc:exchange:worker");
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
@@ -6620,13 +6620,35 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
   if (g_strstr_len (payload_text, -1, issued.credential.credential_id) == NULL)
     return 1955;
 
+  g_autofree gchar *resolved_session = NULL;
+  g_autofree gchar *resolved_actor = NULL;
+  g_autofree gchar *resolved_tenant = NULL;
+  if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
+          &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK
+      || resolved_session == NULL
+      || g_strcmp0 (resolved_actor, "svc:exchange:worker") != 0
+      || g_strcmp0 (resolved_tenant, "tenant-a") != 0)
+    return 1956;
+
+  g_autoptr (SoupSession) protected_session = soup_session_new ();
+  guint protected_status = 0;
+  g_autofree gchar *protected_body = NULL;
+  if (send_raw_decide_bearer (protected_session, "POST", base_url,
+          "svc:exchange:worker", "http.not_armed", "service-scope",
+          "tenant=tenant-a", access_token, &protected_status,
+          &protected_body) != 0 || protected_status != 200
+      || protected_body == NULL
+      || strstr (protected_body, "\"decision\":") == NULL)
+    return 1957;
+
   WylServiceExchangeLimiterSnapshot limiter_snapshot = { 0 };
   wyl_daemon_http_service_exchange_limiter_snapshot_for_test (server,
       &limiter_snapshot);
   if (limiter_snapshot.global_tokens != 99 ||
       limiter_snapshot.credential_bucket_count != 1 ||
       limiter_snapshot.anonymous_tokens != 5)
-    return 1956;
+    return 1958;
 
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   guint route_status = 0;
@@ -6637,7 +6659,7 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
       || extract_json_string (route_body, "access_token") == NULL
       || strstr (route_body, "session_token") != NULL
       || strstr (route_body, "credential_secret") != NULL)
-    return 1957;
+    return 1959;
 
   guint denied_status = 0;
   guint denied_retry_after = 0;
@@ -6648,7 +6670,7 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
       || denied_status != 403 || denied_body == NULL
       || strstr (denied_body, "access_token") != NULL
       || strstr (denied_body, "credential_secret") != NULL)
-    return 1957;
+    return 1960;
 
   g_autofree gchar *malformed_body =
       g_strdup_printf ("{\"credential_id\":\"%s\",\"extra\":\"x\"}",
@@ -6663,7 +6685,9 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
       == NULL)
     return 1958;
 
-  for (guint i = 0; i < 4; i++) {
+  /* The direct publication and route request above consume two of the
+   * credential bucket's five permits; exhaust the remaining three here. */
+  for (guint i = 0; i < 3; i++) {
     g_clear_pointer (&body, g_free);
     if (wyl_daemon_http_issue_service_token_for_test (server, TRUE,
             request_body, strlen (request_body), &status, &body,
@@ -6682,6 +6706,209 @@ check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
     return 1981;
 
   wyl_service_credential_issue_result_clear (&issued);
+  return 0;
+}
+
+static gint
+check_service_token_exchange_contract (void)
+{
+  g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = NULL;
+  g_autofree gchar *base_url = NULL;
+  TestHttpServer http = { 0 };
+  GThread *thread = NULL;
+  gint result = 1990;
+
+  if (!service_credential_store_fixture_init (&credential_store))
+    return result;
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = credential_store.policy_path,
+    .policy_keyprovider_path = credential_store.key_spec,
+    .audit_store_path = credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK
+      || insert_not_armed_fixture (handle) != WYRELOG_E_OK)
+    return result;
+
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  context = g_main_context_new ();
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&options, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL)
+    goto cleanup;
+  thread = g_thread_new ("service-token-exchange",
+      test_http_server_thread_ctx, &http);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL)
+    goto cleanup;
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  if (base_url == NULL)
+    goto cleanup;
+  result = check_service_token_exchange_contract_on_server (http.server,
+      handle, base_url);
+
+cleanup:
+  if (http.loop != NULL)
+    g_main_loop_quit (http.loop);
+  if (thread != NULL)
+    g_thread_join (thread);
+  if (http.server != NULL) {
+    soup_server_disconnect (http.server);
+    g_object_unref (http.server);
+  }
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return result;
+}
+
+static gint
+check_service_publication_fault_matrix (void)
+{
+  static const struct
+  {
+    WylDaemonServicePublicationFault fault;
+    guint sessions;
+    guint access_tokens;
+    gboolean registry_found;
+    gboolean resolves;
+  } cases[] = {
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_RESPONSE_PREPARE, 0, 0, FALSE,
+        FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_CANCEL, 0, 0, FALSE,
+        FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_AFTER_SESSION_INSERT, 0, 0, FALSE,
+        FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_DISCONNECT, 0, 0, FALSE,
+        FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH, 1, 0,
+        FALSE, FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH, 0, 1,
+        FALSE, FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT, 1, 1, TRUE,
+        TRUE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE, 1, 1, TRUE, FALSE},
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
+    g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+    g_autoptr (WylHandle) handle = NULL;
+    if (!service_credential_store_fixture_init (&credential_store))
+      return 2100 + (gint) i;
+    WylHandleOpenOptions handle_options = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+      .policy_store_path = credential_store.policy_path,
+      .policy_keyprovider_path = credential_store.key_spec,
+      .audit_store_path = credential_store.audit_path,
+      .production_mode = TRUE,
+    };
+    if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+      return 2100 + (gint) i;
+    prepare_service_token_subject (handle, "svc:exchange:fault");
+    if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+      return 2110 + (gint) i;
+    wyl_service_credential_issue_result_t issued = { 0 };
+    issue_service_token_credential (handle, "svc:exchange:fault", "tenant-a",
+        "fault-credential", g_get_real_time () + 60 * G_USEC_PER_SEC, &issued);
+    gsize credential_secret_len = 0;
+    const gchar *credential_secret =
+        wyl_service_credential_secret_peek_encoded (issued.secret,
+        &credential_secret_len);
+    WylDaemonOptions opts = {
+      .template_dir = WYL_TEST_TEMPLATE_DIR,
+      .listen_port = 0,
+    };
+    g_autoptr (GError) error = NULL;
+    SoupServer *server = wyl_daemon_start_http_server (&opts, handle, &error);
+    if (server == NULL) {
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2120 + (gint) i;
+    }
+
+    wyl_daemon_http_set_service_publication_fault_for_test (server,
+        cases[i].fault);
+    g_autofree gchar *body = NULL;
+    wyrelog_error_t publish_rc =
+        wyl_daemon_http_publish_service_token_for_test (server,
+        issued.credential.credential_id, credential_secret,
+        credential_secret_len, &body);
+    g_autofree gchar *token =
+        wyl_daemon_http_dup_last_service_publication_token_for_test (server);
+    guint sessions = 0;
+    guint access_tokens = 0;
+    wyl_daemon_http_service_publication_counts_for_test (server, &sessions,
+        &access_tokens);
+    if (publish_rc == WYRELOG_E_OK || body != NULL || token == NULL
+        || sessions != cases[i].sessions
+        || access_tokens != cases[i].access_tokens) {
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2140 + (gint) i;
+    }
+
+    guint8 token_secret[32];
+    g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+    g_autoptr (GBytes) payload = NULL;
+    if (key_id == NULL
+        || wyl_daemon_http_copy_access_token_secret (server, token_secret,
+            sizeof token_secret) != WYRELOG_E_OK
+        || wyl_jwt_verify_hs256_access_token (token, token_secret,
+            sizeof token_secret, key_id, "wyrelogd", "wyrelog-client",
+            g_get_real_time () / G_USEC_PER_SEC, &payload) != WYRELOG_E_OK) {
+      sodium_memzero (token_secret, sizeof token_secret);
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2160 + (gint) i;
+    }
+    sodium_memzero (token_secret, sizeof token_secret);
+    wyl_jwt_access_claims_t claims = { 0 };
+    if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK) {
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2180 + (gint) i;
+    }
+    gint registry_state = WYL_SERVICE_AUTH_PENDING;
+    gboolean registry_found = FALSE;
+    if (wyl_daemon_http_lookup_service_registry_for_test (server,
+            claims.session_id, claims.jti, &registry_state,
+            &registry_found) != WYRELOG_E_OK
+        || registry_found != cases[i].registry_found
+        || (registry_found && registry_state != WYL_SERVICE_AUTH_ACTIVE)) {
+      wyl_jwt_access_claims_clear (&claims);
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2200 + (gint) i;
+    }
+
+    g_autofree gchar *resolved_session = NULL;
+    g_autofree gchar *resolved_actor = NULL;
+    g_autofree gchar *resolved_tenant = NULL;
+    gboolean resolves = wyl_daemon_http_resolve_bearer_for_test (server, token,
+        &resolved_session, &resolved_actor, &resolved_tenant) == WYRELOG_E_OK;
+    if (resolves != cases[i].resolves) {
+      wyl_jwt_access_claims_clear (&claims);
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2220 + (gint) i;
+    }
+    wyl_jwt_access_claims_clear (&claims);
+    soup_server_disconnect (server);
+    g_object_unref (server);
+    wyl_service_credential_issue_result_clear (&issued);
+  }
   return 0;
 }
 #endif
@@ -8251,6 +8478,18 @@ main (void)
     result = service_resolver_rc;
     goto cleanup;
   }
+#ifdef WYL_HAS_AUDIT
+  gint service_exchange_rc = check_service_token_exchange_contract ();
+  if (service_exchange_rc != 0) {
+    result = service_exchange_rc;
+    goto cleanup;
+  }
+  gint service_publication_fault_rc = check_service_publication_fault_matrix ();
+  if (service_publication_fault_rc != 0) {
+    result = service_publication_fault_rc;
+    goto cleanup;
+  }
+#endif
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
    * stands up its own encrypted-store handle and server, so run it as a
    * self-contained check and propagate its return code. */

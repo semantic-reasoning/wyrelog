@@ -43,9 +43,10 @@ PROTECTED = (
     "wyl_jwt_sign_hs256_service",
 )
 
-# #358 may add references only at this exact orchestrator owner. Its counts
-# must be added to MANIFEST in the same change; every other path remains fatal.
-FUTURE_OWNER = "wyrelog/daemon/service-token-exchange.c"
+# #358 adds immutable publication-ticket validation only at this exact
+# orchestrator owner. Its counts are frozen in MANIFEST below; every other path
+# remains fatal.
+FUTURE_OWNER = "wyrelog/auth/service-exchange-private.c"
 
 SELF_EXCLUDED = {
     "tools/check-service-session-private-boundary.py",
@@ -75,9 +76,19 @@ for symbol in PROTECTED:
             2 if symbol in {"wyl_session_get_auth_method_private",
                             "wyl_session_is_active_private"} else 1)
 MANIFEST["wyl_session_dup_service_subject_private"][
-    "wyrelog/daemon/http.c"] = 2
+    "wyrelog/daemon/http.c"] = 1
 MANIFEST["wyl_session_dup_service_tenant_private"][
-    "wyrelog/daemon/http.c"] = 2
+    "wyrelog/daemon/http.c"] = 1
+for symbol in (
+        "wyl_session_dup_service_jti_private",
+        "wyl_session_dup_service_subject_private",
+        "wyl_session_dup_service_tenant_private",
+        "wyl_session_dup_service_credential_id_private",
+        "wyl_session_get_auth_method_private",
+        "wyl_session_is_active_private",
+        "wyl_session_get_service_credential_generation_private",
+        "wyl_session_get_service_expires_at_seconds_private"):
+    MANIFEST[symbol][FUTURE_OWNER] = 1
 MANIFEST["wyl_session_new_service_detached"][
     "tests/test-daemon-http-decide.c"] = 4
 MANIFEST["wyl_session_copy_persistent_id_private"][
@@ -1225,7 +1236,8 @@ def inspect(root: Path, manifest: dict[str, dict[str, int]],
             headers = [path for path in owners if path.endswith(".h")]
             implementations = [path for path in owners
                                if path.startswith("wyrelog/auth/")
-                               and path.endswith(".c")]
+                               and path.endswith(".c")
+                               and path != FUTURE_OWNER]
             if len(headers) != 1 or len(implementations) != 1:
                 raise BoundaryError(
                     f"private owner cardinality changed: {symbol}")
