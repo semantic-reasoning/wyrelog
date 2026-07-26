@@ -160,6 +160,7 @@ struct wyl_policy_store_t
   gboolean encrypted;
   gboolean key_materialized;
   gboolean suppress_close_persist;
+  gboolean maintenance_mode;
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
@@ -7684,6 +7685,8 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   self->next_service_authority_transaction_id = 1;
   owned_keyprovider_adopt (&self->keyprovider, opts);
   self->encrypted = opts->require_encrypted;
+  self->maintenance_mode = opts->mode == WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  self->suppress_close_persist = self->maintenance_mode;
   self->canonical_path = g_strdup (effective_path);
   self->canonical_dirfd = -1;
   wyrelog_error_t rc = WYRELOG_E_OK;
@@ -7914,6 +7917,17 @@ wyl_policy_store_open (const gchar *path, wyl_policy_store_t **out_store)
 {
   wyl_policy_store_open_options_t opts = {.path = path };
   return wyl_policy_store_open_with_options (&opts, out_store);
+}
+
+wyrelog_error_t
+wyl_policy_store_maintenance_publish (wyl_policy_store_t *store)
+{
+  if (store == NULL || !store->maintenance_mode || !store->encrypted
+      || store->lease == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+  if (wyl_policy_store_lease_verify_parent (store->lease) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  return persist_policy_store_encrypted (store);
 }
 
 void

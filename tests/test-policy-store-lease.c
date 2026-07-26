@@ -369,6 +369,10 @@ test_maintenance_exclusivity_and_private_store (void)
   g_assert_cmpint (run_maintenance_helper_exit (path), ==, 73);
   wyl_policy_store_close (attached);
 
+  gchar *before_maintenance = NULL;
+  gsize before_maintenance_len = 0;
+  g_assert_true (g_file_get_contents (path, &before_maintenance,
+          &before_maintenance_len, NULL));
   CountingProvider maintenance_provider = { 0 };
   wyl_policy_store_open_options_t maintenance_opts =
       encrypted_opts (path, &maintenance_provider);
@@ -379,6 +383,15 @@ test_maintenance_exclusivity_and_private_store (void)
   g_assert_cmpint (run_helper_exit (path), ==, 73);
   g_assert_cmpint (run_maintenance_helper_exit (path), ==, 73);
   wyl_policy_store_close (maintenance);
+  gchar *after_maintenance = NULL;
+  gsize after_maintenance_len = 0;
+  g_assert_true (g_file_get_contents (path, &after_maintenance,
+          &after_maintenance_len, NULL));
+  g_assert_cmpuint (after_maintenance_len, ==, before_maintenance_len);
+  g_assert_cmpmem (after_maintenance, after_maintenance_len,
+      before_maintenance, before_maintenance_len);
+  g_free (before_maintenance);
+  g_free (after_maintenance);
 
 #ifndef G_OS_WIN32
   g_autofree gchar *lock_path = g_strdup_printf ("%s%s", path, LOCK_SUFFIX);
@@ -423,6 +436,58 @@ test_maintenance_exclusivity_and_private_store (void)
 
   remove_store_files (path);
   remove_store_files (missing);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_maintenance_explicit_publish (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  g_autofree gchar *path = g_build_filename (dir, "publish.store", NULL);
+  CountingProvider seed_provider = { 0 };
+  wyl_policy_store_open_options_t seed_opts =
+      encrypted_opts (path, &seed_provider);
+  wyl_policy_store_t *seed = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&seed_opts, &seed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_maintenance_publish (seed), ==,
+      WYRELOG_E_INVALID);
+  wyl_policy_store_close (seed);
+
+  CountingProvider apply_provider = { 0 };
+  wyl_policy_store_open_options_t apply_opts =
+      encrypted_opts (path, &apply_provider);
+  apply_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *apply = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&apply_opts, &apply),
+      ==, WYRELOG_E_OK);
+  char *sqlite_error = NULL;
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (apply),
+          "CREATE TABLE maintenance_publish_probe(value INTEGER);",
+          NULL, NULL, &sqlite_error), ==, SQLITE_OK);
+  sqlite3_free (sqlite_error);
+  g_assert_cmpint (wyl_policy_store_maintenance_publish (apply), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_close (apply);
+
+  CountingProvider verify_provider = { 0 };
+  wyl_policy_store_open_options_t verify_opts =
+      encrypted_opts (path, &verify_provider);
+  verify_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *verify = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&verify_opts, &verify),
+      ==, WYRELOG_E_OK);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (verify),
+          "SELECT 1 FROM sqlite_master"
+          " WHERE type='table' AND name='maintenance_publish_probe';",
+          -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  sqlite3_finalize (stmt);
+  wyl_policy_store_close (verify);
+
+  remove_store_files (path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
 
@@ -1519,6 +1584,8 @@ main (int argc, char **argv)
       test_subprocess_busy_crash_and_reacquire);
   g_test_add_func ("/policy-store-lease/maintenance-exclusivity",
       test_maintenance_exclusivity_and_private_store);
+  g_test_add_func ("/policy-store-lease/maintenance-explicit-publish",
+      test_maintenance_explicit_publish);
 #ifndef G_OS_WIN32
   g_test_add_func ("/policy-store-lease/parent-alias-swap",
       test_parent_alias_swap_stays_pinned);

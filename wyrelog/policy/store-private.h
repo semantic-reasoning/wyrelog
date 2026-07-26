@@ -1166,6 +1166,13 @@ wyrelog_error_t wyl_policy_store_open (const gchar * path,
  * wyl_policy_store_open_options_t above. */
 wyrelog_error_t wyl_policy_store_open_with_options (const
     wyl_policy_store_open_options_t * opts, wyl_policy_store_t ** out_store);
+/*
+ * Maintenance stores never persist implicitly from close. A successful
+ * removal transaction explicitly publishes its encrypted image and checks
+ * this result before reporting a durable receipt.
+ */
+wyrelog_error_t wyl_policy_store_maintenance_publish
+    (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
     const gchar * fact_root);
 wyrelog_error_t wyl_policy_store_bind_fact_root_authorized
