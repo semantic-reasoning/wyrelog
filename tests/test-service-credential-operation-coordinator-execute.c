@@ -21,9 +21,6 @@
 
 #define ROTATE_CANONICAL_ID "wlc_000000000000000000000000000"
 
-G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistry,
-    wyl_service_auth_registry_unref);
-
 #ifdef WYL_HAS_AUDIT
 #define HANDOFF_DECISION_AUDIT_DELTA(n) (n)
 #else
@@ -1959,7 +1956,7 @@ test_handoff_automatic_maintenance_gate (void)
   g_auto (Fixture) fixture = { 0 };
   fixture_init (&fixture);
   WylHandle *handle = fixture.handle;
-  g_autoptr (WylServiceAuthRegistry) remediation_registry = NULL;
+  WylServiceAuthRegistry *remediation_registry = NULL;
   g_assert_cmpint (wyl_service_auth_registry_new (&remediation_registry), ==,
       WYRELOG_E_OK);
   prepare_authority (handle, "svc:handoff:executor");
@@ -2498,6 +2495,7 @@ test_handoff_automatic_maintenance_gate (void)
       (&cancelled_request);
 
   wyl_policy_store_service_handoff_set_unseal_gate_for_test (store, NULL, NULL);
+  wyl_service_auth_registry_unref (remediation_registry);
   wyl_service_credential_operation_storage_clear (&storage);
   remove_operation_root_for_test (operation_root);
 }
