@@ -130,7 +130,7 @@ def production_view(text: str) -> str | None:
     directive = re.compile(r"^\s*#")
     continued_from_previous = False
 
-    for line in text.splitlines():
+    for line in text.split("\n"):
         if continued_from_previous and directive.match(line):
             return None
         continued_from_previous = (
@@ -330,6 +330,16 @@ def self_test() -> int:
     trigraph_spliced_directive = spliced_directive.replace("\\\n", "??/\n")
     if production_view(trigraph_spliced_directive) is not None:
         return 1
+    for c_whitespace in ("\v", "\f"):
+        line_comment_directives = (
+            f"//{c_whitespace}#ifdef WYL_TEST_DAEMON_HTTP\n"
+            "void wyl_service_credential_rotate_with_runtime(void);\n"
+            "void f(void) { "
+            "wyl_service_credential_rotate_with_runtime(); }\n"
+            f"//{c_whitespace}#endif")
+        comment_view = production_view(line_comment_directives)
+        if comment_view is None or not a1_violations(comment_view):
+            return 1
 
     # A2: the escaped response spelling fails; the bare input field passes.
     if not a2_violation('g_string_append (json, ",\\"credential_secret\\":");'):
