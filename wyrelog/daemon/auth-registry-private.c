@@ -35,6 +35,13 @@ struct _WylServiceAuthRegistry
   WylServiceAuthAllocator allocator;
 };
 
+struct _WylServiceAuthRegistrySessionParticipant
+{
+  WylServiceAuthRegistry *registry;
+  WylHandle *handle;
+  WylServiceAuthWriteLease *lease;
+};
+
 static gpointer
 default_try_alloc (gsize size, gpointer user_data)
 {
@@ -391,6 +398,108 @@ wyl_service_auth_registry_clear (WylServiceAuthRegistry *registry)
   g_hash_table_destroy (old_by_tenant);
   g_hash_table_destroy (old_by_jti);
   g_hash_table_destroy (old_by_session);
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_session_participant_new_for_write
+    (WylServiceAuthRegistry * registry, WylHandle * handle,
+    WylServiceAuthWriteLease * lease,
+    WylServiceAuthRegistrySessionParticipant ** out_participant) {
+  if (out_participant != NULL)
+    *out_participant = NULL;
+  if (registry == NULL || !WYL_IS_HANDLE (handle) || lease == NULL
+      || out_participant == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation (lease,
+      handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylServiceAuthRegistrySessionParticipant *participant =
+      g_try_new0 (WylServiceAuthRegistrySessionParticipant, 1);
+  if (participant == NULL)
+    return WYRELOG_E_NOMEM;
+  participant->registry = wyl_service_auth_registry_ref (registry);
+  participant->handle = g_object_ref (handle);
+  participant->lease = lease;
+  *out_participant = participant;
+  return WYRELOG_E_OK;
+}
+
+void wyl_service_auth_registry_session_participant_free
+    (WylServiceAuthRegistrySessionParticipant * participant)
+{
+  if (participant == NULL)
+    return;
+  g_clear_pointer (&participant->registry, wyl_service_auth_registry_unref);
+  g_clear_object (&participant->handle);
+  participant->lease = NULL;
+  g_free (participant);
+}
+
+static wyrelog_error_t
+session_participant_validate (WylServiceAuthRegistrySessionParticipant
+    *participant)
+{
+  if (participant == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_service_auth_write_lease_validate_operation (participant->lease,
+      participant->handle);
+}
+
+static wyrelog_error_t
+session_participant_enter_registry (WylServiceAuthRegistrySessionParticipant
+    *participant)
+{
+  wyrelog_error_t rc = session_participant_validate (participant);
+  return rc == WYRELOG_E_OK ? wyl_service_auth_rank_enter
+      (participant->handle, WYL_SERVICE_AUTH_RANK_REGISTRY) : rc;
+}
+
+static wyrelog_error_t
+session_participant_leave_registry (WylServiceAuthRegistrySessionParticipant
+    *participant, wyrelog_error_t rc)
+{
+  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected
+      (participant->handle, WYL_SERVICE_AUTH_RANK_REGISTRY);
+  return rc == WYRELOG_E_OK ? leave_rc : rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_session_participant_reserve
+    (WylServiceAuthRegistrySessionParticipant * participant,
+    const WylServiceAuthReservation * reservation)
+{
+  wyrelog_error_t rc = session_participant_enter_registry (participant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_registry_reserve (participant->registry, reservation);
+  return session_participant_leave_registry (participant, rc);
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_session_participant_activate
+    (WylServiceAuthRegistrySessionParticipant * participant,
+    const WylServiceAuthReservation * reservation, gboolean * out_changed)
+{
+  wyrelog_error_t rc = session_participant_enter_registry (participant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_registry_activate (participant->registry, reservation,
+      out_changed);
+  return session_participant_leave_registry (participant, rc);
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_session_participant_remove_exact
+    (WylServiceAuthRegistrySessionParticipant * participant,
+    const WylServiceAuthReservation * reservation, gboolean * out_removed)
+{
+  wyrelog_error_t rc = session_participant_enter_registry (participant);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_registry_remove_exact (participant->registry,
+      reservation, out_removed);
+  return session_participant_leave_registry (participant, rc);
 }
 
 wyrelog_error_t

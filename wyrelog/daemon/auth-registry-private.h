@@ -3,7 +3,9 @@
 
 #include <glib.h>
 
+#include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/error.h"
+#include "wyrelog/handle.h"
 
 G_BEGIN_DECLS;
 
@@ -62,6 +64,8 @@ typedef struct
 } WylServiceAuthAllocator;
 
 typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
+typedef struct _WylServiceAuthRegistrySessionParticipant
+    WylServiceAuthRegistrySessionParticipant;
 
 /*
  * Concurrency and ownership contract
@@ -130,12 +134,36 @@ wyrelog_error_t wyl_service_auth_registry_remove_exact
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation, gboolean * out_removed);
 
+/*
+ * Lease-bound session mutation capability. The participant retains the
+ * registry and handle but borrows the WRITE lease; its owner must keep that
+ * lease alive and release it independently.
+ */
+wyrelog_error_t wyl_service_auth_registry_session_participant_new_for_write
+    (WylServiceAuthRegistry * registry, WylHandle * handle,
+    WylServiceAuthWriteLease * lease,
+    WylServiceAuthRegistrySessionParticipant ** out_participant);
+void wyl_service_auth_registry_session_participant_free
+    (WylServiceAuthRegistrySessionParticipant * participant);
+wyrelog_error_t wyl_service_auth_registry_session_participant_reserve
+    (WylServiceAuthRegistrySessionParticipant * participant,
+    const WylServiceAuthReservation * reservation);
+wyrelog_error_t wyl_service_auth_registry_session_participant_activate
+    (WylServiceAuthRegistrySessionParticipant * participant,
+    const WylServiceAuthReservation * reservation, gboolean * out_changed);
+wyrelog_error_t wyl_service_auth_registry_session_participant_remove_exact
+    (WylServiceAuthRegistrySessionParticipant * participant,
+    const WylServiceAuthReservation * reservation, gboolean * out_removed);
+
 wyrelog_error_t wyl_service_auth_registry_lookup
     (WylServiceAuthRegistry * registry, const gchar * session_id,
     const gchar * jti, WylServiceAuthReservation * out_reservation,
     WylServiceAuthState * out_state, gboolean * out_found);
 void wyl_service_auth_reservation_clear
     (WylServiceAuthReservation * reservation);
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistrySessionParticipant,
+    wyl_service_auth_registry_session_participant_free);
 
 /* Test-only observations.  They never expose or mutate stored entries. */
 #ifdef WYL_AUTH_REGISTRY_TESTING
