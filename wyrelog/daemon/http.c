@@ -285,6 +285,7 @@ typedef struct _WylDaemonHttpContext
   GHashTable *refresh_tokens_by_token;
   GHashTable *mfa_enroll_challenges;
   GMainContext *dispatch_context;
+  GSource *service_auth_retirement_source;
 #ifdef WYL_HAS_AUDIT
   WylServiceExchangeLimiter *service_exchange_limiter;
 #endif
@@ -306,8 +307,12 @@ typedef struct _WylDaemonHttpContext
   guint64 key_epoch;
   guint64 next_refresh_epoch;
   guint64 next_refresh_claim;
+  /* Wall-clock seconds, clamped monotonically for service JWT lifetime. */
+  gint64 service_auth_clock_floor;
   gboolean shutting_down;
 #ifdef WYL_TEST_DAEMON_HTTP
+  gboolean service_auth_clock_injected;
+  gint64 service_auth_clock_now;
   gboolean refresh_clock_injected;
   gint64 refresh_clock_now;
   WylDaemonServiceResolverCheckpoint resolver_checkpoint;
@@ -645,6 +650,46 @@ wyl_mfa_enroll_challenge_should_remove (gpointer key, gpointer value,
       g_strcmp0 (challenge->session_id, prune->session_id) == 0);
 }
 
+static gint64
+service_auth_now_seconds (WylDaemonHttpContext *ctx)
+{
+  gint64 candidate;
+  g_mutex_lock (&ctx->lock);
+#ifdef WYL_TEST_DAEMON_HTTP
+  candidate = ctx->service_auth_clock_injected
+      ? ctx->service_auth_clock_now : g_get_real_time () / G_USEC_PER_SEC;
+#else
+  candidate = g_get_real_time () / G_USEC_PER_SEC;
+#endif
+  if (candidate < ctx->service_auth_clock_floor)
+    candidate = ctx->service_auth_clock_floor;
+  else
+    ctx->service_auth_clock_floor = candidate;
+  g_mutex_unlock (&ctx->lock);
+  return candidate;
+}
+
+#ifdef WYL_HAS_AUDIT
+static wyrelog_error_t service_auth_retire_due (WylDaemonHttpContext * ctx,
+    gint64 now_seconds);
+#endif
+
+static gboolean
+service_auth_retirement_tick (gpointer data)
+{
+  WylDaemonHttpContext *ctx = data;
+  g_mutex_lock (&ctx->lock);
+  gboolean shutting_down = ctx->shutting_down;
+  g_mutex_unlock (&ctx->lock);
+  if (shutting_down)
+    return G_SOURCE_REMOVE;
+  /* Failure latches service auth inside the maintenance WRITE lease. */
+#ifdef WYL_HAS_AUDIT
+  (void) service_auth_retire_due (ctx, service_auth_now_seconds (ctx));
+#endif
+  return G_SOURCE_CONTINUE;
+}
+
 static void
 wyl_daemon_http_context_unref (gpointer data)
 {
@@ -654,6 +699,10 @@ wyl_daemon_http_context_unref (gpointer data)
     return;
 
   sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
+  if (ctx->service_auth_retirement_source != NULL) {
+    g_source_destroy (ctx->service_auth_retirement_source);
+    g_source_unref (ctx->service_auth_retirement_source);
+  }
   g_free (ctx->access_token_key_id);
 #ifdef WYL_HAS_AUDIT
   sodium_memzero (ctx->service_token_limiter_key,
@@ -699,6 +748,11 @@ wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
     ctx->auth_epoch++;
   }
   g_mutex_unlock (&ctx->lock);
+  if (shutting_down && ctx->service_auth_retirement_source != NULL) {
+    g_source_destroy (ctx->service_auth_retirement_source);
+    g_source_unref (ctx->service_auth_retirement_source);
+    ctx->service_auth_retirement_source = NULL;
+  }
 #ifdef WYL_TEST_DAEMON_HTTP
   if (shutting_down) {
     g_autoptr (GMutexLocker) locker = g_mutex_locker_new
@@ -937,6 +991,11 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
 #endif
   ctx->next_refresh_epoch = 1;
   ctx->next_refresh_claim = 1;
+  ctx->service_auth_clock_floor = g_get_real_time () / G_USEC_PER_SEC;
+  ctx->service_auth_retirement_source = g_timeout_source_new_seconds (1);
+  g_source_set_callback (ctx->service_auth_retirement_source,
+      service_auth_retirement_tick, ctx, NULL);
+  g_source_attach (ctx->service_auth_retirement_source, ctx->dispatch_context);
   rc = wyl_daemon_http_context_rotate_access_token_key (ctx);
   if (rc != WYRELOG_E_OK) {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
@@ -2687,9 +2746,11 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
       goto unlock_fail_stop;
     }
     if (!g_hash_table_steal_extended (ctx->sessions_by_token,
-            reservation->session_id, &pair->session_key, &pair->session_value)
+            reservation->session_id, &pair->session_key,
+            (gpointer *) & pair->session_value)
         || !g_hash_table_steal_extended (ctx->access_tokens_by_jti,
-            reservation->jti, &pair->access_key, &pair->access_value)) {
+            reservation->jti, &pair->access_key,
+            (gpointer *) & pair->access_value)) {
       /* Prevalidation makes this unreachable without an invariant breach. */
       if (pair->session_key != NULL)
         g_hash_table_insert (ctx->sessions_by_token, pair->session_key,
@@ -2780,8 +2841,8 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
       || credential_secret_len == 0 || out_body == NULL)
     return WYRELOG_E_INVALID;
 
-  gint64 now_us = g_get_real_time ();
-  gint64 now_seconds = now_us / G_USEC_PER_SEC;
+  gint64 now_seconds = service_auth_now_seconds (ctx);
+  gint64 now_us = now_seconds * G_USEC_PER_SEC;
   wyrelog_error_t rc = service_auth_retire_due (ctx, now_seconds);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -3166,11 +3227,11 @@ wyl_daemon_http_lookup_service_registry_for_test (SoupServer *server,
 }
 
 wyrelog_error_t
-wyl_daemon_http_retire_due_service_auth_for_test (SoupServer *server,
-    gint64 now_seconds)
+wyl_daemon_http_retire_due_service_auth_for_test (SoupServer *server)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
-  return ctx != NULL ? service_auth_retire_due (ctx, now_seconds)
+  return ctx != NULL ? service_auth_retire_due (ctx,
+      service_auth_now_seconds (ctx))
       : WYRELOG_E_INVALID;
 }
 #endif
@@ -3421,6 +3482,19 @@ wyl_daemon_http_set_refresh_clock_for_test (SoupServer *server,
   g_mutex_lock (&ctx->lock);
   ctx->refresh_clock_injected = enabled;
   ctx->refresh_clock_now = now;
+  g_mutex_unlock (&ctx->lock);
+}
+
+void
+wyl_daemon_http_set_service_auth_clock_for_test (SoupServer *server,
+    gboolean enabled, gint64 now_seconds)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL || now_seconds < 0)
+    return;
+  g_mutex_lock (&ctx->lock);
+  ctx->service_auth_clock_injected = enabled;
+  ctx->service_auth_clock_now = now_seconds;
   g_mutex_unlock (&ctx->lock);
 }
 
@@ -3697,7 +3771,7 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     return rc;
 
   g_autoptr (GBytes) payload = NULL;
-  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  gint64 now = service_auth_now_seconds (ctx);
   rc = wyl_jwt_verify_hs256_access_token (token, secret, sizeof secret,
       ctx->access_token_key_id, WYL_DAEMON_JWT_ISSUER,
       WYL_DAEMON_JWT_AUDIENCE, now, &payload);
