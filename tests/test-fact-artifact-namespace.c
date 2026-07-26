@@ -61,6 +61,25 @@ open_namespace_race_worker (gpointer data)
   return NULL;
 }
 
+typedef struct
+{
+  WylFactArtifactMutationLease *lease;
+  WylFactArtifactName name;
+  wyrelog_error_t result;
+} LeaseMutationWorker;
+
+static gpointer
+open_with_shared_lease_worker (gpointer data)
+{
+  LeaseMutationWorker *worker = data;
+  gint fd = -1;
+  worker->result = wyl_fact_artifact_mutation_lease_open_file (worker->lease,
+      worker->name, TRUE, TRUE, &fd);
+  if (fd >= 0)
+    close (fd);
+  return NULL;
+}
+
 static void
 test_mutation_leases (void)
 {
@@ -129,6 +148,20 @@ test_mutation_leases (void)
           &writer), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (writer,
           WYL_FACT_ARTIFACT_LOCK, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  LeaseMutationWorker mutation_workers[] = {
+    {writer, WYL_FACT_ARTIFACT_WAL, WYRELOG_E_IO},
+    {writer, WYL_FACT_ARTIFACT_CHECKPOINT, WYRELOG_E_IO},
+  };
+  GThread *mutation_threads[] = {
+    g_thread_new ("lease-mutation-a", open_with_shared_lease_worker,
+        &mutation_workers[0]),
+    g_thread_new ("lease-mutation-b", open_with_shared_lease_worker,
+        &mutation_workers[1]),
+  };
+  g_thread_join (mutation_threads[0]);
+  g_thread_join (mutation_threads[1]);
+  g_assert_cmpint (mutation_workers[0].result, ==, WYRELOG_E_OK);
+  g_assert_cmpint (mutation_workers[1].result, ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (writer,
           WYL_FACT_ARTIFACT_MAIN, TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
@@ -152,11 +185,18 @@ test_mutation_leases (void)
           &reader_a), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (reader_a,
           WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_OK);
+  writer = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
+          &writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer);
   close (fd);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (reader_a,
           "reader-temp", FALSE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
   wyl_fact_artifact_mutation_lease_free (reader_a);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
+          &writer), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_mutation_lease_free (writer);
 
   /* A lease retains its namespace even when the caller releases its handle. */
   WylFactArtifactNamespace *lifetime = NULL;
@@ -250,6 +290,26 @@ test_mutation_leases (void)
 }
 #endif
 
+#ifdef G_OS_WIN32
+static void
+test_mutation_leases (void)
+{
+  WylFactArtifactMutationLease *lease = (gpointer) 0x1;
+  gint fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (NULL,
+          &lease), ==, WYRELOG_E_POLICY);
+  g_assert_null (lease);
+  lease = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_MAIN, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "tmp",
+          FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+}
+#endif
+
 static void
 test_namespace (void)
 {
@@ -313,6 +373,20 @@ test_namespace (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
           (WylFactArtifactName) 99, FALSE, FALSE, &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
+          (WylFactArtifactName) - 1, FALSE, FALSE, &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_namespace_unlink (n,
+          (WylFactArtifactName) - 1), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_namespace_rename (n,
+          (WylFactArtifactName) - 1, WYL_FACT_ARTIFACT_MAIN), ==,
+      WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          (WylFactArtifactName) - 1, FALSE, FALSE, &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          (WylFactArtifactName) - 1), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_rename (lease,
+          (WylFactArtifactName) - 1, WYL_FACT_ARTIFACT_MAIN), ==,
+      WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_rename (lease,
           WYL_FACT_ARTIFACT_MAIN, WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_rename (lease,
