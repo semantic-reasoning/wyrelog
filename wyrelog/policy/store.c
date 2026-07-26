@@ -7688,6 +7688,17 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
   self->canonical_dirfd = -1;
   wyrelog_error_t rc = WYRELOG_E_OK;
 
+  if (opts->mode != WYL_POLICY_STORE_OPEN_ATTACHED
+      && opts->mode != WYL_POLICY_STORE_OPEN_MAINTENANCE) {
+    rc = WYRELOG_E_INVALID;
+    goto fail;
+  }
+  if (opts->mode == WYL_POLICY_STORE_OPEN_MAINTENANCE
+      && (!opts->require_encrypted || path_is_memory_db (effective_path))) {
+    rc = WYRELOG_E_POLICY;
+    goto fail;
+  }
+
   rc = cvk_runtime_snapshot (opts->service_cvk_runtime,
       &self->service_cvk_runtime);
   if (rc != WYRELOG_E_OK)
@@ -7695,7 +7706,11 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
 
   gboolean provider_backed = opts->require_encrypted || self->keyprovider.owned;
   if (!path_is_memory_db (effective_path) && provider_backed) {
-    rc = wyl_policy_store_lease_acquire (effective_path, &self->lease);
+    rc = wyl_policy_store_lease_acquire (effective_path,
+        opts->mode == WYL_POLICY_STORE_OPEN_MAINTENANCE ?
+        WYL_POLICY_STORE_LEASE_MAINTENANCE :
+        opts->require_encrypted ? WYL_POLICY_STORE_LEASE_ATTACHED :
+        WYL_POLICY_STORE_LEASE_PROVIDER_ONLY, &self->lease);
     if (rc != WYRELOG_E_OK)
       goto fail;
     g_free (self->canonical_path);
@@ -7761,8 +7776,8 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     {
       g_autofree guint8 *canonical_bytes = NULL;
       gsize canonical_len = 0;
-      rc = read_through_dirfd (self->canonical_dirfd,
-          self->canonical_basename, &canonical_bytes, &canonical_len);
+      rc = wyl_policy_store_lease_read_existing (self->lease,
+          &canonical_bytes, &canonical_len);
       if (rc == WYRELOG_E_OK) {
         rc = decrypt_policy_store_from_bytes (self, canonical_bytes,
             canonical_len);
@@ -7778,8 +7793,8 @@ wyl_policy_store_open_with_options (const wyl_policy_store_open_options_t *opts,
     {
       g_autofree guint8 *canonical_bytes = NULL;
       gsize canonical_len = 0;
-      rc = read_whole_file (self->canonical_path, &canonical_bytes,
-          &canonical_len);
+      rc = wyl_policy_store_lease_read_existing (self->lease,
+          &canonical_bytes, &canonical_len);
       if (rc == WYRELOG_E_OK) {
         rc = decrypt_policy_store_from_bytes (self, canonical_bytes,
             canonical_len);

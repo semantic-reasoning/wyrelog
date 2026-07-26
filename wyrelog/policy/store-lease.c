@@ -25,6 +25,7 @@
 #define WYL_POLICY_STORE_LOCK_SUFFIX ".wyrelog-lock"
 
 #ifdef G_OS_WIN32
+#include <aclapi.h>
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -42,11 +43,13 @@ struct wyl_policy_store_lease_t
 #ifdef G_OS_WIN32
   HANDLE parent_handle;
   HANDLE lock_handle;
+  HANDLE store_handle;
   guint64 parent_volume;
   guint64 parent_file_index;
 #else
   int parent_dirfd;
   int lock_fd;
+  int store_fd;
   guint64 parent_dev;
   guint64 parent_ino;
 #endif
@@ -134,11 +137,86 @@ win_parent_identity (HANDLE handle, guint64 *volume, guint64 *index)
   return TRUE;
 }
 
+static gboolean
+win_sid_matches_current_user (PSID sid)
+{
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  gboolean matches = FALSE;
+
+  if (sid == NULL || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY,
+          &token))
+    return FALSE;
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+    goto out;
+  user = g_malloc (needed);
+  if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
+          &needed))
+    goto out;
+  matches = EqualSid (sid, user->User.Sid);
+out:
+  g_free (user);
+  if (token != NULL)
+    CloseHandle (token);
+  return matches;
+}
+
+static gboolean
+win_handle_owned_by_current_user (HANDLE handle)
+{
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  PSID owner = NULL;
+  gboolean valid = FALSE;
+  DWORD rc = GetSecurityInfo (handle, SE_FILE_OBJECT,
+      OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &descriptor);
+  if (rc == ERROR_SUCCESS) {
+    valid = win_sid_matches_current_user (owner);
+    LocalFree (descriptor);
+  }
+  return valid;
+}
+
+static wyrelog_error_t
+win_open_store_identity (const gchar *path, WylPolicyStoreLeaseMode mode,
+    HANDLE *out_handle)
+{
+  *out_handle = INVALID_HANDLE_VALUE;
+  wchar_t *wide = (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wide == NULL)
+    return WYRELOG_E_INVALID;
+  HANDLE handle = CreateFileW (wide, GENERIC_READ | READ_CONTROL,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  DWORD error = handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
+  g_free (wide);
+  if (handle == INVALID_HANDLE_VALUE)
+    return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND ?
+        WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+  BY_HANDLE_FILE_INFORMATION info;
+  gboolean valid = GetFileInformationByHandle (handle, &info)
+      && !(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+      && !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+      && info.nNumberOfLinks == 1
+      && (mode != WYL_POLICY_STORE_LEASE_MAINTENANCE
+      || win_handle_owned_by_current_user (handle));
+  if (!valid) {
+    CloseHandle (handle);
+    return WYRELOG_E_POLICY;
+  }
+  *out_handle = handle;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_policy_store_lease_acquire (const gchar *path,
-    wyl_policy_store_lease_t **out_lease)
+    WylPolicyStoreLeaseMode mode, wyl_policy_store_lease_t **out_lease)
 {
-  if (path == NULL || path[0] == '\0' || out_lease == NULL)
+  if (path == NULL || path[0] == '\0' || out_lease == NULL
+      || (mode != WYL_POLICY_STORE_LEASE_ATTACHED
+          && mode != WYL_POLICY_STORE_LEASE_PROVIDER_ONLY
+          && mode != WYL_POLICY_STORE_LEASE_MAINTENANCE))
     return WYRELOG_E_INVALID;
   *out_lease = NULL;
 
@@ -207,6 +285,27 @@ wyl_policy_store_lease_acquire (const gchar *path,
     g_mutex_unlock (&lease_registry_mutex);
     return WYRELOG_E_POLICY;
   }
+  if (mode == WYL_POLICY_STORE_LEASE_MAINTENANCE
+      && !win_handle_owned_by_current_user (lock_handle)) {
+    CloseHandle (lock_handle);
+    CloseHandle (parent_handle);
+    g_mutex_unlock (&lease_registry_mutex);
+    return WYRELOG_E_POLICY;
+  }
+
+  HANDLE store_handle = INVALID_HANDLE_VALUE;
+  wyrelog_error_t target_rc = mode == WYL_POLICY_STORE_LEASE_PROVIDER_ONLY ?
+      WYRELOG_E_NOT_FOUND :
+      win_open_store_identity (resolved, mode, &store_handle);
+  if (target_rc != WYRELOG_E_OK
+      && !((mode == WYL_POLICY_STORE_LEASE_ATTACHED
+              || mode == WYL_POLICY_STORE_LEASE_PROVIDER_ONLY)
+          && target_rc == WYRELOG_E_NOT_FOUND)) {
+    CloseHandle (lock_handle);
+    CloseHandle (parent_handle);
+    g_mutex_unlock (&lease_registry_mutex);
+    return target_rc;
+  }
 
   wyl_policy_store_lease_t *lease = g_new0 (wyl_policy_store_lease_t, 1);
   lease->resolved_path = g_steal_pointer (&resolved);
@@ -214,6 +313,7 @@ wyl_policy_store_lease_acquire (const gchar *path,
   lease->registry_keys = g_ptr_array_new_with_free_func (g_free);
   lease->parent_handle = parent_handle;
   lease->lock_handle = lock_handle;
+  lease->store_handle = store_handle;
   lease->parent_volume = volume;
   lease->parent_file_index = parent_index;
   registry_bind (lease, path_key);
@@ -242,6 +342,8 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
     return;
   g_mutex_lock (&lease_registry_mutex);
   registry_unbind_all (lease);
+  if (lease->store_handle != INVALID_HANDLE_VALUE)
+    CloseHandle (lease->store_handle);
   CloseHandle (lease->lock_handle);
   CloseHandle (lease->parent_handle);
   g_mutex_unlock (&lease_registry_mutex);
@@ -273,9 +375,12 @@ lock_nonblocking (int fd)
 
 wyrelog_error_t
 wyl_policy_store_lease_acquire (const gchar *path,
-    wyl_policy_store_lease_t **out_lease)
+    WylPolicyStoreLeaseMode mode, wyl_policy_store_lease_t **out_lease)
 {
-  if (path == NULL || path[0] == '\0' || out_lease == NULL)
+  if (path == NULL || path[0] == '\0' || out_lease == NULL
+      || (mode != WYL_POLICY_STORE_LEASE_ATTACHED
+          && mode != WYL_POLICY_STORE_LEASE_PROVIDER_ONLY
+          && mode != WYL_POLICY_STORE_LEASE_MAINTENANCE))
     return WYRELOG_E_INVALID;
   *out_lease = NULL;
 
@@ -357,8 +462,22 @@ wyl_policy_store_lease_acquire (const gchar *path,
     g_mutex_unlock (&lease_registry_mutex);
     return WYRELOG_E_POLICY;
   }
-  if (fchmod (lock_fd, 0600) != 0 || fstat (lock_fd, &lock_stat) != 0
-      || (lock_stat.st_mode & 0777) != 0600) {
+  /* Maintenance is an authorization boundary, so it must never repair an
+   * attacker-selected or stale lock inode into acceptability. Attached mode
+   * retains the historical normalization used when creating a daemon lock. */
+  gboolean private_lock = lock_stat.st_uid == geteuid ()
+      && (lock_stat.st_mode & 0777) == 0600;
+  if (mode == WYL_POLICY_STORE_LEASE_MAINTENANCE && !private_lock) {
+    close (lock_fd);
+    close (dirfd);
+    g_mutex_unlock (&lease_registry_mutex);
+    return WYRELOG_E_POLICY;
+  }
+  if ((mode == WYL_POLICY_STORE_LEASE_ATTACHED
+          || mode == WYL_POLICY_STORE_LEASE_PROVIDER_ONLY)
+      && (fchmod (lock_fd, 0600) != 0
+          || fstat (lock_fd, &lock_stat) != 0
+          || (lock_stat.st_mode & 0777) != 0600)) {
     close (lock_fd);
     close (dirfd);
     g_mutex_unlock (&lease_registry_mutex);
@@ -373,12 +492,42 @@ wyl_policy_store_lease_acquire (const gchar *path,
     return rc;
   }
 
+  int store_fd = mode == WYL_POLICY_STORE_LEASE_PROVIDER_ONLY ? -1 :
+      openat (dirfd, basename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  int store_errno = errno;
+  if (store_fd < 0) {
+    if (mode != WYL_POLICY_STORE_LEASE_PROVIDER_ONLY
+        && (mode == WYL_POLICY_STORE_LEASE_MAINTENANCE
+            || store_errno != ENOENT)) {
+      close (lock_fd);
+      close (dirfd);
+      g_mutex_unlock (&lease_registry_mutex);
+      return store_errno == ENOENT ? WYRELOG_E_NOT_FOUND :
+          store_errno == ELOOP ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    }
+  } else {
+    struct stat store_stat;
+    gboolean valid = fstat (store_fd, &store_stat) == 0
+        && S_ISREG (store_stat.st_mode) && store_stat.st_nlink == 1
+        && (mode != WYL_POLICY_STORE_LEASE_MAINTENANCE
+        || (store_stat.st_uid == geteuid ()
+            && (store_stat.st_mode & 0077) == 0));
+    if (!valid) {
+      close (store_fd);
+      close (lock_fd);
+      close (dirfd);
+      g_mutex_unlock (&lease_registry_mutex);
+      return WYRELOG_E_POLICY;
+    }
+  }
+
   wyl_policy_store_lease_t *lease = g_new0 (wyl_policy_store_lease_t, 1);
   lease->resolved_path = g_steal_pointer (&resolved);
   lease->basename = g_strdup (basename);
   lease->registry_keys = g_ptr_array_new_with_free_func (g_free);
   lease->parent_dirfd = dirfd;
   lease->lock_fd = lock_fd;
+  lease->store_fd = store_fd;
   lease->parent_dev = parent_stat.st_dev;
   lease->parent_ino = parent_stat.st_ino;
   registry_bind (lease, path_key);
@@ -426,6 +575,8 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
     return;
   g_mutex_lock (&lease_registry_mutex);
   registry_unbind_all (lease);
+  if (lease->store_fd >= 0)
+    close (lease->store_fd);
   close (lease->lock_fd);
   close (lease->parent_dirfd);
   g_mutex_unlock (&lease_registry_mutex);
@@ -435,6 +586,65 @@ wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
   g_free (lease);
 }
 #endif
+
+wyrelog_error_t
+wyl_policy_store_lease_read_existing (const wyl_policy_store_lease_t *lease,
+    guint8 **out_bytes, gsize *out_len)
+{
+  if (lease == NULL || out_bytes == NULL || out_len == NULL)
+    return WYRELOG_E_INVALID;
+  *out_bytes = NULL;
+  *out_len = 0;
+#ifdef G_OS_WIN32
+  if (lease->store_handle == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_NOT_FOUND;
+  LARGE_INTEGER size;
+  LARGE_INTEGER start = {
+    0
+  };
+  if (!GetFileSizeEx (lease->store_handle, &size) || size.QuadPart < 0
+      || (guint64) size.QuadPart > (guint64) G_MAXSIZE
+      || !SetFilePointerEx (lease->store_handle, start, NULL, FILE_BEGIN))
+    return WYRELOG_E_IO;
+  gsize len = (gsize) size.QuadPart;
+  guint8 *bytes = g_malloc (len > 0 ? len : 1);
+  gsize total = 0;
+  while (total < len) {
+    DWORD chunk = MIN ((gsize) 0x10000, len - total);
+    DWORD got = 0;
+    if (!ReadFile (lease->store_handle, bytes + total, chunk, &got, NULL)
+        || got == 0) {
+      g_free (bytes);
+      return WYRELOG_E_IO;
+    }
+    total += got;
+  }
+#else
+  if (lease->store_fd < 0)
+    return WYRELOG_E_NOT_FOUND;
+  struct stat statbuf;
+  if (fstat (lease->store_fd, &statbuf) != 0 || statbuf.st_size < 0
+      || (guint64) statbuf.st_size > (guint64) G_MAXSIZE)
+    return WYRELOG_E_IO;
+  gsize len = (gsize) statbuf.st_size;
+  guint8 *bytes = g_malloc (len > 0 ? len : 1);
+  gsize total = 0;
+  while (total < len) {
+    ssize_t got = pread (lease->store_fd, bytes + total, len - total,
+        (off_t) total);
+    if (got < 0 && errno == EINTR)
+      continue;
+    if (got <= 0) {
+      g_free (bytes);
+      return WYRELOG_E_IO;
+    }
+    total += (gsize) got;
+  }
+#endif
+  *out_bytes = bytes;
+  *out_len = len;
+  return WYRELOG_E_OK;
+}
 
 const gchar *
 wyl_policy_store_lease_resolved_path (const wyl_policy_store_lease_t *lease)

@@ -9,14 +9,23 @@ G_BEGIN_DECLS;
 
 typedef struct wyl_policy_store_lease_t wyl_policy_store_lease_t;
 
+typedef enum
+{
+  WYL_POLICY_STORE_LEASE_ATTACHED,
+  WYL_POLICY_STORE_LEASE_PROVIDER_ONLY,
+  WYL_POLICY_STORE_LEASE_MAINTENANCE,
+} WylPolicyStoreLeaseMode;
+
 wyrelog_error_t wyl_policy_store_lease_acquire (const gchar * path,
-    wyl_policy_store_lease_t ** out_lease);
+    WylPolicyStoreLeaseMode mode, wyl_policy_store_lease_t ** out_lease);
 void wyl_policy_store_lease_release (wyl_policy_store_lease_t * lease);
 
 const gchar *wyl_policy_store_lease_resolved_path (const
     wyl_policy_store_lease_t * lease);
 wyrelog_error_t wyl_policy_store_lease_verify_parent (const
     wyl_policy_store_lease_t * lease);
+wyrelog_error_t wyl_policy_store_lease_read_existing (const
+    wyl_policy_store_lease_t * lease, guint8 ** out_bytes, gsize * out_len);
 
 #ifndef G_OS_WIN32
 int wyl_policy_store_lease_parent_dirfd (const

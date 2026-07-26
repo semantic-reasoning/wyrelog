@@ -23,6 +23,12 @@ typedef struct _WylFactRootWriterLease WylFactRootWriterLease;
 
 typedef enum
 {
+  WYL_POLICY_STORE_OPEN_ATTACHED,
+  WYL_POLICY_STORE_OPEN_MAINTENANCE,
+} WylPolicyStoreOpenMode;
+
+typedef enum
+{
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_NONE,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_BASE_DDL,
   WYL_POLICY_GRAPH_AUTHORITY_MIGRATION_FAIL_AFTER_COLUMNS,
@@ -565,6 +571,7 @@ typedef struct
   gpointer keyprovider_state;
   void (*keyprovider_state_free) (gpointer state);
   gboolean require_encrypted;
+  WylPolicyStoreOpenMode mode;
   const wyl_policy_store_cvk_runtime_t *service_cvk_runtime;
   const wyl_policy_store_rotation_runtime_t *rotation_runtime;
 } wyl_policy_store_open_options_t;

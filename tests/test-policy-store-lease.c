@@ -26,6 +26,7 @@ extern char **environ;
 static gchar *test_lease_self_path;
 
 static gint run_helper_exit (const gchar * path);
+static gint run_maintenance_helper_exit (const gchar * path);
 typedef struct
 {
   guint probes;
@@ -126,6 +127,9 @@ lease_helper_main (int argc, char **argv)
     .keyprovider_state = &provider,
     .require_encrypted = TRUE,
   };
+  gboolean maintenance = argc == 4 && g_strcmp0 (argv[3], "--maintenance") == 0;
+  if (maintenance)
+    opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
   wyl_policy_store_t *store = NULL;
   wyrelog_error_t rc = wyl_policy_store_open_with_options (&opts, &store);
   if (rc == WYRELOG_E_BUSY)
@@ -133,7 +137,7 @@ lease_helper_main (int argc, char **argv)
   if (rc != WYRELOG_E_OK)
     return 74;
 
-  gboolean oneshot = argc == 4 && g_strcmp0 (argv[3], "--oneshot") == 0;
+  gboolean oneshot = argc == 4;
   if (!oneshot) {
     g_print ("READY\n");
     fflush (stdout);
@@ -328,6 +332,98 @@ run_helper_exit (const gchar *path)
   gint status = g_subprocess_get_exit_status (process);
   g_object_unref (process);
   return status;
+}
+
+static gint
+run_maintenance_helper_exit (const gchar *path)
+{
+  const gchar *argv[] = { test_lease_self_path, LEASE_HELPER_ARG, path,
+    "--maintenance", NULL
+  };
+  GError *error = NULL;
+  GSubprocess *process = g_subprocess_newv (argv,
+      G_SUBPROCESS_FLAGS_STDOUT_SILENCE | G_SUBPROCESS_FLAGS_STDERR_SILENCE,
+      &error);
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_wait (process, NULL, &error));
+  g_assert_no_error (error);
+  g_assert_true (g_subprocess_get_if_exited (process));
+  gint status = g_subprocess_get_exit_status (process);
+  g_object_unref (process);
+  return status;
+}
+
+static void
+test_maintenance_exclusivity_and_private_store (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  g_autofree gchar *path = g_build_filename (dir, "maintenance.store", NULL);
+
+  CountingProvider attached_provider = { 0 };
+  wyl_policy_store_open_options_t attached_opts =
+      encrypted_opts (path, &attached_provider);
+  wyl_policy_store_t *attached = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&attached_opts,
+          &attached), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (attached), ==, WYRELOG_E_OK);
+  g_assert_cmpint (run_maintenance_helper_exit (path), ==, 73);
+  wyl_policy_store_close (attached);
+
+  CountingProvider maintenance_provider = { 0 };
+  wyl_policy_store_open_options_t maintenance_opts =
+      encrypted_opts (path, &maintenance_provider);
+  maintenance_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *maintenance = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&maintenance_opts,
+          &maintenance), ==, WYRELOG_E_OK);
+  g_assert_cmpint (run_helper_exit (path), ==, 73);
+  g_assert_cmpint (run_maintenance_helper_exit (path), ==, 73);
+  wyl_policy_store_close (maintenance);
+
+#ifndef G_OS_WIN32
+  g_autofree gchar *lock_path = g_strdup_printf ("%s%s", path, LOCK_SUFFIX);
+  g_assert_cmpint (g_chmod (lock_path, 0640), ==, 0);
+  CountingProvider weak_lock_provider = { 0 };
+  wyl_policy_store_open_options_t weak_lock_opts =
+      encrypted_opts (path, &weak_lock_provider);
+  weak_lock_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *weak_lock_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&weak_lock_opts,
+          &weak_lock_store), ==, WYRELOG_E_POLICY);
+  g_assert_null (weak_lock_store);
+  g_assert_cmpuint (weak_lock_provider.probes, ==, 0);
+  GStatBuf weak_lock_stat;
+  g_assert_cmpint (g_stat (lock_path, &weak_lock_stat), ==, 0);
+  g_assert_cmpuint (weak_lock_stat.st_mode & 0777, ==, 0640);
+  g_assert_cmpint (g_chmod (lock_path, 0600), ==, 0);
+
+  g_assert_cmpint (g_chmod (path, 0640), ==, 0);
+  CountingProvider public_provider = { 0 };
+  wyl_policy_store_open_options_t public_opts =
+      encrypted_opts (path, &public_provider);
+  public_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *public_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&public_opts,
+          &public_store), ==, WYRELOG_E_POLICY);
+  g_assert_null (public_store);
+  g_assert_cmpuint (public_provider.probes, ==, 0);
+  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+#endif
+
+  g_autofree gchar *missing = g_build_filename (dir, "missing.store", NULL);
+  CountingProvider missing_provider = { 0 };
+  wyl_policy_store_open_options_t missing_opts =
+      encrypted_opts (missing, &missing_provider);
+  missing_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *missing_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&missing_opts,
+          &missing_store), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (missing_store);
+  g_assert_cmpuint (missing_provider.probes, ==, 0);
+
+  remove_store_files (path);
+  remove_store_files (missing);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
 
 static void
@@ -1421,6 +1517,8 @@ main (int argc, char **argv)
       test_lock_symlink_rejected);
   g_test_add_func ("/policy-store-lease/subprocess-crash",
       test_subprocess_busy_crash_and_reacquire);
+  g_test_add_func ("/policy-store-lease/maintenance-exclusivity",
+      test_maintenance_exclusivity_and_private_store);
 #ifndef G_OS_WIN32
   g_test_add_func ("/policy-store-lease/parent-alias-swap",
       test_parent_alias_swap_stays_pinned);
