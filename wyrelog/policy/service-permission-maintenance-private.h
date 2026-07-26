@@ -41,6 +41,9 @@ typedef struct
   guint8 post_digest[32];
 } WylServicePermissionApplyReceipt;
 
+typedef struct WylServicePermissionReceiptReservation
+    WylServicePermissionReceiptReservation;
+
 void wyl_service_permission_manifest_clear
     (WylServicePermissionManifest * manifest);
 wyrelog_error_t wyl_service_permission_manifest_from_analysis
@@ -74,5 +77,15 @@ wyrelog_error_t wyl_service_permission_maintenance_apply
     WylServicePermissionApplyReceipt * out_receipt);
 wyrelog_error_t wyl_service_permission_apply_receipt_write_new_owner_only
     (const gchar * path, const WylServicePermissionApplyReceipt * receipt);
+wyrelog_error_t wyl_service_permission_apply_receipt_reserve_owner_only
+    (const gchar * path,
+    WylServicePermissionReceiptReservation ** out_reservation);
+wyrelog_error_t wyl_service_permission_apply_receipt_finalize
+    (WylServicePermissionReceiptReservation * reservation,
+    const WylServicePermissionApplyReceipt * receipt);
+void wyl_service_permission_apply_receipt_reservation_abort
+    (WylServicePermissionReceiptReservation * reservation);
+void wyl_service_permission_apply_receipt_reservation_fail_finalize_once
+    (WylServicePermissionReceiptReservation * reservation);
 
 G_END_DECLS;

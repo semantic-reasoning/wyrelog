@@ -33,6 +33,21 @@
 #include <unistd.h>
 #endif
 
+struct WylServicePermissionReceiptReservation
+{
+  gchar *path;
+  gboolean fail_finalize_once;
+  gboolean created;
+#ifdef G_OS_WIN32
+  HANDLE file;
+  wchar_t *wide_path;
+#else
+  int dirfd;
+  int fd;
+  gchar *basename;
+#endif
+};
+
 static gboolean
 request_id_is_canonical (const gchar *value)
 {
@@ -1306,12 +1321,13 @@ out:
   return rc;
 }
 
-wyrelog_error_t
-wyl_service_permission_apply_receipt_write_new_owner_only (const gchar *path,
-    const WylServicePermissionApplyReceipt *receipt)
+static wyrelog_error_t
+apply_receipt_encode (const WylServicePermissionApplyReceipt *receipt,
+    gchar **out_document, gsize *out_len)
 {
   wyl_id_t parsed_audit_id = WYL_ID_NIL;
-  if (receipt == NULL || !request_id_is_canonical (receipt->request_id)
+  if (out_document == NULL || out_len == NULL || receipt == NULL
+      || !request_id_is_canonical (receipt->request_id)
       || receipt->actor_identity == NULL || receipt->actor_identity[0] == '\0'
       || receipt->audit_id == NULL
       || wyl_id_parse (receipt->audit_id, &parsed_audit_id) != WYRELOG_E_OK
@@ -1341,10 +1357,237 @@ wyl_service_permission_apply_receipt_write_new_owner_only (const gchar *path,
       ",\"post_digest\":\"%s\"}\n", receipt->applied_at_us,
       receipt->operation_count, receipt->pre_generation, pre_digest,
       receipt->post_generation, post_digest);
-  wyrelog_error_t rc = write_new_owner_only_document (path, document->str,
-      document->len);
-  g_string_free (document, TRUE);
+  *out_len = document->len;
+  *out_document = g_string_free (document, FALSE);
   sodium_memzero (pre_digest, sizeof pre_digest);
   sodium_memzero (post_digest, sizeof post_digest);
-  return rc;
+  return *out_document != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+wyrelog_error_t
+wyl_service_permission_apply_receipt_reserve_owner_only (const gchar *path,
+    WylServicePermissionReceiptReservation **out_reservation)
+{
+  if (path == NULL || path[0] == '\0' || out_reservation == NULL)
+    return WYRELOG_E_INVALID;
+  *out_reservation = NULL;
+  WylServicePermissionReceiptReservation *reservation =
+      g_new0 (WylServicePermissionReceiptReservation, 1);
+  if (reservation == NULL)
+    return WYRELOG_E_NOMEM;
+  reservation->path = g_strdup (path);
+#ifdef G_OS_WIN32
+  reservation->file = INVALID_HANDLE_VALUE;
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  LPWSTR sid_text = NULL;
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  wchar_t *sddl = NULL;
+  wyrelog_error_t rc = WYRELOG_E_IO;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    goto win_out;
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+    goto win_out;
+  user = g_malloc (needed);
+  if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
+          &needed) || !ConvertSidToStringSidW (user->User.Sid, &sid_text))
+    goto win_out;
+  gsize sid_len = wcslen (sid_text);
+  sddl = g_new (wchar_t, 32 + sid_len * 2);
+  if (sddl == NULL
+      || swprintf (sddl, 32 + sid_len * 2, L"O:%lsD:P(A;;FA;;;%ls)",
+          sid_text, sid_text) < 0
+      || !ConvertStringSecurityDescriptorToSecurityDescriptorW (sddl,
+          SDDL_REVISION_1, &descriptor, NULL))
+    goto win_out;
+  SECURITY_ATTRIBUTES attrs = { sizeof attrs, descriptor, FALSE };
+  reservation->wide_path =
+      (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (reservation->wide_path == NULL) {
+    rc = WYRELOG_E_INVALID;
+    goto win_out;
+  }
+  reservation->file = CreateFileW (reservation->wide_path, GENERIC_WRITE, 0,
+      &attrs, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (reservation->file == INVALID_HANDLE_VALUE) {
+    rc = GetLastError () == ERROR_FILE_EXISTS
+        || GetLastError () == ERROR_ALREADY_EXISTS ?
+        WYRELOG_E_POLICY : WYRELOG_E_IO;
+    goto win_out;
+  }
+  reservation->created = TRUE;
+  BY_HANDLE_FILE_INFORMATION info;
+  if (!GetFileInformationByHandle (reservation->file, &info)
+      || (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT
+              | FILE_ATTRIBUTE_DIRECTORY)) || info.nNumberOfLinks != 1) {
+    rc = WYRELOG_E_POLICY;
+    goto win_out;
+  }
+  rc = WYRELOG_E_OK;
+win_out:
+  g_free (sddl);
+  if (descriptor != NULL)
+    LocalFree (descriptor);
+  if (sid_text != NULL)
+    LocalFree (sid_text);
+  g_free (user);
+  if (token != NULL)
+    CloseHandle (token);
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_permission_apply_receipt_reservation_abort (reservation);
+    return rc;
+  }
+#else
+  reservation->dirfd = -1;
+  reservation->fd = -1;
+  g_autofree gchar *absolute = g_canonicalize_filename (path, NULL);
+  g_autofree gchar *parent = g_path_get_dirname (absolute);
+  reservation->basename = g_path_get_basename (absolute);
+  gchar *resolved_parent = realpath (parent, NULL);
+  if (resolved_parent == NULL) {
+    wyrelog_error_t rc = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+    wyl_service_permission_apply_receipt_reservation_abort (reservation);
+    return rc;
+  }
+  reservation->dirfd =
+      open (resolved_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  g_free (resolved_parent);
+  struct stat parent_stat;
+  if (reservation->dirfd < 0
+      || fstat (reservation->dirfd, &parent_stat) != 0
+      || !S_ISDIR (parent_stat.st_mode) || parent_stat.st_uid != geteuid ()
+      || (parent_stat.st_mode & 0077) != 0) {
+    wyl_service_permission_apply_receipt_reservation_abort (reservation);
+    return WYRELOG_E_POLICY;
+  }
+  reservation->fd = openat (reservation->dirfd, reservation->basename,
+      O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
+  if (reservation->fd < 0) {
+    int open_errno = errno;
+    wyl_service_permission_apply_receipt_reservation_abort (reservation);
+    return open_errno == EEXIST || open_errno == ELOOP ?
+        WYRELOG_E_POLICY : WYRELOG_E_IO;
+  }
+  reservation->created = TRUE;
+  struct stat file_stat;
+  if (fstat (reservation->fd, &file_stat) != 0
+      || !S_ISREG (file_stat.st_mode) || file_stat.st_nlink != 1
+      || file_stat.st_uid != geteuid () || (file_stat.st_mode & 0077) != 0) {
+    wyl_service_permission_apply_receipt_reservation_abort (reservation);
+    return WYRELOG_E_POLICY;
+  }
+#endif
+  *out_reservation = reservation;
+  return WYRELOG_E_OK;
+}
+
+void wyl_service_permission_apply_receipt_reservation_abort
+    (WylServicePermissionReceiptReservation * reservation)
+{
+  if (reservation == NULL)
+    return;
+#ifdef G_OS_WIN32
+  if (reservation->file != INVALID_HANDLE_VALUE)
+    CloseHandle (reservation->file);
+  if (reservation->created && reservation->wide_path != NULL)
+    (void) DeleteFileW (reservation->wide_path);
+  g_free (reservation->wide_path);
+#else
+  if (reservation->fd >= 0)
+    close (reservation->fd);
+  if (reservation->created && reservation->dirfd >= 0
+      && reservation->basename != NULL)
+    (void) unlinkat (reservation->dirfd, reservation->basename, 0);
+  if (reservation->dirfd >= 0)
+    close (reservation->dirfd);
+  g_free (reservation->basename);
+#endif
+  g_free (reservation->path);
+  g_free (reservation);
+}
+
+void wyl_service_permission_apply_receipt_reservation_fail_finalize_once
+    (WylServicePermissionReceiptReservation * reservation)
+{
+  if (reservation != NULL)
+    reservation->fail_finalize_once = TRUE;
+}
+
+wyrelog_error_t
+    wyl_service_permission_apply_receipt_finalize
+    (WylServicePermissionReceiptReservation * reservation,
+    const WylServicePermissionApplyReceipt * receipt)
+{
+  if (reservation == NULL)
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *document = NULL;
+  gsize len = 0;
+  wyrelog_error_t rc = apply_receipt_encode (receipt, &document, &len);
+  if (rc == WYRELOG_E_OK && reservation->fail_finalize_once)
+    rc = WYRELOG_E_IO;
+  gsize total = 0;
+#ifdef G_OS_WIN32
+  while (rc == WYRELOG_E_OK && total < len) {
+    DWORD written = 0;
+    DWORD chunk = len - total > 0x10000 ? 0x10000 : (DWORD) (len - total);
+    if (!WriteFile (reservation->file, document + total, chunk, &written, NULL)
+        || written == 0)
+      rc = WYRELOG_E_IO;
+    else
+      total += written;
+  }
+  if (rc == WYRELOG_E_OK && !FlushFileBuffers (reservation->file))
+    rc = WYRELOG_E_IO;
+  if (reservation->file != INVALID_HANDLE_VALUE) {
+    CloseHandle (reservation->file);
+    reservation->file = INVALID_HANDLE_VALUE;
+  }
+#else
+  while (rc == WYRELOG_E_OK && total < len) {
+    ssize_t written = write (reservation->fd, document + total, len - total);
+    if (written < 0 && errno == EINTR)
+      continue;
+    if (written <= 0)
+      rc = WYRELOG_E_IO;
+    else
+      total += (gsize) written;
+  }
+  if (rc == WYRELOG_E_OK && fsync (reservation->fd) != 0)
+    rc = WYRELOG_E_IO;
+  if (reservation->fd >= 0) {
+    if (close (reservation->fd) != 0 && rc == WYRELOG_E_OK)
+      rc = WYRELOG_E_IO;
+    reservation->fd = -1;
+  }
+  if (rc == WYRELOG_E_OK && fsync (reservation->dirfd) != 0)
+    rc = WYRELOG_E_IO;
+#endif
+  if (rc != WYRELOG_E_OK) {
+    wyl_service_permission_apply_receipt_reservation_abort (reservation);
+    return rc;
+  }
+#ifdef G_OS_WIN32
+  g_free (reservation->wide_path);
+#else
+  close (reservation->dirfd);
+  g_free (reservation->basename);
+#endif
+  g_free (reservation->path);
+  g_free (reservation);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_service_permission_apply_receipt_write_new_owner_only (const gchar *path,
+    const WylServicePermissionApplyReceipt *receipt)
+{
+  WylServicePermissionReceiptReservation *reservation = NULL;
+  wyrelog_error_t rc =
+      wyl_service_permission_apply_receipt_reserve_owner_only (path,
+      &reservation);
+  return rc == WYRELOG_E_OK ?
+      wyl_service_permission_apply_receipt_finalize (reservation, receipt) : rc;
 }

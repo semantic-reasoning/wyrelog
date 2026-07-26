@@ -757,6 +757,17 @@ test_maintenance_apply_and_replay (void)
       manifest.store_digest, sizeof manifest.store_digest);
   g_assert_cmpuint (applied.post_generation, >, 0);
   g_assert_cmpstr (applied.manifest_fingerprint, !=, "");
+  g_autofree gchar *failed_receipt_path =
+      g_build_filename (dir, "failed-receipt.json", NULL);
+  WylServicePermissionReceiptReservation *failed_reservation = NULL;
+  g_assert_cmpint
+      (wyl_service_permission_apply_receipt_reserve_owner_only
+      (failed_receipt_path, &failed_reservation), ==, WYRELOG_E_OK);
+  wyl_service_permission_apply_receipt_reservation_fail_finalize_once
+      (failed_reservation);
+  g_assert_cmpint (wyl_service_permission_apply_receipt_finalize
+      (failed_reservation, &applied), ==, WYRELOG_E_IO);
+  g_assert_false (g_file_test (failed_receipt_path, G_FILE_TEST_EXISTS));
 
   CountingProvider replay_provider = { 0 };
   wyl_policy_store_open_options_t replay_opts =
@@ -788,6 +799,15 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpuint (replayed.post_generation, ==, applied.post_generation);
   g_assert_cmpmem (replayed.post_digest, sizeof replayed.post_digest,
       applied.post_digest, sizeof applied.post_digest);
+  g_autofree gchar *recovered_receipt_path =
+      g_build_filename (dir, "recovered-receipt.json", NULL);
+  WylServicePermissionReceiptReservation *recovered_reservation = NULL;
+  g_assert_cmpint
+      (wyl_service_permission_apply_receipt_reserve_owner_only
+      (recovered_receipt_path, &recovered_reservation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_permission_apply_receipt_finalize
+      (recovered_reservation, &replayed), ==, WYRELOG_E_OK);
+  g_assert_true (g_file_test (recovered_receipt_path, G_FILE_TEST_IS_REGULAR));
 
   CountingProvider conflict_provider = { 0 };
   wyl_policy_store_open_options_t conflict_opts =
@@ -815,6 +835,7 @@ test_maintenance_apply_and_replay (void)
   wyl_service_permission_apply_receipt_clear (&replayed);
   wyl_service_permission_apply_receipt_clear (&applied);
   wyl_service_permission_manifest_clear (&manifest);
+  g_remove (recovered_receipt_path);
   remove_store_files (path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }

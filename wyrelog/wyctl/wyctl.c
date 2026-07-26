@@ -4114,6 +4114,10 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
   WylServicePermissionManifest manifest = { 0 };
   wyrelog_error_t rc = wyl_service_permission_manifest_read_owner_only
       (opts.manifest_path, &manifest);
+  WylServicePermissionReceiptReservation *receipt_reservation = NULL;
+  if (rc == WYRELOG_E_OK && apply)
+    rc = wyl_service_permission_apply_receipt_reserve_owner_only
+        (opts.output_path, &receipt_reservation);
   wyl_policy_store_t *store = NULL;
   if (rc == WYRELOG_E_OK)
     rc = service_permission_closure_open_store (&opts, &store);
@@ -4126,17 +4130,32 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
     WylServicePermissionApplyReceipt receipt = { 0 };
     rc = wyl_service_permission_maintenance_apply (store, &manifest, &receipt);
     store = NULL;               /* apply always consumes the store */
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_service_permission_apply_receipt_write_new_owner_only
-          (opts.output_path, &receipt);
+    gboolean committed_output_failed = FALSE;
+    if (rc == WYRELOG_E_OK) {
+      rc = wyl_service_permission_apply_receipt_finalize
+          (receipt_reservation, &receipt);
+      receipt_reservation = NULL;
+      committed_output_failed = rc != WYRELOG_E_OK;
+    }
     if (rc == WYRELOG_E_OK)
       g_print ("status=%s request_id=%s operations=%u actor=%s audit_id=%s"
           " applied_at_us=%" G_GINT64_FORMAT "\n",
           receipt.state == WYL_SERVICE_PERMISSION_APPLY_REPLAYED ?
           "replayed" : "applied", receipt.request_id, receipt.operation_count,
           receipt.actor_identity, receipt.audit_id, receipt.applied_at_us);
+    if (committed_output_failed)
+      g_printerr ("status=COMMITTED_OUTPUT_FAILED request_id=%s audit_id=%s"
+          " recovery=\"repeat this exact apply with the same manifest and a"
+          " fresh --receipt path\"\n", receipt.request_id, receipt.audit_id);
     wyl_service_permission_apply_receipt_clear (&receipt);
+    if (committed_output_failed) {
+      wyl_service_permission_manifest_clear (&manifest);
+      return 3;
+    }
   }
+  if (receipt_reservation != NULL)
+    wyl_service_permission_apply_receipt_reservation_abort
+        (receipt_reservation);
   if (store != NULL)
     wyl_policy_store_close (store);
   wyl_service_permission_manifest_clear (&manifest);
