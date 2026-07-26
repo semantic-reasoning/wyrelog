@@ -6889,15 +6889,17 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
      * Keep the original 1924 diagnosis stable for the principal write.  A
      * distinct code proves that the principal was committed and the later
      * tenant setup failed, rather than conflating the two mutations.  Setup
-     * failures (such as request-id allocation) precede both mutations.
+     * failures (such as request-id allocation) precede both mutations.  The
+     * latter two codes stay within the portable 8-bit process-exit range so
+     * every CI platform reports them distinctly.
      */
     if (issue_prepare_failure ==
         SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED)
       return 1924;
     if (issue_prepare_failure ==
         SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED)
-      return 19813;
-    return 19814;
+      return 251;
+    return 252;
   }
   wyl_service_credential_issue_result_t issue_result = { 0 };
   if (wyl_service_credential_issue (handle, "svc:reconcile:issue",
