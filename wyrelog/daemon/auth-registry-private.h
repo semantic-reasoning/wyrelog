@@ -28,6 +28,7 @@ typedef enum
 {
   WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL = 1,
   WYL_SERVICE_AUTH_SELECTOR_TENANT = 2,
+  WYL_SERVICE_AUTH_SELECTOR_CREDENTIAL_GENERATION = 3,
 } WylServiceAuthSelectorKind;
 
 /*
@@ -38,6 +39,7 @@ typedef struct
 {
   WylServiceAuthSelectorKind kind;
   gsize length;
+  guint64 generation;
   gchar bytes[WYL_SERVICE_AUTH_SELECTOR_BYTES];
 } WylServiceAuthSelector;
 
@@ -153,9 +155,11 @@ wyrelog_error_t wyl_service_auth_registry_remove_exact
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation, gboolean * out_removed);
 #endif
+#if defined(WYL_AUTH_REGISTRY_TESTING) || defined(WYL_TEST_DAEMON_HTTP)
 wyrelog_error_t wyl_service_auth_registry_revoke_credential_generation
     (WylServiceAuthRegistry * registry, const gchar * credential_id,
     guint64 generation, WylServiceAuthRevokeResult * out_result);
+#endif
 wyrelog_error_t wyl_service_auth_registry_revoke_principal
     (WylServiceAuthRegistry * registry, const gchar * principal,
     WylServiceAuthRevokeResult * out_result);
@@ -166,6 +170,9 @@ wyrelog_error_t wyl_service_auth_selector_init_principal
     (WylServiceAuthSelector * selector, const gchar * principal);
 wyrelog_error_t wyl_service_auth_selector_init_tenant
     (WylServiceAuthSelector * selector, const gchar * tenant);
+wyrelog_error_t wyl_service_auth_selector_init_credential_generation
+    (WylServiceAuthSelector * selector, const gchar * credential_id,
+    guint64 generation);
 /*
  * Performs no recoverable allocation.  Under one registry mutex it validates
  * all owning/borrowed indexes, transitions the exact indexed set, and scans
