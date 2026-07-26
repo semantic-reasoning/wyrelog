@@ -6783,12 +6783,19 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 #endif /* WYL_HAS_AUDIT */
 
 #ifdef WYL_HAS_FACT_STORE
+typedef enum
+{
+  SERVICE_CREDENTIAL_SUBJECT_PREPARE_SETUP_FAILED,
+  SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED,
+  SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED,
+} ServiceCredentialSubjectPrepareFailure;
+
 static wyrelog_error_t
 prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id,
-    gboolean *out_principal_create_failed)
+    ServiceCredentialSubjectPrepareFailure *out_failure)
 {
-  if (out_principal_create_failed != NULL)
-    *out_principal_create_failed = FALSE;
+  if (out_failure != NULL)
+    *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_SETUP_FAILED;
   wyl_service_principal_t principal = { 0 };
   g_autofree gchar *request_id = g_strdup_printf ("principal-create:%s",
       subject_id);
@@ -6797,16 +6804,19 @@ prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id,
   wyrelog_error_t rc = wyl_service_principal_create (handle, subject_id,
       subject_id, "admin", request_id, &principal);
   if (rc != WYRELOG_E_OK) {
-    if (out_principal_create_failed != NULL)
-      *out_principal_create_failed = TRUE;
+    if (out_failure != NULL)
+      *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED;
     return rc;
   }
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   rc = wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
       "tenant-a", &created);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    if (out_failure != NULL)
+      *out_failure = SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED;
     return rc;
+  }
   return WYRELOG_E_OK;
 }
 
@@ -6871,15 +6881,23 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 1923;
 
-  gboolean issue_principal_create_failed = FALSE;
+  ServiceCredentialSubjectPrepareFailure issue_prepare_failure =
+      SERVICE_CREDENTIAL_SUBJECT_PREPARE_SETUP_FAILED;
   if (prepare_service_credential_subject (handle, "svc:reconcile:issue",
-          &issue_principal_create_failed) != WYRELOG_E_OK) {
+          &issue_prepare_failure) != WYRELOG_E_OK) {
     /*
      * Keep the original 1924 diagnosis stable for the principal write.  A
      * distinct code proves that the principal was committed and the later
-     * tenant setup failed, rather than conflating the two mutations.
+     * tenant setup failed, rather than conflating the two mutations.  Setup
+     * failures (such as request-id allocation) precede both mutations.
      */
-    return issue_principal_create_failed ? 1924 : 19813;
+    if (issue_prepare_failure ==
+        SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED)
+      return 1924;
+    if (issue_prepare_failure ==
+        SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED)
+      return 19813;
+    return 19814;
   }
   wyl_service_credential_issue_result_t issue_result = { 0 };
   if (wyl_service_credential_issue (handle, "svc:reconcile:issue",
