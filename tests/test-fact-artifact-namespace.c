@@ -537,6 +537,12 @@ test_mutation_leases (void)
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "tmp",
           FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (fd, ==, -1);
+  WylFactArtifactTempBinding *binding = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "tmp", FALSE, FALSE, &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
 }
 #endif
 
@@ -572,11 +578,39 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
+  WylFactArtifactTempBinding *binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "bound", TRUE, TRUE, &binding, &fd), ==, WYRELOG_E_OK);
+  g_assert_nonnull (binding);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (binding, TRUE, &fd),
+      ==, WYRELOG_E_OK);
+  close (fd);
+  WylFactArtifactTempBinding *read_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "bound", FALSE, FALSE, &read_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (read_binding, TRUE,
+          &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (read_binding, FALSE,
+          &fd), ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_temp_binding_free (read_binding);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
           "../escape", TRUE, TRUE, &fd), ==, WYRELOG_E_INVALID);
   g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path (&d);
+  g_autofree gchar *bound_path =
+      g_build_filename (graph_path, "tmp-bound", NULL);
+  /* An uncooperative pathname replacement cannot be adopted by the binding. */
+  g_assert_cmpint (unlink (bound_path), ==, 0);
+  fd = open (bound_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  g_assert_cmpint (fd >= 0, ==, TRUE);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (binding, FALSE, &fd),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
   g_autofree gchar *wal_path =
       g_build_filename (graph_path, "facts.duckdb.wal", NULL);
   g_assert_cmpint (mkdir (wal_path, 0700), ==, 0);
@@ -621,6 +655,18 @@ test_namespace (void)
           WYL_FACT_ARTIFACT_MAIN, WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_rename (lease,
           WYL_FACT_ARTIFACT_WAL, WYL_FACT_ARTIFACT_MAIN), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
+  /* The opaque binding retains the exclusive lease after its original owner
+   * releases it; only releasing the binding makes a new writer admissible. */
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
+          &lease), ==, WYRELOG_E_BUSY);
+  g_assert_null (lease);
+  wyl_fact_artifact_temp_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint (unlink (bound_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
+          &lease), ==, WYRELOG_E_OK);
   wyl_fact_artifact_mutation_lease_free (lease);
   lease = NULL;
   fd = 42;
