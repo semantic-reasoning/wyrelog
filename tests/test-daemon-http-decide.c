@@ -7315,6 +7315,28 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       strstr (body, "\"error\":\"service_token_rate_limited\"") == NULL)
     return 1981;
 
+  /* The exchange authority takes microseconds.  A seconds value beyond the
+   * exact conversion bound must fail before it can reserve or expose a token;
+   * no new live companion may appear before the deliberate retirement below. */
+  guint pre_overflow_sessions = 0;
+  guint pre_overflow_access = 0;
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &pre_overflow_sessions, &pre_overflow_access);
+  wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE,
+      (G_MAXINT64 / G_USEC_PER_SEC) + 1);
+  g_clear_pointer (&body, g_free);
+  if (wyl_daemon_http_publish_service_token_for_test (server,
+          issued.credential.credential_id, secret, secret_len, &body)
+      != WYRELOG_E_INVALID || body != NULL)
+    return 19811;
+  guint post_overflow_sessions = 0;
+  guint post_overflow_access = 0;
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &post_overflow_sessions, &post_overflow_access);
+  if (post_overflow_sessions != pre_overflow_sessions
+      || post_overflow_access != pre_overflow_access)
+    return 19812;
+
   wyl_jwt_access_claims_t claims = { 0 };
   if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
     return 1982;

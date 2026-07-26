@@ -2929,6 +2929,12 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
     return WYRELOG_E_INVALID;
 
   gint64 now_seconds = service_auth_now_seconds (ctx);
+  /* The credential authority consumes UTC microseconds.  Reject an
+   * unrepresentable seconds value before touching retirement, admission, or
+   * credential state: wrapping this multiplication could otherwise mint a
+   * token with an attacker-controlled historical timestamp. */
+  if (now_seconds > G_MAXINT64 / G_USEC_PER_SEC)
+    return WYRELOG_E_INVALID;
   gint64 now_us = now_seconds * G_USEC_PER_SEC;
   wyrelog_error_t rc = service_auth_retire_due (ctx, now_seconds);
   if (rc != WYRELOG_E_OK)
