@@ -250,7 +250,7 @@ def main():
             "role_membership_mutation_handler", "if (grant)", "if (TRUE)"),
         "tenant-seal-disabled-selector": mutate_function(source,
             "tenant_mutation_handler",
-            "else if (g_strcmp0 (action, \"seal\") == 0)", "else if (FALSE)"),
+            "if (g_strcmp0 (action, \"seal\") == 0)", "if (FALSE)"),
         "path-dependent-ctx-lock": mutate_function(source,
             "direct_permission_mutation_handler",
             "g_auto (WylDaemonPolicyWrite) write = { 0 };",
