@@ -33,6 +33,9 @@ struct _WylServiceAuthRegistry
   GHashTable *by_credential_generation;
   GHashTable *by_principal;
   GHashTable *by_tenant;
+#ifdef WYL_AUTH_REGISTRY_TESTING
+  GPtrArray *test_orphans;
+#endif
   WylServiceAuthAllocator allocator;
 };
 
@@ -328,6 +331,9 @@ registry_new_with_allocator (const WylServiceAuthAllocator *allocator,
   registry->by_credential_generation = credential_generation_table_new ();
   registry->by_principal = text_bucket_table_new ();
   registry->by_tenant = text_bucket_table_new ();
+#ifdef WYL_AUTH_REGISTRY_TESTING
+  registry->test_orphans = g_ptr_array_new_with_free_func (entry_free);
+#endif
   *out_registry = registry;
   return WYRELOG_E_OK;
 }
@@ -371,6 +377,9 @@ wyl_service_auth_registry_unref (WylServiceAuthRegistry *registry)
   g_hash_table_destroy (registry->by_tenant);
   g_hash_table_destroy (registry->by_jti);
   g_hash_table_destroy (registry->by_session);
+#ifdef WYL_AUTH_REGISTRY_TESTING
+  g_ptr_array_unref (registry->test_orphans);
+#endif
   g_mutex_clear (&registry->mutex);
   g_free (registry);
 }
@@ -1198,6 +1207,12 @@ wyl_service_auth_registry_corrupt_for_test (WylServiceAuthRegistry *registry,
       }
       break;
     }
+    case WYL_SERVICE_AUTH_CORRUPT_OWNING_SESSION_LINK:
+      changed = g_hash_table_steal (registry->by_session,
+          entry->reservation.session_id);
+      if (changed)
+        g_ptr_array_add (registry->test_orphans, entry);
+      break;
     default:
       break;
   }
