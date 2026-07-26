@@ -543,6 +543,18 @@ wyl_refresh_token_state_free (gpointer data)
 }
 
 static void wyl_daemon_http_context_unref (gpointer data);
+
+/* A dispatch source may outlive the server object's shutdown callback.  Its
+ * callback-data reference is therefore an owning reference, released only by
+ * the source destroy notify after terminalize has detached the source. */
+static WylDaemonHttpContext *
+wyl_daemon_http_context_ref (WylDaemonHttpContext *ctx)
+{
+  if (ctx != NULL)
+    g_atomic_int_inc (&ctx->ref_count);
+  return ctx;
+}
+
 static gboolean human_refresh_dispatch_owned (WylDaemonHttpContext * ctx);
 
 typedef struct
@@ -1016,12 +1028,14 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   ctx->service_auth_clock_floor = g_get_real_time () / G_USEC_PER_SEC;
   ctx->service_auth_retirement_source = g_timeout_source_new_seconds (1);
   g_source_set_callback (ctx->service_auth_retirement_source,
-      service_auth_retirement_tick, ctx, NULL);
+      service_auth_retirement_tick, wyl_daemon_http_context_ref (ctx),
+      wyl_daemon_http_context_unref);
   g_source_attach (ctx->service_auth_retirement_source, ctx->dispatch_context);
   rc = wyl_daemon_http_context_rotate_access_token_key (ctx);
   if (rc != WYRELOG_E_OK) {
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
         "JWT signing key initialization failed: %s", wyrelog_error_string (rc));
+    wyl_daemon_http_context_terminalize (ctx, TRUE);
     wyl_daemon_http_context_unref (ctx);
     return NULL;
   }
@@ -1033,6 +1047,7 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
     g_set_error (error, G_OPTION_ERROR, G_OPTION_ERROR_FAILED,
         "service exchange limiter initialization failed: %s",
         wyrelog_error_string (rc));
+    wyl_daemon_http_context_terminalize (ctx, TRUE);
     wyl_daemon_http_context_unref (ctx);
     return NULL;
   }
@@ -2506,6 +2521,12 @@ service_live_state_matches_reservation (WylDaemonHttpContext *ctx,
       && g_strcmp0 (access->tenant, reservation->tenant) == 0
       && g_strcmp0 (access->credential_id, reservation->credential_id) == 0
       && access->credential_generation == reservation->generation
+      /* The registry records the immutable terminal expiry.  The two live
+       * companions must additionally agree on their issuance instant, and a
+       * retirement pass must never delete a bearer minted under a stale key. */
+      && access->issued_at ==
+      wyl_session_get_service_issued_at_seconds_private (session)
+      && g_strcmp0 (access->key_id, ctx->access_token_key_id) == 0
       && access->expires_at == reservation->expires_at;
 }
 
