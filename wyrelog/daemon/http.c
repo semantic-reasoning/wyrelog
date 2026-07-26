@@ -5483,8 +5483,12 @@ service_principal_disable_handler (SoupServer *server, SoupServerMessage *msg,
     return;
 
   wyl_service_principal_t principal = { 0 };
-  wyrelog_error_t rc = wyl_service_principal_disable (ctx->handle, subject_id,
-      actor, ensure_request_id_header (msg), &principal);
+  wyl_service_principal_disable_runtime_t runtime = {
+    .registry = ctx->service_auth_registry,
+  };
+  wyrelog_error_t rc = wyl_service_principal_disable_with_runtime
+      (ctx->handle, subject_id, actor, ensure_request_id_header (msg),
+      &runtime, &principal);
   if (rc == WYRELOG_E_INVALID) {
     set_json_error (msg, 400, WYL_DAEMON_ERR_SERVICE_PRINCIPAL_INVALID);
     return;
@@ -5805,22 +5809,23 @@ tenant_mutation_handler (SoupServer *server, SoupServerMessage *msg,
     return;
   }
 
-  g_auto (WylDaemonPolicyWrite) write = { 0 };
-  wyrelog_error_t rc = wyl_daemon_policy_write_acquire (ctx, &write);
-  if (rc != WYRELOG_E_OK) {
-    set_json_error (msg, 500, "tenant_mutation_failed");
-    return;
-  }
-
   gboolean changed = FALSE;
-  if (g_strcmp0 (action, "create") == 0) {
-    rc = wyl_policy_store_create_tenant (write.store, tenant, &changed);
-  } else if (g_strcmp0 (action, "seal") == 0) {
-    rc = wyl_policy_store_set_tenant_sealed (write.store, tenant, TRUE);
-    changed = rc == WYRELOG_E_OK;
-  } else if (g_strcmp0 (action, "unseal") == 0) {
-    rc = wyl_policy_store_set_tenant_sealed (write.store, tenant, FALSE);
-    changed = rc == WYRELOG_E_OK;
+  wyrelog_error_t rc = WYRELOG_E_INVALID;
+  if (g_strcmp0 (action, "seal") == 0) {
+    wyl_tenant_seal_runtime_t runtime = {
+      .registry = ctx->service_auth_registry,
+    };
+    rc = wyl_tenant_set_sealed_with_runtime (ctx->handle, tenant, TRUE,
+        &runtime, &changed);
+  } else {
+    g_auto (WylDaemonPolicyWrite) write = { 0 };
+    rc = wyl_daemon_policy_write_acquire (ctx, &write);
+    if (rc == WYRELOG_E_OK && g_strcmp0 (action, "create") == 0)
+      rc = wyl_policy_store_create_tenant (write.store, tenant, &changed);
+    else if (rc == WYRELOG_E_OK && g_strcmp0 (action, "unseal") == 0) {
+      rc = wyl_policy_store_set_tenant_sealed (write.store, tenant, FALSE);
+      changed = rc == WYRELOG_E_OK;
+    }
   }
 
   if (rc == WYRELOG_E_INVALID) {
