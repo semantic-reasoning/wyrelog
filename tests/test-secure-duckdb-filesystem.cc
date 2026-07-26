@@ -49,7 +49,8 @@ test_bounded_filesystem ()
     auto main = filesystem.OpenFile ("facts.duckdb",
         duckdb::FileFlags::FILE_FLAGS_READ
         | duckdb::FileFlags::FILE_FLAGS_WRITE
-        | duckdb::FileFlags::FILE_FLAGS_FILE_CREATE, nullptr);
+        | duckdb::FileFlags::FILE_FLAGS_FILE_CREATE
+        | duckdb::FileLockType::WRITE_LOCK, nullptr);
     g_assert_nonnull (main.get ());
     char written[] = "duck";
     filesystem.Write (*main, written, 4, 0);
@@ -64,7 +65,8 @@ test_bounded_filesystem ()
     auto wal = filesystem.OpenFile ("facts.duckdb.wal",
         duckdb::FileFlags::FILE_FLAGS_READ
         | duckdb::FileFlags::FILE_FLAGS_WRITE
-        | duckdb::FileFlags::FILE_FLAGS_FILE_CREATE, nullptr);
+        | duckdb::FileFlags::FILE_FLAGS_FILE_CREATE
+        | duckdb::FileLockType::WRITE_LOCK, nullptr);
     g_assert_nonnull (wal.get ());
     wal->Close ();
     filesystem.MoveFile ("facts.duckdb.wal",

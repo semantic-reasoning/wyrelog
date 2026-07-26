@@ -13,7 +13,7 @@ class WylSecureDuckdbFileSystem final : public duckdb::FileSystem
 {
 public:
   explicit WylSecureDuckdbFileSystem (WylFactArtifactNamespace *);
-  ~WylSecureDuckdbFileSystem () override = default;
+  ~WylSecureDuckdbFileSystem () override;
 
   duckdb::unique_ptr<duckdb::FileHandle> OpenFile (const duckdb::string &,
       duckdb::FileOpenFlags,
@@ -101,9 +101,13 @@ protected:
   bool SupportsGlobExtended () const override;
 
 private:
+  int AcquireLockDescriptor (duckdb::FileLockType);
+
   WylFactArtifactNamespace *namespace_;
   bool main_bound_;
   std::mutex open_mutex_;
+  int lock_fd_;
+  duckdb::FileLockType lock_type_;
 };
 
 duckdb::unique_ptr<duckdb::FileSystem>
