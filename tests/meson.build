@@ -162,6 +162,7 @@ if build_client
     wyrelog_client_dep,
     libsoup_dep,
     sodium_dep,
+    sqlite_dep,
     service_session_private_dep,
   ]
   if get_option('enable_fact_store').allowed()

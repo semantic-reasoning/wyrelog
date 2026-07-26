@@ -3442,10 +3442,41 @@ check_service_resolver_prelatched_unavailable (void)
   g_auto (ServiceResolverFixture) fixture = { 0 };
   if (server == NULL || !service_resolver_fixture_init (server, &fixture,
           WYL_SERVICE_AUTH_ACTIVE, 0)
-      || !service_resolver_expect (server, &fixture, fixture.token, TRUE)
-      || wyl_daemon_http_latch_service_unavailable_for_test (server)
-      != WYRELOG_E_OK
+      || !service_resolver_expect (server, &fixture, fixture.token, TRUE))
+    return FALSE;
+
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_policy_service_principal_info_t principal = { 0 };
+  if (wyl_policy_store_create_service_principal (store,
+          "svc:resolver:unsafe", "resolver unsafe", "admin-user",
+          "req-resolver-unsafe", &principal) != WYRELOG_E_OK)
+    return FALSE;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (wyl_policy_store_upsert_permission (store, "site.resolver.unsafe",
+          "resolver unsafe", "basic") != WYRELOG_E_OK
+      || sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:resolver:unsafe','site.resolver.unsafe','scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return FALSE;
+  WylServiceAuthWriteLease *lease = NULL;
+  if (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &lease) != WYRELOG_E_OK)
+    return FALSE;
+  wyrelog_error_t latch_rc =
+      wyl_handle_validate_service_permission_closure (handle, lease);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  wyl_service_auth_write_lease_free (lease);
+  if (latch_rc != WYRELOG_E_OK || release_rc != WYRELOG_E_OK
       || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
+    return FALSE;
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &reason) != WYRELOG_E_BUSY
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE)
     return FALSE;
   WylServiceAuthAuthoritySnapshot snapshot = { 0 };
   wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
