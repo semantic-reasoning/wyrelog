@@ -136,6 +136,7 @@ struct _WylServiceAuthWriteLease
   guint64 serial;
   WylServiceAuthLeaseState state;
   gboolean transaction_claimed;
+  gboolean maintenance_claimed;
   gboolean cleanup_only;
   gboolean test_fail_mark_unavailable_once;
   gboolean test_fail_release_once;
@@ -656,6 +657,56 @@ wyrelog_error_t
 }
 
 wyrelog_error_t
+wyl_service_auth_write_lease_claim_maintenance (WylServiceAuthWriteLease *lease,
+    WylHandle *handle)
+{
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_operation_locked (lease, handle);
+  if (rc == WYRELOG_E_OK && (lease->transaction_claimed
+          || lease->maintenance_claimed))
+    rc = WYRELOG_E_BUSY;
+  if (rc == WYRELOG_E_OK)
+    lease->maintenance_claimed = TRUE;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_auth_write_lease_validate_maintenance (WylServiceAuthWriteLease
+    *lease, WylHandle *handle)
+{
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
+      WYL_SERVICE_AUTH_RANK_CONTEXT);
+  if (rc == WYRELOG_E_OK && (!lease->maintenance_claimed
+          || lease->cleanup_only))
+    rc = WYRELOG_E_BUSY;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_auth_write_lease_unclaim_maintenance (WylServiceAuthWriteLease
+    *lease, WylHandle *handle)
+{
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->authority->mutex);
+  wyrelog_error_t rc = validate_write_locked_at_rank (lease, handle,
+      WYL_SERVICE_AUTH_RANK_COORDINATION);
+  if (rc == WYRELOG_E_OK && !lease->maintenance_claimed)
+    rc = WYRELOG_E_INVALID;
+  if (rc == WYRELOG_E_OK)
+    lease->maintenance_claimed = FALSE;
+  g_mutex_unlock (&lease->authority->mutex);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_service_auth_read_lease_release (WylServiceAuthReadLease *lease)
 {
   if (lease == NULL)
@@ -757,7 +808,8 @@ wyl_service_auth_write_lease_release (WylServiceAuthWriteLease *lease)
     lease->test_fail_release_once = FALSE;
     rc = WYRELOG_E_INTERNAL;
   }
-  if (rc == WYRELOG_E_OK && lease->transaction_claimed)
+  if (rc == WYRELOG_E_OK
+      && (lease->transaction_claimed || lease->maintenance_claimed))
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK) {
     lease->state = WYL_SERVICE_AUTH_LEASE_RELEASED;

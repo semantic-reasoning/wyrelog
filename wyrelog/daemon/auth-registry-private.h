@@ -91,6 +91,8 @@ typedef struct
 typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
 typedef struct _WylServiceAuthRegistrySessionParticipant
     WylServiceAuthRegistrySessionParticipant;
+typedef struct _WylServiceAuthRegistryMaintenanceParticipant
+    WylServiceAuthRegistryMaintenanceParticipant;
 typedef struct _WylHandle WylHandle;
 typedef struct _WylServiceAuthWriteLease WylServiceAuthWriteLease;
 typedef struct _WylServiceAuthRegistrySessionParticipant
@@ -225,6 +227,14 @@ wyrelog_error_t wyl_service_auth_registry_session_participant_activate
 wyrelog_error_t wyl_service_auth_registry_session_participant_remove_exact
     (WylServiceAuthRegistrySessionParticipant * participant,
     const WylServiceAuthReservation * reservation, gboolean * out_removed);
+wyrelog_error_t wyl_service_auth_registry_maintenance_participant_new_for_write
+    (WylServiceAuthRegistry * registry, WylHandle * handle,
+    WylServiceAuthWriteLease * lease,
+    WylServiceAuthRegistryMaintenanceParticipant ** out_participant);
+void wyl_service_auth_registry_maintenance_participant_free
+    (WylServiceAuthRegistryMaintenanceParticipant * participant);
+wyrelog_error_t wyl_service_auth_registry_maintenance_participant_clear
+    (WylServiceAuthRegistryMaintenanceParticipant * participant);
 
 wyrelog_error_t wyl_service_auth_registry_lookup
     (WylServiceAuthRegistry * registry, const gchar * session_id,
