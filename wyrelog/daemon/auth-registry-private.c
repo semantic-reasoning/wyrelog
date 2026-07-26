@@ -570,6 +570,27 @@ wyrelog_error_t
       WYL_SERVICE_AUTH_RANK_REGISTRY);
 }
 
+wyrelog_error_t
+    wyl_service_auth_registry_maintenance_participant_remove_exact
+    (WylServiceAuthRegistryMaintenanceParticipant * p,
+    const WylServiceAuthReservation * reservation, gboolean * out_removed)
+{
+  if (p == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_maintenance
+      (p->lease, p->handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_rank_enter (p->handle, WYL_SERVICE_AUTH_RANK_REGISTRY);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_registry_remove_exact (p->registry, reservation,
+      out_removed);
+  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected (p->handle,
+      WYL_SERVICE_AUTH_RANK_REGISTRY);
+  return rc == WYRELOG_E_OK ? leave_rc : rc;
+}
+
 static wyrelog_error_t
 session_participant_leave_registry (WylServiceAuthRegistrySessionParticipant
     *participant, wyrelog_error_t rc)
