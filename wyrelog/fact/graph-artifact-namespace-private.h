@@ -6,6 +6,7 @@
 #include "fact/graph-locator-private.h"
 
 G_BEGIN_DECLS typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
+typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 
 /* Only these names are part of the authority.  Callers cannot supply a path. */
 typedef enum
@@ -24,9 +25,33 @@ wyrelog_error_t wyl_fact_artifact_namespace_open
 void wyl_fact_artifact_namespace_free (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_revalidate
     (WylFactArtifactNamespace * namespace_);
+/* Cooperative 0700 graph-directory contract: only an exclusive opaque lease
+ * authorizes sanctioned pathname mutation.  It pins both the held directory
+ * and facts.duckdb.lock identities.  POSIX cannot make unlink/rename exact
+ * against an uncooperative same-UID writer that bypasses this lease. */
+wyrelog_error_t wyl_fact_artifact_namespace_acquire_reader_guard
+    (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
+wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
+    (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
+wyrelog_error_t wyl_fact_artifact_mutation_lease_revalidate
+    (WylFactArtifactMutationLease *);
+void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
+    (WylFactArtifactMutationLease *, WylFactArtifactName name,
+    gboolean create, gboolean writable, gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp
+    (WylFactArtifactMutationLease *, const gchar * token,
+    gboolean create, gboolean writable, gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
+    (WylFactArtifactMutationLease *, WylFactArtifactName name);
+wyrelog_error_t wyl_fact_artifact_mutation_lease_rename
+    (WylFactArtifactMutationLease *, WylFactArtifactName source,
+    WylFactArtifactName destination);
 wyrelog_error_t wyl_fact_artifact_namespace_open_file
     (WylFactArtifactNamespace * namespace_, WylFactArtifactName name,
     gboolean create, gboolean writable, gint * out_fd);
+/* Deprecated mutation entry points are retained only to fail closed with
+ * WYRELOG_E_POLICY; use the exclusive mutation-lease variants above. */
 wyrelog_error_t wyl_fact_artifact_namespace_unlink
     (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_namespace_sync
