@@ -117,6 +117,9 @@ wyrelog_error_t wyl_service_auth_read_lease_release_terminal
     (WylServiceAuthReadLease ** lease);
 wyrelog_error_t wyl_service_auth_write_lease_release
     (WylServiceAuthWriteLease * lease);
+/* Consumes an exchange-owned lease in one independent terminal operation. */
+wyrelog_error_t wyl_service_auth_write_lease_release_terminal
+    (WylServiceAuthWriteLease ** lease);
 void wyl_service_auth_read_lease_free (WylServiceAuthReadLease * lease);
 void wyl_service_auth_write_lease_free (WylServiceAuthWriteLease * lease);
 
@@ -141,6 +144,11 @@ wyl_policy_store_t *wyl_service_auth_read_lease_test_swap_pinned_store
     (WylServiceAuthReadLease * lease, wyl_policy_store_t * replacement);
 void wyl_service_auth_write_lease_test_corrupt_serial
     (WylServiceAuthWriteLease * lease);
+void wyl_service_auth_write_lease_test_fail_terminal_prevalidation
+    (WylServiceAuthWriteLease * lease);
+void wyl_service_auth_write_lease_test_set_terminal_checkpoint
+    (WylServiceAuthWriteLease * lease, void (*checkpoint) (gpointer data),
+    gpointer data);
 wyl_policy_store_t *wyl_service_auth_write_lease_test_swap_pinned_store
     (WylServiceAuthWriteLease * lease, wyl_policy_store_t * replacement);
 
