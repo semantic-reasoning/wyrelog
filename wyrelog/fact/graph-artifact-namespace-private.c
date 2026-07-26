@@ -1158,16 +1158,19 @@ wyl_fact_artifact_temp_binding_open (WylFactArtifactTempBinding *binding,
     *out_fd = -1;
   if (!binding || !out_fd)
     return WYRELOG_E_INVALID;
-  if (!binding->active || !binding->creator
-      || (writable && !binding->lease->exclusive))
-    return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = binding->lease;
+  g_autofree gchar *name = NULL;
   g_mutex_lock (&lease->mutex);
-  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  wyrelog_error_t r;
+  if (!binding->active || !binding->creator || (writable && !lease->exclusive)) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  r = lease_revalidate_unlocked (lease);
   if (r != WYRELOG_E_OK)
     goto done;
   struct stat named, pinned;
-  g_autofree gchar *name = g_strdup_printf ("tmp-%s", binding->token);
+  name = g_strdup_printf ("tmp-%s", binding->token);
   if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
       || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
@@ -1202,17 +1205,22 @@ done:
 wyrelog_error_t
 wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *binding)
 {
-  if (!binding || !binding->active || !binding->creator
-      || !binding->lease->exclusive)
+  if (!binding)
     return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = binding->lease;
+  g_autofree gchar *name = NULL;
   g_mutex_lock (&lease->mutex);
-  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  wyrelog_error_t r;
+  if (!binding->active || !binding->creator || !lease->exclusive) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  r = lease_revalidate_unlocked (lease);
   if (r != WYRELOG_E_OK)
     goto done;
 
   struct stat named, pinned;
-  g_autofree gchar *name = g_strdup_printf ("tmp-%s", binding->token);
+  name = g_strdup_printf ("tmp-%s", binding->token);
   if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
       || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
@@ -1282,21 +1290,34 @@ wyrelog_error_t
 wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
     const gchar *destination_token)
 {
-  if (!binding || !binding->active || !binding->creator
-      || !binding->lease->exclusive)
+  if (!binding)
     return WYRELOG_E_POLICY;
-  if (!temp_token_valid (destination_token)
-      || g_strcmp0 (binding->token, destination_token) == 0)
+  if (!temp_token_valid (destination_token))
     return WYRELOG_E_INVALID;
   WylFactArtifactMutationLease *lease = binding->lease;
-  g_autofree gchar *next_token = g_strdup (destination_token);
-  g_autofree gchar *source = g_strdup_printf ("tmp-%s", binding->token);
   g_autofree gchar *destination = g_strdup_printf ("tmp-%s", destination_token);
-  if (!next_token || !source || !destination)
+  g_autofree gchar *next_token = NULL;
+  g_autofree gchar *source = NULL;
+  if (!destination)
     return WYRELOG_E_NOMEM;
 
   g_mutex_lock (&lease->mutex);
-  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  wyrelog_error_t r;
+  if (!binding->active || !binding->creator || !lease->exclusive) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (g_strcmp0 (binding->token, destination_token) == 0) {
+    r = WYRELOG_E_INVALID;
+    goto done;
+  }
+  next_token = g_strdup (destination_token);
+  source = g_strdup_printf ("tmp-%s", binding->token);
+  if (!next_token || !source) {
+    r = WYRELOG_E_NOMEM;
+    goto done;
+  }
+  r = lease_revalidate_unlocked (lease);
   if (r != WYRELOG_E_OK)
     goto done;
   struct stat source_stat, destination_stat, pinned;
@@ -1361,16 +1382,21 @@ wyrelog_error_t
     WylFactArtifactTempRecoveryEvidence ** out_evidence) {
   if (out_evidence)
     *out_evidence = NULL;
-  if (!binding || !out_evidence || !binding->active || !binding->creator
-      || !binding->lease->exclusive)
+  if (!binding || !out_evidence)
     return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = binding->lease;
+  g_autofree gchar *name = NULL;
   g_mutex_lock (&lease->mutex);
-  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  wyrelog_error_t r;
+  if (!binding->active || !binding->creator || !lease->exclusive) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  r = lease_revalidate_unlocked (lease);
   if (r != WYRELOG_E_OK)
     goto done;
   struct stat named, pinned;
-  g_autofree gchar *name = g_strdup_printf ("tmp-%s", binding->token);
+  name = g_strdup_printf ("tmp-%s", binding->token);
   if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
       || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode
