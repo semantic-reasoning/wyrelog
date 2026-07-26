@@ -14,6 +14,7 @@ typedef struct
   WylServiceAuthReservation reservation;
   WylServiceAuthState state;
   WylServiceAuthAllocator allocator;
+  GSequenceIter *expiry_iter;   /* owned by registry->by_expiry */
 } ServiceAuthEntry;
 
 typedef struct
@@ -33,6 +34,8 @@ struct _WylServiceAuthRegistry
   GHashTable *by_credential_generation;
   GHashTable *by_principal;
   GHashTable *by_tenant;
+  /* Sorted by immutable expiry.  It owns one reference per entry. */
+  GSequence *by_expiry;
 #ifdef WYL_AUTH_REGISTRY_TESTING
   GPtrArray *test_orphans;
 #endif
@@ -117,6 +120,20 @@ entry_ref (ServiceAuthEntry *entry)
 {
   g_atomic_ref_count_inc (&entry->ref_count);
   return entry;
+}
+
+static gint
+expiry_entry_compare (gconstpointer left, gconstpointer right,
+    gpointer user_data)
+{
+  const ServiceAuthEntry *a = left;
+  const ServiceAuthEntry *b = right;
+  (void) user_data;
+  if (a->reservation.expires_at < b->reservation.expires_at)
+    return -1;
+  if (a->reservation.expires_at > b->reservation.expires_at)
+    return 1;
+  return g_strcmp0 (a->reservation.session_id, b->reservation.session_id);
 }
 
 static gchar *try_strdup_with_allocator
@@ -217,7 +234,11 @@ reservation_is_valid (const WylServiceAuthReservation *reservation)
       || !wyl_policy_service_subject_is_valid (reservation->principal,
           strlen (reservation->principal))
       || !wyl_policy_store_tenant_id_is_valid (reservation->tenant)
-      || reservation->generation < 1)
+      || reservation->generation < 1
+#if !defined(WYL_AUTH_REGISTRY_TESTING) && !defined(WYL_TEST_DAEMON_HTTP)
+      || reservation->expires_at <= 0
+#endif
+      )
     return FALSE;
   return TRUE;
 }
@@ -258,6 +279,7 @@ reservation_copy_with_allocator (const WylServiceAuthAllocator *allocator,
   if (copy.tenant == NULL)
     goto nomem;
   copy.generation = source->generation;
+  copy.expires_at = source->expires_at;
 
   copy._free = allocator->free;
   copy._free_data = allocator->user_data;
@@ -274,6 +296,7 @@ reservation_equal (const WylServiceAuthReservation *left,
     const WylServiceAuthReservation *right)
 {
   return left->generation == right->generation
+      && left->expires_at == right->expires_at
       && strcmp (left->session_id, right->session_id) == 0
       && strcmp (left->jti, right->jti) == 0
       && strcmp (left->credential_id, right->credential_id) == 0
@@ -331,6 +354,7 @@ registry_new_with_allocator (const WylServiceAuthAllocator *allocator,
   registry->by_credential_generation = credential_generation_table_new ();
   registry->by_principal = text_bucket_table_new ();
   registry->by_tenant = text_bucket_table_new ();
+  registry->by_expiry = g_sequence_new (entry_free);
 #ifdef WYL_AUTH_REGISTRY_TESTING
   registry->test_orphans = g_ptr_array_new_with_free_func (entry_free);
 #endif
@@ -376,6 +400,7 @@ wyl_service_auth_registry_unref (WylServiceAuthRegistry *registry)
   g_hash_table_destroy (registry->by_principal);
   g_hash_table_destroy (registry->by_tenant);
   g_hash_table_destroy (registry->by_jti);
+  g_sequence_free (registry->by_expiry);
   g_hash_table_destroy (registry->by_session);
 #ifdef WYL_AUTH_REGISTRY_TESTING
   g_ptr_array_unref (registry->test_orphans);
@@ -392,11 +417,13 @@ wyl_service_auth_registry_clear (WylServiceAuthRegistry *registry)
   GHashTable *old_by_credential_generation;
   GHashTable *old_by_principal;
   GHashTable *old_by_tenant;
+  GSequence *old_by_expiry;
   GHashTable *new_by_session;
   GHashTable *new_by_jti;
   GHashTable *new_by_credential_generation;
   GHashTable *new_by_principal;
   GHashTable *new_by_tenant;
+  GSequence *new_by_expiry;
 
   if (registry == NULL)
     return;
@@ -408,6 +435,7 @@ wyl_service_auth_registry_clear (WylServiceAuthRegistry *registry)
   new_by_credential_generation = credential_generation_table_new ();
   new_by_principal = text_bucket_table_new ();
   new_by_tenant = text_bucket_table_new ();
+  new_by_expiry = g_sequence_new (entry_free);
 
   g_mutex_lock (&registry->mutex);
   old_by_session = registry->by_session;
@@ -415,11 +443,13 @@ wyl_service_auth_registry_clear (WylServiceAuthRegistry *registry)
   old_by_credential_generation = registry->by_credential_generation;
   old_by_principal = registry->by_principal;
   old_by_tenant = registry->by_tenant;
+  old_by_expiry = registry->by_expiry;
   registry->by_session = new_by_session;
   registry->by_jti = new_by_jti;
   registry->by_credential_generation = new_by_credential_generation;
   registry->by_principal = new_by_principal;
   registry->by_tenant = new_by_tenant;
+  registry->by_expiry = new_by_expiry;
   g_mutex_unlock (&registry->mutex);
 
   /* The borrowed index must disappear before its owning entries. */
@@ -427,6 +457,7 @@ wyl_service_auth_registry_clear (WylServiceAuthRegistry *registry)
   g_hash_table_destroy (old_by_principal);
   g_hash_table_destroy (old_by_tenant);
   g_hash_table_destroy (old_by_jti);
+  g_sequence_free (old_by_expiry);
   g_hash_table_destroy (old_by_session);
 }
 
@@ -615,6 +646,8 @@ wyl_service_auth_registry_reserve (WylServiceAuthRegistry *registry,
   g_hash_table_insert (registry->by_session, entry->reservation.session_id,
       entry);
   g_hash_table_insert (registry->by_jti, entry->reservation.jti, entry);
+  entry->expiry_iter = g_sequence_insert_sorted (registry->by_expiry,
+      entry_ref (entry), expiry_entry_compare, NULL);
   g_mutex_unlock (&registry->mutex);
 
   if (credential_candidate != NULL)
@@ -780,6 +813,8 @@ registry_consistent_locked (WylServiceAuthRegistry *registry)
   gsize size = g_hash_table_size (registry->by_session);
   if (size != g_hash_table_size (registry->by_jti))
     return FALSE;
+  if ((gsize) g_sequence_get_length (registry->by_expiry) != size)
+    return FALSE;
 
   GHashTableIter iter;
   gpointer key;
@@ -797,7 +832,11 @@ registry_consistent_locked (WylServiceAuthRegistry *registry)
         (registry->by_principal, entry->reservation.principal);
     ServiceAuthBucket *tenant = g_hash_table_lookup
         (registry->by_tenant, entry->reservation.tenant);
-    if (key != entry->reservation.session_id
+    if (key != entry->reservation.session_id || entry->expiry_iter == NULL
+#if !defined(WYL_AUTH_REGISTRY_TESTING) && !defined(WYL_TEST_DAEMON_HTTP)
+        || entry->reservation.expires_at <= 0
+#endif
+        || g_sequence_get (entry->expiry_iter) != entry
         || g_hash_table_lookup (registry->by_jti,
             entry->reservation.jti) != entry
         || credential == NULL || principal == NULL || tenant == NULL
@@ -806,6 +845,14 @@ registry_consistent_locked (WylServiceAuthRegistry *registry)
         || !g_hash_table_contains (tenant->members, entry)
         || entry->state < WYL_SERVICE_AUTH_PENDING
         || entry->state > WYL_SERVICE_AUTH_REVOKED)
+      return FALSE;
+  }
+  for (GSequenceIter * iter = g_sequence_get_begin_iter (registry->by_expiry);
+      !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
+    ServiceAuthEntry *entry = g_sequence_get (iter);
+    if (entry == NULL || entry->expiry_iter != iter
+        || g_hash_table_lookup (registry->by_session,
+            entry->reservation.session_id) != entry)
       return FALSE;
   }
   return bucket_table_consistent_locked (registry,
@@ -1080,6 +1127,10 @@ wyl_service_auth_registry_remove_exact (WylServiceAuthRegistry *registry,
     g_mutex_unlock (&registry->mutex);
     return WYRELOG_E_POLICY;
   }
+  if (by_session->expiry_iter == NULL) {
+    g_mutex_unlock (&registry->mutex);
+    return WYRELOG_E_POLICY;
+  }
 
   credential_key.selector = by_session->reservation.credential_id;
   credential_key.generation = by_session->reservation.generation;
@@ -1089,6 +1140,8 @@ wyl_service_auth_registry_remove_exact (WylServiceAuthRegistry *registry,
       by_session->reservation.principal, by_session);
   empty_tenant = remove_bucket_member_locked (registry->by_tenant,
       by_session->reservation.tenant, by_session);
+  g_sequence_remove (by_session->expiry_iter);
+  by_session->expiry_iter = NULL;
   g_hash_table_remove (registry->by_jti, by_jti->reservation.jti);
   g_hash_table_steal (registry->by_session, by_session->reservation.session_id);
   *out_removed = TRUE;
@@ -1176,6 +1229,70 @@ wyl_service_auth_reservation_clear (WylServiceAuthReservation *reservation)
   allocator.free = reservation->_free;
   allocator.user_data = reservation->_free_data;
   reservation_clear_with_allocator (&allocator, reservation);
+}
+
+static void
+reservation_snapshot_free (gpointer data)
+{
+  WylServiceAuthReservation *reservation = data;
+  if (reservation != NULL) {
+    wyl_service_auth_reservation_clear (reservation);
+    g_free (reservation);
+  }
+}
+
+wyrelog_error_t
+wyl_service_auth_registry_copy_due (WylServiceAuthRegistry *registry,
+    gint64 now_seconds, gsize max_entries, GPtrArray **out_reservations)
+{
+  g_autoptr (GPtrArray) entries = NULL;
+  GPtrArray *snapshots;
+
+  if (out_reservations != NULL)
+    *out_reservations = NULL;
+  if (registry == NULL || out_reservations == NULL || now_seconds < 0
+      || max_entries == 0)
+    return WYRELOG_E_INVALID;
+
+  entries = g_ptr_array_new_with_free_func ((GDestroyNotify) entry_free);
+  snapshots = g_ptr_array_new_with_free_func (reservation_snapshot_free);
+  g_mutex_lock (&registry->mutex);
+  if (!registry_consistent_locked (registry)) {
+    g_mutex_unlock (&registry->mutex);
+    g_ptr_array_unref (snapshots);
+    return WYRELOG_E_POLICY;
+  }
+  for (GSequenceIter * iter = g_sequence_get_begin_iter (registry->by_expiry);
+      !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
+    ServiceAuthEntry *entry = g_sequence_get (iter);
+    if (entry->reservation.expires_at > now_seconds)
+      break;
+    /* A due PENDING entry proves its owning exchange escaped its WRITE epoch. */
+    if (entry->state == WYL_SERVICE_AUTH_PENDING) {
+      g_mutex_unlock (&registry->mutex);
+      g_ptr_array_unref (snapshots);
+      return WYRELOG_E_POLICY;
+    }
+    g_ptr_array_add (entries, entry_ref (entry));
+    if (entries->len == max_entries)
+      break;
+  }
+  g_mutex_unlock (&registry->mutex);
+
+  for (guint i = 0; i < entries->len; i++) {
+    ServiceAuthEntry *entry = g_ptr_array_index (entries, i);
+    WylServiceAuthReservation *copy = g_new0 (WylServiceAuthReservation, 1);
+    wyrelog_error_t rc = reservation_copy_with_allocator (&registry->allocator,
+        &entry->reservation, copy);
+    if (rc != WYRELOG_E_OK) {
+      g_free (copy);
+      g_ptr_array_unref (snapshots);
+      return rc;
+    }
+    g_ptr_array_add (snapshots, copy);
+  }
+  *out_reservations = snapshots;
+  return WYRELOG_E_OK;
 }
 
 #ifdef WYL_AUTH_REGISTRY_TESTING

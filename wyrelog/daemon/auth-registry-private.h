@@ -69,6 +69,8 @@ typedef struct
   guint64 generation;
   gchar *principal;
   gchar *tenant;
+  /* Immutable service JWT/session expiry in UTC seconds. */
+  gint64 expires_at;
   WylServiceAuthFreeFunc _free;
   gpointer _free_data;
 } WylServiceAuthReservation;
@@ -228,6 +230,15 @@ wyrelog_error_t wyl_service_auth_registry_lookup
     WylServiceAuthState * out_state, gboolean * out_found);
 void wyl_service_auth_reservation_clear
     (WylServiceAuthReservation * reservation);
+
+/*
+ * Returns at most max_entries immutable snapshots of due terminal/ACTIVE
+ * pairs without walking the owning registry.  PENDING entries are never
+ * returned.  The caller releases every returned snapshot and the array.
+ */
+wyrelog_error_t wyl_service_auth_registry_copy_due
+    (WylServiceAuthRegistry * registry, gint64 now_seconds, gsize max_entries,
+    GPtrArray ** out_reservations);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistrySessionParticipant,
     wyl_service_auth_registry_session_participant_free);
