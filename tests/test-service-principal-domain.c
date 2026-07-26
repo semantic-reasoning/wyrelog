@@ -454,6 +454,7 @@ test_compound_tenant_seal_zero_survivors (void)
     .generation = 1,
     .principal = (gchar *) "svc:tenant-a:worker",
     .tenant = (gchar *) "tenant-a",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   WylServiceAuthReservation unrelated = matching;
   unrelated.session_id = (gchar *) SESSION_B;
