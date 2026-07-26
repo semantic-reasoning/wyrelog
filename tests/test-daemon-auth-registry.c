@@ -517,6 +517,7 @@ test_due_cleanup_rejects_corrupt_indexes (void)
     WYL_SERVICE_AUTH_CORRUPT_CREDENTIAL_MEMBER,
     WYL_SERVICE_AUTH_CORRUPT_JTI_INDEX,
     WYL_SERVICE_AUTH_CORRUPT_OWNING_SESSION_LINK,
+    WYL_SERVICE_AUTH_CORRUPT_STATE,
   };
 
   for (guint i = 0; i < G_N_ELEMENTS (corruptions); i++) {
@@ -545,6 +546,38 @@ test_due_cleanup_rejects_corrupt_indexes (void)
     g_assert_false (removed);
     wyl_service_auth_registry_unref (registry);
   }
+}
+
+static void
+test_due_cleanup_rejects_foreign_selector_member (void)
+{
+  WylServiceAuthRegistry *registry = new_registry ();
+  WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
+  WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
+  GPtrArray *due = (GPtrArray *) 0x1;
+  gboolean changed = FALSE;
+  gboolean removed = TRUE;
+
+  first.expires_at = second.expires_at = 1;
+  second.principal = (gchar *) "svc:tenant-a:other";
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &first,
+          &changed), ==, WYRELOG_E_OK);
+  changed = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
+          &changed), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry, &first,
+          WYL_SERVICE_AUTH_CORRUPT_FOREIGN_PRINCIPAL_MEMBER));
+  g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 32,
+          &due), ==, WYRELOG_E_POLICY);
+  g_assert_null (due);
+  g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &first,
+          &removed), ==, WYRELOG_E_POLICY);
+  g_assert_false (removed);
+  wyl_service_auth_registry_unref (registry);
 }
 
 static void
@@ -1181,6 +1214,8 @@ main (int argc, char **argv)
       test_due_cleanup_rejects_corrupt_indexes);
   g_test_add_func ("/daemon/auth-registry/due-cleanup-any-pending",
       test_due_cleanup_rejects_any_pending);
+  g_test_add_func ("/daemon/auth-registry/due-cleanup-foreign-selector",
+      test_due_cleanup_rejects_foreign_selector_member);
   g_test_add_func ("/daemon/auth-registry/allocation-cleanup",
       test_allocation_failures_and_cleanup);
   g_test_add_func ("/daemon/auth-registry/counted-clear-reuse",
