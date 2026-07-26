@@ -7346,6 +7346,19 @@ check_service_token_exchange_contract (void)
     goto cleanup;
   result = check_service_token_exchange_contract_on_server (http.server,
       handle, base_url);
+  if (result == 0) {
+    guint ticks = 0;
+    if (!wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
+            &ticks))
+      result = 1988;
+    else {
+      wyl_daemon_http_shutdown_service_auth_maintenance_for_test (http.server);
+      guint after_shutdown = 0;
+      if (wyl_daemon_http_service_auth_maintenance_active_for_test
+          (http.server, &after_shutdown) || after_shutdown != ticks)
+        result = 1989;
+    }
+  }
 
 cleanup:
   if (http.loop != NULL)
