@@ -101,6 +101,12 @@ wyrelog_error_t wyl_service_auth_write_lease_claim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
 wyrelog_error_t wyl_service_auth_write_lease_unclaim_transaction
     (WylServiceAuthWriteLease * lease, WylHandle * handle);
+wyrelog_error_t wyl_service_auth_write_lease_claim_maintenance
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
+wyrelog_error_t wyl_service_auth_write_lease_validate_maintenance
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
+wyrelog_error_t wyl_service_auth_write_lease_unclaim_maintenance
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
 /* Fail-stop cleanup path: the exact transaction owner may latch the handle
  * even after its claim was consumed or the authority entered CLOSING. */
 wyrelog_error_t wyl_service_auth_write_lease_terminalize_cleanup

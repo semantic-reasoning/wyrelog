@@ -48,6 +48,12 @@ struct _WylServiceAuthRegistrySessionParticipant
   WylHandle *handle;
   WylServiceAuthWriteLease *lease;
 };
+struct _WylServiceAuthRegistryMaintenanceParticipant
+{
+  WylServiceAuthRegistry *registry;
+  WylHandle *handle;
+  WylServiceAuthWriteLease *lease;
+};
 
 struct _WylServiceAuthRegistryWriteParticipant
 {
@@ -501,15 +507,66 @@ static wyrelog_error_t
 session_participant_enter_registry (WylServiceAuthRegistrySessionParticipant
     *participant)
 {
-  /* Construction proved that this participant borrows the active same-handle
-   * WRITE lease at the coordination rank.  Its owner keeps that lease alive;
-   * the actual mutation runs after entering CONTEXT, where re-validating via
-   * write_lease_validate_operation() would incorrectly require the old
-   * coordination rank and reject the mandated WRITE -> CONTEXT -> REGISTRY
-   * order. */
-  if (participant == NULL || participant->lease == NULL)
+  if (participant == NULL)
     return WYRELOG_E_INVALID;
-  return wyl_service_auth_rank_enter (participant->handle,
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
+      (participant->lease, participant->handle);
+  return rc == WYRELOG_E_OK ? wyl_service_auth_rank_enter (participant->handle,
+      WYL_SERVICE_AUTH_RANK_REGISTRY) : rc;
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_maintenance_participant_new_for_write
+    (WylServiceAuthRegistry * registry, WylHandle * handle,
+    WylServiceAuthWriteLease * lease,
+    WylServiceAuthRegistryMaintenanceParticipant ** out_participant) {
+  if (out_participant != NULL)
+    *out_participant = NULL;
+  if (registry == NULL || !WYL_IS_HANDLE (handle) || lease == NULL
+      || out_participant == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_auth_write_lease_claim_maintenance (lease, handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylServiceAuthRegistryMaintenanceParticipant *p =
+      g_try_new0 (WylServiceAuthRegistryMaintenanceParticipant, 1);
+  if (p == NULL) {
+    (void) wyl_service_auth_write_lease_unclaim_maintenance (lease, handle);
+    return WYRELOG_E_NOMEM;
+  }
+  p->registry = wyl_service_auth_registry_ref (registry);
+  p->handle = g_object_ref (handle);
+  p->lease = lease;
+  *out_participant = p;
+  return WYRELOG_E_OK;
+}
+
+void wyl_service_auth_registry_maintenance_participant_free
+    (WylServiceAuthRegistryMaintenanceParticipant * p)
+{
+  if (p == NULL)
+    return;
+  (void) wyl_service_auth_write_lease_unclaim_maintenance (p->lease, p->handle);
+  g_clear_pointer (&p->registry, wyl_service_auth_registry_unref);
+  g_clear_object (&p->handle);
+  g_free (p);
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_maintenance_participant_clear
+    (WylServiceAuthRegistryMaintenanceParticipant * p) {
+  if (p == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_auth_write_lease_validate_maintenance (p->lease, p->handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_rank_enter (p->handle, WYL_SERVICE_AUTH_RANK_REGISTRY);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  wyl_service_auth_registry_clear (p->registry);
+  return wyl_service_auth_rank_leave_expected (p->handle,
       WYL_SERVICE_AUTH_RANK_REGISTRY);
 }
 
