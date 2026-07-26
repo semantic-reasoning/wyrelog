@@ -227,7 +227,7 @@ struct WylFactArtifactNamespace
 {
   gint references;
   gint fd;
-  guint64 device, inode;
+  guint64 device, inode, owner;
   gint main_fd;
   guint64 main_device, main_inode;
   gint lock_pin_fd;
@@ -305,6 +305,8 @@ check (WylFactArtifactNamespace *n)
 {
   struct stat s;
   if (!n || n->fd < 0 || fstat (n->fd, &s) || !S_ISDIR (s.st_mode)
+      || (s.st_mode & 07777) != 0700 || (guint64) s.st_uid != n->owner
+      || s.st_uid != geteuid ()
       || (guint64) s.st_dev != n->device || (guint64) s.st_ino != n->inode)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
@@ -337,11 +339,11 @@ static wyrelog_error_t
 lock_stat_matches (WylFactArtifactNamespace *n, gint fd,
     guint64 device, guint64 inode)
 {
-  struct stat directory, held, named;
-  if (check (n) != WYRELOG_E_OK || fstat (n->fd, &directory) != 0 || fd < 0
-      || fstat (fd, &held) != 0
+  struct stat held, named;
+  if (check (n) != WYRELOG_E_OK || fd < 0 || fstat (fd, &held) != 0
       || !S_ISREG (held.st_mode) || held.st_nlink != 1
-      || (held.st_mode & 07777) != 0600 || held.st_uid != directory.st_uid
+      || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_uid != n->owner
       || (guint64) held.st_dev != device || (guint64) held.st_ino != inode)
     return WYRELOG_E_POLICY;
   if (fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK), &named,
@@ -349,7 +351,7 @@ lock_stat_matches (WylFactArtifactNamespace *n, gint fd,
     return WYRELOG_E_POLICY;
   return S_ISREG (named.st_mode) && named.st_nlink == 1
       && (named.st_mode & 07777) == 0600
-      && named.st_uid == directory.st_uid
+      && (guint64) named.st_uid == n->owner
       && (guint64) named.st_dev == device && (guint64) named.st_ino == inode
       ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
@@ -552,7 +554,8 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
   if (fd < 0)
     return WYRELOG_E_IO;
   struct stat s;
-  if (fstat (fd, &s) || !S_ISDIR (s.st_mode)) {
+  if (fstat (fd, &s) || !S_ISDIR (s.st_mode)
+      || (s.st_mode & 07777) != 0700 || s.st_uid != geteuid ()) {
     close (fd);
     return WYRELOG_E_POLICY;
   }
@@ -563,6 +566,7 @@ wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
   n->lock_pin_fd = -1;
   n->device = s.st_dev;
   n->inode = s.st_ino;
+  n->owner = s.st_uid;
   /* Pin and register before publishing n: no concurrent namespace can choose
    * a different inode for this held graph directory. */
   wyrelog_error_t lock_result = pin_lock_domain (n);

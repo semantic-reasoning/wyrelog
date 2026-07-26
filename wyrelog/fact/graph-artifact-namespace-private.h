@@ -36,19 +36,23 @@ wyrelog_error_t wyl_fact_artifact_namespace_open
 void wyl_fact_artifact_namespace_free (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_revalidate
     (WylFactArtifactNamespace * namespace_);
-/* Cooperative 0700 graph-directory contract: only an exclusive opaque lease
- * authorizes sanctioned pathname mutation.  It pins both the held directory
- * and facts.duckdb.lock identities.  POSIX cannot make unlink/rename exact
+/* Cooperative graph-directory contract: the held directory remains owned by
+ * the effective UID with exact mode 0700, while facts.duckdb.lock remains a
+ * same-owner regular file with exact mode 0600 and nlink 1.  Only an exclusive
+ * opaque lease authorizes sanctioned pathname mutation.  It pins both the held
+ * directory and lock identities.  POSIX cannot make unlink/rename exact
  * against an uncooperative same-UID writer that bypasses this lease.
  *
  * A lease retains the namespace and owns its kernel flock; freeing it releases
  * both.  Operations on one live lease are serialized.  Every fd opened
  * through a lease is valid only while that lease lives,
  * and callers must close such fds and stop/join all lease operations before
- * freeing it.  Process death releases flock while a validated regular lock
- * entry remains reusable.  Fork with a live lease is unsupported: a child
- * must neither use nor rely on an inherited lease.  Fork after multithreading
- * is not a supported synchronization guarantee. */
+ * freeing it.  Normal process exit releases flock after every inherited copy
+ * of its open file description closes; the validated regular entry remains
+ * reusable.  Fork with a live lease is unsupported: the child must immediately
+ * exec (the fd is CLOEXEC) or _exit without using the lease, or its inherited
+ * fd will prolong the lock.  Fork after multithreading is not a supported
+ * synchronization guarantee. */
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_reader_guard
     (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
