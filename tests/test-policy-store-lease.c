@@ -767,6 +767,11 @@ test_maintenance_apply_and_replay (void)
           &replay_store), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_validate_service_permission_closure
       (replay_store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (replay_store,
+          "test.later-authority", "later authority", "basic"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_maintenance_publish (replay_store), ==,
+      WYRELOG_E_OK);
   WylServicePermissionApplyReceipt replayed = {
     0
   };

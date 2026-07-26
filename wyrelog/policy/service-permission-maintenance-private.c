@@ -1036,35 +1036,6 @@ validate_operation_evidence (wyl_policy_store_t *store,
 }
 
 static wyrelog_error_t
-validate_receipt_post_state (wyl_policy_store_t *store,
-    const WylServicePermissionApplyReceipt *receipt)
-{
-  WylPolicyPermissionClosureAnalysis analysis = {
-    0
-  };
-  wyrelog_error_t rc =
-      wyl_policy_store_analyze_service_permission_closure (store, &analysis);
-  if (rc == WYRELOG_E_OK
-      && (analysis.removals == NULL || analysis.removals->len != 0
-          || analysis.unsafe_permission_count != 0
-          || analysis.dangling_subject_count != 0
-          || analysis.dangling_role_count != 0))
-    rc = WYRELOG_E_POLICY;
-  wyl_policy_permission_closure_analysis_clear (&analysis);
-  guint64 generation = 0;
-  guint8 digest[32];
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_policy_store_service_permission_authority_snapshot (store,
-        &generation, digest);
-  if (rc == WYRELOG_E_OK
-      && (generation != receipt->post_generation
-          || memcmp (digest, receipt->post_digest, 32) != 0))
-    rc = WYRELOG_E_POLICY;
-  sodium_memzero (digest, sizeof digest);
-  return rc;
-}
-
-static wyrelog_error_t
 receipt_lookup (wyl_policy_store_t *store,
     const WylServicePermissionManifest *manifest, const gchar *fingerprint,
     WylServicePermissionApplyReceipt *out_receipt)
@@ -1109,8 +1080,7 @@ receipt_lookup (wyl_policy_store_t *store,
   int final_step = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   if (!valid || final_step != SQLITE_DONE
-      || validate_operation_evidence (store, manifest) != WYRELOG_E_OK
-      || validate_receipt_post_state (store, out_receipt) != WYRELOG_E_OK)
+      || validate_operation_evidence (store, manifest) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
   out_receipt->state = WYL_SERVICE_PERMISSION_APPLY_REPLAYED;
   out_receipt->request_id = g_strdup (manifest->request_id);
