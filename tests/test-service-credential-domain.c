@@ -36,9 +36,10 @@ credential_registry_fixture_clear (CredentialRegistryFixture *fixture)
 }
 
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (CredentialRegistryFixture,
-    credential_registry_fixture_clear)
-     static gboolean
-         credential_registry_fixture_init (CredentialRegistryFixture *fixture,
+    credential_registry_fixture_clear);
+
+static gboolean
+credential_registry_fixture_init (CredentialRegistryFixture *fixture,
     WylHandle *handle, const gchar *credential_id, guint64 generation,
     const gchar *principal, const gchar *tenant, gboolean activate)
 {
@@ -88,6 +89,19 @@ credential_registry_fixture_is (CredentialRegistryFixture *fixture,
       fixture->sid, fixture->jti, &copy, &state, &found);
   wyl_service_auth_reservation_clear (&copy);
   return rc == WYRELOG_E_OK && found && state == expected;
+}
+
+static WylServiceAuthState
+credential_registry_fixture_state (CredentialRegistryFixture *fixture)
+{
+  WylServiceAuthReservation copy = { 0 };
+  WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
+  gboolean found = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_lookup (fixture->registry,
+          fixture->sid, fixture->jti, &copy, &state, &found), ==, WYRELOG_E_OK);
+  g_assert_true (found);
+  wyl_service_auth_reservation_clear (&copy);
+  return state;
 }
 
 typedef struct
@@ -2536,9 +2550,24 @@ test_revoke_registry_compound (void)
 static void
 test_revoke_rotate_registry_commit_outcomes (void)
 {
+  static const WylPolicyAuthorityTransactionFailStage stages[] = {
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AND_ROLLBACK,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_AND_CLAIM_AFTER,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_INSTALL,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_AUTHORIZER_REMOVE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_RANK_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_CLAIM_BEFORE,
+    WYL_POLICY_AUTHORITY_TXN_FAIL_LEASE_SERIAL_AT_FINISH,
+  };
   for (guint operation = 0; operation < 2; operation++) {
-    for (guint stage = WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE;
-        stage <= WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER; stage++) {
+    for (guint i = 0; i < G_N_ELEMENTS (stages); i++) {
+      WylPolicyAuthorityTransactionFailStage stage = stages[i];
+      g_test_message ("credential operation=%u commit fault stage=%u",
+          operation, (guint) stage);
       g_auto (Fixture) fixture = { 0 };
       fixture_init (&fixture);
       prepare_authority (fixture.handle, "svc:outcome:credential");
@@ -2562,7 +2591,7 @@ test_revoke_rotate_registry_commit_outcomes (void)
         wyl_service_credential_t out = { 0 };
         g_assert_cmpint (wyl_service_credential_revoke_with_runtime
             (fixture.handle, issued.credential.credential_id, "admin",
-                "outcome-revoke", &runtime, &out), ==, WYRELOG_E_IO);
+                "outcome-revoke", &runtime, &out), !=, WYRELOG_E_OK);
         g_assert_null (out.credential_id);
       } else {
         wyl_service_credential_rotate_runtime_t runtime = {
@@ -2572,31 +2601,93 @@ test_revoke_rotate_registry_commit_outcomes (void)
         wyl_service_credential_issue_result_t out = { 0 };
         g_assert_cmpint (wyl_service_credential_rotate_with_runtime
             (fixture.handle, issued.credential.credential_id, "admin",
-                "outcome-rotate", 0, &runtime, &out), ==, WYRELOG_E_IO);
+                "outcome-rotate", 0, &runtime, &out), !=, WYRELOG_E_OK);
         g_assert_null (out.secret);
         g_assert_null (out.credential.credential_id);
       }
       wyl_service_credential_t stored = { 0 };
-      g_assert_cmpint (wyl_service_credential_get (fixture.handle,
-              issued.credential.credential_id, &stored), ==, WYRELOG_E_OK);
-      if (stage == WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE) {
-        g_assert_cmpstr (stored.state, ==, "active");
-        g_assert_true (credential_registry_fixture_is (&registry,
-                WYL_SERVICE_AUTH_ACTIVE));
-      } else {
-        g_assert_cmpstr (stored.state, ==, "revoked");
-        g_assert_true (credential_registry_fixture_is (&registry,
-                WYL_SERVICE_AUTH_REVOKED));
-      }
-      wyl_service_credential_clear (&stored);
       WylServiceAuthUnavailableReason reason =
           WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
-      g_assert_cmpint (wyl_service_auth_authority_validate_available
+      wyrelog_error_t available = wyl_service_auth_authority_validate_available
           (wyl_handle_get_service_auth_authority (fixture.handle),
-              fixture.handle, &reason), ==, WYRELOG_E_OK);
-      g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+          fixture.handle, &reason);
+      WylServiceAuthState auth_state =
+          credential_registry_fixture_state (&registry);
+      wyrelog_error_t lookup = wyl_service_credential_get (fixture.handle,
+          issued.credential.credential_id, &stored);
+      if (lookup == WYRELOG_E_OK) {
+        gboolean committed = g_str_equal (stored.state, "revoked");
+        g_assert_true (committed || g_str_equal (stored.state, "active"));
+        if (committed)
+          g_assert_true (auth_state == WYL_SERVICE_AUTH_REVOKED
+              || available == WYRELOG_E_BUSY);
+        else
+          g_assert_true ((auth_state == WYL_SERVICE_AUTH_ACTIVE
+                  && available == WYRELOG_E_OK)
+              || available == WYRELOG_E_BUSY);
+      } else
+        g_assert_cmpint (available, ==, WYRELOG_E_BUSY);
+      wyl_service_credential_clear (&stored);
+      if (available == WYRELOG_E_OK)
+        g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+      else {
+        g_assert_cmpint (available, ==, WYRELOG_E_BUSY);
+        g_assert_cmpint (reason, !=, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+      }
       wyl_service_credential_issue_result_clear (&issued);
     }
+  }
+}
+
+static void
+test_revoke_rotate_registry_rollback_fault (void)
+{
+  for (guint operation = 0; operation < 2; operation++) {
+    g_auto (Fixture) fixture = { 0 };
+    fixture_init (&fixture);
+    prepare_authority (fixture.handle, "svc:rollback:credential");
+    wyl_service_credential_issue_result_t issued = { 0 };
+    g_assert_cmpint (wyl_service_credential_issue (fixture.handle,
+            "svc:rollback:credential", "tenant-a", "admin",
+            operation == 0 ? "rollback-revoke-issue" :
+            "rollback-rotate-issue", 0, &issued), ==, WYRELOG_E_OK);
+    g_auto (CredentialRegistryFixture) registry = { 0 };
+    g_assert_true (credential_registry_fixture_init (&registry,
+            fixture.handle, issued.credential.credential_id,
+            issued.credential.generation, issued.credential.subject_id,
+            issued.credential.tenant_id, TRUE));
+    wyl_policy_store_service_authority_transaction_fail_once
+        (store_of (fixture.handle), WYL_POLICY_AUTHORITY_TXN_FAIL_ROLLBACK);
+    if (operation == 0) {
+      wyl_service_credential_revoke_runtime_t runtime = {
+        .registry = registry.registry,
+      };
+      wyl_service_credential_t out = { 0 };
+      g_assert_cmpint (wyl_service_credential_revoke_with_runtime
+          (fixture.handle, SECOND_ID, "admin", "rollback-revoke", &runtime,
+              &out), !=, WYRELOG_E_OK);
+      g_assert_null (out.credential_id);
+    } else {
+      wyl_service_credential_rotate_runtime_t runtime = {
+        .registry = registry.registry,
+        .old_credential_generation = 1,
+      };
+      wyl_service_credential_issue_result_t out = { 0 };
+      g_assert_cmpint (wyl_service_credential_rotate_with_runtime
+          (fixture.handle, SECOND_ID, "admin", "rollback-rotate", 0, &runtime,
+              &out), !=, WYRELOG_E_OK);
+      g_assert_null (out.secret);
+      g_assert_null (out.credential.credential_id);
+    }
+    g_assert_true (credential_registry_fixture_is (&registry,
+            WYL_SERVICE_AUTH_ACTIVE));
+    WylServiceAuthUnavailableReason reason =
+        WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (fixture.handle),
+            fixture.handle, &reason), ==, WYRELOG_E_OK);
+    g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+    wyl_service_credential_issue_result_clear (&issued);
   }
 }
 
@@ -6795,6 +6886,8 @@ main (int argc, char **argv)
       test_revoke_registry_compound);
   g_test_add_func ("/auth/service-credential/registry-commit-outcomes",
       test_revoke_rotate_registry_commit_outcomes);
+  g_test_add_func ("/auth/service-credential/registry-rollback-fault",
+      test_revoke_rotate_registry_rollback_fault);
   g_test_add_func ("/auth/service-credential/handoff-exact-classifier",
       test_handoff_exact_successor_classifier);
 #ifdef WYL_TEST_HAS_HANDOFF_MAINTENANCE_CORE

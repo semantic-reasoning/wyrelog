@@ -159,13 +159,13 @@ wyrelog_error_t wyl_service_auth_registry_remove_exact
 wyrelog_error_t wyl_service_auth_registry_revoke_credential_generation
     (WylServiceAuthRegistry * registry, const gchar * credential_id,
     guint64 generation, WylServiceAuthRevokeResult * out_result);
-#endif
 wyrelog_error_t wyl_service_auth_registry_revoke_principal
     (WylServiceAuthRegistry * registry, const gchar * principal,
     WylServiceAuthRevokeResult * out_result);
 wyrelog_error_t wyl_service_auth_registry_revoke_tenant
     (WylServiceAuthRegistry * registry, const gchar * tenant,
     WylServiceAuthRevokeResult * out_result);
+#endif
 wyrelog_error_t wyl_service_auth_selector_init_principal
     (WylServiceAuthSelector * selector, const gchar * principal);
 wyrelog_error_t wyl_service_auth_selector_init_tenant
@@ -179,10 +179,12 @@ wyrelog_error_t wyl_service_auth_selector_init_credential_generation
  * the authoritative owning table to prove that no matching PENDING or ACTIVE
  * entry survives.  POLICY therefore means registry invariant corruption.
  */
+#if defined(WYL_AUTH_REGISTRY_TESTING) || defined(WYL_TEST_DAEMON_HTTP)
 wyrelog_error_t wyl_service_auth_registry_revoke_selector_zero_survivors
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthSelector * selector,
     WylServiceAuthRevokeResult * out_result);
+#endif
 /*
  * Lease-bound mutation capability.  Construction is a fallible preflight;
  * execution validates that the same-handle WRITE lease remains the active
