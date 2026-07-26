@@ -54,7 +54,8 @@ credential_registry_fixture_init (CredentialRegistryFixture *fixture,
   fixture->reservation = (WylServiceAuthReservation) {
   .session_id = fixture->sid,.jti = fixture->jti,.credential_id =
         (gchar *) credential_id,.generation = generation,.principal =
-        (gchar *) principal,.tenant = (gchar *) tenant,};
+        (gchar *) principal,.tenant = (gchar *) tenant,.expires_at =
+        g_get_real_time () / G_USEC_PER_SEC + 3600,};
   WylServiceAuthWriteLease *lease = NULL;
   if (wyl_service_auth_authority_acquire_write
       (wyl_handle_get_service_auth_authority (handle), handle, NULL,
