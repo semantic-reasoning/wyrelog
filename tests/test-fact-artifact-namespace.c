@@ -543,6 +543,8 @@ test_mutation_leases (void)
           "tmp", FALSE, FALSE, &binding, &fd), ==, WYRELOG_E_POLICY);
   g_assert_null (binding);
   g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (binding), ==,
+      WYRELOG_E_POLICY);
 }
 #endif
 
@@ -595,7 +597,35 @@ test_namespace (void)
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_open (read_binding, FALSE,
           &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (read_binding), ==,
+      WYRELOG_E_POLICY);
   wyl_fact_artifact_temp_binding_free (read_binding);
+  WylFactArtifactTempBinding *unlink_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "unlink-owner", TRUE, TRUE, &unlink_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (unlink_binding), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (unlink_binding, FALSE,
+          &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (unlink_binding), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
+          "unlink-owner", FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_artifact_temp_binding_free (unlink_binding);
+  WylFactArtifactTempBinding *fault_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "unlink-fault", TRUE, TRUE, &fault_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (fault_binding), ==,
+      WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (fault_binding, FALSE,
+          &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
+          "unlink-fault", FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_artifact_temp_binding_free (fault_binding);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,

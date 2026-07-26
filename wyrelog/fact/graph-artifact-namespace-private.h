@@ -25,6 +25,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE = 0,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC,
 } WylFactArtifactNamespaceTestFault;
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
@@ -79,6 +80,11 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp_binding
  * is read-only even when it retained an exclusive lease. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_open
     (WylFactArtifactTempBinding *, gboolean writable, gint * out_fd);
+/* An owner binding consumes its exact temporary artifact.  A successful
+ * unlink makes the binding terminal even when the subsequent durability or
+ * post-mutation check reports an error. */
+wyrelog_error_t wyl_fact_artifact_temp_binding_unlink
+    (WylFactArtifactTempBinding *);
 void wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
     (WylFactArtifactMutationLease *, WylFactArtifactName name);
