@@ -6587,6 +6587,118 @@ issue_service_token_credential (WylHandle *handle, const gchar *subject_id,
       WYRELOG_E_OK);
 }
 
+static gint64
+service_exchange_table_count (wyl_policy_store_t *store,
+    const gchar *table_name)
+{
+  g_autofree gchar *sql =
+      g_strdup_printf ("SELECT count(*) FROM %s;", table_name);
+  sqlite3_stmt *stmt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (store), sql,
+          -1, &stmt, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (sqlite3_step (stmt), ==, SQLITE_ROW);
+  gint64 count = sqlite3_column_int64 (stmt, 0);
+  sqlite3_finalize (stmt);
+  return count;
+}
+
+static gint
+check_unsafe_permission_closure_blocks_service_exchange (SoupServer *server,
+    WylHandle *handle, const gchar *base_url)
+{
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_service_principal_t principal = { 0 };
+  if (wyl_service_principal_create (handle, "svc:unsafe:exchange",
+          "unsafe exchange", "admin", "unsafe-exchange-principal",
+          &principal) != WYRELOG_E_OK)
+    return 2050;
+  wyl_service_principal_clear (&principal);
+  gboolean tenant_created = FALSE;
+  if (wyl_policy_store_create_tenant (store, "tenant-unsafe",
+          &tenant_created) != WYRELOG_E_OK || !tenant_created)
+    return 2051;
+
+  wyl_service_credential_issue_result_t issued = { 0 };
+  if (wyl_service_credential_issue (handle, "svc:unsafe:exchange",
+          "tenant-unsafe", "admin", "unsafe-exchange-credential",
+          g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC,
+          &issued) != WYRELOG_E_OK || issued.secret == NULL
+      || issued.credential.credential_id == NULL) {
+    wyl_service_credential_issue_result_clear (&issued);
+    return 2052;
+  }
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  g_autofree gchar *request_body = secret == NULL ? NULL :
+      g_strdup_printf
+      ("{\"credential_id\":\"%s\",\"credential_secret\":\"%.*s\"}",
+      issued.credential.credential_id, (gint) secret_len, secret);
+  wyl_service_credential_issue_result_clear (&issued);
+  if (request_body == NULL)
+    return 2053;
+
+  gint64 intentions_before = service_exchange_table_count (store,
+      "service_exchange_audit_intentions");
+  gint64 requests_before = service_exchange_table_count (store,
+      "service_domain_requests");
+  WylDaemonServiceExchangeCounters counters_before = { 0 };
+  wyl_daemon_http_service_exchange_counters_for_test (server, &counters_before);
+
+  if (wyl_policy_store_upsert_permission (store, "site.exchange.unsafe",
+          "exchange unsafe", "basic") != WYRELOG_E_OK
+      || sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:unsafe:exchange','site.exchange.unsafe','scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 2054;
+  WylServiceAuthWriteLease *lease = NULL;
+  if (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &lease) != WYRELOG_E_OK)
+    return 2055;
+  wyrelog_error_t latch_rc =
+      wyl_handle_validate_service_permission_closure (handle, lease);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  wyl_service_auth_write_lease_free (lease);
+  if (latch_rc != WYRELOG_E_OK || release_rc != WYRELOG_E_OK)
+    return 2056;
+
+  g_autoptr (SoupSession) session = soup_session_new ();
+  guint status = 0;
+  g_autofree gchar *body = NULL;
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/auth/service-token", NULL, request_body, &status, &body) != 0
+      || status != 503 || body == NULL
+      || strstr (body, "\"error\":\"service_token_unavailable\"") == NULL
+      || strstr (body, "access_token") != NULL)
+    return 2057;
+
+  WylDaemonServiceExchangeCounters counters_after = { 0 };
+  wyl_daemon_http_service_exchange_counters_for_test (server, &counters_after);
+  if (counters_after.registry_reserves != counters_before.registry_reserves
+      || counters_after.registry_activations !=
+      counters_before.registry_activations
+      || counters_after.auth_context_publications !=
+      counters_before.auth_context_publications
+      || service_exchange_table_count (store,
+          "service_exchange_audit_intentions") != intentions_before
+      || service_exchange_table_count (store,
+          "service_domain_requests") != requests_before)
+    return 2058;
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  WylServiceAuthAuthoritySnapshot snapshot = { 0 };
+  wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &reason) != WYRELOG_E_BUSY
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE
+      || snapshot.active_readers != 0 || snapshot.writer_active)
+    return 2059;
+  return 0;
+}
+
 static gint
 check_service_token_exchange_contract (SoupServer *server, WylHandle *handle,
     const gchar *base_url)
@@ -8295,6 +8407,15 @@ main (void)
       (http.server, handle, base_url);
   if (reconcile_rc != 0) {
     result = reconcile_rc;
+    goto cleanup;
+  }
+#endif
+#ifdef WYL_HAS_AUDIT
+  gint unsafe_exchange_rc =
+      check_unsafe_permission_closure_blocks_service_exchange (http.server,
+      handle, base_url);
+  if (unsafe_exchange_rc != 0) {
+    result = unsafe_exchange_rc;
     goto cleanup;
   }
 #endif

@@ -321,6 +321,9 @@ typedef struct _WylDaemonHttpContext
   guint refresh_jwt_sign_successes;
   guint refresh_token_id_successes;
   guint refresh_publications;
+  guint service_exchange_registry_reserves;
+  guint service_exchange_registry_activations;
+  guint service_exchange_auth_context_publications;
   gboolean fail_next_refresh_publication;
   WylDaemonRefreshFault refresh_fault;
   GPtrArray *refresh_generated_ids;
@@ -1810,6 +1813,23 @@ void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
       out_snapshot);
 }
 
+void
+wyl_daemon_http_service_exchange_counters_for_test (SoupServer *server,
+    WylDaemonServiceExchangeCounters *out_counters)
+{
+  if (out_counters == NULL)
+    return;
+  memset (out_counters, 0, sizeof *out_counters);
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return;
+  out_counters->registry_reserves = ctx->service_exchange_registry_reserves;
+  out_counters->registry_activations =
+      ctx->service_exchange_registry_activations;
+  out_counters->auth_context_publications =
+      ctx->service_exchange_auth_context_publications;
+}
+
 wyrelog_error_t
 wyl_daemon_http_service_token_exchange_for_test (SoupServer *server,
     const WylDaemonServiceTokenRequest *request, guint *out_status,
@@ -2101,7 +2121,11 @@ service_token_registry_reserve_hook (gpointer user_data,
     const gchar *session_id, const gchar *jti, const gchar *credential_id,
     guint64 generation, const gchar *principal, const gchar *tenant)
 {
-  return wyl_service_auth_registry_reserve (user_data,
+  WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  ctx->service_exchange_registry_reserves++;
+#endif
+  return wyl_service_auth_registry_reserve (ctx->service_auth_registry,
       &(WylServiceAuthReservation) {
       .session_id = (gchar *) session_id,.jti = (gchar *) jti,.credential_id =
         (gchar *) credential_id,.generation = generation,.principal =
@@ -2115,7 +2139,11 @@ service_token_registry_activate_hook (gpointer user_data,
     guint64 generation, const gchar *principal, const gchar *tenant,
     gboolean *out_changed)
 {
-  return wyl_service_auth_registry_activate (user_data,
+  WylDaemonHttpContext *ctx = user_data;
+#ifdef WYL_TEST_DAEMON_HTTP
+  ctx->service_exchange_registry_activations++;
+#endif
+  return wyl_service_auth_registry_activate (ctx->service_auth_registry,
       &(WylServiceAuthReservation) {
       .session_id = (gchar *) session_id,.jti = (gchar *) jti,.credential_id =
         (gchar *) credential_id,.generation = generation,.principal =
@@ -2129,7 +2157,8 @@ service_token_registry_remove_hook (gpointer user_data,
     guint64 generation, const gchar *principal, const gchar *tenant,
     gboolean *out_removed)
 {
-  return wyl_service_auth_registry_remove_exact (user_data,
+  WylDaemonHttpContext *ctx = user_data;
+  return wyl_service_auth_registry_remove_exact (ctx->service_auth_registry,
       &(WylServiceAuthReservation) {
       .session_id = (gchar *) session_id,.jti = (gchar *) jti,.credential_id =
         (gchar *) credential_id,.generation = generation,.principal =
@@ -2193,7 +2222,7 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
     .reserve = service_token_registry_reserve_hook,
     .activate = service_token_registry_activate_hook,
     .remove_exact = service_token_registry_remove_hook,
-    .user_data = ctx->service_auth_registry,
+    .user_data = ctx,
   };
   WylServiceExchangePrepared prepared = { 0 };
   rc = wyl_service_exchange_authority_complete (&authority,
@@ -2210,6 +2239,9 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
     wyl_service_exchange_authority_clear (&authority);
     return WYRELOG_E_INTERNAL;
   }
+#ifdef WYL_TEST_DAEMON_HTTP
+  ctx->service_exchange_auth_context_publications++;
+#endif
 
   g_autofree gchar *session_id = wyl_session_dup_id_string (prepared.session);
   g_autofree gchar *subject = wyl_session_dup_service_subject_private

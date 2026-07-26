@@ -115,6 +115,12 @@ typedef struct
   guint refresh_id_successes;
   guint publications;
 } WylDaemonRefreshCounters;
+typedef struct
+{
+  guint registry_reserves;
+  guint registry_activations;
+  guint auth_context_publications;
+} WylDaemonServiceExchangeCounters;
 void wyl_daemon_http_set_service_resolver_checkpoint_for_test
     (SoupServer * server, WylDaemonServiceResolverCheckpoint checkpoint,
     gpointer data);
@@ -236,6 +242,8 @@ wyrelog_error_t wyl_daemon_http_profile_events_ingest_for_test
 #ifdef WYL_HAS_AUDIT
 void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
     (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot);
+void wyl_daemon_http_service_exchange_counters_for_test
+    (SoupServer * server, WylDaemonServiceExchangeCounters * out_counters);
 #endif
 void wyl_daemon_http_set_refresh_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now);
