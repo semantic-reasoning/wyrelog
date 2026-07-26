@@ -1216,7 +1216,10 @@ test_policy_service_namespace = executable('test-policy-service-namespace',
 test('policy-service-namespace', test_policy_service_namespace)
 
 test_service_principal_domain = executable('test-service-principal-domain',
-  'test-service-principal-domain.c',
+  [
+    'test-service-principal-domain.c',
+    '../wyrelog/daemon/auth-registry-private.c',
+  ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   c_args : ['-DWYL_AUTH_REGISTRY_TESTING'],
   dependencies : [wyrelog_dep, sodium_dep, sqlite_dep],

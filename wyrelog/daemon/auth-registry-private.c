@@ -866,8 +866,8 @@ wyrelog_error_t
       generation);
 }
 
-wyrelog_error_t
-    wyl_service_auth_registry_revoke_selector_zero_survivors
+static wyrelog_error_t
+    registry_revoke_selector_zero_survivors
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthSelector * selector,
     WylServiceAuthRevokeResult * out_result)
@@ -970,9 +970,28 @@ wyrelog_error_t
     return WYRELOG_E_INVALID;
   wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
       (participant->lease, participant->handle);
-  return rc == WYRELOG_E_OK
-      ? wyl_service_auth_registry_revoke_selector_zero_survivors
-      (participant->registry, selector, out_result) : rc;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_rank_enter (participant->handle,
+      WYL_SERVICE_AUTH_RANK_REGISTRY);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = registry_revoke_selector_zero_survivors (participant->registry,
+      selector, out_result);
+  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected
+      (participant->handle, WYL_SERVICE_AUTH_RANK_REGISTRY);
+  return rc == WYRELOG_E_OK ? leave_rc : rc;
+}
+
+#if defined(WYL_AUTH_REGISTRY_TESTING) || defined(WYL_TEST_DAEMON_HTTP)
+wyrelog_error_t
+    wyl_service_auth_registry_revoke_selector_zero_survivors
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result)
+{
+  return registry_revoke_selector_zero_survivors (registry, selector,
+      out_result);
 }
 
 wyrelog_error_t
@@ -987,8 +1006,8 @@ wyrelog_error_t
       wyl_service_auth_selector_init_credential_generation (&selector,
       credential_id, generation);
   return rc == WYRELOG_E_OK
-      ? wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-      &selector, out_result) : rc;
+      ? registry_revoke_selector_zero_survivors (registry, &selector,
+      out_result) : rc;
 }
 
 wyrelog_error_t
@@ -1000,8 +1019,8 @@ wyrelog_error_t
   wyrelog_error_t rc = wyl_service_auth_selector_init_principal (&selector,
       principal);
   return rc == WYRELOG_E_OK
-      ? wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-      &selector, out_result) : rc;
+      ? registry_revoke_selector_zero_survivors (registry, &selector,
+      out_result) : rc;
 }
 
 wyrelog_error_t
@@ -1012,9 +1031,10 @@ wyl_service_auth_registry_revoke_tenant (WylServiceAuthRegistry *registry,
   wyrelog_error_t rc = wyl_service_auth_selector_init_tenant (&selector,
       tenant);
   return rc == WYRELOG_E_OK
-      ? wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
-      &selector, out_result) : rc;
+      ? registry_revoke_selector_zero_survivors (registry, &selector,
+      out_result) : rc;
 }
+#endif
 
 static ServiceAuthBucket *
 remove_bucket_member_locked (GHashTable *table, gconstpointer key,
@@ -1158,6 +1178,7 @@ wyl_service_auth_reservation_clear (WylServiceAuthReservation *reservation)
   reservation_clear_with_allocator (&allocator, reservation);
 }
 
+#ifdef WYL_AUTH_REGISTRY_TESTING
 gboolean
     wyl_service_auth_registry_corrupt_selector_index_for_test
     (WylServiceAuthRegistry * registry, const WylServiceAuthSelector * selector)
@@ -1180,7 +1201,6 @@ gboolean
   return member != NULL;
 }
 
-#ifdef WYL_AUTH_REGISTRY_TESTING
 gboolean
 wyl_service_auth_registry_corrupt_for_test (WylServiceAuthRegistry *registry,
     const WylServiceAuthReservation *reservation,
