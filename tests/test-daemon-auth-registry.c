@@ -508,6 +508,45 @@ test_zero_survivor_global_corruption_matrix (void)
   }
 }
 
+static void
+test_due_cleanup_rejects_corrupt_indexes (void)
+{
+  const WylServiceAuthRegistryCorruption corruptions[] = {
+    WYL_SERVICE_AUTH_CORRUPT_PRINCIPAL_MEMBER,
+    WYL_SERVICE_AUTH_CORRUPT_TENANT_MEMBER,
+    WYL_SERVICE_AUTH_CORRUPT_CREDENTIAL_MEMBER,
+    WYL_SERVICE_AUTH_CORRUPT_JTI_INDEX,
+    WYL_SERVICE_AUTH_CORRUPT_OWNING_SESSION_LINK,
+  };
+
+  for (guint i = 0; i < G_N_ELEMENTS (corruptions); i++) {
+    WylServiceAuthRegistry *registry = new_registry ();
+    WylServiceAuthReservation value = fixture (SESSION_A, JTI_A);
+    GPtrArray *due = (GPtrArray *) 0x1;
+    gboolean removed = TRUE;
+    gboolean changed = FALSE;
+
+    value.expires_at = 1;
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
+            &changed), ==, WYRELOG_E_OK);
+    g_assert_true (changed);
+    g_assert_true (wyl_service_auth_registry_corrupt_for_test (registry,
+            &value, corruptions[i]));
+
+    /* copy_due is the expiry worker's read half; it must inspect every
+     * authoritative index before handing a snapshot to removal. */
+    g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 1,
+            &due), ==, WYRELOG_E_POLICY);
+    g_assert_null (due);
+    g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry, &value,
+            &removed), ==, WYRELOG_E_POLICY);
+    g_assert_false (removed);
+    wyl_service_auth_registry_unref (registry);
+  }
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -1098,6 +1137,8 @@ main (int argc, char **argv)
       test_zero_survivor_selector_and_corruption);
   g_test_add_func ("/daemon/auth-registry/zero-survivor-corruption-matrix",
       test_zero_survivor_global_corruption_matrix);
+  g_test_add_func ("/daemon/auth-registry/due-cleanup-corrupt-indexes",
+      test_due_cleanup_rejects_corrupt_indexes);
   g_test_add_func ("/daemon/auth-registry/allocation-cleanup",
       test_allocation_failures_and_cleanup);
   g_test_add_func ("/daemon/auth-registry/counted-clear-reuse",
