@@ -21,6 +21,7 @@ fixture (const gchar *session_id, const gchar *jti)
     .generation = 1,
     .principal = (gchar *) "svc:tenant-a:worker",
     .tenant = (gchar *) "tenant-a",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   return value;
 }
@@ -53,6 +54,7 @@ assert_lookup (WylServiceAuthRegistry *registry,
   g_assert_cmpuint (snapshot.generation, ==, expected->generation);
   g_assert_cmpstr (snapshot.principal, ==, expected->principal);
   g_assert_cmpstr (snapshot.tenant, ==, expected->tenant);
+  g_assert_cmpint (snapshot.expires_at, ==, expected->expires_at);
   wyl_service_auth_reservation_clear (&snapshot);
 }
 

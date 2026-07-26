@@ -396,6 +396,7 @@ test_write_participant_registry_rank (void)
     .generation = 1,
     .principal = (gchar *) "svc:rank:worker",
     .tenant = (gchar *) "rank",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &reservation),
       ==, WYRELOG_E_OK);
@@ -504,6 +505,7 @@ test_compound_corruption_latches_unavailable (void)
     .generation = 1,
     .principal = (gchar *) "svc:fault:worker",
     .tenant = (gchar *) "fault",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &reservation),
       ==, WYRELOG_E_OK);
@@ -569,6 +571,7 @@ test_compound_terminalizes_latch_and_release_failures (void)
       .generation = 1,
       .principal = (gchar *) "svc:terminal:worker",
       .tenant = (gchar *) "terminal",
+      .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
     };
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
             &reservation), ==, WYRELOG_E_OK);
@@ -647,6 +650,7 @@ test_compound_commit_outcomes (void)
       .generation = 1,
       .principal = (gchar *) "svc:outcome:worker",
       .tenant = (gchar *) "outcome",
+      .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
     };
     g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
             &reservation), ==, WYRELOG_E_OK);
@@ -703,6 +707,7 @@ test_compound_rollback_fault (void)
     .generation = 1,
     .principal = (gchar *) "svc:rollback:unrelated",
     .tenant = (gchar *) "rollback",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &reservation),
       ==, WYRELOG_E_OK);
@@ -1013,6 +1018,7 @@ test_restart_after_latch_rebuilds_empty_registry (void)
     .generation = 1,
     .principal = (gchar *) "svc:restart-latch:worker",
     .tenant = (gchar *) "restart-latch",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &disabled),
       ==, WYRELOG_E_OK);
