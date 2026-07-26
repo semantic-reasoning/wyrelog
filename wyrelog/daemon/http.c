@@ -311,6 +311,7 @@ typedef struct _WylDaemonHttpContext
   gint64 service_auth_clock_floor;
   gboolean shutting_down;
 #ifdef WYL_TEST_DAEMON_HTTP
+  guint service_auth_retirement_ticks;
   gboolean service_auth_clock_injected;
   gint64 service_auth_clock_now;
   gboolean refresh_clock_injected;
@@ -683,6 +684,9 @@ service_auth_retirement_tick (gpointer data)
   g_mutex_unlock (&ctx->lock);
   if (shutting_down)
     return G_SOURCE_REMOVE;
+#ifdef WYL_TEST_DAEMON_HTTP
+  g_atomic_int_inc ((gint *) & ctx->service_auth_retirement_ticks);
+#endif
   /* Failure latches service auth inside the maintenance WRITE lease. */
 #ifdef WYL_HAS_AUDIT
   (void) service_auth_retire_due (ctx, service_auth_now_seconds (ctx));
@@ -3496,6 +3500,29 @@ wyl_daemon_http_set_service_auth_clock_for_test (SoupServer *server,
   ctx->service_auth_clock_injected = enabled;
   ctx->service_auth_clock_now = now_seconds;
   g_mutex_unlock (&ctx->lock);
+}
+
+gboolean
+wyl_daemon_http_service_auth_maintenance_active_for_test (SoupServer *server,
+    guint *out_ticks)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (out_ticks != NULL)
+    *out_ticks = 0;
+  if (ctx == NULL || out_ticks == NULL)
+    return FALSE;
+  g_mutex_lock (&ctx->lock);
+  *out_ticks = g_atomic_int_get ((gint *) & ctx->service_auth_retirement_ticks);
+  gboolean active = ctx->service_auth_retirement_source != NULL;
+  g_mutex_unlock (&ctx->lock);
+  return active;
+}
+
+void
+wyl_daemon_http_shutdown_service_auth_maintenance_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  wyl_daemon_http_context_terminalize (ctx, TRUE);
 }
 
 gboolean
