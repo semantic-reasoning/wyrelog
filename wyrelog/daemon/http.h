@@ -192,6 +192,8 @@ wyrelog_error_t wyl_daemon_http_publish_service_token_for_test
 wyrelog_error_t wyl_daemon_http_lookup_service_registry_for_test
     (SoupServer * server, const gchar * session_id, const gchar * jti,
     gint * out_state, gboolean * out_found);
+wyrelog_error_t wyl_daemon_http_retire_due_service_auth_for_test
+    (SoupServer * server, gint64 now_seconds);
 gboolean wyl_daemon_http_mutate_service_session_for_test
     (SoupServer * server, const gchar * session_id, gint field,
     const gchar * text, guint64 number);

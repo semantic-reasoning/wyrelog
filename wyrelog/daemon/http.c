@@ -2337,6 +2337,29 @@ typedef struct
   WylAccessTokenState *access_value;
 } WylServiceLivePublicationCandidate;
 
+#define WYL_SERVICE_AUTH_RETIRE_BATCH_MAX 32u
+
+typedef struct
+{
+  gpointer session_key;
+  WylSession *session_value;
+  gpointer access_key;
+  WylAccessTokenState *access_value;
+} WylServiceRetiredLivePair;
+
+static void
+service_retired_live_pair_free (gpointer data)
+{
+  WylServiceRetiredLivePair *pair = data;
+  if (pair == NULL)
+    return;
+  g_free (pair->session_key);
+  g_clear_object (&pair->session_value);
+  g_free (pair->access_key);
+  wyl_access_token_state_free (pair->access_value);
+  g_free (pair);
+}
+
 static void
     service_live_publication_candidate_clear
     (WylServiceLivePublicationCandidate * candidate)
@@ -2367,6 +2390,33 @@ service_access_state_matches_view (const WylAccessTokenState *state,
       && state->expires_at == view->expires_at
       && g_strcmp0 (state->credential_id, view->credential_id) == 0
       && state->credential_generation == view->generation;
+}
+
+static gboolean
+service_live_state_matches_reservation (WylDaemonHttpContext *ctx,
+    const WylServiceAuthReservation *reservation)
+{
+  WylSession *session = g_hash_table_lookup (ctx->sessions_by_token,
+      reservation->session_id);
+  WylAccessTokenState *access = g_hash_table_lookup (ctx->access_tokens_by_jti,
+      reservation->jti);
+  return session != NULL && access != NULL
+      && wyl_session_get_auth_method_private (session)
+      == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      && wyl_session_matches_service_tuple_private (session,
+      reservation->session_id, reservation->jti, reservation->principal,
+      reservation->tenant, reservation->credential_id,
+      reservation->generation,
+      wyl_session_get_service_issued_at_seconds_private (session),
+      reservation->expires_at)
+      && access->auth_method == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      && !access->revoked && g_strcmp0 (access->jti, reservation->jti) == 0
+      && g_strcmp0 (access->session_id, reservation->session_id) == 0
+      && g_strcmp0 (access->subject, reservation->principal) == 0
+      && g_strcmp0 (access->tenant, reservation->tenant) == 0
+      && g_strcmp0 (access->credential_id, reservation->credential_id) == 0
+      && access->credential_generation == reservation->generation
+      && access->expires_at == reservation->expires_at;
 }
 
 static wyrelog_error_t
@@ -2582,6 +2632,116 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
   return exact;
 }
 
+/*
+ * WRITE -> context -> registry is the only maintenance lock order.  Candidate
+ * snapshots are taken before the context lock; the WRITE lease prevents a
+ * resolver, exchange ticket, or invalidator from changing the tuple while the
+ * exact live companions are prevalidated and removed.
+ */
+static wyrelog_error_t
+service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
+{
+  WylServiceAuthWriteLease *lease = NULL;
+  GPtrArray *due = NULL;
+  GPtrArray *retired = NULL;
+  wyrelog_error_t rc;
+
+  if (ctx == NULL || now_seconds < 0)
+    return WYRELOG_E_INVALID;
+  rc = wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (ctx->handle), ctx->handle, NULL,
+      &lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_service_auth_registry_copy_due (ctx->service_auth_registry,
+      now_seconds, WYL_SERVICE_AUTH_RETIRE_BATCH_MAX, &due);
+  if (rc != WYRELOG_E_OK)
+    goto fail_stop;
+  if (due->len == 0)
+    goto out;
+
+  retired = g_ptr_array_new_with_free_func (service_retired_live_pair_free);
+  rc = service_publication_context_lock (ctx);
+  if (rc != WYRELOG_E_OK)
+    goto fail_stop;
+  for (guint i = 0; i < due->len; i++) {
+    WylServiceAuthReservation *reservation = g_ptr_array_index (due, i);
+    if (!service_live_state_matches_reservation (ctx, reservation)) {
+      rc = WYRELOG_E_POLICY;
+      goto unlock_fail_stop;
+    }
+  }
+  for (guint i = 0; i < due->len; i++) {
+    WylServiceAuthReservation *reservation = g_ptr_array_index (due, i);
+    g_autoptr (WylServiceAuthRegistrySessionParticipant) participant = NULL;
+    WylServiceRetiredLivePair *pair = g_new0 (WylServiceRetiredLivePair, 1);
+    gboolean removed = FALSE;
+    if (pair == NULL) {
+      rc = WYRELOG_E_NOMEM;
+      goto unlock_fail_stop;
+    }
+    rc = wyl_service_auth_registry_session_participant_new_for_write
+        (ctx->service_auth_registry, ctx->handle, lease, &participant);
+    if (rc != WYRELOG_E_OK) {
+      g_free (pair);
+      goto unlock_fail_stop;
+    }
+    if (!g_hash_table_steal_extended (ctx->sessions_by_token,
+            reservation->session_id, &pair->session_key, &pair->session_value)
+        || !g_hash_table_steal_extended (ctx->access_tokens_by_jti,
+            reservation->jti, &pair->access_key, &pair->access_value)) {
+      /* Prevalidation makes this unreachable without an invariant breach. */
+      if (pair->session_key != NULL)
+        g_hash_table_insert (ctx->sessions_by_token, pair->session_key,
+            pair->session_value);
+      g_free (pair->access_key);
+      wyl_access_token_state_free (pair->access_value);
+      g_free (pair);
+      rc = WYRELOG_E_POLICY;
+      goto unlock_fail_stop;
+    }
+    rc = wyl_service_auth_registry_session_participant_remove_exact
+        (participant, reservation, &removed);
+    if (rc != WYRELOG_E_OK || !removed) {
+      g_hash_table_insert (ctx->sessions_by_token, pair->session_key,
+          pair->session_value);
+      g_hash_table_insert (ctx->access_tokens_by_jti, pair->access_key,
+          pair->access_value);
+      pair->session_key = NULL;
+      pair->session_value = NULL;
+      pair->access_key = NULL;
+      pair->access_value = NULL;
+      g_free (pair);
+      if (rc == WYRELOG_E_OK)
+        rc = WYRELOG_E_POLICY;
+      goto unlock_fail_stop;
+    }
+    g_ptr_array_add (retired, pair);
+  }
+  rc = service_publication_context_unlock (ctx, WYRELOG_E_OK);
+  if (rc != WYRELOG_E_OK)
+    goto fail_stop;
+  goto out;
+
+unlock_fail_stop:
+  (void) service_publication_context_unlock (ctx, WYRELOG_E_OK);
+fail_stop:
+  (void) wyl_service_auth_write_lease_mark_unavailable (lease, ctx->handle,
+      WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+out:
+  if (due != NULL)
+    g_ptr_array_unref (due);
+  if (retired != NULL)
+    g_ptr_array_unref (retired);
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
+  }
+  return rc;
+}
+
 static wyrelog_error_t
 service_token_limiter_decide (WylDaemonHttpContext *ctx,
     WylServiceExchangeLimiterRequestKind kind, const gchar *credential_id,
@@ -2620,10 +2780,15 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
       || credential_secret_len == 0 || out_body == NULL)
     return WYRELOG_E_INVALID;
 
+  gint64 now_us = g_get_real_time ();
+  gint64 now_seconds = now_us / G_USEC_PER_SEC;
+  wyrelog_error_t rc = service_auth_retire_due (ctx, now_seconds);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   WylServiceExchangeAuthority authority = { 0 };
-  wyrelog_error_t rc = wyl_service_exchange_authority_begin (ctx->handle,
+  rc = wyl_service_exchange_authority_begin (ctx->handle,
       credential_id, credential_secret, credential_secret_len,
-      g_get_real_time (), &authority);
+      now_us, &authority);
   if (rc != WYRELOG_E_OK) {
     wyl_service_exchange_authority_clear (&authority);
     return rc;
@@ -2650,8 +2815,7 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
   WylServiceExchangePrepared prepared = { 0 };
   rc = wyl_service_exchange_authority_prepare_token (&authority, key_id,
       WYL_DAEMON_JWT_ISSUER, WYL_DAEMON_JWT_AUDIENCE,
-      g_get_real_time () / G_USEC_PER_SEC, token_secret,
-      sizeof token_secret, &prepared);
+      now_seconds, token_secret, sizeof token_secret, &prepared);
   sodium_memzero (token_secret, sizeof token_secret);
   if (rc != WYRELOG_E_OK) {
     wyl_service_exchange_authority_clear (&authority);
@@ -2997,6 +3161,15 @@ wyl_daemon_http_lookup_service_registry_for_test (SoupServer *server,
     *out_state = state;
   wyl_service_auth_reservation_clear (&reservation);
   return rc;
+}
+
+wyrelog_error_t
+wyl_daemon_http_retire_due_service_auth_for_test (SoupServer *server,
+    gint64 now_seconds)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return ctx != NULL ? service_auth_retire_due (ctx, now_seconds)
+      : WYRELOG_E_INVALID;
 }
 #endif
 
@@ -3632,7 +3805,8 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
           || g_strcmp0 (reservation.credential_id, claims.credential_id) != 0
           || reservation.generation != claims.credential_generation
           || g_strcmp0 (reservation.principal, claims.subject) != 0
-          || g_strcmp0 (reservation.tenant, claims.tenant) != 0)
+          || g_strcmp0 (reservation.tenant, claims.tenant) != 0
+          || reservation.expires_at != claims.expires_at)
         rc = WYRELOG_E_POLICY;
     }
     if (rc == WYRELOG_E_OK) {
