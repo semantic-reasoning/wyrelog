@@ -45,6 +45,11 @@ struct WylServicePermissionReceiptReservation
   int dirfd;
   int fd;
   gchar *basename;
+  gchar *parent_path;
+  dev_t parent_dev;
+  ino_t parent_ino;
+  dev_t target_dev;
+  ino_t target_ino;
 #endif
 };
 
@@ -1452,6 +1457,7 @@ win_out:
     wyl_service_permission_apply_receipt_reservation_abort (reservation);
     return rc;
   }
+  reservation->parent_path = g_strdup (resolved_parent);
   reservation->dirfd =
       open (resolved_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   g_free (resolved_parent);
@@ -1463,6 +1469,8 @@ win_out:
     wyl_service_permission_apply_receipt_reservation_abort (reservation);
     return WYRELOG_E_POLICY;
   }
+  reservation->parent_dev = parent_stat.st_dev;
+  reservation->parent_ino = parent_stat.st_ino;
   reservation->fd = openat (reservation->dirfd, reservation->basename,
       O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0600);
   if (reservation->fd < 0) {
@@ -1479,10 +1487,39 @@ win_out:
     wyl_service_permission_apply_receipt_reservation_abort (reservation);
     return WYRELOG_E_POLICY;
   }
+  reservation->target_dev = file_stat.st_dev;
+  reservation->target_ino = file_stat.st_ino;
 #endif
   *out_reservation = reservation;
   return WYRELOG_E_OK;
 }
+
+#ifndef G_OS_WIN32
+static gboolean
+    receipt_reservation_named_target_matches
+    (const WylServicePermissionReceiptReservation * reservation)
+{
+  struct stat pinned_parent;
+  struct stat named_parent;
+  struct stat named_target;
+  int named_parent_fd = open (reservation->parent_path,
+      O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+  gboolean matches = fstat (reservation->dirfd, &pinned_parent) == 0
+      && pinned_parent.st_dev == reservation->parent_dev
+      && pinned_parent.st_ino == reservation->parent_ino
+      && named_parent_fd >= 0
+      && fstat (named_parent_fd, &named_parent) == 0
+      && named_parent.st_dev == reservation->parent_dev
+      && named_parent.st_ino == reservation->parent_ino
+      && fstatat (reservation->dirfd, reservation->basename, &named_target,
+      AT_SYMLINK_NOFOLLOW) == 0 && S_ISREG (named_target.st_mode)
+      && named_target.st_dev == reservation->target_dev
+      && named_target.st_ino == reservation->target_ino;
+  if (named_parent_fd >= 0)
+    close (named_parent_fd);
+  return matches;
+}
+#endif
 
 void wyl_service_permission_apply_receipt_reservation_abort
     (WylServicePermissionReceiptReservation * reservation)
@@ -1499,11 +1536,13 @@ void wyl_service_permission_apply_receipt_reservation_abort
   if (reservation->fd >= 0)
     close (reservation->fd);
   if (reservation->created && reservation->dirfd >= 0
-      && reservation->basename != NULL)
+      && reservation->basename != NULL
+      && receipt_reservation_named_target_matches (reservation))
     (void) unlinkat (reservation->dirfd, reservation->basename, 0);
   if (reservation->dirfd >= 0)
     close (reservation->dirfd);
   g_free (reservation->basename);
+  g_free (reservation->parent_path);
 #endif
   g_free (reservation->path);
   g_free (reservation);
@@ -1557,6 +1596,9 @@ wyrelog_error_t
   }
   if (rc == WYRELOG_E_OK && fsync (reservation->fd) != 0)
     rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && !receipt_reservation_named_target_matches (reservation))
+    rc = WYRELOG_E_POLICY;
   if (reservation->fd >= 0) {
     if (close (reservation->fd) != 0 && rc == WYRELOG_E_OK)
       rc = WYRELOG_E_IO;
@@ -1574,6 +1616,7 @@ wyrelog_error_t
 #else
   close (reservation->dirfd);
   g_free (reservation->basename);
+  g_free (reservation->parent_path);
 #endif
   g_free (reservation->path);
   g_free (reservation);

@@ -768,6 +768,38 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpint (wyl_service_permission_apply_receipt_finalize
       (failed_reservation, &applied), ==, WYRELOG_E_IO);
   g_assert_false (g_file_test (failed_receipt_path, G_FILE_TEST_EXISTS));
+#ifndef G_OS_WIN32
+  g_autofree gchar *substituted_receipt_path =
+      g_build_filename (dir, "substituted-receipt.json", NULL);
+  g_autofree gchar *displaced_receipt_path =
+      g_build_filename (dir, "displaced-receipt.json", NULL);
+  WylServicePermissionReceiptReservation *substituted_reservation = NULL;
+  g_assert_cmpint
+      (wyl_service_permission_apply_receipt_reserve_owner_only
+      (substituted_receipt_path, &substituted_reservation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (g_rename (substituted_receipt_path,
+          displaced_receipt_path), ==, 0);
+  static const gchar receipt_substitute[] = "do not unlink or overwrite";
+  g_assert_true (g_file_set_contents (substituted_receipt_path,
+          receipt_substitute, sizeof receipt_substitute - 1, NULL));
+  g_assert_cmpint (g_chmod (substituted_receipt_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_service_permission_apply_receipt_finalize
+      (substituted_reservation, &applied), ==, WYRELOG_E_POLICY);
+  g_autofree gchar *substitute_after = NULL;
+  gsize substitute_after_len = 0;
+  g_assert_true (g_file_get_contents (substituted_receipt_path,
+          &substitute_after, &substitute_after_len, NULL));
+  g_assert_cmpmem (substitute_after, substitute_after_len, receipt_substitute,
+      sizeof receipt_substitute - 1);
+  g_autofree gchar *displaced_after = NULL;
+  gsize displaced_after_len = 0;
+  g_assert_true (g_file_get_contents (displaced_receipt_path,
+          &displaced_after, &displaced_after_len, NULL));
+  g_assert_cmpuint (displaced_after_len, >, 0);
+  g_assert_true (g_str_has_prefix (displaced_after, "{\"version\":1,"));
+  g_remove (substituted_receipt_path);
+  g_remove (displaced_receipt_path);
+#endif
 
   CountingProvider replay_provider = { 0 };
   wyl_policy_store_open_options_t replay_opts =
