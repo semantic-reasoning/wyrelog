@@ -852,15 +852,23 @@ test_namespace (void)
   close (fd);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
       (wrong_binding, &wrong_evidence), ==, WYRELOG_E_OK);
-  wyl_fact_artifact_temp_binding_free (wrong_binding);
   g_autofree gchar *wrong_path =
       g_build_filename (graph_path, "tmp-recovery-wrong", NULL);
+  /* Keep the binding's pin open while replacing the name.  Otherwise an
+   * allocator may immediately recycle the unlinked inode, leaving this as a
+   * same-identity replacement rather than the mismatch this test requires. */
+  struct stat original_wrong, replacement_wrong;
+  g_assert_cmpint (lstat (wrong_path, &original_wrong), ==, 0);
   g_assert_cmpint (unlink (wrong_path), ==, 0);
   fd = open (wrong_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
   g_assert_cmpint (fd >= 0, ==, TRUE);
   close (fd);
+  g_assert_cmpint (lstat (wrong_path, &replacement_wrong), ==, 0);
+  g_assert_true (original_wrong.st_dev != replacement_wrong.st_dev
+      || original_wrong.st_ino != replacement_wrong.st_ino);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
           wrong_evidence), ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_temp_binding_free (wrong_binding);
   wyl_fact_artifact_temp_recovery_evidence_free (wrong_evidence);
   g_assert_cmpint (unlink (wrong_path), ==, 0);
   WylFactArtifactTempBinding *substitution_binding = NULL;
