@@ -7250,25 +7250,30 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
   wyl_jwt_access_claims_t claims = { 0 };
   if (wyl_jwt_parse_access_claims_json (payload, &claims) != WYRELOG_E_OK)
     return 1982;
-  if (wyl_daemon_http_retire_due_service_auth_for_test (server, G_MAXINT64)
+  if (wyl_daemon_http_revoke_service_credential_for_test (server,
+          issued.credential.credential_id, "expiry-retire", NULL, NULL)
       != WYRELOG_E_OK)
     return 1983;
+  wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE, G_MAXINT64);
+  if (wyl_daemon_http_retire_due_service_auth_for_test (server)
+      != WYRELOG_E_OK)
+    return 1984;
   gint registry_state = WYL_SERVICE_AUTH_PENDING;
   gboolean registry_found = TRUE;
   if (wyl_daemon_http_lookup_service_registry_for_test (server,
           claims.session_id, claims.jti, &registry_state, &registry_found)
       != WYRELOG_E_OK || registry_found)
-    return 1984;
+    return 1985;
   g_clear_pointer (&resolved_session, g_free);
   if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
           &resolved_session, NULL, NULL) == WYRELOG_E_OK)
-    return 1985;
+    return 1986;
   guint retired_sessions = 0;
   guint retired_access_tokens = 0;
   wyl_daemon_http_service_publication_counts_for_test (server,
       &retired_sessions, &retired_access_tokens);
   if (retired_sessions != 0 || retired_access_tokens != 0)
-    return 1986;
+    return 1987;
   wyl_jwt_access_claims_clear (&claims);
 
   wyl_service_credential_issue_result_clear (&issued);

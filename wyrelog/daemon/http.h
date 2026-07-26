@@ -193,7 +193,7 @@ wyrelog_error_t wyl_daemon_http_lookup_service_registry_for_test
     (SoupServer * server, const gchar * session_id, const gchar * jti,
     gint * out_state, gboolean * out_found);
 wyrelog_error_t wyl_daemon_http_retire_due_service_auth_for_test
-    (SoupServer * server, gint64 now_seconds);
+    (SoupServer * server);
 gboolean wyl_daemon_http_mutate_service_session_for_test
     (SoupServer * server, const gchar * session_id, gint field,
     const gchar * text, guint64 number);
@@ -292,6 +292,8 @@ void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
 #endif
 void wyl_daemon_http_set_refresh_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now);
+void wyl_daemon_http_set_service_auth_clock_for_test (SoupServer * server,
+    gboolean enabled, gint64 now_seconds);
 gboolean wyl_daemon_http_set_refresh_times_for_test (SoupServer * server,
     const gchar * token, gint64 expires_at, gint64 consumed_at);
 void wyl_daemon_http_fail_next_refresh_publication_for_test
