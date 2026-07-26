@@ -227,6 +227,17 @@ test_registry_expiry_index_returns_bounded_due_active_entries (void)
           &due), ==, WYRELOG_E_OK);
   g_assert_cmpuint (due->len, ==, 1);
   g_ptr_array_unref (due);
+  WylServiceAuthReservation pending = first;
+  pending.session_id = (gchar *) "01890c10-2e3f-7000-8000-000000000205";
+  pending.jti = (gchar *) "01890c10-2e3f-7000-8000-000000000206";
+  pending.principal = (gchar *) "svc:expiry:pending";
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &pending), ==,
+      WYRELOG_E_OK);
+  due = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 100, 4,
+          &due), ==, WYRELOG_E_POLICY);
+  g_assert_null (due);
+  g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==, 3);
   g_assert_true (wyl_service_auth_registry_check_invariants_for_test
       (registry));
   wyl_service_auth_registry_unref (registry);
