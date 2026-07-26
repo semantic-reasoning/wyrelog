@@ -285,6 +285,51 @@ test_registry_capacity_rejects_without_partial_reservation (void)
 }
 
 static void
+test_registry_expiry_churn_stays_bounded (void)
+{
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  for (gint64 window = 1; window <= 128; window++) {
+    wyl_id_t session_id;
+    wyl_id_t jti;
+    gchar session[WYL_ID_STRING_BUF];
+    gchar jti_text[WYL_ID_STRING_BUF];
+    g_assert_cmpint (wyl_id_new (&session_id), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_new (&jti), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_format (&session_id, session, sizeof session), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_format (&jti, jti_text, sizeof jti_text), ==,
+        WYRELOG_E_OK);
+    WylServiceAuthReservation reservation = {
+      .session_id = session,.jti = jti_text,
+      .credential_id = (gchar *) CREDENTIAL_A,.generation = 1,
+      .principal = (gchar *) "svc:expiry:churn",.tenant = (gchar *) "jobs",
+      .expires_at = window,
+    };
+    gboolean changed = FALSE;
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
+            &reservation), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_service_auth_registry_activate (registry,
+            &reservation, &changed), ==, WYRELOG_E_OK);
+    GPtrArray *due = NULL;
+    g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, window, 4,
+            &due), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (due->len, ==, 1);
+    WylServiceAuthReservation *snapshot = g_ptr_array_index (due, 0);
+    gboolean removed = FALSE;
+    g_assert_cmpint (wyl_service_auth_registry_remove_exact (registry,
+            snapshot, &removed), ==, WYRELOG_E_OK);
+    g_assert_true (removed);
+    g_ptr_array_unref (due);
+    g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
+        0);
+  }
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
 test_compound_disable_zero_survivors (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1102,6 +1147,8 @@ main (int argc, char **argv)
       test_registry_expiry_index_returns_bounded_due_active_entries);
   g_test_add_func ("/auth/service-principal/registry-capacity",
       test_registry_capacity_rejects_without_partial_reservation);
+  g_test_add_func ("/auth/service-principal/registry-expiry-churn",
+      test_registry_expiry_churn_stays_bounded);
   g_test_add_func ("/auth/service-principal/write-participant-registry-rank",
       test_write_participant_registry_rank);
   g_test_add_func ("/auth/service-principal/compound-tenant-seal",
