@@ -1513,6 +1513,13 @@ wyl_daemon_http_revoke_service_credential_for_test (SoupServer *server,
   return rc;
 }
 
+WylServiceAuthRegistry *
+wyl_daemon_http_get_service_registry_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return ctx != NULL ? ctx->service_auth_registry : NULL;
+}
+
 void
 wyl_daemon_http_set_service_resolver_checkpoint_for_test (SoupServer *server,
     WylDaemonServiceResolverCheckpoint checkpoint, gpointer data)
