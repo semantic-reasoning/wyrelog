@@ -163,7 +163,7 @@ wyl_fact_artifact_namespace_lock (WylFactArtifactNamespace *n, gboolean e,
   (void) e;
   if (o)
     *o = -1;
-  return closed ();
+  return !n || !o ? WYRELOG_E_INVALID : closed ();
 }
 
 wyrelog_error_t
@@ -702,21 +702,8 @@ wyl_fact_artifact_namespace_lock (WylFactArtifactNamespace *n, gboolean ex,
 {
   if (o)
     *o = -1;
-  gint fd = -1;
-  wyrelog_error_t r = open_checked_lock (n, &fd);
-  if (r)
-    return r;
-  if (flock (fd, (ex ? LOCK_EX : LOCK_SH) | LOCK_NB)) {
-    close (fd);
-    return errno == EWOULDBLOCK ? WYRELOG_E_BUSY : WYRELOG_E_IO;
-  }
-  if (lock_stat_matches (n, fd, n->lock_device, n->lock_inode)
-      != WYRELOG_E_OK) {
-    close (fd);
-    return WYRELOG_E_POLICY;
-  }
-  *o = fd;
-  return WYRELOG_E_OK;
+  (void) ex;
+  return !n || !o ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t

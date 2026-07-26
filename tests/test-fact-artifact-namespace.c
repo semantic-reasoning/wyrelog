@@ -309,16 +309,10 @@ test_namespace (void)
           WYL_FACT_ARTIFACT_WAL, WYL_FACT_ARTIFACT_MAIN), ==, WYRELOG_E_OK);
   wyl_fact_artifact_mutation_lease_free (lease);
   lease = NULL;
+  fd = 42;
   g_assert_cmpint (wyl_fact_artifact_namespace_lock (n, TRUE, &fd), ==,
-      WYRELOG_E_OK);
-  WylFactArtifactNamespace *n2 = NULL;
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &n2), ==,
-      WYRELOG_E_OK);
-  gint fd2 = -1;
-  g_assert_cmpint (wyl_fact_artifact_namespace_lock (n2, TRUE, &fd2), ==,
-      WYRELOG_E_BUSY);
-  wyl_fact_artifact_namespace_free (n2);
-  close (fd);
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
           &lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,

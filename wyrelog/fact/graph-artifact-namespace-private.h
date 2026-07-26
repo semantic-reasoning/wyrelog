@@ -56,6 +56,8 @@ wyrelog_error_t wyl_fact_artifact_namespace_unlink
     (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_namespace_sync
     (WylFactArtifactNamespace * namespace_, WylFactArtifactName name);
+/* Retained for source compatibility only; it always fails closed.  Raw flock
+ * descriptors cannot carry the namespace lifetime/identity invariants. */
 wyrelog_error_t wyl_fact_artifact_namespace_lock
     (WylFactArtifactNamespace * namespace_, gboolean exclusive, gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_namespace_bind_main
