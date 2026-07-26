@@ -286,6 +286,8 @@ typedef struct _WylDaemonHttpContext
   GHashTable *mfa_enroll_challenges;
   GMainContext *dispatch_context;
   GSource *service_auth_retirement_source;
+  GCond service_auth_maintenance_changed;
+  guint service_auth_maintenance_inflight;
 #ifdef WYL_HAS_AUDIT
   WylServiceExchangeLimiter *service_exchange_limiter;
 #endif
@@ -681,6 +683,8 @@ service_auth_retirement_tick (gpointer data)
   WylDaemonHttpContext *ctx = data;
   g_mutex_lock (&ctx->lock);
   gboolean shutting_down = ctx->shutting_down;
+  if (!shutting_down)
+    ctx->service_auth_maintenance_inflight++;
   g_mutex_unlock (&ctx->lock);
   if (shutting_down)
     return G_SOURCE_REMOVE;
@@ -691,6 +695,10 @@ service_auth_retirement_tick (gpointer data)
 #ifdef WYL_HAS_AUDIT
   (void) service_auth_retire_due (ctx, service_auth_now_seconds (ctx));
 #endif
+  g_mutex_lock (&ctx->lock);
+  ctx->service_auth_maintenance_inflight--;
+  g_cond_broadcast (&ctx->service_auth_maintenance_changed);
+  g_mutex_unlock (&ctx->lock);
   return G_SOURCE_CONTINUE;
 }
 
@@ -707,6 +715,7 @@ wyl_daemon_http_context_unref (gpointer data)
     g_source_destroy (ctx->service_auth_retirement_source);
     g_source_unref (ctx->service_auth_retirement_source);
   }
+  g_cond_clear (&ctx->service_auth_maintenance_changed);
   g_free (ctx->access_token_key_id);
 #ifdef WYL_HAS_AUDIT
   sodium_memzero (ctx->service_token_limiter_key,
@@ -746,16 +755,24 @@ wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
   if (ctx == NULL)
     return;
 
+  GSource *retirement_source = NULL;
   g_mutex_lock (&ctx->lock);
   if (shutting_down && !ctx->shutting_down) {
     ctx->shutting_down = TRUE;
     ctx->auth_epoch++;
   }
-  g_mutex_unlock (&ctx->lock);
-  if (shutting_down && ctx->service_auth_retirement_source != NULL) {
-    g_source_destroy (ctx->service_auth_retirement_source);
-    g_source_unref (ctx->service_auth_retirement_source);
+  if (shutting_down) {
+    retirement_source = ctx->service_auth_retirement_source;
     ctx->service_auth_retirement_source = NULL;
+  }
+  g_mutex_unlock (&ctx->lock);
+  if (retirement_source != NULL) {
+    g_source_destroy (retirement_source);
+    g_source_unref (retirement_source);
+    g_mutex_lock (&ctx->lock);
+    while (ctx->service_auth_maintenance_inflight != 0)
+      g_cond_wait (&ctx->service_auth_maintenance_changed, &ctx->lock);
+    g_mutex_unlock (&ctx->lock);
   }
 #ifdef WYL_TEST_DAEMON_HTTP
   if (shutting_down) {
@@ -987,6 +1004,7 @@ wyl_daemon_http_context_new (const WylDaemonOptions *opts, WylHandle *handle,
   ctx->revoked_session_tokens = g_hash_table_new_full (g_str_hash, g_str_equal,
       g_free, NULL);
   g_mutex_init (&ctx->lock);
+  g_cond_init (&ctx->service_auth_maintenance_changed);
 #ifdef WYL_TEST_DAEMON_HTTP
   g_mutex_init (&ctx->refresh_latch.mutex);
   g_cond_init (&ctx->refresh_latch.changed);
@@ -1643,11 +1661,20 @@ wyl_daemon_http_service_registry_transition_for_test (SoupServer *server,
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   if (ctx == NULL || out_changed == NULL)
     return WYRELOG_E_INVALID;
+  gint64 expires_at = 0;
+  g_mutex_lock (&ctx->lock);
+  WylSession *session = g_hash_table_lookup (ctx->sessions_by_token,
+      session_id);
+  if (session != NULL)
+    expires_at = wyl_session_get_service_expires_at_seconds_private (session);
+  g_mutex_unlock (&ctx->lock);
+  if (expires_at <= 0)
+    return WYRELOG_E_INVALID;
   WylServiceAuthReservation reservation = {
     .session_id = (gchar *) session_id,.jti = (gchar *) jti,
     .credential_id = (gchar *) credential_id,.generation = generation,
     .principal = (gchar *) principal,.tenant = (gchar *) tenant,
-    .expires_at = G_MAXINT64,
+    .expires_at = expires_at,
   };
   switch (operation) {
     case WYL_DAEMON_SERVICE_REGISTRY_RESERVE:
