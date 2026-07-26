@@ -79,6 +79,75 @@ RECEIPT_KEY_ALLOWLIST = frozenset({
 HANDOFF_MODULE = "service-credential-handoff-private.c"
 
 
+def production_view(text: str) -> str | None:
+    """Remove only positive WYL_TEST_DAEMON_HTTP arms, preserving line count."""
+    output: list[str] = []
+    stack: list[dict[str, object]] = []
+    keep = True
+    positive = re.compile(
+        r"^\s*#\s*(?:ifdef\s+WYL_TEST_DAEMON_HTTP|"
+        r"if\s+defined\s*\(\s*WYL_TEST_DAEMON_HTTP\s*\))\s*$")
+    negative = re.compile(
+        r"^\s*#\s*(?:ifndef\s+WYL_TEST_DAEMON_HTTP|"
+        r"if\s+!\s*defined\s*\(\s*WYL_TEST_DAEMON_HTTP\s*\))\s*$")
+    opening = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef)\b")
+    alternate = re.compile(r"^\s*#\s*(elif|else)\b")
+    closing = re.compile(r"^\s*#\s*endif\b")
+
+    for line in text.splitlines():
+        parent_keep = keep
+        if opening.match(line):
+            test_branch: bool | None = None
+            if positive.match(line):
+                test_branch = False
+            elif negative.match(line):
+                test_branch = True
+            elif "WYL_TEST_DAEMON_HTTP" in line:
+                return None
+            stack.append({
+                "parent_keep": parent_keep,
+                "test_branch": test_branch,
+                "seen_else": False,
+            })
+            keep = parent_keep and (
+                test_branch if test_branch is not None else True)
+            output.append(line if test_branch is None and parent_keep else "")
+            continue
+        match = alternate.match(line)
+        if match:
+            if not stack:
+                return None
+            frame = stack[-1]
+            test_branch = frame["test_branch"]
+            if match.group(1) == "elif" and (
+                    test_branch is not None
+                    or "WYL_TEST_DAEMON_HTTP" in line):
+                return None
+            if frame["seen_else"]:
+                return None
+            if match.group(1) == "else":
+                frame["seen_else"] = True
+                if test_branch is not None:
+                    keep = bool(frame["parent_keep"]) and not bool(test_branch)
+                    output.append("")
+                    continue
+            keep = bool(frame["parent_keep"])
+            output.append(line if keep else "")
+            continue
+        if closing.match(line):
+            if not stack:
+                return None
+            frame = stack.pop()
+            keep = bool(frame["parent_keep"])
+            output.append(
+                line if frame["test_branch"] is None and keep else "")
+            continue
+        output.append(line if keep else "")
+    if stack:
+        return None
+    return "\n".join(output)
+
+
 def a1_violations(text: str) -> list[str]:
     return sorted({match.group(0) for match in A1_ISSUER.finditer(text)})
 
@@ -107,12 +176,19 @@ def check_root(root: Path) -> int:
         return 1
     for source in sources:
         text = source.read_text(encoding="utf-8")
-        offenders = a1_violations(text)
+        if not a1_violations(text) and not a2_violation(text):
+            continue
+        production = production_view(text)
+        if production is None:
+            print(f"unbalanced or unsupported test conditional in {source}",
+                  file=sys.stderr)
+            return 1
+        offenders = a1_violations(production)
         if offenders:
             print(f"secret-returning issuer reached from {source}:",
                   *offenders, sep="\n  ", file=sys.stderr)
             return 1
-        if a2_violation(text):
+        if a2_violation(production):
             print(f"inline secret response key in {source}: "
                   f"{A2_RESPONSE_KEY}", file=sys.stderr)
             return 1
@@ -151,6 +227,40 @@ def self_test() -> int:
             "wyl_service_credential_rotate_handoff_checked_with_runtime (h);"):
         return 1
     if a1_violations("wyl_daemon_service_credential_handoff (&ctx, &in);"):
+        return 1
+    test_only_issuer = (
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "wyl_service_credential_rotate_with_runtime (h, &r);\n"
+        "#endif")
+    test_only_production = production_view(test_only_issuer)
+    if test_only_production is None or a1_violations(test_only_production):
+        return 1
+    negative_test_arm = (
+        "#ifndef WYL_TEST_DAEMON_HTTP\n"
+        "wyl_service_credential_rotate_with_runtime (h, &r);\n"
+        "#endif")
+    negative_production = production_view(negative_test_arm)
+    if negative_production is None or not a1_violations(negative_production):
+        return 1
+    production_else = (
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "wyl_daemon_service_credential_handoff (&ctx, &in);\n"
+        "#else\n"
+        "wyl_service_credential_rotate_with_runtime (h, &r);\n"
+        "#endif")
+    else_production = production_view(production_else)
+    if else_production is None or not a1_violations(else_production):
+        return 1
+    nested_test_only = (
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "#if defined(WYL_HAS_AUDIT)\n"
+        "wyl_service_credential_rotate_with_runtime (h, &r);\n"
+        "#endif\n"
+        "#endif")
+    nested_production = production_view(nested_test_only)
+    if nested_production is None or a1_violations(nested_production):
+        return 1
+    if production_view("#ifdef WYL_TEST_DAEMON_HTTP\n") is not None:
         return 1
 
     # A2: the escaped response spelling fails; the bare input field passes.
