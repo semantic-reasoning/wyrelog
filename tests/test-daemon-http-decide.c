@@ -9453,6 +9453,22 @@ main (void)
     goto cleanup;
   }
   wyl_daemon_access_token_snapshot_clear (&service_token_snapshot);
+#if defined(WYL_HAS_FACT_STORE) && !defined(WYL_HAS_AUDIT)
+  /* The fact-store resolver matrix deliberately constructs a PENDING
+   * registry tuple to prove that it cannot authenticate.  Production
+   * maintenance treats every observed PENDING tuple as an escaped
+   * publication and permanently latches the authority.  Stop its
+   * asynchronous source before that synthetic fixture exists; shutdown
+   * waits for an in-flight tick, so this is a real exclusion boundary rather
+   * than a timing assumption.  The audit variant exercises scheduler
+   * lifecycle with its dedicated exchange-server contract. */
+  wyl_daemon_http_shutdown_service_auth_maintenance_for_test (http.server);
+  if (wyl_daemon_http_service_auth_maintenance_active_for_test (http.server,
+          NULL)) {
+    result = 2156;
+    goto cleanup;
+  }
+#endif
   gint service_resolver_rc = check_service_bearer_resolver_contract
       (http.server);
   if (service_resolver_rc != 0) {
