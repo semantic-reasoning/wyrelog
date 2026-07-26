@@ -138,6 +138,9 @@ struct _WylServiceAuthWriteLease
   gboolean transaction_claimed;
   gboolean cleanup_only;
   wyl_policy_store_t *pinned_store;
+  gboolean test_fail_terminal_prevalidation;
+  void (*test_terminal_checkpoint) (gpointer data);
+  gpointer test_terminal_checkpoint_data;
 };
 
 static gboolean
@@ -762,6 +765,72 @@ wyl_service_auth_write_lease_release (WylServiceAuthWriteLease *lease)
     wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
     lease->pinned_store = NULL;
   }
+  return rc;
+}
+
+void wyl_service_auth_write_lease_test_fail_terminal_prevalidation
+    (WylServiceAuthWriteLease * lease)
+{
+  if (lease != NULL)
+    lease->test_fail_terminal_prevalidation = TRUE;
+}
+
+void wyl_service_auth_write_lease_test_set_terminal_checkpoint
+    (WylServiceAuthWriteLease * lease, void (*checkpoint) (gpointer data),
+    gpointer data)
+{
+  if (lease != NULL) {
+    lease->test_terminal_checkpoint = checkpoint;
+    lease->test_terminal_checkpoint_data = data;
+  }
+}
+
+wyrelog_error_t
+wyl_service_auth_write_lease_release_terminal (WylServiceAuthWriteLease
+    **inout_lease)
+{
+  if (inout_lease == NULL || *inout_lease == NULL)
+    return WYRELOG_E_INVALID;
+  WylServiceAuthWriteLease *lease = *inout_lease;
+  if (lease->test_terminal_checkpoint != NULL)
+    lease->test_terminal_checkpoint (lease->test_terminal_checkpoint_data);
+  WylServiceAuthAuthority *authority = lease->authority;
+  gboolean consumed = FALSE;
+  g_mutex_lock (&authority->mutex);
+  wyrelog_error_t rc = lease->test_fail_terminal_prevalidation
+      ? WYRELOG_E_INTERNAL : validate_write_locked (lease, lease->handle);
+  gboolean cleanup_identity = authority->handle == lease->handle
+      && lease->owner == g_thread_self ()
+      && lease->state == WYL_SERVICE_AUTH_LEASE_ACTIVE
+      && !lease->transaction_claimed && authority->writer_active
+      && authority->writer_owner == lease->owner
+      && authority->writer_serial != 0;
+  if (cleanup_identity) {
+    lease->state = WYL_SERVICE_AUTH_LEASE_RELEASED;
+    authority->writer_active = FALSE;
+    authority->writer_owner = NULL;
+    authority->writer_serial = 0;
+    if (authority->waiting_writers > 0)
+      authority->writer_priority_reserved = TRUE;
+    if (rc != WYRELOG_E_OK)
+      wyl_handle_service_auth_set_unavailable_reason_locked (lease->handle,
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT);
+    g_cond_broadcast (&authority->changed);
+    consumed = TRUE;
+  }
+  g_mutex_unlock (&authority->mutex);
+  if (!consumed)
+    return rc != WYRELOG_E_OK ? rc : WYRELOG_E_INVALID;
+  wyrelog_error_t rank_rc = wyl_service_auth_rank_leave_expected
+      (lease->handle, WYL_SERVICE_AUTH_RANK_COORDINATION);
+  if (rc == WYRELOG_E_OK && rank_rc != WYRELOG_E_OK)
+    rc = rank_rc;
+  wyl_handle_policy_store_unpin (lease->handle, lease->pinned_store);
+  lease->pinned_store = NULL;
+  g_clear_object (&lease->handle);
+  wyl_service_auth_authority_unref (lease->authority);
+  g_free (lease);
+  *inout_lease = NULL;
   return rc;
 }
 
