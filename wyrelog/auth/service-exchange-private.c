@@ -727,77 +727,6 @@ exchange_build_prepared (const WylServiceExchangeAuthority *authority,
   return WYRELOG_E_OK;
 }
 
-static wyrelog_error_t
-exchange_prepare_and_publish (const WylServiceExchangeAuthority *authority,
-    const gchar *key_id, const gchar *issuer, const gchar *audience,
-    gint64 issued_at_seconds, const guint8 *token_secret,
-    gsize token_secret_len, const WylServiceExchangeRegistryHooks *hooks,
-    WylServiceExchangePrepared *out_prepared)
-{
-  if (out_prepared != NULL)
-    wyl_service_exchange_prepared_clear (out_prepared);
-  if (authority == NULL || hooks == NULL || hooks->reserve == NULL
-      || hooks->activate == NULL || hooks->remove_exact == NULL)
-    return WYRELOG_E_INVALID;
-
-  wyl_id_t session_id = WYL_ID_NIL;
-  if (wyl_id_new (&session_id) != WYRELOG_E_OK)
-    return WYRELOG_E_CRYPTO;
-  gchar session_text[WYL_ID_STRING_BUF];
-  if (wyl_id_format (&session_id, session_text, sizeof session_text)
-      != WYRELOG_E_OK)
-    return WYRELOG_E_INTERNAL;
-
-  wyl_id_t jti = WYL_ID_NIL;
-  if (wyl_id_new (&jti) != WYRELOG_E_OK)
-    return WYRELOG_E_CRYPTO;
-  gchar jti_text[WYL_ID_STRING_BUF];
-  if (wyl_id_format (&jti, jti_text, sizeof jti_text) != WYRELOG_E_OK)
-    return WYRELOG_E_INTERNAL;
-
-  wyrelog_error_t rc = hooks->reserve (hooks->user_data, session_text,
-      jti_text, authority->credential.credential_id,
-      authority->credential.generation, authority->credential.subject_id,
-      authority->credential.tenant_id);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-
-  WylServiceExchangePrepared prepared = { 0 };
-  rc = exchange_build_prepared (authority, session_text, jti_text, key_id,
-      issuer, audience, issued_at_seconds, token_secret, token_secret_len,
-      &prepared);
-  if (rc != WYRELOG_E_OK) {
-    gboolean removed = FALSE;
-    (void) hooks->remove_exact (hooks->user_data, session_text, jti_text,
-        authority->credential.credential_id,
-        authority->credential.generation, authority->credential.subject_id,
-        authority->credential.tenant_id, &removed);
-    return rc;
-  }
-
-  gboolean activated = FALSE;
-  rc = hooks->activate (hooks->user_data, session_text, jti_text,
-      authority->credential.credential_id, authority->credential.generation,
-      authority->credential.subject_id, authority->credential.tenant_id,
-      &activated);
-  if (rc == WYRELOG_E_OK && !activated)
-    rc = WYRELOG_E_POLICY;
-  if (rc != WYRELOG_E_OK) {
-    gboolean removed = FALSE;
-    wyrelog_error_t cleanup_rc = hooks->remove_exact (hooks->user_data,
-        session_text, jti_text, authority->credential.credential_id,
-        authority->credential.generation, authority->credential.subject_id,
-        authority->credential.tenant_id, &removed);
-    if (cleanup_rc != WYRELOG_E_OK)
-      rc = cleanup_rc;
-    wyl_service_exchange_prepared_clear (&prepared);
-    return rc;
-  }
-
-  *out_prepared = prepared;
-  return WYRELOG_E_OK;
-}
-
 wyrelog_error_t
 wyl_service_exchange_authority_prepare_token (WylServiceExchangeAuthority
     *authority, const gchar *key_id, const gchar *issuer, const gchar *audience,
@@ -834,25 +763,4 @@ wyl_service_exchange_authority_prepare_token (WylServiceExchangeAuthority
   return exchange_build_prepared (authority, session_text, jti_text, key_id,
       issuer, audience, issued_at_seconds, token_secret, token_secret_len,
       out_prepared);
-}
-
-wyrelog_error_t
-wyl_service_exchange_authority_complete (WylServiceExchangeAuthority *authority,
-    const gchar *key_id, const gchar *issuer, const gchar *audience,
-    gint64 issued_at_seconds, const guint8 *token_secret,
-    gsize token_secret_len, const WylServiceExchangeRegistryHooks *hooks,
-    WylServiceExchangePrepared *out_prepared)
-{
-  if (authority == NULL || !authority->verified || authority->handle == NULL
-      || key_id == NULL || issuer == NULL || audience == NULL
-      || issued_at_seconds < 0 || out_prepared == NULL
-      || !credential_secret_is_sane (token_secret, token_secret_len))
-    return WYRELOG_E_INVALID;
-  if (authority->credential.credential_id == NULL
-      || authority->credential.subject_id == NULL
-      || authority->credential.tenant_id == NULL
-      || authority->credential.generation == 0)
-    return WYRELOG_E_INVALID;
-  return exchange_prepare_and_publish (authority, key_id, issuer, audience,
-      issued_at_seconds, token_secret, token_secret_len, hooks, out_prepared);
 }
