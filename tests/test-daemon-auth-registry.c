@@ -10,6 +10,13 @@
 #define JTI_B "01890c10-2e3f-7000-8000-000000000104"
 #define CREDENTIAL_A "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
 #define CREDENTIAL_B "wlc_000000000000000000000000000"
+/*
+ * An exact registry transition authenticates the complete reservation,
+ * including its expiry.  Keep the generic fixture stable (and safely in the
+ * future) so separately initialized worker DTOs describe the same lease.
+ * Expiry-specific tests overwrite this deliberately.
+ */
+#define FIXTURE_EXPIRES_AT G_GINT64_CONSTANT (4102444800)
 
 static WylServiceAuthReservation
 fixture (const gchar *session_id, const gchar *jti)
@@ -21,7 +28,7 @@ fixture (const gchar *session_id, const gchar *jti)
     .generation = 1,
     .principal = (gchar *) "svc:tenant-a:worker",
     .tenant = (gchar *) "tenant-a",
-    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
+    .expires_at = FIXTURE_EXPIRES_AT,
   };
   return value;
 }
