@@ -2075,7 +2075,7 @@ wyrelog_error_t
     return WYRELOG_E_INVALID;
   static const gchar *sql =
       "SELECT tag,a,b,c FROM ("
-      " SELECT 'principal' tag,subject_id a,'' b,'' c"
+      " SELECT 'principal' tag,subject_id a,state b,CAST(generation AS TEXT) c"
       "   FROM service_principals"
       " UNION ALL SELECT 'role',role_id,role_name,'' FROM roles"
       " UNION ALL SELECT 'permission',perm_id,perm_name,class FROM permissions"

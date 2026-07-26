@@ -692,6 +692,17 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpint (wyl_service_permission_maintenance_dry_run (apply_store,
           &manifest), ==, WYRELOG_E_POLICY);
   wyl_policy_store_rollback_mutation (apply_store);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (apply_store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (apply_store),
+          "UPDATE service_principals"
+          " SET state='disabled',generation=generation+1,"
+          " disabled_by='digest-test',disabled_at_us=updated_at_us"
+          " WHERE subject_id='svc:offline-apply';",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+  g_assert_cmpint (wyl_service_permission_maintenance_dry_run (apply_store,
+          &manifest), ==, WYRELOG_E_POLICY);
+  wyl_policy_store_rollback_mutation (apply_store);
   gboolean audit_inserted = FALSE;
   g_assert_cmpint (wyl_policy_store_append_audit_event_full (apply_store,
           "01890c10-2e3f-7000-8000-000000000618", g_get_real_time (),
