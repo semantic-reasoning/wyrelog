@@ -6784,8 +6784,11 @@ check_audit_event_present (WylClient *client, const gchar *filter,
 
 #ifdef WYL_HAS_FACT_STORE
 static wyrelog_error_t
-prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id)
+prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id,
+    gboolean *out_principal_create_failed)
 {
+  if (out_principal_create_failed != NULL)
+    *out_principal_create_failed = FALSE;
   wyl_service_principal_t principal = { 0 };
   g_autofree gchar *request_id = g_strdup_printf ("principal-create:%s",
       subject_id);
@@ -6793,8 +6796,11 @@ prepare_service_credential_subject (WylHandle *handle, const gchar *subject_id)
     return WYRELOG_E_INTERNAL;
   wyrelog_error_t rc = wyl_service_principal_create (handle, subject_id,
       subject_id, "admin", request_id, &principal);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    if (out_principal_create_failed != NULL)
+      *out_principal_create_failed = TRUE;
     return rc;
+  }
   wyl_service_principal_clear (&principal);
   gboolean created = FALSE;
   rc = wyl_policy_store_create_tenant (wyl_handle_get_policy_store (handle),
@@ -6865,9 +6871,16 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
     return 1923;
 
-  if (prepare_service_credential_subject (handle, "svc:reconcile:issue")
-      != WYRELOG_E_OK)
-    return 1924;
+  gboolean issue_principal_create_failed = FALSE;
+  if (prepare_service_credential_subject (handle, "svc:reconcile:issue",
+          &issue_principal_create_failed) != WYRELOG_E_OK) {
+    /*
+     * Keep the original 1924 diagnosis stable for the principal write.  A
+     * distinct code proves that the principal was committed and the later
+     * tenant setup failed, rather than conflating the two mutations.
+     */
+    return issue_principal_create_failed ? 1924 : 19813;
+  }
   wyl_service_credential_issue_result_t issue_result = { 0 };
   if (wyl_service_credential_issue (handle, "svc:reconcile:issue",
           "tenant-a", "http-allow-user", issue_request_id,
@@ -6916,8 +6929,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
   if (rc != 0 || status != 400)
     return 1929;
 
-  if (prepare_service_credential_subject (handle, "svc:reconcile:rotate")
-      != WYRELOG_E_OK)
+  if (prepare_service_credential_subject (handle, "svc:reconcile:rotate",
+          NULL) != WYRELOG_E_OK)
     return 1930;
   gchar rotate_seed_request_id[WYL_REQUEST_ID_STRING_BUF];
   if (wyl_request_id_new (rotate_seed_request_id, sizeof rotate_seed_request_id)
@@ -6980,8 +6993,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
       "\"target\":{\"subject\":\"svc:reconcile:pending\",\"tenant\":\"tenant-a\"}}",
       pending_request_id);
-  if (prepare_service_credential_subject (handle, "svc:reconcile:pending")
-      != WYRELOG_E_OK)
+  if (prepare_service_credential_subject (handle, "svc:reconcile:pending",
+          NULL) != WYRELOG_E_OK)
     return 1939;
 
   g_clear_pointer (&body, g_free);
@@ -7009,8 +7022,8 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       ("{\"version\":1,\"request_id\":\"%s\",\"operation\":\"issue\","
       "\"target\":{\"subject\":\"svc:reconcile:conflict\",\"tenant\":\"tenant-a\"}}",
       pending_request_id);
-  if (prepare_service_credential_subject (handle, "svc:reconcile:conflict")
-      != WYRELOG_E_OK)
+  if (prepare_service_credential_subject (handle, "svc:reconcile:conflict",
+          NULL) != WYRELOG_E_OK)
     return 1942;
   g_clear_pointer (&body, g_free);
   rc = send_raw_reconcile (session, "POST", base_url, query, conflict_body,
