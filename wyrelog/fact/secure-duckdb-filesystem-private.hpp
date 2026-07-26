@@ -102,6 +102,7 @@ protected:
 
 private:
   int AcquireLockDescriptor (duckdb::FileLockType);
+  void RequireBinding (const char *);
 
   WylFactArtifactNamespace *namespace_;
   bool main_bound_;
