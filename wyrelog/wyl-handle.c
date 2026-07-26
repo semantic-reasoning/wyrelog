@@ -838,6 +838,36 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   return WYRELOG_E_OK;
 }
 
+wyrelog_error_t
+wyl_handle_adopt_offline_maintenance_store (wyl_policy_store_t *store,
+    WylHandle **out_handle)
+{
+  if (store == NULL || out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  *out_handle = NULL;
+  WylHandle *self = g_object_new (WYL_TYPE_HANDLE, NULL);
+  self->policy_store = store;
+  self->policy_store_generation = 1;
+
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (self->service_auth_authority, self, NULL, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_validate_service_permission_closure (self, lease);
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
+  }
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+  *out_handle = self;
+  return WYRELOG_E_OK;
+}
+
 void
 wyl_shutdown (WylHandle *handle)
 {

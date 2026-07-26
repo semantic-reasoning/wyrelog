@@ -14,7 +14,12 @@
 #include "service-permission-maintenance-private.h"
 
 #include <chronoid/ksuid.h>
+#include <sodium.h>
 #include <string.h>
+
+#include "wyrelog/auth/service-auth-coordination-private.h"
+#include "wyrelog/wyl-handle-private.h"
+#include "wyrelog/wyl-id-private.h"
 
 #ifdef G_OS_WIN32
 #include <sddl.h>
@@ -583,5 +588,265 @@ wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
     rc = wyl_policy_store_dry_run_service_permission_closure (store,
         manifest->operations);
   wyl_policy_permission_closure_analysis_clear (&analysis);
+  return rc;
+}
+
+#define REMEDIATION_RECEIPT_ACTION \
+  "service.permission_closure.remediation_receipt"
+
+void wyl_service_permission_apply_receipt_clear
+    (WylServicePermissionApplyReceipt * receipt)
+{
+  if (receipt == NULL)
+    return;
+  g_free (receipt->request_id);
+  g_free (receipt->actor_identity);
+  g_free (receipt->audit_id);
+  memset (receipt, 0, sizeof *receipt);
+}
+
+static wyrelog_error_t
+manifest_fingerprint (const WylServicePermissionManifest *manifest,
+    gchar out_hex[65])
+{
+  g_autofree gchar *document = NULL;
+  gsize len = 0;
+  wyrelog_error_t rc =
+      wyl_service_permission_manifest_encode (manifest, &document, &len);
+  guint8 digest[32];
+  if (rc == WYRELOG_E_OK
+      && crypto_generichash (digest, sizeof digest,
+          (const guint8 *) document, len, NULL, 0) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  if (rc == WYRELOG_E_OK) {
+    for (guint i = 0; i < sizeof digest; i++)
+      g_snprintf (out_hex + i * 2, 3, "%02x", digest[i]);
+  }
+  sodium_memzero (digest, sizeof digest);
+  return rc;
+}
+
+static wyrelog_error_t
+maintenance_actor_identity (gchar **out_actor)
+{
+  *out_actor = NULL;
+#ifdef G_OS_WIN32
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    return WYRELOG_E_IO;
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0) {
+    CloseHandle (token);
+    return WYRELOG_E_IO;
+  }
+  user = g_malloc (needed);
+  if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
+          &needed)) {
+    g_free (user);
+    CloseHandle (token);
+    return WYRELOG_E_IO;
+  }
+  DWORD sid_len = GetLengthSid (user->User.Sid);
+  guint8 digest[32];
+  gboolean ok = sid_len > 0 && crypto_generichash (digest, sizeof digest,
+      user->User.Sid, sid_len, NULL, 0) == 0;
+  g_free (user);
+  CloseHandle (token);
+  if (!ok)
+    return WYRELOG_E_CRYPTO;
+  gchar hex[65];
+  for (guint i = 0; i < sizeof digest; i++)
+    g_snprintf (hex + i * 2, 3, "%02x", digest[i]);
+  sodium_memzero (digest, sizeof digest);
+  *out_actor = g_strdup_printf ("windows-sid-sha256:%s", hex);
+#else
+  *out_actor = g_strdup_printf ("posix-uid:%" G_GUINT64_FORMAT,
+      (guint64) geteuid ());
+#endif
+  return *out_actor == NULL ? WYRELOG_E_NOMEM : WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+receipt_lookup (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest, const gchar *fingerprint,
+    WylServicePermissionApplyReceipt *out_receipt)
+{
+  sqlite3_stmt *stmt = NULL;
+  int sql_rc = sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+      "SELECT id,created_at_us,subject_id,deny_reason,deny_origin"
+      " FROM audit_events WHERE action=? AND request_id=? ORDER BY id;",
+      -1, &stmt, NULL);
+  if (sql_rc != SQLITE_OK)
+    return WYRELOG_E_IO;
+  sqlite3_bind_text (stmt, 1, REMEDIATION_RECEIPT_ACTION, -1, SQLITE_STATIC);
+  sqlite3_bind_text (stmt, 2, manifest->request_id, -1, SQLITE_STATIC);
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_NOT_FOUND;
+  }
+  if (step_rc != SQLITE_ROW) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  const gchar *audit_id = (const gchar *) sqlite3_column_text (stmt, 0);
+  gint64 applied_at = sqlite3_column_int64 (stmt, 1);
+  const gchar *actor = (const gchar *) sqlite3_column_text (stmt, 2);
+  const gchar *stored_fingerprint =
+      (const gchar *) sqlite3_column_text (stmt, 3);
+  const gchar *count_text = (const gchar *) sqlite3_column_text (stmt, 4);
+  g_autofree gchar *expected_count =
+      g_strdup_printf ("operations:%u", manifest->operations->len);
+  gboolean valid = audit_id != NULL && actor != NULL
+      && applied_at > 0 && stored_fingerprint != NULL && count_text != NULL
+      && g_str_equal (stored_fingerprint, fingerprint)
+      && g_str_equal (count_text, expected_count);
+  g_autofree gchar *audit_copy = g_strdup (audit_id);
+  g_autofree gchar *actor_copy = g_strdup (actor);
+  int final_step = sqlite3_step (stmt);
+  sqlite3_finalize (stmt);
+  if (!valid || final_step != SQLITE_DONE)
+    return WYRELOG_E_POLICY;
+  out_receipt->state = WYL_SERVICE_PERMISSION_APPLY_REPLAYED;
+  out_receipt->request_id = g_strdup (manifest->request_id);
+  out_receipt->actor_identity = g_steal_pointer (&actor_copy);
+  out_receipt->audit_id = g_steal_pointer (&audit_copy);
+  out_receipt->operation_count = manifest->operations->len;
+  out_receipt->applied_at_us = applied_at;
+  return out_receipt->request_id != NULL && out_receipt->actor_identity != NULL
+      && out_receipt->audit_id != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
+}
+
+static wyrelog_error_t
+new_audit_id (gchar out[WYL_ID_STRING_BUF])
+{
+  wyl_id_t id = WYL_ID_NIL;
+  wyrelog_error_t rc = wyl_id_new (&id);
+  return rc == WYRELOG_E_OK ? wyl_id_format (&id, out, WYL_ID_STRING_BUF) : rc;
+}
+
+wyrelog_error_t
+wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest,
+    WylServicePermissionApplyReceipt *out_receipt)
+{
+  if (store == NULL || manifest == NULL || out_receipt == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_receipt, 0, sizeof *out_receipt);
+  WylHandle *handle = NULL;
+  g_autofree gchar *actor = NULL;
+  g_autofree gchar *count_text = NULL;
+  wyrelog_error_t rc =
+      wyl_handle_adopt_offline_maintenance_store (store, &handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;                  /* adopt consumes store on every outcome */
+  store = wyl_handle_get_policy_store (handle);
+
+  gchar fingerprint[65];
+  rc = manifest_fingerprint (manifest, fingerprint);
+  if (rc == WYRELOG_E_OK)
+    rc = receipt_lookup (store, manifest, fingerprint, out_receipt);
+  if (rc == WYRELOG_E_OK) {
+    g_object_unref (handle);
+    return WYRELOG_E_OK;
+  }
+  if (rc != WYRELOG_E_NOT_FOUND)
+    goto out;
+
+  WylPolicyPermissionClosureAnalysis analysis = {
+    0
+  };
+  rc = wyl_policy_store_analyze_service_permission_closure (store, &analysis);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_permission_manifest_matches_analysis (manifest, &analysis);
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+
+  rc = maintenance_actor_identity (&actor);
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *transaction = NULL;
+  WylServiceAuthorityCommitEvidence *evidence = NULL;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_authority_acquire_permission_remediation_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_begin (store, handle,
+        lease, &transaction);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_prepare_commit_evidence
+        (transaction, store, &evidence);
+  WylServiceAuthorityWriteIntentOutcome intent = {
+    0
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_acquire_write_intent
+        (transaction, store, NULL, &intent);
+
+  gint64 applied_at = g_get_real_time ();
+  for (guint i = 0; rc == WYRELOG_E_OK && i < manifest->operations->len; i++) {
+    const WylPolicyPermissionClosureRemoval *operation =
+        g_ptr_array_index (manifest->operations, i);
+    gchar audit_id[WYL_ID_STRING_BUF];
+    rc = new_audit_id (audit_id);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_remediate_permission_closure
+          (transaction, store,
+          operation->action ==
+          WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
+          WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT :
+          WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP,
+          operation->subject_id, operation->right_id, operation->scope,
+          audit_id, applied_at, actor, manifest->request_id);
+  }
+
+  gchar receipt_audit_id[WYL_ID_STRING_BUF];
+  if (rc == WYRELOG_E_OK)
+    rc = new_audit_id (receipt_audit_id);
+  count_text = g_strdup_printf ("operations:%u", manifest->operations->len);
+  gboolean inserted = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_audit_event_full (store, receipt_audit_id,
+        applied_at, actor, REMEDIATION_RECEIPT_ACTION, manifest->request_id,
+        fingerprint, count_text, manifest->request_id, WYL_DECISION_ALLOW,
+        &inserted);
+  if (rc == WYRELOG_E_OK && !inserted)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_commit (transaction);
+  else if (transaction != NULL)
+    (void) wyl_policy_store_service_authority_transaction_abort (transaction);
+
+  if (evidence != NULL)
+    wyl_policy_store_service_authority_commit_evidence_unref (evidence);
+  if (transaction != NULL)
+    wyl_policy_store_service_authority_transaction_free (transaction);
+  if (lease != NULL) {
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_maintenance_publish (store);
+  if (rc == WYRELOG_E_OK) {
+    out_receipt->state = WYL_SERVICE_PERMISSION_APPLY_APPLIED;
+    out_receipt->request_id = g_strdup (manifest->request_id);
+    out_receipt->actor_identity = g_strdup (actor);
+    out_receipt->audit_id = g_strdup (receipt_audit_id);
+    out_receipt->operation_count = manifest->operations->len;
+    out_receipt->applied_at_us = applied_at;
+    if (out_receipt->request_id == NULL
+        || out_receipt->actor_identity == NULL || out_receipt->audit_id == NULL)
+      rc = WYRELOG_E_NOMEM;
+  }
+
+out:
+  sodium_memzero (fingerprint, sizeof fingerprint);
+  if (rc != WYRELOG_E_OK)
+    wyl_service_permission_apply_receipt_clear (out_receipt);
+  g_object_unref (handle);
   return rc;
 }

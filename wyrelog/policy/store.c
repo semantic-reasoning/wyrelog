@@ -161,6 +161,7 @@ struct wyl_policy_store_t
   gboolean key_materialized;
   gboolean suppress_close_persist;
   gboolean maintenance_mode;
+  gboolean maintenance_publish_fail_once;
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
@@ -8083,7 +8084,18 @@ wyl_policy_store_maintenance_publish (wyl_policy_store_t *store)
     return WYRELOG_E_INVALID;
   if (wyl_policy_store_lease_verify_parent (store->lease) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
+  if (store->maintenance_publish_fail_once) {
+    store->maintenance_publish_fail_once = FALSE;
+    return WYRELOG_E_IO;
+  }
   return persist_policy_store_encrypted (store);
+}
+
+void
+wyl_policy_store_maintenance_publish_fail_once (wyl_policy_store_t *store)
+{
+  if (store != NULL && store->maintenance_mode)
+    store->maintenance_publish_fail_once = TRUE;
 }
 
 void
@@ -14605,8 +14617,13 @@ wyrelog_error_t
         WYL_SERVICE_AUTHORITY_WRITE_INTENT_POLICY, SQLITE_MISUSE,
         WYRELOG_E_POLICY);
 
-  rc = wyl_policy_store_service_authority_transaction_enter_participant (txn,
-      expected_store);
+  if (txn->permission_remediation_only) {
+    txn->durable_operation_started = TRUE;
+    rc = WYRELOG_E_OK;
+  } else {
+    rc = wyl_policy_store_service_authority_transaction_enter_participant
+        (txn, expected_store);
+  }
   if (rc != WYRELOG_E_OK)
     return rc;
   if (txn->commit_evidence == NULL)

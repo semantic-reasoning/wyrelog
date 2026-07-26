@@ -44,6 +44,13 @@ typedef struct
  */
 wyrelog_error_t wyl_handle_open_with_options (const WylHandleOpenOptions *
     opts, WylHandle ** out_handle);
+/*
+ * Transfers an already-open maintenance store into a fresh unpublished
+ * handle. It starts no engine, fact replay, audit mirror, HTTP, resolver, or
+ * service-context publication.
+ */
+wyrelog_error_t wyl_handle_adopt_offline_maintenance_store
+    (wyl_policy_store_t * store, WylHandle ** out_handle);
 
 #ifdef WYL_HAS_AUDIT
 /*

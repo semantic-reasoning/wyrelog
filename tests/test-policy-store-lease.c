@@ -9,6 +9,8 @@
 #include <string.h>
 
 #include "wyrelog/policy/store-private.h"
+#include "wyrelog/policy/service-permission-maintenance-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 
 #ifdef G_OS_WIN32
 #include <windows.h>
@@ -487,6 +489,130 @@ test_maintenance_explicit_publish (void)
   sqlite3_finalize (stmt);
   wyl_policy_store_close (verify);
 
+  remove_store_files (path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
+test_maintenance_apply_and_replay (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  g_autofree gchar *path = g_build_filename (dir, "apply.store", NULL);
+  CountingProvider seed_provider = { 0 };
+  wyl_policy_store_open_options_t seed_opts =
+      encrypted_opts (path, &seed_provider);
+  wyl_policy_store_t *seed = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&seed_opts, &seed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_t principal = {
+    0
+  };
+  g_assert_cmpint (wyl_policy_store_create_service_principal (seed,
+          "svc:offline-apply", "offline apply", "admin",
+          "seed-offline-apply", &principal), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&principal);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (seed, "site.unsafe",
+          "unsafe", "basic"), ==, WYRELOG_E_OK);
+  g_assert_cmpint (sqlite3_exec (wyl_policy_store_get_db (seed),
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:offline-apply','site.unsafe','scope');",
+          NULL, NULL, NULL), ==, SQLITE_OK);
+  wyl_policy_store_close (seed);
+
+  CountingProvider apply_provider = { 0 };
+  wyl_policy_store_open_options_t apply_opts =
+      encrypted_opts (path, &apply_provider);
+  apply_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *apply_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&apply_opts,
+          &apply_store), ==, WYRELOG_E_OK);
+  WylPolicyPermissionClosureAnalysis analysis = {
+    0
+  };
+  g_assert_cmpint (wyl_policy_store_analyze_service_permission_closure
+      (apply_store, &analysis), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (analysis.removals->len, ==, 1);
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  g_assert_cmpint (wyl_request_id_new (request_id, sizeof request_id), ==,
+      WYRELOG_E_OK);
+  WylServicePermissionManifest manifest = {
+    0
+  };
+  g_assert_cmpint (wyl_service_permission_manifest_from_analysis (&analysis,
+          request_id, &manifest), ==, WYRELOG_E_OK);
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+  WylServicePermissionApplyReceipt applied = {
+    0
+  };
+  gchar *before_failed_publish = NULL;
+  gsize before_failed_publish_len = 0;
+  g_assert_true (g_file_get_contents (path, &before_failed_publish,
+          &before_failed_publish_len, NULL));
+  wyl_policy_store_maintenance_publish_fail_once (apply_store);
+  g_assert_cmpint (wyl_service_permission_maintenance_apply (apply_store,
+          &manifest, &applied), ==, WYRELOG_E_IO);
+  g_assert_null (applied.request_id);
+  gchar *after_failed_publish = NULL;
+  gsize after_failed_publish_len = 0;
+  g_assert_true (g_file_get_contents (path, &after_failed_publish,
+          &after_failed_publish_len, NULL));
+  g_assert_cmpuint (after_failed_publish_len, ==, before_failed_publish_len);
+  g_assert_cmpmem (after_failed_publish, after_failed_publish_len,
+      before_failed_publish, before_failed_publish_len);
+  g_free (before_failed_publish);
+  g_free (after_failed_publish);
+
+  CountingProvider retry_provider = { 0 };
+  wyl_policy_store_open_options_t retry_opts =
+      encrypted_opts (path, &retry_provider);
+  retry_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *retry_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&retry_opts,
+          &retry_store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_permission_maintenance_apply (retry_store,
+          &manifest, &applied), ==, WYRELOG_E_OK);
+  g_assert_cmpint (applied.state, ==, WYL_SERVICE_PERMISSION_APPLY_APPLIED);
+  g_assert_cmpuint (applied.operation_count, ==, 1);
+  g_assert_nonnull (applied.actor_identity);
+  g_assert_nonnull (applied.audit_id);
+
+  CountingProvider replay_provider = { 0 };
+  wyl_policy_store_open_options_t replay_opts =
+      encrypted_opts (path, &replay_provider);
+  replay_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *replay_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&replay_opts,
+          &replay_store), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_validate_service_permission_closure
+      (replay_store), ==, WYRELOG_E_OK);
+  WylServicePermissionApplyReceipt replayed = {
+    0
+  };
+  g_assert_cmpint (wyl_service_permission_maintenance_apply (replay_store,
+          &manifest, &replayed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (replayed.state, ==, WYL_SERVICE_PERMISSION_APPLY_REPLAYED);
+  g_assert_cmpstr (replayed.audit_id, ==, applied.audit_id);
+  g_assert_cmpstr (replayed.actor_identity, ==, applied.actor_identity);
+
+  CountingProvider conflict_provider = { 0 };
+  wyl_policy_store_open_options_t conflict_opts =
+      encrypted_opts (path, &conflict_provider);
+  conflict_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *conflict_store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&conflict_opts,
+          &conflict_store), ==, WYRELOG_E_OK);
+  manifest.store_digest[0] ^= 1;
+  WylServicePermissionApplyReceipt conflict = {
+    0
+  };
+  g_assert_cmpint (wyl_service_permission_maintenance_apply (conflict_store,
+          &manifest, &conflict), ==, WYRELOG_E_POLICY);
+  g_assert_null (conflict.request_id);
+
+  wyl_service_permission_apply_receipt_clear (&replayed);
+  wyl_service_permission_apply_receipt_clear (&applied);
+  wyl_service_permission_manifest_clear (&manifest);
   remove_store_files (path);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
@@ -1586,6 +1712,8 @@ main (int argc, char **argv)
       test_maintenance_exclusivity_and_private_store);
   g_test_add_func ("/policy-store-lease/maintenance-explicit-publish",
       test_maintenance_explicit_publish);
+  g_test_add_func ("/policy-store-lease/maintenance-apply-replay",
+      test_maintenance_apply_and_replay);
 #ifndef G_OS_WIN32
   g_test_add_func ("/policy-store-lease/parent-alias-swap",
       test_parent_alias_swap_stays_pinned);
