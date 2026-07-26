@@ -67,20 +67,6 @@ typedef struct
   const gchar *access_token;
 } WylServiceExchangePublicationView;
 
-typedef struct
-{
-  wyrelog_error_t (*reserve) (gpointer user_data, const gchar * session_id,
-      const gchar * jti, const gchar * credential_id, guint64 generation,
-      const gchar * principal, const gchar * tenant);
-  wyrelog_error_t (*activate) (gpointer user_data, const gchar * session_id,
-      const gchar * jti, const gchar * credential_id, guint64 generation,
-      const gchar * principal, const gchar * tenant, gboolean * out_changed);
-  wyrelog_error_t (*remove_exact) (gpointer user_data, const gchar * session_id,
-      const gchar * jti, const gchar * credential_id, guint64 generation,
-      const gchar * principal, const gchar * tenant, gboolean * out_removed);
-  gpointer user_data;
-} WylServiceExchangeRegistryHooks;
-
 G_GNUC_INTERNAL wyrelog_error_t wyl_service_exchange_authority_begin
     (WylHandle * handle, const gchar * credential_id,
     const gchar * presented_secret, gsize presented_secret_len,
@@ -89,12 +75,6 @@ G_GNUC_INTERNAL wyrelog_error_t wyl_service_exchange_authority_prepare_token
     (WylServiceExchangeAuthority * authority, const gchar * key_id,
     const gchar * issuer, const gchar * audience, gint64 issued_at_seconds,
     const guint8 * token_secret, gsize token_secret_len,
-    WylServiceExchangePrepared * out_prepared);
-G_GNUC_INTERNAL wyrelog_error_t wyl_service_exchange_authority_complete
-    (WylServiceExchangeAuthority * authority, const gchar * key_id,
-    const gchar * issuer, const gchar * audience, gint64 issued_at_seconds,
-    const guint8 * token_secret, gsize token_secret_len,
-    const WylServiceExchangeRegistryHooks * hooks,
     WylServiceExchangePrepared * out_prepared);
 G_GNUC_INTERNAL wyrelog_error_t wyl_service_exchange_authority_rollback
     (WylServiceExchangeAuthority * authority);
