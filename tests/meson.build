@@ -746,6 +746,12 @@ test_fact_artifact_namespace = executable('test-fact-artifact-namespace',
   dependencies : [wyrelog_dep],
 )
 test('fact-artifact-namespace', test_fact_artifact_namespace)
+test_secure_duckdb_artifact_contract = executable('test-secure-duckdb-artifact-contract',
+  'test-secure-duckdb-artifact-contract.cc',
+  include_directories : include_directories('../wyrelog'),
+  dependencies : [wyrelog_dep],
+)
+test('secure-duckdb-artifact-contract', test_secure_duckdb_artifact_contract)
 
 if host_machine.system() == 'windows'
   # This is intentionally separate from test-fact-artifact-namespace: that
