@@ -2910,6 +2910,8 @@ typedef struct
   const gchar *request_id;
   const gchar *tenant_id;
   const gchar *credential_id;
+  guint64 credential_generation;
+  gboolean credential_rotate;
   gboolean tenant_mutation;
   gboolean acquired;
   gboolean release;
@@ -2932,7 +2934,19 @@ static gpointer
 compound_disable_thread (gpointer data)
 {
   CompoundDisableRace *race = data;
-  if (race->credential_id != NULL)
+  if (race->credential_id != NULL && race->credential_rotate) {
+    wyl_service_credential_rotate_runtime_t runtime = {
+      .registry = wyl_daemon_http_get_service_registry_for_test (race->server),
+      .after_write_acquired = compound_disable_after_write_acquired,
+      .data = race,
+      .old_credential_generation = race->credential_generation,
+    };
+    wyl_service_credential_issue_result_t rotated = { 0 };
+    race->rc = wyl_service_credential_rotate_with_runtime
+        (wyl_daemon_http_get_handle_for_test (race->server),
+        race->credential_id, "admin", race->request_id, 0, &runtime, &rotated);
+    wyl_service_credential_issue_result_clear (&rotated);
+  } else if (race->credential_id != NULL)
     race->rc = wyl_daemon_http_revoke_service_credential_for_test
         (race->server, race->credential_id, race->request_id,
         compound_disable_after_write_acquired, race);
@@ -3256,14 +3270,16 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
 }
 
 static gboolean
-check_compound_credential_real_resolver (SoupServer *server)
+check_compound_credential_real_resolver_operation (SoupServer *server,
+    gboolean rotate)
 {
   WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
   wyl_service_credential_issue_result_t issued = { 0 };
   if (handle == NULL
       || wyl_service_credential_issue (handle, "svc:resolver:test",
-          "__wr_default", "admin", "resolver-credential-issue", 0,
-          &issued) != WYRELOG_E_OK)
+          "__wr_default", "admin",
+          rotate ? "resolver-credential-rotate-issue" :
+          "resolver-credential-revoke-issue", 0, &issued) != WYRELOG_E_OK)
     return FALSE;
   g_auto (ServiceResolverFixture) active = { 0 };
   gboolean ok = service_resolver_fixture_init_tenant_credential (server,
@@ -3276,8 +3292,11 @@ check_compound_credential_real_resolver (SoupServer *server)
       issued.credential.credential_id, issued.credential.generation);
   CompoundDisableRace race = {
     .server = server,
-    .request_id = "resolver-credential-revoke",
+    .request_id = rotate ? "resolver-credential-rotate" :
+        "resolver-credential-revoke",
     .credential_id = issued.credential.credential_id,
+    .credential_generation = issued.credential.generation,
+    .credential_rotate = rotate,
     .rc = WYRELOG_E_INTERNAL,
   };
   g_mutex_init (&race.mutex);
@@ -3290,8 +3309,8 @@ check_compound_credential_real_resolver (SoupServer *server)
   };
   g_autoptr (GThread) resolver = NULL;
   if (ok) {
-    mutation = g_thread_new ("compound-credential-revoke",
-        compound_disable_thread, &race);
+    mutation = g_thread_new (rotate ? "compound-credential-rotate" :
+        "compound-credential-revoke", compound_disable_thread, &race);
     ok = compound_disable_wait_acquired (&race);
   }
   if (ok) {
@@ -3324,6 +3343,13 @@ check_compound_credential_real_resolver (SoupServer *server)
   g_mutex_clear (&race.mutex);
   wyl_service_credential_issue_result_clear (&issued);
   return ok;
+}
+
+static gboolean
+check_compound_credential_real_resolver (SoupServer *server)
+{
+  return check_compound_credential_real_resolver_operation (server, FALSE)
+      && check_compound_credential_real_resolver_operation (server, TRUE);
 }
 
 static gboolean
@@ -4078,8 +4104,12 @@ check_service_bearer_resolver_contract (SoupServer *server)
     return 2148;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
     return 2149;
+#if !defined(WYL_TEST_VARIANT_SERVICE)
+  /* The service variant deliberately forbids plaintext credential issuance
+   * and covers production escrow rotation separately. */
   if (!check_compound_credential_real_resolver (server))
     return 2150;
+#endif
   if (!check_compound_tenant_real_resolver_and_activation (server))
     return 2151;
   if (!check_compound_disable_real_resolver_and_activation (server))
