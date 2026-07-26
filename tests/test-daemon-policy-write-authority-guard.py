@@ -172,6 +172,9 @@ def main():
             "wyl_daemon_policy_write_acquire (ctx, &write);",
             "wyl_daemon_policy_write_acquire (ctx, &write);\n"
             "  wyl_daemon_policy_write_acquire (ctx, &write);"),
+        "rotation-key-acquire-removed": mutate_function(source,
+            "wyl_daemon_http_context_rotate_access_token_key",
+            "wyl_daemon_policy_write_acquire", "rotation_key_acquire_removed"),
         "inactive-acquire": mutate_function(source, "tenant_mutation_handler",
             "wyl_daemon_policy_write_acquire (ctx, &write);",
             "#if 0\n  wyl_daemon_policy_write_acquire (ctx, &write);\n#endif"),
