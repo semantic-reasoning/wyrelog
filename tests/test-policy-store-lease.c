@@ -495,6 +495,24 @@ test_maintenance_explicit_publish (void)
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
 
+typedef struct
+{
+  const gchar *path;
+  const gchar *moved;
+  const gchar *replacement;
+  gsize replacement_len;
+} LastMomentSubstitution;
+
+static void
+substitute_maintenance_target_at_last_moment (gpointer data)
+{
+  LastMomentSubstitution *substitution = data;
+  g_assert_cmpint (g_rename (substitution->path, substitution->moved), ==, 0);
+  g_assert_true (g_file_set_contents (substitution->path,
+          substitution->replacement, substitution->replacement_len, NULL));
+  g_assert_cmpint (g_chmod (substitution->path, 0600), ==, 0);
+}
+
 static void
 test_maintenance_rejects_named_target_substitution (void)
 {
@@ -517,17 +535,27 @@ test_maintenance_rejects_named_target_substitution (void)
   wyl_policy_store_t *maintenance = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&maintenance_opts,
           &maintenance), ==, WYRELOG_E_OK);
-  g_assert_cmpint (g_rename (path, moved), ==, 0);
   static const gchar replacement[] = "owner-controlled replacement";
-  g_assert_true (g_file_set_contents (path, replacement,
-          sizeof replacement - 1, NULL));
-  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  g_autofree gchar *original = NULL;
+  gsize original_len = 0;
+  g_assert_true (g_file_get_contents (path, &original, &original_len, NULL));
+  LastMomentSubstitution substitution = {
+    .path = path,
+    .moved = moved,
+    .replacement = replacement,
+    .replacement_len = sizeof replacement - 1,
+  };
+  wyl_policy_store_maintenance_set_before_replace_hook (maintenance,
+      substitute_maintenance_target_at_last_moment, &substitution);
   g_assert_cmpint (wyl_policy_store_maintenance_publish (maintenance), ==,
       WYRELOG_E_POLICY);
   gchar *after = NULL;
   gsize after_len = 0;
   g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
   g_assert_cmpmem (after, after_len, replacement, sizeof replacement - 1);
+  g_free (after);
+  g_assert_true (g_file_get_contents (moved, &after, &after_len, NULL));
+  g_assert_cmpmem (after, after_len, original, original_len);
   g_free (after);
   wyl_policy_store_close (maintenance);
 

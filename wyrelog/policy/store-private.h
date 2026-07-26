@@ -1230,6 +1230,8 @@ void wyl_policy_store_service_permission_maintenance_fail_once
 WylServicePermissionMaintenanceFailStage
     wyl_policy_store_service_permission_maintenance_take_failure
     (wyl_policy_store_t * store);
+void wyl_policy_store_maintenance_set_before_replace_hook
+    (wyl_policy_store_t * store, void (*hook) (gpointer data), gpointer data);
 wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
     const gchar * fact_root);
 wyrelog_error_t wyl_policy_store_bind_fact_root_authorized

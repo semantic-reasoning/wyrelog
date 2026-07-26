@@ -26,6 +26,13 @@ wyrelog_error_t wyl_policy_store_lease_verify_parent (const
     wyl_policy_store_lease_t * lease);
 wyrelog_error_t wyl_policy_store_lease_verify_named_target (const
     wyl_policy_store_lease_t * lease);
+#ifdef G_OS_WIN32
+wyrelog_error_t wyl_policy_store_lease_verify_displaced_target (const
+    wyl_policy_store_lease_t * lease, const gchar * path);
+#else
+wyrelog_error_t wyl_policy_store_lease_verify_displaced_target_at (const
+    wyl_policy_store_lease_t * lease, int dirfd, const gchar * basename);
+#endif
 wyrelog_error_t wyl_policy_store_lease_read_existing (const
     wyl_policy_store_lease_t * lease, guint8 ** out_bytes, gsize * out_len);
 

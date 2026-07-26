@@ -1,4 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE 1
+#endif
 #ifndef G_OS_WIN32
 /* Expose POSIX.1-2008 openat/renameat/unlinkat/O_NOFOLLOW/O_CLOEXEC.
  * Must be set before any system header is pulled in. */
@@ -33,6 +36,9 @@
 #include <windows.h>
 #else
 #include <sys/stat.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 #include <sys/types.h>
 #include <unistd.h>
 #endif
@@ -165,6 +171,8 @@ struct wyl_policy_store_t
   gboolean maintenance_publish_fail_once;
     WylServicePermissionMaintenanceFailStage
       service_permission_maintenance_fail_once;
+  void (*maintenance_before_replace_hook) (gpointer data);
+  gpointer maintenance_before_replace_data;
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
@@ -2745,7 +2753,8 @@ read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
 static wyrelog_error_t
 write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced, const wyl_policy_store_lease_t *target_guard)
+    gboolean *out_replaced, const wyl_policy_store_lease_t *target_guard,
+    void (*before_replace_hook) (gpointer data), gpointer hook_data)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
@@ -2854,17 +2863,29 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     g_free (wdst);
     return WYRELOG_E_IO;
   }
-  if (target_guard != NULL
-      && wyl_policy_store_lease_verify_named_target (target_guard)
-      != WYRELOG_E_OK) {
-    (void) DeleteFileW (wtmp);
+  if (before_replace_hook != NULL)
+    before_replace_hook (hook_data);
+  g_autofree gchar *backup_uuid =
+      target_guard != NULL ? g_uuid_string_random () : NULL;
+  g_autofree gchar *backup_path =
+      target_guard != NULL ? g_strdup_printf ("%s.displaced-%s", path,
+      backup_uuid) : NULL;
+  g_autofree wchar_t *wbackup = backup_path != NULL ?
+      (wchar_t *) g_utf8_to_utf16 (backup_path, -1, NULL, NULL, NULL) : NULL;
+  BOOL moved = target_guard != NULL ? ReplaceFileW (wdst, wtmp, wbackup,
+      REPLACEFILE_WRITE_THROUGH, NULL, NULL) : MoveFileExW (wtmp, wdst,
+      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  if (moved && target_guard != NULL
+      && wyl_policy_store_lease_verify_displaced_target (target_guard,
+          backup_path) != WYRELOG_E_OK) {
+    BOOL restored = ReplaceFileW (wdst, wbackup, NULL,
+        REPLACEFILE_WRITE_THROUGH, NULL, NULL);
     g_free (wtmp);
     g_free (wdst);
-    return WYRELOG_E_POLICY;
+    return restored ? WYRELOG_E_POLICY : WYRELOG_E_IO;
   }
-
-  BOOL moved = MoveFileExW (wtmp, wdst,
-      MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
+  if (moved && wbackup != NULL)
+    (void) DeleteFileW (wbackup);
   g_free (wtmp);
   g_free (wdst);
   if (!moved) {
@@ -2889,7 +2910,8 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 static wyrelog_error_t
 write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 {
-  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL, NULL);
+  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL, NULL,
+      NULL, NULL);
 }
 #endif /* G_OS_WIN32 */
 
@@ -3066,7 +3088,8 @@ static wyrelog_error_t read_through_dirfd (int dirfd, const gchar * basename,
 static wyrelog_error_t write_through_dirfd (int dirfd, const gchar * basename,
     const guint8 * bytes, gsize len,
     const wyl_policy_store_rotation_runtime_t * rotation_runtime,
-    gboolean * out_replaced, const wyl_policy_store_lease_t * target_guard);
+    gboolean * out_replaced, const wyl_policy_store_lease_t * target_guard,
+    void (*before_replace_hook) (gpointer data), gpointer hook_data);
 #endif
 
 static wyrelog_error_t
@@ -3113,10 +3136,10 @@ wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK) {
 #ifdef G_OS_WIN32
     rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL,
-        NULL);
+        NULL, NULL, NULL);
 #else
     rc = write_through_dirfd (store->canonical_dirfd, basename, wire,
-        wire_len, NULL, NULL, NULL);
+        wire_len, NULL, NULL, NULL, NULL, NULL);
 #endif
   }
   sodium_memzero (wire, wire_len);
@@ -6571,7 +6594,8 @@ read_work_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
 static wyrelog_error_t
 write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced, const wyl_policy_store_lease_t *target_guard)
+    gboolean *out_replaced, const wyl_policy_store_lease_t *target_guard,
+    void (*before_replace_hook) (gpointer data), gpointer hook_data)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
@@ -6626,19 +6650,42 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     (void) unlinkat (dirfd, tmp_basename, 0);
     return WYRELOG_E_IO;
   }
-  if (target_guard != NULL
-      && wyl_policy_store_lease_verify_named_target (target_guard)
-      != WYRELOG_E_OK) {
-    (void) unlinkat (dirfd, tmp_basename, 0);
-    return WYRELOG_E_POLICY;
+  if (before_replace_hook != NULL)
+    before_replace_hook (hook_data);
+  int rename_rc = -1;
+  if (target_guard != NULL) {
+#ifdef __linux__
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1 << 1)
+#endif
+    rename_rc = (int) syscall (SYS_renameat2, dirfd, tmp_basename, dirfd,
+        basename, RENAME_EXCHANGE);
+    if (rename_rc == 0
+        && wyl_policy_store_lease_verify_displaced_target_at (target_guard,
+            dirfd, tmp_basename) != WYRELOG_E_OK) {
+      int restore_rc = (int) syscall (SYS_renameat2, dirfd, tmp_basename,
+          dirfd, basename, RENAME_EXCHANGE);
+      (void) unlinkat (dirfd, tmp_basename, 0);
+      return restore_rc == 0 ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    }
+#else
+    errno = ENOTSUP;
+#endif
+  } else {
+    rename_rc = renameat (dirfd, tmp_basename, dirfd, basename);
   }
-
-  if (renameat (dirfd, tmp_basename, dirfd, basename) != 0) {
+  if (rename_rc != 0) {
     (void) unlinkat (dirfd, tmp_basename, 0);
+    if (target_guard != NULL
+        && (errno == ENOSYS || errno == EINVAL || errno == ENOTSUP
+            || errno == EOPNOTSUPP))
+      return WYRELOG_E_POLICY;
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store renameat onto canonical name failed");
     return WYRELOG_E_IO;
   }
+  if (target_guard != NULL)
+    (void) unlinkat (dirfd, tmp_basename, 0);
   if (out_replaced != NULL)
     *out_replaced = TRUE;
 
@@ -7135,6 +7182,12 @@ publish_policy_store_encrypted (wyl_policy_store_t *store,
   if (store == NULL || encrypted == NULL || encrypted_len == 0)
     return WYRELOG_E_INVALID;
 
+  void (*before_replace_hook) (gpointer data) =
+      store->maintenance_before_replace_hook;
+  gpointer before_replace_data = store->maintenance_before_replace_data;
+  store->maintenance_before_replace_hook = NULL;
+  store->maintenance_before_replace_data = NULL;
+
 #ifndef G_OS_WIN32
   /* POSIX builds always have canonical_dirfd; the open path enforces
    * this invariant. */
@@ -7142,11 +7195,13 @@ publish_policy_store_encrypted (wyl_policy_store_t *store,
     return WYRELOG_E_INTERNAL;
   return write_through_dirfd (store->canonical_dirfd,
       store->canonical_basename, encrypted, encrypted_len, rotation_runtime,
-      out_replaced, store->maintenance_mode ? store->lease : NULL);
+      out_replaced, store->maintenance_mode ? store->lease : NULL,
+      before_replace_hook, before_replace_data);
 #else
   return write_whole_file_atomic_private (store->canonical_path, encrypted,
       encrypted_len, rotation_runtime, out_replaced,
-      store->maintenance_mode ? store->lease : NULL);
+      store->maintenance_mode ? store->lease : NULL,
+      before_replace_hook, before_replace_data);
 #endif
 }
 
@@ -8241,6 +8296,16 @@ wyl_policy_store_service_permission_maintenance_take_failure (wyl_policy_store_t
   store->service_permission_maintenance_fail_once =
       WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_NONE;
   return stage;
+}
+
+void
+wyl_policy_store_maintenance_set_before_replace_hook (wyl_policy_store_t *store,
+    void (*hook) (gpointer data), gpointer data)
+{
+  if (store != NULL && store->maintenance_mode) {
+    store->maintenance_before_replace_hook = hook;
+    store->maintenance_before_replace_data = data;
+  }
 }
 
 void

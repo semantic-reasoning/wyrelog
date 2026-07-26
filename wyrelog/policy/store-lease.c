@@ -422,6 +422,36 @@ wyl_policy_store_lease_verify_named_target (const wyl_policy_store_lease_t
   return same ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_policy_store_lease_verify_displaced_target (const
+    wyl_policy_store_lease_t *lease, const gchar *path)
+{
+  if (lease == NULL || lease->store_handle == INVALID_HANDLE_VALUE
+      || path == NULL)
+    return WYRELOG_E_INVALID;
+  g_autofree wchar_t *wide =
+      (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wide == NULL)
+    return WYRELOG_E_INVALID;
+  HANDLE displaced = CreateFileW (wide, GENERIC_READ,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (displaced == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_POLICY;
+  BY_HANDLE_FILE_INFORMATION pinned_info;
+  BY_HANDLE_FILE_INFORMATION displaced_info;
+  gboolean same = GetFileInformationByHandle (lease->store_handle,
+      &pinned_info) && GetFileInformationByHandle (displaced, &displaced_info)
+      && !(displaced_info.dwFileAttributes &
+      (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+      && pinned_info.dwVolumeSerialNumber ==
+      displaced_info.dwVolumeSerialNumber
+      && pinned_info.nFileIndexHigh == displaced_info.nFileIndexHigh
+      && pinned_info.nFileIndexLow == displaced_info.nFileIndexLow;
+  CloseHandle (displaced);
+  return same ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 void
 wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
 {
@@ -661,6 +691,23 @@ wyl_policy_store_lease_verify_named_target (const wyl_policy_store_lease_t
     return WYRELOG_E_POLICY;
   return pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino ?
       WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_verify_displaced_target_at (const
+    wyl_policy_store_lease_t *lease, int dirfd, const gchar *basename)
+{
+  if (lease == NULL || lease->store_fd < 0 || dirfd < 0 || basename == NULL)
+    return WYRELOG_E_INVALID;
+  struct stat pinned;
+  struct stat displaced;
+  if (fstat (lease->store_fd, &pinned) != 0)
+    return WYRELOG_E_IO;
+  if (fstatat (dirfd, basename, &displaced, AT_SYMLINK_NOFOLLOW) != 0
+      || !S_ISREG (displaced.st_mode))
+    return WYRELOG_E_POLICY;
+  return pinned.st_dev == displaced.st_dev
+      && pinned.st_ino == displaced.st_ino ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
 int
