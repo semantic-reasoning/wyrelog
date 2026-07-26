@@ -1186,9 +1186,21 @@ gboolean
   if (registry == NULL || selector == NULL)
     return FALSE;
   g_mutex_lock (&registry->mutex);
-  GHashTable *index = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
-      ? registry->by_principal : registry->by_tenant;
-  ServiceAuthBucket *bucket = g_hash_table_lookup (index, selector->bytes);
+  GHashTable *index;
+  ServiceAuthBucket credential_key = {
+    .selector = (gchar *) selector->bytes,
+    .generation = selector->generation,
+  };
+  gconstpointer key = selector->bytes;
+  if (selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL)
+    index = registry->by_principal;
+  else if (selector->kind == WYL_SERVICE_AUTH_SELECTOR_TENANT)
+    index = registry->by_tenant;
+  else {
+    index = registry->by_credential_generation;
+    key = &credential_key;
+  }
+  ServiceAuthBucket *bucket = g_hash_table_lookup (index, key);
   GHashTableIter iter;
   gpointer member = NULL;
   if (bucket != NULL) {

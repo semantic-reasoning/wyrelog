@@ -114,28 +114,6 @@ typedef struct
   gchar *key_spec;
 } Fixture;
 
-typedef struct
-{
-  gboolean called;
-  gboolean fail;
-  gchar *credential_id;
-  guint64 generation;
-} InvalidationProbe;
-
-static wyrelog_error_t
-probe_credential_invalidation (gpointer data, const gchar *credential_id,
-    guint64 generation)
-{
-  InvalidationProbe *probe = data;
-  if (probe == NULL)
-    return WYRELOG_E_INVALID;
-  probe->called = TRUE;
-  g_free (probe->credential_id);
-  probe->credential_id = g_strdup (credential_id);
-  probe->generation = generation;
-  return probe->fail ? WYRELOG_E_IO : WYRELOG_E_OK;
-}
-
 static void
 fixture_clear (Fixture *fixture)
 {
@@ -3679,6 +3657,11 @@ test_handoff_remediation_fresh_authorization_and_replay (void)
           "svc:handoff:remediation", "tenant-a", "admin",
           original_request_id, g_get_real_time () + G_TIME_SPAN_HOUR,
           &handoff, &issue_runtime, &issued), ==, WYRELOG_E_OK);
+  g_auto (CredentialRegistryFixture) remediation_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&remediation_registry,
+          handle, issued.credential.credential_id,
+          issued.credential.generation, issued.credential.subject_id,
+          issued.credential.tenant_id, TRUE));
 
   wyl_service_credential_handoff_remediation_input_t input = {
     .remediation_request_id = remediation_request_id,
@@ -3703,6 +3686,7 @@ test_handoff_remediation_fresh_authorization_and_replay (void)
   };
   wyl_service_credential_handoff_remediation_runtime_t runtime = {
     .authorization = &authorization,
+    .registry = remediation_registry.registry,
   };
   wyl_service_credential_handoff_remediation_result_t result = { 0 };
   g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
@@ -3784,6 +3768,7 @@ test_handoff_remediation_fresh_authorization_and_replay (void)
   probe.calls = 0;
   wyl_service_credential_handoff_remediation_runtime_t resolve_runtime = {
     .authorization = &authorization,
+    .registry = remediation_registry.registry,
   };
   g_assert_cmpint (wyl_service_credential_handoff_resolve_remediation (handle,
           remediation_request_id, "operator", &resolve_runtime, &result), ==,
@@ -4147,8 +4132,14 @@ test_handoff_cancellation_claim_fresh_authorization_and_replay (void)
       sizeof resume_input.journal_snapshot_digest);
   memcpy (resume_input.tuple.binding_digest, issued.handoff.binding_digest,
       sizeof resume_input.tuple.binding_digest);
+  g_auto (CredentialRegistryFixture) remediation_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&remediation_registry,
+          handle, issued.credential.credential_id,
+          issued.credential.generation, issued.credential.subject_id,
+          issued.credential.tenant_id, TRUE));
   wyl_service_credential_handoff_remediation_runtime_t resume_runtime = {
     .authorization = &authorization,
+    .registry = remediation_registry.registry,
   };
   wyl_service_credential_handoff_remediation_result_t resume_result = { 0 };
   probe.calls = 0;
@@ -5429,6 +5420,12 @@ test_handoff_disposition_attention_and_oar (void)
           "svc:handoff:disposition", "tenant-a", "admin", expired_original,
           g_get_real_time () + 100 * 1000, &expired_handoff,
           &default_issue_runtime, &expired_issued), ==, WYRELOG_E_OK);
+  g_auto (CredentialRegistryFixture) expired_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&expired_registry, handle,
+          expired_issued.credential.credential_id,
+          expired_issued.credential.generation,
+          expired_issued.credential.subject_id,
+          expired_issued.credential.tenant_id, TRUE));
   g_usleep (150 * 1000);
   gchar expired_remediation_audit[WYL_ID_STRING_BUF];
   new_uuid_string (expired_remediation_audit);
@@ -5436,11 +5433,9 @@ test_handoff_disposition_attention_and_oar (void)
   wyl_service_credential_mutation_authorization_t expired_authorization = {
     .authorize = probe_mutation_authorization,.data = &expired_probe,
   };
-  InvalidationProbe expired_invalidation = { 0 };
   wyl_service_credential_handoff_remediation_runtime_t expired_runtime = {
     .authorization = &expired_authorization,
-    .invalidate_credential = probe_credential_invalidation,
-    .invalidation_data = &expired_invalidation,
+    .registry = expired_registry.registry,
   };
   wyl_service_credential_handoff_remediation_input_t expired_remediation = {
     .remediation_request_id = expired_remediation_id,
@@ -5480,8 +5475,8 @@ test_handoff_disposition_attention_and_oar (void)
   g_assert_cmpint (after_expired.credentials, ==, before_expired.credentials);
   g_assert_cmpint (after_expired.events, ==, before_expired.events);
   g_assert_cmpint (after_expired.escrows, ==, before_expired.escrows - 1);
-  g_assert_true (expired_invalidation.called);
-  g_assert_cmpuint (expired_invalidation.generation, ==, 1);
+  g_assert_true (credential_registry_fixture_is (&expired_registry,
+          WYL_SERVICE_AUTH_REVOKED));
   WylPolicyServiceHandoffRetirementInput expired_retirement = {
     .journal_version = 6,
     .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
@@ -5526,20 +5521,15 @@ test_handoff_disposition_attention_and_oar (void)
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
       NULL, NULL);
   wyl_service_credential_handoff_remediation_result_clear (&expired_result);
-  g_clear_pointer (&expired_invalidation.credential_id, g_free);
-  expired_invalidation.called = FALSE;
   expired_probe.calls = 0;
   g_assert_cmpint (wyl_service_credential_handoff_resolve_remediation (handle,
           expired_remediation_id, "operator", &expired_runtime,
           &expired_result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (expired_probe.calls, ==, 1);
   g_assert_true (expired_result.replayed);
-  g_assert_true (expired_invalidation.called);
-  g_assert_cmpstr (expired_invalidation.credential_id, ==,
-      expired_issued.credential.credential_id);
-  g_assert_cmpuint (expired_invalidation.generation, ==, 1);
+  g_assert_true (credential_registry_fixture_is (&expired_registry,
+          WYL_SERVICE_AUTH_REVOKED));
   wyl_service_credential_handoff_remediation_result_clear (&expired_result);
-  g_clear_pointer (&expired_invalidation.credential_id, g_free);
   g_free (expired_probe.actor_subject_id);
   wyl_service_credential_handoff_result_clear (&expired_issued);
 
@@ -5591,11 +5581,14 @@ test_handoff_disposition_attention_and_oar (void)
   wyl_service_credential_mutation_authorization_t remediation_authorization = {
     .authorize = probe_mutation_authorization,.data = &remediation_probe,
   };
-  InvalidationProbe invalidation = { 0 };
+  g_auto (CredentialRegistryFixture) remediation_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&remediation_registry,
+          handle, issued.credential.credential_id,
+          issued.credential.generation, issued.credential.subject_id,
+          issued.credential.tenant_id, TRUE));
   wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
     .authorization = &remediation_authorization,
-    .invalidate_credential = probe_credential_invalidation,
-    .invalidation_data = &invalidation,
+    .registry = remediation_registry.registry,
   };
   wyl_service_credential_handoff_remediation_input_t remediation = {
     .remediation_request_id = remediation_id,
@@ -5638,8 +5631,8 @@ test_handoff_disposition_attention_and_oar (void)
       before_remediation.escrows - 1);
   g_assert_cmpint (after_remediation.handoff_remediations, ==,
       before_remediation.handoff_remediations + 1);
-  g_assert_true (invalidation.called);
-  g_assert_cmpuint (invalidation.generation, ==, 1);
+  g_assert_true (credential_registry_fixture_is (&remediation_registry,
+          WYL_SERVICE_AUTH_REVOKED));
   WylPolicyServiceHandoffRetirementInput revoked_retirement = {
     .journal_version = 6,
     .journal_state = WYL_POLICY_HANDOFF_REMEDIATION_STATE_TERMINAL,
@@ -5685,7 +5678,6 @@ test_handoff_disposition_attention_and_oar (void)
   wyl_policy_store_handoff_maintenance_set_clock_for_test (store_of (handle),
       NULL, NULL);
   wyl_service_credential_handoff_remediation_result_clear (&remediation_result);
-  g_clear_pointer (&invalidation.credential_id, g_free);
   g_free (remediation_probe.actor_subject_id);
   wyl_service_credential_clear (&revoked);
   wyl_service_credential_handoff_result_clear (&issued);
@@ -5763,11 +5755,13 @@ test_handoff_revoke_wipe_fault_atomicity (void)
   wyl_service_credential_mutation_authorization_t authorization = {
     .authorize = probe_mutation_authorization,.data = &probe,
   };
-  InvalidationProbe invalidation = { 0 };
+  g_auto (CredentialRegistryFixture) registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&registry, handle,
+          issued.credential.credential_id, issued.credential.generation,
+          issued.credential.subject_id, issued.credential.tenant_id, TRUE));
   wyl_service_credential_handoff_remediation_runtime_t runtime = {
     .authorization = &authorization,
-    .invalidate_credential = probe_credential_invalidation,
-    .invalidation_data = &invalidation,
+    .registry = registry.registry,
   };
   static const WylPolicyServiceHandoffFailStage stages[] = {
     WYL_POLICY_HANDOFF_FAIL_AFTER_REQUEST_CLAIM,
@@ -5787,13 +5781,13 @@ test_handoff_revoke_wipe_fault_atomicity (void)
   assert_mutation_effects_equal (mutation_effects (handle), before);
   for (guint i = 0; i < G_N_ELEMENTS (stages); i++) {
     probe.calls = 0;
-    invalidation.called = FALSE;
     wyl_policy_store_service_handoff_fail_once (store_of (handle), stages[i]);
     wyl_service_credential_handoff_remediation_result_t failed = { 0 };
     g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
             &input, &runtime, &failed), ==, WYRELOG_E_IO);
     g_assert_cmpuint (probe.calls, ==, 1);
-    g_assert_false (invalidation.called);
+    g_assert_true (credential_registry_fixture_is (&registry,
+            WYL_SERVICE_AUTH_ACTIVE));
     g_assert_null (failed.audit_id);
     assert_mutation_effects_equal (mutation_effects (handle), before);
   }
@@ -5812,8 +5806,8 @@ test_handoff_revoke_wipe_fault_atomicity (void)
   g_assert_cmpstr (result.revoke_event_request_id, ==, remediation_id);
   g_assert_cmpstr (result.revoke_event_actor_subject_id, ==, "operator");
   g_assert_cmpint (result.revoke_event_created_at_us, ==, result.created_at_us);
-  g_assert_true (invalidation.called);
-  g_assert_cmpuint (invalidation.generation, ==, 1);
+  g_assert_true (credential_registry_fixture_is (&registry,
+          WYL_SERVICE_AUTH_REVOKED));
   g_assert_cmpint (scalar (db_of (handle),
           "SELECT count(*) FROM service_credentials WHERE state='revoked'"
           " AND generation=2;"), ==, 1);
@@ -5829,15 +5823,41 @@ test_handoff_revoke_wipe_fault_atomicity (void)
           " AND e.created_at_us=r.created_at_us;"), ==, 1);
   wyl_service_credential_handoff_remediation_result_clear (&result);
   probe.calls = 0;
-  invalidation.called = FALSE;
   g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
           &input, &runtime, &result), ==, WYRELOG_E_OK);
   g_assert_cmpuint (probe.calls, ==, 1);
   g_assert_true (result.replayed);
   g_assert_false (result.revoked_now);
-  g_assert_true (invalidation.called);
-  g_assert_cmpuint (invalidation.generation, ==, 1);
+  g_assert_true (credential_registry_fixture_is (&registry,
+          WYL_SERVICE_AUTH_REVOKED));
   wyl_service_credential_handoff_remediation_result_clear (&result);
+
+  /*
+   * A commit failure reported after SQLite released the savepoint is still a
+   * committed remediation.  A fresh registry replica must therefore converge
+   * to zero survivors before the write lease is released.
+   */
+  g_auto (CredentialRegistryFixture) committed_fault_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&committed_fault_registry,
+          handle, issued.credential.credential_id,
+          issued.credential.generation, issued.credential.subject_id,
+          issued.credential.tenant_id, TRUE));
+  runtime.registry = committed_fault_registry.registry;
+  wyl_policy_store_service_authority_transaction_fail_once
+      (store_of (handle), WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
+  g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
+          &input, &runtime, &result), !=, WYRELOG_E_OK);
+  g_assert_null (result.audit_id);
+  g_assert_true (credential_registry_fixture_is (&committed_fault_registry,
+          WYL_SERVICE_AUTH_REVOKED));
+  WylServiceAuthUnavailableReason committed_fault_reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &committed_fault_reason), ==, WYRELOG_E_OK);
+  g_assert_cmpint (committed_fault_reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+  runtime.registry = registry.registry;
 
   gchar missing_original[WYL_REQUEST_ID_STRING_BUF];
   gchar missing_remediation[WYL_REQUEST_ID_STRING_BUF];
@@ -5974,11 +5994,19 @@ test_handoff_revoke_wipe_fault_atomicity (void)
           &other, &runtime, &result), ==, WYRELOG_E_POLICY);
   assert_mutation_effects_equal (mutation_effects (handle), completed);
 
-  invalidation.fail = TRUE;
-  invalidation.called = FALSE;
+  g_auto (CredentialRegistryFixture) corrupt_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&corrupt_registry, handle,
+          issued.credential.credential_id, issued.credential.generation,
+          issued.credential.subject_id, issued.credential.tenant_id, TRUE));
+  runtime.registry = corrupt_registry.registry;
+  WylServiceAuthSelector selector = { 0 };
+  g_assert_cmpint (wyl_service_auth_selector_init_credential_generation
+      (&selector, issued.credential.credential_id,
+          issued.credential.generation), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
+      (corrupt_registry.registry, &selector));
   g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
-          &input, &runtime, &result), ==, WYRELOG_E_IO);
-  g_assert_true (invalidation.called);
+          &input, &runtime, &result), ==, WYRELOG_E_POLICY);
   g_assert_null (result.audit_id);
   assert_mutation_effects_equal (mutation_effects (handle), completed);
   WylServiceAuthUnavailableReason unavailable_reason =
@@ -5988,7 +6016,6 @@ test_handoff_revoke_wipe_fault_atomicity (void)
           &unavailable_reason), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (unavailable_reason, ==,
       WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
-  g_clear_pointer (&invalidation.credential_id, g_free);
   wyl_service_credential_handoff_result_clear (&issued);
   g_free (probe.actor_subject_id);
   g_free (issue_probe.actor_subject_id);
@@ -6142,8 +6169,14 @@ test_handoff_terminal_retirement_resumed_file_dual_proof (void)
   wyl_service_credential_mutation_authorization_t remediation_authorization = {
     .authorize = probe_mutation_authorization,.data = &remediation_probe,
   };
+  g_auto (CredentialRegistryFixture) remediation_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&remediation_registry,
+          handle, issued.credential.credential_id,
+          issued.credential.generation, issued.credential.subject_id,
+          issued.credential.tenant_id, TRUE));
   wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
     .authorization = &remediation_authorization,
+    .registry = remediation_registry.registry,
   };
   wyl_service_credential_handoff_remediation_result_t remediation = { 0 };
   g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
@@ -6421,11 +6454,14 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   wyl_service_credential_mutation_authorization_t remediation_authorization = {
     .authorize = probe_mutation_authorization,.data = &remediation_probe,
   };
-  InvalidationProbe invalidation = { 0 };
+  g_auto (CredentialRegistryFixture) remediation_registry = { 0 };
+  g_assert_true (credential_registry_fixture_init (&remediation_registry,
+          handle, issued.credential.credential_id,
+          issued.credential.generation, issued.credential.subject_id,
+          issued.credential.tenant_id, TRUE));
   wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
     .authorization = &remediation_authorization,
-    .invalidate_credential = probe_credential_invalidation,
-    .invalidation_data = &invalidation,
+    .registry = remediation_registry.registry,
   };
   wyl_service_credential_handoff_remediation_result_t remediation = { 0 };
   g_assert_cmpint (wyl_service_credential_handoff_remediate_exact (handle,
@@ -6433,6 +6469,8 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
       WYRELOG_E_OK);
   g_assert_true (remediation.revoked_now);
   g_assert_cmpint (remediation.revoke_event_id, >, 0);
+  g_assert_true (credential_registry_fixture_is (&remediation_registry,
+          WYL_SERVICE_AUTH_REVOKED));
   WylServiceCredentialOperationRemediationProof remediation_proof = { 0 };
   wyl_service_credential_operation_remediation_proof_from_result
       (&remediation, &remediation_proof);
@@ -6528,7 +6566,6 @@ test_handoff_terminal_retirement_revoke_fault_replay (void)
   g_assert_cmpint (g_rmdir (operation_root), ==, 0);
   wyl_service_credential_handoff_remediation_result_clear (&remediation);
   wyl_service_credential_handoff_result_clear (&issued);
-  g_clear_pointer (&invalidation.credential_id, g_free);
   g_free (remediation_probe.actor_subject_id);
   g_free (issue_probe.actor_subject_id);
 }

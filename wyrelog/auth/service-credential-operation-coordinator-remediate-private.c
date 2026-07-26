@@ -405,7 +405,8 @@ wyrelog_error_t
     wyl_service_credential_operation_handoff_remediation_result_clear
         (out_result);
   if (handle == NULL || storage == NULL || anchor == NULL || runtime == NULL
-      || out_result == NULL || runtime->session == NULL
+      || runtime->registry == NULL || out_result == NULL
+      || runtime->session == NULL
       || runtime->authenticated_actor_subject_id == NULL
       || !wyl_policy_service_actor_subject_is_valid
       (runtime->authenticated_actor_subject_id)
@@ -505,8 +506,7 @@ wyrelog_error_t
   };
   wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
     .authorization = &mutation_authorization,
-    .invalidate_credential = runtime->invalidate_credential,
-    .invalidation_data = runtime->invalidation_data,
+    .registry = runtime->registry,
   };
 
   if (resolve_existing) {

@@ -377,9 +377,7 @@ typedef struct
 typedef struct
 {
   const wyl_service_credential_mutation_authorization_t *authorization;
-    wyrelog_error_t (*invalidate_credential) (gpointer data,
-      const gchar * credential_id, guint64 generation);
-  gpointer invalidation_data;
+  WylServiceAuthRegistry *registry;
 } wyl_service_credential_handoff_remediation_runtime_t;
 
 typedef wyrelog_error_t (*wyl_service_principal_cb) (const

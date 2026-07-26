@@ -1277,6 +1277,7 @@ if get_option('enable_audit').allowed()
     '-DWYL_TEST_HAS_HANDOFF_CANCELLATION'
   test_service_credential_domain_deps += service_exchange_private_dep
 endif
+test_service_credential_domain_c_args += '-DWYL_AUTH_REGISTRY_TESTING'
 
 test_service_credential_domain = executable('test-service-credential-domain',
   [
@@ -1285,6 +1286,7 @@ test_service_credential_domain = executable('test-service-credential-domain',
     '../wyrelog/auth/service-credential-operation-coordinator-storage-private.c',
     '../wyrelog/auth/service-credential-operation-storage-private.c',
     '../wyrelog/auth/service-credential-operation-storage-windows-private.c',
+    '../wyrelog/daemon/auth-registry-private.c',
   ],
   c_args : test_service_credential_domain_c_args,
   link_with : test_service_credential_domain_link_with,
