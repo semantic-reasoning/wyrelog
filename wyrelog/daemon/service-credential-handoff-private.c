@@ -232,10 +232,8 @@ wyl_daemon_service_credential_handoff (const
 
   handoff_build_request (ctx, inputs, parent_identity, &request);
 
-  /* Thread the caller's registry-eviction hook into the rotate runtime so it
-   * fires at store commit; ISSUE never consumes rotate_runtime. */
-  rotate_runtime.invalidate_credential = ctx->invalidate_credential;
-  rotate_runtime.invalidation_data = ctx->invalidation_data;
+  /* ISSUE never consumes rotate_runtime. */
+  rotate_runtime.registry = ctx->registry;
 
   WylServiceCredentialOperationHandoffExecuteRuntime runtime = {
     .session = ctx->session,

@@ -4771,19 +4771,6 @@ service_credential_subject_matches_tenant (const gchar *subject,
       (gsize) (tenant_end - tenant_start)) == 0;
 }
 
-static wyrelog_error_t
-service_credential_registry_invalidate (gpointer data,
-    const gchar *credential_id, guint64 generation)
-{
-  WylDaemonHttpContext *ctx = data;
-  if (ctx == NULL || ctx->service_auth_registry == NULL
-      || credential_id == NULL || generation == 0)
-    return WYRELOG_E_INVALID;
-  WylServiceAuthRevokeResult result = { 0 };
-  return wyl_service_auth_registry_revoke_credential_generation
-      (ctx->service_auth_registry, credential_id, generation, &result);
-}
-
 /* Run the built escrow handoff inputs through the daemon handoff module and map
  * its return code onto the service-credential HTTP contract.  Success emits the
  * module's non-secret JSON receipt; the credential material is delivered only
@@ -4807,13 +4794,9 @@ service_credential_handoff_emit (SoupServerMessage *msg,
     .credential_publication_root = ctx->credential_publication_root,
     .cancellable = NULL,
   };
-  /* Rotate must evict the retired generation from the in-memory service-auth
-   * registry at commit so old-generation bearer tokens stop authenticating;
-   * issue mints a first credential and has nothing to evict. */
-  if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE) {
-    hctx.invalidate_credential = service_credential_registry_invalidate;
-    hctx.invalidation_data = ctx;
-  }
+  /* Issue mints a first credential and has nothing to evict. */
+  if (inputs->kind == WYL_SERVICE_CREDENTIAL_OPERATION_ROTATE)
+    hctx.registry = ctx->service_auth_registry;
 #ifdef WYL_TEST_DAEMON_HTTP
   hctx.publication_override = ctx->publication_override;
   hctx.publication_override_data = ctx->publication_override_data;
@@ -5221,8 +5204,7 @@ service_credential_revoke_handler (SoupServer *server, SoupServerMessage *msg,
 
   wyl_service_credential_t revoked = { 0 };
   wyl_service_credential_revoke_runtime_t revoke_runtime = {
-    .invalidate_credential = service_credential_registry_invalidate,
-    .invalidation_data = ctx,
+    .registry = ctx->service_auth_registry,
   };
   rc = wyl_service_credential_revoke_with_runtime (ctx->handle, path + 1,
       actor, values[1], &revoke_runtime, &revoked);

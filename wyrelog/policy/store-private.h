@@ -744,6 +744,12 @@ typedef struct
 
 typedef struct
 {
+  gchar credential_id[WYL_SERVICE_CREDENTIAL_ID_BUF];
+  guint64 generation;
+} WylPolicyServiceCredentialPredecessor;
+
+typedef struct
+{
   guint64 generation;
   guint32 envelope_format_version;
   guint8 provider_binding[32];
@@ -1806,7 +1812,8 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential_core
     gpointer now_data, const wyl_service_credential_runtime_t * runtime,
     guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
     wyl_policy_service_credential_info_t * out,
-    wyl_service_credential_secret_t ** out_secret);
+    wyl_service_credential_secret_t ** out_secret,
+    WylPolicyServiceCredentialPredecessor * out_predecessor);
 wyrelog_error_t wyl_policy_store_rotate_service_credential_handoff_core
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * store, const gchar * old_credential_id,
@@ -1816,7 +1823,8 @@ wyrelog_error_t wyl_policy_store_rotate_service_credential_handoff_core
     guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
     const wyl_policy_service_handoff_request_t * handoff,
     wyl_policy_service_credential_info_t * out,
-    wyl_policy_service_handoff_escrow_info_t * out_escrow);
+    wyl_policy_service_handoff_escrow_info_t * out_escrow,
+    WylPolicyServiceCredentialPredecessor * out_predecessor);
 wyrelog_error_t wyl_policy_store_verify_service_credential_secret
     (wyl_policy_store_t * store,
     const wyl_policy_service_credential_info_t * credential,

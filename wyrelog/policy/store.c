@@ -21366,12 +21366,15 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
     guint64 expected_generation,
     const guint8 *authority_cvk, gsize authority_cvk_len,
     wyl_policy_service_credential_info_t *out,
-    wyl_service_credential_secret_t **out_secret, gboolean authority_owned)
+    wyl_service_credential_secret_t **out_secret, gboolean authority_owned,
+    WylPolicyServiceCredentialPredecessor *out_predecessor)
 {
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
   if (out_secret != NULL)
     wyl_service_credential_secret_clear (out_secret);
+  if (out_predecessor != NULL)
+    memset (out_predecessor, 0, sizeof *out_predecessor);
   if (store == NULL || store->db == NULL || out == NULL || out_secret == NULL
       || old_credential_id == NULL
       || !wyl_service_credential_id_is_canonical (old_credential_id,
@@ -21564,6 +21567,11 @@ service_credential_rotate_impl (wyl_policy_store_t *store,
     wyl_policy_store_rollback_mutation (store);
   if (!authority_owned)
     g_mutex_unlock (&store->service_lifecycle_mutex);
+  if (rc == WYRELOG_E_OK && out_predecessor != NULL) {
+    g_strlcpy (out_predecessor->credential_id, old.credential_id,
+        sizeof out_predecessor->credential_id);
+    out_predecessor->generation = old.generation;
+  }
   wyl_policy_service_principal_info_clear (&principal);
   wyl_policy_service_credential_info_clear (&old);
   wyl_service_credential_material_clear (&material);
@@ -21595,7 +21603,7 @@ wyl_policy_store_rotate_service_credential (wyl_policy_store_t *store,
 {
   return service_credential_rotate_impl (store, old_credential_id,
       actor_subject_id, request_id, new_expires_at_us, now_us_cb, now_data,
-      runtime, 0, NULL, 0, out, out_secret, FALSE);
+      runtime, 0, NULL, 0, out, out_secret, FALSE, NULL);
 }
 
 wyrelog_error_t
@@ -21607,8 +21615,11 @@ wyrelog_error_t
     const wyl_service_credential_runtime_t * runtime,
     guint64 expected_generation, const guint8 * cvk,
     gsize cvk_len, wyl_policy_service_credential_info_t * out,
-    wyl_service_credential_secret_t ** out_secret)
+    wyl_service_credential_secret_t ** out_secret,
+    WylPolicyServiceCredentialPredecessor * out_predecessor)
 {
+  if (out_predecessor == NULL)
+    return WYRELOG_E_INVALID;
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
   if (out_secret != NULL)
@@ -21619,7 +21630,7 @@ wyrelog_error_t
   return rc == WYRELOG_E_OK ? service_credential_rotate_impl (store,
       old_credential_id, actor_subject_id, request_id, new_expires_at_us,
       now_us_cb, now_data, runtime, expected_generation, cvk, cvk_len, out,
-      out_secret, TRUE) : rc;
+      out_secret, TRUE, out_predecessor) : rc;
 }
 
 wyrelog_error_t
@@ -21632,13 +21643,16 @@ wyrelog_error_t
     guint64 expected_generation, const guint8 * cvk, gsize cvk_len,
     const wyl_policy_service_handoff_request_t * handoff,
     wyl_policy_service_credential_info_t * out,
-    wyl_policy_service_handoff_escrow_info_t * out_escrow)
+    wyl_policy_service_handoff_escrow_info_t * out_escrow,
+    WylPolicyServiceCredentialPredecessor * out_predecessor)
 {
   if (out != NULL)
     wyl_policy_service_credential_info_clear (out);
   if (out_escrow != NULL)
     wyl_policy_service_handoff_escrow_info_clear (out_escrow);
-  if (out == NULL || out_escrow == NULL
+  if (out_predecessor != NULL)
+    memset (out_predecessor, 0, sizeof *out_predecessor);
+  if (out == NULL || out_escrow == NULL || out_predecessor == NULL
       || !service_credential_handoff_request_valid (handoff))
     return WYRELOG_E_INVALID;
   if (old_credential_id == NULL
@@ -21665,15 +21679,28 @@ wyrelog_error_t
       actor_subject_id, handoff, "credential_rotate", old_credential_id,
       fingerprint, out, out_escrow);
   sodium_memzero (fingerprint, sizeof fingerprint);
-  if (rc == WYRELOG_E_OK)
+  if (rc == WYRELOG_E_OK) {
+    wyl_policy_service_credential_info_t retired = { 0 };
+    rc = wyl_policy_store_lookup_service_credential_by_id (store,
+        old_credential_id, &retired);
+    if (rc == WYRELOG_E_OK && (!g_str_equal (retired.state, "revoked")
+            || retired.generation < 2))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK) {
+      g_strlcpy (out_predecessor->credential_id, retired.credential_id,
+          sizeof out_predecessor->credential_id);
+      out_predecessor->generation = retired.generation - 1;
+    }
+    wyl_policy_service_credential_info_clear (&retired);
     return rc;
+  }
   if (rc != WYRELOG_E_NOT_FOUND)
     return rc;
   wyl_service_credential_secret_t *secret = NULL;
   rc = wyl_policy_store_rotate_service_credential_core (txn,
       store, old_credential_id, actor_subject_id, request_id,
       new_expires_at_us, now_us_cb, now_data, runtime, expected_generation,
-      cvk, cvk_len, out, &secret);
+      cvk, cvk_len, out, &secret, out_predecessor);
   if (rc == WYRELOG_E_OK)
     rc = service_credential_handoff_store (store, "rotate", request_id,
         actor_subject_id, handoff, out, secret, out_escrow);

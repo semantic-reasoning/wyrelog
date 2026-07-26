@@ -6,6 +6,7 @@
 #include <string.h>
 
 #include "daemon/service-credential-handoff-private.h"
+#include "daemon/auth-registry-private.h"
 #include "auth/service-credential-domain-private.h"
 #include "auth/service-credential-private.h"
 #include "wyrelog/wyl-handle-private.h"
@@ -406,26 +407,6 @@ rotate_inputs_for (const gchar *request_id, const gchar *subject_id,
         g_get_real_time () + G_TIME_SPAN_HOUR,};
 }
 
-/* Records the (credential_id, generation) the rotate authority commit asks the
- * daemon to evict from its in-memory service-auth registry. */
-typedef struct
-{
-  guint calls;
-  gchar *credential_id;
-  guint64 generation;
-} InvalidateProbe;
-
-static wyrelog_error_t
-invalidate_probe (gpointer data, const gchar *credential_id, guint64 generation)
-{
-  InvalidateProbe *probe = data;
-  probe->calls++;
-  g_free (probe->credential_id);
-  probe->credential_id = g_strdup (credential_id);
-  probe->generation = generation;
-  return WYRELOG_E_OK;
-}
-
 /* A configured issue emits a non-secret JSON receipt, mints one credential and
  * records exactly one delivery. */
 static void
@@ -494,11 +475,25 @@ test_daemon_handoff_rotate (void)
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
   fresh_request_id (request_id);
   HandoffPublication publication = { 0 };
-  InvalidateProbe probe = { 0 };
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) "01890c10-2e3f-7000-8000-000000000221",
+    .jti = (gchar *) "01890c10-2e3f-7000-8000-000000000222",
+    .credential_id = old_id,
+    .generation = old_generation,
+    .principal = (gchar *) "svc:handoff:executor",
+    .tenant = (gchar *) "tenant-a",
+  };
+  gboolean changed = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
+          &reservation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry,
+          &reservation, &changed), ==, WYRELOG_E_OK);
+  g_assert_true (changed);
   WylDaemonServiceCredentialHandoffContext ctx =
       context_for (&fixture, session, request_id, &publication);
-  ctx.invalidate_credential = invalidate_probe;
-  ctx.invalidation_data = &probe;
+  ctx.registry = registry;
   WylDaemonServiceCredentialHandoffInputs inputs =
       rotate_inputs_for (request_id, "svc:handoff:executor", old_id,
       old_generation);
@@ -517,10 +512,16 @@ test_daemon_handoff_rotate (void)
 
   /* The retired generation was evicted from the registry exactly once, keyed by
    * the OLD credential id and generation. */
-  g_assert_cmpuint (probe.calls, ==, 1);
-  g_assert_cmpstr (probe.credential_id, ==, old_id);
-  g_assert_cmpuint (probe.generation, ==, old_generation);
-  g_free (probe.credential_id);
+  WylServiceAuthReservation copy = { 0 };
+  WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
+  gboolean found = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
+          reservation.session_id, reservation.jti, &copy, &state, &found),
+      ==, WYRELOG_E_OK);
+  g_assert_true (found);
+  g_assert_cmpint (state, ==, WYL_SERVICE_AUTH_REVOKED);
+  wyl_service_auth_reservation_clear (&copy);
+  wyl_service_auth_registry_unref (registry);
 }
 
 /* Re-submitting the same request_id replays to a byte-identical receipt with no
