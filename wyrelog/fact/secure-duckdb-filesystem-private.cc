@@ -148,6 +148,16 @@ WylSecureDuckdbFileSystem::AcquireLockDescriptor (
   return duplicate;
 }
 
+void
+WylSecureDuckdbFileSystem::RequireBinding (const char *operation)
+{
+  require_ok (wyl_fact_artifact_namespace_revalidate (namespace_),
+      operation);
+  if (main_bound_)
+    require_ok (wyl_fact_artifact_namespace_revalidate_main (namespace_),
+        operation);
+}
+
 duckdb::unique_ptr<duckdb::FileHandle>
 WylSecureDuckdbFileSystem::OpenFile (const duckdb::string &path,
     duckdb::FileOpenFlags flags,
@@ -389,6 +399,7 @@ WylSecureDuckdbFileSystem::MoveFile (const duckdb::string &source,
     duckdb::optional_ptr<duckdb::FileOpener> opener)
 {
   (void) opener;
+  RequireBinding ("pre-rename binding revalidation");
   const auto source_artifact = logical_artifact_for (source);
   const auto target_artifact = logical_artifact_for (target);
   if (source_artifact.artifact == WYL_FACT_ARTIFACT_TEMP
@@ -399,6 +410,7 @@ WylSecureDuckdbFileSystem::MoveFile (const duckdb::string &source,
     io_reject ("renaming the held main binding is forbidden");
   require_ok (wyl_fact_artifact_namespace_rename (namespace_,
       source_artifact.artifact, target_artifact.artifact), "rename");
+  RequireBinding ("post-rename binding revalidation");
 }
 
 bool
@@ -410,6 +422,7 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string &path,
    * false denies the host path without turning it into filesystem authority. */
   if (path == "/proc/self/cgroup")
     return false;
+  RequireBinding ("pre-exists binding revalidation");
   const auto logical = logical_artifact_for (path);
   int fd = -1;
   auto rc = logical.artifact == WYL_FACT_ARTIFACT_TEMP
@@ -419,11 +432,15 @@ WylSecureDuckdbFileSystem::FileExists (const duckdb::string &path,
           logical.artifact, FALSE, FALSE, &fd);
   if (rc == WYRELOG_E_OK) {
     close (fd);
+    RequireBinding ("post-exists binding revalidation");
     return true;
   }
-  if (is_missing (rc))
+  if (is_missing (rc)) {
+    RequireBinding ("post-exists binding revalidation");
     return false;
+  }
   require_ok (rc, "exists");
+  return false;
 }
 
 bool
@@ -431,6 +448,7 @@ WylSecureDuckdbFileSystem::IsPipe (const duckdb::string &path,
     duckdb::optional_ptr<duckdb::FileOpener> opener)
 {
   (void) opener;
+  RequireBinding ("pre-remove binding revalidation");
   (void) logical_artifact_for (path);
   return false;
 }
@@ -449,6 +467,7 @@ WylSecureDuckdbFileSystem::RemoveFile (const duckdb::string &path,
       logical.artifact), "remove");
   require_ok (wyl_fact_artifact_namespace_sync_directory (namespace_),
       "remove directory sync");
+  RequireBinding ("post-remove binding revalidation");
 }
 
 bool
@@ -456,6 +475,7 @@ WylSecureDuckdbFileSystem::TryRemoveFile (const duckdb::string &path,
     duckdb::optional_ptr<duckdb::FileOpener> opener)
 {
   (void) opener;
+  RequireBinding ("pre-try-remove binding revalidation");
   const auto logical = logical_artifact_for (path);
   if (logical.artifact == WYL_FACT_ARTIFACT_TEMP)
     io_reject ("temporary removal is not provided by the namespace");
@@ -467,11 +487,15 @@ WylSecureDuckdbFileSystem::TryRemoveFile (const duckdb::string &path,
   {
     require_ok (wyl_fact_artifact_namespace_sync_directory (namespace_),
         "try-remove directory sync");
+    RequireBinding ("post-try-remove binding revalidation");
     return true;
   }
-  if (is_missing (rc))
+  if (is_missing (rc)) {
+    RequireBinding ("post-try-remove binding revalidation");
     return false;
+  }
   require_ok (rc, "try remove");
+  return false;
 }
 
 void
@@ -487,10 +511,13 @@ WylSecureDuckdbFileSystem::RemoveFiles (
 void
 WylSecureDuckdbFileSystem::FileSync (duckdb::FileHandle &handle)
 {
-  if (!bounded_handle (handle).Sync ())
+  auto &bounded = bounded_handle (handle);
+  if (!bounded.Sync ())
     io_reject ("file sync");
   require_ok (wyl_fact_artifact_namespace_sync_directory (namespace_),
       "directory sync");
+  if (!bounded.Revalidate ())
+    io_reject ("post-sync binding revalidation");
 }
 
 duckdb::string WylSecureDuckdbFileSystem::GetHomeDirectory ()
