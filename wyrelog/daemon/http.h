@@ -95,6 +95,7 @@ typedef enum
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_AFTER_SESSION_INSERT,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_DISCONNECT,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE,
@@ -253,11 +254,16 @@ gchar *wyl_daemon_http_dup_last_service_publication_token_for_test
     (SoupServer * server);
 void wyl_daemon_http_service_publication_counts_for_test
     (SoupServer * server, guint * out_sessions, guint * out_access_tokens);
-wyrelog_error_t wyl_daemon_http_profile_events_ingest_for_test
-    (WylDaemonProfile profile, gboolean transport_ok, gboolean body_oversize,
-    const gchar * body, gsize body_len, gint * out_status,
-    const gchar ** out_token, gchar ** out_profile, gchar ** out_event,
-    gint64 * out_timestamp_us);
+void wyl_daemon_http_service_response_wipe_snapshot_for_test
+    (SoupServer * server, guint * out_count, gboolean * out_canary_seen,
+    gboolean * out_all_zero);
+gboolean
+    wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
+    (SoupServer * server, const gchar * session_id);
+wyrelog_error_t wyl_daemon_http_profile_events_ingest_for_test (WylDaemonProfile
+    profile, gboolean transport_ok, gboolean body_oversize, const gchar * body,
+    gsize body_len, gint * out_status, const gchar ** out_token,
+    gchar ** out_profile, gchar ** out_event, gint64 * out_timestamp_us);
 #ifdef WYL_HAS_AUDIT
 void wyl_daemon_http_service_exchange_limiter_snapshot_for_test
     (SoupServer * server, WylServiceExchangeLimiterSnapshot * out_snapshot);

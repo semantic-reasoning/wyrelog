@@ -6780,22 +6780,27 @@ check_service_publication_fault_matrix (void)
     guint access_tokens;
     gboolean registry_found;
     gboolean resolves;
+    guint response_wipes;
+    gboolean mutated_same_pointer;
   } cases[] = {
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_RESPONSE_PREPARE, 0, 0, FALSE,
-        FALSE},
+        FALSE, 0, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_CANCEL, 0, 0, FALSE,
-        FALSE},
+        FALSE, 1, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_AFTER_SESSION_INSERT, 0, 0, FALSE,
-        FALSE},
+        FALSE, 1, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_DISCONNECT, 0, 0, FALSE,
-        FALSE},
-    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH, 1, 0,
-        FALSE, FALSE},
-    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH, 0, 1,
-        FALSE, FALSE},
+        FALSE, 1, FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH, 1, 1,
+        FALSE, FALSE, 1, FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION, 1,
+        1, FALSE, FALSE, 1, TRUE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH, 1, 1,
+        FALSE, FALSE, 1, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT, 1, 1, TRUE,
-        TRUE},
-    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE, 1, 1, TRUE, FALSE},
+        TRUE, 1, FALSE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE, 1, 1, TRUE, FALSE,
+        1, FALSE},
   };
 
   for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
@@ -6846,9 +6851,17 @@ check_service_publication_fault_matrix (void)
     guint access_tokens = 0;
     wyl_daemon_http_service_publication_counts_for_test (server, &sessions,
         &access_tokens);
+    guint response_wipes = 0;
+    gboolean response_canary_seen = FALSE;
+    gboolean response_all_zero = FALSE;
+    wyl_daemon_http_service_response_wipe_snapshot_for_test (server,
+        &response_wipes, &response_canary_seen, &response_all_zero);
     if (publish_rc == WYRELOG_E_OK || body != NULL || token == NULL
         || sessions != cases[i].sessions
-        || access_tokens != cases[i].access_tokens) {
+        || access_tokens != cases[i].access_tokens
+        || response_wipes != cases[i].response_wipes
+        || (response_wipes > 0
+            && (!response_canary_seen || !response_all_zero))) {
       soup_server_disconnect (server);
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
@@ -6877,6 +6890,16 @@ check_service_publication_fault_matrix (void)
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
       return 2180 + (gint) i;
+    }
+    gboolean mutated_same_pointer =
+        wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
+        (server, claims.session_id);
+    if (mutated_same_pointer != cases[i].mutated_same_pointer) {
+      wyl_jwt_access_claims_clear (&claims);
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2190 + (gint) i;
     }
     gint registry_state = WYL_SERVICE_AUTH_PENDING;
     gboolean registry_found = FALSE;
@@ -6910,6 +6933,194 @@ check_service_publication_fault_matrix (void)
     wyl_service_credential_issue_result_clear (&issued);
   }
   return 0;
+}
+
+static gint
+check_service_terminal_release_restart_contract (void)
+{
+  g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GBytes) old_payload = NULL;
+  g_autoptr (GBytes) fresh_payload = NULL;
+  g_autofree gchar *failed_body = NULL;
+  g_autofree gchar *old_token = NULL;
+  g_autofree gchar *old_key_id = NULL;
+  g_autofree gchar *resolved_session = NULL;
+  g_autofree gchar *fresh_body = NULL;
+  g_autofree gchar *fresh_token = NULL;
+  g_autofree gchar *fresh_key_id = NULL;
+  g_autofree gchar *resolved_actor = NULL;
+  g_autofree gchar *resolved_tenant = NULL;
+  wyl_service_credential_issue_result_t issued = { 0 };
+  SoupServer *server = NULL;
+  wyl_jwt_access_claims_t old_claims = { 0 };
+  wyl_jwt_access_claims_t fresh_claims = { 0 };
+  wyl_id_t canonical_session = WYL_ID_NIL;
+  wyl_id_t canonical_jti = WYL_ID_NIL;
+  gint result = 2250;
+
+  if (!service_credential_store_fixture_init (&credential_store))
+    return result;
+  WylHandleOpenOptions handle_options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .policy_store_path = credential_store.policy_path,
+    .policy_keyprovider_path = credential_store.key_spec,
+    .audit_store_path = credential_store.audit_path,
+    .production_mode = TRUE,
+  };
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+    return result;
+  prepare_service_token_subject (handle, "svc:exchange:restart");
+  if (wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK)
+    goto cleanup;
+  issue_service_token_credential (handle, "svc:exchange:restart", "tenant-a",
+      "restart-credential",
+      g_get_real_time () + (gint64) 3600 * G_USEC_PER_SEC, &issued);
+  gsize credential_secret_len = 0;
+  const gchar *credential_secret =
+      wyl_service_credential_secret_peek_encoded (issued.secret,
+      &credential_secret_len);
+  WylDaemonOptions options = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+  };
+  server = wyl_daemon_start_http_server (&options, handle, &error);
+  if (server == NULL)
+    goto cleanup;
+
+  wyl_daemon_http_set_service_publication_fault_for_test (server,
+      WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE);
+  if (wyl_daemon_http_publish_service_token_for_test (server,
+          issued.credential.credential_id, credential_secret,
+          credential_secret_len, &failed_body) == WYRELOG_E_OK
+      || failed_body != NULL)
+    goto cleanup;
+  old_token =
+      wyl_daemon_http_dup_last_service_publication_token_for_test (server);
+  guint sessions = 0;
+  guint access_tokens = 0;
+  wyl_daemon_http_service_publication_counts_for_test (server, &sessions,
+      &access_tokens);
+  if (old_token == NULL || sessions != 1 || access_tokens != 1)
+    goto cleanup;
+
+  guint8 old_secret[32];
+  old_key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (old_key_id == NULL
+      || wyl_daemon_http_copy_access_token_secret (server, old_secret,
+          sizeof old_secret) != WYRELOG_E_OK
+      || wyl_jwt_verify_hs256_access_token (old_token, old_secret,
+          sizeof old_secret, old_key_id, "wyrelogd", "wyrelog-client",
+          g_get_real_time () / G_USEC_PER_SEC, &old_payload) != WYRELOG_E_OK) {
+    sodium_memzero (old_secret, sizeof old_secret);
+    goto cleanup;
+  }
+  sodium_memzero (old_secret, sizeof old_secret);
+  if (wyl_jwt_parse_access_claims_json (old_payload,
+          &old_claims) != WYRELOG_E_OK)
+    goto cleanup;
+  gboolean old_registry_found = FALSE;
+  gint old_registry_state = WYL_SERVICE_AUTH_PENDING;
+  if (wyl_daemon_http_lookup_service_registry_for_test (server,
+          old_claims.session_id, old_claims.jti, &old_registry_state,
+          &old_registry_found) != WYRELOG_E_OK
+      || !old_registry_found || old_registry_state != WYL_SERVICE_AUTH_ACTIVE)
+    goto cleanup;
+  if (wyl_daemon_http_resolve_bearer_for_test (server, old_token,
+          &resolved_session, NULL, NULL) == WYRELOG_E_OK)
+    goto cleanup;
+
+  soup_server_disconnect (server);
+  g_clear_object (&server);
+  g_clear_object (&handle);
+  g_clear_error (&error);
+
+  if (wyl_handle_open_with_options (&handle_options, &handle) != WYRELOG_E_OK)
+    goto cleanup;
+  server = wyl_daemon_start_http_server (&options, handle, &error);
+  if (server == NULL)
+    goto cleanup;
+  sessions = G_MAXUINT;
+  access_tokens = G_MAXUINT;
+  wyl_daemon_http_service_publication_counts_for_test (server, &sessions,
+      &access_tokens);
+  gboolean restarted_registry_found = TRUE;
+  gint restarted_registry_state = WYL_SERVICE_AUTH_ACTIVE;
+  if (sessions != 0 || access_tokens != 0
+      || wyl_daemon_http_lookup_service_registry_for_test (server,
+          old_claims.session_id, old_claims.jti, &restarted_registry_state,
+          &restarted_registry_found) != WYRELOG_E_OK
+      || restarted_registry_found)
+    goto cleanup;
+  g_clear_pointer (&resolved_session, g_free);
+  if (wyl_daemon_http_resolve_bearer_for_test (server, old_token,
+          &resolved_session, NULL, NULL) == WYRELOG_E_OK)
+    goto cleanup;
+
+  if (wyl_daemon_http_publish_service_token_for_test (server,
+          issued.credential.credential_id, credential_secret,
+          credential_secret_len, &fresh_body) != WYRELOG_E_OK
+      || fresh_body == NULL)
+    goto cleanup;
+  fresh_token = extract_json_string (fresh_body, "access_token");
+  guint8 fresh_secret[32];
+  fresh_key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (fresh_token == NULL || fresh_key_id == NULL
+      || wyl_daemon_http_copy_access_token_secret (server, fresh_secret,
+          sizeof fresh_secret) != WYRELOG_E_OK
+      || wyl_jwt_verify_hs256_access_token (fresh_token, fresh_secret,
+          sizeof fresh_secret, fresh_key_id, "wyrelogd", "wyrelog-client",
+          g_get_real_time () / G_USEC_PER_SEC,
+          &fresh_payload) != WYRELOG_E_OK) {
+    sodium_memzero (fresh_secret, sizeof fresh_secret);
+    goto cleanup;
+  }
+  sodium_memzero (fresh_secret, sizeof fresh_secret);
+  if (wyl_jwt_parse_access_claims_json (fresh_payload,
+          &fresh_claims) != WYRELOG_E_OK
+      || wyl_id_parse (fresh_claims.session_id,
+          &canonical_session) != WYRELOG_E_OK
+      || wyl_id_parse (fresh_claims.jti, &canonical_jti) != WYRELOG_E_OK
+      || g_strcmp0 (fresh_claims.auth_method, "service_credential") != 0)
+    goto cleanup;
+  sessions = 0;
+  access_tokens = 0;
+  gboolean fresh_registry_found = FALSE;
+  gint fresh_registry_state = WYL_SERVICE_AUTH_PENDING;
+  guint fresh_response_wipes = G_MAXUINT;
+  gboolean fresh_response_canary = TRUE;
+  gboolean fresh_response_all_zero = TRUE;
+  wyl_daemon_http_service_publication_counts_for_test (server, &sessions,
+      &access_tokens);
+  wyl_daemon_http_service_response_wipe_snapshot_for_test (server,
+      &fresh_response_wipes, &fresh_response_canary, &fresh_response_all_zero);
+  if (sessions != 1 || access_tokens != 1 || fresh_response_wipes != 0
+      || fresh_response_canary || fresh_response_all_zero
+      || wyl_daemon_http_lookup_service_registry_for_test (server,
+          fresh_claims.session_id, fresh_claims.jti, &fresh_registry_state,
+          &fresh_registry_found) != WYRELOG_E_OK
+      || !fresh_registry_found
+      || fresh_registry_state != WYL_SERVICE_AUTH_ACTIVE)
+    goto cleanup;
+  g_clear_pointer (&resolved_session, g_free);
+  if (wyl_daemon_http_resolve_bearer_for_test (server, fresh_token,
+          &resolved_session, &resolved_actor,
+          &resolved_tenant) != WYRELOG_E_OK
+      || g_strcmp0 (resolved_actor, "svc:exchange:restart") != 0
+      || g_strcmp0 (resolved_tenant, "tenant-a") != 0)
+    goto cleanup;
+  result = 0;
+
+cleanup:
+  if (server != NULL) {
+    soup_server_disconnect (server);
+    g_object_unref (server);
+  }
+  wyl_jwt_access_claims_clear (&fresh_claims);
+  wyl_jwt_access_claims_clear (&old_claims);
+  wyl_service_credential_issue_result_clear (&issued);
+  return result;
 }
 #endif
 
@@ -8487,6 +8698,12 @@ main (void)
   gint service_publication_fault_rc = check_service_publication_fault_matrix ();
   if (service_publication_fault_rc != 0) {
     result = service_publication_fault_rc;
+    goto cleanup;
+  }
+  gint service_terminal_restart_rc =
+      check_service_terminal_release_restart_contract ();
+  if (service_terminal_restart_rc != 0) {
+    result = service_terminal_restart_rc;
     goto cleanup;
   }
 #endif

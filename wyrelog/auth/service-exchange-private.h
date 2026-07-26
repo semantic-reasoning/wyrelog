@@ -61,6 +61,7 @@ typedef struct
   const gchar *principal;
   const gchar *tenant;
   const gchar *key_id;
+  gint64 issued_at;
   gint64 expires_at;
   WylSession *session;
   const gchar *access_token;
@@ -101,6 +102,11 @@ G_GNUC_INTERNAL void wyl_service_exchange_authority_clear
     (WylServiceExchangeAuthority * authority);
 G_GNUC_INTERNAL void wyl_service_exchange_prepared_clear
     (WylServiceExchangePrepared * prepared);
+/* A publication ticket is fixed to the thread that owns the transferred WRITE
+ * lease. Every lifecycle call, including terminal release, abort, and free,
+ * must run on that owner thread; tickets and borrowed views are not
+ * transferable. The publication_context is an identity binding, not owned
+ * storage, and must remain live until the ticket reaches a terminal state. */
 G_GNUC_INTERNAL wyrelog_error_t
     wyl_service_exchange_publication_ticket_new_take
     (WylServiceExchangeAuthority * authority,

@@ -617,6 +617,8 @@ test_publication_ticket_lifecycle_and_exact_binding (void)
   g_assert_cmpstr (view.principal, ==, "svc:exchange:ticket");
   g_assert_cmpstr (view.tenant, ==, "tenant-a");
   g_assert_cmpstr (view.key_id, ==, "ticket-key");
+  g_assert_cmpint (view.issued_at, >=, 0);
+  g_assert_cmpint (view.expires_at, ==, view.issued_at + 300);
   g_assert_nonnull (view.session);
   g_assert_nonnull (view.access_token);
 

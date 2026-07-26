@@ -20,6 +20,7 @@ struct _WylServiceExchangePublicationTicket
   WylServiceExchangeTicketState state;
   WylServiceAuthReservation reservation;
   gchar *key_id;
+  gint64 issued_at;
   gint64 expires_at;
   WylSession *session;
   gchar *access_token;
@@ -134,6 +135,7 @@ publication_ticket_validate (WylServiceExchangePublicationTicket *ticket)
       || g_strcmp0 (ticket->session->service_subject_id,
           ticket->reservation.principal) != 0
       || g_strcmp0 (ticket->session->tenant, ticket->reservation.tenant) != 0
+      || ticket->session->service_issued_at_seconds != ticket->issued_at
       || ticket->session->service_expires_at_seconds != ticket->expires_at)
     return WYRELOG_E_POLICY;
   guint64 serial = 0;
@@ -172,6 +174,8 @@ wyrelog_error_t
   ticket->access_token = g_strdup (prepared->access_token);
   ticket->expires_at =
       wyl_session_get_service_expires_at_seconds_private (prepared->session);
+  ticket->issued_at =
+      wyl_session_get_service_issued_at_seconds_private (prepared->session);
   ticket->reservation.session_id =
       wyl_session_dup_id_string (prepared->session);
   ticket->reservation.jti =
@@ -187,7 +191,8 @@ wyrelog_error_t
   ticket->reservation._free = publication_ticket_reservation_free;
   ticket->reservation._free_data = NULL;
   ticket->state = WYL_SERVICE_EXCHANGE_TICKET_NEW;
-  if (ticket->expires_at <= 0 || ticket->reservation.session_id == NULL
+  if (ticket->issued_at < 0 || ticket->expires_at <= ticket->issued_at
+      || ticket->reservation.session_id == NULL
       || ticket->reservation.jti == NULL
       || ticket->reservation.credential_id == NULL
       || ticket->reservation.generation == 0
@@ -236,9 +241,9 @@ wyrelog_error_t
         ticket->reservation.credential_id,.generation =
         ticket->reservation.generation,.principal =
         ticket->reservation.principal,.tenant =
-        ticket->reservation.tenant,.key_id = ticket->key_id,.expires_at =
-        ticket->expires_at,.session = ticket->session,.access_token =
-        ticket->access_token,};
+        ticket->reservation.tenant,.key_id = ticket->key_id,.issued_at =
+        ticket->issued_at,.expires_at = ticket->expires_at,.session =
+        ticket->session,.access_token = ticket->access_token,};
   return WYRELOG_E_OK;
 }
 

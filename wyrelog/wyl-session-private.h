@@ -58,5 +58,13 @@ G_GNUC_INTERNAL gint64 wyl_session_get_service_issued_at_seconds_private (const
     WylSession * session);
 G_GNUC_INTERNAL gint64 wyl_session_get_service_expires_at_seconds_private (const
     WylSession * session);
+/* Allocation-free exact matcher for publication/rollback while the daemon
+ * context lock is held. It includes ACTIVE state, auth method, session id,
+ * JTI, subject, tenant, credential generation, and both timestamps. */
+G_GNUC_INTERNAL gboolean wyl_session_matches_service_tuple_private (const
+    WylSession * session, const gchar * session_id, const gchar * jti,
+    const gchar * subject_id, const gchar * tenant_id,
+    const gchar * credential_id, guint64 credential_generation,
+    gint64 issued_at_seconds, gint64 expires_at_seconds);
 
 G_END_DECLS;
