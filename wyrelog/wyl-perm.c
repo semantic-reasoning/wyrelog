@@ -516,6 +516,61 @@ update_direct_permission_store (WylHandle *handle, const gchar *subject_id,
     const gchar *action, const gchar *resource_id, gboolean insert,
     const WylAuditEvent *audit_event)
 {
+  if (wyl_policy_subject_has_service_prefix (subject_id)) {
+    WylServiceAuthWriteLease *lease = NULL;
+    WylServiceAuthorityTransaction *transaction = NULL;
+    wyl_policy_store_t *store = NULL;
+    g_autofree gchar *audit_id = audit_event != NULL
+        ? wyl_audit_event_dup_id_string (audit_event) : NULL;
+    if (audit_event != NULL && audit_id == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_auth_write_lease_get_policy_store (lease, handle,
+          &store);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_transaction_begin (store,
+          handle, lease, &transaction);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_apply_direct_permission_mutation
+          (transaction, store, subject_id, action, resource_id, insert,
+          audit_id,
+          audit_event != NULL ? wyl_audit_event_get_created_at_us
+          (audit_event) : 0,
+          audit_event != NULL ? wyl_audit_event_get_subject_id
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_action
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_resource_id
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_deny_reason
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_deny_origin
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_request_id
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_decision
+          (audit_event) : WYL_DECISION_DENY);
+    if (transaction != NULL) {
+      wyrelog_error_t terminal_rc = rc == WYRELOG_E_OK
+          ? wyl_policy_store_service_authority_transaction_commit (transaction)
+          : wyl_policy_store_service_authority_transaction_rollback
+          (transaction);
+      if (rc == WYRELOG_E_OK)
+        rc = terminal_rc;
+      wyl_policy_store_service_authority_transaction_free (transaction);
+    }
+    if (lease != NULL) {
+      wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+      if (rc == WYRELOG_E_OK)
+        rc = release_rc;
+      wyl_service_auth_write_lease_free (lease);
+    }
+    return rc;
+  }
+
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
     return WYRELOG_E_INVALID;
@@ -546,6 +601,60 @@ update_role_membership_store (WylHandle *handle, const gchar *subject_id,
     const gchar *role_id, const gchar *scope, gboolean insert,
     const WylAuditEvent *audit_event)
 {
+  if (wyl_policy_subject_has_service_prefix (subject_id)) {
+    WylServiceAuthWriteLease *lease = NULL;
+    WylServiceAuthorityTransaction *transaction = NULL;
+    wyl_policy_store_t *store = NULL;
+    g_autofree gchar *audit_id = audit_event != NULL
+        ? wyl_audit_event_dup_id_string (audit_event) : NULL;
+    if (audit_event != NULL && audit_id == NULL)
+      return WYRELOG_E_INTERNAL;
+
+    wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+        (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_auth_write_lease_get_policy_store (lease, handle,
+          &store);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_transaction_begin (store,
+          handle, lease, &transaction);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_apply_role_membership_mutation
+          (transaction, store, subject_id, role_id, scope, insert, audit_id,
+          audit_event != NULL ? wyl_audit_event_get_created_at_us
+          (audit_event) : 0,
+          audit_event != NULL ? wyl_audit_event_get_subject_id
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_action
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_resource_id
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_deny_reason
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_deny_origin
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_request_id
+          (audit_event) : NULL,
+          audit_event != NULL ? wyl_audit_event_get_decision
+          (audit_event) : WYL_DECISION_DENY);
+    if (transaction != NULL) {
+      wyrelog_error_t terminal_rc = rc == WYRELOG_E_OK
+          ? wyl_policy_store_service_authority_transaction_commit (transaction)
+          : wyl_policy_store_service_authority_transaction_rollback
+          (transaction);
+      if (rc == WYRELOG_E_OK)
+        rc = terminal_rc;
+      wyl_policy_store_service_authority_transaction_free (transaction);
+    }
+    if (lease != NULL) {
+      wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+      if (rc == WYRELOG_E_OK)
+        rc = release_rc;
+      wyl_service_auth_write_lease_free (lease);
+    }
+    return rc;
+  }
+
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   if (store == NULL)
     return WYRELOG_E_INVALID;

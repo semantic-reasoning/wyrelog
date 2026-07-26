@@ -1900,16 +1900,27 @@ wyrelog_error_t wyl_policy_store_upsert_role (wyl_policy_store_t * store,
     const gchar * role_id, const gchar * role_name);
 wyrelog_error_t wyl_policy_store_upsert_permission (wyl_policy_store_t * store,
     const gchar * perm_id, const gchar * perm_name, const gchar * klass);
+wyrelog_error_t wyl_policy_store_service_authority_upsert_permission
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * perm_id,
+    const gchar * perm_name, const gchar * klass);
 wyrelog_error_t wyl_policy_store_role_exists (wyl_policy_store_t * store,
     const gchar * role_id, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_permission_exists (wyl_policy_store_t * store,
     const gchar * perm_id, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_grant_role_permission (wyl_policy_store_t *
     store, const gchar * role_id, const gchar * perm_id);
+wyrelog_error_t wyl_policy_store_service_authority_grant_role_permission
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * role_id, const gchar * perm_id);
 wyrelog_error_t wyl_policy_store_foreach_role_permission (wyl_policy_store_t *
     store, wyl_policy_role_permission_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_grant_role_inheritance (wyl_policy_store_t *
     store, const gchar * child_role_id, const gchar * parent_role_id);
+wyrelog_error_t wyl_policy_store_service_authority_grant_role_inheritance
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * child_role_id,
+    const gchar * parent_role_id);
 wyrelog_error_t wyl_policy_store_foreach_role_inheritance (wyl_policy_store_t *
     store, wyl_policy_role_inheritance_cb cb, gpointer user_data);
 wyrelog_error_t wyl_policy_store_grant_role_membership (wyl_policy_store_t *
@@ -1925,6 +1936,16 @@ wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t * store,
 wyrelog_error_t
     wyl_policy_store_apply_role_membership_mutation_with_audit
     (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * role_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision);
+wyrelog_error_t
+    wyl_policy_store_service_authority_apply_role_membership_mutation
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * role_id, const gchar * scope, gboolean insert,
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,
@@ -1956,6 +1977,16 @@ wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t * store,
 wyrelog_error_t
     wyl_policy_store_apply_direct_permission_mutation_with_audit
     (wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision);
+wyrelog_error_t
+    wyl_policy_store_service_authority_apply_direct_permission_mutation
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
     const gchar * perm_id, const gchar * scope, gboolean insert,
     const gchar * audit_id, gint64 audit_created_at_us,
     const gchar * audit_subject_id, const gchar * audit_action,

@@ -2142,8 +2142,13 @@ check_store_enforces_service_permission_planes (void)
   wyl_policy_service_principal_info_clear (&principal);
 
   if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
-          "wr.stream.read", "svc-scope") != WYRELOG_E_OK)
+          "wr.stream.read", "svc-scope") != WYRELOG_E_BUSY)
     return 94;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:plane:test','wr.stream.read','svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 116;
   if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
           "wr.service_principal.manage", "svc-scope") != WYRELOG_E_POLICY)
     return 95;
@@ -2164,8 +2169,13 @@ check_store_enforces_service_permission_planes (void)
           "wr.stream.read") != WYRELOG_E_OK)
     return 98;
   if (wyl_policy_store_grant_role_membership (store, "svc:plane:test",
-          "site.service-role", "svc-scope") != WYRELOG_E_OK)
+          "site.service-role", "svc-scope") != WYRELOG_E_BUSY)
     return 99;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO role_memberships(subject_id,role_id,scope)"
+          " VALUES('svc:plane:test','site.service-role','svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 117;
   if (wyl_policy_store_role_is_service_eligible (store, "site.service-role",
           &eligible) != WYRELOG_E_OK)
     return 100;
@@ -2205,8 +2215,13 @@ check_store_enforces_service_permission_planes (void)
     return 111;
   wyl_policy_service_principal_info_clear (&principal);
   if (wyl_policy_store_grant_role_membership (store, "svc:plane:child",
-          "site.child-role", "svc-scope") != WYRELOG_E_OK)
+          "site.child-role", "svc-scope") != WYRELOG_E_BUSY)
     return 112;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO role_memberships(subject_id,role_id,scope)"
+          " VALUES('svc:plane:child','site.child-role','svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 118;
   if (wyl_policy_store_grant_role_inheritance (store, "site.child-role",
           "site.control-parent") != WYRELOG_E_POLICY)
     return 113;

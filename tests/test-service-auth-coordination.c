@@ -2610,6 +2610,67 @@ finish_rolled_back (WylServiceAuthWriteLease *lease,
 }
 
 static void
+test_permission_mutation_participant_is_atomic (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_policy_service_principal_info_t principal = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_service_principal (store,
+          "svc:participant", "participant", "admin-user",
+          "req-participant", &principal), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&principal);
+
+  WylServiceAuthWriteLease *lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_apply_direct_permission_mutation
+      (txn, store, "svc:participant", "site.auto-created", "scope", TRUE,
+          NULL, 0, NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+
+  gboolean exists = TRUE;
+  g_assert_cmpint (wyl_policy_store_permission_exists (store,
+          "site.auto-created", &exists), ==, WYRELOG_E_OK);
+  g_assert_false (exists);
+
+  lease = NULL;
+  txn = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write
+      (wyl_handle_get_service_auth_authority (handle), handle, NULL,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_apply_direct_permission_mutation
+      (txn, store, "svc:participant", "wr.stream.read", "scope", TRUE, NULL,
+          0, NULL, NULL, NULL, NULL, NULL, NULL, WYL_DECISION_DENY), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+  g_assert_cmpint (wyl_policy_store_direct_permission_exists (store,
+          "svc:participant", "wr.stream.read", "scope", &exists), ==,
+      WYRELOG_E_OK);
+  g_assert_true (exists);
+}
+
+static void
 test_authority_transaction_write_intent (void)
 {
   g_autoptr (WylHandle) handle = new_store_handle ();
@@ -3147,6 +3208,8 @@ main (int argc, char **argv)
       test_authority_transaction_credential_last_used_unavailable);
   g_test_add_func ("/service-auth/transaction/participant-contract",
       test_authority_transaction_participant_contract);
+  g_test_add_func ("/service-auth/transaction/permission-mutation-participant",
+      test_permission_mutation_participant_is_atomic);
   g_test_add_func ("/service-auth/transaction/write-intent",
       test_authority_transaction_write_intent);
   g_test_add_func ("/service-auth/transaction/service-exchange-intention",

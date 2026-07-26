@@ -425,6 +425,14 @@ service_store_scope_leave (wyl_policy_store_t *store)
 }
 
 static gboolean
+service_store_scope_is_current (wyl_policy_store_t *store)
+{
+  WylServiceStoreScope *scope = g_private_get (&service_store_scope);
+  return scope != NULL && scope->depth > 0
+      && scope->stores[scope->depth - 1] == store;
+}
+
+static gboolean
 service_authority_store_unavailable (wyl_policy_store_t *store)
 {
   return g_atomic_int_get (&store->service_authority_transaction_active)
@@ -22163,6 +22171,8 @@ wyl_policy_store_grant_direct_permission (wyl_policy_store_t *store,
       return rc;
     if (plane != WYL_PERMISSION_PLANE_DATA)
       return WYRELOG_E_POLICY;
+    if (!service_store_scope_is_current (store))
+      return WYRELOG_E_BUSY;
   }
 
   static const gchar *sql =
@@ -22198,6 +22208,9 @@ wyl_policy_store_revoke_direct_permission (wyl_policy_store_t *store,
 
   /* Revocation is a repair operation: legacy unregistered service subjects
    * and registered services with human-only grants must remain removable. */
+  if (wyl_policy_subject_has_service_prefix (subject_id)
+      && !service_store_scope_is_current (store))
+    return WYRELOG_E_BUSY;
 
   static const gchar *sql =
       "DELETE FROM direct_permissions "
@@ -22287,6 +22300,58 @@ wyl_policy_store_apply_direct_permission_mutation (wyl_policy_store_t *store,
   return wyl_policy_store_apply_direct_permission_mutation_with_audit (store,
       subject_id, perm_id, scope, insert, NULL, 0, NULL, NULL, NULL, NULL, NULL,
       NULL, WYL_DECISION_DENY);
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_apply_direct_permission_mutation
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * perm_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision)
+{
+  if (store == NULL || subject_id == NULL || perm_id == NULL || scope == NULL
+      || !wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  if (insert) {
+    gboolean exists = FALSE;
+    rc = wyl_policy_store_permission_exists (store, perm_id, &exists);
+    if (rc == WYRELOG_E_OK && !exists && is_reserved_catalog_id (perm_id))
+      rc = WYRELOG_E_POLICY;
+    if (rc == WYRELOG_E_OK && !exists)
+      rc = wyl_policy_store_upsert_permission (store, perm_id, perm_id,
+          "basic");
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = insert
+        ? wyl_policy_store_grant_direct_permission (store, subject_id, perm_id,
+        scope)
+        : wyl_policy_store_revoke_direct_permission (store, subject_id,
+        perm_id, scope);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_direct_permission_event (store, subject_id,
+        perm_id, scope, insert ? "grant" : "revoke");
+  if (rc == WYRELOG_E_OK && audit_id != NULL) {
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
+        audit_created_at_us, audit_subject_id, audit_action,
+        audit_resource_id, audit_deny_reason, audit_deny_origin,
+        audit_request_id, audit_decision, &inserted);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_OK)
+    service_authority_transaction_fail_participant (transaction, rc);
+  return rc;
 }
 
 wyrelog_error_t
@@ -23523,12 +23588,45 @@ wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
   if (builtin == NULL && is_reserved_catalog_id (perm_id))
     return WYRELOG_E_POLICY;
 
+  static const gchar *service_use_sql =
+      "WITH RECURSIVE service_roles(role_id) AS ("
+      "  SELECT rm.role_id FROM role_memberships rm"
+      "  JOIN service_principals sp ON sp.subject_id=rm.subject_id"
+      "  UNION"
+      "  SELECT ri.parent_role_id FROM service_roles sr"
+      "  JOIN role_inheritances ri ON ri.child_role_id=sr.role_id"
+      ")"
+      "SELECT 1 FROM direct_permissions dp"
+      " JOIN service_principals sp ON sp.subject_id=dp.subject_id"
+      " WHERE dp.perm_id=?"
+      " UNION ALL"
+      " SELECT 1 FROM service_roles sr"
+      " JOIN role_permissions rp ON rp.role_id=sr.role_id"
+      " WHERE rp.perm_id=? LIMIT 1;";
+  sqlite3_stmt *service_use_stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, service_use_sql,
+      &service_use_stmt);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if ((rc = bind_text (service_use_stmt, 1, perm_id)) != WYRELOG_E_OK
+      || (rc = bind_text (service_use_stmt, 2, perm_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (service_use_stmt);
+    return rc;
+  }
+  int service_use_step = sqlite3_step (service_use_stmt);
+  gboolean service_used = service_use_step == SQLITE_ROW;
+  sqlite3_finalize (service_use_stmt);
+  if (service_use_step != SQLITE_ROW && service_use_step != SQLITE_DONE)
+    return WYRELOG_E_IO;
+  if (service_used && !service_store_scope_is_current (store))
+    return WYRELOG_E_BUSY;
+
   static const gchar *sql =
       "INSERT INTO permissions (perm_id, perm_name, class, created_at) "
       "VALUES (?, ?, ?, unixepoch()) "
       "ON CONFLICT(perm_id) DO UPDATE SET "
       "  perm_name = excluded.perm_name," "  class = excluded.class;";
-  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
   if ((rc = bind_text (stmt, 1, perm_id)) != WYRELOG_E_OK
@@ -23541,6 +23639,24 @@ wyl_policy_store_upsert_permission (wyl_policy_store_t *store,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_upsert_permission
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * perm_id,
+    const gchar * perm_name, const gchar * klass)
+{
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_upsert_permission (store, perm_id, perm_name, klass);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_OK && transaction != NULL)
+    service_authority_transaction_fail_participant (transaction, rc);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -23605,15 +23721,17 @@ wyl_policy_store_grant_role_permission (wyl_policy_store_t *store,
       &plane);
   if (rc != WYRELOG_E_OK)
     return rc;
+  gboolean has_service_members = FALSE;
+  rc = role_has_service_principal_descendants (store, role_id,
+      &has_service_members);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   if (plane == WYL_PERMISSION_PLANE_CONTROL) {
-    gboolean has_service_members = FALSE;
-    rc = role_has_service_principal_descendants (store, role_id,
-        &has_service_members);
-    if (rc != WYRELOG_E_OK)
-      return rc;
     if (has_service_members)
       return WYRELOG_E_POLICY;
   }
+  if (has_service_members && !service_store_scope_is_current (store))
+    return WYRELOG_E_BUSY;
 
   static const gchar *sql =
       "INSERT INTO role_permissions (role_id, perm_id, granted_at) "
@@ -23632,6 +23750,23 @@ wyl_policy_store_grant_role_permission (wyl_policy_store_t *store,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_grant_role_permission
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * role_id, const gchar * perm_id)
+{
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_role_permission (store, role_id, perm_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_OK && transaction != NULL)
+    service_authority_transaction_fail_participant (transaction, rc);
+  return rc;
 }
 
 wyrelog_error_t
@@ -23696,6 +23831,8 @@ wyl_policy_store_grant_role_inheritance (wyl_policy_store_t *store,
       return rc;
     if (!parent_is_eligible)
       return WYRELOG_E_POLICY;
+    if (!service_store_scope_is_current (store))
+      return WYRELOG_E_BUSY;
   }
 
   static const gchar *sql =
@@ -23716,6 +23853,25 @@ wyl_policy_store_grant_role_inheritance (wyl_policy_store_t *store,
   int step_rc = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
   return (step_rc == SQLITE_DONE) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_grant_role_inheritance
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * child_role_id,
+    const gchar * parent_role_id)
+{
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_grant_role_inheritance (store, child_role_id,
+        parent_role_id);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_OK && transaction != NULL)
+    service_authority_transaction_fail_participant (transaction, rc);
+  return rc;
 }
 
 wyrelog_error_t
@@ -23770,6 +23926,8 @@ wyl_policy_store_grant_role_membership (wyl_policy_store_t *store,
       return rc;
     if (!eligible)
       return WYRELOG_E_POLICY;
+    if (!service_store_scope_is_current (store))
+      return WYRELOG_E_BUSY;
   }
 
   static const gchar *sql =
@@ -23804,6 +23962,9 @@ wyl_policy_store_revoke_role_membership (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   /* Keep legacy namespace collisions remediable while grants remain guarded. */
+  if (wyl_policy_subject_has_service_prefix (subject_id)
+      && !service_store_scope_is_current (store))
+    return WYRELOG_E_BUSY;
 
   static const gchar *sql =
       "DELETE FROM role_memberships "
@@ -23880,6 +24041,48 @@ wyl_policy_store_apply_role_membership_mutation (wyl_policy_store_t *store,
   return wyl_policy_store_apply_role_membership_mutation_with_audit (store,
       subject_id, role_id, scope, insert, NULL, 0, NULL, NULL, NULL, NULL, NULL,
       NULL, WYL_DECISION_DENY);
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_apply_role_membership_mutation
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * subject_id,
+    const gchar * role_id, const gchar * scope, gboolean insert,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * audit_subject_id, const gchar * audit_action,
+    const gchar * audit_resource_id, const gchar * audit_deny_reason,
+    const gchar * audit_deny_origin, const gchar * audit_request_id,
+    wyl_decision_t audit_decision)
+{
+  if (store == NULL || subject_id == NULL || role_id == NULL || scope == NULL
+      || !wyl_policy_subject_has_service_prefix (subject_id))
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = insert
+      ? wyl_policy_store_grant_role_membership (store, subject_id, role_id,
+      scope)
+      : wyl_policy_store_revoke_role_membership (store, subject_id, role_id,
+      scope);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_append_role_membership_event (store, subject_id,
+        role_id, scope, insert ? "grant" : "revoke");
+  if (rc == WYRELOG_E_OK && audit_id != NULL) {
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
+        audit_created_at_us, audit_subject_id, audit_action,
+        audit_resource_id, audit_deny_reason, audit_deny_origin,
+        audit_request_id, audit_decision, &inserted);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_OK)
+    service_authority_transaction_fail_participant (transaction, rc);
+  return rc;
 }
 
 wyrelog_error_t
