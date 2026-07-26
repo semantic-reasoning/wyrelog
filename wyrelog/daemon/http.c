@@ -288,6 +288,7 @@ typedef struct _WylDaemonHttpContext
   GSource *service_auth_retirement_source;
   GCond service_auth_maintenance_changed;
   guint service_auth_maintenance_inflight;
+  gboolean service_auth_maintenance_suspended;
 #ifdef WYL_HAS_AUDIT
   WylServiceExchangeLimiter *service_exchange_limiter;
 #endif
@@ -694,11 +695,12 @@ service_auth_retirement_tick (gpointer data)
 {
   WylDaemonHttpContext *ctx = data;
   g_mutex_lock (&ctx->lock);
-  gboolean shutting_down = ctx->shutting_down;
-  if (!shutting_down)
+  gboolean suspended = ctx->shutting_down
+      || ctx->service_auth_maintenance_suspended;
+  if (!suspended)
     ctx->service_auth_maintenance_inflight++;
   g_mutex_unlock (&ctx->lock);
-  if (shutting_down)
+  if (suspended)
     return G_SOURCE_REMOVE;
 #ifdef WYL_TEST_DAEMON_HTTP
   g_atomic_int_inc ((gint *) & ctx->service_auth_retirement_ticks);
@@ -766,6 +768,7 @@ static void
 {
   GSource *retirement_source = NULL;
   g_mutex_lock (&ctx->lock);
+  ctx->service_auth_maintenance_suspended = TRUE;
   retirement_source = ctx->service_auth_retirement_source;
   ctx->service_auth_retirement_source = NULL;
   g_mutex_unlock (&ctx->lock);
