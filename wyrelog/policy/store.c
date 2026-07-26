@@ -163,6 +163,8 @@ struct wyl_policy_store_t
   gboolean suppress_close_persist;
   gboolean maintenance_mode;
   gboolean maintenance_publish_fail_once;
+    WylServicePermissionMaintenanceFailStage
+      service_permission_maintenance_fail_once;
   GMutex service_cvk_mutex;
   GMutex service_domain_gate_mutex;
   GMutex service_lifecycle_mutex;
@@ -8200,6 +8202,29 @@ wyl_policy_store_maintenance_publish_fail_once (wyl_policy_store_t *store)
 {
   if (store != NULL && store->maintenance_mode)
     store->maintenance_publish_fail_once = TRUE;
+}
+
+void
+wyl_policy_store_service_permission_maintenance_fail_once (wyl_policy_store_t
+    *store, WylServicePermissionMaintenanceFailStage stage)
+{
+  if (store != NULL && store->maintenance_mode
+      && stage >= WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_NONE
+      && stage <= WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PUBLISH)
+    store->service_permission_maintenance_fail_once = stage;
+}
+
+WylServicePermissionMaintenanceFailStage
+wyl_policy_store_service_permission_maintenance_take_failure (wyl_policy_store_t
+    *store)
+{
+  if (store == NULL || !store->maintenance_mode)
+    return WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_NONE;
+  WylServicePermissionMaintenanceFailStage stage =
+      store->service_permission_maintenance_fail_once;
+  store->service_permission_maintenance_fail_once =
+      WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_NONE;
+  return stage;
 }
 
 void

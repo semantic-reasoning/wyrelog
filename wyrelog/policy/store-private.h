@@ -410,6 +410,18 @@ typedef enum
 
 typedef enum
 {
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_NONE = 0,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_WRITE_INTENT,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PARTICIPANT,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_AUDIT,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_COMMIT,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_COMMIT_UNCERTAIN,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_LEASE_RELEASE,
+  WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PUBLISH,
+} WylServicePermissionMaintenanceFailStage;
+
+typedef enum
+{
   WYL_POLICY_AUTHORITY_TXN_FAIL_NONE,
   WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE,
   WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER,
@@ -1211,6 +1223,12 @@ wyrelog_error_t wyl_policy_store_open_with_options (const
 wyrelog_error_t wyl_policy_store_maintenance_publish
     (wyl_policy_store_t * store);
 void wyl_policy_store_maintenance_publish_fail_once
+    (wyl_policy_store_t * store);
+void wyl_policy_store_service_permission_maintenance_fail_once
+    (wyl_policy_store_t * store,
+    WylServicePermissionMaintenanceFailStage stage);
+WylServicePermissionMaintenanceFailStage
+    wyl_policy_store_service_permission_maintenance_take_failure
     (wyl_policy_store_t * store);
 wyrelog_error_t wyl_policy_store_bind_fact_root (wyl_policy_store_t * store,
     const gchar * fact_root);

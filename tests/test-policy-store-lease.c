@@ -776,6 +776,144 @@ test_maintenance_apply_and_replay (void)
 }
 
 static void
+test_maintenance_apply_fault_matrix (void)
+{
+  static const WylServicePermissionMaintenanceFailStage stages[] = {
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_WRITE_INTENT,
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PARTICIPANT,
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_AUDIT,
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_COMMIT,
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_COMMIT_UNCERTAIN,
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_LEASE_RELEASE,
+    WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PUBLISH,
+  };
+  g_autofree gchar *dir = make_tmpdir ();
+  for (guint stage_index = 0; stage_index < G_N_ELEMENTS (stages);
+      stage_index++) {
+    g_autofree gchar *path = g_strdup_printf ("%s/fault-%u.store", dir,
+        stage_index);
+    CountingProvider seed_provider = { 0 };
+    wyl_policy_store_open_options_t seed_opts =
+        encrypted_opts (path, &seed_provider);
+    wyl_policy_store_t *seed = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&seed_opts, &seed),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
+    wyl_policy_service_principal_info_t principal = {
+      0
+    };
+    g_autofree gchar *subject =
+        g_strdup_printf ("svc:fault-matrix-%u", stage_index);
+    g_autofree gchar *request_seed =
+        g_strdup_printf ("seed-fault-matrix-%u", stage_index);
+    g_assert_cmpint (wyl_policy_store_create_service_principal (seed, subject,
+            "fault matrix", "admin", request_seed, &principal), ==,
+        WYRELOG_E_OK);
+    wyl_policy_service_principal_info_clear (&principal);
+    g_assert_cmpint (wyl_policy_store_upsert_permission (seed, "site.unsafe",
+            "unsafe", "basic"), ==, WYRELOG_E_OK);
+    sqlite3_stmt *grant = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (seed),
+            "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+            " VALUES(?,'site.unsafe','scope');", -1, &grant, NULL), ==,
+        SQLITE_OK);
+    sqlite3_bind_text (grant, 1, subject, -1, SQLITE_STATIC);
+    g_assert_cmpint (sqlite3_step (grant), ==, SQLITE_DONE);
+    sqlite3_finalize (grant);
+    wyl_policy_store_close (seed);
+
+    CountingProvider failure_provider = { 0 };
+    wyl_policy_store_open_options_t failure_opts =
+        encrypted_opts (path, &failure_provider);
+    failure_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+    wyl_policy_store_t *failure_store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&failure_opts,
+            &failure_store), ==, WYRELOG_E_OK);
+    WylPolicyPermissionClosureAnalysis analysis = {
+      0
+    };
+    g_assert_cmpint (wyl_policy_store_analyze_service_permission_closure
+        (failure_store, &analysis), ==, WYRELOG_E_OK);
+    gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+    g_assert_cmpint (wyl_request_id_new (request_id, sizeof request_id), ==,
+        WYRELOG_E_OK);
+    WylServicePermissionManifest manifest = {
+      0
+    };
+    g_assert_cmpint (wyl_service_permission_manifest_from_analysis (&analysis,
+            request_id, &manifest), ==, WYRELOG_E_OK);
+    wyl_policy_permission_closure_analysis_clear (&analysis);
+    gchar *before = NULL;
+    gsize before_len = 0;
+    g_assert_true (g_file_get_contents (path, &before, &before_len, NULL));
+    wyl_policy_store_service_permission_maintenance_fail_once (failure_store,
+        stages[stage_index]);
+    g_test_message ("fault stage %u", stages[stage_index]);
+    WylServicePermissionApplyReceipt failed = {
+      0
+    };
+    g_assert_cmpint (wyl_service_permission_maintenance_apply (failure_store,
+            &manifest, &failed), !=, WYRELOG_E_OK);
+    g_assert_null (failed.request_id);
+    gchar *after = NULL;
+    gsize after_len = 0;
+    g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+    g_assert_cmpmem (after, after_len, before, before_len);
+    g_free (before);
+    g_free (after);
+
+    CountingProvider retry_provider = { 0 };
+    wyl_policy_store_open_options_t retry_opts =
+        encrypted_opts (path, &retry_provider);
+    retry_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+    wyl_policy_store_t *retry_store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&retry_opts,
+            &retry_store), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_policy_store_analyze_service_permission_closure
+        (retry_store, &analysis), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (analysis.removals->len, ==, 1);
+    g_assert_cmpuint (analysis.generation, ==, manifest.store_generation);
+    g_assert_cmpmem (analysis.digest, sizeof analysis.digest,
+        manifest.store_digest, sizeof manifest.store_digest);
+    wyl_policy_permission_closure_analysis_clear (&analysis);
+    sqlite3_stmt *receipt_count = NULL;
+    g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (retry_store),
+            "SELECT count(*) FROM audit_events WHERE request_id=?;", -1,
+            &receipt_count, NULL), ==, SQLITE_OK);
+    sqlite3_bind_text (receipt_count, 1, request_id, -1, SQLITE_STATIC);
+    g_assert_cmpint (sqlite3_step (receipt_count), ==, SQLITE_ROW);
+    g_assert_cmpint (sqlite3_column_int (receipt_count, 0), ==, 0);
+    sqlite3_finalize (receipt_count);
+    WylServicePermissionApplyReceipt applied = {
+      0
+    };
+    g_assert_cmpint (wyl_service_permission_maintenance_apply (retry_store,
+            &manifest, &applied), ==, WYRELOG_E_OK);
+    g_assert_cmpint (applied.state, ==, WYL_SERVICE_PERMISSION_APPLY_APPLIED);
+
+    CountingProvider replay_provider = { 0 };
+    wyl_policy_store_open_options_t replay_opts =
+        encrypted_opts (path, &replay_provider);
+    replay_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+    wyl_policy_store_t *replay_store = NULL;
+    g_assert_cmpint (wyl_policy_store_open_with_options (&replay_opts,
+            &replay_store), ==, WYRELOG_E_OK);
+    WylServicePermissionApplyReceipt replayed = {
+      0
+    };
+    g_assert_cmpint (wyl_service_permission_maintenance_apply (replay_store,
+            &manifest, &replayed), ==, WYRELOG_E_OK);
+    g_assert_cmpint (replayed.state, ==, WYL_SERVICE_PERMISSION_APPLY_REPLAYED);
+    g_assert_cmpstr (replayed.audit_id, ==, applied.audit_id);
+    wyl_service_permission_apply_receipt_clear (&replayed);
+    wyl_service_permission_apply_receipt_clear (&applied);
+    wyl_service_permission_manifest_clear (&manifest);
+    remove_store_files (path);
+  }
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
 test_provider_lifetime_success (void)
 {
   g_autofree gchar *dir = make_tmpdir ();
@@ -1878,6 +2016,8 @@ main (int argc, char **argv)
 #endif
   g_test_add_func ("/policy-store-lease/maintenance-apply-replay",
       test_maintenance_apply_and_replay);
+  g_test_add_func ("/policy-store-lease/maintenance-apply-fault-matrix",
+      test_maintenance_apply_fault_matrix);
 #ifndef G_OS_WIN32
   g_test_add_func ("/policy-store-lease/parent-alias-swap",
       test_parent_alias_swap_stays_pinned);

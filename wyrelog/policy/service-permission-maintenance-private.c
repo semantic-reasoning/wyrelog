@@ -1145,6 +1145,8 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   guint8 pre_digest[32] = { 0 };
   guint64 post_generation = 0;
   guint8 post_digest[32] = { 0 };
+  WylServicePermissionMaintenanceFailStage fail_stage =
+      wyl_policy_store_service_permission_maintenance_take_failure (store);
   wyrelog_error_t rc =
       wyl_handle_adopt_offline_maintenance_store (store, &handle);
   if (rc != WYRELOG_E_OK)
@@ -1180,6 +1182,12 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   WylServiceAuthWriteLease *lease = NULL;
   WylServiceAuthorityTransaction *transaction = NULL;
   WylServiceAuthorityCommitEvidence *evidence = NULL;
+  if (fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_COMMIT)
+    wyl_policy_store_service_authority_transaction_fail_once (store,
+        WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE);
+  if (fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_COMMIT_UNCERTAIN)
+    wyl_policy_store_service_authority_transaction_fail_once (store,
+        WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_auth_authority_acquire_permission_remediation_write
         (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease);
@@ -1191,6 +1199,10 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_prepare_commit_evidence
         (transaction, store, &evidence);
+  if (rc == WYRELOG_E_OK
+      && fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_WRITE_INTENT)
+    wyl_policy_store_service_authority_transaction_test_fail_intent_once
+        (transaction, SQLITE_LOCKED);
   WylServiceAuthorityWriteIntentOutcome intent = {
     0
   };
@@ -1199,6 +1211,9 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
         (transaction, store, NULL, &intent);
 
   gint64 applied_at = g_get_real_time ();
+  if (rc == WYRELOG_E_OK
+      && fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PARTICIPANT)
+    rc = WYRELOG_E_IO;
   for (guint i = 0; rc == WYRELOG_E_OK && i < manifest->operations->len; i++) {
     const WylPolicyPermissionClosureRemoval *operation =
         g_ptr_array_index (manifest->operations, i);
@@ -1213,6 +1228,9 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
           WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP,
           operation->subject_id, operation->right_id, operation->scope,
           audit_id, applied_at, actor, manifest->request_id);
+    if (rc == WYRELOG_E_OK
+        && fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_AUDIT)
+      rc = WYRELOG_E_IO;
     gchar evidence_id[WYL_ID_STRING_BUF];
     gchar operation_digest[65];
     if (rc == WYRELOG_E_OK)
@@ -1270,7 +1288,8 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_transaction_commit (transaction);
   else if (transaction != NULL)
-    (void) wyl_policy_store_service_authority_transaction_abort (transaction);
+    (void) wyl_policy_store_service_authority_transaction_rollback
+        (transaction);
 
   if (evidence != NULL)
     wyl_policy_store_service_authority_commit_evidence_unref (evidence);
@@ -1278,10 +1297,16 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
     wyl_policy_store_service_authority_transaction_free (transaction);
   if (lease != NULL) {
     wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+    if (release_rc == WYRELOG_E_OK
+        && fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_LEASE_RELEASE)
+      release_rc = WYRELOG_E_IO;
     if (rc == WYRELOG_E_OK)
       rc = release_rc;
     wyl_service_auth_write_lease_free (lease);
   }
+  if (rc == WYRELOG_E_OK
+      && fail_stage == WYL_SERVICE_PERMISSION_MAINTENANCE_FAIL_PUBLISH)
+    wyl_policy_store_maintenance_publish_fail_once (store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_maintenance_publish (store);
   if (rc == WYRELOG_E_OK) {
