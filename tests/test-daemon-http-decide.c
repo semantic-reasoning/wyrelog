@@ -4193,6 +4193,25 @@ check_service_bearer_resolver_contract (SoupServer *server)
   if (!check_compound_disable_real_resolver_and_activation (server))
     return 2152;
 #endif
+#ifdef WYL_HAS_AUDIT
+  g_auto (ServiceResolverFixture) missing = { 0 };
+  if (!service_resolver_fixture_init (server, &missing,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !wyl_daemon_http_remove_access_token_for_test (server, missing.jti))
+    return 2153;
+  wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE,
+      missing.now + 300);
+  if (wyl_daemon_http_retire_due_service_auth_for_test (server)
+      == WYRELOG_E_OK)
+    return 2154;
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority
+          (wyl_daemon_http_get_handle_for_test (server)),
+          wyl_daemon_http_get_handle_for_test (server), &reason) == WYRELOG_E_OK
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT)
+    return 2155;
+#endif
   return 0;
 }
 
