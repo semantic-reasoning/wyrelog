@@ -127,8 +127,14 @@ def production_view(text: str) -> str | None:
     opening = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef)\b")
     alternate = re.compile(r"^\s*#\s*(elif|else)\b")
     closing = re.compile(r"^\s*#\s*endif\b")
+    directive = re.compile(r"^\s*#")
+    continued_from_previous = False
 
     for line in text.splitlines():
+        if continued_from_previous and directive.match(line):
+            return None
+        continued_from_previous = (
+            line.endswith("\\") or line.endswith("??/"))
         line_starts_in_comment = in_block_comment
         in_block_comment = block_comment_state(line, in_block_comment)
         if line_starts_in_comment:
@@ -312,6 +318,17 @@ def self_test() -> int:
     commented_production = production_view(commented_directives)
     if (commented_production is None
             or not a1_violations(commented_production)):
+        return 1
+    spliced_directive = (
+        "#define HIDDEN_OPEN \\\n"
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "void wyl_service_credential_rotate_with_runtime(void);\n"
+        "#define HIDDEN_CLOSE \\\n"
+        "#endif")
+    if production_view(spliced_directive) is not None:
+        return 1
+    trigraph_spliced_directive = spliced_directive.replace("\\\n", "??/\n")
+    if production_view(trigraph_spliced_directive) is not None:
         return 1
 
     # A2: the escaped response spelling fails; the bare input field passes.
