@@ -498,22 +498,19 @@ void wyl_service_auth_registry_session_participant_free
 }
 
 static wyrelog_error_t
-session_participant_validate (WylServiceAuthRegistrySessionParticipant
-    *participant)
-{
-  if (participant == NULL)
-    return WYRELOG_E_INVALID;
-  return wyl_service_auth_write_lease_validate_operation (participant->lease,
-      participant->handle);
-}
-
-static wyrelog_error_t
 session_participant_enter_registry (WylServiceAuthRegistrySessionParticipant
     *participant)
 {
-  wyrelog_error_t rc = session_participant_validate (participant);
-  return rc == WYRELOG_E_OK ? wyl_service_auth_rank_enter
-      (participant->handle, WYL_SERVICE_AUTH_RANK_REGISTRY) : rc;
+  /* Construction proved that this participant borrows the active same-handle
+   * WRITE lease at the coordination rank.  Its owner keeps that lease alive;
+   * the actual mutation runs after entering CONTEXT, where re-validating via
+   * write_lease_validate_operation() would incorrectly require the old
+   * coordination rank and reject the mandated WRITE -> CONTEXT -> REGISTRY
+   * order. */
+  if (participant == NULL || participant->lease == NULL)
+    return WYRELOG_E_INVALID;
+  return wyl_service_auth_rank_enter (participant->handle,
+      WYL_SERVICE_AUTH_RANK_REGISTRY);
 }
 
 static wyrelog_error_t

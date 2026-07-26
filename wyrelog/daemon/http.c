@@ -2786,6 +2786,7 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
   WylServiceAuthWriteLease *lease = NULL;
   GPtrArray *due = NULL;
   GPtrArray *retired = NULL;
+  WylServiceAuthRegistrySessionParticipant *participant = NULL;
   wyrelog_error_t rc;
 
   if (ctx == NULL || now_seconds < 0)
@@ -2802,6 +2803,14 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
   if (due->len == 0)
     goto out;
 
+  /* Participant construction validates the WRITE lease at the coordination
+   * rank.  It must happen before entering the context rank; its mutation
+   * methods then enter the registry as the third and final rank. */
+  rc = wyl_service_auth_registry_session_participant_new_for_write
+      (ctx->service_auth_registry, ctx->handle, lease, &participant);
+  if (rc != WYRELOG_E_OK)
+    goto fail_stop;
+
   retired = g_ptr_array_new_with_free_func (service_retired_live_pair_free);
   rc = service_publication_context_lock (ctx);
   if (rc != WYRELOG_E_OK)
@@ -2815,17 +2824,10 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
   }
   for (guint i = 0; i < due->len; i++) {
     WylServiceAuthReservation *reservation = g_ptr_array_index (due, i);
-    g_autoptr (WylServiceAuthRegistrySessionParticipant) participant = NULL;
     WylServiceRetiredLivePair *pair = g_new0 (WylServiceRetiredLivePair, 1);
     gboolean removed = FALSE;
     if (pair == NULL) {
       rc = WYRELOG_E_NOMEM;
-      goto unlock_fail_stop;
-    }
-    rc = wyl_service_auth_registry_session_participant_new_for_write
-        (ctx->service_auth_registry, ctx->handle, lease, &participant);
-    if (rc != WYRELOG_E_OK) {
-      g_free (pair);
       goto unlock_fail_stop;
     }
     if (!g_hash_table_steal_extended (ctx->sessions_by_token,
@@ -2877,6 +2879,8 @@ out:
     g_ptr_array_unref (due);
   if (retired != NULL)
     g_ptr_array_unref (retired);
+  if (participant != NULL)
+    wyl_service_auth_registry_session_participant_free (participant);
   if (lease != NULL) {
     wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
     if (rc == WYRELOG_E_OK)
