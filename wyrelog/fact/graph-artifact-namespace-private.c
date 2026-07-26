@@ -386,7 +386,7 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC)
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1508,7 +1508,9 @@ wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
     r = post_mutation_check_unlocked (l, r);
     goto done;
   }
-  r = fsync (l->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  r = !namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC)
+      && fsync (l->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
   r = post_mutation_check_unlocked (l, r);
   if (fstatat (l->namespace_->fd, name, &artifact, AT_SYMLINK_NOFOLLOW) == 0
       || errno != ENOENT)
