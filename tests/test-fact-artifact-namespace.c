@@ -618,6 +618,16 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
+          FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  WylFactArtifactTempBinding *writable_reopen = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "spill-1", FALSE, TRUE, &writable_reopen, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (writable_reopen);
+  g_assert_cmpint (fd, ==, -1);
   WylFactArtifactTempBinding *binding = NULL;
   WylFactArtifactTempBinding *invalid_binding = (gpointer) 0x1;
   fd = 42;

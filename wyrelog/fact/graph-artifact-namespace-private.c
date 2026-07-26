@@ -1052,7 +1052,7 @@ wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
     *out_fd = -1;
   if (!l || !out_fd)
     return WYRELOG_E_INVALID;
-  if (!l->exclusive && (create || writable))
+  if ((!l->exclusive && (create || writable)) || (!create && writable))
     return WYRELOG_E_POLICY;
   g_mutex_lock (&l->mutex);
   wyrelog_error_t r = lease_revalidate_unlocked (l);
@@ -1087,7 +1087,7 @@ wyl_fact_artifact_mutation_lease_open_temp_binding (WylFactArtifactMutationLease
     *out_fd = -1;
   if (!l || !out_binding || !out_fd)
     return WYRELOG_E_INVALID;
-  if (!l->exclusive && (create || writable))
+  if ((!l->exclusive && (create || writable)) || (!create && writable))
     return WYRELOG_E_POLICY;
 
   g_mutex_lock (&l->mutex);
