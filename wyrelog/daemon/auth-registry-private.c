@@ -716,8 +716,16 @@ static gboolean
 entry_matches_selector (const ServiceAuthEntry *entry,
     const WylServiceAuthSelector *selector)
 {
-  const gchar *value = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
-      ? entry->reservation.principal : entry->reservation.tenant;
+  const gchar *value;
+  if (selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL)
+    value = entry->reservation.principal;
+  else if (selector->kind == WYL_SERVICE_AUTH_SELECTOR_TENANT)
+    value = entry->reservation.tenant;
+  else {
+    value = entry->reservation.credential_id;
+    if (entry->reservation.generation != selector->generation)
+      return FALSE;
+  }
   return strlen (value) == selector->length
       && memcmp (value, selector->bytes, selector->length) == 0;
 }
@@ -810,7 +818,7 @@ registry_consistent_locked (WylServiceAuthRegistry *registry)
 
 static wyrelog_error_t
 selector_init (WylServiceAuthSelector *selector,
-    WylServiceAuthSelectorKind kind, const gchar *value)
+    WylServiceAuthSelectorKind kind, const gchar *value, guint64 generation)
 {
   if (selector != NULL)
     memset (selector, 0, sizeof *selector);
@@ -821,10 +829,14 @@ selector_init (WylServiceAuthSelector *selector,
       || (kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
           && !wyl_policy_service_subject_is_valid (value, length))
       || (kind == WYL_SERVICE_AUTH_SELECTOR_TENANT
-          && !wyl_policy_store_tenant_id_is_valid (value)))
+          && !wyl_policy_store_tenant_id_is_valid (value))
+      || (kind == WYL_SERVICE_AUTH_SELECTOR_CREDENTIAL_GENERATION
+          && (generation == 0
+              || !wyl_service_credential_id_is_canonical (value, length))))
     return WYRELOG_E_INVALID;
   selector->kind = kind;
   selector->length = length;
+  selector->generation = generation;
   memcpy (selector->bytes, value, length + 1);
   return WYRELOG_E_OK;
 }
@@ -834,14 +846,24 @@ wyl_service_auth_selector_init_principal (WylServiceAuthSelector *selector,
     const gchar *principal)
 {
   return selector_init (selector, WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL,
-      principal);
+      principal, 0);
 }
 
 wyrelog_error_t
 wyl_service_auth_selector_init_tenant (WylServiceAuthSelector *selector,
     const gchar *tenant)
 {
-  return selector_init (selector, WYL_SERVICE_AUTH_SELECTOR_TENANT, tenant);
+  return selector_init (selector, WYL_SERVICE_AUTH_SELECTOR_TENANT, tenant, 0);
+}
+
+wyrelog_error_t
+    wyl_service_auth_selector_init_credential_generation
+    (WylServiceAuthSelector * selector, const gchar * credential_id,
+    guint64 generation)
+{
+  return selector_init (selector,
+      WYL_SERVICE_AUTH_SELECTOR_CREDENTIAL_GENERATION, credential_id,
+      generation);
 }
 
 wyrelog_error_t
@@ -857,7 +879,10 @@ wyrelog_error_t
       || selector->length >= sizeof selector->bytes
       || selector->bytes[selector->length] != '\0'
       || (selector->kind != WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
-          && selector->kind != WYL_SERVICE_AUTH_SELECTOR_TENANT))
+          && selector->kind != WYL_SERVICE_AUTH_SELECTOR_TENANT
+          && selector->kind != WYL_SERVICE_AUTH_SELECTOR_CREDENTIAL_GENERATION)
+      || (selector->kind == WYL_SERVICE_AUTH_SELECTOR_CREDENTIAL_GENERATION
+          && selector->generation == 0))
     return WYRELOG_E_INVALID;
 
   g_mutex_lock (&registry->mutex);
@@ -865,9 +890,21 @@ wyrelog_error_t
     g_mutex_unlock (&registry->mutex);
     return WYRELOG_E_POLICY;
   }
-  GHashTable *index = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
-      ? registry->by_principal : registry->by_tenant;
-  ServiceAuthBucket *bucket = g_hash_table_lookup (index, selector->bytes);
+  GHashTable *index;
+  ServiceAuthBucket credential_key = {
+    .selector = (gchar *) selector->bytes,
+    .generation = selector->generation,
+  };
+  gconstpointer key = selector->bytes;
+  if (selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL)
+    index = registry->by_principal;
+  else if (selector->kind == WYL_SERVICE_AUTH_SELECTOR_TENANT)
+    index = registry->by_tenant;
+  else {
+    index = registry->by_credential_generation;
+    key = &credential_key;
+  }
+  ServiceAuthBucket *bucket = g_hash_table_lookup (index, key);
   revoke_bucket_locked (bucket, out_result);
 
   gboolean survivors = FALSE;
@@ -943,23 +980,15 @@ wyrelog_error_t
     (WylServiceAuthRegistry * registry, const gchar * credential_id,
     guint64 generation, WylServiceAuthRevokeResult * out_result)
 {
-  ServiceAuthBucket key = { 0 };
-  ServiceAuthBucket *bucket;
-
   if (out_result != NULL)
     memset (out_result, 0, sizeof *out_result);
-  if (registry == NULL || out_result == NULL || credential_id == NULL
-      || generation < 1 || !wyl_service_credential_id_is_canonical
-      (credential_id, strlen (credential_id)))
-    return WYRELOG_E_INVALID;
-
-  key.selector = (gchar *) credential_id;
-  key.generation = generation;
-  g_mutex_lock (&registry->mutex);
-  bucket = g_hash_table_lookup (registry->by_credential_generation, &key);
-  revoke_bucket_locked (bucket, out_result);
-  g_mutex_unlock (&registry->mutex);
-  return WYRELOG_E_OK;
+  WylServiceAuthSelector selector = { 0 };
+  wyrelog_error_t rc =
+      wyl_service_auth_selector_init_credential_generation (&selector,
+      credential_id, generation);
+  return rc == WYRELOG_E_OK
+      ? wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+      &selector, out_result) : rc;
 }
 
 wyrelog_error_t
