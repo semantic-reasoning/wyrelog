@@ -13,6 +13,8 @@
 #include "wyrelog/wyl-request-id-private.h"
 
 #ifdef G_OS_WIN32
+#include <aclapi.h>
+#include <sddl.h>
 #include <windows.h>
 #else
 #include <sys/wait.h>
@@ -535,6 +537,75 @@ test_maintenance_rejects_named_target_substitution (void)
   g_remove (lock);
   g_assert_cmpint (g_rmdir (dir), ==, 0);
 }
+
+#ifdef G_OS_WIN32
+static void
+set_world_access_dacl (const gchar *path)
+{
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  PACL dacl = NULL;
+  BOOL present = FALSE;
+  BOOL defaulted = FALSE;
+  g_autofree wchar_t *wide =
+      (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wide);
+  g_assert_true (ConvertStringSecurityDescriptorToSecurityDescriptorW
+      (L"D:(A;;GA;;;WD)", SDDL_REVISION_1, &descriptor, NULL));
+  g_assert_true (GetSecurityDescriptorDacl (descriptor, &present, &dacl,
+          &defaulted));
+  g_assert_true (present);
+  g_assert_nonnull (dacl);
+  g_assert_cmpuint (SetNamedSecurityInfoW (wide, SE_FILE_OBJECT,
+          DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+          NULL, NULL, dacl, NULL), ==, ERROR_SUCCESS);
+  LocalFree (descriptor);
+}
+
+static void
+test_maintenance_rejects_permissive_windows_dacls (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  g_autofree gchar *path = g_build_filename (dir, "permissive.store", NULL);
+  CountingProvider seed_provider = { 0 };
+  wyl_policy_store_open_options_t seed_opts =
+      encrypted_opts (path, &seed_provider);
+  wyl_policy_store_t *seed = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&seed_opts, &seed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (seed);
+
+  set_world_access_dacl (path);
+  CountingProvider provider = { 0 };
+  wyl_policy_store_open_options_t opts = encrypted_opts (path, &provider);
+  opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *store = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&opts, &store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (store);
+
+  remove_store_files (path);
+
+  CountingProvider lock_seed_provider = { 0 };
+  wyl_policy_store_open_options_t lock_seed_opts =
+      encrypted_opts (path, &lock_seed_provider);
+  g_assert_cmpint (wyl_policy_store_open_with_options (&lock_seed_opts,
+          &seed), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (seed);
+  g_autofree gchar *lock_path = g_strdup_printf ("%s%s", path, LOCK_SUFFIX);
+  set_world_access_dacl (lock_path);
+  CountingProvider lock_provider = { 0 };
+  wyl_policy_store_open_options_t lock_opts =
+      encrypted_opts (path, &lock_provider);
+  lock_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&lock_opts, &store), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (store);
+  remove_store_files (path);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+#endif
 
 static void
 test_maintenance_apply_and_replay (void)
@@ -1765,6 +1836,10 @@ main (int argc, char **argv)
       test_maintenance_explicit_publish);
   g_test_add_func ("/policy-store-lease/maintenance-target-substitution",
       test_maintenance_rejects_named_target_substitution);
+#ifdef G_OS_WIN32
+  g_test_add_func ("/policy-store-lease/maintenance-windows-dacl",
+      test_maintenance_rejects_permissive_windows_dacls);
+#endif
   g_test_add_func ("/policy-store-lease/maintenance-apply-replay",
       test_maintenance_apply_and_replay);
 #ifndef G_OS_WIN32

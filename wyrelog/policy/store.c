@@ -28,6 +28,7 @@
 #include <glib/gstdio.h>
 
 #ifdef G_OS_WIN32
+#include <sddl.h>
 #include <io.h>
 #include <windows.h>
 #else
@@ -2491,6 +2492,47 @@ materialize_store_key (wyl_policy_store_t *store,
 }
 
 #ifdef G_OS_WIN32
+static gboolean
+win_owner_only_security_attributes (SECURITY_ATTRIBUTES *attrs,
+    PSECURITY_DESCRIPTOR *out_descriptor)
+{
+  *out_descriptor = NULL;
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  LPWSTR sid_text = NULL;
+  wchar_t *sddl = NULL;
+  gboolean ok = FALSE;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    goto out;
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+    goto out;
+  user = g_malloc (needed);
+  if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
+          &needed) || !ConvertSidToStringSidW (user->User.Sid, &sid_text))
+    goto out;
+  gsize sid_len = wcslen (sid_text);
+  sddl = g_new (wchar_t, 32 + sid_len * 2);
+  if (sddl == NULL
+      || swprintf (sddl, 32 + sid_len * 2, L"O:%lsD:P(A;;FA;;;%ls)",
+          sid_text, sid_text) < 0
+      || !ConvertStringSecurityDescriptorToSecurityDescriptorW (sddl,
+          SDDL_REVISION_1, out_descriptor, NULL))
+    goto out;
+  *attrs = (SECURITY_ATTRIBUTES) {
+  sizeof *attrs, *out_descriptor, FALSE};
+  ok = TRUE;
+out:
+  g_free (sddl);
+  if (sid_text != NULL)
+    LocalFree (sid_text);
+  g_free (user);
+  if (token != NULL)
+    CloseHandle (token);
+  return ok;
+}
+
 /* TOCTOU mitigation for Windows: probe the final path component with
  * FILE_FLAG_OPEN_REPARSE_POINT so a symlink or junction at that
  * position is opened as itself rather than transparently followed.
@@ -2677,8 +2719,16 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 
   (void) DeleteFileW (wtmp);
 
-  HANDLE h = CreateFileW (wtmp, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+  SECURITY_ATTRIBUTES attrs = { 0 };
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  if (!win_owner_only_security_attributes (&attrs, &descriptor)) {
+    g_free (wtmp);
+    g_free (wdst);
+    return WYRELOG_E_IO;
+  }
+  HANDLE h = CreateFileW (wtmp, GENERIC_WRITE, 0, &attrs, CREATE_NEW,
       FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  LocalFree (descriptor);
   if (h == INVALID_HANDLE_VALUE) {
     g_free (wtmp);
     g_free (wdst);

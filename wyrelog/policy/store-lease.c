@@ -164,18 +164,74 @@ out:
 }
 
 static gboolean
-win_handle_owned_by_current_user (HANDLE handle)
+win_handle_owner_only_current_user (HANDLE handle)
 {
   PSECURITY_DESCRIPTOR descriptor = NULL;
   PSID owner = NULL;
+  PACL dacl = NULL;
   gboolean valid = FALSE;
   DWORD rc = GetSecurityInfo (handle, SE_FILE_OBJECT,
-      OWNER_SECURITY_INFORMATION, &owner, NULL, NULL, NULL, &descriptor);
+      OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, NULL,
+      &dacl, NULL, &descriptor);
   if (rc == ERROR_SUCCESS) {
-    valid = win_sid_matches_current_user (owner);
+    SECURITY_DESCRIPTOR_CONTROL control = 0;
+    DWORD revision = 0;
+    ACL_SIZE_INFORMATION acl_info = { 0 };
+    LPVOID raw_ace = NULL;
+    valid = win_sid_matches_current_user (owner)
+        && GetSecurityDescriptorControl (descriptor, &control, &revision)
+        && (control & SE_DACL_PROTECTED) != 0 && dacl != NULL
+        && GetAclInformation (dacl, &acl_info, sizeof acl_info,
+        AclSizeInformation) && acl_info.AceCount == 1
+        && GetAce (dacl, 0, &raw_ace)
+        && ((ACE_HEADER *) raw_ace)->AceType == ACCESS_ALLOWED_ACE_TYPE
+        && ((((ACE_HEADER *) raw_ace)->AceFlags & INHERITED_ACE) == 0)
+        && ((ACCESS_ALLOWED_ACE *) raw_ace)->Mask == FILE_ALL_ACCESS
+        && EqualSid (&((ACCESS_ALLOWED_ACE *) raw_ace)->SidStart, owner);
     LocalFree (descriptor);
   }
   return valid;
+}
+
+static gboolean
+win_owner_only_security_attributes (SECURITY_ATTRIBUTES *attrs,
+    PSECURITY_DESCRIPTOR *out_descriptor)
+{
+  *out_descriptor = NULL;
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  LPWSTR sid_text = NULL;
+  wchar_t *sddl = NULL;
+  gboolean ok = FALSE;
+  if (!OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token))
+    goto out;
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0)
+    goto out;
+  user = g_malloc (needed);
+  if (user == NULL || !GetTokenInformation (token, TokenUser, user, needed,
+          &needed) || !ConvertSidToStringSidW (user->User.Sid, &sid_text))
+    goto out;
+  gsize sid_len = wcslen (sid_text);
+  sddl = g_new (wchar_t, 32 + sid_len * 2);
+  if (sddl == NULL
+      || swprintf (sddl, 32 + sid_len * 2, L"O:%lsD:P(A;;FA;;;%ls)",
+          sid_text, sid_text) < 0
+      || !ConvertStringSecurityDescriptorToSecurityDescriptorW (sddl,
+          SDDL_REVISION_1, out_descriptor, NULL))
+    goto out;
+  *attrs = (SECURITY_ATTRIBUTES) {
+  sizeof *attrs, *out_descriptor, FALSE};
+  ok = TRUE;
+out:
+  g_free (sddl);
+  if (sid_text != NULL)
+    LocalFree (sid_text);
+  g_free (user);
+  if (token != NULL)
+    CloseHandle (token);
+  return ok;
 }
 
 static wyrelog_error_t
@@ -200,7 +256,7 @@ win_open_store_identity (const gchar *path, WylPolicyStoreLeaseMode mode,
       && !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
       && info.nNumberOfLinks == 1
       && (mode != WYL_POLICY_STORE_LEASE_MAINTENANCE
-      || win_handle_owned_by_current_user (handle));
+      || win_handle_owner_only_current_user (handle));
   if (!valid) {
     CloseHandle (handle);
     return WYRELOG_E_POLICY;
@@ -264,10 +320,19 @@ wyl_policy_store_lease_acquire (const gchar *path,
     CloseHandle (parent_handle);
     return WYRELOG_E_INVALID;
   }
-  HANDLE lock_handle = CreateFileW (wlock, GENERIC_READ | GENERIC_WRITE, 0,
-      NULL, OPEN_ALWAYS,
+  SECURITY_ATTRIBUTES lock_attrs = { 0 };
+  PSECURITY_DESCRIPTOR lock_descriptor = NULL;
+  if (!win_owner_only_security_attributes (&lock_attrs, &lock_descriptor)) {
+    g_free (wlock);
+    g_mutex_unlock (&lease_registry_mutex);
+    CloseHandle (parent_handle);
+    return WYRELOG_E_IO;
+  }
+  HANDLE lock_handle = CreateFileW (wlock,
+      GENERIC_READ | GENERIC_WRITE | READ_CONTROL, 0, &lock_attrs, OPEN_ALWAYS,
       FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
   DWORD last_error = lock_handle == INVALID_HANDLE_VALUE ? GetLastError () : 0;
+  LocalFree (lock_descriptor);
   g_free (wlock);
   if (lock_handle == INVALID_HANDLE_VALUE) {
     g_mutex_unlock (&lease_registry_mutex);
@@ -286,7 +351,7 @@ wyl_policy_store_lease_acquire (const gchar *path,
     return WYRELOG_E_POLICY;
   }
   if (mode == WYL_POLICY_STORE_LEASE_MAINTENANCE
-      && !win_handle_owned_by_current_user (lock_handle)) {
+      && !win_handle_owner_only_current_user (lock_handle)) {
     CloseHandle (lock_handle);
     CloseHandle (parent_handle);
     g_mutex_unlock (&lease_registry_mutex);
