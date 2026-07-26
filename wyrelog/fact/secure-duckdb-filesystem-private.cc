@@ -7,6 +7,8 @@
 
 #include <cerrno>
 #include <cstdint>
+#include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -105,13 +107,45 @@ validate_flags (duckdb::FileOpenFlags flags)
 
 WylSecureDuckdbFileSystem::WylSecureDuckdbFileSystem (
     WylFactArtifactNamespace *namespace_)
-    : namespace_ (namespace_), main_bound_ (false)
+    : namespace_ (namespace_), main_bound_ (false), lock_fd_ (-1),
+      lock_type_ (duckdb::FileLockType::NO_LOCK)
 {
   if (namespace_ == nullptr
       || wyl_fact_artifact_namespace_revalidate (namespace_) != WYRELOG_E_OK)
     io_reject ("invalid namespace binding");
   main_bound_ = wyl_fact_artifact_namespace_revalidate_main (namespace_)
       == WYRELOG_E_OK;
+}
+
+WylSecureDuckdbFileSystem::~WylSecureDuckdbFileSystem ()
+{
+  if (lock_fd_ >= 0)
+    close (lock_fd_);
+}
+
+int
+WylSecureDuckdbFileSystem::AcquireLockDescriptor (
+    duckdb::FileLockType requested)
+{
+  if (requested == duckdb::FileLockType::NO_LOCK)
+    return -1;
+  if (lock_fd_ < 0) {
+    require_ok (wyl_fact_artifact_namespace_lock (namespace_,
+        requested == duckdb::FileLockType::WRITE_LOCK, &lock_fd_),
+        "database lock");
+    lock_type_ = requested;
+    require_ok (wyl_fact_artifact_namespace_sync_directory (namespace_),
+        "lock directory sync");
+  } else if (lock_type_ == duckdb::FileLockType::READ_LOCK
+      && requested == duckdb::FileLockType::WRITE_LOCK) {
+    if (flock (lock_fd_, LOCK_EX | LOCK_NB) != 0)
+      io_reject ("database lock upgrade");
+    lock_type_ = duckdb::FileLockType::WRITE_LOCK;
+  }
+  const int duplicate = fcntl (lock_fd_, F_DUPFD_CLOEXEC, 0);
+  if (duplicate < 0)
+    io_reject ("database lock duplication");
+  return duplicate;
 }
 
 duckdb::unique_ptr<duckdb::FileHandle>
@@ -196,13 +230,11 @@ WylSecureDuckdbFileSystem::OpenFile (const duckdb::string &path,
         "created-file directory sync");
 
   int lock_fd = -1;
-  if (flags.Lock () != duckdb::FileLockType::NO_LOCK) {
-    rc = wyl_fact_artifact_namespace_lock (namespace_,
-        flags.Lock () == duckdb::FileLockType::WRITE_LOCK, &lock_fd);
-    if (rc != WYRELOG_E_OK) {
-      close (fd);
-      require_ok (rc, "lock");
-    }
+  try {
+    lock_fd = AcquireLockDescriptor (flags.Lock ());
+  } catch (...) {
+    close (fd);
+    throw;
   }
   if (artifact == WYL_FACT_ARTIFACT_MAIN) {
     rc = main_bound_
@@ -524,7 +556,7 @@ duckdb::unique_ptr<duckdb::FileHandle>
 WylSecureDuckdbFileSystem::OpenCompressedFile (duckdb::QueryContext,
     duckdb::unique_ptr<duckdb::FileHandle>, bool)
 { unsupported ("compressed files"); }
-bool WylSecureDuckdbFileSystem::IsLocalFileSystem () const { return true; }
+bool WylSecureDuckdbFileSystem::IsLocalFileSystem () const { return false; }
 std::string WylSecureDuckdbFileSystem::GetName () const
 { return "wyrelog-bounded-duckdb-filesystem"; }
 void WylSecureDuckdbFileSystem::SetDisabledFileSystems (
