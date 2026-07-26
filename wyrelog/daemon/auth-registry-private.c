@@ -792,6 +792,27 @@ entry_indexes_consistent_locked (WylServiceAuthRegistry *registry,
       && g_hash_table_contains (tenant->members, entry);
 }
 
+/* Maintenance holds the service WRITE lease, so this bounded all-entry scan
+ * is the invariant gate before it may retire even one due pair. */
+static gboolean
+registry_maintenance_consistent_locked (WylServiceAuthRegistry *registry)
+{
+  gsize size = g_hash_table_size (registry->by_session);
+
+  if (size > WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES
+      || (gsize) g_sequence_get_length (registry->by_expiry) != size)
+    return FALSE;
+  for (GSequenceIter * iter = g_sequence_get_begin_iter (registry->by_expiry);
+      !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
+    ServiceAuthEntry *entry = g_sequence_get (iter);
+    if (entry == NULL || entry->expiry_iter != iter
+        || !entry_indexes_consistent_locked (registry, entry)
+        || entry->state == WYL_SERVICE_AUTH_PENDING)
+      return FALSE;
+  }
+  return TRUE;
+}
+
 static gboolean
 bucket_table_consistent_locked (WylServiceAuthRegistry *registry,
     GHashTable *table, WylServiceAuthSelectorKind family, gsize expected)
@@ -1294,6 +1315,14 @@ wyl_service_auth_registry_copy_due (WylServiceAuthRegistry *registry,
   entries = g_ptr_array_new_with_free_func ((GDestroyNotify) entry_free);
   snapshots = g_ptr_array_new_with_free_func (reservation_snapshot_free);
   g_mutex_lock (&registry->mutex);
+  /* This scans the complete bounded registry before the batch limit is
+   * applied.  A PENDING pair is proof of an escaped WRITE epoch even when it
+   * expires in the future or sorts after this maintenance batch. */
+  if (!registry_maintenance_consistent_locked (registry)) {
+    g_mutex_unlock (&registry->mutex);
+    g_ptr_array_unref (snapshots);
+    return WYRELOG_E_POLICY;
+  }
   for (GSequenceIter * iter = g_sequence_get_begin_iter (registry->by_expiry);
       !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
     ServiceAuthEntry *entry = g_sequence_get (iter);

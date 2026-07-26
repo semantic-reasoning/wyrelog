@@ -547,6 +547,46 @@ test_due_cleanup_rejects_corrupt_indexes (void)
   }
 }
 
+static void
+test_due_cleanup_rejects_any_pending (void)
+{
+  WylServiceAuthRegistry *registry = new_registry ();
+  WylServiceAuthReservation future = fixture (SESSION_A, JTI_A);
+  GPtrArray *due = (GPtrArray *) 0x1;
+
+  future.expires_at = 2;
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &future), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 32,
+          &due), ==, WYRELOG_E_POLICY);
+  g_assert_null (due);
+  wyl_service_auth_registry_unref (registry);
+
+  registry = new_registry ();
+  for (guint i = 0; i < 33; i++) {
+    g_autofree gchar *session = g_strdup_printf
+        ("01890c10-2e3f-7000-8000-%012u", 1000 + i);
+    g_autofree gchar *jti = g_strdup_printf
+        ("01890c10-2e3f-7000-8001-%012u", 1000 + i);
+    WylServiceAuthReservation value = fixture (session, jti);
+    gboolean changed = FALSE;
+
+    value.expires_at = 1;
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &value), ==,
+        WYRELOG_E_OK);
+    if (i < 32) {
+      g_assert_cmpint (wyl_service_auth_registry_activate (registry, &value,
+              &changed), ==, WYRELOG_E_OK);
+      g_assert_true (changed);
+    }
+  }
+  due = (GPtrArray *) 0x1;
+  g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 1, 32,
+          &due), ==, WYRELOG_E_POLICY);
+  g_assert_null (due);
+  wyl_service_auth_registry_unref (registry);
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -1139,6 +1179,8 @@ main (int argc, char **argv)
       test_zero_survivor_global_corruption_matrix);
   g_test_add_func ("/daemon/auth-registry/due-cleanup-corrupt-indexes",
       test_due_cleanup_rejects_corrupt_indexes);
+  g_test_add_func ("/daemon/auth-registry/due-cleanup-any-pending",
+      test_due_cleanup_rejects_any_pending);
   g_test_add_func ("/daemon/auth-registry/allocation-cleanup",
       test_allocation_failures_and_cleanup);
   g_test_add_func ("/daemon/auth-registry/counted-clear-reuse",
