@@ -985,7 +985,12 @@ wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
    * epoch.  Human access/refresh state is also key-bound and is discarded in
    * the same context critical section. */
   g_auto (WylDaemonPolicyWrite) write = { 0 };
+  WylServiceAuthRegistryMaintenanceParticipant *maintenance = NULL;
   rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_service_auth_registry_maintenance_participant_new_for_write
+      (ctx->service_auth_registry, ctx->handle, write.lease, &maintenance);
   if (rc != WYRELOG_E_OK)
     goto out;
   rc = service_publication_context_lock (ctx);
@@ -998,11 +1003,13 @@ wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
         NULL);
 #endif
   if (rc == WYRELOG_E_OK) {
+    rc = wyl_service_auth_registry_maintenance_participant_clear (maintenance);
+  }
+  if (rc == WYRELOG_E_OK) {
     g_hash_table_foreach_remove (ctx->sessions_by_token,
         service_session_remove_on_key_rotation, NULL);
     g_hash_table_remove_all (ctx->access_tokens_by_jti);
     g_hash_table_remove_all (ctx->refresh_tokens_by_token);
-    wyl_service_auth_registry_clear (ctx->service_auth_registry);
   }
   if (rc == WYRELOG_E_OK) {
     sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
@@ -1015,6 +1022,8 @@ wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
   }
   rc = service_publication_context_unlock (ctx, rc);
 out:
+  if (maintenance != NULL)
+    wyl_service_auth_registry_maintenance_participant_free (maintenance);
   sodium_memzero (next_secret, sizeof next_secret);
   return rc;
 }
@@ -2786,7 +2795,7 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
   WylServiceAuthWriteLease *lease = NULL;
   GPtrArray *due = NULL;
   GPtrArray *retired = NULL;
-  WylServiceAuthRegistrySessionParticipant *participant = NULL;
+  WylServiceAuthRegistryMaintenanceParticipant *maintenance = NULL;
   wyrelog_error_t rc;
 
   if (ctx == NULL || now_seconds < 0)
@@ -2803,11 +2812,11 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
   if (due->len == 0)
     goto out;
 
-  /* Participant construction validates the WRITE lease at the coordination
-   * rank.  It must happen before entering the context rank; its mutation
-   * methods then enter the registry as the third and final rank. */
-  rc = wyl_service_auth_registry_session_participant_new_for_write
-      (ctx->service_auth_registry, ctx->handle, lease, &participant);
+  /* The maintenance capability claims this WRITE lease while still at the
+   * coordination rank. Its exact removal enters REGISTRY only after the
+   * caller has entered CONTEXT, preserving the global rank order. */
+  rc = wyl_service_auth_registry_maintenance_participant_new_for_write
+      (ctx->service_auth_registry, ctx->handle, lease, &maintenance);
   if (rc != WYRELOG_E_OK)
     goto fail_stop;
 
@@ -2846,8 +2855,8 @@ service_auth_retire_due (WylDaemonHttpContext *ctx, gint64 now_seconds)
       rc = WYRELOG_E_POLICY;
       goto unlock_fail_stop;
     }
-    rc = wyl_service_auth_registry_session_participant_remove_exact
-        (participant, reservation, &removed);
+    rc = wyl_service_auth_registry_maintenance_participant_remove_exact
+        (maintenance, reservation, &removed);
     if (rc != WYRELOG_E_OK || !removed) {
       g_hash_table_insert (ctx->sessions_by_token, pair->session_key,
           pair->session_value);
@@ -2879,8 +2888,8 @@ out:
     g_ptr_array_unref (due);
   if (retired != NULL)
     g_ptr_array_unref (retired);
-  if (participant != NULL)
-    wyl_service_auth_registry_session_participant_free (participant);
+  if (maintenance != NULL)
+    wyl_service_auth_registry_maintenance_participant_free (maintenance);
   if (lease != NULL) {
     wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
     if (rc == WYRELOG_E_OK)
