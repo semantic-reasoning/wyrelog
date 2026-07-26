@@ -653,11 +653,11 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
 {
   if (o)
     *o = -1;
-  /* A namespace-only handle may access an existing file, but cannot change
-   * the namespace by creating a new pathname. */
-  if (create)
+  /* Direct namespace access is read-only.  A guard is required before any
+   * writable descriptor can be handed to a caller. */
+  if (create || writable)
     return WYRELOG_E_POLICY;
-  return open_file_unchecked (n, a, FALSE, writable, o);
+  return open_file_unchecked (n, a, FALSE, FALSE, o);
 }
 
 wyrelog_error_t
@@ -798,9 +798,9 @@ wyl_fact_artifact_namespace_open_temp (WylFactArtifactNamespace *n,
 {
   if (out_fd)
     *out_fd = -1;
-  if (create)
+  if (create || writable)
     return WYRELOG_E_POLICY;
-  return open_temp_unchecked (n, token, FALSE, writable, out_fd);
+  return open_temp_unchecked (n, token, FALSE, FALSE, out_fd);
 }
 
 wyrelog_error_t
