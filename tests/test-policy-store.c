@@ -2215,6 +2215,82 @@ check_store_enforces_service_permission_planes (void)
 }
 
 static gint
+check_store_rejects_unsafe_service_permission_closure (void)
+{
+  g_autoptr (wyl_policy_store_t) store = NULL;
+  wyl_policy_service_principal_info_t principal = { 0 };
+  sqlite3 *db = NULL;
+
+  if (wyl_policy_store_open (NULL, &store) != WYRELOG_E_OK)
+    return 116;
+  if (wyl_policy_store_create_schema (store) != WYRELOG_E_OK)
+    return 117;
+  if (wyl_policy_store_create_service_principal (store, "svc:closure:test",
+          "closure test", "admin-user", "req-service-closure", &principal)
+      != WYRELOG_E_OK)
+    return 118;
+  wyl_policy_service_principal_info_clear (&principal);
+  if (wyl_policy_store_upsert_permission (store, "site.closure.basic",
+          "closure basic", "basic") != WYRELOG_E_OK)
+    return 119;
+  if (wyl_policy_store_upsert_role (store, "site.closure-child",
+          "closure child") != WYRELOG_E_OK)
+    return 120;
+  if (wyl_policy_store_upsert_role (store, "site.closure-parent",
+          "closure parent") != WYRELOG_E_OK)
+    return 121;
+  if (wyl_policy_store_grant_role_permission (store, "site.closure-parent",
+          "site.closure.basic") != WYRELOG_E_OK)
+    return 122;
+  if (wyl_policy_store_grant_role_inheritance (store, "site.closure-child",
+          "site.closure-parent") != WYRELOG_E_OK)
+    return 123;
+
+  db = wyl_policy_store_get_db (store);
+  if (sqlite3_exec (db,
+          "INSERT INTO role_memberships(subject_id,role_id,scope)"
+          " VALUES('svc:closure:test','site.closure-child','scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 124;
+  if (wyl_policy_store_validate_service_permission_closure (store)
+      != WYRELOG_E_POLICY)
+    return 125;
+  if (sqlite3_exec (db,
+          "DELETE FROM role_memberships WHERE subject_id='svc:closure:test';"
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:closure:test','site.closure.basic','scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 126;
+  if (wyl_policy_store_validate_service_permission_closure (store)
+      != WYRELOG_E_POLICY)
+    return 127;
+  if (sqlite3_exec (db,
+          "DELETE FROM direct_permissions WHERE subject_id='svc:closure:test';"
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:closure:test','wr.stream.read','scope');"
+          "UPDATE permissions SET class='critical'"
+          " WHERE perm_id='wr.stream.read';", NULL, NULL, NULL) != SQLITE_OK)
+    return 128;
+  if (wyl_policy_store_validate_service_permission_closure (store)
+      != WYRELOG_E_POLICY)
+    return 129;
+  if (sqlite3_exec (db,
+          "UPDATE permissions SET class='basic'"
+          " WHERE perm_id='wr.stream.read';"
+          "DELETE FROM direct_permissions WHERE subject_id='svc:closure:test';"
+          "PRAGMA foreign_keys=OFF;"
+          "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+          " VALUES('svc:dangling','wr.stream.read','scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 130;
+  if (wyl_policy_store_validate_service_permission_closure (store)
+      != WYRELOG_E_POLICY)
+    return 131;
+
+  return 0;
+}
+
+static gint
 check_store_checks_effective_subject_permission (void)
 {
   g_autoptr (wyl_policy_store_t) store = NULL;
@@ -4856,6 +4932,8 @@ main (void)
   if ((rc = check_store_reports_permission_planes ()) != 0)
     return rc;
   if ((rc = check_store_enforces_service_permission_planes ()) != 0)
+    return rc;
+  if ((rc = check_store_rejects_unsafe_service_permission_closure ()) != 0)
     return rc;
   if ((rc = check_store_checks_effective_subject_permission ()) != 0)
     return rc;

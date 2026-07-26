@@ -305,6 +305,8 @@ static wyrelog_error_t bind_text (sqlite3_stmt * stmt, int index,
     const gchar * value);
 static wyrelog_error_t query_single_text (sqlite3 * db, const gchar * sql,
     const gchar * id, gchar ** out_value);
+static wyrelog_error_t query_has_rows (sqlite3 * db, const gchar * sql,
+    gboolean * out_has_rows);
 static wyrelog_error_t service_domain_claim_request (wyl_policy_store_t * store,
     const gchar * request_id, const gchar * operation,
     const gchar * resource_id,
@@ -2012,6 +2014,69 @@ wyl_policy_store_role_is_service_eligible (wyl_policy_store_t *store,
   sqlite3_finalize (stmt);
   *out_eligible = !has_control;
   return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_policy_store_validate_service_permission_closure
+    (wyl_policy_store_t * store) {
+  if (store == NULL || store->db == NULL)
+    return WYRELOG_E_INVALID;
+
+  /* Treat service-shaped dangling subjects as service authority.  This keeps
+   * a damaged legacy store fail-closed instead of reinterpreting it as human
+   * authority merely because its service_principals row is missing. */
+  static const gchar *sql =
+      "WITH RECURSIVE service_subject(subject_id) AS ("
+      "  SELECT subject_id FROM service_principals"
+      "  UNION SELECT subject_id FROM direct_permissions"
+      "    WHERE substr(subject_id, 1, 4) = 'svc:'"
+      "  UNION SELECT subject_id FROM role_memberships"
+      "    WHERE substr(subject_id, 1, 4) = 'svc:'"
+      "), service_roles(subject_id, role_id) AS ("
+      "  SELECT ss.subject_id, rm.role_id"
+      "  FROM service_subject ss"
+      "  JOIN role_memberships rm ON rm.subject_id = ss.subject_id"
+      "  UNION"
+      "  SELECT sr.subject_id, ri.parent_role_id"
+      "  FROM service_roles sr"
+      "  JOIN role_inheritances ri ON ri.child_role_id = sr.role_id"
+      "), effective_permission(subject_id, perm_id) AS ("
+      "  SELECT ss.subject_id, dp.perm_id"
+      "  FROM service_subject ss"
+      "  JOIN direct_permissions dp ON dp.subject_id = ss.subject_id"
+      "  UNION"
+      "  SELECT sr.subject_id, rp.perm_id"
+      "  FROM service_roles sr"
+      "  JOIN role_permissions rp ON rp.role_id = sr.role_id"
+      "), unsafe_permission AS ("
+      "  SELECT ep.subject_id"
+      "  FROM effective_permission ep"
+      "  LEFT JOIN permissions p ON p.perm_id = ep.perm_id"
+      "  WHERE NOT ("
+      "    (p.perm_id = 'wr.stream.read' AND p.perm_name = 'stream read'"
+      "      AND p.class = 'basic')"
+      "    OR (p.perm_id = 'wr.stream.list' AND p.perm_name = 'stream list'"
+      "      AND p.class = 'basic')"
+      "    OR (p.perm_id = 'wr.svc.read_decision'"
+      "      AND p.perm_name = 'service decision read'"
+      "      AND p.class = 'basic')"
+      "  ) OR p.perm_id IS NULL"
+      "), dangling_reference AS ("
+      "  SELECT ss.subject_id FROM service_subject ss"
+      "  LEFT JOIN service_principals sp ON sp.subject_id = ss.subject_id"
+      "  WHERE sp.subject_id IS NULL"
+      "  UNION"
+      "  SELECT sr.subject_id FROM service_roles sr"
+      "  LEFT JOIN roles r ON r.role_id = sr.role_id"
+      "  WHERE r.role_id IS NULL"
+      ")"
+      "SELECT 1 FROM unsafe_permission"
+      " UNION ALL SELECT 1 FROM dangling_reference" " LIMIT 1;";
+  gboolean unsafe = FALSE;
+  wyrelog_error_t rc = query_has_rows (store->db, sql, &unsafe);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return unsafe ? WYRELOG_E_POLICY : WYRELOG_E_OK;
 }
 
 static gboolean
@@ -7177,6 +7242,8 @@ wyrelog_error_t
       (txn->write_lease, txn->handle);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_snapshot (txn->store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_service_permission_closure (txn->store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_validate_service_schema (txn->store);
   if (rc == WYRELOG_E_OK) {
