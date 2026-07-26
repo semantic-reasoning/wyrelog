@@ -491,6 +491,19 @@ test_mutation_leases (void)
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard (fresh,
           &reader_a), ==, WYRELOG_E_OK);
+  const mode_t invalid_directory_modes[] = { 0755, 0770, 0777 };
+  for (guint i = 0; i < G_N_ELEMENTS (invalid_directory_modes); i++) {
+    g_assert_cmpint (chmod (graph_path, invalid_directory_modes[i]), ==, 0);
+    g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (reader_a), ==,
+        WYRELOG_E_POLICY);
+    WylFactArtifactNamespace *rejected = (gpointer) 0x1;
+    g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &rejected), ==,
+        WYRELOG_E_POLICY);
+    g_assert_null (rejected);
+    g_assert_cmpint (chmod (graph_path, 0700), ==, 0);
+    g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (reader_a), ==,
+        WYRELOG_E_OK);
+  }
   wyl_fact_artifact_mutation_lease_free (reader_a);
   wyl_fact_artifact_namespace_free (fresh);
   /* Test cleanup runs outside the production namespace authority. */
