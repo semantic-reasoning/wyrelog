@@ -52,6 +52,7 @@ wyrelog_sources = files(
   'fact/schema.c',
   'policy/store.c',
   'policy/store-lease.c',
+  'policy/service-permission-maintenance-private.c',
   'wyl-boot.c',
   'wyl-decide.c',
   'wyl-dl-static.c',

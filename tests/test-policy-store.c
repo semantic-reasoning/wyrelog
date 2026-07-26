@@ -12,9 +12,11 @@
 #include "fact-test-support.h"
 #include "wyrelog/wyrelog.h"
 #include "wyrelog/fact/graph-locator-private.h"
+#include "wyrelog/policy/service-permission-maintenance-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyrelog/wyl-keyprovider-file-private.h"
+#include "wyrelog/wyl-request-id-private.h"
 
 #ifndef G_OS_WIN32
 #include <unistd.h>
@@ -2369,6 +2371,139 @@ check_store_rejects_unsafe_service_permission_closure (void)
     return 346;
   wyl_policy_permission_closure_analysis_clear (&dangling_analysis);
 
+  return 0;
+}
+
+static gint
+check_service_permission_manifest_is_canonical (void)
+{
+  WylPolicyPermissionClosureAnalysis analysis = {
+    .generation = 42,
+    .removals = g_ptr_array_new_with_free_func
+        ((GDestroyNotify) wyl_policy_permission_closure_removal_free),
+  };
+  memset (analysis.digest, 0x5a, sizeof analysis.digest);
+  WylPolicyPermissionClosureRemoval *direct =
+      g_new0 (WylPolicyPermissionClosureRemoval, 1);
+  direct->action = WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT;
+  direct->reason = WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION;
+  direct->subject_id = g_strdup ("svc:manifest");
+  direct->right_id = g_strdup ("site.unsafe");
+  direct->scope = g_strdup ("scope/\"quoted\"");
+  g_ptr_array_add (analysis.removals, direct);
+  WylPolicyPermissionClosureRemoval *membership =
+      g_new0 (WylPolicyPermissionClosureRemoval, 1);
+  membership->action = WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP;
+  membership->reason = WYL_POLICY_PERMISSION_CLOSURE_DANGLING_ROLE;
+  membership->subject_id = g_strdup ("svc:manifest");
+  membership->right_id = g_strdup ("site.role");
+  membership->scope = g_strdup ("tenant");
+  g_ptr_array_add (analysis.removals, membership);
+
+  gchar request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (request_id, sizeof request_id) != WYRELOG_E_OK)
+    return 347;
+  WylServicePermissionManifest manifest = { 0 };
+  if (wyl_service_permission_manifest_from_analysis (&analysis, request_id,
+          &manifest) != WYRELOG_E_OK)
+    return 348;
+  g_autofree gchar *encoded = NULL;
+  gsize encoded_len = 0;
+  if (wyl_service_permission_manifest_encode (&manifest, &encoded,
+          &encoded_len) != WYRELOG_E_OK)
+    return 349;
+  WylServicePermissionManifest decoded = { 0 };
+  if (wyl_service_permission_manifest_decode (encoded, encoded_len, &decoded)
+      != WYRELOG_E_OK
+      || wyl_service_permission_manifest_matches_analysis (&decoded,
+          &analysis) != WYRELOG_E_OK)
+    return 350;
+
+  g_autofree gchar *extra = g_strdup_printf (" %s", encoded);
+  WylServicePermissionManifest rejected = { 0 };
+  if (wyl_service_permission_manifest_decode (extra, strlen (extra),
+          &rejected) != WYRELOG_E_POLICY)
+    return 351;
+  g_autofree gchar *unknown = g_strdup (encoded);
+  gchar *version_end = strstr (unknown, "\"request_id\"");
+  if (version_end == NULL)
+    return 352;
+  memcpy (version_end, "\"extra_id\" ", 11);
+  if (wyl_service_permission_manifest_decode (unknown, strlen (unknown),
+          &rejected) != WYRELOG_E_POLICY)
+    return 353;
+  g_autofree gchar *human = g_strdup (encoded);
+  gchar *service_subject = strstr (human, "svc:manifest");
+  if (service_subject == NULL)
+    return 361;
+  memcpy (service_subject, "usr:manifest", strlen ("usr:manifest"));
+  if (wyl_service_permission_manifest_decode (human, strlen (human),
+          &rejected) != WYRELOG_E_POLICY)
+    return 362;
+  g_autofree gchar *grant = g_strdup (encoded);
+  gchar *revoke_action = strstr (grant, "revoke_direct_permission");
+  if (revoke_action == NULL)
+    return 363;
+  memcpy (revoke_action, "grant___direct_permission",
+      strlen ("grant___direct_permission"));
+  if (wyl_service_permission_manifest_decode (grant, strlen (grant),
+          &rejected) != WYRELOG_E_POLICY)
+    return 364;
+  WylPolicyPermissionClosureRemoval *last =
+      g_ptr_array_index (manifest.operations, manifest.operations->len - 1);
+  WylPolicyPermissionClosureRemoval *duplicate =
+      g_new0 (WylPolicyPermissionClosureRemoval, 1);
+  duplicate->action = last->action;
+  duplicate->reason = last->reason;
+  duplicate->subject_id = g_strdup (last->subject_id);
+  duplicate->right_id = g_strdup (last->right_id);
+  duplicate->scope = g_strdup (last->scope);
+  g_ptr_array_add (manifest.operations, duplicate);
+  g_autofree gchar *duplicate_document = NULL;
+  gsize duplicate_len = 0;
+  if (wyl_service_permission_manifest_encode (&manifest, &duplicate_document,
+          &duplicate_len) != WYRELOG_E_INVALID)
+    return 366;
+  g_ptr_array_remove_index (manifest.operations, manifest.operations->len - 1);
+  analysis.digest[0] ^= 1;
+  if (wyl_service_permission_manifest_matches_analysis (&decoded, &analysis)
+      != WYRELOG_E_POLICY)
+    return 354;
+  analysis.digest[0] ^= 1;
+
+  GError *error = NULL;
+  g_autofree gchar *output_dir =
+      g_dir_make_tmp ("wyl-permission-manifest-XXXXXX", &error);
+  if (error != NULL || output_dir == NULL)
+    return 355;
+  g_autofree gchar *output_path =
+      g_build_filename (output_dir, "inspect.json", NULL);
+  if (wyl_service_permission_manifest_write_new_owner_only (output_path,
+          &manifest) != WYRELOG_E_OK)
+    return 356;
+  if (wyl_service_permission_manifest_write_new_owner_only (output_path,
+          &manifest) != WYRELOG_E_POLICY)
+    return 357;
+  GStatBuf output_stat;
+  if (g_stat (output_path, &output_stat) != 0)
+    return 358;
+#ifndef G_OS_WIN32
+  if (!S_ISREG (output_stat.st_mode)
+      || (output_stat.st_mode & 0777) != 0600)
+    return 359;
+#endif
+  g_autofree gchar *written = NULL;
+  gsize written_len = 0;
+  if (!g_file_get_contents (output_path, &written, &written_len, &error)
+      || written_len != encoded_len
+      || memcmp (written, encoded, encoded_len) != 0)
+    return 360;
+  (void) g_remove (output_path);
+  (void) g_rmdir (output_dir);
+
+  wyl_service_permission_manifest_clear (&decoded);
+  wyl_service_permission_manifest_clear (&manifest);
+  wyl_policy_permission_closure_analysis_clear (&analysis);
   return 0;
 }
 
@@ -5016,6 +5151,8 @@ main (void)
   if ((rc = check_store_enforces_service_permission_planes ()) != 0)
     return rc;
   if ((rc = check_store_rejects_unsafe_service_permission_closure ()) != 0)
+    return rc;
+  if ((rc = check_service_permission_manifest_is_canonical ()) != 0)
     return rc;
   if ((rc = check_store_checks_effective_subject_permission ()) != 0)
     return rc;
