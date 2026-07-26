@@ -238,6 +238,7 @@ struct WylFactArtifactLockDomain
 struct WylFactArtifactMutationLease
 {
   WylFactArtifactNamespace *namespace_;
+  GMutex mutex;
   gint lock_fd;
   guint64 directory_device, directory_inode;
   guint64 lock_device, lock_inode;
@@ -261,7 +262,7 @@ name_for (WylFactArtifactName n)
 static gboolean
 valid (WylFactArtifactName n)
 {
-  return n <= WYL_FACT_ARTIFACT_LOCK;
+  return n >= WYL_FACT_ARTIFACT_MAIN && n <= WYL_FACT_ARTIFACT_LOCK;
 }
 
 static wyrelog_error_t
@@ -347,13 +348,10 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
     return WYRELOG_E_POLICY;
 
   if (n->lock_pin_fd < 0) {
-    gboolean created = FALSE;
     gint pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
         O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL,
         0600);
-    if (pin >= 0)
-      created = TRUE;
-    else if (errno == EEXIST)
+    if (pin < 0 && errno == EEXIST)
       pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
           O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (pin < 0)
@@ -367,7 +365,9 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
       close (pin);
       return WYRELOG_E_POLICY;
     }
-    if (created && fsync (n->fd) != 0) {
+    /* An EEXIST opener may race the creator before its durability barrier.
+     * Fsyncing in both paths makes publication wait for one directory barrier. */
+    if (fsync (n->fd) != 0) {
       close (pin);
       return WYRELOG_E_IO;
     }
@@ -567,6 +567,7 @@ acquire_lease (WylFactArtifactNamespace *n, gboolean exclusive,
   WylFactArtifactMutationLease *lease =
       g_new0 (WylFactArtifactMutationLease, 1);
   lease->namespace_ = namespace_ref (n);
+  g_mutex_init (&lease->mutex);
   lease->lock_fd = fd;
   lease->directory_device = n->device;
   lease->directory_inode = n->inode;
@@ -596,8 +597,8 @@ wyl_fact_artifact_namespace_acquire_mutation_lease (WylFactArtifactNamespace *n,
   return acquire_lease (n, TRUE, out_lease);
 }
 
-wyrelog_error_t
-wyl_fact_artifact_mutation_lease_revalidate (WylFactArtifactMutationLease *l)
+static wyrelog_error_t
+lease_revalidate_unlocked (WylFactArtifactMutationLease *l)
 {
   if (!l || !l->namespace_ || l->lock_fd < 0
       || l->directory_device != l->namespace_->device
@@ -609,11 +610,23 @@ wyl_fact_artifact_mutation_lease_revalidate (WylFactArtifactMutationLease *l)
       l->lock_inode);
 }
 
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_revalidate (WylFactArtifactMutationLease *l)
+{
+  if (!l)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  g_mutex_unlock (&l->mutex);
+  return r;
+}
+
 void
 wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *l)
 {
   if (!l)
     return;
+  g_mutex_clear (&l->mutex);
   if (l->lock_fd >= 0)
     close (l->lock_fd);
   namespace_unref (l->namespace_);
@@ -822,9 +835,10 @@ wyl_fact_artifact_namespace_rename (WylFactArtifactNamespace *n,
  * have raced after changing the namespace.  A failed identity check wins so
  * callers never continue after observing a substituted lock or directory. */
 static wyrelog_error_t
-post_mutation_check (WylFactArtifactMutationLease *l, wyrelog_error_t result)
+post_mutation_check_unlocked (WylFactArtifactMutationLease *l,
+    wyrelog_error_t result)
 {
-  wyrelog_error_t post = wyl_fact_artifact_mutation_lease_revalidate (l);
+  wyrelog_error_t post = lease_revalidate_unlocked (l);
   return post == WYRELOG_E_OK ? result : post;
 }
 
@@ -840,19 +854,25 @@ wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
     return WYRELOG_E_POLICY;
   if (a == WYL_FACT_ARTIFACT_LOCK)
     return WYRELOG_E_POLICY;
-  wyrelog_error_t r = wyl_fact_artifact_mutation_lease_revalidate (l);
-  if (r != WYRELOG_E_OK)
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  if (r != WYRELOG_E_OK) {
+    g_mutex_unlock (&l->mutex);
     return r;
+  }
   r = open_file_unchecked (l->namespace_, a, create, writable, out_fd);
-  if (!create)
+  if (!create) {
+    g_mutex_unlock (&l->mutex);
     return r;
-  r = post_mutation_check (l, r);
+  }
+  r = post_mutation_check_unlocked (l, r);
   if (r != WYRELOG_E_OK) {
     if (*out_fd >= 0) {
       close (*out_fd);
       *out_fd = -1;
     }
   }
+  g_mutex_unlock (&l->mutex);
   return r;
 }
 
@@ -866,19 +886,25 @@ wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
     return WYRELOG_E_INVALID;
   if (create && !l->exclusive)
     return WYRELOG_E_POLICY;
-  wyrelog_error_t r = wyl_fact_artifact_mutation_lease_revalidate (l);
-  if (r != WYRELOG_E_OK)
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  if (r != WYRELOG_E_OK) {
+    g_mutex_unlock (&l->mutex);
     return r;
+  }
   r = open_temp_unchecked (l->namespace_, token, create, writable, out_fd);
-  if (!create)
+  if (!create) {
+    g_mutex_unlock (&l->mutex);
     return r;
-  r = post_mutation_check (l, r);
+  }
+  r = post_mutation_check_unlocked (l, r);
   if (r != WYRELOG_E_OK) {
     if (*out_fd >= 0) {
       close (*out_fd);
       *out_fd = -1;
     }
   }
+  g_mutex_unlock (&l->mutex);
   return r;
 }
 
@@ -890,11 +916,16 @@ wyl_fact_artifact_mutation_lease_unlink (WylFactArtifactMutationLease *l,
     return WYRELOG_E_POLICY;
   if (a == WYL_FACT_ARTIFACT_LOCK)
     return WYRELOG_E_POLICY;
-  wyrelog_error_t r = wyl_fact_artifact_mutation_lease_revalidate (l);
-  if (r != WYRELOG_E_OK)
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  if (r != WYRELOG_E_OK) {
+    g_mutex_unlock (&l->mutex);
     return r;
+  }
   r = unlink_unchecked (l->namespace_, a);
-  return post_mutation_check (l, r);
+  r = post_mutation_check_unlocked (l, r);
+  g_mutex_unlock (&l->mutex);
+  return r;
 }
 
 wyrelog_error_t
@@ -905,11 +936,16 @@ wyl_fact_artifact_mutation_lease_rename (WylFactArtifactMutationLease *l,
     return WYRELOG_E_POLICY;
   if (source == WYL_FACT_ARTIFACT_LOCK || destination == WYL_FACT_ARTIFACT_LOCK)
     return WYRELOG_E_POLICY;
-  wyrelog_error_t r = wyl_fact_artifact_mutation_lease_revalidate (l);
-  if (r != WYRELOG_E_OK)
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  if (r != WYRELOG_E_OK) {
+    g_mutex_unlock (&l->mutex);
     return r;
+  }
   r = rename_unchecked (l->namespace_, source, destination);
-  return post_mutation_check (l, r);
+  r = post_mutation_check_unlocked (l, r);
+  g_mutex_unlock (&l->mutex);
+  return r;
 }
 
 wyrelog_error_t

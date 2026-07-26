@@ -28,7 +28,15 @@ wyrelog_error_t wyl_fact_artifact_namespace_revalidate
 /* Cooperative 0700 graph-directory contract: only an exclusive opaque lease
  * authorizes sanctioned pathname mutation.  It pins both the held directory
  * and facts.duckdb.lock identities.  POSIX cannot make unlink/rename exact
- * against an uncooperative same-UID writer that bypasses this lease. */
+ * against an uncooperative same-UID writer that bypasses this lease.
+ *
+ * A lease retains the namespace and owns its kernel flock; freeing it releases
+ * both.  Operations on one live lease are serialized.  Every fd opened
+ * through a lease is valid only while that lease lives,
+ * and callers must close such fds and stop/join all lease operations before
+ * freeing it.  Process death releases flock while a validated regular lock
+ * entry remains reusable.  Fork after multithreading is not a supported
+ * synchronization guarantee. */
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_reader_guard
     (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
