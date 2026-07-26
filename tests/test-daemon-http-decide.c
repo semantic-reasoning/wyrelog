@@ -2881,6 +2881,39 @@ typedef struct
   gchar *tenant;
 } ServiceResolverRace;
 
+typedef struct
+{
+  GMutex mutex;
+  GCond changed;
+  SoupServer *server;
+  const gchar *request_id;
+  gboolean acquired;
+  gboolean release;
+  wyrelog_error_t rc;
+} CompoundDisableRace;
+
+static void
+compound_disable_after_write_acquired (gpointer data)
+{
+  CompoundDisableRace *race = data;
+  g_mutex_lock (&race->mutex);
+  race->acquired = TRUE;
+  g_cond_broadcast (&race->changed);
+  while (!race->release)
+    g_cond_wait (&race->changed, &race->mutex);
+  g_mutex_unlock (&race->mutex);
+}
+
+static gpointer
+compound_disable_thread (gpointer data)
+{
+  CompoundDisableRace *race = data;
+  race->rc = wyl_daemon_http_disable_service_principal_for_test
+      (race->server, "svc:resolver:test", race->request_id,
+      compound_disable_after_write_acquired, race);
+  return NULL;
+}
+
 static void
 service_resolver_race_checkpoint (WylDaemonServiceResolverPhase phase,
     gpointer data)
@@ -3022,6 +3055,98 @@ service_resolver_wait_flag (ServiceResolverRace *race, gboolean *flag)
   gboolean reached = *flag;
   g_mutex_unlock (&race->mutex);
   return reached;
+}
+
+static gboolean
+compound_disable_wait_acquired (CompoundDisableRace *race)
+{
+  gint64 deadline = g_get_monotonic_time () + 5 * G_TIME_SPAN_SECOND;
+  g_mutex_lock (&race->mutex);
+  while (!race->acquired
+      && g_cond_wait_until (&race->changed, &race->mutex, deadline));
+  gboolean acquired = race->acquired;
+  g_mutex_unlock (&race->mutex);
+  return acquired;
+}
+
+typedef struct
+{
+  SoupServer *server;
+  const ServiceResolverFixture *fixture;
+  wyrelog_error_t rc;
+  gchar *sid;
+  gchar *actor;
+  gchar *tenant;
+} ServiceResolverCall;
+
+static gpointer
+service_resolver_call_thread (gpointer data)
+{
+  ServiceResolverCall *call = data;
+  call->rc = wyl_daemon_http_resolve_bearer_for_test (call->server,
+      call->fixture->token, &call->sid, &call->actor, &call->tenant);
+  return NULL;
+}
+
+static gboolean
+check_compound_disable_real_resolver_and_activation (SoupServer *server)
+{
+  g_auto (ServiceResolverFixture) active = { 0 };
+  if (!service_resolver_fixture_init (server, &active,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !service_resolver_expect (server, &active, active.token, TRUE))
+    return FALSE;
+  CompoundDisableRace race = {
+    .server = server,
+    .request_id = "resolver-compound-disable",
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GThread) mutation = g_thread_new ("compound-disable",
+      compound_disable_thread, &race);
+  gboolean ok = compound_disable_wait_acquired (&race);
+  ServiceResolverCall later = {
+    .server = server,
+    .fixture = &active,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_autoptr (GThread) resolver = NULL;
+  if (ok) {
+    resolver = g_thread_new ("compound-later-resolver",
+        service_resolver_call_thread, &later);
+    ok = service_resolver_wait_reader_queued (server);
+  }
+  g_mutex_lock (&race.mutex);
+  race.release = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  g_thread_join (g_steal_pointer (&mutation));
+  if (resolver != NULL)
+    g_thread_join (g_steal_pointer (&resolver));
+  ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL;
+  g_free (later.sid);
+  g_free (later.actor);
+  g_free (later.tenant);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+
+  g_auto (ServiceResolverFixture) pending = { 0 };
+  gboolean changed = TRUE;
+  if (!ok || !service_resolver_fixture_init (server, &pending,
+          WYL_SERVICE_AUTH_PENDING, 0)
+      || wyl_daemon_http_disable_service_principal_for_test (server,
+          "svc:resolver:test", "resolver-compound-replay", NULL,
+          NULL) != WYRELOG_E_OK
+      || wyl_daemon_http_service_registry_transition_for_test (server,
+          pending.sid, pending.jti, pending.credential, 9,
+          "svc:resolver:test", "__wr_default",
+          WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) != WYRELOG_E_POLICY
+      || changed || !service_resolver_expect (server, &pending,
+          pending.token, FALSE))
+    return FALSE;
+  return TRUE;
 }
 
 static gboolean
@@ -3215,25 +3340,6 @@ check_service_resolver_publication_barrier (SoupServer *server,
   g_cond_clear (&race.changed);
   g_mutex_clear (&race.mutex);
   return ok;
-}
-
-typedef struct
-{
-  SoupServer *server;
-  const ServiceResolverFixture *fixture;
-  wyrelog_error_t rc;
-  gchar *sid;
-  gchar *actor;
-  gchar *tenant;
-} ServiceResolverCall;
-
-static gpointer
-service_resolver_call_thread (gpointer data)
-{
-  ServiceResolverCall *call = data;
-  call->rc = wyl_daemon_http_resolve_bearer_for_test (call->server,
-      call->fixture->token, &call->sid, &call->actor, &call->tenant);
-  return NULL;
 }
 
 static gboolean
@@ -3558,6 +3664,12 @@ check_service_resolver_conflicting_candidate (SoupServer *server)
 static gint
 check_service_bearer_resolver_contract (SoupServer *server)
 {
+  wyl_service_principal_t registered = { 0 };
+  if (wyl_service_principal_create (wyl_daemon_http_get_handle_for_test
+          (server), "svc:resolver:test", "resolver test", "admin",
+          "resolver-principal-create", &registered) != WYRELOG_E_OK)
+    return 1969;
+  wyl_service_principal_clear (&registered);
   g_auto (ServiceResolverFixture) control = { 0 };
   if (!service_resolver_fixture_init (server, &control,
           WYL_SERVICE_AUTH_ACTIVE, 0)
@@ -3751,6 +3863,8 @@ check_service_bearer_resolver_contract (SoupServer *server)
     return 2148;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
     return 2149;
+  if (!check_compound_disable_real_resolver_and_activation (server))
+    return 2150;
   return 0;
 }
 

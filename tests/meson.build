@@ -1172,6 +1172,11 @@ test_daemon_auth_registry = executable('test-daemon-auth-registry',
 
 test('daemon-auth-registry', test_daemon_auth_registry)
 
+test('service-auth-registry-capability-boundary', python3,
+  args : [meson.current_source_dir() /
+    'test-service-auth-registry-capability-boundary.py'],
+)
+
 test_service_auth_coordination = executable('test-service-auth-coordination',
   'test-service-auth-coordination.c',
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
@@ -2139,7 +2144,7 @@ if get_option('enable_audit').allowed()
     'test-service-exchange-private',
     'test-service-exchange-private.c',
     '../wyrelog/daemon/auth-registry-private.c',
-    c_args : ['-DWYL_HAS_AUDIT'],
+    c_args : ['-DWYL_HAS_AUDIT', '-DWYL_AUTH_REGISTRY_TESTING'],
     include_directories : [wyrelog_inc, include_directories('../wyrelog')],
     dependencies : [service_exchange_private_dep],
   )

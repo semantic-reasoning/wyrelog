@@ -353,11 +353,16 @@ wyl_service_principal_disable_with_runtime (WylHandle *handle,
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
     return WYRELOG_E_INVALID;
+  if (runtime != NULL && runtime->before_gate != NULL)
+    runtime->before_gate (runtime->data);
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_principal_info_t stored = { 0 };
   if (rc == WYRELOG_E_OK && runtime != NULL)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
+  if (rc == WYRELOG_E_OK && runtime != NULL
+      && runtime->after_write_acquired != NULL)
+    runtime->after_write_acquired (runtime->data);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
@@ -384,10 +389,15 @@ wyl_tenant_set_sealed_with_runtime (WylHandle *handle,
     *out_changed = FALSE;
   if (handle == NULL || out_changed == NULL)
     return WYRELOG_E_INVALID;
+  if (runtime != NULL && runtime->before_gate != NULL)
+    runtime->before_gate (runtime->data);
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   if (rc == WYRELOG_E_OK && sealed && runtime != NULL)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
+  if (rc == WYRELOG_E_OK && runtime != NULL
+      && runtime->after_write_acquired != NULL)
+    runtime->after_write_acquired (runtime->data);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
   if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)

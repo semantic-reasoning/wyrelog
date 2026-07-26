@@ -27,11 +27,17 @@ typedef struct
    * operation for callers that do not own the daemon registry; #376 wires the
    * compound entry point into real handlers. */
   WylServiceAuthRegistry *registry;
+  void (*before_gate) (gpointer data);
+  void (*after_write_acquired) (gpointer data);
+  gpointer data;
 } wyl_service_principal_disable_runtime_t;
 
 typedef struct
 {
   WylServiceAuthRegistry *registry;
+  void (*before_gate) (gpointer data);
+  void (*after_write_acquired) (gpointer data);
+  gpointer data;
 } wyl_tenant_seal_runtime_t;
 
 typedef struct

@@ -87,6 +87,8 @@ typedef struct _WylServiceAuthRegistrySessionParticipant
     WylServiceAuthRegistrySessionParticipant;
 typedef struct _WylHandle WylHandle;
 typedef struct _WylServiceAuthWriteLease WylServiceAuthWriteLease;
+typedef struct _WylServiceAuthRegistrySessionParticipant
+    WylServiceAuthRegistrySessionParticipant;
 typedef struct _WylServiceAuthRegistryWriteParticipant
     WylServiceAuthRegistryWriteParticipant;
 
@@ -135,6 +137,9 @@ WylServiceAuthRegistry *wyl_service_auth_registry_ref
 void wyl_service_auth_registry_unref (WylServiceAuthRegistry * registry);
 void wyl_service_auth_registry_clear (WylServiceAuthRegistry * registry);
 
+#if defined(WYL_AUTH_REGISTRY_TESTING) || defined(WYL_TEST_DAEMON_HTTP)
+/* Test adapters may exercise the state machine directly. Production
+ * reserve/activate/cleanup callsites use a lease-bound participant. */
 wyrelog_error_t wyl_service_auth_registry_reserve
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation);
@@ -144,6 +149,10 @@ wyrelog_error_t wyl_service_auth_registry_activate
 wyrelog_error_t wyl_service_auth_registry_revoke_exact
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation, gboolean * out_changed);
+wyrelog_error_t wyl_service_auth_registry_remove_exact
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthReservation * reservation, gboolean * out_removed);
+#endif
 wyrelog_error_t wyl_service_auth_registry_revoke_credential_generation
     (WylServiceAuthRegistry * registry, const gchar * credential_id,
     guint64 generation, WylServiceAuthRevokeResult * out_result);
@@ -183,10 +192,6 @@ wyrelog_error_t
     (WylServiceAuthRegistryWriteParticipant * participant,
     const WylServiceAuthSelector * selector,
     WylServiceAuthRevokeResult * out_result);
-wyrelog_error_t wyl_service_auth_registry_remove_exact
-    (WylServiceAuthRegistry * registry,
-    const WylServiceAuthReservation * reservation, gboolean * out_removed);
-
 /*
  * Lease-bound session mutation capability. The participant retains the
  * registry and handle but borrows the WRITE lease; its owner must keep that
