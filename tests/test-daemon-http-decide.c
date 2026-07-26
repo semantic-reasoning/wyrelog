@@ -3266,16 +3266,26 @@ static gboolean
 check_compound_tenant_real_resolver_and_activation (SoupServer *server)
 {
   const gchar *tenant = "tenant-compound";
+  const gchar *subject = "svc:tenant-compound:resolver";
   if (wyl_daemon_http_configure_tenant_for_test (server, tenant, TRUE,
           FALSE) != WYRELOG_E_OK)
     return FALSE;
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t principal_rc = handle != NULL ?
+      wyl_service_principal_create (handle, subject, "Tenant compound resolver",
+      "admin", "resolver-compound-tenant-principal", &principal) :
+      WYRELOG_E_INVALID;
+  wyl_service_principal_clear (&principal);
+  if (principal_rc != WYRELOG_E_OK)
+    return FALSE;
   g_auto (ActualServiceTokens) active = { 0 };
-  if (!actual_service_tokens_init (server, "svc:resolver:test", tenant,
+  if (!actual_service_tokens_init (server, subject, tenant,
           "resolver-compound-tenant-credential", &active)
       || !actual_service_token_expect (server, active.token_a,
-          "svc:resolver:test", tenant, TRUE)
+          subject, tenant, TRUE)
       || !actual_service_token_expect (server, active.token_b,
-          "svc:resolver:test", tenant, TRUE))
+          subject, tenant, TRUE))
     return FALSE;
   CompoundDisableRace race = {
     .server = server,
@@ -3309,9 +3319,9 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
   ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
       && later.sid == NULL && later.actor == NULL && later.tenant == NULL
       && actual_service_token_expect (server, active.token_a,
-      "svc:resolver:test", tenant, FALSE)
+      subject, tenant, FALSE)
       && actual_service_token_expect (server, active.token_b,
-      "svc:resolver:test", tenant, FALSE);
+      subject, tenant, FALSE);
   g_free (later.sid);
   g_free (later.actor);
   g_free (later.tenant);
@@ -8238,6 +8248,8 @@ check_service_principal_management_contract (void)
 #ifdef WYL_HAS_AUDIT
   g_auto (ActualServiceTokens) principal_route_tokens = { 0 };
   g_auto (ActualServiceTokens) tenant_route_tokens = { 0 };
+  g_autofree gchar *tenant_route_query = NULL;
+  wyl_service_principal_t tenant_route_principal = { 0 };
 #endif
   const gchar *create_body =
       "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"Worker\"}";
@@ -8362,10 +8374,12 @@ check_service_principal_management_contract (void)
           session_token, "armed") != WYRELOG_E_OK
       || wyl_policy_store_grant_direct_permission (policy_store,
           "human-principal-admin", "wr.tenant.manage",
-          session_token) != WYRELOG_E_OK
+          WYL_TENANT_DEFAULT) != WYRELOG_E_OK
       || wyl_policy_store_set_permission_state (policy_store,
           "human-principal-admin", "wr.tenant.manage",
-          session_token, "armed") != WYRELOG_E_OK
+          WYL_TENANT_DEFAULT, "armed") != WYRELOG_E_OK
+      || wyl_policy_store_set_session_state (policy_store, WYL_TENANT_DEFAULT,
+          "active") != WYRELOG_E_OK
       || wyl_handle_reload_engine_pair (handle) != WYRELOG_E_OK) {
     rc = 1989;
     goto cleanup;
@@ -8790,7 +8804,6 @@ check_service_principal_management_contract (void)
     goto cleanup;
   }
   tenant_created = FALSE;
-  wyl_service_principal_t tenant_route_principal = { 0 };
   if (wyl_policy_store_create_tenant (policy_store, "tenant-route",
           &tenant_created) != WYRELOG_E_OK || !tenant_created
       || wyl_service_principal_create (handle, "svc:tenant-route:worker",
@@ -8800,13 +8813,10 @@ check_service_principal_management_contract (void)
       || !actual_service_tokens_init (http.server,
           "svc:tenant-route:worker", "tenant-route",
           "http-route-tenant-token", &tenant_route_tokens)) {
-    wyl_service_principal_clear (&tenant_route_principal);
     rc = 2161;
     goto cleanup;
   }
-  wyl_service_principal_clear (&tenant_route_principal);
-  g_autofree gchar *tenant_route_query = g_strdup_printf
-      ("name=tenant-route&%s", query);
+  tenant_route_query = g_strdup_printf ("name=tenant-route&%s", query);
   if (!actual_http_route_retirement_race (http.server, base_url,
           "/tenants/seal", tenant_route_query, ACTUAL_ROUTE_SEAL_TENANT,
           &tenant_route_tokens, "svc:tenant-route:worker", "tenant-route")) {
@@ -8858,6 +8868,9 @@ check_service_principal_management_contract (void)
 #endif
 
 cleanup:
+#ifdef WYL_HAS_AUDIT
+  wyl_service_principal_clear (&tenant_route_principal);
+#endif
   g_free (publication.staged_secret);
   g_main_loop_quit (http.loop);
   if (thread != NULL)
@@ -9217,7 +9230,7 @@ main (void)
   if (policy_shutdown_rc != 0)
     return policy_shutdown_rc;
 
-#ifdef WYL_HAS_FACT_STORE
+#if defined(WYL_HAS_FACT_STORE) || defined(WYL_HAS_AUDIT)
   g_auto (ServiceCredentialStoreFixture) credential_store = { 0 };
   g_autoptr (WylHandle) handle = NULL;
   if (!service_credential_store_fixture_init (&credential_store))
