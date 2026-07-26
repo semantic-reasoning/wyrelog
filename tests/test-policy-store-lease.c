@@ -602,6 +602,14 @@ test_maintenance_apply_and_replay (void)
   wyl_policy_store_t *conflict_store = NULL;
   g_assert_cmpint (wyl_policy_store_open_with_options (&conflict_opts,
           &conflict_store), ==, WYRELOG_E_OK);
+  sqlite3_stmt *delete_receipt = NULL;
+  g_assert_cmpint (sqlite3_prepare_v2 (wyl_policy_store_get_db (conflict_store),
+          "DELETE FROM audit_events WHERE id=?;", -1, &delete_receipt, NULL),
+      ==, SQLITE_OK);
+  sqlite3_bind_text (delete_receipt, 1, applied.audit_id, -1, SQLITE_STATIC);
+  g_assert_cmpint (sqlite3_step (delete_receipt), ==,
+      SQLITE_CONSTRAINT_TRIGGER);
+  sqlite3_finalize (delete_receipt);
   manifest.store_digest[0] ^= 1;
   WylServicePermissionApplyReceipt conflict = {
     0

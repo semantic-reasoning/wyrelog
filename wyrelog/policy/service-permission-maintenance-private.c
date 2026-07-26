@@ -746,6 +746,10 @@ wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
 
 #define REMEDIATION_RECEIPT_ACTION \
   "service.permission_closure.remediation_receipt"
+#define REMEDIATION_RECEIPT_UPDATE_TRIGGER \
+  "trg_service_permission_remediation_receipt_no_update"
+#define REMEDIATION_RECEIPT_DELETE_TRIGGER \
+  "trg_service_permission_remediation_receipt_no_delete"
 
 void wyl_service_permission_apply_receipt_clear
     (WylServicePermissionApplyReceipt * receipt)
@@ -822,6 +826,46 @@ maintenance_actor_identity (gchar **out_actor)
 }
 
 static wyrelog_error_t
+receipt_guards_present (wyl_policy_store_t *store)
+{
+  sqlite3_stmt *stmt = NULL;
+  int sql_rc = sqlite3_prepare_v2 (wyl_policy_store_get_db (store),
+      "SELECT count(*) FROM sqlite_master WHERE type='trigger'"
+      " AND name IN (?,?);", -1, &stmt, NULL);
+  if (sql_rc != SQLITE_OK)
+    return WYRELOG_E_IO;
+  sqlite3_bind_text (stmt, 1, REMEDIATION_RECEIPT_UPDATE_TRIGGER, -1,
+      SQLITE_STATIC);
+  sqlite3_bind_text (stmt, 2, REMEDIATION_RECEIPT_DELETE_TRIGGER, -1,
+      SQLITE_STATIC);
+  int step_rc = sqlite3_step (stmt);
+  gboolean present = step_rc == SQLITE_ROW && sqlite3_column_int (stmt, 0) == 2;
+  sqlite3_finalize (stmt);
+  return present ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+static wyrelog_error_t
+install_receipt_guards (wyl_policy_store_t *store)
+{
+  static const gchar *sql =
+      "CREATE TRIGGER IF NOT EXISTS "
+      REMEDIATION_RECEIPT_UPDATE_TRIGGER
+      " BEFORE UPDATE ON audit_events"
+      " WHEN OLD.action='" REMEDIATION_RECEIPT_ACTION
+      "' OR NEW.action='" REMEDIATION_RECEIPT_ACTION
+      "' BEGIN SELECT RAISE(ABORT,"
+      " 'service permission remediation receipts are immutable'); END;"
+      "CREATE TRIGGER IF NOT EXISTS "
+      REMEDIATION_RECEIPT_DELETE_TRIGGER
+      " BEFORE DELETE ON audit_events"
+      " WHEN OLD.action='" REMEDIATION_RECEIPT_ACTION
+      "' BEGIN SELECT RAISE(ABORT,"
+      " 'service permission remediation receipts are permanent'); END;";
+  return sqlite3_exec (wyl_policy_store_get_db (store), sql, NULL, NULL,
+      NULL) == SQLITE_OK ? receipt_guards_present (store) : WYRELOG_E_IO;
+}
+
+static wyrelog_error_t
 receipt_lookup (wyl_policy_store_t *store,
     const WylServicePermissionManifest *manifest, const gchar *fingerprint,
     WylServicePermissionApplyReceipt *out_receipt)
@@ -843,6 +887,10 @@ receipt_lookup (wyl_policy_store_t *store,
   if (step_rc != SQLITE_ROW) {
     sqlite3_finalize (stmt);
     return WYRELOG_E_IO;
+  }
+  if (receipt_guards_present (store) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_POLICY;
   }
   const gchar *audit_id = (const gchar *) sqlite3_column_text (stmt, 0);
   gint64 applied_at = sqlite3_column_int64 (stmt, 1);
@@ -928,6 +976,8 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_transaction_begin (store, handle,
         lease, &transaction);
+  if (rc == WYRELOG_E_OK)
+    rc = install_receipt_guards (store);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_service_authority_prepare_commit_evidence
         (transaction, store, &evidence);
