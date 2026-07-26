@@ -763,11 +763,41 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpint
       (wyl_service_permission_apply_receipt_reserve_owner_only
       (failed_receipt_path, &failed_reservation), ==, WYRELOG_E_OK);
+#ifndef G_OS_WIN32
+  g_autofree gchar *retained_failed_receipt_path =
+      g_build_filename (dir, "retained-failed-receipt.json", NULL);
+  static const gchar abort_window_substitute[] = "abort-window substitute";
+  LastMomentSubstitution abort_window = {
+    .path = failed_receipt_path,
+    .moved = retained_failed_receipt_path,
+    .replacement = abort_window_substitute,
+    .replacement_len = sizeof abort_window_substitute - 1,
+  };
+  wyl_service_permission_apply_receipt_reservation_set_before_abort_hook
+      (failed_reservation, substitute_maintenance_target_at_last_moment,
+      &abort_window);
+#endif
   wyl_service_permission_apply_receipt_reservation_fail_finalize_once
       (failed_reservation);
   g_assert_cmpint (wyl_service_permission_apply_receipt_finalize
       (failed_reservation, &applied), ==, WYRELOG_E_IO);
-  g_assert_false (g_file_test (failed_receipt_path, G_FILE_TEST_EXISTS));
+#ifndef G_OS_WIN32
+  g_autofree gchar *abort_window_after = NULL;
+  gsize abort_window_after_len = 0;
+  g_assert_true (g_file_get_contents (failed_receipt_path,
+          &abort_window_after, &abort_window_after_len, NULL));
+  g_assert_cmpmem (abort_window_after, abort_window_after_len,
+      abort_window_substitute, sizeof abort_window_substitute - 1);
+  GStatBuf retained_failed_stat;
+  g_assert_cmpint (g_stat (retained_failed_receipt_path,
+          &retained_failed_stat), ==, 0);
+  g_assert_cmpint (retained_failed_stat.st_size, ==, 0);
+  g_remove (failed_receipt_path);
+  g_remove (retained_failed_receipt_path);
+#else
+  g_assert_true (g_file_test (failed_receipt_path, G_FILE_TEST_IS_REGULAR));
+  g_remove (failed_receipt_path);
+#endif
 #ifndef G_OS_WIN32
   g_autofree gchar *substituted_receipt_path =
       g_build_filename (dir, "substituted-receipt.json", NULL);

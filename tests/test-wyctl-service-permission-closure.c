@@ -118,6 +118,18 @@ test_offline_closure_commands (void)
     "--store", store_path, "--keyprovider", key_spec,
     "--manifest", manifest_path, "--receipt", receipt_path, NULL
   };
+  g_assert_cmpint (open_encrypted (store_path, key_path,
+          WYL_POLICY_STORE_OPEN_ATTACHED, &attached), ==, WYRELOG_E_OK);
+  g_clear_pointer (&out, g_free);
+  g_clear_pointer (&err, g_free);
+  g_assert_cmpint (run_command (apply_argv, &out, &err), ==, 1);
+  g_assert_nonnull (strstr (err, "status=OUTPUT_RESERVATION_RETAINED"));
+  GStatBuf retained_output_stat;
+  g_assert_cmpint (g_stat (receipt_path, &retained_output_stat), ==, 0);
+  g_assert_cmpint (retained_output_stat.st_size, ==, 0);
+  g_assert_cmpint (g_remove (receipt_path), ==, 0);
+  wyl_policy_store_close (attached);
+  attached = NULL;
   static const gchar occupied_receipt[] = "do not replace";
   g_assert_true (g_file_set_contents (receipt_path, occupied_receipt,
           sizeof occupied_receipt - 1, NULL));

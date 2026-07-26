@@ -4145,6 +4145,7 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
           receipt.actor_identity, receipt.audit_id, receipt.applied_at_us);
     if (committed_output_failed)
       g_printerr ("status=COMMITTED_OUTPUT_FAILED request_id=%s audit_id=%s"
+          " reserved_output=retained"
           " recovery=\"repeat this exact apply with the same manifest and a"
           " fresh --receipt path\"\n", receipt.request_id, receipt.audit_id);
     wyl_service_permission_apply_receipt_clear (&receipt);
@@ -4153,9 +4154,13 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
       return 3;
     }
   }
-  if (receipt_reservation != NULL)
+  if (receipt_reservation != NULL) {
     wyl_service_permission_apply_receipt_reservation_abort
         (receipt_reservation);
+    g_printerr ("status=OUTPUT_RESERVATION_RETAINED"
+        " recovery=\"remove the reserved output manually or retry with a"
+        " fresh --receipt path\"\n");
+  }
   if (store != NULL)
     wyl_policy_store_close (store);
   wyl_service_permission_manifest_clear (&manifest);

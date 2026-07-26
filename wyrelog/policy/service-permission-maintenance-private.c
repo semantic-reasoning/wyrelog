@@ -38,6 +38,8 @@ struct WylServicePermissionReceiptReservation
   gchar *path;
   gboolean fail_finalize_once;
   gboolean created;
+  void (*before_abort_close_hook) (gpointer data);
+  gpointer before_abort_close_data;
 #ifdef G_OS_WIN32
   HANDLE file;
   wchar_t *wide_path;
@@ -1527,18 +1529,18 @@ void wyl_service_permission_apply_receipt_reservation_abort
   if (reservation == NULL)
     return;
 #ifdef G_OS_WIN32
+  if (reservation->before_abort_close_hook != NULL)
+    reservation->before_abort_close_hook (reservation->before_abort_close_data);
   if (reservation->file != INVALID_HANDLE_VALUE)
     CloseHandle (reservation->file);
-  if (reservation->created && reservation->wide_path != NULL)
-    (void) DeleteFileW (reservation->wide_path);
   g_free (reservation->wide_path);
 #else
+  if (reservation->created)
+    (void) receipt_reservation_named_target_matches (reservation);
+  if (reservation->before_abort_close_hook != NULL)
+    reservation->before_abort_close_hook (reservation->before_abort_close_data);
   if (reservation->fd >= 0)
     close (reservation->fd);
-  if (reservation->created && reservation->dirfd >= 0
-      && reservation->basename != NULL
-      && receipt_reservation_named_target_matches (reservation))
-    (void) unlinkat (reservation->dirfd, reservation->basename, 0);
   if (reservation->dirfd >= 0)
     close (reservation->dirfd);
   g_free (reservation->basename);
@@ -1546,6 +1548,16 @@ void wyl_service_permission_apply_receipt_reservation_abort
 #endif
   g_free (reservation->path);
   g_free (reservation);
+}
+
+void wyl_service_permission_apply_receipt_reservation_set_before_abort_hook
+    (WylServicePermissionReceiptReservation * reservation,
+    void (*hook) (gpointer data), gpointer data)
+{
+  if (reservation != NULL) {
+    reservation->before_abort_close_hook = hook;
+    reservation->before_abort_close_data = data;
+  }
 }
 
 void wyl_service_permission_apply_receipt_reservation_fail_finalize_once

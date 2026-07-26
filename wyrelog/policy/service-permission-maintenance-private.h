@@ -87,5 +87,8 @@ void wyl_service_permission_apply_receipt_reservation_abort
     (WylServicePermissionReceiptReservation * reservation);
 void wyl_service_permission_apply_receipt_reservation_fail_finalize_once
     (WylServicePermissionReceiptReservation * reservation);
+void wyl_service_permission_apply_receipt_reservation_set_before_abort_hook
+    (WylServicePermissionReceiptReservation * reservation,
+    void (*hook) (gpointer data), gpointer data);
 
 G_END_DECLS;
