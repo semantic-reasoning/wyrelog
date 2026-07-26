@@ -652,6 +652,15 @@ static const BuiltinPermission builtin_permissions[] = {
   {"wr.schema.manage", "fact schema manage", "critical"},
 };
 
+/* Service principals may only receive these workload-safe permissions.
+ * Classification is deliberately independent of the mutable catalog class:
+ * a custom permission named "basic" is still control-plane authority. */
+static const gchar *const approved_data_plane_permissions[] = {
+  "wr.stream.read",
+  "wr.stream.list",
+  "wr.svc.read_decision",
+};
+
 /* Login skip-MFA authorization is intentionally scoped to the synthetic
  * "login" resource rather than a tenant. Keep the bootstrap grant aligned
  * with wyl-handle.c's WYL_LOGIN_SKIP_MFA_SCOPE so a freshly bootstrapped
@@ -1847,9 +1856,15 @@ find_builtin_permission (const gchar *perm_id)
 }
 
 static gboolean
-permission_class_is_data_plane (const gchar *klass)
+permission_id_is_approved_data_plane (const gchar *perm_id)
 {
-  return g_strcmp0 (klass, "basic") == 0;
+  if (perm_id == NULL)
+    return FALSE;
+  for (gsize i = 0; i < G_N_ELEMENTS (approved_data_plane_permissions); i++) {
+    if (g_strcmp0 (approved_data_plane_permissions[i], perm_id) == 0)
+      return TRUE;
+  }
+  return FALSE;
 }
 
 const gchar *
@@ -1875,26 +1890,37 @@ wyl_policy_store_permission_plane (wyl_policy_store_t *store,
     return WYRELOG_E_INVALID;
 
   *out_plane = WYL_PERMISSION_PLANE_CONTROL;
-  static const gchar *sql = "SELECT class FROM permissions WHERE perm_id = ?;";
-  gchar *klass = NULL;
-  wyrelog_error_t rc = query_single_text (store->db, sql, perm_id, &klass);
-  if (rc == WYRELOG_E_POLICY) {
-    *out_plane = WYL_PERMISSION_PLANE_CONTROL;
+  if (!permission_id_is_approved_data_plane (perm_id))
     return WYRELOG_E_OK;
-  }
+
+  const BuiltinPermission *builtin = find_builtin_permission (perm_id);
+  if (builtin == NULL)
+    return WYRELOG_E_OK;
+
+  sqlite3_stmt *stmt = NULL;
+  static const gchar *sql =
+      "SELECT perm_name, class FROM permissions WHERE perm_id = ?;";
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
-
-  if (permission_class_is_data_plane (klass)) {
-    *out_plane = WYL_PERMISSION_PLANE_DATA;
-  } else if (g_strcmp0 (klass, "sensitive") == 0
-      || g_strcmp0 (klass, "critical") == 0) {
-    *out_plane = WYL_PERMISSION_PLANE_CONTROL;
-  } else {
-    g_free (klass);
-    return WYRELOG_E_POLICY;
+  if ((rc = bind_text (stmt, 1, perm_id)) != WYRELOG_E_OK) {
+    sqlite3_finalize (stmt);
+    return rc;
   }
-  g_free (klass);
+
+  int step_rc = sqlite3_step (stmt);
+  if (step_rc == SQLITE_ROW) {
+    const gchar *name = (const gchar *) sqlite3_column_text (stmt, 0);
+    const gchar *klass = (const gchar *) sqlite3_column_text (stmt, 1);
+    if (name != NULL && klass != NULL
+        && g_strcmp0 (name, builtin->name) == 0
+        && g_strcmp0 (klass, builtin->klass) == 0)
+      *out_plane = WYL_PERMISSION_PLANE_DATA;
+  } else if (step_rc != SQLITE_DONE) {
+    sqlite3_finalize (stmt);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_finalize (stmt);
   return WYRELOG_E_OK;
 }
 
@@ -1959,8 +1985,15 @@ wyl_policy_store_role_is_service_eligible (wyl_policy_store_t *store,
       ") "
       "SELECT 1 FROM role_closure rc "
       "JOIN role_permissions rp ON rp.role_id = rc.effective_role_id "
-      "JOIN permissions p ON p.perm_id = rp.perm_id "
-      "WHERE p.class != 'basic' " "LIMIT 1;";
+      "LEFT JOIN permissions p ON p.perm_id = rp.perm_id "
+      "WHERE NOT ("
+      "  (p.perm_id = 'wr.stream.read' AND p.perm_name = 'stream read'"
+      "    AND p.class = 'basic')"
+      "  OR (p.perm_id = 'wr.stream.list' AND p.perm_name = 'stream list'"
+      "    AND p.class = 'basic')"
+      "  OR (p.perm_id = 'wr.svc.read_decision'"
+      "    AND p.perm_name = 'service decision read' AND p.class = 'basic')"
+      ") OR p.perm_id IS NULL " "LIMIT 1;";
   gboolean has_control = FALSE;
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
@@ -9478,6 +9511,20 @@ gsize
 wyl_policy_store_builtin_permission_count (void)
 {
   return G_N_ELEMENTS (builtin_permissions);
+}
+
+gsize
+wyl_policy_store_approved_data_plane_permission_count (void)
+{
+  return G_N_ELEMENTS (approved_data_plane_permissions);
+}
+
+const gchar *
+wyl_policy_store_approved_data_plane_permission_id (gsize idx)
+{
+  if (idx >= G_N_ELEMENTS (approved_data_plane_permissions))
+    return NULL;
+  return approved_data_plane_permissions[idx];
 }
 
 const gchar *

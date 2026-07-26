@@ -2100,6 +2100,25 @@ check_store_reports_permission_planes (void)
   if (plane != WYL_PERMISSION_PLANE_CONTROL)
     return 95;
 
+  if (wyl_policy_store_upsert_permission (store, "site.custom.basic",
+          "custom basic", "basic") != WYRELOG_E_OK)
+    return 97;
+  if (wyl_policy_store_permission_plane (store, "site.custom.basic", &plane)
+      != WYRELOG_E_OK)
+    return 98;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 99;
+
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "UPDATE permissions SET class = 'critical' "
+          "WHERE perm_id = 'wr.stream.read';", NULL, NULL, NULL) != SQLITE_OK)
+    return 100;
+  if (wyl_policy_store_permission_plane (store, "wr.stream.read", &plane)
+      != WYRELOG_E_OK)
+    return 101;
+  if (plane != WYL_PERMISSION_PLANE_CONTROL)
+    return 102;
+
   if (wyl_permission_plane_name (WYL_PERMISSION_PLANE_LAST_) != NULL)
     return 96;
   return 0;
@@ -2131,6 +2150,12 @@ check_store_enforces_service_permission_planes (void)
   if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
           "site.unknown.read", "svc-scope") != WYRELOG_E_POLICY)
     return 96;
+  if (wyl_policy_store_upsert_permission (store, "site.registered.basic",
+          "registered basic", "basic") != WYRELOG_E_OK)
+    return 114;
+  if (wyl_policy_store_grant_direct_permission (store, "svc:plane:test",
+          "site.registered.basic", "svc-scope") != WYRELOG_E_POLICY)
+    return 115;
 
   if (wyl_policy_store_upsert_role (store, "site.service-role",
           "service role") != WYRELOG_E_OK)

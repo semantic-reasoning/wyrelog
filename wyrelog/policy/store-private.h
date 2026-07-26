@@ -1835,6 +1835,8 @@ gsize wyl_policy_store_builtin_role_count (void);
 const gchar *wyl_policy_store_builtin_role_id (gsize idx);
 gsize wyl_policy_store_builtin_permission_count (void);
 const gchar *wyl_policy_store_builtin_permission_id (gsize idx);
+gsize wyl_policy_store_approved_data_plane_permission_count (void);
+const gchar *wyl_policy_store_approved_data_plane_permission_id (gsize idx);
 typedef enum
 {
   WYL_PERMISSION_PLANE_CONTROL = 0,
