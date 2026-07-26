@@ -1923,6 +1923,8 @@ wyrelog_error_t wyl_policy_store_validate_service_permission_closure
 wyrelog_error_t wyl_policy_store_analyze_service_permission_closure
     (wyl_policy_store_t * store,
     WylPolicyPermissionClosureAnalysis * out_analysis);
+wyrelog_error_t wyl_policy_store_dry_run_service_permission_closure
+    (wyl_policy_store_t * store, const GPtrArray * removals);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,
     const gchar * table_name, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_set_deployment_mode (wyl_policy_store_t *

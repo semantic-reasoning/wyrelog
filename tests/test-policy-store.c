@@ -2312,6 +2312,27 @@ check_store_rejects_unsafe_service_permission_closure (void)
     return 342;
   guint8 role_digest[32];
   memcpy (role_digest, role_analysis.digest, sizeof role_digest);
+  gchar dry_run_request_id[WYL_REQUEST_ID_STRING_BUF];
+  if (wyl_request_id_new (dry_run_request_id, sizeof dry_run_request_id)
+      != WYRELOG_E_OK)
+    return 367;
+  WylServicePermissionManifest dry_run_manifest = { 0 };
+  if (wyl_service_permission_manifest_from_analysis (&role_analysis,
+          dry_run_request_id, &dry_run_manifest) != WYRELOG_E_OK
+      || wyl_service_permission_maintenance_dry_run (store,
+          &dry_run_manifest) != WYRELOG_E_OK)
+    return 368;
+  WylPolicyPermissionClosureAnalysis after_dry_run = { 0 };
+  if (wyl_policy_store_analyze_service_permission_closure (store,
+          &after_dry_run) != WYRELOG_E_OK
+      || after_dry_run.removals->len != role_analysis.removals->len
+      || memcmp (after_dry_run.digest, role_analysis.digest,
+          sizeof role_analysis.digest) != 0
+      || wyl_policy_store_validate_service_permission_closure (store)
+      != WYRELOG_E_POLICY)
+    return 369;
+  wyl_policy_permission_closure_analysis_clear (&after_dry_run);
+  wyl_service_permission_manifest_clear (&dry_run_manifest);
   wyl_policy_permission_closure_analysis_clear (&role_analysis);
   if (sqlite3_exec (db,
           "DELETE FROM role_memberships WHERE subject_id='svc:closure:test';"

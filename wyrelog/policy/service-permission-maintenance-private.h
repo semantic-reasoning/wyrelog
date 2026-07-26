@@ -36,5 +36,7 @@ wyrelog_error_t wyl_service_permission_manifest_matches_analysis
     const WylPolicyPermissionClosureAnalysis * analysis);
 wyrelog_error_t wyl_service_permission_manifest_write_new_owner_only
     (const gchar * path, const WylServicePermissionManifest * manifest);
+wyrelog_error_t wyl_service_permission_maintenance_dry_run
+    (wyl_policy_store_t * store, const WylServicePermissionManifest * manifest);
 
 G_END_DECLS;

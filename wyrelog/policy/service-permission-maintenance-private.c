@@ -565,3 +565,23 @@ win_out:
   return rc;
 #endif
 }
+
+wyrelog_error_t
+wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest)
+{
+  if (store == NULL || manifest == NULL)
+    return WYRELOG_E_INVALID;
+  WylPolicyPermissionClosureAnalysis analysis = {
+    0
+  };
+  wyrelog_error_t rc =
+      wyl_policy_store_analyze_service_permission_closure (store, &analysis);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_permission_manifest_matches_analysis (manifest, &analysis);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_dry_run_service_permission_closure (store,
+        manifest->operations);
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+  return rc;
+}

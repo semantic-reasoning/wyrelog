@@ -317,6 +317,11 @@ static wyrelog_error_t service_domain_append_audit (wyl_policy_store_t * store,
     const gchar * audit_id, gint64 now_us, const gchar * actor_subject_id,
     const gchar * action, const gchar * subject_id, const gchar * request_id);
 static gboolean service_handoff_request_id_is_canonical (const gchar * value);
+static wyrelog_error_t exec_sql (sqlite3 * db, const gchar * sql);
+static wyrelog_error_t permission_remediation_delete_exact
+    (wyl_policy_store_t * store, WylPolicyPermissionRemediationAction action,
+    const gchar * subject_or_child_role_id,
+    const gchar * permission_or_role_id, const gchar * scope);
 static gboolean service_handoff_exact_tuple_is_valid
     (const WylPolicyServiceHandoffExactTuple * tuple);
 static wyrelog_error_t service_handoff_validate_exact_escrow
@@ -2201,6 +2206,44 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK && analysis.removals->len > 0)
     rc = WYRELOG_E_POLICY;
   wyl_policy_permission_closure_analysis_clear (&analysis);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_dry_run_service_permission_closure
+    (wyl_policy_store_t * store, const GPtrArray * removals)
+{
+  if (store == NULL || store->db == NULL || removals == NULL
+      || removals->len == 0 || removals->len > 4096u)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = exec_sql (store->db,
+      "SAVEPOINT wyrelog_permission_closure_dry_run;");
+  for (guint i = 0; rc == WYRELOG_E_OK && i < removals->len; i++) {
+    const WylPolicyPermissionClosureRemoval *removal =
+        g_ptr_array_index ((GPtrArray *) removals, i);
+    if (removal == NULL
+        || removal->action >
+        WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP
+        || removal->subject_id == NULL
+        || !g_str_has_prefix (removal->subject_id, "svc:")
+        || removal->right_id == NULL || removal->scope == NULL) {
+      rc = WYRELOG_E_INVALID;
+      break;
+    }
+    rc = permission_remediation_delete_exact (store,
+        removal->action == WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
+        WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT :
+        WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP,
+        removal->subject_id, removal->right_id, removal->scope);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_validate_snapshot (store);
+  wyrelog_error_t rollback_rc = exec_sql (store->db,
+      "ROLLBACK TO SAVEPOINT wyrelog_permission_closure_dry_run;");
+  wyrelog_error_t release_rc = exec_sql (store->db,
+      "RELEASE SAVEPOINT wyrelog_permission_closure_dry_run;");
+  if (rollback_rc != WYRELOG_E_OK || release_rc != WYRELOG_E_OK)
+    return WYRELOG_E_IO;
   return rc;
 }
 
@@ -14393,6 +14436,49 @@ permission_remediation_action_name (WylPolicyPermissionRemediationAction action)
   }
 }
 
+static wyrelog_error_t
+permission_remediation_delete_exact (wyl_policy_store_t *store,
+    WylPolicyPermissionRemediationAction action,
+    const gchar *subject_or_child_role_id,
+    const gchar *permission_or_role_id, const gchar *scope)
+{
+  const gchar *sql = NULL;
+  switch (action) {
+    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT:
+      sql = "DELETE FROM direct_permissions"
+          " WHERE subject_id=? AND perm_id=? AND scope=?;";
+      break;
+    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP:
+      sql = "DELETE FROM role_memberships"
+          " WHERE subject_id=? AND role_id=? AND scope=?;";
+      break;
+    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE:
+      sql = "DELETE FROM role_inheritances"
+          " WHERE child_role_id=? AND parent_role_id=?;";
+      break;
+    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION:
+      sql = "DELETE FROM role_permissions WHERE role_id=? AND perm_id=?;";
+      break;
+    default:
+      return WYRELOG_E_INVALID;
+  }
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, subject_or_child_role_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, permission_or_role_id);
+  if (rc == WYRELOG_E_OK && scope != NULL)
+    rc = bind_text (stmt, 3, scope);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_POLICY;
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  return rc;
+}
+
 wyrelog_error_t
     wyl_policy_store_service_authority_transaction_enter_participant
     (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * expected_store)
@@ -14440,42 +14526,8 @@ wyrelog_error_t
     return rc;
   txn->durable_operation_started = TRUE;
 
-  sqlite3_stmt *stmt = NULL;
-  const gchar *sql = NULL;
-  switch (action) {
-    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT:
-      sql = "DELETE FROM direct_permissions"
-          " WHERE subject_id=? AND perm_id=? AND scope=?;";
-      break;
-    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP:
-      sql = "DELETE FROM role_memberships"
-          " WHERE subject_id=? AND role_id=? AND scope=?;";
-      break;
-    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE:
-      sql = "DELETE FROM role_inheritances"
-          " WHERE child_role_id=? AND parent_role_id=?;";
-      break;
-    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION:
-      sql = "DELETE FROM role_permissions WHERE role_id=? AND perm_id=?;";
-      break;
-    default:
-      rc = WYRELOG_E_INVALID;
-      break;
-  }
-  if (rc == WYRELOG_E_OK)
-    rc = prepare_stmt (store->db, sql, &stmt);
-  if (rc == WYRELOG_E_OK)
-    rc = bind_text (stmt, 1, subject_or_child_role_id);
-  if (rc == WYRELOG_E_OK)
-    rc = bind_text (stmt, 2, permission_or_role_id);
-  if (rc == WYRELOG_E_OK && scope != NULL)
-    rc = bind_text (stmt, 3, scope);
-  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
-    rc = WYRELOG_E_IO;
-  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
-    rc = WYRELOG_E_POLICY;
-  if (stmt != NULL)
-    sqlite3_finalize (stmt);
+  rc = permission_remediation_delete_exact (store, action,
+      subject_or_child_role_id, permission_or_role_id, scope);
 
   if (rc == WYRELOG_E_OK
       && action == WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT)
