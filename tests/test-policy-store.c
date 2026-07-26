@@ -2291,6 +2291,26 @@ check_store_rejects_unsafe_service_permission_closure (void)
   if (wyl_policy_store_validate_service_permission_closure (store)
       != WYRELOG_E_POLICY)
     return 125;
+  WylPolicyPermissionClosureAnalysis role_analysis = { 0 };
+  if (wyl_policy_store_analyze_service_permission_closure (store,
+          &role_analysis) != WYRELOG_E_OK
+      || role_analysis.removals == NULL || role_analysis.removals->len != 1)
+    return 341;
+  WylPolicyPermissionClosureRemoval *role_removal =
+      g_ptr_array_index (role_analysis.removals, 0);
+  if (role_removal->action !=
+      WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP
+      || role_removal->reason !=
+      WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION
+      || g_strcmp0 (role_removal->subject_id, "svc:closure:test") != 0
+      || g_strcmp0 (role_removal->right_id, "site.closure-child") != 0
+      || g_strcmp0 (role_removal->scope, "scope") != 0
+      || role_analysis.generation == 0
+      || role_analysis.unsafe_permission_count != 1)
+    return 342;
+  guint8 role_digest[32];
+  memcpy (role_digest, role_analysis.digest, sizeof role_digest);
+  wyl_policy_permission_closure_analysis_clear (&role_analysis);
   if (sqlite3_exec (db,
           "DELETE FROM role_memberships WHERE subject_id='svc:closure:test';"
           "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
@@ -2300,6 +2320,19 @@ check_store_rejects_unsafe_service_permission_closure (void)
   if (wyl_policy_store_validate_service_permission_closure (store)
       != WYRELOG_E_POLICY)
     return 127;
+  WylPolicyPermissionClosureAnalysis direct_analysis = { 0 };
+  if (wyl_policy_store_analyze_service_permission_closure (store,
+          &direct_analysis) != WYRELOG_E_OK
+      || direct_analysis.removals->len != 1)
+    return 343;
+  WylPolicyPermissionClosureRemoval *direct_removal =
+      g_ptr_array_index (direct_analysis.removals, 0);
+  if (direct_removal->action != WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT
+      || direct_removal->reason !=
+      WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION
+      || memcmp (role_digest, direct_analysis.digest, sizeof role_digest) == 0)
+    return 344;
+  wyl_policy_permission_closure_analysis_clear (&direct_analysis);
   if (sqlite3_exec (db,
           "DELETE FROM direct_permissions WHERE subject_id='svc:closure:test';"
           "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
@@ -2322,6 +2355,19 @@ check_store_rejects_unsafe_service_permission_closure (void)
   if (wyl_policy_store_validate_service_permission_closure (store)
       != WYRELOG_E_POLICY)
     return 131;
+  WylPolicyPermissionClosureAnalysis dangling_analysis = { 0 };
+  if (wyl_policy_store_analyze_service_permission_closure (store,
+          &dangling_analysis) != WYRELOG_E_OK
+      || dangling_analysis.removals->len != 1)
+    return 345;
+  WylPolicyPermissionClosureRemoval *dangling_removal =
+      g_ptr_array_index (dangling_analysis.removals, 0);
+  if (dangling_removal->action != WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT
+      || dangling_removal->reason !=
+      WYL_POLICY_PERMISSION_CLOSURE_DANGLING_SUBJECT
+      || dangling_analysis.dangling_subject_count != 1)
+    return 346;
+  wyl_policy_permission_closure_analysis_clear (&dangling_analysis);
 
   return 0;
 }

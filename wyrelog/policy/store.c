@@ -2028,15 +2028,40 @@ wyl_policy_store_role_is_service_eligible (wyl_policy_store_t *store,
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-    wyl_policy_store_validate_service_permission_closure
-    (wyl_policy_store_t * store) {
-  if (store == NULL || store->db == NULL)
-    return WYRELOG_E_INVALID;
+void wyl_policy_permission_closure_removal_free
+    (WylPolicyPermissionClosureRemoval * removal)
+{
+  if (removal == NULL)
+    return;
+  g_free (removal->subject_id);
+  g_free (removal->right_id);
+  g_free (removal->scope);
+  g_free (removal);
+}
 
-  /* Treat service-shaped dangling subjects as service authority.  This keeps
-   * a damaged legacy store fail-closed instead of reinterpreting it as human
-   * authority merely because its service_principals row is missing. */
+void wyl_policy_permission_closure_analysis_clear
+    (WylPolicyPermissionClosureAnalysis * analysis)
+{
+  if (analysis == NULL)
+    return;
+  g_clear_pointer (&analysis->removals, g_ptr_array_unref);
+  sodium_memzero (analysis->digest, sizeof analysis->digest);
+  memset (analysis, 0, sizeof *analysis);
+}
+
+wyrelog_error_t
+    wyl_policy_store_analyze_service_permission_closure
+    (wyl_policy_store_t * store,
+    WylPolicyPermissionClosureAnalysis * out_analysis) {
+  if (store == NULL || store->db == NULL || out_analysis == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_analysis, 0, sizeof *out_analysis);
+  out_analysis->removals = g_ptr_array_new_with_free_func
+      ((GDestroyNotify) wyl_policy_permission_closure_removal_free);
+
+  /* This is the single service closure classifier. The validator below and
+   * offline inspect consume this exact projection; no second interpretation
+   * of workload-safe permissions or transitive role closure exists. */
   static const gchar *sql =
       "WITH RECURSIVE service_subject(subject_id) AS ("
       "  SELECT subject_id FROM service_principals"
@@ -2044,51 +2069,139 @@ wyrelog_error_t
       "    WHERE substr(subject_id, 1, 4) = 'svc:'"
       "  UNION SELECT subject_id FROM role_memberships"
       "    WHERE substr(subject_id, 1, 4) = 'svc:'"
-      "), service_roles(subject_id, role_id) AS ("
-      "  SELECT ss.subject_id, rm.role_id"
+      "), service_roles(subject_id, root_role_id, role_id) AS ("
+      "  SELECT ss.subject_id, rm.role_id, rm.role_id"
       "  FROM service_subject ss"
       "  JOIN role_memberships rm ON rm.subject_id = ss.subject_id"
       "  UNION"
-      "  SELECT sr.subject_id, ri.parent_role_id"
+      "  SELECT sr.subject_id, sr.root_role_id, ri.parent_role_id"
       "  FROM service_roles sr"
       "  JOIN role_inheritances ri ON ri.child_role_id = sr.role_id"
-      "), effective_permission(subject_id, perm_id) AS ("
-      "  SELECT ss.subject_id, dp.perm_id"
+      "), direct_candidate(action,subject_id,right_id,scope,reason) AS ("
+      "  SELECT 0,ss.subject_id,dp.perm_id,dp.scope,"
+      "    CASE WHEN sp.subject_id IS NULL THEN 1 ELSE 0 END"
       "  FROM service_subject ss"
-      "  JOIN direct_permissions dp ON dp.subject_id = ss.subject_id"
-      "  UNION"
-      "  SELECT sr.subject_id, rp.perm_id"
-      "  FROM service_roles sr"
-      "  JOIN role_permissions rp ON rp.role_id = sr.role_id"
-      "), unsafe_permission AS ("
-      "  SELECT ep.subject_id"
-      "  FROM effective_permission ep"
-      "  LEFT JOIN permissions p ON p.perm_id = ep.perm_id"
-      "  WHERE NOT ("
-      "    (p.perm_id = 'wr.stream.read' AND p.perm_name = 'stream read'"
-      "      AND p.class = 'basic')"
-      "    OR (p.perm_id = 'wr.stream.list' AND p.perm_name = 'stream list'"
-      "      AND p.class = 'basic')"
-      "    OR (p.perm_id = 'wr.svc.read_decision'"
-      "      AND p.perm_name = 'service decision read'"
-      "      AND p.class = 'basic')"
+      "  JOIN direct_permissions dp ON dp.subject_id=ss.subject_id"
+      "  LEFT JOIN service_principals sp ON sp.subject_id=ss.subject_id"
+      "  LEFT JOIN permissions p ON p.perm_id=dp.perm_id"
+      "  WHERE sp.subject_id IS NULL OR NOT ("
+      "    (p.perm_id='wr.stream.read' AND p.perm_name='stream read'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.stream.list' AND p.perm_name='stream list'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.svc.read_decision'"
+      "      AND p.perm_name='service decision read' AND p.class='basic')"
       "  ) OR p.perm_id IS NULL"
-      "), dangling_reference AS ("
-      "  SELECT ss.subject_id FROM service_subject ss"
-      "  LEFT JOIN service_principals sp ON sp.subject_id = ss.subject_id"
-      "  WHERE sp.subject_id IS NULL"
-      "  UNION"
-      "  SELECT sr.subject_id FROM service_roles sr"
-      "  LEFT JOIN roles r ON r.role_id = sr.role_id"
-      "  WHERE r.role_id IS NULL"
+      "), role_issue(subject_id,root_role_id,reason) AS ("
+      "  SELECT sr.subject_id,sr.root_role_id,"
+      "    MAX(CASE WHEN r.role_id IS NULL THEN 2 ELSE 0 END)"
+      "  FROM service_roles sr"
+      "  LEFT JOIN roles r ON r.role_id=sr.role_id"
+      "  LEFT JOIN role_permissions rp ON rp.role_id=sr.role_id"
+      "  LEFT JOIN permissions p ON p.perm_id=rp.perm_id"
+      "  WHERE r.role_id IS NULL OR (rp.perm_id IS NOT NULL AND (NOT ("
+      "    (p.perm_id='wr.stream.read' AND p.perm_name='stream read'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.stream.list' AND p.perm_name='stream list'"
+      "      AND p.class='basic')"
+      "    OR (p.perm_id='wr.svc.read_decision'"
+      "      AND p.perm_name='service decision read' AND p.class='basic')"
+      "  ) OR p.perm_id IS NULL))"
+      "  GROUP BY sr.subject_id,sr.root_role_id"
+      "), membership_candidate(action,subject_id,right_id,scope,reason) AS ("
+      "  SELECT 1,ss.subject_id,rm.role_id,rm.scope,"
+      "    CASE WHEN sp.subject_id IS NULL THEN 1 ELSE ri.reason END"
+      "  FROM service_subject ss"
+      "  JOIN role_memberships rm ON rm.subject_id=ss.subject_id"
+      "  LEFT JOIN service_principals sp ON sp.subject_id=ss.subject_id"
+      "  LEFT JOIN role_issue ri ON ri.subject_id=ss.subject_id"
+      "    AND ri.root_role_id=rm.role_id"
+      "  WHERE sp.subject_id IS NULL OR ri.root_role_id IS NOT NULL"
       ")"
-      "SELECT 1 FROM unsafe_permission"
-      " UNION ALL SELECT 1 FROM dangling_reference" " LIMIT 1;";
-  gboolean unsafe = FALSE;
-  wyrelog_error_t rc = query_has_rows (store->db, sql, &unsafe);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  return unsafe ? WYRELOG_E_POLICY : WYRELOG_E_OK;
+      "SELECT action,subject_id,right_id,scope,reason FROM ("
+      "  SELECT * FROM direct_candidate"
+      "  UNION SELECT * FROM membership_candidate"
+      ") ORDER BY action,subject_id,right_id,scope;";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    if (sqlite3_column_type (stmt, 0) != SQLITE_INTEGER
+        || sqlite3_column_type (stmt, 1) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 2) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 3) != SQLITE_TEXT
+        || sqlite3_column_type (stmt, 4) != SQLITE_INTEGER) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    WylPolicyPermissionClosureRemoval *removal =
+        g_try_new0 (WylPolicyPermissionClosureRemoval, 1);
+    if (removal == NULL) {
+      rc = WYRELOG_E_NOMEM;
+      break;
+    }
+    removal->action = sqlite3_column_int (stmt, 0);
+    removal->subject_id = g_strdup ((const gchar *)
+        sqlite3_column_text (stmt, 1));
+    removal->right_id = g_strdup ((const gchar *)
+        sqlite3_column_text (stmt, 2));
+    removal->scope = g_strdup ((const gchar *) sqlite3_column_text (stmt, 3));
+    removal->reason = sqlite3_column_int (stmt, 4);
+    if (removal->subject_id == NULL || removal->right_id == NULL
+        || removal->scope == NULL
+        || removal->action > WYL_POLICY_PERMISSION_CLOSURE_REMOVE_MEMBERSHIP
+        || removal->reason > WYL_POLICY_PERMISSION_CLOSURE_DANGLING_ROLE) {
+      wyl_policy_permission_closure_removal_free (removal);
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    if (removal->reason == WYL_POLICY_PERMISSION_CLOSURE_UNSAFE_PERMISSION)
+      out_analysis->unsafe_permission_count++;
+    else if (removal->reason == WYL_POLICY_PERMISSION_CLOSURE_DANGLING_SUBJECT)
+      out_analysis->dangling_subject_count++;
+    else
+      out_analysis->dangling_role_count++;
+    g_ptr_array_add (out_analysis->removals, removal);
+    step_rc = sqlite3_step (stmt);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+
+  sqlite3_int64 image_len = 0;
+  guint8 *image = rc == WYRELOG_E_OK ?
+      sqlite3_serialize (store->db, "main", &image_len, 0) : NULL;
+  if (rc == WYRELOG_E_OK && (image == NULL || image_len <= 0))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && crypto_generichash (out_analysis->digest,
+          sizeof out_analysis->digest, image, image_len, NULL, 0) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  if (image != NULL)
+    sqlite3_free (image);
+  if (rc == WYRELOG_E_OK) {
+    guint64 generation_be = 0;
+    memcpy (&generation_be, out_analysis->digest, sizeof generation_be);
+    out_analysis->generation = GUINT64_FROM_BE (generation_be);
+    if (out_analysis->generation == 0)
+      out_analysis->generation = 1;
+  } else {
+    wyl_policy_permission_closure_analysis_clear (out_analysis);
+  }
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_validate_service_permission_closure
+    (wyl_policy_store_t * store) {
+  WylPolicyPermissionClosureAnalysis analysis = { 0 };
+  wyrelog_error_t rc =
+      wyl_policy_store_analyze_service_permission_closure (store, &analysis);
+  if (rc == WYRELOG_E_OK && analysis.removals->len > 0)
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+  return rc;
 }
 
 static gboolean
