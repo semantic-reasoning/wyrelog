@@ -3979,6 +3979,46 @@ check_service_resolver_conflicting_candidate (SoupServer *server)
       && service_resolver_expect (server, &original, original.token, TRUE);
 }
 
+#ifdef WYL_HAS_AUDIT
+/* Retirement intentionally latches the service authority when an expired
+ * registry tuple no longer has both live companions.  Exercise that
+ * destructive fail-closed path on its own handle and daemon, so the shared
+ * resolver server remains usable by the reconciliation contract that follows
+ * this matrix.  `server` owns the context's retirement source and is declared
+ * after `handle`, therefore the existing automatic cleanup tears it down
+ * before releasing the isolated handle. */
+static gint
+check_service_auth_retirement_latch_isolated (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 2153;
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,.listen_port = 0,
+  };
+  g_autoptr (GError) error = NULL;
+  g_autoptr (SoupServer) server = wyl_daemon_start_http_server (&opts, handle,
+      &error);
+  g_auto (ServiceResolverFixture) missing = { 0 };
+  if (server == NULL || !service_resolver_fixture_init (server, &missing,
+          WYL_SERVICE_AUTH_ACTIVE, 0)
+      || !wyl_daemon_http_remove_access_token_for_test (server, missing.jti))
+    return 2153;
+  wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE,
+      missing.now + 300);
+  if (wyl_daemon_http_retire_due_service_auth_for_test (server)
+      == WYRELOG_E_OK)
+    return 2154;
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason)
+      == WYRELOG_E_OK
+      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT)
+    return 2155;
+  return 0;
+}
+#endif
+
 static gint
 check_service_bearer_resolver_contract (SoupServer *server)
 {
@@ -4206,23 +4246,9 @@ check_service_bearer_resolver_contract (SoupServer *server)
     return 2152;
 #endif
 #ifdef WYL_HAS_AUDIT
-  g_auto (ServiceResolverFixture) missing = { 0 };
-  if (!service_resolver_fixture_init (server, &missing,
-          WYL_SERVICE_AUTH_ACTIVE, 0)
-      || !wyl_daemon_http_remove_access_token_for_test (server, missing.jti))
-    return 2153;
-  wyl_daemon_http_set_service_auth_clock_for_test (server, TRUE,
-      missing.now + 300);
-  if (wyl_daemon_http_retire_due_service_auth_for_test (server)
-      == WYRELOG_E_OK)
-    return 2154;
-  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
-  if (wyl_service_auth_authority_validate_available
-      (wyl_handle_get_service_auth_authority
-          (wyl_daemon_http_get_handle_for_test (server)),
-          wyl_daemon_http_get_handle_for_test (server), &reason) == WYRELOG_E_OK
-      || reason != WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT)
-    return 2155;
+  gint retirement_latch_rc = check_service_auth_retirement_latch_isolated ();
+  if (retirement_latch_rc != 0)
+    return retirement_latch_rc;
 #endif
   return 0;
 }
