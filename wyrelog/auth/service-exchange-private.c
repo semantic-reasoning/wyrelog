@@ -184,6 +184,7 @@ wyrelog_error_t
       wyl_session_dup_service_credential_id_private (prepared->session);
   ticket->reservation.generation =
       wyl_session_get_service_credential_generation_private (prepared->session);
+  ticket->reservation.expires_at = ticket->expires_at;
   ticket->reservation.principal =
       wyl_session_dup_service_subject_private (prepared->session);
   ticket->reservation.tenant =

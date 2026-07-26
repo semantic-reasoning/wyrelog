@@ -186,6 +186,53 @@ registry_state (WylServiceAuthRegistry *registry,
 }
 
 static void
+test_registry_expiry_index_returns_bounded_due_active_entries (void)
+{
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  WylServiceAuthReservation first = {
+    .session_id = (gchar *) SESSION_A,.jti = (gchar *) JTI_A,
+    .credential_id = (gchar *) CREDENTIAL_A,.generation = 1,
+    .principal = (gchar *) "svc:expiry:first",.tenant = (gchar *) "jobs",
+    .expires_at = 100,
+  };
+  WylServiceAuthReservation second = first;
+  second.session_id = (gchar *) SESSION_B;
+  second.jti = (gchar *) JTI_B;
+  second.principal = (gchar *) "svc:expiry:second";
+  second.expires_at = 200;
+  gboolean changed = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &first,
+          &changed), ==, WYRELOG_E_OK);
+  g_assert_true (changed);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
+          &changed), ==, WYRELOG_E_OK);
+
+  GPtrArray *due = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 100, 1,
+          &due), ==, WYRELOG_E_OK);
+  g_assert_nonnull (due);
+  g_assert_cmpuint (due->len, ==, 1);
+  WylServiceAuthReservation *snapshot = g_ptr_array_index (due, 0);
+  g_assert_cmpstr (snapshot->session_id, ==, SESSION_A);
+  g_assert_cmpint (snapshot->expires_at, ==, 100);
+  g_ptr_array_unref (due);
+
+  due = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_copy_due (registry, 199, 4,
+          &due), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (due->len, ==, 1);
+  g_ptr_array_unref (due);
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
 test_compound_disable_zero_survivors (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -999,6 +1046,8 @@ main (int argc, char **argv)
       test_owned_output_contract);
   g_test_add_func ("/auth/service-principal/compound-zero-survivors",
       test_compound_disable_zero_survivors);
+  g_test_add_func ("/auth/service-principal/registry-expiry-index",
+      test_registry_expiry_index_returns_bounded_due_active_entries);
   g_test_add_func ("/auth/service-principal/write-participant-registry-rank",
       test_write_participant_registry_rank);
   g_test_add_func ("/auth/service-principal/compound-tenant-seal",

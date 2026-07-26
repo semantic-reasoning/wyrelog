@@ -1413,6 +1413,7 @@ wyl_daemon_http_seed_service_session_for_test (SoupServer *server,
     .generation = generation,
     .principal = (gchar *) principal,
     .tenant = (gchar *) tenant,
+    .expires_at = wyl_session_get_service_expires_at_seconds_private (session),
   };
   wyrelog_error_t rc = wyl_service_auth_registry_reserve
       (ctx->service_auth_registry, &reservation);
@@ -1583,6 +1584,7 @@ wyl_daemon_http_service_registry_transition_for_test (SoupServer *server,
     .session_id = (gchar *) session_id,.jti = (gchar *) jti,
     .credential_id = (gchar *) credential_id,.generation = generation,
     .principal = (gchar *) principal,.tenant = (gchar *) tenant,
+    .expires_at = G_MAXINT64,
   };
   switch (operation) {
     case WYL_DAEMON_SERVICE_REGISTRY_RESERVE:
