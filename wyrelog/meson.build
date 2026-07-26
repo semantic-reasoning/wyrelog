@@ -45,6 +45,7 @@ wyrelog_sources = files(
   'auth/service-exchange-projector-private.c',
   'auth/totp.c',
   'audit/event.c',
+  'daemon/auth-registry-private.c',
   'fact/graph-locator-private.c',
   'fact/graph-artifact-namespace-private.c',
   'fact/reconcile-private.c',
@@ -343,7 +344,6 @@ endif
 
 wyrelogd_sources = files(
     'daemon/checks.c',
-    'daemon/auth-registry-private.c',
     'daemon/delta.c',
     'daemon/fact-status.c',
     'daemon/http.c',

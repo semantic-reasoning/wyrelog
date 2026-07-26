@@ -9628,6 +9628,75 @@ wyl_policy_store_set_tenant_sealed (wyl_policy_store_t *store,
 }
 
 wyrelog_error_t
+    wyl_policy_store_set_tenant_sealed_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES], gboolean * out_changed)
+{
+  if (out_tenant != NULL)
+    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  if (out_changed != NULL)
+    *out_changed = FALSE;
+  if (store == NULL || tenant_id == NULL || out_tenant == NULL
+      || out_changed == NULL || !wyl_policy_store_tenant_id_is_valid (tenant_id)
+      || strlen (tenant_id) >= WYL_POLICY_TENANT_SELECTOR_BYTES)
+    return WYRELOG_E_INVALID;
+  if (sealed && g_strcmp0 (tenant_id, WYL_TENANT_DEFAULT) == 0)
+    return WYRELOG_E_POLICY;
+
+  wyrelog_error_t rc =
+      wyl_policy_store_service_authority_transaction_enter_participant
+      (transaction, store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  g_autoptr (GRecMutexLocker) authority_locker =
+      g_rec_mutex_locker_new (&store->graph_authority_mutex);
+  sqlite3_stmt *stmt = NULL;
+  rc = prepare_stmt (store->db,
+      "SELECT tenant_id,sealed FROM tenants WHERE tenant_id=?;", &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, tenant_id);
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  if (rc == WYRELOG_E_OK && step_rc == SQLITE_DONE)
+    rc = WYRELOG_E_NOT_FOUND;
+  if (rc == WYRELOG_E_OK && step_rc != SQLITE_ROW)
+    rc = WYRELOG_E_IO;
+  const gchar *stored = rc == WYRELOG_E_OK
+      ? (const gchar *) sqlite3_column_text (stmt, 0) : NULL;
+  int was_sealed = rc == WYRELOG_E_OK ? sqlite3_column_int (stmt, 1) : 0;
+  if (rc == WYRELOG_E_OK
+      && (stored == NULL || strlen (stored) >= WYL_POLICY_TENANT_SELECTOR_BYTES
+          || strcmp (stored, tenant_id) != 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    memcpy (out_tenant, stored, strlen (stored) + 1);
+  sqlite3_finalize (stmt);
+
+  if (rc == WYRELOG_E_OK && was_sealed != (sealed ? 1 : 0)) {
+    stmt = NULL;
+    rc = prepare_stmt (store->db,
+        "UPDATE tenants SET sealed=?,updated_at=unixepoch() "
+        "WHERE tenant_id=? AND sealed=?;", &stmt);
+    if (rc == WYRELOG_E_OK
+        && (sqlite3_bind_int (stmt, 1, sealed ? 1 : 0) != SQLITE_OK
+            || (rc = bind_text (stmt, 2, out_tenant)) != WYRELOG_E_OK
+            || sqlite3_bind_int (stmt, 3, was_sealed) != SQLITE_OK))
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+      rc = WYRELOG_E_IO;
+    if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+      rc = WYRELOG_E_POLICY;
+    sqlite3_finalize (stmt);
+    if (rc == WYRELOG_E_OK)
+      *out_changed = TRUE;
+  }
+  if (rc != WYRELOG_E_OK)
+    memset (out_tenant, 0, WYL_POLICY_TENANT_SELECTOR_BYTES);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_policy_store_tenant_exists (wyl_policy_store_t *store,
     const gchar *tenant_id, gboolean *out_exists)
 {

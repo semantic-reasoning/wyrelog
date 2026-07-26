@@ -19,6 +19,21 @@ G_BEGIN_DECLS typedef struct
   gint64 disabled_at_us;
 } wyl_service_principal_t;
 
+typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
+
+typedef struct
+{
+  /* Borrowed for the complete call.  NULL keeps the legacy authority-only
+   * operation for callers that do not own the daemon registry; #376 wires the
+   * compound entry point into real handlers. */
+  WylServiceAuthRegistry *registry;
+} wyl_service_principal_disable_runtime_t;
+
+typedef struct
+{
+  WylServiceAuthRegistry *registry;
+} wyl_tenant_seal_runtime_t;
+
 typedef struct
 {
   gchar *credential_id;
@@ -383,6 +398,14 @@ wyrelog_error_t wyl_service_principal_foreach (WylHandle * handle,
 wyrelog_error_t wyl_service_principal_disable (WylHandle * handle,
     const gchar * subject_id, const gchar * actor_subject_id,
     const gchar * request_id, wyl_service_principal_t * out);
+wyrelog_error_t wyl_service_principal_disable_with_runtime
+    (WylHandle * handle, const gchar * subject_id,
+    const gchar * actor_subject_id, const gchar * request_id,
+    const wyl_service_principal_disable_runtime_t * runtime,
+    wyl_service_principal_t * out);
+wyrelog_error_t wyl_tenant_set_sealed_with_runtime
+    (WylHandle * handle, const gchar * tenant_id, gboolean sealed,
+    const wyl_tenant_seal_runtime_t * runtime, gboolean * out_changed);
 
 /* Credential outputs follow the same zero-init, non-aliasing, caller-owned,
  * reuse and failure-clears contract above. Issue or rotation success transfers

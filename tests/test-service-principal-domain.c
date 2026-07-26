@@ -4,7 +4,14 @@
 #include <sqlite3.h>
 
 #include "auth/service-credential-domain-private.h"
+#include "daemon/auth-registry-private.h"
 #include "wyrelog/wyl-handle-private.h"
+
+#define SESSION_A "01890c10-2e3f-7000-8000-000000000201"
+#define JTI_A "01890c10-2e3f-7000-8000-000000000202"
+#define SESSION_B "01890c10-2e3f-7000-8000-000000000203"
+#define JTI_B "01890c10-2e3f-7000-8000-000000000204"
+#define CREDENTIAL_A "wlc_0ujtsYcgvSTl8PAuAdqWYSMnLOv"
 
 static void
 remove_store_files (const gchar *path)
@@ -146,6 +153,228 @@ test_create_get_list_disable (void)
       3);
   g_assert_cmpint (wyl_service_principal_disable (handle, "svc:jobs:worker",
           "admin.root", "request-disable-noop", &failed), ==, WYRELOG_E_POLICY);
+}
+
+static void
+assert_registry_state (WylServiceAuthRegistry *registry,
+    const WylServiceAuthReservation *reservation, WylServiceAuthState expected)
+{
+  WylServiceAuthReservation snapshot = { 0 };
+  WylServiceAuthState state = WYL_SERVICE_AUTH_PENDING;
+  gboolean found = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_lookup (registry,
+          reservation->session_id, reservation->jti, &snapshot, &state,
+          &found), ==, WYRELOG_E_OK);
+  g_assert_true (found);
+  g_assert_cmpint (state, ==, expected);
+  wyl_service_auth_reservation_clear (&snapshot);
+}
+
+static void
+test_compound_disable_zero_survivors (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_create (handle, "svc:jobs:worker",
+          "worker", "admin", "compound-create", &principal), ==, WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+
+  WylServiceAuthReservation pending = {
+    .session_id = (gchar *) SESSION_A,
+    .jti = (gchar *) JTI_A,
+    .credential_id = (gchar *) CREDENTIAL_A,
+    .generation = 1,
+    .principal = (gchar *) "svc:jobs:worker",
+    .tenant = (gchar *) "jobs",
+  };
+  WylServiceAuthReservation unrelated = pending;
+  unrelated.session_id = (gchar *) SESSION_B;
+  unrelated.jti = (gchar *) JTI_B;
+  unrelated.principal = (gchar *) "svc:jobs:other";
+  gboolean changed = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &pending), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &unrelated),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &unrelated,
+          &changed), ==, WYRELOG_E_OK);
+
+  wyl_service_principal_disable_runtime_t runtime = {
+    .registry = registry,
+  };
+  g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
+          "svc:jobs:worker", "admin", "compound-disable", &runtime,
+          &principal), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (principal.state, ==, "disabled");
+  assert_registry_state (registry, &pending, WYL_SERVICE_AUTH_REVOKED);
+  assert_registry_state (registry, &unrelated, WYL_SERVICE_AUTH_ACTIVE);
+  wyl_service_principal_clear (&principal);
+
+  /* Replay still reruns the exact zero-survivor verification. */
+  g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
+          "svc:jobs:worker", "admin", "compound-disable-replay", &runtime,
+          &principal), ==, WYRELOG_E_OK);
+  assert_registry_state (registry, &pending, WYL_SERVICE_AUTH_REVOKED);
+  wyl_service_principal_clear (&principal);
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
+test_compound_tenant_seal_zero_survivors (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+  gboolean created = FALSE;
+  g_assert_cmpint (wyl_policy_store_create_tenant
+      (wyl_handle_get_policy_store (handle), "tenant-a", &created), ==,
+      WYRELOG_E_OK);
+  g_assert_true (created);
+  g_assert_cmpint (wyl_policy_store_create_tenant
+      (wyl_handle_get_policy_store (handle), "tenant-b", &created), ==,
+      WYRELOG_E_OK);
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  WylServiceAuthReservation matching = {
+    .session_id = (gchar *) SESSION_A,
+    .jti = (gchar *) JTI_A,
+    .credential_id = (gchar *) CREDENTIAL_A,
+    .generation = 1,
+    .principal = (gchar *) "svc:tenant-a:worker",
+    .tenant = (gchar *) "tenant-a",
+  };
+  WylServiceAuthReservation unrelated = matching;
+  unrelated.session_id = (gchar *) SESSION_B;
+  unrelated.jti = (gchar *) JTI_B;
+  unrelated.principal = (gchar *) "svc:tenant-b:worker";
+  unrelated.tenant = (gchar *) "tenant-b";
+  gboolean changed = FALSE;
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &matching),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &unrelated),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &matching,
+          &changed), ==, WYRELOG_E_OK);
+
+  wyl_tenant_seal_runtime_t runtime = {
+    .registry = registry,
+  };
+  g_assert_cmpint (wyl_tenant_set_sealed_with_runtime (handle, "tenant-a",
+          TRUE, &runtime, &changed), ==, WYRELOG_E_OK);
+  g_assert_true (changed);
+  assert_registry_state (registry, &matching, WYL_SERVICE_AUTH_REVOKED);
+  assert_registry_state (registry, &unrelated, WYL_SERVICE_AUTH_PENDING);
+
+  changed = TRUE;
+  g_assert_cmpint (wyl_tenant_set_sealed_with_runtime (handle, "tenant-a",
+          TRUE, &runtime, &changed), ==, WYRELOG_E_OK);
+  g_assert_false (changed);
+  assert_registry_state (registry, &matching, WYL_SERVICE_AUTH_REVOKED);
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
+test_compound_corruption_latches_unavailable (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  wyl_service_principal_t principal = { 0 };
+  g_assert_cmpint (wyl_service_principal_create (handle, "svc:fault:worker",
+          "worker", "admin", "fault-create", &principal), ==, WYRELOG_E_OK);
+  wyl_service_principal_clear (&principal);
+  WylServiceAuthReservation reservation = {
+    .session_id = (gchar *) SESSION_A,
+    .jti = (gchar *) JTI_A,
+    .credential_id = (gchar *) CREDENTIAL_A,
+    .generation = 1,
+    .principal = (gchar *) "svc:fault:worker",
+    .tenant = (gchar *) "fault",
+  };
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &reservation),
+      ==, WYRELOG_E_OK);
+  WylServiceAuthSelector selector = { 0 };
+  g_assert_cmpint (wyl_service_auth_selector_init_principal (&selector,
+          reservation.principal), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
+      (registry, &selector));
+
+  wyl_service_principal_disable_runtime_t runtime = {
+    .registry = registry,
+  };
+  g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
+          reservation.principal, "admin", "fault-disable", &runtime,
+          &principal), ==, WYRELOG_E_POLICY);
+  wyl_service_principal_clear (&principal);
+  g_assert_cmpint (wyl_service_principal_get (handle, reservation.principal,
+          &principal), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (principal.state, ==, "disabled");
+  wyl_service_principal_clear (&principal);
+  assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_PENDING);
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+      WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
+test_compound_commit_outcomes (void)
+{
+  for (guint stage = WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE;
+      stage <= WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER; stage++) {
+    g_autoptr (WylHandle) handle = NULL;
+    g_assert_cmpint (wyl_init (NULL, &handle), ==, WYRELOG_E_OK);
+    WylServiceAuthRegistry *registry = NULL;
+    g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==,
+        WYRELOG_E_OK);
+    wyl_service_principal_t principal = { 0 };
+    g_assert_cmpint (wyl_service_principal_create (handle,
+            "svc:outcome:worker", "worker", "admin", "outcome-create",
+            &principal), ==, WYRELOG_E_OK);
+    wyl_service_principal_clear (&principal);
+    WylServiceAuthReservation reservation = {
+      .session_id = (gchar *) SESSION_A,
+      .jti = (gchar *) JTI_A,
+      .credential_id = (gchar *) CREDENTIAL_A,
+      .generation = 1,
+      .principal = (gchar *) "svc:outcome:worker",
+      .tenant = (gchar *) "outcome",
+    };
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
+            &reservation), ==, WYRELOG_E_OK);
+    wyl_service_principal_disable_runtime_t runtime = {
+      .registry = registry,
+    };
+    wyl_policy_store_service_authority_transaction_fail_once
+        (wyl_handle_get_policy_store (handle),
+        (WylPolicyAuthorityTransactionFailStage) stage);
+    g_assert_cmpint (wyl_service_principal_disable_with_runtime (handle,
+            reservation.principal, "admin", "outcome-disable", &runtime,
+            &principal), ==, WYRELOG_E_IO);
+    g_assert_null (principal.subject_id);
+    g_assert_cmpint (wyl_service_principal_get (handle,
+            reservation.principal, &principal), ==, WYRELOG_E_OK);
+    if (stage == WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE) {
+      g_assert_cmpstr (principal.state, ==, "active");
+      assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_PENDING);
+    } else {
+      g_assert_cmpstr (principal.state, ==, "disabled");
+      assert_registry_state (registry, &reservation, WYL_SERVICE_AUTH_REVOKED);
+    }
+    wyl_service_principal_clear (&principal);
+    WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    g_assert_cmpint (wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle, &reason), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (reason, ==, WYL_SERVICE_AUTH_UNAVAILABLE_NONE);
+    wyl_service_auth_registry_unref (registry);
+  }
 }
 
 static void
@@ -474,6 +703,14 @@ main (int argc, char **argv)
       test_create_get_list_disable);
   g_test_add_func ("/auth/service-principal/owned-output-contract",
       test_owned_output_contract);
+  g_test_add_func ("/auth/service-principal/compound-zero-survivors",
+      test_compound_disable_zero_survivors);
+  g_test_add_func ("/auth/service-principal/compound-tenant-seal",
+      test_compound_tenant_seal_zero_survivors);
+  g_test_add_func ("/auth/service-principal/compound-corruption-latch",
+      test_compound_corruption_latches_unavailable);
+  g_test_add_func ("/auth/service-principal/compound-commit-outcomes",
+      test_compound_commit_outcomes);
   g_test_add_func ("/auth/service-principal/collision-classes",
       test_collision_classes);
   g_test_add_func ("/auth/service-principal/concurrent-request",
