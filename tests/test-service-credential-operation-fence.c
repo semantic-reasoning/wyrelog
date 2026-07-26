@@ -1110,11 +1110,15 @@ test_handoff_cores_commit_once_and_stale_rotate_rolls_back (void)
   };
   wyl_policy_service_credential_info_t rotated = { 0 };
   wyl_policy_service_handoff_escrow_info_t rotate_escrow = { 0 };
+  WylPolicyServiceCredentialPredecessor rotate_predecessor = { 0 };
   Txn rotate_txn = begin_txn (handle);
   g_assert_cmpint (wyl_policy_store_rotate_service_credential_handoff_core
       (rotate_txn.txn, store, issued.credential_id, "admin", "handoff-rotate",
           0, NULL, NULL, NULL, issued.generation, cvk, cvk_len,
-          &rotate_handoff, &rotated, &rotate_escrow), ==, WYRELOG_E_OK);
+          &rotate_handoff, &rotated, &rotate_escrow, &rotate_predecessor), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpstr (rotate_predecessor.credential_id, ==, issued.credential_id);
+  g_assert_cmpuint (rotate_predecessor.generation, ==, issued.generation);
   g_assert_cmpstr (rotated.credential_id, ==, rotate_escrow.credential_id);
   g_assert_cmpuint (rotated.generation, ==,
       rotate_escrow.credential_generation);
@@ -1136,11 +1140,15 @@ test_handoff_cores_commit_once_and_stale_rotate_rolls_back (void)
   g_autofree gchar *stale_old_id = g_strdup (rotated.credential_id);
   guint64 stale_generation = rotated.generation;
   wyl_policy_service_handoff_escrow_info_t stale_escrow = { 0 };
+  WylPolicyServiceCredentialPredecessor stale_predecessor = { 0 };
   Txn stale_txn = begin_txn (handle);
   g_assert_cmpint (wyl_policy_store_rotate_service_credential_handoff_core
       (stale_txn.txn, store, stale_old_id, "admin", "handoff-stale",
           0, NULL, NULL, NULL, stale_generation + 1, cvk, cvk_len,
-          &stale_handoff, &rotated, &stale_escrow), ==, WYRELOG_E_POLICY);
+          &stale_handoff, &rotated, &stale_escrow, &stale_predecessor), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpstr (stale_predecessor.credential_id, ==, "");
+  g_assert_cmpuint (stale_predecessor.generation, ==, 0);
   finish_txn (&stale_txn, FALSE);
   g_assert_cmpint (scalar (wyl_policy_store_get_db (store),
           "SELECT count(*) FROM service_credentials;"), ==, 2);
