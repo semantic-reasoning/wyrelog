@@ -145,6 +145,15 @@ wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *b)
   return closed ();
 }
 
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *b,
+    const gchar *t)
+{
+  (void) b;
+  (void) t;
+  return closed ();
+}
+
 void
 wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *b)
 {
@@ -262,6 +271,10 @@ wyl_fact_artifact_namespace_sync_directory (WylFactArtifactNamespace *n)
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+extern long syscall (long, ...);
+#endif
 typedef struct WylFactArtifactLockDomain WylFactArtifactLockDomain;
 struct WylFactArtifactNamespace
 {
@@ -322,7 +335,7 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC)
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1180,6 +1193,112 @@ wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *binding)
   if (fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) == 0
       || errno != ENOENT)
     r = WYRELOG_E_POLICY;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return r;
+}
+
+static wyrelog_error_t
+rename_no_replace (gint dirfd, const gchar *source, const gchar *destination)
+{
+#if defined(__linux__) && defined(SYS_renameat2)
+#ifndef RENAME_NOREPLACE
+#define RENAME_NOREPLACE 1
+#endif
+  if (syscall (SYS_renameat2, dirfd, source, dirfd, destination,
+          RENAME_NOREPLACE) == 0)
+    return WYRELOG_E_OK;
+  if (errno == EEXIST)
+    return WYRELOG_E_POLICY;
+  if (errno == ENOSYS || errno == EINVAL || errno == ENOENT)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_IO;
+#elif defined(__APPLE__)
+  if (renameatx_np (dirfd, source, dirfd, destination, RENAME_EXCL) == 0)
+    return WYRELOG_E_OK;
+  if (errno == EEXIST || errno == ENOENT)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_IO;
+#else
+  (void) dirfd;
+  (void) source;
+  (void) destination;
+  return WYRELOG_E_POLICY;
+#endif
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
+    const gchar *destination_token)
+{
+  if (!binding || !binding->active || !binding->creator
+      || !binding->lease->exclusive)
+    return WYRELOG_E_POLICY;
+  if (!temp_token_valid (destination_token)
+      || g_strcmp0 (binding->token, destination_token) == 0)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = binding->lease;
+  g_autofree gchar *next_token = g_strdup (destination_token);
+  g_autofree gchar *source = g_strdup_printf ("tmp-%s", binding->token);
+  g_autofree gchar *destination = g_strdup_printf ("tmp-%s", destination_token);
+  if (!next_token || !source || !destination)
+    return WYRELOG_E_NOMEM;
+
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  if (r != WYRELOG_E_OK)
+    goto done;
+  struct stat source_stat, destination_stat, pinned;
+  if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || fstatat (lease->namespace_->fd, source, &source_stat,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (source_stat.st_mode)
+      || source_stat.st_nlink != 1
+      || (guint64) source_stat.st_dev != binding->device
+      || (guint64) source_stat.st_ino != binding->inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (fstatat (lease->namespace_->fd, destination, &destination_stat,
+          AT_SYMLINK_NOFOLLOW) == 0) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (errno != ENOENT) {
+    r = WYRELOG_E_IO;
+    goto done;
+  }
+  r = rename_no_replace (lease->namespace_->fd, source, destination);
+  if (r != WYRELOG_E_OK) {
+    r = post_mutation_check_unlocked (lease, r);
+    goto done;
+  }
+
+  /* rename is the linearization point.  The old token must never be exposed
+   * by a live binding after this point, including an fsync failure below. */
+  g_free (binding->token);
+  binding->token = g_steal_pointer (&next_token);
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC)
+      || fsync (lease->namespace_->fd) != 0)
+    r = WYRELOG_E_IO;
+  else
+    r = WYRELOG_E_OK;
+  r = post_mutation_check_unlocked (lease, r);
+  if (fstatat (lease->namespace_->fd, source, &source_stat,
+          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (fstatat (lease->namespace_->fd, destination, &destination_stat,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (destination_stat.st_mode)
+      || destination_stat.st_nlink != 1
+      || (guint64) destination_stat.st_dev != binding->device
+      || (guint64) destination_stat.st_ino != binding->inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
 done:
   g_mutex_unlock (&lease->mutex);
   return r;
