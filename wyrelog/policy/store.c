@@ -35,6 +35,9 @@
 #include <io.h>
 #include <windows.h>
 #else
+#ifdef __APPLE__
+#include <stdio.h>
+#endif
 #include <sys/stat.h>
 #ifdef __linux__
 #include <sys/syscall.h>
@@ -6591,6 +6594,23 @@ read_work_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
   return WYRELOG_E_OK;
 }
 
+static int
+exchange_names_at (int dirfd, const gchar *left, const gchar *right)
+{
+#ifdef __linux__
+#ifndef RENAME_EXCHANGE
+#define RENAME_EXCHANGE (1 << 1)
+#endif
+  return (int) syscall (SYS_renameat2, dirfd, left, dirfd, right,
+      RENAME_EXCHANGE);
+#elif defined(__APPLE__)
+  return renameatx_np (dirfd, left, dirfd, right, RENAME_SWAP);
+#else
+  errno = ENOTSUP;
+  return -1;
+#endif
+}
+
 static wyrelog_error_t
 write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
@@ -6654,23 +6674,14 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     before_replace_hook (hook_data);
   int rename_rc = -1;
   if (target_guard != NULL) {
-#ifdef __linux__
-#ifndef RENAME_EXCHANGE
-#define RENAME_EXCHANGE (1 << 1)
-#endif
-    rename_rc = (int) syscall (SYS_renameat2, dirfd, tmp_basename, dirfd,
-        basename, RENAME_EXCHANGE);
+    rename_rc = exchange_names_at (dirfd, tmp_basename, basename);
     if (rename_rc == 0
         && wyl_policy_store_lease_verify_displaced_target_at (target_guard,
             dirfd, tmp_basename) != WYRELOG_E_OK) {
-      int restore_rc = (int) syscall (SYS_renameat2, dirfd, tmp_basename,
-          dirfd, basename, RENAME_EXCHANGE);
+      int restore_rc = exchange_names_at (dirfd, tmp_basename, basename);
       (void) unlinkat (dirfd, tmp_basename, 0);
       return restore_rc == 0 ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     }
-#else
-    errno = ENOTSUP;
-#endif
   } else {
     rename_rc = renameat (dirfd, tmp_basename, dirfd, basename);
   }
