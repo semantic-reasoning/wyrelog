@@ -761,22 +761,13 @@ wyl_daemon_http_context_unref (gpointer data)
 }
 
 static void
-wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
-    gboolean shutting_down)
+    wyl_daemon_http_context_suspend_service_auth_maintenance
+    (WylDaemonHttpContext * ctx)
 {
-  if (ctx == NULL)
-    return;
-
   GSource *retirement_source = NULL;
   g_mutex_lock (&ctx->lock);
-  if (shutting_down && !ctx->shutting_down) {
-    ctx->shutting_down = TRUE;
-    ctx->auth_epoch++;
-  }
-  if (shutting_down) {
-    retirement_source = ctx->service_auth_retirement_source;
-    ctx->service_auth_retirement_source = NULL;
-  }
+  retirement_source = ctx->service_auth_retirement_source;
+  ctx->service_auth_retirement_source = NULL;
   g_mutex_unlock (&ctx->lock);
   if (retirement_source != NULL) {
     g_source_destroy (retirement_source);
@@ -785,6 +776,24 @@ wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
     while (ctx->service_auth_maintenance_inflight != 0)
       g_cond_wait (&ctx->service_auth_maintenance_changed, &ctx->lock);
     g_mutex_unlock (&ctx->lock);
+  }
+}
+
+static void
+wyl_daemon_http_context_terminalize (WylDaemonHttpContext *ctx,
+    gboolean shutting_down)
+{
+  if (ctx == NULL)
+    return;
+
+  if (shutting_down) {
+    g_mutex_lock (&ctx->lock);
+    if (!ctx->shutting_down) {
+      ctx->shutting_down = TRUE;
+      ctx->auth_epoch++;
+    }
+    g_mutex_unlock (&ctx->lock);
+    wyl_daemon_http_context_suspend_service_auth_maintenance (ctx);
   }
 #ifdef WYL_TEST_DAEMON_HTTP
   if (shutting_down) {
@@ -3614,6 +3623,14 @@ wyl_daemon_http_service_auth_maintenance_active_for_test (SoupServer *server,
   gboolean active = ctx->service_auth_retirement_source != NULL;
   g_mutex_unlock (&ctx->lock);
   return active;
+}
+
+void
+wyl_daemon_http_suspend_service_auth_maintenance_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx != NULL)
+    wyl_daemon_http_context_suspend_service_auth_maintenance (ctx);
 }
 
 void

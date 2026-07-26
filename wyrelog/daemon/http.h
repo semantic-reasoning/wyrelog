@@ -296,6 +296,8 @@ void wyl_daemon_http_set_service_auth_clock_for_test (SoupServer * server,
     gboolean enabled, gint64 now_seconds);
 gboolean wyl_daemon_http_service_auth_maintenance_active_for_test
     (SoupServer * server, guint * out_ticks);
+void wyl_daemon_http_suspend_service_auth_maintenance_for_test
+    (SoupServer * server);
 void wyl_daemon_http_shutdown_service_auth_maintenance_for_test
     (SoupServer * server);
 gboolean wyl_daemon_http_set_refresh_times_for_test (SoupServer * server,
