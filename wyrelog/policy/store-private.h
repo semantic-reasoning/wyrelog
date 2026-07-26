@@ -359,6 +359,14 @@ typedef enum
 
 typedef enum
 {
+  WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT = 0,
+  WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP,
+  WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE,
+  WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION,
+} WylPolicyPermissionRemediationAction;
+
+typedef enum
+{
   WYL_POLICY_AUTHORITY_TXN_FAIL_NONE,
   WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_BEFORE,
   WYL_POLICY_AUTHORITY_TXN_FAIL_RELEASE_AFTER,
@@ -1330,6 +1338,15 @@ wyrelog_error_t
     wyl_policy_store_service_authority_transaction_enter_participant
     (WylServiceAuthorityTransaction * transaction,
     wyl_policy_store_t * expected_store);
+wyrelog_error_t
+    wyl_policy_store_service_authority_remediate_permission_closure
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store,
+    WylPolicyPermissionRemediationAction action,
+    const gchar * subject_or_child_role_id,
+    const gchar * permission_or_role_id, const gchar * scope,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * actor_subject_id, const gchar * request_id);
 wyrelog_error_t
     wyl_policy_store_service_authority_transaction_acquire_write_intent
     (WylServiceAuthorityTransaction * transaction,

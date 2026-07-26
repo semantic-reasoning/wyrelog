@@ -262,6 +262,7 @@ struct _WylServiceAuthorityTransaction
   guint64 serial;
   WylServiceAuthorityCommitEvidence *commit_evidence;
   gboolean durable_operation_started;
+  gboolean permission_remediation_only;
   gboolean fail_evidence_allocation_once;
   guint evidence_allocation_count;
   gboolean fail_last_used_sql_once;
@@ -7210,6 +7211,9 @@ wyrelog_error_t
   txn->owns_store_locks = TRUE;
   txn->owns_handle_pin = TRUE;
   txn->owns_store_rank = TRUE;
+  txn->permission_remediation_only =
+      wyl_service_auth_write_lease_is_permission_remediation (write_lease,
+      handle);
   g_assert_cmpint (wyl_service_auth_write_lease_get_serial (write_lease,
           handle, &txn->originating_writer_serial), ==, WYRELOG_E_OK);
   g_atomic_int_set (&store->service_authority_transaction_active, TRUE);
@@ -14234,8 +14238,104 @@ wyrelog_error_t
 {
   wyrelog_error_t rc = service_authority_transaction_validate_active (txn,
       expected_store);
+  if (rc == WYRELOG_E_OK && txn->permission_remediation_only)
+    rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK)
     txn->durable_operation_started = TRUE;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_policy_store_service_authority_remediate_permission_closure
+    (WylServiceAuthorityTransaction * txn,
+    wyl_policy_store_t * store,
+    WylPolicyPermissionRemediationAction action,
+    const gchar * subject_or_child_role_id,
+    const gchar * permission_or_role_id, const gchar * scope,
+    const gchar * audit_id, gint64 audit_created_at_us,
+    const gchar * actor_subject_id, const gchar * request_id)
+{
+  if (txn == NULL || store == NULL || subject_or_child_role_id == NULL
+      || permission_or_role_id == NULL || audit_id == NULL
+      || actor_subject_id == NULL || request_id == NULL
+      || audit_created_at_us <= 0
+      || action < WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT
+      || action > WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION)
+    return WYRELOG_E_INVALID;
+  if ((action == WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT
+          || action ==
+          WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP) && scope == NULL)
+    return WYRELOG_E_INVALID;
+  if ((action == WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE
+          || action == WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION)
+      && scope != NULL)
+    return WYRELOG_E_INVALID;
+
+  wyrelog_error_t rc =
+      service_authority_transaction_validate_active (txn, store);
+  if (rc == WYRELOG_E_OK && !txn->permission_remediation_only)
+    rc = WYRELOG_E_BUSY;
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  txn->durable_operation_started = TRUE;
+
+  sqlite3_stmt *stmt = NULL;
+  const gchar *sql = NULL;
+  switch (action) {
+    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT:
+      sql = "DELETE FROM direct_permissions"
+          " WHERE subject_id=? AND perm_id=? AND scope=?;";
+      break;
+    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP:
+      sql = "DELETE FROM role_memberships"
+          " WHERE subject_id=? AND role_id=? AND scope=?;";
+      break;
+    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE:
+      sql = "DELETE FROM role_inheritances"
+          " WHERE child_role_id=? AND parent_role_id=?;";
+      break;
+    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION:
+      sql = "DELETE FROM role_permissions WHERE role_id=? AND perm_id=?;";
+      break;
+    default:
+      rc = WYRELOG_E_INVALID;
+      break;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = prepare_stmt (store->db, sql, &stmt);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 1, subject_or_child_role_id);
+  if (rc == WYRELOG_E_OK)
+    rc = bind_text (stmt, 2, permission_or_role_id);
+  if (rc == WYRELOG_E_OK && scope != NULL)
+    rc = bind_text (stmt, 3, scope);
+  if (rc == WYRELOG_E_OK && sqlite3_step (stmt) != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && sqlite3_changes (store->db) != 1)
+    rc = WYRELOG_E_POLICY;
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+
+  if (rc == WYRELOG_E_OK
+      && action == WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT)
+    rc = wyl_policy_store_append_direct_permission_event (store,
+        subject_or_child_role_id, permission_or_role_id, scope, "revoke");
+  if (rc == WYRELOG_E_OK
+      && action == WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP)
+    rc = wyl_policy_store_append_role_membership_event (store,
+        subject_or_child_role_id, permission_or_role_id, scope, "revoke");
+  if (rc == WYRELOG_E_OK) {
+    gboolean inserted = FALSE;
+    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
+        audit_created_at_us, actor_subject_id,
+        "service.permission_closure.remediate",
+        subject_or_child_role_id, NULL, NULL, request_id, WYL_DECISION_ALLOW,
+        &inserted);
+    if (rc == WYRELOG_E_OK && !inserted)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc != WYRELOG_E_OK)
+    service_authority_transaction_fail_participant (txn, rc);
   return rc;
 }
 

@@ -57,6 +57,12 @@ wyrelog_error_t wyl_service_auth_authority_acquire_read
 wyrelog_error_t wyl_service_auth_authority_acquire_write
     (WylServiceAuthAuthority * authority, WylHandle * handle,
     GCancellable * cancellable, WylServiceAuthWriteLease ** out_lease);
+/* Typed recovery acquisition: succeeds only while the monotonic reason is
+ * UNSAFE_PERMISSION_CLOSURE. The resulting lease is remediation-only. */
+wyrelog_error_t
+    wyl_service_auth_authority_acquire_permission_remediation_write
+    (WylServiceAuthAuthority * authority, WylHandle * handle,
+    GCancellable * cancellable, WylServiceAuthWriteLease ** out_lease);
 
 /* Inner lock owners mark and unmark their rank around the real lock scope. */
 wyrelog_error_t wyl_service_auth_rank_enter (WylHandle * handle,
@@ -89,6 +95,8 @@ wyrelog_error_t wyl_service_auth_write_lease_get_serial
 wyrelog_error_t wyl_service_auth_write_lease_mark_unavailable
     (WylServiceAuthWriteLease * lease, WylHandle * handle,
     WylServiceAuthUnavailableReason reason);
+gboolean wyl_service_auth_write_lease_is_permission_remediation
+    (WylServiceAuthWriteLease * lease, WylHandle * handle);
 /* Typed successor seam for resolver, activation and exchange entry checks. */
 wyrelog_error_t wyl_service_auth_authority_validate_available
     (WylServiceAuthAuthority * authority, WylHandle * handle,

@@ -137,6 +137,7 @@ struct _WylServiceAuthWriteLease
   WylServiceAuthLeaseState state;
   gboolean transaction_claimed;
   gboolean cleanup_only;
+  gboolean permission_remediation_only;
   wyl_policy_store_t *pinned_store;
 };
 
@@ -388,6 +389,79 @@ wyl_service_auth_authority_acquire_write (WylServiceAuthAuthority *authority,
   return rc;
 }
 
+wyrelog_error_t
+    wyl_service_auth_authority_acquire_permission_remediation_write
+    (WylServiceAuthAuthority * authority, WylHandle * handle,
+    GCancellable * cancellable, WylServiceAuthWriteLease ** out_lease) {
+  if (out_lease != NULL)
+    *out_lease = NULL;
+  if (authority == NULL || !WYL_IS_HANDLE (handle) || out_lease == NULL
+      || (cancellable != NULL && !G_IS_CANCELLABLE (cancellable)))
+    return WYRELOG_E_INVALID;
+  if (authority->handle != handle
+      || !rank_can_enter (handle, WYL_SERVICE_AUTH_RANK_COORDINATION))
+    return WYRELOG_E_BUSY;
+
+  wyl_policy_store_t *pinned_store = NULL;
+  wyrelog_error_t pin_rc = wyl_handle_policy_store_pin_current (handle,
+      &pinned_store);
+  if (pin_rc != WYRELOG_E_OK)
+    return pin_rc;
+
+  wyl_service_auth_authority_ref (authority);
+  g_object_ref (handle);
+  gulong cancel_id = connect_cancellable (cancellable, authority);
+  GThread *thread = g_thread_self ();
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  guint64 serial = 0;
+
+  g_mutex_lock (&authority->mutex);
+  if (thread_owns_lease_locked (authority, thread)) {
+    rc = WYRELOG_E_BUSY;
+  } else {
+    authority->waiting_writers++;
+    while (!authority->closing && !acquisition_cancelled (cancellable)
+        && wyl_handle_service_auth_unavailable_reason_locked (handle) ==
+        WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE
+        && (authority->writer_active || authority->active_readers > 0))
+      g_cond_wait (&authority->changed, &authority->mutex);
+    authority->waiting_writers--;
+    if (authority->closing || acquisition_cancelled (cancellable)
+        || wyl_handle_service_auth_unavailable_reason_locked (handle) !=
+        WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE)
+      rc = WYRELOG_E_BUSY;
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = next_serial_locked (authority, &serial);
+  if (rc == WYRELOG_E_OK) {
+    authority->writer_active = TRUE;
+    authority->writer_owner = thread;
+    authority->writer_serial = serial;
+  }
+  g_mutex_unlock (&authority->mutex);
+  if (cancel_id != 0)
+    g_cancellable_disconnect (cancellable, cancel_id);
+
+  if (rc == WYRELOG_E_OK) {
+    WylServiceAuthWriteLease *lease = g_new0 (WylServiceAuthWriteLease, 1);
+    lease->authority = authority;
+    lease->handle = handle;
+    lease->owner = thread;
+    lease->serial = serial;
+    lease->state = WYL_SERVICE_AUTH_LEASE_ACTIVE;
+    lease->permission_remediation_only = TRUE;
+    lease->pinned_store = pinned_store;
+    g_assert_cmpint (wyl_service_auth_rank_enter (handle,
+            WYL_SERVICE_AUTH_RANK_COORDINATION), ==, WYRELOG_E_OK);
+    *out_lease = lease;
+  } else {
+    wyl_handle_policy_store_unpin (handle, pinned_store);
+    g_object_unref (handle);
+    wyl_service_auth_authority_unref (authority);
+  }
+  return rc;
+}
+
 static wyrelog_error_t
 validate_read_locked (WylServiceAuthReadLease *lease, WylHandle *handle)
 {
@@ -517,6 +591,18 @@ wyl_service_auth_write_lease_get_serial (WylServiceAuthWriteLease *lease,
   if (rc == WYRELOG_E_OK)
     *out_serial = lease->serial;
   return rc;
+}
+
+gboolean
+    wyl_service_auth_write_lease_is_permission_remediation
+    (WylServiceAuthWriteLease * lease, WylHandle * handle) {
+  if (lease == NULL || !WYL_IS_HANDLE (handle))
+    return FALSE;
+  g_mutex_lock (&lease->authority->mutex);
+  gboolean remediation = validate_write_operation_locked (lease,
+      handle) == WYRELOG_E_OK && lease->permission_remediation_only;
+  g_mutex_unlock (&lease->authority->mutex);
+  return remediation;
 }
 
 wyrelog_error_t
