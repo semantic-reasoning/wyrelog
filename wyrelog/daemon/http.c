@@ -932,6 +932,37 @@ static wyrelog_error_t
 #endif
 
 static wyrelog_error_t
+service_publication_context_lock (WylDaemonHttpContext *ctx)
+{
+  wyrelog_error_t rc = wyl_service_auth_rank_enter (ctx->handle,
+      WYL_SERVICE_AUTH_RANK_CONTEXT);
+  if (rc == WYRELOG_E_OK)
+    g_mutex_lock (&ctx->lock);
+  return rc;
+}
+
+static wyrelog_error_t
+service_publication_context_unlock (WylDaemonHttpContext *ctx,
+    wyrelog_error_t rc)
+{
+  g_mutex_unlock (&ctx->lock);
+  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected (ctx->handle,
+      WYL_SERVICE_AUTH_RANK_CONTEXT);
+  return rc == WYRELOG_E_OK ? leave_rc : rc;
+}
+
+static gboolean
+service_session_remove_on_key_rotation (gpointer key, gpointer value,
+    gpointer user_data)
+{
+  (void) key;
+  (void) user_data;
+  return WYL_IS_SESSION (value)
+      && wyl_session_get_auth_method_private (value)
+      == WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
+}
+
+static wyrelog_error_t
 wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
 {
   if (ctx == NULL)
@@ -948,30 +979,44 @@ wyl_daemon_http_context_rotate_access_token_key (WylDaemonHttpContext *ctx)
   if (rc != WYRELOG_E_OK)
     return rc;
 
-  g_mutex_lock (&ctx->lock);
-  sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
-  memcpy (ctx->access_token_secret, next_secret, sizeof next_secret);
-  g_clear_pointer (&ctx->access_token_key_id, g_free);
-  ctx->access_token_key_id = g_steal_pointer (&next_key_id);
-  ctx->access_token_secret_ready = TRUE;
-  ctx->auth_epoch++;
-  ctx->key_epoch++;
-  g_hash_table_remove_all (ctx->access_tokens_by_jti);
-  g_hash_table_remove_all (ctx->refresh_tokens_by_token);
+  /* A rotation invalidates a single security epoch.  Take the service-auth
+   * WRITE lease before the context lock, then clear every service companion
+   * and its registry index while no exchange/resolver can observe a mixed
+   * epoch.  Human access/refresh state is also key-bound and is discarded in
+   * the same context critical section. */
+  g_auto (WylDaemonPolicyWrite) write = { 0 };
+  rc = wyl_daemon_policy_write_acquire (ctx, &write);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = service_publication_context_lock (ctx);
+  if (rc != WYRELOG_E_OK)
+    goto out;
 #ifdef WYL_HAS_AUDIT
-  if (ctx->service_exchange_limiter != NULL) {
-    if (wyl_service_exchange_limiter_reseed (ctx->service_exchange_limiter,
-            ctx->access_token_secret, sizeof ctx->access_token_secret,
-            4096, service_exchange_limiter_now_us, NULL) != WYRELOG_E_OK) {
-      g_mutex_unlock (&ctx->lock);
-      sodium_memzero (next_secret, sizeof next_secret);
-      return WYRELOG_E_INTERNAL;
-    }
-  }
+  if (ctx->service_exchange_limiter != NULL)
+    rc = wyl_service_exchange_limiter_reseed (ctx->service_exchange_limiter,
+        next_secret, sizeof next_secret, 4096, service_exchange_limiter_now_us,
+        NULL);
 #endif
-  g_mutex_unlock (&ctx->lock);
+  if (rc == WYRELOG_E_OK) {
+    g_hash_table_foreach_remove (ctx->sessions_by_token,
+        service_session_remove_on_key_rotation, NULL);
+    g_hash_table_remove_all (ctx->access_tokens_by_jti);
+    g_hash_table_remove_all (ctx->refresh_tokens_by_token);
+    wyl_service_auth_registry_clear (ctx->service_auth_registry);
+  }
+  if (rc == WYRELOG_E_OK) {
+    sodium_memzero (ctx->access_token_secret, sizeof ctx->access_token_secret);
+    memcpy (ctx->access_token_secret, next_secret, sizeof next_secret);
+    g_clear_pointer (&ctx->access_token_key_id, g_free);
+    ctx->access_token_key_id = g_steal_pointer (&next_key_id);
+    ctx->access_token_secret_ready = TRUE;
+    ctx->auth_epoch++;
+    ctx->key_epoch++;
+  }
+  rc = service_publication_context_unlock (ctx, rc);
+out:
   sodium_memzero (next_secret, sizeof next_secret);
-  return WYRELOG_E_OK;
+  return rc;
 }
 
 static WylDaemonHttpContext *
@@ -2558,26 +2603,6 @@ static wyrelog_error_t
   candidate->access_value = state;
   return service_access_state_matches_view (state, view)
       ? WYRELOG_E_OK : WYRELOG_E_INTERNAL;
-}
-
-static wyrelog_error_t
-service_publication_context_lock (WylDaemonHttpContext *ctx)
-{
-  wyrelog_error_t rc = wyl_service_auth_rank_enter (ctx->handle,
-      WYL_SERVICE_AUTH_RANK_CONTEXT);
-  if (rc == WYRELOG_E_OK)
-    g_mutex_lock (&ctx->lock);
-  return rc;
-}
-
-static wyrelog_error_t
-service_publication_context_unlock (WylDaemonHttpContext *ctx,
-    wyrelog_error_t rc)
-{
-  g_mutex_unlock (&ctx->lock);
-  wyrelog_error_t leave_rc = wyl_service_auth_rank_leave_expected (ctx->handle,
-      WYL_SERVICE_AUTH_RANK_CONTEXT);
-  return rc == WYRELOG_E_OK ? leave_rc : rc;
 }
 
 #ifdef WYL_TEST_DAEMON_HTTP

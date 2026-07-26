@@ -7211,6 +7211,55 @@ check_service_token_exchange_contract_on_server (SoupServer *server,
       limiter_snapshot.anonymous_tokens != 5)
     return 1958;
 
+  /* Key rotation is a service-auth epoch transition, not merely a JWT key
+   * swap: it retires every old service companion and leaves the authority
+   * available for a fresh exchange of the still-valid credential. */
+  wyl_jwt_access_claims_t pre_rotation_claims = { 0 };
+  if (wyl_jwt_parse_access_claims_json (payload, &pre_rotation_claims)
+      != WYRELOG_E_OK)
+    return 19581;
+  if (wyl_daemon_http_rotate_access_token_key_for_test (server)
+      != WYRELOG_E_OK)
+    return 19582;
+  g_autofree gchar *old_rotation_session = NULL;
+  g_autofree gchar *old_rotation_actor = NULL;
+  g_autofree gchar *old_rotation_tenant = NULL;
+  if (wyl_daemon_http_resolve_bearer_for_test (server, access_token,
+          &old_rotation_session, &old_rotation_actor,
+          &old_rotation_tenant) == WYRELOG_E_OK)
+    return 19583;
+  gint pre_rotation_state = WYL_SERVICE_AUTH_PENDING;
+  gboolean pre_rotation_found = TRUE;
+  if (wyl_daemon_http_lookup_service_registry_for_test (server,
+          pre_rotation_claims.session_id, pre_rotation_claims.jti,
+          &pre_rotation_state, &pre_rotation_found) != WYRELOG_E_OK
+      || pre_rotation_found)
+    return 19584;
+  guint rotation_sessions = 0;
+  guint rotation_access = 0;
+  wyl_daemon_http_service_publication_counts_for_test (server,
+      &rotation_sessions, &rotation_access);
+  if (rotation_sessions != 0 || rotation_access != 0)
+    return 19585;
+  WylServiceAuthUnavailableReason rotation_reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  if (wyl_service_auth_authority_validate_available
+      (wyl_handle_get_service_auth_authority (handle), handle,
+          &rotation_reason) != WYRELOG_E_OK
+      || rotation_reason != WYL_SERVICE_AUTH_UNAVAILABLE_NONE)
+    return 19586;
+  g_clear_pointer (&body, g_free);
+  if (wyl_daemon_http_issue_service_token_for_test (server, TRUE, request_body,
+          strlen (request_body), &status, &body, &retry_after) != WYRELOG_E_OK
+      || status != 200 || body == NULL)
+    return 19587;
+  g_autofree gchar *rotated_access = extract_json_string (body, "access_token");
+  if (rotated_access == NULL)
+    return 19588;
+  g_clear_pointer (&access_token, g_free);
+  access_token = g_steal_pointer (&rotated_access);
+  wyl_jwt_access_claims_clear (&pre_rotation_claims);
+
   g_autoptr (SoupSession) session = g_object_new (SOUP_TYPE_SESSION, NULL);
   guint route_status = 0;
   g_autofree gchar *route_body = NULL;
