@@ -361,6 +361,11 @@ test_mutation_leases (void)
   fd = -1;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (reader_a,
           WYL_FACT_ARTIFACT_MAIN, TRUE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  fd = -1;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (reader_a,
+          "reader-guard-temp", TRUE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (reader_a,
           WYL_FACT_ARTIFACT_LOCK, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
   wyl_fact_artifact_mutation_lease_free (reader_a);
@@ -406,15 +411,15 @@ test_mutation_leases (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard (n,
           &reader_a), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (reader_a,
-          WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_OK);
+          WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
   writer = NULL;
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
           &writer), ==, WYRELOG_E_BUSY);
   g_assert_null (writer);
-  close (fd);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (reader_a,
-          "reader-temp", FALSE, TRUE, &fd), ==, WYRELOG_E_OK);
-  close (fd);
+          "reader-temp", FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
   wyl_fact_artifact_mutation_lease_free (reader_a);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
           &writer), ==, WYRELOG_E_OK);
