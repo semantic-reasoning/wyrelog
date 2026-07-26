@@ -154,6 +154,10 @@ WylHandle *wyl_daemon_http_get_handle_for_test (SoupServer * server);
 wyrelog_error_t wyl_daemon_http_seal_tenant_for_test
     (SoupServer * server, const gchar * tenant_id,
     void (*after_write_acquired) (gpointer data), gpointer data);
+wyrelog_error_t wyl_daemon_http_revoke_service_credential_for_test
+    (SoupServer * server, const gchar * credential_id,
+    const gchar * request_id,
+    void (*after_write_acquired) (gpointer data), gpointer data);
 gboolean wyl_daemon_http_replace_session_for_test
     (SoupServer * server, const gchar * session_id, WylSession * session);
 gboolean wyl_daemon_http_seed_human_session_for_test

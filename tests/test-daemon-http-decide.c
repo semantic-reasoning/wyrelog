@@ -2560,9 +2560,10 @@ service_resolver_fixture_clear (ServiceResolverFixture *fixture)
 G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
     service_resolver_fixture_clear)
      static gboolean
-         service_resolver_fixture_init_tenant (SoupServer *server,
+         service_resolver_fixture_init_tenant_credential (SoupServer *server,
     ServiceResolverFixture *fixture, gint registry_state,
-    guint registry_mismatch, const gchar *tenant_id)
+    guint registry_mismatch, const gchar *tenant_id,
+    const gchar *credential_id, guint64 credential_generation)
 {
   memset (fixture, 0, sizeof *fixture);
   wyl_id_t sid = WYL_ID_NIL, jti = WYL_ID_NIL;
@@ -2582,15 +2583,25 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
           sizeof fixture->other_sid) != WYRELOG_E_OK
       || wyl_id_format (&other_jti, fixture->other_jti,
           sizeof fixture->other_jti) != WYRELOG_E_OK
-      || wyl_service_credential_id_new (fixture->credential,
-          sizeof fixture->credential) != WYRELOG_E_OK
       || wyl_service_credential_id_new (fixture->other_credential,
           sizeof fixture->other_credential) != WYRELOG_E_OK)
     return FALSE;
+  if (credential_id == NULL) {
+    if (wyl_service_credential_id_new (fixture->credential,
+            sizeof fixture->credential) != WYRELOG_E_OK)
+      return FALSE;
+    credential_generation = 9;
+  } else if (!wyl_service_credential_id_is_canonical (credential_id,
+          strlen (credential_id)) || credential_generation == 0) {
+    return FALSE;
+  } else {
+    g_strlcpy (fixture->credential, credential_id, sizeof fixture->credential);
+  }
   wyl_service_session_descriptor_t descriptor = {
     .session_id = sid,.jti = fixture->jti,
     .subject_id = "svc:resolver:test",.tenant_id = fixture->tenant,
-    .credential_id = fixture->credential,.credential_generation = 9,
+    .credential_id = fixture->credential,
+    .credential_generation = credential_generation,
     .issued_at_seconds = fixture->now,
     .expires_at_seconds = fixture->now + 300,
   };
@@ -2602,8 +2613,8 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
       || !wyl_daemon_http_store_service_access_token_for_test (server,
           fixture->jti, fixture->sid, descriptor.subject_id,
           descriptor.tenant_id, fixture->key_id, fixture->now + 300,
-          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, fixture->credential, 9,
-          FALSE))
+          WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, fixture->credential,
+          credential_generation, FALSE))
     return FALSE;
   const gchar *reg_sid = registry_mismatch == 1 ? fixture->other_sid
       : fixture->sid;
@@ -2611,7 +2622,8 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
       : fixture->jti;
   const gchar *reg_cred = registry_mismatch == 3 ? fixture->other_credential
       : fixture->credential;
-  guint64 reg_generation = registry_mismatch == 4 ? 10 : 9;
+  guint64 reg_generation = registry_mismatch == 4 ?
+      credential_generation + 1 : credential_generation;
   const gchar *reg_subject = registry_mismatch == 5 ? "svc:resolver:other"
       : descriptor.subject_id;
   const gchar *reg_tenant = registry_mismatch == 6 ? "tenant-other"
@@ -2640,12 +2652,21 @@ G_DEFINE_AUTO_CLEANUP_CLEAR_FUNC (ServiceResolverFixture,
     .subject = descriptor.subject_id,.issuer = "wyrelogd",
     .audience = "wyrelog-client",.tenant = descriptor.tenant_id,
     .session_id = fixture->sid,.credential_id = fixture->credential,
-    .credential_generation = 9,.issued_at = fixture->now,
+    .credential_generation = credential_generation,.issued_at = fixture->now,
   };
   wyrelog_error_t rc = wyl_jwt_sign_hs256_service (&input, secret,
       sizeof secret, &fixture->token);
   sodium_memzero (secret, sizeof secret);
   return rc == WYRELOG_E_OK;
+}
+
+static gboolean
+service_resolver_fixture_init_tenant (SoupServer *server,
+    ServiceResolverFixture *fixture, gint registry_state,
+    guint registry_mismatch, const gchar *tenant_id)
+{
+  return service_resolver_fixture_init_tenant_credential (server, fixture,
+      registry_state, registry_mismatch, tenant_id, NULL, 0);
 }
 
 static gboolean
@@ -2888,6 +2909,7 @@ typedef struct
   SoupServer *server;
   const gchar *request_id;
   const gchar *tenant_id;
+  const gchar *credential_id;
   gboolean tenant_mutation;
   gboolean acquired;
   gboolean release;
@@ -2910,7 +2932,11 @@ static gpointer
 compound_disable_thread (gpointer data)
 {
   CompoundDisableRace *race = data;
-  if (race->tenant_mutation)
+  if (race->credential_id != NULL)
+    race->rc = wyl_daemon_http_revoke_service_credential_for_test
+        (race->server, race->credential_id, race->request_id,
+        compound_disable_after_write_acquired, race);
+  else if (race->tenant_mutation)
     race->rc = wyl_daemon_http_seal_tenant_for_test (race->server,
         race->tenant_id, compound_disable_after_write_acquired, race);
   else
@@ -3227,6 +3253,77 @@ check_compound_tenant_real_resolver_and_activation (SoupServer *server)
           pending.token, FALSE))
     return FALSE;
   return TRUE;
+}
+
+static gboolean
+check_compound_credential_real_resolver (SoupServer *server)
+{
+  WylHandle *handle = wyl_daemon_http_get_handle_for_test (server);
+  wyl_service_credential_issue_result_t issued = { 0 };
+  if (handle == NULL
+      || wyl_service_credential_issue (handle, "svc:resolver:test",
+          "__wr_default", "admin", "resolver-credential-issue", 0,
+          &issued) != WYRELOG_E_OK)
+    return FALSE;
+  g_auto (ServiceResolverFixture) active = { 0 };
+  gboolean ok = service_resolver_fixture_init_tenant_credential (server,
+      &active, WYL_SERVICE_AUTH_ACTIVE, 0, "__wr_default",
+      issued.credential.credential_id, issued.credential.generation)
+      && service_resolver_expect (server, &active, active.token, TRUE);
+  g_auto (ServiceResolverFixture) pending = { 0 };
+  ok = ok && service_resolver_fixture_init_tenant_credential (server,
+      &pending, WYL_SERVICE_AUTH_PENDING, 0, "__wr_default",
+      issued.credential.credential_id, issued.credential.generation);
+  CompoundDisableRace race = {
+    .server = server,
+    .request_id = "resolver-credential-revoke",
+    .credential_id = issued.credential.credential_id,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_mutex_init (&race.mutex);
+  g_cond_init (&race.changed);
+  g_autoptr (GThread) mutation = NULL;
+  ServiceResolverCall later = {
+    .server = server,
+    .fixture = &active,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  g_autoptr (GThread) resolver = NULL;
+  if (ok) {
+    mutation = g_thread_new ("compound-credential-revoke",
+        compound_disable_thread, &race);
+    ok = compound_disable_wait_acquired (&race);
+  }
+  if (ok) {
+    resolver = g_thread_new ("compound-credential-later-resolver",
+        service_resolver_call_thread, &later);
+    ok = service_resolver_wait_reader_queued (server);
+  }
+  g_mutex_lock (&race.mutex);
+  race.release = TRUE;
+  g_cond_broadcast (&race.changed);
+  g_mutex_unlock (&race.mutex);
+  if (mutation != NULL)
+    g_thread_join (g_steal_pointer (&mutation));
+  if (resolver != NULL)
+    g_thread_join (g_steal_pointer (&resolver));
+  ok = ok && race.rc == WYRELOG_E_OK && later.rc == WYRELOG_E_POLICY
+      && later.sid == NULL && later.actor == NULL && later.tenant == NULL;
+  gboolean changed = TRUE;
+  ok = ok
+      && wyl_daemon_http_service_registry_transition_for_test (server,
+      pending.sid, pending.jti, pending.credential,
+      issued.credential.generation, "svc:resolver:test", "__wr_default",
+      WYL_DAEMON_SERVICE_REGISTRY_ACTIVATE, &changed) == WYRELOG_E_POLICY
+      && !changed
+      && service_resolver_expect (server, &pending, pending.token, FALSE);
+  g_free (later.sid);
+  g_free (later.actor);
+  g_free (later.tenant);
+  g_cond_clear (&race.changed);
+  g_mutex_clear (&race.mutex);
+  wyl_service_credential_issue_result_clear (&issued);
+  return ok;
 }
 
 static gboolean
@@ -3981,10 +4078,12 @@ check_service_bearer_resolver_contract (SoupServer *server)
     return 2148;
   if (!service_resolver_expect (server, &sealed, sealed.token, TRUE))
     return 2149;
-  if (!check_compound_tenant_real_resolver_and_activation (server))
+  if (!check_compound_credential_real_resolver (server))
     return 2150;
-  if (!check_compound_disable_real_resolver_and_activation (server))
+  if (!check_compound_tenant_real_resolver_and_activation (server))
     return 2151;
+  if (!check_compound_disable_real_resolver_and_activation (server))
+    return 2152;
   return 0;
 }
 
