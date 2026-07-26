@@ -1727,6 +1727,12 @@ wyl_daemon_http_service_registry_transition_for_test (SoupServer *server,
       session_id);
   if (session != NULL)
     expires_at = wyl_session_get_service_expires_at_seconds_private (session);
+  else {
+    WylAccessTokenState *access = g_hash_table_lookup
+        (ctx->access_tokens_by_jti, jti);
+    if (access != NULL)
+      expires_at = access->expires_at;
+  }
   g_mutex_unlock (&ctx->lock);
   if (expires_at <= 0)
     return WYRELOG_E_INVALID;
