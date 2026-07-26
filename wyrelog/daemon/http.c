@@ -1492,6 +1492,27 @@ wyl_daemon_http_seal_tenant_for_test (SoupServer *server,
       &runtime, &changed);
 }
 
+wyrelog_error_t
+wyl_daemon_http_revoke_service_credential_for_test (SoupServer *server,
+    const gchar *credential_id, const gchar *request_id,
+    void (*after_write_acquired) (gpointer data), gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_service_credential_revoke_runtime_t runtime = {
+    .registry = ctx->service_auth_registry,
+    .after_write_acquired = after_write_acquired,
+    .data = data,
+  };
+  wyl_service_credential_t credential = { 0 };
+  wyrelog_error_t rc = wyl_service_credential_revoke_with_runtime
+      (ctx->handle, credential_id, "admin", request_id, &runtime,
+      &credential);
+  wyl_service_credential_clear (&credential);
+  return rc;
+}
+
 void
 wyl_daemon_http_set_service_resolver_checkpoint_for_test (SoupServer *server,
     WylDaemonServiceResolverCheckpoint checkpoint, gpointer data)

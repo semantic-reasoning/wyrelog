@@ -139,6 +139,7 @@ typedef struct
   /* Borrowed for the complete call.  When non-NULL, retired-generation
    * invalidation is compounded under the mutation's existing WRITE lease. */
   WylServiceAuthRegistry *registry;
+  void (*after_write_acquired) (gpointer data);
   /* The observed active generation used by the authoritative rotate CAS.
    * Zero preserves callers that have no externally observed generation. */
   guint64 old_credential_generation;
@@ -149,6 +150,8 @@ typedef struct
 {
   /* Borrowed for the complete call. */
   WylServiceAuthRegistry *registry;
+  void (*after_write_acquired) (gpointer data);
+  gpointer data;
 } wyl_service_credential_revoke_runtime_t;
 
 typedef struct
