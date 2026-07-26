@@ -770,6 +770,32 @@ entry_matches_selector (const ServiceAuthEntry *entry,
 }
 
 static gboolean
+entry_indexes_consistent_locked (WylServiceAuthRegistry *registry,
+    ServiceAuthEntry *entry)
+{
+  ServiceAuthBucket credential_key = {
+    .selector = entry->reservation.credential_id,
+    .generation = entry->reservation.generation,
+  };
+  ServiceAuthBucket *credential = g_hash_table_lookup
+      (registry->by_credential_generation, &credential_key);
+  ServiceAuthBucket *principal = g_hash_table_lookup (registry->by_principal,
+      entry->reservation.principal);
+  ServiceAuthBucket *tenant = g_hash_table_lookup (registry->by_tenant,
+      entry->reservation.tenant);
+
+  return g_hash_table_lookup (registry->by_session,
+      entry->reservation.session_id) == entry
+      && g_hash_table_lookup (registry->by_jti, entry->reservation.jti) == entry
+      && entry->expiry_iter != NULL
+      && g_sequence_get (entry->expiry_iter) == entry
+      && credential != NULL && principal != NULL && tenant != NULL
+      && g_hash_table_contains (credential->members, entry)
+      && g_hash_table_contains (principal->members, entry)
+      && g_hash_table_contains (tenant->members, entry);
+}
+
+static gboolean
 bucket_table_consistent_locked (WylServiceAuthRegistry *registry,
     GHashTable *table, WylServiceAuthSelectorKind family, gsize expected)
 {
@@ -1095,11 +1121,16 @@ remove_bucket_member_locked (GHashTable *table, gconstpointer key,
 {
   ServiceAuthBucket *bucket = g_hash_table_lookup (table, key);
 
-  g_assert (bucket != NULL);
-  g_assert (g_hash_table_remove (bucket->members, entry));
+  /* Callers preflight every index while holding the registry mutex.  Keep
+   * this helper non-fatal nevertheless: selector-index corruption is an
+   * availability fault, never a daemon assertion. */
+  if (bucket == NULL || !g_hash_table_contains (bucket->members, entry))
+    return NULL;
+  (void) g_hash_table_remove (bucket->members, entry);
   if (g_hash_table_size (bucket->members) != 0)
     return NULL;
-  g_assert (g_hash_table_steal (table, key));
+  if (!g_hash_table_steal (table, key))
+    return NULL;
   return bucket;
 }
 
@@ -1133,7 +1164,10 @@ wyl_service_auth_registry_remove_exact (WylServiceAuthRegistry *registry,
     g_mutex_unlock (&registry->mutex);
     return WYRELOG_E_POLICY;
   }
-  if (by_session->expiry_iter == NULL) {
+  /* Validate the complete immutable entry before mutating any one index.
+   * Due cleanup calls this API with a snapshot; a malformed selector bucket
+   * must therefore fail closed, with no partial removal. */
+  if (!entry_indexes_consistent_locked (registry, by_session)) {
     g_mutex_unlock (&registry->mutex);
     return WYRELOG_E_POLICY;
   }
@@ -1267,8 +1301,7 @@ wyl_service_auth_registry_copy_due (WylServiceAuthRegistry *registry,
       !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
     ServiceAuthEntry *entry = g_sequence_get (iter);
     if (entry == NULL || entry->expiry_iter != iter
-        || g_hash_table_lookup (registry->by_session,
-            entry->reservation.session_id) != entry) {
+        || !entry_indexes_consistent_locked (registry, entry)) {
       g_mutex_unlock (&registry->mutex);
       g_ptr_array_unref (snapshots);
       return WYRELOG_E_POLICY;
