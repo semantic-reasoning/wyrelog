@@ -616,6 +616,12 @@ wyl_service_auth_registry_reserve (WylServiceAuthRegistry *registry,
     rc = WYRELOG_E_POLICY;
     goto fail;
   }
+  if (g_hash_table_size (registry->by_session)
+      >= WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES) {
+    g_mutex_unlock (&registry->mutex);
+    rc = WYRELOG_E_BUSY;
+    goto fail;
+  }
   credential_bucket = g_hash_table_lookup
       (registry->by_credential_generation, &credential_key);
   if (credential_bucket == NULL) {
@@ -1257,14 +1263,16 @@ wyl_service_auth_registry_copy_due (WylServiceAuthRegistry *registry,
   entries = g_ptr_array_new_with_free_func ((GDestroyNotify) entry_free);
   snapshots = g_ptr_array_new_with_free_func (reservation_snapshot_free);
   g_mutex_lock (&registry->mutex);
-  if (!registry_consistent_locked (registry)) {
-    g_mutex_unlock (&registry->mutex);
-    g_ptr_array_unref (snapshots);
-    return WYRELOG_E_POLICY;
-  }
   for (GSequenceIter * iter = g_sequence_get_begin_iter (registry->by_expiry);
       !g_sequence_iter_is_end (iter); iter = g_sequence_iter_next (iter)) {
     ServiceAuthEntry *entry = g_sequence_get (iter);
+    if (entry == NULL || entry->expiry_iter != iter
+        || g_hash_table_lookup (registry->by_session,
+            entry->reservation.session_id) != entry) {
+      g_mutex_unlock (&registry->mutex);
+      g_ptr_array_unref (snapshots);
+      return WYRELOG_E_POLICY;
+    }
     if (entry->reservation.expires_at > now_seconds)
       break;
     /* A due PENDING entry proves its owning exchange escaped its WRITE epoch. */
@@ -1293,6 +1301,19 @@ wyl_service_auth_registry_copy_due (WylServiceAuthRegistry *registry,
   }
   *out_reservations = snapshots;
   return WYRELOG_E_OK;
+}
+
+gboolean
+wyl_service_auth_registry_has_capacity (WylServiceAuthRegistry *registry)
+{
+  gboolean available;
+  if (registry == NULL)
+    return FALSE;
+  g_mutex_lock (&registry->mutex);
+  available = g_hash_table_size (registry->by_session)
+      < WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES;
+  g_mutex_unlock (&registry->mutex);
+  return available;
 }
 
 #ifdef WYL_AUTH_REGISTRY_TESTING

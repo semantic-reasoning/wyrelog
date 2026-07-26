@@ -2785,6 +2785,8 @@ service_token_exchange_prepare (WylDaemonHttpContext *ctx,
   wyrelog_error_t rc = service_auth_retire_due (ctx, now_seconds);
   if (rc != WYRELOG_E_OK)
     return rc;
+  if (!wyl_service_auth_registry_has_capacity (ctx->service_auth_registry))
+    return WYRELOG_E_BUSY;
   WylServiceExchangeAuthority authority = { 0 };
   rc = wyl_service_exchange_authority_begin (ctx->handle,
       credential_id, credential_secret, credential_secret_len,

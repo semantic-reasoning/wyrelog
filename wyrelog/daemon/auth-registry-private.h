@@ -23,6 +23,8 @@ typedef struct
 } WylServiceAuthRevokeResult;
 
 #define WYL_SERVICE_AUTH_SELECTOR_BYTES 256u
+/* Hard volatile-state ceiling; admission never evicts an unexpired pair. */
+#define WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES 4096u
 
 typedef enum
 {
@@ -239,6 +241,8 @@ void wyl_service_auth_reservation_clear
 wyrelog_error_t wyl_service_auth_registry_copy_due
     (WylServiceAuthRegistry * registry, gint64 now_seconds, gsize max_entries,
     GPtrArray ** out_reservations);
+gboolean wyl_service_auth_registry_has_capacity
+    (WylServiceAuthRegistry * registry);
 
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistrySessionParticipant,
     wyl_service_auth_registry_session_participant_free);
