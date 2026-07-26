@@ -6675,10 +6675,11 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     rename_rc = renameat (dirfd, tmp_basename, dirfd, basename);
   }
   if (rename_rc != 0) {
+    int rename_errno = errno;
     (void) unlinkat (dirfd, tmp_basename, 0);
     if (target_guard != NULL
-        && (errno == ENOSYS || errno == EINVAL || errno == ENOTSUP
-            || errno == EOPNOTSUPP))
+        && (rename_errno == ENOSYS || rename_errno == EINVAL
+            || rename_errno == ENOTSUP || rename_errno == EOPNOTSUPP))
       return WYRELOG_E_POLICY;
     WYL_LOG_ERROR (WYL_LOG_SECTION_BOOT,
         "policy store renameat onto canonical name failed");
