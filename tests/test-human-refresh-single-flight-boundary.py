@@ -107,7 +107,23 @@ def check(source: str) -> None:
             raise SystemExit(f"classifier lost grace replay: {required}")
     if source.count('soup_server_add_handler (server, "/auth/refresh",') != 1:
         raise SystemExit("refresh route must be registered exactly once")
-    for obsolete in forbidden[:10]:
+    # The context owns one periodic source for service-auth expiry retirement.
+    # It is not part of human refresh: keep the latter's old timeout machinery
+    # forbidden everywhere else, while pinning the former to its single,
+    # context-bound construction site.
+    retirement_scheduler = "g_timeout_source_new_seconds (1)"
+    if source.count("g_timeout_source_new") != 1 or \
+            context_new.count(retirement_scheduler) != 1:
+        raise SystemExit("service-auth retirement timeout escaped its context owner")
+    for required in (
+        "ctx->service_auth_retirement_source = " + retirement_scheduler,
+        "service_auth_retirement_tick, wyl_daemon_http_context_ref (ctx)",
+        "wyl_daemon_http_context_unref",
+        "ctx->service_auth_retirement_source, ctx->dispatch_context",
+    ):
+        if required not in context_new:
+            raise SystemExit("service-auth retirement scheduler lost ownership")
+    for obsolete in forbidden[:9]:
         if obsolete in source:
             raise SystemExit(f"obsolete async machinery remains: {obsolete}")
     if "g_cond_wait_until" not in latch or "10 * G_USEC_PER_SEC" not in latch:
