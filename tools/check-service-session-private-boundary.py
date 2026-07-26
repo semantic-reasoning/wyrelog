@@ -73,8 +73,12 @@ for symbol in PROTECTED:
     if symbol not in {"wyl_session_new_service_detached",
                       "wyl_jwt_sign_hs256_service"}:
         MANIFEST[symbol]["wyrelog/daemon/http.c"] = (
-            2 if symbol in {"wyl_session_get_auth_method_private",
-                            "wyl_session_is_active_private"} else 1)
+            4 if symbol == "wyl_session_get_auth_method_private" else
+            2 if symbol == "wyl_session_is_active_private" else 1)
+MANIFEST["wyl_session_get_service_issued_at_seconds_private"][
+    "wyrelog/daemon/http.c"] = 3
+MANIFEST["wyl_session_get_service_expires_at_seconds_private"][
+    "wyrelog/daemon/http.c"] = 3
 MANIFEST["wyl_session_dup_service_subject_private"][
     "wyrelog/daemon/http.c"] = 1
 MANIFEST["wyl_session_dup_service_tenant_private"][
