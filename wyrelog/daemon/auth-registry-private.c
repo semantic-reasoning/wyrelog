@@ -50,6 +50,19 @@ struct _WylServiceAuthRegistryWriteParticipant
   WylServiceAuthWriteLease *lease;
 };
 
+wyrelog_error_t wyl_service_auth_registry_reserve
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthReservation * reservation);
+wyrelog_error_t wyl_service_auth_registry_activate
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthReservation * reservation, gboolean * out_changed);
+wyrelog_error_t wyl_service_auth_registry_revoke_exact
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthReservation * reservation, gboolean * out_changed);
+wyrelog_error_t wyl_service_auth_registry_remove_exact
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthReservation * reservation, gboolean * out_removed);
+
 static gpointer
 default_try_alloc (gsize size, gpointer user_data)
 {

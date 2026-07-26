@@ -1447,6 +1447,33 @@ wyl_daemon_http_invalidate_service_auth_for_test (SoupServer *server,
       out_result);
 }
 
+wyrelog_error_t
+wyl_daemon_http_disable_service_principal_for_test (SoupServer *server,
+    const gchar *subject_id, const gchar *request_id,
+    void (*after_write_acquired) (gpointer data), gpointer data)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  if (ctx == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_service_principal_disable_runtime_t runtime = {
+    .registry = ctx->service_auth_registry,
+    .after_write_acquired = after_write_acquired,
+    .data = data,
+  };
+  wyl_service_principal_t principal = { 0 };
+  wyrelog_error_t rc = wyl_service_principal_disable_with_runtime
+      (ctx->handle, subject_id, "admin", request_id, &runtime, &principal);
+  wyl_service_principal_clear (&principal);
+  return rc;
+}
+
+WylHandle *
+wyl_daemon_http_get_handle_for_test (SoupServer *server)
+{
+  WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  return ctx != NULL ? ctx->handle : NULL;
+}
+
 void
 wyl_daemon_http_set_service_resolver_checkpoint_for_test (SoupServer *server,
     WylDaemonServiceResolverCheckpoint checkpoint, gpointer data)
