@@ -6887,12 +6887,10 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
       (handle, "svc:reconcile:issue", &issue_prepare_failure);
   if (issue_prepare_rc != WYRELOG_E_OK) {
     /*
-     * Keep the original 1924 diagnosis stable for the principal write.  A
-     * distinct code proves that the principal was committed and the later
-     * tenant setup failed, rather than conflating the two mutations.  Setup
-     * failures (such as request-id allocation) precede both mutations.  The
-     * latter two codes stay within the portable 8-bit process-exit range so
-     * every CI platform reports them distinctly.
+     * Keep legacy 1924 for the principal write and use compact fallback
+     * values for the other stages.  CI must use the structured
+     * WYRELOG_TEST_DIAG line below as the authoritative discriminator: exit
+     * status values alone are not globally unique across this test source.
      */
     if (issue_prepare_failure ==
         SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED) {
