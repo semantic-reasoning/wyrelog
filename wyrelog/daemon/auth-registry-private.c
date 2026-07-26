@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "wyrelog/auth/service-auth-coordination-private.h"
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-id-private.h"
@@ -36,6 +37,13 @@ struct _WylServiceAuthRegistry
 };
 
 struct _WylServiceAuthRegistrySessionParticipant
+{
+  WylServiceAuthRegistry *registry;
+  WylHandle *handle;
+  WylServiceAuthWriteLease *lease;
+};
+
+struct _WylServiceAuthRegistryWriteParticipant
 {
   WylServiceAuthRegistry *registry;
   WylHandle *handle;
@@ -682,6 +690,232 @@ revoke_bucket_locked (ServiceAuthBucket *bucket,
   }
 }
 
+static gboolean
+entry_matches_selector (const ServiceAuthEntry *entry,
+    const WylServiceAuthSelector *selector)
+{
+  const gchar *value = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+      ? entry->reservation.principal : entry->reservation.tenant;
+  return strlen (value) == selector->length
+      && memcmp (value, selector->bytes, selector->length) == 0;
+}
+
+static gboolean
+bucket_table_consistent_locked (WylServiceAuthRegistry *registry,
+    GHashTable *table, WylServiceAuthSelectorKind family, gsize expected)
+{
+  GHashTableIter buckets;
+  gpointer key;
+  gpointer value;
+  gsize members = 0;
+
+  g_hash_table_iter_init (&buckets, table);
+  while (g_hash_table_iter_next (&buckets, &key, &value)) {
+    ServiceAuthBucket *bucket = value;
+    if (bucket == NULL || bucket->members == NULL
+        || g_hash_table_size (bucket->members) == 0)
+      return FALSE;
+    if ((family == 0 && key != bucket)
+        || (family != 0 && key != bucket->selector))
+      return FALSE;
+
+    GHashTableIter iter;
+    gpointer member;
+    g_hash_table_iter_init (&iter, bucket->members);
+    while (g_hash_table_iter_next (&iter, NULL, &member)) {
+      ServiceAuthEntry *entry = member;
+      if (g_hash_table_lookup (registry->by_session,
+              entry->reservation.session_id) != entry)
+        return FALSE;
+      if (family == 0
+          && (entry->reservation.generation != bucket->generation
+              || strcmp (entry->reservation.credential_id,
+                  bucket->selector) != 0))
+        return FALSE;
+      if (family == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+          && strcmp (entry->reservation.principal, bucket->selector) != 0)
+        return FALSE;
+      if (family == WYL_SERVICE_AUTH_SELECTOR_TENANT
+          && strcmp (entry->reservation.tenant, bucket->selector) != 0)
+        return FALSE;
+      members++;
+    }
+  }
+  return members == expected;
+}
+
+static gboolean
+registry_consistent_locked (WylServiceAuthRegistry *registry)
+{
+  gsize size = g_hash_table_size (registry->by_session);
+  if (size != g_hash_table_size (registry->by_jti))
+    return FALSE;
+
+  GHashTableIter iter;
+  gpointer key;
+  gpointer value;
+  g_hash_table_iter_init (&iter, registry->by_session);
+  while (g_hash_table_iter_next (&iter, &key, &value)) {
+    ServiceAuthEntry *entry = value;
+    ServiceAuthBucket credential_key = {
+      .selector = entry->reservation.credential_id,
+      .generation = entry->reservation.generation,
+    };
+    ServiceAuthBucket *credential = g_hash_table_lookup
+        (registry->by_credential_generation, &credential_key);
+    ServiceAuthBucket *principal = g_hash_table_lookup
+        (registry->by_principal, entry->reservation.principal);
+    ServiceAuthBucket *tenant = g_hash_table_lookup
+        (registry->by_tenant, entry->reservation.tenant);
+    if (key != entry->reservation.session_id
+        || g_hash_table_lookup (registry->by_jti,
+            entry->reservation.jti) != entry
+        || credential == NULL || principal == NULL || tenant == NULL
+        || !g_hash_table_contains (credential->members, entry)
+        || !g_hash_table_contains (principal->members, entry)
+        || !g_hash_table_contains (tenant->members, entry)
+        || entry->state < WYL_SERVICE_AUTH_PENDING
+        || entry->state > WYL_SERVICE_AUTH_REVOKED)
+      return FALSE;
+  }
+  return bucket_table_consistent_locked (registry,
+      registry->by_credential_generation, 0, size)
+      && bucket_table_consistent_locked (registry, registry->by_principal,
+      WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL, size)
+      && bucket_table_consistent_locked (registry, registry->by_tenant,
+      WYL_SERVICE_AUTH_SELECTOR_TENANT, size);
+}
+
+static wyrelog_error_t
+selector_init (WylServiceAuthSelector *selector,
+    WylServiceAuthSelectorKind kind, const gchar *value)
+{
+  if (selector != NULL)
+    memset (selector, 0, sizeof *selector);
+  if (selector == NULL || value == NULL)
+    return WYRELOG_E_INVALID;
+  gsize length = strlen (value);
+  if (length >= sizeof selector->bytes
+      || (kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+          && !wyl_policy_service_subject_is_valid (value, length))
+      || (kind == WYL_SERVICE_AUTH_SELECTOR_TENANT
+          && !wyl_policy_store_tenant_id_is_valid (value)))
+    return WYRELOG_E_INVALID;
+  selector->kind = kind;
+  selector->length = length;
+  memcpy (selector->bytes, value, length + 1);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_service_auth_selector_init_principal (WylServiceAuthSelector *selector,
+    const gchar *principal)
+{
+  return selector_init (selector, WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL,
+      principal);
+}
+
+wyrelog_error_t
+wyl_service_auth_selector_init_tenant (WylServiceAuthSelector *selector,
+    const gchar *tenant)
+{
+  return selector_init (selector, WYL_SERVICE_AUTH_SELECTOR_TENANT, tenant);
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_revoke_selector_zero_survivors
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result)
+{
+  if (out_result != NULL)
+    memset (out_result, 0, sizeof *out_result);
+  if (registry == NULL || selector == NULL || out_result == NULL
+      || selector->length == 0
+      || selector->length >= sizeof selector->bytes
+      || selector->bytes[selector->length] != '\0'
+      || (selector->kind != WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+          && selector->kind != WYL_SERVICE_AUTH_SELECTOR_TENANT))
+    return WYRELOG_E_INVALID;
+
+  g_mutex_lock (&registry->mutex);
+  if (!registry_consistent_locked (registry)) {
+    g_mutex_unlock (&registry->mutex);
+    return WYRELOG_E_POLICY;
+  }
+  GHashTable *index = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+      ? registry->by_principal : registry->by_tenant;
+  ServiceAuthBucket *bucket = g_hash_table_lookup (index, selector->bytes);
+  revoke_bucket_locked (bucket, out_result);
+
+  gboolean survivors = FALSE;
+  GHashTableIter iter;
+  gpointer value;
+  g_hash_table_iter_init (&iter, registry->by_session);
+  while (g_hash_table_iter_next (&iter, NULL, &value)) {
+    ServiceAuthEntry *entry = value;
+    if (entry_matches_selector (entry, selector)
+        && entry->state != WYL_SERVICE_AUTH_REVOKED) {
+      survivors = TRUE;
+      break;
+    }
+  }
+  gboolean consistent = registry_consistent_locked (registry);
+  g_mutex_unlock (&registry->mutex);
+  return !survivors && consistent ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_write_participant_new
+    (WylServiceAuthRegistry * registry, WylHandle * handle,
+    WylServiceAuthWriteLease * lease,
+    WylServiceAuthRegistryWriteParticipant ** out_participant) {
+  if (out_participant != NULL)
+    *out_participant = NULL;
+  if (registry == NULL || !WYL_IS_HANDLE (handle) || lease == NULL
+      || out_participant == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation (lease,
+      handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  WylServiceAuthRegistryWriteParticipant *participant =
+      g_try_new0 (WylServiceAuthRegistryWriteParticipant, 1);
+  if (participant == NULL)
+    return WYRELOG_E_NOMEM;
+  participant->registry = wyl_service_auth_registry_ref (registry);
+  participant->handle = g_object_ref (handle);
+  participant->lease = lease;
+  *out_participant = participant;
+  return WYRELOG_E_OK;
+}
+
+void wyl_service_auth_registry_write_participant_free
+    (WylServiceAuthRegistryWriteParticipant * participant)
+{
+  if (participant == NULL)
+    return;
+  g_clear_pointer (&participant->registry, wyl_service_auth_registry_unref);
+  g_clear_object (&participant->handle);
+  participant->lease = NULL;
+  g_free (participant);
+}
+
+wyrelog_error_t
+    wyl_service_auth_registry_write_participant_revoke_zero_survivors
+    (WylServiceAuthRegistryWriteParticipant * participant,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result)
+{
+  if (participant == NULL)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_validate_operation
+      (participant->lease, participant->handle);
+  return rc == WYRELOG_E_OK
+      ? wyl_service_auth_registry_revoke_selector_zero_survivors
+      (participant->registry, selector, out_result) : rc;
+}
+
 wyrelog_error_t
     wyl_service_auth_registry_revoke_credential_generation
     (WylServiceAuthRegistry * registry, const gchar * credential_id,
@@ -711,38 +945,24 @@ wyrelog_error_t
     (WylServiceAuthRegistry * registry, const gchar * principal,
     WylServiceAuthRevokeResult * out_result)
 {
-  ServiceAuthBucket *bucket;
-
-  if (out_result != NULL)
-    memset (out_result, 0, sizeof *out_result);
-  if (registry == NULL || out_result == NULL || principal == NULL
-      || !wyl_policy_service_subject_is_valid (principal, strlen (principal)))
-    return WYRELOG_E_INVALID;
-
-  g_mutex_lock (&registry->mutex);
-  bucket = g_hash_table_lookup (registry->by_principal, principal);
-  revoke_bucket_locked (bucket, out_result);
-  g_mutex_unlock (&registry->mutex);
-  return WYRELOG_E_OK;
+  WylServiceAuthSelector selector = { 0 };
+  wyrelog_error_t rc = wyl_service_auth_selector_init_principal (&selector,
+      principal);
+  return rc == WYRELOG_E_OK
+      ? wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+      &selector, out_result) : rc;
 }
 
 wyrelog_error_t
 wyl_service_auth_registry_revoke_tenant (WylServiceAuthRegistry *registry,
     const gchar *tenant, WylServiceAuthRevokeResult *out_result)
 {
-  ServiceAuthBucket *bucket;
-
-  if (out_result != NULL)
-    memset (out_result, 0, sizeof *out_result);
-  if (registry == NULL || out_result == NULL
-      || !wyl_policy_store_tenant_id_is_valid (tenant))
-    return WYRELOG_E_INVALID;
-
-  g_mutex_lock (&registry->mutex);
-  bucket = g_hash_table_lookup (registry->by_tenant, tenant);
-  revoke_bucket_locked (bucket, out_result);
-  g_mutex_unlock (&registry->mutex);
-  return WYRELOG_E_OK;
+  WylServiceAuthSelector selector = { 0 };
+  wyrelog_error_t rc = wyl_service_auth_selector_init_tenant (&selector,
+      tenant);
+  return rc == WYRELOG_E_OK
+      ? wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+      &selector, out_result) : rc;
 }
 
 static ServiceAuthBucket *
@@ -888,102 +1108,13 @@ wyl_service_auth_reservation_clear (WylServiceAuthReservation *reservation)
 }
 
 #ifdef WYL_AUTH_REGISTRY_TESTING
-static gboolean
-bucket_table_invariants_locked (WylServiceAuthRegistry *registry,
-    GHashTable *table, guint family, gsize *out_members)
-{
-  GHashTableIter bucket_iter;
-  gpointer key;
-  gpointer value;
-
-  *out_members = 0;
-  g_hash_table_iter_init (&bucket_iter, table);
-  while (g_hash_table_iter_next (&bucket_iter, &key, &value)) {
-    ServiceAuthBucket *bucket = value;
-    GHashTableIter member_iter;
-    gpointer member;
-
-    if (g_hash_table_size (bucket->members) == 0)
-      return FALSE;
-    if ((family == 0 && key != bucket)
-        || (family != 0 && key != bucket->selector))
-      return FALSE;
-    g_hash_table_iter_init (&member_iter, bucket->members);
-    while (g_hash_table_iter_next (&member_iter, NULL, &member)) {
-      ServiceAuthEntry *entry = member;
-      if (g_hash_table_lookup (registry->by_session,
-              entry->reservation.session_id) != entry)
-        return FALSE;
-      if (family == 0
-          && (entry->reservation.generation != bucket->generation
-              || strcmp (entry->reservation.credential_id,
-                  bucket->selector) != 0))
-        return FALSE;
-      if (family == 1
-          && strcmp (entry->reservation.principal, bucket->selector) != 0)
-        return FALSE;
-      if (family == 2
-          && strcmp (entry->reservation.tenant, bucket->selector) != 0)
-        return FALSE;
-      (*out_members)++;
-    }
-  }
-  return TRUE;
-}
-
 gboolean
     wyl_service_auth_registry_check_invariants_for_test
     (WylServiceAuthRegistry * registry) {
-  GHashTableIter iter;
-  gpointer key;
-  gpointer value;
-  gboolean valid = TRUE;
-  gsize credential_members = 0;
-  gsize principal_members = 0;
-  gsize tenant_members = 0;
-  gsize primary_size;
-
   if (registry == NULL)
     return FALSE;
   g_mutex_lock (&registry->mutex);
-  if (g_hash_table_size (registry->by_session)
-      != g_hash_table_size (registry->by_jti))
-    valid = FALSE;
-  primary_size = g_hash_table_size (registry->by_session);
-  g_hash_table_iter_init (&iter, registry->by_session);
-  while (valid && g_hash_table_iter_next (&iter, &key, &value)) {
-    ServiceAuthEntry *entry = value;
-    ServiceAuthBucket credential_key = {
-      .selector = entry->reservation.credential_id,
-      .generation = entry->reservation.generation,
-    };
-    ServiceAuthBucket *credential_bucket = g_hash_table_lookup
-        (registry->by_credential_generation, &credential_key);
-    ServiceAuthBucket *principal_bucket = g_hash_table_lookup
-        (registry->by_principal, entry->reservation.principal);
-    ServiceAuthBucket *tenant_bucket = g_hash_table_lookup
-        (registry->by_tenant, entry->reservation.tenant);
-    if (key != entry->reservation.session_id
-        || g_hash_table_lookup (registry->by_jti,
-            entry->reservation.jti) != entry
-        || credential_bucket == NULL || principal_bucket == NULL
-        || tenant_bucket == NULL
-        || !g_hash_table_contains (credential_bucket->members, entry)
-        || !g_hash_table_contains (principal_bucket->members, entry)
-        || !g_hash_table_contains (tenant_bucket->members, entry)
-        || entry->state < WYL_SERVICE_AUTH_PENDING
-        || entry->state > WYL_SERVICE_AUTH_REVOKED)
-      valid = FALSE;
-  }
-  if (valid)
-    valid = bucket_table_invariants_locked (registry,
-        registry->by_credential_generation, 0, &credential_members)
-        && bucket_table_invariants_locked (registry, registry->by_principal,
-        1, &principal_members)
-        && bucket_table_invariants_locked (registry, registry->by_tenant, 2,
-        &tenant_members)
-        && credential_members == primary_size
-        && principal_members == primary_size && tenant_members == primary_size;
+  gboolean valid = registry_consistent_locked (registry);
   g_mutex_unlock (&registry->mutex);
   return valid;
 }
@@ -999,5 +1130,27 @@ wyl_service_auth_registry_size_for_test (WylServiceAuthRegistry *registry)
   size = g_hash_table_size (registry->by_session);
   g_mutex_unlock (&registry->mutex);
   return size;
+}
+
+gboolean
+    wyl_service_auth_registry_corrupt_selector_index_for_test
+    (WylServiceAuthRegistry * registry, const WylServiceAuthSelector * selector)
+{
+  if (registry == NULL || selector == NULL)
+    return FALSE;
+  g_mutex_lock (&registry->mutex);
+  GHashTable *index = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+      ? registry->by_principal : registry->by_tenant;
+  ServiceAuthBucket *bucket = g_hash_table_lookup (index, selector->bytes);
+  GHashTableIter iter;
+  gpointer member = NULL;
+  if (bucket != NULL) {
+    g_hash_table_iter_init (&iter, bucket->members);
+    (void) g_hash_table_iter_next (&iter, NULL, &member);
+    if (member != NULL)
+      g_hash_table_remove (bucket->members, member);
+  }
+  g_mutex_unlock (&registry->mutex);
+  return member != NULL;
 }
 #endif
