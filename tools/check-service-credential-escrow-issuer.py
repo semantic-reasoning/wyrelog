@@ -79,25 +79,59 @@ RECEIPT_KEY_ALLOWLIST = frozenset({
 HANDOFF_MODULE = "service-credential-handoff-private.c"
 
 
-def block_comment_state(line: str, active: bool) -> bool:
-    """Return whether a C block comment remains open after this source line."""
+def c_logical_lines(text: str) -> list[str]:
+    """Apply the C17 trigraph and line-splicing translation phases."""
+    trigraphs = {
+        "??=": "#",
+        "??/": "\\",
+        "??'": "^",
+        "??(": "[",
+        "??)": "]",
+        "??!": "|",
+        "??<": "{",
+        "??>": "}",
+        "??-": "~",
+    }
+    for spelling, replacement in trigraphs.items():
+        text = text.replace(spelling, replacement)
+
+    physical = text.split("\n")
+    logical: list[str] = []
+    pending = ""
+    for index, line in enumerate(physical):
+        if index < len(physical) - 1 and line.endswith("\\"):
+            pending += line[:-1]
+            continue
+        logical.append(pending + line)
+        pending = ""
+    return logical
+
+
+def c_comment_free_line(line: str, active: bool) -> tuple[str, bool]:
+    """Replace C comments with spaces while preserving literals."""
+    output: list[str] = []
     index = 0
     while index < len(line):
         if active:
             end = line.find("*/", index)
             if end < 0:
-                return True
+                output.append(" " * (len(line) - index))
+                return "".join(output), True
+            output.append(" " * (end + 2 - index))
             active = False
             index = end + 2
             continue
         if line.startswith("//", index):
-            return False
+            output.append(" " * (len(line) - index))
+            return "".join(output), False
         if line.startswith("/*", index):
+            output.append("  ")
             active = True
             index += 2
             continue
         if line[index] in {'"', "'"}:
             quote = line[index]
+            start = index
             index += 1
             while index < len(line):
                 if line[index] == "\\":
@@ -107,39 +141,37 @@ def block_comment_state(line: str, active: bool) -> bool:
                     break
                 else:
                     index += 1
+            output.append(line[start:index])
             continue
+        output.append(line[index])
         index += 1
-    return active
+    return "".join(output), active
 
 
 def production_view(text: str) -> str | None:
-    """Remove only positive WYL_TEST_DAEMON_HTTP arms, preserving line count."""
+    """Remove positive WYL_TEST_DAEMON_HTTP arms from C logical lines."""
     output: list[str] = []
     stack: list[dict[str, object]] = []
     keep = True
     in_block_comment = False
+    marker = r"(?:#|%:)"
     positive = re.compile(
-        r"^\s*#\s*(?:ifdef\s+WYL_TEST_DAEMON_HTTP|"
+        rf"^\s*{marker}\s*(?:ifdef\s+WYL_TEST_DAEMON_HTTP|"
         r"if\s+defined\s*\(\s*WYL_TEST_DAEMON_HTTP\s*\))\s*$")
     negative = re.compile(
-        r"^\s*#\s*(?:ifndef\s+WYL_TEST_DAEMON_HTTP|"
+        rf"^\s*{marker}\s*(?:ifndef\s+WYL_TEST_DAEMON_HTTP|"
         r"if\s+!\s*defined\s*\(\s*WYL_TEST_DAEMON_HTTP\s*\))\s*$")
-    opening = re.compile(r"^\s*#\s*(?:if|ifdef|ifndef)\b")
-    alternate = re.compile(r"^\s*#\s*(elif|else)\b")
-    closing = re.compile(r"^\s*#\s*endif\b")
-    directive = re.compile(r"^\s*#")
-    continued_from_previous = False
+    opening = re.compile(rf"^\s*{marker}\s*(?:if|ifdef|ifndef)\b")
+    alternate = re.compile(
+        rf"^\s*{marker}\s*(elifdef|elifndef|elif|else)\b")
+    closing = re.compile(rf"^\s*{marker}\s*endif\b")
+    ambiguous_header = re.compile(
+        rf"{marker}[^\n]*<[^>\n]*(?:/\*|\*/)[^>\n]*>")
 
-    for line in text.split("\n"):
-        if continued_from_previous and directive.match(line):
+    for line in c_logical_lines(text):
+        if ambiguous_header.search(line):
             return None
-        continued_from_previous = (
-            line.endswith("\\") or line.endswith("??/"))
-        line_starts_in_comment = in_block_comment
-        in_block_comment = block_comment_state(line, in_block_comment)
-        if line_starts_in_comment:
-            output.append(line if keep else "")
-            continue
+        line, in_block_comment = c_comment_free_line(line, in_block_comment)
         parent_keep = keep
         if opening.match(line):
             test_branch: bool | None = None
@@ -164,7 +196,7 @@ def production_view(text: str) -> str | None:
                 return None
             frame = stack[-1]
             test_branch = frame["test_branch"]
-            if match.group(1) == "elif" and (
+            if match.group(1) != "else" and (
                     test_branch is not None
                     or "WYL_TEST_DAEMON_HTTP" in line):
                 return None
@@ -325,11 +357,71 @@ def self_test() -> int:
         "void wyl_service_credential_rotate_with_runtime(void);\n"
         "#define HIDDEN_CLOSE \\\n"
         "#endif")
-    if production_view(spliced_directive) is not None:
+    spliced_production = production_view(spliced_directive)
+    if spliced_production is None or not a1_violations(spliced_production):
         return 1
     trigraph_spliced_directive = spliced_directive.replace("\\\n", "??/\n")
-    if production_view(trigraph_spliced_directive) is not None:
+    trigraph_production = production_view(trigraph_spliced_directive)
+    if trigraph_production is None or not a1_violations(trigraph_production):
         return 1
+    spliced_comments = (
+        "/\\\n"
+        "*\n"
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "*\\\n"
+        "/\n"
+        "void wyl_service_credential_rotate_with_runtime(void);\n"
+        "void f(void) { "
+        "wyl_service_credential_rotate_with_runtime(); }\n"
+        "/\\\n"
+        "*\n"
+        "#endif\n"
+        "*\\\n"
+        "/")
+    spliced_comment_view = production_view(spliced_comments)
+    if (spliced_comment_view is None
+            or not a1_violations(spliced_comment_view)):
+        return 1
+    commented_prefix_directives = (
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "/* close */ #endif\n"
+        "void wyl_service_credential_rotate_with_runtime(void);\n"
+        "void f(void) { "
+        "wyl_service_credential_rotate_with_runtime(); }\n"
+        "/* open */ #ifdef OTHER\n"
+        "#endif")
+    prefix_view = production_view(commented_prefix_directives)
+    if prefix_view is None or not a1_violations(prefix_view):
+        return 1
+    digraph_directives = commented_prefix_directives.replace(
+        "#endif", "%:endif", 1).replace("#ifdef OTHER", "%:ifdef OTHER")
+    digraph_view = production_view(digraph_directives)
+    if digraph_view is None or not a1_violations(digraph_view):
+        return 1
+    header_name_comments = (
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "#include <a/*b>\n"
+        "#endif\n"
+        "void wyl_service_credential_rotate_with_runtime(void);\n"
+        "void f(void) { "
+        "wyl_service_credential_rotate_with_runtime(); }\n"
+        "#ifdef OTHER\n"
+        "#include <a*/b>\n"
+        "#endif")
+    if production_view(header_name_comments) is not None:
+        return 1
+    extended_alternate = (
+        "#ifdef WYL_TEST_DAEMON_HTTP\n"
+        "#elifdef WYL_HAS_AUDIT\n"
+        "void wyl_service_credential_rotate_with_runtime(void);\n"
+        "void f(void) { "
+        "wyl_service_credential_rotate_with_runtime(); }\n"
+        "#endif")
+    for extended in (
+            extended_alternate,
+            extended_alternate.replace("#elifdef", "#elifndef")):
+        if production_view(extended) is not None:
+            return 1
     for c_whitespace in ("\v", "\f"):
         line_comment_directives = (
             f"//{c_whitespace}#ifdef WYL_TEST_DAEMON_HTTP\n"
