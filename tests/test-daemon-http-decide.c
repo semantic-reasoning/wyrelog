@@ -6883,8 +6883,9 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
 
   ServiceCredentialSubjectPrepareFailure issue_prepare_failure =
       SERVICE_CREDENTIAL_SUBJECT_PREPARE_SETUP_FAILED;
-  if (prepare_service_credential_subject (handle, "svc:reconcile:issue",
-          &issue_prepare_failure) != WYRELOG_E_OK) {
+  wyrelog_error_t issue_prepare_rc = prepare_service_credential_subject
+      (handle, "svc:reconcile:issue", &issue_prepare_failure);
+  if (issue_prepare_rc != WYRELOG_E_OK) {
     /*
      * Keep the original 1924 diagnosis stable for the principal write.  A
      * distinct code proves that the principal was committed and the later
@@ -6894,11 +6895,19 @@ check_service_credential_operation_reconcile_contract (SoupServer *server,
      * every CI platform reports them distinctly.
      */
     if (issue_prepare_failure ==
-        SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED)
+        SERVICE_CREDENTIAL_SUBJECT_PREPARE_PRINCIPAL_CREATE_FAILED) {
+      g_printerr ("WYRELOG_TEST_DIAG reconcile_subject_prepare "
+          "phase=principal_create rc=%d\n", issue_prepare_rc);
       return 1924;
+    }
     if (issue_prepare_failure ==
-        SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED)
+        SERVICE_CREDENTIAL_SUBJECT_PREPARE_TENANT_CREATE_FAILED) {
+      g_printerr ("WYRELOG_TEST_DIAG reconcile_subject_prepare "
+          "phase=tenant_create rc=%d\n", issue_prepare_rc);
       return 251;
+    }
+    g_printerr ("WYRELOG_TEST_DIAG reconcile_subject_prepare "
+        "phase=setup rc=%d\n", issue_prepare_rc);
     return 252;
   }
   wyl_service_credential_issue_result_t issue_result = { 0 };
