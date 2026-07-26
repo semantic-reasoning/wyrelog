@@ -2376,9 +2376,11 @@ check_service_access_token_state_contract (SoupServer *server,
       wyl_daemon_http_dup_access_token_key_id (server);
   if (active_key == NULL
       || !wyl_daemon_http_store_human_access_token_for_test (server,
-          human_jti, human_sid, "human-state", "tenant-state", active_key, 500)
+          human_jti, human_sid, "human-state", "tenant-state", active_key, 100,
+          500)
       || !wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "human-state", "tenant-state", 500, NULL, NULL, 0, 499))
+          human_sid, "human-state", "tenant-state", 100, 500, NULL, NULL, 0,
+          499))
     return 1958;
   wyl_daemon_access_token_snapshot_t human_snapshot = { 0 };
   if (!wyl_daemon_http_snapshot_access_token_for_test (server, human_jti,
@@ -2391,7 +2393,7 @@ check_service_access_token_state_contract (SoupServer *server,
   }
   wyl_daemon_access_token_snapshot_clear (&human_snapshot);
   if (wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "human-state", "tenant-state", 500,
+          human_sid, "human-state", "tenant-state", 100, 500,
           "service_credential", credential, 7, 499))
     return 1960;
 
@@ -2419,8 +2421,8 @@ check_service_access_token_state_contract (SoupServer *server,
       || g_strcmp0 (snapshot.key_id, "key-state") != 0
       || snapshot.auth_method != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
       || g_strcmp0 (snapshot.credential_id, credential) != 0
-      || snapshot.credential_generation != 7 || snapshot.expires_at != 500
-      || snapshot.revoked)
+      || snapshot.credential_generation != 7 || snapshot.issued_at != 200
+      || snapshot.expires_at != 500 || snapshot.revoked)
     return 1942;
   if (!wyl_daemon_http_service_access_token_is_exact_for_test (server, jti,
           sid, "svc:state:test", "tenant-state", "key-state", 500,
@@ -2520,7 +2522,8 @@ check_service_access_token_state_contract (SoupServer *server,
           human_sid, "svc:state:test", "tenant-state", active_key, 500,
           WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, credential, 7, FALSE)
       || wyl_daemon_http_access_token_is_active_for_test (server, human_jti,
-          human_sid, "svc:state:test", "tenant-state", 500, NULL, NULL, 0, 499))
+          human_sid, "svc:state:test", "tenant-state", 200, 500, NULL, NULL, 0,
+          499))
     return 1962;
 
   *owned_after_teardown = snapshot;
@@ -3362,7 +3365,7 @@ check_human_resolver_while_write_held (SoupServer *server)
       || !wyl_daemon_http_seed_human_session_for_test (server, sid,
           "human-resolver", "__wr_default")
       || !wyl_daemon_http_store_human_access_token_for_test (server, jti, sid,
-          "human-resolver", "__wr_default", key_id, now + 300)
+          "human-resolver", "__wr_default", key_id, now, now + 300)
       || wyl_daemon_http_copy_access_token_secret (server, secret,
           sizeof secret) != WYRELOG_E_OK)
     return FALSE;
@@ -3592,7 +3595,7 @@ check_service_bearer_resolver_contract (SoupServer *server)
   }
 
   /* Live access-token absence, revocation, expiry, and every tuple field. */
-  for (guint field = 0; field < 11; field++) {
+  for (guint field = 0; field < 12; field++) {
     g_auto (ServiceResolverFixture) fixture = { 0 };
     if (!service_resolver_fixture_init (server, &fixture,
             WYL_SERVICE_AUTH_ACTIVE, 0)
@@ -3606,14 +3609,14 @@ check_service_bearer_resolver_contract (SoupServer *server)
         return 2011;
     } else {
       gint token_field = field - 1;
-      const gchar *text = field == 3 ? fixture.other_sid
-          : field == 4 ? fixture.other_jti
-          : field == 5 ? "svc:resolver:other"
-          : field == 6 ? "tenant-other"
-          : field == 7 ? "wrong-key"
-          : field == 9 ? fixture.other_credential : NULL;
-      guint64 number = field == 2 ? (guint64) (fixture.now - 1)
-          : field == 8 ? WYL_SESSION_AUTH_METHOD_HUMAN : 10;
+      const gchar *text = field == 4 ? fixture.other_sid
+          : field == 5 ? fixture.other_jti
+          : field == 6 ? "svc:resolver:other"
+          : field == 7 ? "tenant-other"
+          : field == 8 ? "wrong-key"
+          : field == 10 ? fixture.other_credential : NULL;
+      guint64 number = field == 2 || field == 3 ? (guint64) (fixture.now - 1)
+          : field == 9 ? WYL_SESSION_AUTH_METHOD_HUMAN : 10;
       if (!wyl_daemon_http_mutate_access_token_for_test (server, fixture.jti,
               token_field, text, number))
         return 2020 + (gint) field;
@@ -6782,25 +6785,31 @@ check_service_publication_fault_matrix (void)
     gboolean resolves;
     guint response_wipes;
     gboolean mutated_same_pointer;
+    gboolean mutated_access_iat;
+    gboolean registry_conflict_latched;
   } cases[] = {
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_RESPONSE_PREPARE, 0, 0, FALSE,
-        FALSE, 0, FALSE},
+        FALSE, 0, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_CANCEL, 0, 0, FALSE,
-        FALSE, 1, FALSE},
+        FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_AFTER_SESSION_INSERT, 0, 0, FALSE,
-        FALSE, 1, FALSE},
+        FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_DISCONNECT, 0, 0, FALSE,
-        FALSE, 1, FALSE},
+        FALSE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH, 1, 1,
-        FALSE, FALSE, 1, FALSE},
+        FALSE, FALSE, 1, FALSE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION, 1,
-        1, FALSE, FALSE, 1, TRUE},
+        1, FALSE, FALSE, 1, TRUE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH, 1, 1,
-        FALSE, FALSE, 1, FALSE},
+        FALSE, FALSE, 1, FALSE, FALSE, TRUE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION, 1, 1,
+        FALSE, FALSE, 1, FALSE, TRUE, TRUE},
+    {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE, 1, 1,
+        FALSE, FALSE, 1, FALSE, FALSE, TRUE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT, 1, 1, TRUE,
-        TRUE, 1, FALSE},
+        TRUE, 1, FALSE, FALSE, FALSE},
     {WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE, 1, 1, TRUE, FALSE,
-        1, FALSE},
+        1, FALSE, FALSE, FALSE},
   };
 
   for (guint i = 0; i < G_N_ELEMENTS (cases); i++) {
@@ -6894,12 +6903,36 @@ check_service_publication_fault_matrix (void)
     gboolean mutated_same_pointer =
         wyl_daemon_http_service_publication_session_is_mutated_same_pointer_for_test
         (server, claims.session_id);
-    if (mutated_same_pointer != cases[i].mutated_same_pointer) {
+    wyl_daemon_access_token_snapshot_t access_snapshot = { 0 };
+    gboolean has_access_snapshot =
+        wyl_daemon_http_snapshot_access_token_for_test (server, claims.jti,
+        &access_snapshot);
+    gboolean mutated_access_iat = has_access_snapshot
+        && access_snapshot.issued_at != claims.issued_at;
+    wyl_daemon_access_token_snapshot_clear (&access_snapshot);
+    if (mutated_same_pointer != cases[i].mutated_same_pointer
+        || mutated_access_iat != cases[i].mutated_access_iat) {
       wyl_jwt_access_claims_clear (&claims);
       soup_server_disconnect (server);
       g_object_unref (server);
       wyl_service_credential_issue_result_clear (&issued);
       return 2190 + (gint) i;
+    }
+    WylServiceAuthUnavailableReason unavailable_reason =
+        WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+    wyrelog_error_t available_rc = wyl_service_auth_authority_validate_available
+        (wyl_handle_get_service_auth_authority (handle), handle,
+        &unavailable_reason);
+    gboolean registry_conflict_latched =
+        available_rc != WYRELOG_E_OK
+        && unavailable_reason ==
+        WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INDEX_CONFLICT;
+    if (registry_conflict_latched != cases[i].registry_conflict_latched) {
+      wyl_jwt_access_claims_clear (&claims);
+      soup_server_disconnect (server);
+      g_object_unref (server);
+      wyl_service_credential_issue_result_clear (&issued);
+      return 2195 + (gint) i;
     }
     gint registry_state = WYL_SERVICE_AUTH_PENDING;
     gboolean registry_found = FALSE;

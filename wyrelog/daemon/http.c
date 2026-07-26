@@ -180,6 +180,7 @@ typedef struct
   gchar *credential_id;
   guint64 credential_generation;
   gboolean revoked;
+  gint64 issued_at;
   gint64 expires_at;
 } WylAccessTokenState;
 
@@ -1019,14 +1020,15 @@ access_token_identity_is_valid (const gchar *jti, const gchar *session_id)
 static gboolean
 service_access_token_tuple_is_valid (const gchar *jti,
     const gchar *session_id, const gchar *subject, const gchar *tenant,
-    const gchar *key_id, gint64 expires_at, const gchar *credential_id,
-    guint64 credential_generation)
+    const gchar *key_id, gint64 issued_at, gint64 expires_at,
+    const gchar *credential_id, guint64 credential_generation)
 {
   return access_token_identity_is_valid (jti, session_id)
       && subject != NULL
       && wyl_policy_service_subject_is_valid (subject, strlen (subject))
       && wyl_policy_store_tenant_id_is_valid (tenant)
-      && key_id != NULL && key_id[0] != '\0' && expires_at > 0
+      && key_id != NULL && key_id[0] != '\0' && issued_at >= 0
+      && expires_at > issued_at
       && wyl_service_credential_id_is_canonical (credential_id,
       credential_id != NULL ? strlen (credential_id) : 0)
       && credential_generation > 0;
@@ -1035,19 +1037,19 @@ service_access_token_tuple_is_valid (const gchar *jti,
 static gboolean
 wyl_daemon_http_context_store_access_token_state (WylDaemonHttpContext *ctx,
     const gchar *jti, const gchar *session_id, const gchar *subject,
-    const gchar *tenant, const gchar *key_id, gint64 expires_at,
-    wyl_session_auth_method_t auth_method, const gchar *credential_id,
-    guint64 credential_generation, gboolean revoked)
+    const gchar *tenant, const gchar *key_id, gint64 issued_at,
+    gint64 expires_at, wyl_session_auth_method_t auth_method,
+    const gchar *credential_id, guint64 credential_generation, gboolean revoked)
 {
   if (ctx == NULL || jti == NULL || jti[0] == '\0' || session_id == NULL
       || session_id[0] == '\0' || subject == NULL || subject[0] == '\0'
       || tenant == NULL || tenant[0] == '\0' || key_id == NULL
-      || key_id[0] == '\0' || expires_at < 0
+      || key_id[0] == '\0' || issued_at < 0 || expires_at <= issued_at
       || (auth_method == WYL_SESSION_AUTH_METHOD_HUMAN
           ? credential_id != NULL || credential_generation != 0
           : auth_method != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
           || !service_access_token_tuple_is_valid (jti, session_id, subject,
-              tenant, key_id, expires_at, credential_id,
+              tenant, key_id, issued_at, expires_at, credential_id,
               credential_generation)))
     return FALSE;
 
@@ -1057,6 +1059,7 @@ wyl_daemon_http_context_store_access_token_state (WylDaemonHttpContext *ctx,
   state->subject = g_strdup (subject);
   state->tenant = g_strdup (tenant);
   state->key_id = g_strdup (key_id);
+  state->issued_at = issued_at;
   state->expires_at = expires_at;
   state->auth_method = auth_method;
   state->credential_id = g_strdup (credential_id);
@@ -1078,17 +1081,18 @@ static gboolean
 wyl_daemon_http_context_store_access_token (WylDaemonHttpContext *ctx,
     WylSession *session, const gchar *jti, const gchar *session_id,
     const gchar *subject,
-    const gchar *tenant, const gchar *key_id, gint64 expires_at)
+    const gchar *tenant, const gchar *key_id, gint64 issued_at,
+    gint64 expires_at)
 {
   if (ctx == NULL || jti == NULL || jti[0] == '\0' || session_id == NULL ||
       session_id[0] == '\0' || subject == NULL || subject[0] == '\0' ||
       tenant == NULL || tenant[0] == '\0' || key_id == NULL ||
-      key_id[0] == '\0' || expires_at < 0
+      key_id[0] == '\0' || issued_at < 0 || expires_at <= issued_at
       || !human_session_matches (ctx, session, session_id, subject, tenant))
     return FALSE;
 
   return wyl_daemon_http_context_store_access_token_state (ctx, jti,
-      session_id, subject, tenant, key_id, expires_at,
+      session_id, subject, tenant, key_id, issued_at, expires_at,
       WYL_SESSION_AUTH_METHOD_HUMAN, NULL, 0, FALSE);
 }
 
@@ -1172,6 +1176,7 @@ wyl_daemon_http_context_access_token_is_active (WylDaemonHttpContext *ctx,
       && g_strcmp0 (state->subject, claims->subject) == 0
       && g_strcmp0 (state->tenant, claims->tenant) == 0
       && g_strcmp0 (state->key_id, ctx->access_token_key_id) == 0
+      && state->issued_at == claims->issued_at
       && state->expires_at == claims->expires_at;
   g_mutex_unlock (&ctx->lock);
   return active;
@@ -1181,12 +1186,14 @@ static gboolean
     wyl_daemon_http_context_service_access_token_is_exact
     (WylDaemonHttpContext * ctx, const gchar * jti, const gchar * session_id,
     const gchar * subject, const gchar * tenant, const gchar * key_id,
-    gint64 expires_at, wyl_session_auth_method_t auth_method,
+    gint64 issued_at, gint64 expires_at,
+    wyl_session_auth_method_t auth_method,
     const gchar * credential_id, guint64 credential_generation, gint64 now)
 {
   if (ctx == NULL || auth_method != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
       || !service_access_token_tuple_is_valid (jti, session_id, subject,
-          tenant, key_id, expires_at, credential_id, credential_generation))
+          tenant, key_id, issued_at, expires_at, credential_id,
+          credential_generation))
     return FALSE;
   g_mutex_lock (&ctx->lock);
   WylAccessTokenState *state = g_hash_table_lookup (ctx->access_tokens_by_jti,
@@ -1199,6 +1206,7 @@ static gboolean
       && g_strcmp0 (state->subject, subject) == 0
       && g_strcmp0 (state->tenant, tenant) == 0
       && g_strcmp0 (state->key_id, key_id) == 0
+      && state->issued_at == issued_at
       && state->expires_at == expires_at
       && g_strcmp0 (state->credential_id, credential_id) == 0
       && state->credential_generation == credential_generation;
@@ -1286,19 +1294,21 @@ wyl_daemon_http_context_revoke_session_refresh_tokens (WylDaemonHttpContext
 gboolean
 wyl_daemon_http_store_human_access_token_for_test (SoupServer *server,
     const gchar *jti, const gchar *session_id, const gchar *subject,
-    const gchar *tenant, const gchar *key_id, gint64 expires_at)
+    const gchar *tenant, const gchar *key_id, gint64 issued_at,
+    gint64 expires_at)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   return wyl_daemon_http_context_store_access_token_state (ctx, jti,
-      session_id, subject, tenant, key_id, expires_at,
+      session_id, subject, tenant, key_id, issued_at, expires_at,
       WYL_SESSION_AUTH_METHOD_HUMAN, NULL, 0, FALSE);
 }
 
 gboolean
 wyl_daemon_http_access_token_is_active_for_test (SoupServer *server,
     const gchar *jti, const gchar *session_id, const gchar *subject,
-    const gchar *tenant, gint64 expires_at, const gchar *auth_method,
-    const gchar *credential_id, guint64 credential_generation, gint64 now)
+    const gchar *tenant, gint64 issued_at, gint64 expires_at,
+    const gchar *auth_method, const gchar *credential_id,
+    guint64 credential_generation, gint64 now)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   wyl_jwt_access_claims_t claims = {
@@ -1306,6 +1316,7 @@ wyl_daemon_http_access_token_is_active_for_test (SoupServer *server,
     .session_id = (gchar *) session_id,
     .subject = (gchar *) subject,
     .tenant = (gchar *) tenant,
+    .issued_at = issued_at,
     .expires_at = expires_at,
     .auth_method = (gchar *) auth_method,
     .credential_id = (gchar *) credential_id,
@@ -1600,6 +1611,9 @@ wyl_daemon_http_mutate_access_token_for_test (SoupServer *server,
     case WYL_DAEMON_SERVICE_TOKEN_EXPIRES:
       state->expires_at = (gint64) number;
       break;
+    case WYL_DAEMON_SERVICE_TOKEN_ISSUED_AT:
+      state->issued_at = (gint64) number;
+      break;
     case WYL_DAEMON_SERVICE_TOKEN_SESSION_ID:
       slot = &state->session_id;
       break;
@@ -1753,8 +1767,10 @@ wyl_daemon_http_store_service_access_token_for_test (SoupServer *server,
     guint64 credential_generation, gboolean revoked)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  gint64 issued_at = expires_at >= WYL_JWT_SERVICE_ACCESS_TTL_SECONDS
+      ? expires_at - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS : -1;
   return wyl_daemon_http_context_store_access_token_state (ctx, jti,
-      session_id, subject, tenant, key_id, expires_at,
+      session_id, subject, tenant, key_id, issued_at, expires_at,
       (wyl_session_auth_method_t) auth_method, credential_id,
       credential_generation, revoked);
 }
@@ -1781,6 +1797,7 @@ wyl_daemon_http_snapshot_access_token_for_test (SoupServer *server,
     out_snapshot->auth_method = state->auth_method;
     out_snapshot->credential_id = g_strdup (state->credential_id);
     out_snapshot->credential_generation = state->credential_generation;
+    out_snapshot->issued_at = state->issued_at;
     out_snapshot->expires_at = state->expires_at;
     out_snapshot->revoked = state->revoked;
   }
@@ -1796,8 +1813,10 @@ wyl_daemon_http_service_access_token_is_exact_for_test (SoupServer *server,
     guint64 credential_generation, gint64 now)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
+  gint64 issued_at = expires_at >= WYL_JWT_SERVICE_ACCESS_TTL_SECONDS
+      ? expires_at - WYL_JWT_SERVICE_ACCESS_TTL_SECONDS : -1;
   return wyl_daemon_http_context_service_access_token_is_exact (ctx, jti,
-      session_id, subject, tenant, key_id, expires_at,
+      session_id, subject, tenant, key_id, issued_at, expires_at,
       (wyl_session_auth_method_t) auth_method, credential_id,
       credential_generation, now);
 }
@@ -2254,6 +2273,7 @@ service_access_state_matches_view (const WylAccessTokenState *state,
       && g_strcmp0 (state->subject, view->principal) == 0
       && g_strcmp0 (state->tenant, view->tenant) == 0
       && g_strcmp0 (state->key_id, view->key_id) == 0
+      && state->issued_at == view->issued_at
       && state->expires_at == view->expires_at
       && g_strcmp0 (state->credential_id, view->credential_id) == 0
       && state->credential_generation == view->generation;
@@ -2267,8 +2287,8 @@ static wyrelog_error_t
   if (view == NULL || candidate == NULL || view->session == NULL
       || view->access_token == NULL
       || !service_access_token_tuple_is_valid (view->jti, view->session_id,
-          view->principal, view->tenant, view->key_id, view->expires_at,
-          view->credential_id, view->generation))
+          view->principal, view->tenant, view->key_id, view->issued_at,
+          view->expires_at, view->credential_id, view->generation))
     return WYRELOG_E_INVALID;
   WylAccessTokenState *state = g_new0 (WylAccessTokenState, 1);
   state->jti = g_strdup (view->jti);
@@ -2279,6 +2299,7 @@ static wyrelog_error_t
   state->auth_method = WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL;
   state->credential_id = g_strdup (view->credential_id);
   state->credential_generation = view->generation;
+  state->issued_at = view->issued_at;
   state->expires_at = view->expires_at;
   candidate->session_key = g_strdup (view->session_id);
   candidate->session_value = g_object_ref (view->session);
@@ -2375,6 +2396,12 @@ service_live_publication_insert (WylDaemonHttpContext *ctx,
             FALSE)
         || service_publication_fault_is_locked (ctx,
             WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH,
+            FALSE)
+        || service_publication_fault_is_locked (ctx,
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION,
+            FALSE)
+        || service_publication_fault_is_locked (ctx,
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE,
             FALSE))
       rc = WYRELOG_E_INTERNAL;
     if (service_publication_fault_is_locked (ctx,
@@ -2384,6 +2411,10 @@ service_live_publication_insert (WylDaemonHttpContext *ctx,
       (*out_published_session)->service_subject_id =
           g_strdup ("svc:exchange:mutated");
     }
+    if (service_publication_fault_is_locked (ctx,
+            WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION,
+            FALSE))
+      (*out_published_access)->issued_at++;
 #endif
   }
   return service_publication_context_unlock (ctx, rc);
@@ -2400,6 +2431,7 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
   gpointer access_value = NULL;
   gboolean session_exact = TRUE;
   gboolean access_exact = TRUE;
+  gboolean second_remove_failure = FALSE;
   if (service_publication_context_lock (ctx) != WYRELOG_E_OK)
     return FALSE;
   if (published_session != NULL) {
@@ -2423,6 +2455,9 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
 #ifdef WYL_TEST_DAEMON_HTTP
     gboolean mismatch = service_publication_fault_is_locked (ctx,
         WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH, TRUE);
+    second_remove_failure = service_publication_fault_is_locked (ctx,
+        WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE,
+        TRUE);
 #else
     gboolean mismatch = FALSE;
 #endif
@@ -2434,13 +2469,18 @@ service_live_publication_rollback (WylDaemonHttpContext *ctx,
       && !g_hash_table_steal_extended (ctx->sessions_by_token,
           view->session_id, &session_key, &session_value))
     exact = FALSE;
-  if (exact && published_access != NULL
-      && !g_hash_table_steal_extended (ctx->access_tokens_by_jti, view->jti,
-          &access_key, &access_value)) {
-    /* Both prechecks passed under the same lock. A failed second steal is an
-     * impossible hash-table invariant; keep the first stolen value alive
-     * outside the table and fail-stop the authority. */
-    exact = FALSE;
+  if (exact && published_access != NULL) {
+    if (second_remove_failure
+        || !g_hash_table_steal_extended (ctx->access_tokens_by_jti, view->jti,
+            &access_key, &access_value)) {
+      if (session_key != NULL) {
+        g_hash_table_insert (ctx->sessions_by_token, session_key,
+            session_value);
+        session_key = NULL;
+        session_value = NULL;
+      }
+      exact = FALSE;
+    }
   }
   if (service_publication_context_unlock (ctx, WYRELOG_E_OK) != WYRELOG_E_OK)
     exact = FALSE;
@@ -2933,7 +2973,7 @@ issue_access_token (WylDaemonHttpContext *ctx, WylSession *session,
     return rc;
   if (!wyl_daemon_http_context_store_access_token (ctx, session, token_id,
           session_token, username, tenant, ctx->access_token_key_id,
-          issued_at + ttl)) {
+          issued_at, issued_at + ttl)) {
     g_clear_pointer (out_token, g_free);
     return WYRELOG_E_INTERNAL;
   }
@@ -3457,7 +3497,7 @@ resolve_bearer_session (SoupServer *server, WylDaemonHttpContext *ctx,
     if (rc == WYRELOG_E_OK
         && !wyl_daemon_http_context_service_access_token_is_exact (ctx,
             claims.jti, claims.session_id, claims.subject, claims.tenant,
-            ctx->access_token_key_id, claims.expires_at,
+            ctx->access_token_key_id, claims.issued_at, claims.expires_at,
             WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL, claims.credential_id,
             claims.credential_generation, now))
       rc = WYRELOG_E_POLICY;
@@ -9266,6 +9306,7 @@ prepare_human_access_candidate (WylHumanRefreshClaim *claim,
   candidate->state->subject = g_strdup (claim->subject);
   candidate->state->tenant = g_strdup (claim->tenant);
   candidate->state->key_id = g_strdup (claim->key_id);
+  candidate->state->issued_at = issued_at;
   candidate->state->expires_at = issued_at + WYL_JWT_ACCESS_TTL_SECONDS;
   candidate->state->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
   return WYRELOG_E_OK;

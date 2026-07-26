@@ -71,6 +71,7 @@ typedef enum
 typedef enum
 {
   WYL_DAEMON_SERVICE_TOKEN_EXPIRES = 1,
+  WYL_DAEMON_SERVICE_TOKEN_ISSUED_AT,
   WYL_DAEMON_SERVICE_TOKEN_SESSION_ID,
   WYL_DAEMON_SERVICE_TOKEN_JTI,
   WYL_DAEMON_SERVICE_TOKEN_SUBJECT,
@@ -97,6 +98,8 @@ typedef enum
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_TUPLE_MUTATION,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_IAT_MUTATION,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ROLLBACK_SECOND_REMOVE_FAILURE,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT,
   WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE,
 } WylDaemonServicePublicationFault;
@@ -179,12 +182,12 @@ gboolean wyl_daemon_http_mutate_service_session_for_test
 gboolean wyl_daemon_http_store_human_access_token_for_test
     (SoupServer * server, const gchar * jti, const gchar * session_id,
     const gchar * subject, const gchar * tenant, const gchar * key_id,
-    gint64 expires_at);
+    gint64 issued_at, gint64 expires_at);
 gboolean wyl_daemon_http_access_token_is_active_for_test
     (SoupServer * server, const gchar * jti, const gchar * session_id,
-    const gchar * subject, const gchar * tenant, gint64 expires_at,
-    const gchar * auth_method, const gchar * credential_id,
-    guint64 credential_generation, gint64 now);
+    const gchar * subject, const gchar * tenant, gint64 issued_at,
+    gint64 expires_at, const gchar * auth_method,
+    const gchar * credential_id, guint64 credential_generation, gint64 now);
 wyrelog_error_t wyl_daemon_http_seed_service_session_for_test
     (SoupServer * server, WylSession * session, const gchar * session_id,
     const gchar * jti, const gchar * credential_id, guint64 generation,
@@ -202,6 +205,7 @@ typedef struct wyl_daemon_access_token_snapshot_t
   gint auth_method;
   gchar *credential_id;
   guint64 credential_generation;
+  gint64 issued_at;
   gint64 expires_at;
   gboolean revoked;
 } wyl_daemon_access_token_snapshot_t;
