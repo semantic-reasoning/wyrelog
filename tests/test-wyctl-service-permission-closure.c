@@ -126,7 +126,8 @@ test_offline_closure_commands (void)
 
   wyl_policy_store_t *verify = NULL;
   g_assert_cmpint (open_encrypted (store_path, key_path,
-          WYL_POLICY_STORE_OPEN_MAINTENANCE, &verify), ==, WYRELOG_E_OK);
+          WYL_POLICY_STORE_OPEN_ATTACHED, &verify), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (verify), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_policy_store_validate_service_permission_closure
       (verify), ==, WYRELOG_E_OK);
   wyl_policy_store_close (verify);
