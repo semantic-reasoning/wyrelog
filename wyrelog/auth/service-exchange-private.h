@@ -127,11 +127,18 @@ G_GNUC_INTERNAL wyrelog_error_t
 G_GNUC_INTERNAL wyrelog_error_t
     wyl_service_exchange_publication_ticket_abort
     (WylServiceExchangePublicationTicket * ticket);
+G_GNUC_INTERNAL wyrelog_error_t
+    wyl_service_exchange_publication_ticket_abort_fail_stop
+    (WylServiceExchangePublicationTicket * ticket,
+    WylServiceAuthUnavailableReason reason);
 G_GNUC_INTERNAL WylServiceExchangeTicketState
     wyl_service_exchange_publication_ticket_get_state
     (const WylServiceExchangePublicationTicket * ticket);
 G_GNUC_INTERNAL void
     wyl_service_exchange_publication_ticket_test_corrupt_lease_serial
+    (WylServiceExchangePublicationTicket * ticket);
+G_GNUC_INTERNAL void
+    wyl_service_exchange_publication_ticket_test_fail_terminal_release
     (WylServiceExchangePublicationTicket * ticket);
 G_GNUC_INTERNAL void wyl_service_exchange_publication_ticket_free
     (WylServiceExchangePublicationTicket * ticket);

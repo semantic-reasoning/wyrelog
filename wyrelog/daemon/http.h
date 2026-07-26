@@ -89,6 +89,18 @@ typedef struct
 } WylDaemonServiceTokenRequest;
 typedef enum
 {
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_NONE = 0,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_RESPONSE_PREPARE,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_CANCEL,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_AFTER_SESSION_INSERT,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_PRE_ACTIVE_DISCONNECT,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_SESSION_ROLLBACK_MISMATCH,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_ACCESS_ROLLBACK_MISMATCH,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_POST_ACTIVE_DISCONNECT,
+  WYL_DAEMON_SERVICE_PUBLICATION_FAULT_TERMINAL_RELEASE,
+} WylDaemonServicePublicationFault;
+typedef enum
+{
   WYL_DAEMON_REFRESH_BEFORE_CLAIM = 1,
   WYL_DAEMON_REFRESH_AFTER_CLAIM,
   WYL_DAEMON_REFRESH_AFTER_ACCESS_PREPARE,
@@ -153,6 +165,13 @@ wyrelog_error_t wyl_daemon_http_issue_service_token_for_test
     (SoupServer * server, gboolean transport_ok, const gchar * request_body,
     gsize request_body_len, guint * out_status, gchar ** out_body,
     guint * out_retry_after);
+wyrelog_error_t wyl_daemon_http_publish_service_token_for_test
+    (SoupServer * server, const gchar * credential_id,
+    const gchar * credential_secret, gsize credential_secret_len,
+    gchar ** out_body);
+wyrelog_error_t wyl_daemon_http_lookup_service_registry_for_test
+    (SoupServer * server, const gchar * session_id, const gchar * jti,
+    gint * out_state, gboolean * out_found);
 gboolean wyl_daemon_http_mutate_service_session_for_test
     (SoupServer * server, const gchar * session_id, gint field,
     const gchar * text, guint64 number);
@@ -228,6 +247,12 @@ void wyl_daemon_http_refresh_counters_for_test (SoupServer * server,
 wyrelog_error_t wyl_daemon_http_service_token_exchange_for_test (SoupServer *
     server, const WylDaemonServiceTokenRequest * request, guint * out_status,
     gchar ** out_body, guint * out_retry_after);
+void wyl_daemon_http_set_service_publication_fault_for_test
+    (SoupServer * server, WylDaemonServicePublicationFault fault);
+gchar *wyl_daemon_http_dup_last_service_publication_token_for_test
+    (SoupServer * server);
+void wyl_daemon_http_service_publication_counts_for_test
+    (SoupServer * server, guint * out_sessions, guint * out_access_tokens);
 wyrelog_error_t wyl_daemon_http_profile_events_ingest_for_test
     (WylDaemonProfile profile, gboolean transport_ok, gboolean body_oversize,
     const gchar * body, gsize body_len, gint * out_status,

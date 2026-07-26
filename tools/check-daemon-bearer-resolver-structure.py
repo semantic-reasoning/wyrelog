@@ -71,9 +71,28 @@ def check(path: Path) -> list[str]:
         "wyl_service_auth_read_lease_get_policy_store",
         "wyl_service_auth_registry_lookup",
     )
+    registry_test_span: tuple[int, int] | None = None
+    try:
+        registry_test_span = function_span(
+            source, "wyl_daemon_http_lookup_service_registry_for_test"
+        )
+    except ValueError as exc:
+        if "found 0" not in str(exc):
+            errors.append(str(exc))
     for symbol in authority_symbols:
         positions = [match.start() for match in re.finditer(r"\b" + symbol + r"\b", source)]
-        if len(positions) != 1 or not all(start <= pos < end for pos in positions):
+        production_positions = [pos for pos in positions if start <= pos < end]
+        permitted_test_positions: list[int] = []
+        if symbol == "wyl_service_auth_registry_lookup" and registry_test_span is not None:
+            test_start, test_end = registry_test_span
+            permitted_test_positions = [
+                pos for pos in positions if test_start <= pos < test_end
+            ]
+        if (
+            len(production_positions) != 1
+            or len(permitted_test_positions) > 1
+            or len(positions) != len(production_positions) + len(permitted_test_positions)
+        ):
             errors.append(f"{symbol} must occur exactly once inside resolve_bearer_session")
     body = source[start:end]
     if not re.search(r"registry_state\s*!=\s*WYL_SERVICE_AUTH_ACTIVE", body):
