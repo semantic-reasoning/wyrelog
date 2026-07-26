@@ -2745,7 +2745,7 @@ read_whole_file (const gchar *path, guint8 **out_bytes, gsize *out_len)
 static wyrelog_error_t
 write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced)
+    gboolean *out_replaced, const wyl_policy_store_lease_t *target_guard)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
@@ -2854,6 +2854,14 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
     g_free (wdst);
     return WYRELOG_E_IO;
   }
+  if (target_guard != NULL
+      && wyl_policy_store_lease_verify_named_target (target_guard)
+      != WYRELOG_E_OK) {
+    (void) DeleteFileW (wtmp);
+    g_free (wtmp);
+    g_free (wdst);
+    return WYRELOG_E_POLICY;
+  }
 
   BOOL moved = MoveFileExW (wtmp, wdst,
       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH);
@@ -2881,7 +2889,7 @@ write_whole_file_atomic_private (const gchar *path, const guint8 *bytes,
 static wyrelog_error_t
 write_plaintext_work_file (const gchar *path, const guint8 *bytes, gsize len)
 {
-  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL);
+  return write_whole_file_atomic_private (path, bytes, len, NULL, NULL, NULL);
 }
 #endif /* G_OS_WIN32 */
 
@@ -3058,7 +3066,7 @@ static wyrelog_error_t read_through_dirfd (int dirfd, const gchar * basename,
 static wyrelog_error_t write_through_dirfd (int dirfd, const gchar * basename,
     const guint8 * bytes, gsize len,
     const wyl_policy_store_rotation_runtime_t * rotation_runtime,
-    gboolean * out_replaced);
+    gboolean * out_replaced, const wyl_policy_store_lease_t * target_guard);
 #endif
 
 static wyrelog_error_t
@@ -3104,10 +3112,11 @@ wyl_policy_rotation_intent_write_sidecar (wyl_policy_store_t *store,
   rc = rotation_intent_sidecar_path (store, &path, &basename);
   if (rc == WYRELOG_E_OK) {
 #ifdef G_OS_WIN32
-    rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL);
+    rc = write_whole_file_atomic_private (path, wire, wire_len, NULL, NULL,
+        NULL);
 #else
     rc = write_through_dirfd (store->canonical_dirfd, basename, wire,
-        wire_len, NULL, NULL);
+        wire_len, NULL, NULL, NULL);
 #endif
   }
   sodium_memzero (wire, wire_len);
@@ -6562,7 +6571,7 @@ read_work_through_dirfd (int dirfd, const gchar *basename, guint8 **out_bytes,
 static wyrelog_error_t
 write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
     gsize len, const wyl_policy_store_rotation_runtime_t *rotation_runtime,
-    gboolean *out_replaced)
+    gboolean *out_replaced, const wyl_policy_store_lease_t *target_guard)
 {
   if (out_replaced != NULL)
     *out_replaced = FALSE;
@@ -6616,6 +6625,12 @@ write_through_dirfd (int dirfd, const gchar *basename, const guint8 *bytes,
           WYL_POLICY_ROTATION_BEFORE_CANONICAL_RENAME) != 0) {
     (void) unlinkat (dirfd, tmp_basename, 0);
     return WYRELOG_E_IO;
+  }
+  if (target_guard != NULL
+      && wyl_policy_store_lease_verify_named_target (target_guard)
+      != WYRELOG_E_OK) {
+    (void) unlinkat (dirfd, tmp_basename, 0);
+    return WYRELOG_E_POLICY;
   }
 
   if (renameat (dirfd, tmp_basename, dirfd, basename) != 0) {
@@ -7127,10 +7142,11 @@ publish_policy_store_encrypted (wyl_policy_store_t *store,
     return WYRELOG_E_INTERNAL;
   return write_through_dirfd (store->canonical_dirfd,
       store->canonical_basename, encrypted, encrypted_len, rotation_runtime,
-      out_replaced);
+      out_replaced, store->maintenance_mode ? store->lease : NULL);
 #else
   return write_whole_file_atomic_private (store->canonical_path, encrypted,
-      encrypted_len, rotation_runtime, out_replaced);
+      encrypted_len, rotation_runtime, out_replaced,
+      store->maintenance_mode ? store->lease : NULL);
 #endif
 }
 
