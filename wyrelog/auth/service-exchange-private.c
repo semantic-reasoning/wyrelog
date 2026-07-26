@@ -9,6 +9,29 @@
 #include "wyrelog/wyl-session-layout-private.h"
 #include "wyrelog/wyl-session-private.h"
 
+struct _WylServiceExchangePublicationTicket
+{
+  WylHandle *handle;
+  WylServiceAuthRegistry *registry;
+  gpointer publication_context;
+  WylServiceAuthWriteLease *lease;
+  WylServiceAuthRegistrySessionParticipant *participant;
+  guint64 lease_serial;
+  WylServiceExchangeTicketState state;
+  WylServiceAuthReservation reservation;
+  gchar *key_id;
+  gint64 expires_at;
+  WylSession *session;
+  gchar *access_token;
+};
+
+static void
+publication_ticket_reservation_free (gpointer memory, gpointer user_data)
+{
+  (void) user_data;
+  g_free (memory);
+}
+
 static void
 service_exchange_authority_dispose (WylServiceExchangeAuthority *authority)
 {
@@ -68,6 +91,274 @@ wyl_service_exchange_prepared_clear (WylServiceExchangePrepared *prepared)
   service_exchange_prepared_dispose (prepared);
   if (prepared != NULL)
     memset (prepared, 0, sizeof *prepared);
+}
+
+static void
+publication_ticket_clear_owned (WylServiceExchangePublicationTicket *ticket)
+{
+  if (ticket == NULL)
+    return;
+  wyl_service_auth_reservation_clear (&ticket->reservation);
+  if (ticket->access_token != NULL)
+    sodium_memzero (ticket->access_token, strlen (ticket->access_token));
+  g_clear_pointer (&ticket->access_token, g_free);
+  g_clear_object (&ticket->session);
+  g_clear_pointer (&ticket->key_id, g_free);
+  g_clear_pointer (&ticket->participant,
+      wyl_service_auth_registry_session_participant_free);
+  g_clear_pointer (&ticket->registry, wyl_service_auth_registry_unref);
+  g_clear_object (&ticket->handle);
+}
+
+static wyrelog_error_t
+publication_ticket_validate (WylServiceExchangePublicationTicket *ticket)
+{
+  if (ticket == NULL || ticket->lease == NULL || ticket->handle == NULL
+      || ticket->registry == NULL || ticket->publication_context == NULL
+      || ticket->participant == NULL || ticket->lease_serial == 0)
+    return WYRELOG_E_INVALID;
+  gchar session_id[WYL_ID_STRING_BUF];
+  if (!WYL_IS_SESSION (ticket->session)
+      || !wyl_session_is_active_private (ticket->session)
+      || wyl_session_get_auth_method_private (ticket->session)
+      != WYL_SESSION_AUTH_METHOD_SERVICE_CREDENTIAL
+      || wyl_id_format (&ticket->session->id, session_id, sizeof session_id)
+      != WYRELOG_E_OK
+      || g_strcmp0 (session_id, ticket->reservation.session_id) != 0
+      || g_strcmp0 (ticket->session->service_jti,
+          ticket->reservation.jti) != 0
+      || g_strcmp0 (ticket->session->service_credential_id,
+          ticket->reservation.credential_id) != 0
+      || ticket->session->service_credential_generation
+      != ticket->reservation.generation
+      || g_strcmp0 (ticket->session->service_subject_id,
+          ticket->reservation.principal) != 0
+      || g_strcmp0 (ticket->session->tenant, ticket->reservation.tenant) != 0
+      || ticket->session->service_expires_at_seconds != ticket->expires_at)
+    return WYRELOG_E_POLICY;
+  guint64 serial = 0;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_get_serial (ticket->lease,
+      ticket->handle, &serial);
+  if (rc == WYRELOG_E_OK && serial != ticket->lease_serial)
+    rc = WYRELOG_E_INVALID;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_new_take
+    (WylServiceExchangeAuthority * authority,
+    WylServiceAuthRegistry * registry, gpointer publication_context,
+    const gchar * key_id, WylServiceExchangePrepared * prepared,
+    WylServiceExchangePublicationTicket ** out_ticket)
+{
+  if (out_ticket != NULL)
+    *out_ticket = NULL;
+  if (authority == NULL || !authority->verified || authority->handle == NULL
+      || authority->lease == NULL || registry == NULL
+      || publication_context == NULL || key_id == NULL || key_id[0] == '\0'
+      || prepared == NULL || prepared->session == NULL
+      || prepared->access_token == NULL || out_ticket == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylServiceExchangePublicationTicket *ticket =
+      g_try_new0 (WylServiceExchangePublicationTicket, 1);
+  if (ticket == NULL)
+    return WYRELOG_E_NOMEM;
+  ticket->handle = g_object_ref (authority->handle);
+  ticket->registry = wyl_service_auth_registry_ref (registry);
+  ticket->publication_context = publication_context;
+  ticket->key_id = g_strdup (key_id);
+  ticket->session = g_object_ref (prepared->session);
+  ticket->access_token = g_strdup (prepared->access_token);
+  ticket->expires_at =
+      wyl_session_get_service_expires_at_seconds_private (prepared->session);
+  ticket->reservation.session_id =
+      wyl_session_dup_id_string (prepared->session);
+  ticket->reservation.jti =
+      wyl_session_dup_service_jti_private (prepared->session);
+  ticket->reservation.credential_id =
+      wyl_session_dup_service_credential_id_private (prepared->session);
+  ticket->reservation.generation =
+      wyl_session_get_service_credential_generation_private (prepared->session);
+  ticket->reservation.principal =
+      wyl_session_dup_service_subject_private (prepared->session);
+  ticket->reservation.tenant =
+      wyl_session_dup_service_tenant_private (prepared->session);
+  ticket->reservation._free = publication_ticket_reservation_free;
+  ticket->reservation._free_data = NULL;
+  ticket->state = WYL_SERVICE_EXCHANGE_TICKET_NEW;
+  if (ticket->expires_at <= 0 || ticket->reservation.session_id == NULL
+      || ticket->reservation.jti == NULL
+      || ticket->reservation.credential_id == NULL
+      || ticket->reservation.generation == 0
+      || ticket->reservation.principal == NULL
+      || ticket->reservation.tenant == NULL) {
+    publication_ticket_clear_owned (ticket);
+    g_free (ticket);
+    return WYRELOG_E_INVALID;
+  }
+  wyrelog_error_t rc = wyl_service_auth_write_lease_get_serial
+      (authority->lease, authority->handle, &ticket->lease_serial);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_auth_registry_session_participant_new_for_write
+        (registry, authority->handle, authority->lease, &ticket->participant);
+  if (rc != WYRELOG_E_OK) {
+    publication_ticket_clear_owned (ticket);
+    g_free (ticket);
+    return rc;
+  }
+  ticket->lease = g_steal_pointer (&authority->lease);
+  g_clear_object (&prepared->session);
+  if (prepared->access_token != NULL)
+    sodium_memzero (prepared->access_token, strlen (prepared->access_token));
+  g_clear_pointer (&prepared->access_token, g_free);
+  *out_ticket = ticket;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_view
+    (WylServiceExchangePublicationTicket * ticket, WylHandle * handle,
+    WylServiceAuthRegistry * registry, gpointer publication_context,
+    WylServiceExchangePublicationView * out_view) {
+  if (out_view != NULL)
+    memset (out_view, 0, sizeof *out_view);
+  if (out_view == NULL || ticket == NULL || ticket->handle != handle
+      || ticket->registry != registry
+      || ticket->publication_context != publication_context)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = publication_ticket_validate (ticket);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  *out_view = (WylServiceExchangePublicationView) {
+  .session_id = ticket->reservation.session_id,.jti =
+        ticket->reservation.jti,.credential_id =
+        ticket->reservation.credential_id,.generation =
+        ticket->reservation.generation,.principal =
+        ticket->reservation.principal,.tenant =
+        ticket->reservation.tenant,.key_id = ticket->key_id,.expires_at =
+        ticket->expires_at,.session = ticket->session,.access_token =
+        ticket->access_token,};
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_reserve
+    (WylServiceExchangePublicationTicket * ticket) {
+  wyrelog_error_t rc = publication_ticket_validate (ticket);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (ticket->state != WYL_SERVICE_EXCHANGE_TICKET_NEW)
+    return WYRELOG_E_POLICY;
+  rc = wyl_service_auth_registry_session_participant_reserve
+      (ticket->participant, &ticket->reservation);
+  if (rc == WYRELOG_E_OK)
+    ticket->state = WYL_SERVICE_EXCHANGE_TICKET_PENDING;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_mark_live
+    (WylServiceExchangePublicationTicket * ticket) {
+  wyrelog_error_t rc = publication_ticket_validate (ticket);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (ticket->state != WYL_SERVICE_EXCHANGE_TICKET_PENDING)
+    return WYRELOG_E_POLICY;
+  ticket->state = WYL_SERVICE_EXCHANGE_TICKET_LIVE;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_activate
+    (WylServiceExchangePublicationTicket * ticket) {
+  wyrelog_error_t rc = publication_ticket_validate (ticket);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (ticket->state != WYL_SERVICE_EXCHANGE_TICKET_LIVE)
+    return WYRELOG_E_POLICY;
+  gboolean changed = FALSE;
+  rc = wyl_service_auth_registry_session_participant_activate
+      (ticket->participant, &ticket->reservation, &changed);
+  if (rc == WYRELOG_E_OK && !changed)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    ticket->state = WYL_SERVICE_EXCHANGE_TICKET_ACTIVE;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_release_terminal
+    (WylServiceExchangePublicationTicket * ticket) {
+  if (ticket == NULL || ticket->state != WYL_SERVICE_EXCHANGE_TICKET_ACTIVE)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc =
+      wyl_service_auth_write_lease_release_terminal (&ticket->lease);
+  if (ticket->lease == NULL)
+    ticket->state = WYL_SERVICE_EXCHANGE_TICKET_TERMINAL;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_service_exchange_publication_ticket_abort
+    (WylServiceExchangePublicationTicket * ticket) {
+  if (ticket == NULL || ticket->lease == NULL
+      || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ACTIVE
+      || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_TERMINAL
+      || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ABORTED)
+    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = publication_ticket_validate (ticket);
+  if (ticket->state == WYL_SERVICE_EXCHANGE_TICKET_PENDING
+      || ticket->state == WYL_SERVICE_EXCHANGE_TICKET_LIVE) {
+    gboolean removed = FALSE;
+    wyrelog_error_t remove_rc =
+        wyl_service_auth_registry_session_participant_remove_exact
+        (ticket->participant, &ticket->reservation, &removed);
+    if (remove_rc != WYRELOG_E_OK || !removed) {
+      if (rc == WYRELOG_E_OK)
+        rc = remove_rc != WYRELOG_E_OK ? remove_rc : WYRELOG_E_POLICY;
+      (void) wyl_service_auth_write_lease_mark_unavailable (ticket->lease,
+          ticket->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+    }
+  }
+  wyrelog_error_t release_rc =
+      wyl_service_auth_write_lease_release_terminal (&ticket->lease);
+  if (rc == WYRELOG_E_OK)
+    rc = release_rc;
+  if (ticket->lease == NULL)
+    ticket->state = WYL_SERVICE_EXCHANGE_TICKET_ABORTED;
+  return rc;
+}
+
+WylServiceExchangeTicketState
+    wyl_service_exchange_publication_ticket_get_state
+    (const WylServiceExchangePublicationTicket * ticket)
+{
+  return ticket != NULL ? ticket->state : WYL_SERVICE_EXCHANGE_TICKET_ABORTED;
+}
+
+void wyl_service_exchange_publication_ticket_test_corrupt_lease_serial
+    (WylServiceExchangePublicationTicket * ticket)
+{
+  if (ticket != NULL)
+    wyl_service_auth_write_lease_test_corrupt_serial (ticket->lease);
+}
+
+void wyl_service_exchange_publication_ticket_free
+    (WylServiceExchangePublicationTicket * ticket)
+{
+  if (ticket == NULL)
+    return;
+  if (ticket->lease != NULL) {
+    if (ticket->state == WYL_SERVICE_EXCHANGE_TICKET_ACTIVE)
+      (void) wyl_service_exchange_publication_ticket_release_terminal (ticket);
+    else
+      (void) wyl_service_exchange_publication_ticket_abort (ticket);
+  }
+  if (ticket->lease != NULL)
+    return;
+  publication_ticket_clear_owned (ticket);
+  g_free (ticket);
 }
 
 static wyrelog_error_t
