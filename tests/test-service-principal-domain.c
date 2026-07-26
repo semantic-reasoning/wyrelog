@@ -233,6 +233,47 @@ test_registry_expiry_index_returns_bounded_due_active_entries (void)
 }
 
 static void
+test_registry_capacity_rejects_without_partial_reservation (void)
+{
+  WylServiceAuthRegistry *registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&registry), ==, WYRELOG_E_OK);
+  for (guint i = 0; i < WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES; i++) {
+    wyl_id_t session_id;
+    wyl_id_t jti;
+    gchar session[WYL_ID_STRING_BUF];
+    gchar jti_text[WYL_ID_STRING_BUF];
+    g_assert_cmpint (wyl_id_new (&session_id), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_new (&jti), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_format (&session_id, session, sizeof session), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_id_format (&jti, jti_text, sizeof jti_text), ==,
+        WYRELOG_E_OK);
+    WylServiceAuthReservation reservation = {
+      .session_id = session,.jti = jti_text,
+      .credential_id = (gchar *) CREDENTIAL_A,.generation = 1,
+      .principal = (gchar *) "svc:capacity",.tenant = (gchar *) "jobs",
+      .expires_at = 100000,
+    };
+    g_assert_cmpint (wyl_service_auth_registry_reserve (registry,
+            &reservation), ==, WYRELOG_E_OK);
+  }
+  WylServiceAuthReservation overflow = {
+    .session_id = (gchar *) "01890c10-2e3f-7000-8000-000000000201",
+    .jti = (gchar *) "01890c10-2e3f-7000-8000-000000000202",
+    .credential_id = (gchar *) CREDENTIAL_A,.generation = 1,
+    .principal = (gchar *) "svc:capacity",.tenant = (gchar *) "jobs",
+    .expires_at = 100000,
+  };
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &overflow),
+      ==, WYRELOG_E_BUSY);
+  g_assert_cmpuint (wyl_service_auth_registry_size_for_test (registry), ==,
+      WYL_SERVICE_AUTH_REGISTRY_MAX_ENTRIES);
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  wyl_service_auth_registry_unref (registry);
+}
+
+static void
 test_compound_disable_zero_survivors (void)
 {
   g_autoptr (WylHandle) handle = NULL;
@@ -1048,6 +1089,8 @@ main (int argc, char **argv)
       test_compound_disable_zero_survivors);
   g_test_add_func ("/auth/service-principal/registry-expiry-index",
       test_registry_expiry_index_returns_bounded_due_active_entries);
+  g_test_add_func ("/auth/service-principal/registry-capacity",
+      test_registry_capacity_rejects_without_partial_reservation);
   g_test_add_func ("/auth/service-principal/write-participant-registry-rank",
       test_write_participant_registry_rank);
   g_test_add_func ("/auth/service-principal/compound-tenant-seal",
