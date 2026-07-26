@@ -211,6 +211,36 @@ open_namespace_race_worker (gpointer data)
 
 typedef struct
 {
+  WylFactArtifactTempBinding *binding;
+  const gchar *destination;
+  wyrelog_error_t result;
+} TempBindingRenameWorker;
+
+static gpointer
+rename_temp_binding_worker (gpointer data)
+{
+  TempBindingRenameWorker *worker = data;
+  worker->result = wyl_fact_artifact_temp_binding_rename (worker->binding,
+      worker->destination);
+  return NULL;
+}
+
+typedef struct
+{
+  WylFactArtifactTempBinding *binding;
+  wyrelog_error_t result;
+} TempBindingUnlinkWorker;
+
+static gpointer
+unlink_temp_binding_worker (gpointer data)
+{
+  TempBindingUnlinkWorker *worker = data;
+  worker->result = wyl_fact_artifact_temp_binding_unlink (worker->binding);
+  return NULL;
+}
+
+typedef struct
+{
   WylFactArtifactMutationLease *lease;
   WylFactArtifactName name;
   wyrelog_error_t result;
@@ -589,6 +619,13 @@ test_namespace (void)
           TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
   WylFactArtifactTempBinding *binding = NULL;
+  WylFactArtifactTempBinding *invalid_binding = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "../escape", TRUE, TRUE, &invalid_binding, &fd), ==,
+      WYRELOG_E_INVALID);
+  g_assert_null (invalid_binding);
+  g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
           "bound", TRUE, TRUE, &binding, &fd), ==, WYRELOG_E_OK);
   g_assert_nonnull (binding);
@@ -609,6 +646,10 @@ test_namespace (void)
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (read_binding,
           "read-moved"), ==, WYRELOG_E_POLICY);
+  WylFactArtifactTempRecoveryEvidence *read_evidence = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
+      (read_binding, &read_evidence), ==, WYRELOG_E_POLICY);
+  g_assert_null (read_evidence);
   wyl_fact_artifact_temp_binding_free (read_binding);
   WylFactArtifactTempBinding *unlink_binding = NULL;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
@@ -642,6 +683,10 @@ test_namespace (void)
   close (fd);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_binding,
           "rename-source"), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_binding,
+          "../escape"), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_binding,
+          "nested/token"), ==, WYRELOG_E_INVALID);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (rename_binding,
           "rename-destination"), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_open (rename_binding, TRUE,
@@ -687,6 +732,56 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (rename_fault), ==,
       WYRELOG_E_OK);
   wyl_fact_artifact_temp_binding_free (rename_fault);
+  WylFactArtifactTempBinding *race_a = NULL;
+  WylFactArtifactTempBinding *race_b = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "rename-race-a", TRUE, TRUE, &race_a, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "rename-race-b", TRUE, TRUE, &race_b, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  TempBindingRenameWorker rename_workers[] = {
+    {race_a, "rename-race-destination", WYRELOG_E_INTERNAL},
+    {race_b, "rename-race-destination", WYRELOG_E_INTERNAL},
+  };
+  GThread *rename_threads[] = {
+    g_thread_new ("temp-rename-a", rename_temp_binding_worker,
+        &rename_workers[0]),
+    g_thread_new ("temp-rename-b", rename_temp_binding_worker,
+        &rename_workers[1]),
+  };
+  g_thread_join (rename_threads[0]);
+  g_thread_join (rename_threads[1]);
+  g_assert_true ((rename_workers[0].result == WYRELOG_E_OK
+          && rename_workers[1].result == WYRELOG_E_POLICY)
+      || (rename_workers[1].result == WYRELOG_E_OK
+          && rename_workers[0].result == WYRELOG_E_POLICY));
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (race_a), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (race_b), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (race_a);
+  wyl_fact_artifact_temp_binding_free (race_b);
+  WylFactArtifactTempBinding *linear_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "linear-race", TRUE, TRUE, &linear_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  TempBindingRenameWorker linear_rename = { linear_binding, "linear-moved",
+    WYRELOG_E_INTERNAL
+  };
+  TempBindingUnlinkWorker linear_unlink =
+      { linear_binding, WYRELOG_E_INTERNAL };
+  GThread *linear_rename_thread = g_thread_new ("temp-linear-rename",
+      rename_temp_binding_worker, &linear_rename);
+  GThread *linear_unlink_thread = g_thread_new ("temp-linear-unlink",
+      unlink_temp_binding_worker, &linear_unlink);
+  g_thread_join (linear_rename_thread);
+  g_thread_join (linear_unlink_thread);
+  g_assert_true ((linear_rename.result == WYRELOG_E_OK
+          && linear_unlink.result == WYRELOG_E_OK)
+      || (linear_rename.result == WYRELOG_E_POLICY
+          && linear_unlink.result == WYRELOG_E_OK));
+  wyl_fact_artifact_temp_binding_free (linear_binding);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_IO);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
@@ -724,6 +819,22 @@ test_namespace (void)
           decoded), ==, WYRELOG_E_OK);
   wyl_fact_artifact_temp_recovery_evidence_free (decoded);
   wyl_fact_artifact_temp_recovery_evidence_free (evidence);
+  WylFactArtifactTempBinding *recovery_fault_binding = NULL;
+  WylFactArtifactTempRecoveryEvidence *recovery_fault_evidence = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "recovery-fault", TRUE, TRUE, &recovery_fault_binding, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
+      (recovery_fault_binding, &recovery_fault_evidence), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (recovery_fault_binding);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          recovery_fault_evidence), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          recovery_fault_evidence), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_recovery_evidence_free (recovery_fault_evidence);
   WylFactArtifactTempBinding *wrong_binding = NULL;
   WylFactArtifactTempRecoveryEvidence *wrong_evidence = NULL;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
@@ -742,6 +853,25 @@ test_namespace (void)
           wrong_evidence), ==, WYRELOG_E_POLICY);
   wyl_fact_artifact_temp_recovery_evidence_free (wrong_evidence);
   g_assert_cmpint (unlink (wrong_path), ==, 0);
+  WylFactArtifactTempBinding *substitution_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "substitute", TRUE, TRUE, &substitution_binding, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_autofree gchar *substitution_path =
+      g_build_filename (graph_path, "tmp-substitute", NULL);
+  g_autofree gchar *protected_main_path =
+      g_build_filename (graph_path, "facts.duckdb", NULL);
+  g_assert_cmpint (unlink (substitution_path), ==, 0);
+  g_assert_cmpint (symlink ("facts.duckdb", substitution_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (substitution_binding),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlink (substitution_path), ==, 0);
+  g_assert_cmpint (link (protected_main_path, substitution_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (substitution_binding,
+          "substitute-moved"), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlink (substitution_path), ==, 0);
+  wyl_fact_artifact_temp_binding_free (substitution_binding);
   g_autofree gchar *bound_path =
       g_build_filename (graph_path, "tmp-bound", NULL);
   /* An uncooperative pathname replacement cannot be adopted by the binding. */
