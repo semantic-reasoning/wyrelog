@@ -1925,6 +1925,9 @@ wyrelog_error_t wyl_policy_store_validate_service_permission_closure
 wyrelog_error_t wyl_policy_store_analyze_service_permission_closure
     (wyl_policy_store_t * store,
     WylPolicyPermissionClosureAnalysis * out_analysis);
+wyrelog_error_t wyl_policy_store_service_permission_authority_snapshot
+    (wyl_policy_store_t * store, guint64 * out_generation,
+    guint8 out_digest[32]);
 wyrelog_error_t wyl_policy_store_dry_run_service_permission_closure
     (wyl_policy_store_t * store, const GPtrArray * removals);
 wyrelog_error_t wyl_policy_store_table_exists (wyl_policy_store_t * store,

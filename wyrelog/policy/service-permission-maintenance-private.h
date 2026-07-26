@@ -32,8 +32,13 @@ typedef struct
   gchar *request_id;
   gchar *actor_identity;
   gchar *audit_id;
+  gchar manifest_fingerprint[65];
   guint operation_count;
   gint64 applied_at_us;
+  guint64 pre_generation;
+  guint8 pre_digest[32];
+  guint64 post_generation;
+  guint8 post_digest[32];
 } WylServicePermissionApplyReceipt;
 
 void wyl_service_permission_manifest_clear
@@ -67,5 +72,7 @@ wyrelog_error_t wyl_service_permission_maintenance_apply
     (wyl_policy_store_t * store,
     const WylServicePermissionManifest * manifest,
     WylServicePermissionApplyReceipt * out_receipt);
+wyrelog_error_t wyl_service_permission_apply_receipt_write_new_owner_only
+    (const gchar * path, const WylServicePermissionApplyReceipt * receipt);
 
 G_END_DECLS;

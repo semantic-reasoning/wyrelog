@@ -56,6 +56,9 @@ test_offline_closure_commands (void)
   g_autofree gchar *key_spec = g_strdup_printf ("file:%s", key_path);
   g_autofree gchar *manifest_path =
       g_build_filename (dir, "closure.json", NULL);
+  g_autofree gchar *receipt_path = g_build_filename (dir, "receipt.json", NULL);
+  g_autofree gchar *replay_receipt_path =
+      g_build_filename (dir, "replay-receipt.json", NULL);
   guint8 key[32];
   memset (key, 0x5c, sizeof key);
   g_assert_true (g_file_set_contents (key_path, (const gchar *) key,
@@ -113,16 +116,39 @@ test_offline_closure_commands (void)
   gchar *apply_argv[] = {
     WYL_TEST_WYCTL_PATH, "service-permission-closure", "apply",
     "--store", store_path, "--keyprovider", key_spec,
-    "--manifest", manifest_path, NULL
+    "--manifest", manifest_path, "--receipt", receipt_path, NULL
   };
   g_clear_pointer (&out, g_free);
   g_clear_pointer (&err, g_free);
   g_assert_cmpint (run_command (apply_argv, &out, &err), ==, 0);
   g_assert_nonnull (strstr (out, "status=applied"));
+  g_assert_true (g_file_test (receipt_path, G_FILE_TEST_IS_REGULAR));
+#ifndef G_OS_WIN32
+  GStatBuf receipt_stat;
+  g_assert_cmpint (g_stat (receipt_path, &receipt_stat), ==, 0);
+  g_assert_cmpuint (receipt_stat.st_mode & 0777, ==, 0600);
+#endif
+  gchar *replay_apply_argv[] = {
+    WYL_TEST_WYCTL_PATH, "service-permission-closure", "apply",
+    "--store", store_path, "--keyprovider", key_spec,
+    "--manifest", manifest_path, "--receipt", replay_receipt_path, NULL
+  };
   g_clear_pointer (&out, g_free);
   g_clear_pointer (&err, g_free);
-  g_assert_cmpint (run_command (apply_argv, &out, &err), ==, 0);
+  g_assert_cmpint (run_command (replay_apply_argv, &out, &err), ==, 0);
   g_assert_nonnull (strstr (out, "status=replayed"));
+  gchar *receipt_document = NULL;
+  gchar *replay_receipt_document = NULL;
+  gsize receipt_len = 0;
+  gsize replay_receipt_len = 0;
+  g_assert_true (g_file_get_contents (receipt_path, &receipt_document,
+          &receipt_len, NULL));
+  g_assert_true (g_file_get_contents (replay_receipt_path,
+          &replay_receipt_document, &replay_receipt_len, NULL));
+  g_assert_cmpmem (receipt_document, receipt_len, replay_receipt_document,
+      replay_receipt_len);
+  g_free (receipt_document);
+  g_free (replay_receipt_document);
 
   wyl_policy_store_t *verify = NULL;
   g_assert_cmpint (open_encrypted (store_path, key_path,
@@ -134,6 +160,8 @@ test_offline_closure_commands (void)
 
   g_autofree gchar *lock_path = g_strdup_printf ("%s.wyrelog-lock", store_path);
   g_remove (manifest_path);
+  g_remove (receipt_path);
+  g_remove (replay_receipt_path);
   g_remove (store_path);
   g_remove (lock_path);
   g_remove (key_path);

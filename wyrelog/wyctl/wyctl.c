@@ -4091,6 +4091,8 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
         "Policy KeyProvider spec", "SPEC"},
     {"manifest", 0, 0, G_OPTION_ARG_STRING, &opts.manifest_path,
         "Owner-only canonical removal manifest", "PATH"},
+    {"receipt", 0, 0, G_OPTION_ARG_STRING, &opts.output_path,
+        "Create owner-only durable apply receipt", "PATH"},
     {NULL}
   };
   g_autoptr (GError) error = NULL;
@@ -4103,9 +4105,10 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
     return 2;
   }
   if (argc > 1 || opts.store_path == NULL || opts.keyprovider_path == NULL
-      || opts.manifest_path == NULL) {
-    g_printerr ("wyctl: %s requires --store, --keyprovider, and --manifest\n",
-        apply ? "apply" : "dry-run");
+      || opts.manifest_path == NULL || (apply && opts.output_path == NULL)
+      || (!apply && opts.output_path != NULL)) {
+    g_printerr ("wyctl: %s requires --store, --keyprovider, --manifest%s\n",
+        apply ? "apply" : "dry-run", apply ? ", and --receipt" : "");
     return 2;
   }
   WylServicePermissionManifest manifest = { 0 };
@@ -4123,6 +4126,9 @@ run_service_permission_closure_manifest_command (gboolean apply, gint argc,
     WylServicePermissionApplyReceipt receipt = { 0 };
     rc = wyl_service_permission_maintenance_apply (store, &manifest, &receipt);
     store = NULL;               /* apply always consumes the store */
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_service_permission_apply_receipt_write_new_owner_only
+          (opts.output_path, &receipt);
     if (rc == WYRELOG_E_OK)
       g_print ("status=%s request_id=%s operations=%u actor=%s audit_id=%s"
           " applied_at_us=%" G_GINT64_FORMAT "\n",

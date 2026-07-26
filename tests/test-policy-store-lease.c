@@ -656,6 +656,29 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpint (wyl_service_permission_manifest_from_analysis (&analysis,
           request_id, &manifest), ==, WYRELOG_E_OK);
   wyl_policy_permission_closure_analysis_clear (&analysis);
+  g_assert_cmpint (wyl_policy_store_begin_mutation (apply_store), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (apply_store,
+          "test.authority-change", "authority change", "basic"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_permission_maintenance_dry_run (apply_store,
+          &manifest), ==, WYRELOG_E_POLICY);
+  wyl_policy_store_rollback_mutation (apply_store);
+  gboolean audit_inserted = FALSE;
+  g_assert_cmpint (wyl_policy_store_append_audit_event_full (apply_store,
+          "01890c10-2e3f-7000-8000-000000000618", g_get_real_time (),
+          "audit-only", "audit.only", "closure", NULL, NULL, "req-audit-only",
+          WYL_DECISION_ALLOW, &audit_inserted), ==, WYRELOG_E_OK);
+  g_assert_true (audit_inserted);
+  WylPolicyPermissionClosureAnalysis audit_stable = {
+    0
+  };
+  g_assert_cmpint (wyl_policy_store_analyze_service_permission_closure
+      (apply_store, &audit_stable), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (audit_stable.generation, ==, manifest.store_generation);
+  g_assert_cmpmem (audit_stable.digest, sizeof audit_stable.digest,
+      manifest.store_digest, sizeof manifest.store_digest);
+  wyl_policy_permission_closure_analysis_clear (&audit_stable);
   WylServicePermissionApplyReceipt applied = {
     0
   };
@@ -690,6 +713,11 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpuint (applied.operation_count, ==, 1);
   g_assert_nonnull (applied.actor_identity);
   g_assert_nonnull (applied.audit_id);
+  g_assert_cmpuint (applied.pre_generation, ==, manifest.store_generation);
+  g_assert_cmpmem (applied.pre_digest, sizeof applied.pre_digest,
+      manifest.store_digest, sizeof manifest.store_digest);
+  g_assert_cmpuint (applied.post_generation, >, 0);
+  g_assert_cmpstr (applied.manifest_fingerprint, !=, "");
 
   CountingProvider replay_provider = { 0 };
   wyl_policy_store_open_options_t replay_opts =
@@ -708,6 +736,14 @@ test_maintenance_apply_and_replay (void)
   g_assert_cmpint (replayed.state, ==, WYL_SERVICE_PERMISSION_APPLY_REPLAYED);
   g_assert_cmpstr (replayed.audit_id, ==, applied.audit_id);
   g_assert_cmpstr (replayed.actor_identity, ==, applied.actor_identity);
+  g_assert_cmpstr (replayed.manifest_fingerprint, ==,
+      applied.manifest_fingerprint);
+  g_assert_cmpuint (replayed.pre_generation, ==, applied.pre_generation);
+  g_assert_cmpmem (replayed.pre_digest, sizeof replayed.pre_digest,
+      applied.pre_digest, sizeof applied.pre_digest);
+  g_assert_cmpuint (replayed.post_generation, ==, applied.post_generation);
+  g_assert_cmpmem (replayed.post_digest, sizeof replayed.post_digest,
+      applied.post_digest, sizeof applied.post_digest);
 
   CountingProvider conflict_provider = { 0 };
   wyl_policy_store_open_options_t conflict_opts =

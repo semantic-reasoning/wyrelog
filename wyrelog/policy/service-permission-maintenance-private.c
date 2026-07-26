@@ -417,18 +417,13 @@ wyrelog_error_t
   return WYRELOG_E_OK;
 }
 
-wyrelog_error_t
-    wyl_service_permission_manifest_write_new_owner_only
-    (const gchar * path, const WylServicePermissionManifest * manifest)
+static wyrelog_error_t
+write_new_owner_only_document (const gchar *path, const gchar *document,
+    gsize len)
 {
-  if (path == NULL || path[0] == '\0')
+  if (path == NULL || path[0] == '\0' || document == NULL || len == 0)
     return WYRELOG_E_INVALID;
-  g_autofree gchar *document = NULL;
-  gsize len = 0;
-  wyrelog_error_t rc =
-      wyl_service_permission_manifest_encode (manifest, &document, &len);
-  if (rc != WYRELOG_E_OK)
-    return rc;
+  wyrelog_error_t rc = WYRELOG_E_OK;
 #ifdef G_OS_WIN32
   HANDLE token = NULL;
   DWORD needed = 0;
@@ -570,6 +565,18 @@ win_out:
   close (dirfd);
   return rc;
 #endif
+}
+
+wyrelog_error_t
+    wyl_service_permission_manifest_write_new_owner_only
+    (const gchar * path, const WylServicePermissionManifest * manifest)
+{
+  g_autofree gchar *document = NULL;
+  gsize len = 0;
+  wyrelog_error_t rc =
+      wyl_service_permission_manifest_encode (manifest, &document, &len);
+  return rc == WYRELOG_E_OK ?
+      write_new_owner_only_document (path, document, len) : rc;
 }
 
 wyrelog_error_t
@@ -746,6 +753,10 @@ wyl_service_permission_maintenance_dry_run (wyl_policy_store_t *store,
 
 #define REMEDIATION_RECEIPT_ACTION \
   "service.permission_closure.remediation_receipt"
+#define REMEDIATION_OPERATION_ACTION \
+  "service.permission_closure.remediation_operation"
+#define REMEDIATION_MUTATION_ACTION \
+  "service.permission_closure.remediate"
 #define REMEDIATION_RECEIPT_UPDATE_TRIGGER \
   "trg_service_permission_remediation_receipt_no_update"
 #define REMEDIATION_RECEIPT_DELETE_TRIGGER \
@@ -781,6 +792,47 @@ manifest_fingerprint (const WylServicePermissionManifest *manifest,
   }
   sodium_memzero (digest, sizeof digest);
   return rc;
+}
+
+static void
+digest_to_hex (const guint8 digest[32], gchar out_hex[65])
+{
+  for (guint i = 0; i < 32; i++)
+    g_snprintf (out_hex + i * 2, 3, "%02x", digest[i]);
+}
+
+static gboolean
+hex_to_digest (const gchar *hex, guint8 out_digest[32])
+{
+  if (hex == NULL || strlen (hex) != 64)
+    return FALSE;
+  for (guint i = 0; i < 32; i++) {
+    gint high = g_ascii_xdigit_value (hex[i * 2]);
+    gint low = g_ascii_xdigit_value (hex[i * 2 + 1]);
+    if (high < 0 || low < 0 || g_ascii_isupper (hex[i * 2])
+        || g_ascii_isupper (hex[i * 2 + 1]))
+      return FALSE;
+    out_digest[i] = (guint8) ((high << 4) | low);
+  }
+  return TRUE;
+}
+
+static wyrelog_error_t
+operation_fingerprint (const WylPolicyPermissionClosureRemoval *operation,
+    gchar out_hex[65])
+{
+  g_autofree gchar *canonical = g_strdup_printf ("%u\n%s\n%s\n%s\n",
+      operation->action, operation->subject_id, operation->right_id,
+      operation->scope);
+  guint8 digest[32];
+  if (canonical == NULL)
+    return WYRELOG_E_NOMEM;
+  if (crypto_generichash (digest, sizeof digest,
+          (const guint8 *) canonical, strlen (canonical), NULL, 0) != 0)
+    return WYRELOG_E_CRYPTO;
+  digest_to_hex (digest, out_hex);
+  sodium_memzero (digest, sizeof digest);
+  return WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -851,18 +903,165 @@ install_receipt_guards (wyl_policy_store_t *store)
       "CREATE TRIGGER IF NOT EXISTS "
       REMEDIATION_RECEIPT_UPDATE_TRIGGER
       " BEFORE UPDATE ON audit_events"
-      " WHEN OLD.action='" REMEDIATION_RECEIPT_ACTION
-      "' OR NEW.action='" REMEDIATION_RECEIPT_ACTION
-      "' BEGIN SELECT RAISE(ABORT,"
+      " WHEN OLD.action IN ('" REMEDIATION_RECEIPT_ACTION "','"
+      REMEDIATION_OPERATION_ACTION "','" REMEDIATION_MUTATION_ACTION
+      "') OR NEW.action IN ('" REMEDIATION_RECEIPT_ACTION "','"
+      REMEDIATION_OPERATION_ACTION "','" REMEDIATION_MUTATION_ACTION
+      "') BEGIN SELECT RAISE(ABORT,"
       " 'service permission remediation receipts are immutable'); END;"
       "CREATE TRIGGER IF NOT EXISTS "
       REMEDIATION_RECEIPT_DELETE_TRIGGER
       " BEFORE DELETE ON audit_events"
-      " WHEN OLD.action='" REMEDIATION_RECEIPT_ACTION
-      "' BEGIN SELECT RAISE(ABORT,"
+      " WHEN OLD.action IN ('" REMEDIATION_RECEIPT_ACTION "','"
+      REMEDIATION_OPERATION_ACTION "','" REMEDIATION_MUTATION_ACTION
+      "') BEGIN SELECT RAISE(ABORT,"
       " 'service permission remediation receipts are permanent'); END;";
   return sqlite3_exec (wyl_policy_store_get_db (store), sql, NULL, NULL,
       NULL) == SQLITE_OK ? receipt_guards_present (store) : WYRELOG_E_IO;
+}
+
+static gboolean
+parse_uint64_field (const gchar *field, const gchar *prefix, guint64 *out)
+{
+  if (field == NULL || !g_str_has_prefix (field, prefix))
+    return FALSE;
+  return g_ascii_string_to_unsigned (field + strlen (prefix), 10, 0,
+      G_MAXUINT64, out, NULL);
+}
+
+static gboolean
+receipt_summary_parse (const gchar *summary,
+    WylServicePermissionApplyReceipt *receipt)
+{
+  g_auto (GStrv) fields = g_strsplit (summary, ";", -1);
+  guint64 operations = 0;
+  if (g_strv_length (fields) != 5
+      || !parse_uint64_field (fields[0], "pre_generation:",
+          &receipt->pre_generation)
+      || !g_str_has_prefix (fields[1], "pre_digest:")
+      || !hex_to_digest (fields[1] + strlen ("pre_digest:"),
+          receipt->pre_digest)
+      || !parse_uint64_field (fields[2], "post_generation:",
+          &receipt->post_generation)
+      || !g_str_has_prefix (fields[3], "post_digest:")
+      || !hex_to_digest (fields[3] + strlen ("post_digest:"),
+          receipt->post_digest)
+      || !parse_uint64_field (fields[4], "operations:", &operations)
+      || operations > G_MAXUINT)
+    return FALSE;
+  receipt->operation_count = (guint) operations;
+  return TRUE;
+}
+
+static wyrelog_error_t
+validate_operation_evidence (wyl_policy_store_t *store,
+    const WylServicePermissionManifest *manifest)
+{
+  sqlite3 *db = wyl_policy_store_get_db (store);
+  sqlite3_stmt *evidence = NULL;
+  sqlite3_stmt *mutation = NULL;
+  int sql_rc = sqlite3_prepare_v2 (db,
+      "SELECT resource_id,deny_reason,deny_origin FROM audit_events"
+      " WHERE action=? AND request_id=? ORDER BY deny_reason;", -1,
+      &evidence, NULL);
+  if (sql_rc == SQLITE_OK)
+    sql_rc = sqlite3_prepare_v2 (db,
+        "SELECT resource_id,deny_reason,deny_origin FROM audit_events"
+        " WHERE id=? AND action=? AND request_id=?;", -1, &mutation, NULL);
+  if (sql_rc != SQLITE_OK) {
+    if (evidence != NULL)
+      sqlite3_finalize (evidence);
+    if (mutation != NULL)
+      sqlite3_finalize (mutation);
+    return WYRELOG_E_IO;
+  }
+  sqlite3_bind_text (evidence, 1, REMEDIATION_OPERATION_ACTION, -1,
+      SQLITE_STATIC);
+  sqlite3_bind_text (evidence, 2, manifest->request_id, -1, SQLITE_STATIC);
+  wyrelog_error_t rc = WYRELOG_E_OK;
+  for (guint i = 0; rc == WYRELOG_E_OK && i < manifest->operations->len; i++) {
+    if (sqlite3_step (evidence) != SQLITE_ROW) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    const gchar *mutation_id =
+        (const gchar *) sqlite3_column_text (evidence, 0);
+    const gchar *ordinal = (const gchar *) sqlite3_column_text (evidence, 1);
+    const gchar *stored_fingerprint =
+        (const gchar *) sqlite3_column_text (evidence, 2);
+    const WylPolicyPermissionClosureRemoval *operation =
+        g_ptr_array_index (manifest->operations, i);
+    gchar expected_ordinal[32];
+    gchar expected_fingerprint[65];
+    g_snprintf (expected_ordinal, sizeof expected_ordinal, "ordinal:%010u", i);
+    rc = operation_fingerprint (operation, expected_fingerprint);
+    if (rc != WYRELOG_E_OK || mutation_id == NULL || ordinal == NULL
+        || stored_fingerprint == NULL
+        || !g_str_equal (ordinal, expected_ordinal)
+        || !g_str_equal (stored_fingerprint, expected_fingerprint)) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    sqlite3_reset (mutation);
+    sqlite3_clear_bindings (mutation);
+    sqlite3_bind_text (mutation, 1, mutation_id, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text (mutation, 2, REMEDIATION_MUTATION_ACTION, -1,
+        SQLITE_STATIC);
+    sqlite3_bind_text (mutation, 3, manifest->request_id, -1, SQLITE_STATIC);
+    if (sqlite3_step (mutation) != SQLITE_ROW) {
+      rc = WYRELOG_E_POLICY;
+      break;
+    }
+    const gchar *subject = (const gchar *) sqlite3_column_text (mutation, 0);
+    const gchar *action = (const gchar *) sqlite3_column_text (mutation, 1);
+    const gchar *tuple = (const gchar *) sqlite3_column_text (mutation, 2);
+    g_autofree gchar *expected_tuple =
+        g_strdup_printf ("right=%s;scope=%s", operation->right_id,
+        operation->scope);
+    const gchar *expected_action =
+        operation->action == WYL_POLICY_PERMISSION_CLOSURE_REVOKE_DIRECT ?
+        "revoke_direct" : "remove_membership";
+    if (subject == NULL || action == NULL || tuple == NULL
+        || g_strcmp0 (subject, operation->subject_id) != 0
+        || !g_str_equal (action, expected_action)
+        || g_strcmp0 (tuple, expected_tuple) != 0
+        || sqlite3_step (mutation) != SQLITE_DONE)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc == WYRELOG_E_OK && sqlite3_step (evidence) != SQLITE_DONE)
+    rc = WYRELOG_E_POLICY;
+  sqlite3_finalize (mutation);
+  sqlite3_finalize (evidence);
+  return rc;
+}
+
+static wyrelog_error_t
+validate_receipt_post_state (wyl_policy_store_t *store,
+    const WylServicePermissionApplyReceipt *receipt)
+{
+  WylPolicyPermissionClosureAnalysis analysis = {
+    0
+  };
+  wyrelog_error_t rc =
+      wyl_policy_store_analyze_service_permission_closure (store, &analysis);
+  if (rc == WYRELOG_E_OK
+      && (analysis.removals == NULL || analysis.removals->len != 0
+          || analysis.unsafe_permission_count != 0
+          || analysis.dangling_subject_count != 0
+          || analysis.dangling_role_count != 0))
+    rc = WYRELOG_E_POLICY;
+  wyl_policy_permission_closure_analysis_clear (&analysis);
+  guint64 generation = 0;
+  guint8 digest[32];
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_permission_authority_snapshot (store,
+        &generation, digest);
+  if (rc == WYRELOG_E_OK
+      && (generation != receipt->post_generation
+          || memcmp (digest, receipt->post_digest, 32) != 0))
+    rc = WYRELOG_E_POLICY;
+  sodium_memzero (digest, sizeof digest);
+  return rc;
 }
 
 static wyrelog_error_t
@@ -897,25 +1096,28 @@ receipt_lookup (wyl_policy_store_t *store,
   const gchar *actor = (const gchar *) sqlite3_column_text (stmt, 2);
   const gchar *stored_fingerprint =
       (const gchar *) sqlite3_column_text (stmt, 3);
-  const gchar *count_text = (const gchar *) sqlite3_column_text (stmt, 4);
-  g_autofree gchar *expected_count =
-      g_strdup_printf ("operations:%u", manifest->operations->len);
-  gboolean valid = audit_id != NULL && actor != NULL
-      && applied_at > 0 && stored_fingerprint != NULL && count_text != NULL
+  const gchar *summary = (const gchar *) sqlite3_column_text (stmt, 4);
+  gboolean valid = audit_id != NULL && actor != NULL && applied_at > 0
+      && stored_fingerprint != NULL && summary != NULL
       && g_str_equal (stored_fingerprint, fingerprint)
-      && g_str_equal (count_text, expected_count);
+      && receipt_summary_parse (summary, out_receipt)
+      && out_receipt->operation_count == manifest->operations->len
+      && out_receipt->pre_generation == manifest->store_generation
+      && memcmp (out_receipt->pre_digest, manifest->store_digest, 32) == 0;
   g_autofree gchar *audit_copy = g_strdup (audit_id);
   g_autofree gchar *actor_copy = g_strdup (actor);
   int final_step = sqlite3_step (stmt);
   sqlite3_finalize (stmt);
-  if (!valid || final_step != SQLITE_DONE)
+  if (!valid || final_step != SQLITE_DONE
+      || validate_operation_evidence (store, manifest) != WYRELOG_E_OK
+      || validate_receipt_post_state (store, out_receipt) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
   out_receipt->state = WYL_SERVICE_PERMISSION_APPLY_REPLAYED;
   out_receipt->request_id = g_strdup (manifest->request_id);
   out_receipt->actor_identity = g_steal_pointer (&actor_copy);
   out_receipt->audit_id = g_steal_pointer (&audit_copy);
-  out_receipt->operation_count = manifest->operations->len;
   out_receipt->applied_at_us = applied_at;
+  memcpy (out_receipt->manifest_fingerprint, fingerprint, 65);
   return out_receipt->request_id != NULL && out_receipt->actor_identity != NULL
       && out_receipt->audit_id != NULL ? WYRELOG_E_OK : WYRELOG_E_NOMEM;
 }
@@ -938,7 +1140,11 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   memset (out_receipt, 0, sizeof *out_receipt);
   WylHandle *handle = NULL;
   g_autofree gchar *actor = NULL;
-  g_autofree gchar *count_text = NULL;
+  g_autofree gchar *receipt_summary = NULL;
+  guint64 pre_generation = 0;
+  guint8 pre_digest[32] = { 0 };
+  guint64 post_generation = 0;
+  guint8 post_digest[32] = { 0 };
   wyrelog_error_t rc =
       wyl_handle_adopt_offline_maintenance_store (store, &handle);
   if (rc != WYRELOG_E_OK)
@@ -962,6 +1168,10 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
   rc = wyl_policy_store_analyze_service_permission_closure (store, &analysis);
   if (rc == WYRELOG_E_OK)
     rc = wyl_service_permission_manifest_matches_analysis (manifest, &analysis);
+  if (rc == WYRELOG_E_OK) {
+    pre_generation = analysis.generation;
+    memcpy (pre_digest, analysis.digest, sizeof pre_digest);
+  }
   wyl_policy_permission_closure_analysis_clear (&analysis);
   if (rc != WYRELOG_E_OK)
     goto out;
@@ -1003,17 +1213,57 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
           WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP,
           operation->subject_id, operation->right_id, operation->scope,
           audit_id, applied_at, actor, manifest->request_id);
+    gchar evidence_id[WYL_ID_STRING_BUF];
+    gchar operation_digest[65];
+    if (rc == WYRELOG_E_OK)
+      rc = new_audit_id (evidence_id);
+    if (rc == WYRELOG_E_OK)
+      rc = operation_fingerprint (operation, operation_digest);
+    g_autofree gchar *ordinal = g_strdup_printf ("ordinal:%010u", i);
+    gboolean operation_inserted = FALSE;
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_append_audit_event_full (store, evidence_id,
+          applied_at, actor, REMEDIATION_OPERATION_ACTION, audit_id, ordinal,
+          operation_digest, manifest->request_id, WYL_DECISION_ALLOW,
+          &operation_inserted);
+    if (rc == WYRELOG_E_OK && !operation_inserted)
+      rc = WYRELOG_E_POLICY;
   }
+
+  WylPolicyPermissionClosureAnalysis post_analysis = {
+    0
+  };
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_analyze_service_permission_closure (store,
+        &post_analysis);
+  if (rc == WYRELOG_E_OK
+      && (post_analysis.removals == NULL || post_analysis.removals->len != 0
+          || post_analysis.unsafe_permission_count != 0
+          || post_analysis.dangling_subject_count != 0
+          || post_analysis.dangling_role_count != 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_policy_store_service_permission_authority_snapshot (store,
+        &post_generation, post_digest);
+  }
+  wyl_policy_permission_closure_analysis_clear (&post_analysis);
 
   gchar receipt_audit_id[WYL_ID_STRING_BUF];
   if (rc == WYRELOG_E_OK)
     rc = new_audit_id (receipt_audit_id);
-  count_text = g_strdup_printf ("operations:%u", manifest->operations->len);
+  gchar pre_digest_hex[65];
+  gchar post_digest_hex[65];
+  digest_to_hex (pre_digest, pre_digest_hex);
+  digest_to_hex (post_digest, post_digest_hex);
+  receipt_summary = g_strdup_printf ("pre_generation:%" G_GUINT64_FORMAT
+      ";pre_digest:%s;post_generation:%" G_GUINT64_FORMAT
+      ";post_digest:%s;operations:%u", pre_generation, pre_digest_hex,
+      post_generation, post_digest_hex, manifest->operations->len);
   gboolean inserted = FALSE;
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_append_audit_event_full (store, receipt_audit_id,
         applied_at, actor, REMEDIATION_RECEIPT_ACTION, manifest->request_id,
-        fingerprint, count_text, manifest->request_id, WYL_DECISION_ALLOW,
+        fingerprint, receipt_summary, manifest->request_id, WYL_DECISION_ALLOW,
         &inserted);
   if (rc == WYRELOG_E_OK && !inserted)
     rc = WYRELOG_E_POLICY;
@@ -1039,8 +1289,13 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
     out_receipt->request_id = g_strdup (manifest->request_id);
     out_receipt->actor_identity = g_strdup (actor);
     out_receipt->audit_id = g_strdup (receipt_audit_id);
+    memcpy (out_receipt->manifest_fingerprint, fingerprint, 65);
     out_receipt->operation_count = manifest->operations->len;
     out_receipt->applied_at_us = applied_at;
+    out_receipt->pre_generation = pre_generation;
+    memcpy (out_receipt->pre_digest, pre_digest, sizeof pre_digest);
+    out_receipt->post_generation = post_generation;
+    memcpy (out_receipt->post_digest, post_digest, sizeof post_digest);
     if (out_receipt->request_id == NULL
         || out_receipt->actor_identity == NULL || out_receipt->audit_id == NULL)
       rc = WYRELOG_E_NOMEM;
@@ -1048,8 +1303,53 @@ wyl_service_permission_maintenance_apply (wyl_policy_store_t *store,
 
 out:
   sodium_memzero (fingerprint, sizeof fingerprint);
+  sodium_memzero (pre_digest, sizeof pre_digest);
+  sodium_memzero (post_digest, sizeof post_digest);
   if (rc != WYRELOG_E_OK)
     wyl_service_permission_apply_receipt_clear (out_receipt);
   g_object_unref (handle);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_service_permission_apply_receipt_write_new_owner_only (const gchar *path,
+    const WylServicePermissionApplyReceipt *receipt)
+{
+  wyl_id_t parsed_audit_id = WYL_ID_NIL;
+  if (receipt == NULL || !request_id_is_canonical (receipt->request_id)
+      || receipt->actor_identity == NULL || receipt->actor_identity[0] == '\0'
+      || receipt->audit_id == NULL
+      || wyl_id_parse (receipt->audit_id, &parsed_audit_id) != WYRELOG_E_OK
+      || strlen (receipt->manifest_fingerprint) != 64
+      || receipt->pre_generation == 0 || receipt->post_generation == 0
+      || receipt->operation_count == 0)
+    return WYRELOG_E_INVALID;
+  guint8 fingerprint_bytes[32];
+  if (!hex_to_digest (receipt->manifest_fingerprint, fingerprint_bytes))
+    return WYRELOG_E_INVALID;
+  sodium_memzero (fingerprint_bytes, sizeof fingerprint_bytes);
+  gchar pre_digest[65];
+  gchar post_digest[65];
+  digest_to_hex (receipt->pre_digest, pre_digest);
+  digest_to_hex (receipt->post_digest, post_digest);
+  GString *document = g_string_new ("{\"version\":1,\"request_id\":");
+  append_json_string (document, receipt->request_id);
+  g_string_append (document, ",\"manifest_fingerprint\":");
+  append_json_string (document, receipt->manifest_fingerprint);
+  g_string_append (document, ",\"actor\":");
+  append_json_string (document, receipt->actor_identity);
+  g_string_append (document, ",\"audit_id\":");
+  append_json_string (document, receipt->audit_id);
+  g_string_append_printf (document, ",\"applied_at_us\":%" G_GINT64_FORMAT
+      ",\"operation_count\":%u,\"pre_generation\":%" G_GUINT64_FORMAT
+      ",\"pre_digest\":\"%s\",\"post_generation\":%" G_GUINT64_FORMAT
+      ",\"post_digest\":\"%s\"}\n", receipt->applied_at_us,
+      receipt->operation_count, receipt->pre_generation, pre_digest,
+      receipt->post_generation, post_digest);
+  wyrelog_error_t rc = write_new_owner_only_document (path, document->str,
+      document->len);
+  g_string_free (document, TRUE);
+  sodium_memzero (pre_digest, sizeof pre_digest);
+  sodium_memzero (post_digest, sizeof post_digest);
   return rc;
 }

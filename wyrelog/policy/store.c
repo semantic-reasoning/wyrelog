@@ -2057,6 +2057,72 @@ void wyl_policy_permission_closure_analysis_clear
 }
 
 wyrelog_error_t
+    wyl_policy_store_service_permission_authority_snapshot
+    (wyl_policy_store_t * store, guint64 * out_generation,
+    guint8 out_digest[32]) {
+  if (store == NULL || store->db == NULL || out_generation == NULL
+      || out_digest == NULL)
+    return WYRELOG_E_INVALID;
+  static const gchar *sql =
+      "SELECT tag,a,b,c FROM ("
+      " SELECT 'principal' tag,subject_id a,'' b,'' c"
+      "   FROM service_principals"
+      " UNION ALL SELECT 'role',role_id,role_name,'' FROM roles"
+      " UNION ALL SELECT 'permission',perm_id,perm_name,class FROM permissions"
+      " UNION ALL SELECT 'role_permission',role_id,perm_id,''"
+      "   FROM role_permissions"
+      " UNION ALL SELECT 'inheritance',child_role_id,parent_role_id,''"
+      "   FROM role_inheritances"
+      " UNION ALL SELECT 'membership',subject_id,role_id,scope"
+      "   FROM role_memberships"
+      " UNION ALL SELECT 'direct',subject_id,perm_id,scope"
+      "   FROM direct_permissions" ") ORDER BY tag,a,b,c;";
+  sqlite3_stmt *stmt = NULL;
+  wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
+  crypto_generichash_state hash = {
+    0
+  };
+  if (rc == WYRELOG_E_OK && crypto_generichash_init (&hash, NULL, 0, 32) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  int step_rc = rc == WYRELOG_E_OK ? sqlite3_step (stmt) : SQLITE_ERROR;
+  while (rc == WYRELOG_E_OK && step_rc == SQLITE_ROW) {
+    for (guint column = 0; column < 4; column++) {
+      const guint8 *value = sqlite3_column_text (stmt, column);
+      int len = sqlite3_column_bytes (stmt, column);
+      if (value == NULL || len < 0) {
+        rc = WYRELOG_E_POLICY;
+        break;
+      }
+      guint64 length_be = GUINT64_TO_BE ((guint64) len);
+      crypto_generichash_update (&hash, (const guint8 *) &length_be,
+          sizeof length_be);
+      crypto_generichash_update (&hash, value, (gsize) len);
+    }
+    if (rc == WYRELOG_E_OK)
+      step_rc = sqlite3_step (stmt);
+  }
+  if (stmt != NULL)
+    sqlite3_finalize (stmt);
+  if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK
+      && crypto_generichash_final (&hash, out_digest, 32) != 0)
+    rc = WYRELOG_E_CRYPTO;
+  sodium_memzero (&hash, sizeof hash);
+  if (rc != WYRELOG_E_OK) {
+    sodium_memzero (out_digest, 32);
+    *out_generation = 0;
+    return rc;
+  }
+  guint64 generation_be = 0;
+  memcpy (&generation_be, out_digest, sizeof generation_be);
+  *out_generation = GUINT64_FROM_BE (generation_be);
+  if (*out_generation == 0)
+    *out_generation = 1;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
     wyl_policy_store_analyze_service_permission_closure
     (wyl_policy_store_t * store,
     WylPolicyPermissionClosureAnalysis * out_analysis) {
@@ -2176,26 +2242,11 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK && step_rc != SQLITE_DONE)
     rc = WYRELOG_E_IO;
 
-  sqlite3_int64 image_len = 0;
-  guint8 *image = rc == WYRELOG_E_OK ?
-      sqlite3_serialize (store->db, "main", &image_len, 0) : NULL;
-  if (rc == WYRELOG_E_OK && (image == NULL || image_len <= 0))
-    rc = WYRELOG_E_IO;
-  if (rc == WYRELOG_E_OK
-      && crypto_generichash (out_analysis->digest,
-          sizeof out_analysis->digest, image, image_len, NULL, 0) != 0)
-    rc = WYRELOG_E_CRYPTO;
-  if (image != NULL)
-    sqlite3_free (image);
-  if (rc == WYRELOG_E_OK) {
-    guint64 generation_be = 0;
-    memcpy (&generation_be, out_analysis->digest, sizeof generation_be);
-    out_analysis->generation = GUINT64_FROM_BE (generation_be);
-    if (out_analysis->generation == 0)
-      out_analysis->generation = 1;
-  } else {
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_permission_authority_snapshot (store,
+        &out_analysis->generation, out_analysis->digest);
+  if (rc != WYRELOG_E_OK)
     wyl_policy_permission_closure_analysis_clear (out_analysis);
-  }
   return rc;
 }
 
