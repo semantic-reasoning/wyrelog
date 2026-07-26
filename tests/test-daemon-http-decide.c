@@ -3561,6 +3561,44 @@ check_service_resolver_prelatched_unavailable (void)
       != WYRELOG_E_OK
       || !service_resolver_expect (server, &fixture, fixture.token, FALSE))
     return FALSE;
+
+  wyl_id_t sid_id = WYL_ID_NIL, jti_id = WYL_ID_NIL;
+  gchar sid[WYL_ID_STRING_BUF], jti[WYL_ID_STRING_BUF];
+  gint64 now = g_get_real_time () / G_USEC_PER_SEC;
+  guint8 secret[32] = { 0 };
+  g_autofree gchar *key_id = wyl_daemon_http_dup_access_token_key_id (server);
+  if (key_id == NULL || wyl_id_new (&sid_id) != WYRELOG_E_OK
+      || wyl_id_new (&jti_id) != WYRELOG_E_OK
+      || wyl_id_format (&sid_id, sid, sizeof sid) != WYRELOG_E_OK
+      || wyl_id_format (&jti_id, jti, sizeof jti) != WYRELOG_E_OK
+      || !wyl_daemon_http_seed_human_session_for_test (server, sid,
+          "human-after-latch", "__wr_default")
+      || !wyl_daemon_http_store_human_access_token_for_test (server, jti, sid,
+          "human-after-latch", "__wr_default", key_id, now + 300)
+      || wyl_daemon_http_copy_access_token_secret (server, secret,
+          sizeof secret) != WYRELOG_E_OK)
+    return FALSE;
+  wyl_jwt_issue_input_t input = {
+    .key_id = key_id,.jti = jti,.subject = "human-after-latch",
+    .issuer = "wyrelogd",.audience = "wyrelog-client",
+    .tenant = "__wr_default",
+    .principal_state_at_issue = "authenticated",.session_id = sid,
+    .issued_at = now,.ttl_seconds = 300,
+  };
+  g_autofree gchar *human_token = NULL;
+  wyrelog_error_t sign_rc = wyl_jwt_sign_hs256 (&input, secret,
+      sizeof secret, &human_token);
+  sodium_memzero (secret, sizeof secret);
+  g_autofree gchar *resolved_sid = NULL;
+  g_autofree gchar *actor = NULL;
+  g_autofree gchar *tenant = NULL;
+  if (sign_rc != WYRELOG_E_OK
+      || wyl_daemon_http_resolve_bearer_for_test (server, human_token,
+          &resolved_sid, &actor, &tenant) != WYRELOG_E_OK
+      || g_strcmp0 (resolved_sid, sid) != 0
+      || g_strcmp0 (actor, "human-after-latch") != 0
+      || g_strcmp0 (tenant, "__wr_default") != 0)
+    return FALSE;
   WylServiceAuthAuthoritySnapshot snapshot = { 0 };
   wyl_daemon_http_service_authority_snapshot_for_test (server, &snapshot);
   return snapshot.active_readers == 0 && !snapshot.writer_active;
