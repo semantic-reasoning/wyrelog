@@ -3,6 +3,7 @@
 
 #include <string.h>
 
+#include "wyrelog/daemon/auth-registry-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
 static wyrelog_error_t
@@ -24,7 +25,17 @@ typedef struct
   gpointer invalidation_data;
   const gchar *invalidation_credential_id;
   guint64 invalidation_generation;
+  WylServiceAuthRegistryWriteParticipant *registry_participant;
+  WylServiceAuthSelector invalidation_selector;
+  gboolean has_invalidation_selector;
 } ServiceMutation;
+
+typedef enum
+{
+  SERVICE_MUTATION_NOT_COMMITTED = 0,
+  SERVICE_MUTATION_COMMITTED,
+  SERVICE_MUTATION_UNCERTAIN,
+} ServiceMutationCommitOutcome;
 
 static wyrelog_error_t
 service_mutation_begin (WylHandle *handle, ServiceMutation *mutation)
@@ -49,6 +60,23 @@ service_mutation_start_transaction (ServiceMutation *mutation)
   return wyl_policy_store_service_authority_transaction_begin
       (mutation->store, mutation->handle, mutation->lease,
       &mutation->transaction);
+}
+
+static wyrelog_error_t
+service_mutation_prepare_registry (ServiceMutation *mutation,
+    WylServiceAuthRegistry *registry)
+{
+  if (registry == NULL)
+    return WYRELOG_E_OK;
+  return wyl_service_auth_registry_write_participant_new (registry,
+      mutation->handle, mutation->lease, &mutation->registry_participant);
+}
+
+static wyrelog_error_t
+service_mutation_prepare_commit_evidence (ServiceMutation *mutation)
+{
+  return wyl_policy_store_service_authority_prepare_commit_evidence
+      (mutation->transaction, mutation->store, &mutation->evidence);
 }
 
 static wyrelog_error_t
@@ -93,16 +121,41 @@ static wyrelog_error_t
 service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
 {
   wyrelog_error_t result = operation;
+  ServiceMutationCommitOutcome outcome = SERVICE_MUTATION_NOT_COMMITTED;
   if (mutation->transaction != NULL) {
     wyrelog_error_t terminal = operation == WYRELOG_E_OK ?
         wyl_policy_store_service_authority_transaction_commit
         (mutation->transaction) :
         wyl_policy_store_service_authority_transaction_rollback
         (mutation->transaction);
-    if (operation == WYRELOG_E_OK)
+    if (operation == WYRELOG_E_OK) {
       result = terminal;
-    else if (terminal != WYRELOG_E_OK)
+      if (terminal == WYRELOG_E_OK) {
+        outcome = SERVICE_MUTATION_COMMITTED;
+      } else if (mutation->evidence != NULL
+          &&
+          wyl_policy_store_service_authority_commit_evidence_validate_committed_diagnostic
+          (mutation->evidence, mutation->handle,
+              mutation->store) == WYRELOG_E_OK) {
+        outcome = SERVICE_MUTATION_COMMITTED;
+      } else
+          if (wyl_policy_store_service_authority_transaction_get_state
+          (mutation->transaction) ==
+          WYL_SERVICE_AUTHORITY_TXN_FAILED_COMMIT
+          &&
+          wyl_policy_store_service_authority_transaction_get_cleanup_result
+          (mutation->transaction) == WYRELOG_E_OK
+          &&
+          !wyl_policy_store_service_authority_transaction_is_poisoned
+          (mutation->store)) {
+        outcome = SERVICE_MUTATION_NOT_COMMITTED;
+      } else {
+        outcome = SERVICE_MUTATION_UNCERTAIN;
+      }
+    } else if (terminal != WYRELOG_E_OK) {
       result = terminal;
+      outcome = SERVICE_MUTATION_UNCERTAIN;
+    }
     if (wyl_policy_store_service_authority_transaction_is_poisoned
         (mutation->store)) {
       wyrelog_error_t abort_rc =
@@ -114,13 +167,44 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     wyl_policy_store_service_authority_transaction_free (mutation->transaction);
     mutation->transaction = NULL;
   }
-  if (result == WYRELOG_E_OK && mutation->invalidate_credential != NULL) {
-    result = mutation->invalidate_credential (mutation->invalidation_data,
+  if (outcome == SERVICE_MUTATION_COMMITTED
+      && mutation->invalidate_credential != NULL) {
+    wyrelog_error_t invalidate =
+        mutation->invalidate_credential (mutation->invalidation_data,
         mutation->invalidation_credential_id,
         mutation->invalidation_generation);
-    if (result != WYRELOG_E_OK && mutation->lease != NULL)
+    if (result == WYRELOG_E_OK)
+      result = invalidate;
+    if (invalidate != WYRELOG_E_OK && mutation->lease != NULL)
       (void) wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
           mutation->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+  }
+  if ((outcome == SERVICE_MUTATION_COMMITTED
+          || outcome == SERVICE_MUTATION_UNCERTAIN)
+      && mutation->has_invalidation_selector) {
+    WylServiceAuthRevokeResult revoke = { 0 };
+    wyrelog_error_t invalidate =
+        wyl_service_auth_registry_write_participant_revoke_zero_survivors
+        (mutation->registry_participant, &mutation->invalidation_selector,
+        &revoke);
+    if (invalidate != WYRELOG_E_OK && result == WYRELOG_E_OK)
+      result = invalidate;
+    if (invalidate != WYRELOG_E_OK || outcome == SERVICE_MUTATION_UNCERTAIN) {
+      wyrelog_error_t latch =
+          wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
+          mutation->handle,
+          invalidate == WYRELOG_E_OK ?
+          WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT :
+          WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
+      if (latch != WYRELOG_E_OK) {
+        (void) wyl_service_auth_write_lease_terminalize_cleanup
+            (mutation->lease, mutation->handle);
+        if (result == WYRELOG_E_OK)
+          result = latch;
+      }
+      if (result == WYRELOG_E_OK)
+        result = WYRELOG_E_INTERNAL;
+    }
   }
   if (mutation->evidence != NULL) {
     wyl_policy_store_service_authority_commit_evidence_unref
@@ -135,6 +219,8 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     wyl_service_auth_write_lease_free (mutation->lease);
     mutation->lease = NULL;
   }
+  g_clear_pointer (&mutation->registry_participant,
+      wyl_service_auth_registry_write_participant_free);
   if (mutation->owns_handle_pin) {
     wyl_handle_policy_store_unpin (mutation->handle, mutation->store);
     mutation->owns_handle_pin = FALSE;
@@ -252,6 +338,17 @@ wyl_service_principal_disable (WylHandle *handle, const gchar *subject_id,
     const gchar *actor_subject_id, const gchar *request_id,
     wyl_service_principal_t *out)
 {
+  return wyl_service_principal_disable_with_runtime (handle, subject_id,
+      actor_subject_id, request_id, NULL, out);
+}
+
+wyrelog_error_t
+wyl_service_principal_disable_with_runtime (WylHandle *handle,
+    const gchar *subject_id, const gchar *actor_subject_id,
+    const gchar *request_id,
+    const wyl_service_principal_disable_runtime_t *runtime,
+    wyl_service_principal_t *out)
+{
   if (out != NULL)
     wyl_service_principal_clear (out);
   if (handle == NULL || out == NULL)
@@ -259,14 +356,56 @@ wyl_service_principal_disable (WylHandle *handle, const gchar *subject_id,
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_principal_info_t stored = { 0 };
+  if (rc == WYRELOG_E_OK && runtime != NULL)
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
   if (rc == WYRELOG_E_OK)
     rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
   if (rc == WYRELOG_E_OK)
     rc = wyl_policy_store_disable_service_principal_core
         (mutation.transaction, mutation.store, subject_id, actor_subject_id,
         request_id, &stored);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+    rc = wyl_service_auth_selector_init_principal
+        (&mutation.invalidation_selector, stored.subject_id);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
+  }
   rc = service_mutation_finish (&mutation, rc);
   return finish_principal_result (rc, &stored, out);
+}
+
+wyrelog_error_t
+wyl_tenant_set_sealed_with_runtime (WylHandle *handle,
+    const gchar *tenant_id, gboolean sealed,
+    const wyl_tenant_seal_runtime_t *runtime, gboolean *out_changed)
+{
+  if (out_changed != NULL)
+    *out_changed = FALSE;
+  if (handle == NULL || out_changed == NULL)
+    return WYRELOG_E_INVALID;
+  ServiceMutation mutation;
+  wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (rc == WYRELOG_E_OK && sealed && runtime != NULL)
+    rc = service_mutation_prepare_registry (&mutation, runtime->registry);
+  if (rc == WYRELOG_E_OK)
+    rc = service_mutation_start_transaction (&mutation);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL)
+    rc = service_mutation_prepare_commit_evidence (&mutation);
+  gchar stored_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES] = { 0 };
+  gboolean changed = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_set_tenant_sealed_core (mutation.transaction,
+        mutation.store, tenant_id, sealed, stored_tenant, &changed);
+  if (rc == WYRELOG_E_OK && mutation.registry_participant != NULL) {
+    rc = wyl_service_auth_selector_init_tenant
+        (&mutation.invalidation_selector, stored_tenant);
+    mutation.has_invalidation_selector = rc == WYRELOG_E_OK;
+  }
+  rc = service_mutation_finish (&mutation, rc);
+  if (rc == WYRELOG_E_OK)
+    *out_changed = changed;
+  return rc;
 }
 
 void

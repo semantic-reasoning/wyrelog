@@ -1861,6 +1861,11 @@ wyrelog_error_t wyl_policy_store_create_tenant (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_created);
 wyrelog_error_t wyl_policy_store_set_tenant_sealed (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean sealed);
+#define WYL_POLICY_TENANT_SELECTOR_BYTES 256u
+wyrelog_error_t wyl_policy_store_set_tenant_sealed_core
+    (WylServiceAuthorityTransaction * transaction,
+    wyl_policy_store_t * store, const gchar * tenant_id, gboolean sealed,
+    gchar out_tenant[WYL_POLICY_TENANT_SELECTOR_BYTES], gboolean * out_changed);
 wyrelog_error_t wyl_policy_store_tenant_exists (wyl_policy_store_t * store,
     const gchar * tenant_id, gboolean * out_exists);
 wyrelog_error_t wyl_policy_store_tenant_is_active (wyl_policy_store_t * store,

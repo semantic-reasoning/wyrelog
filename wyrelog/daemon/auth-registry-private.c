@@ -1107,6 +1107,28 @@ wyl_service_auth_reservation_clear (WylServiceAuthReservation *reservation)
   reservation_clear_with_allocator (&allocator, reservation);
 }
 
+gboolean
+    wyl_service_auth_registry_corrupt_selector_index_for_test
+    (WylServiceAuthRegistry * registry, const WylServiceAuthSelector * selector)
+{
+  if (registry == NULL || selector == NULL)
+    return FALSE;
+  g_mutex_lock (&registry->mutex);
+  GHashTable *index = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
+      ? registry->by_principal : registry->by_tenant;
+  ServiceAuthBucket *bucket = g_hash_table_lookup (index, selector->bytes);
+  GHashTableIter iter;
+  gpointer member = NULL;
+  if (bucket != NULL) {
+    g_hash_table_iter_init (&iter, bucket->members);
+    (void) g_hash_table_iter_next (&iter, NULL, &member);
+    if (member != NULL)
+      g_hash_table_remove (bucket->members, member);
+  }
+  g_mutex_unlock (&registry->mutex);
+  return member != NULL;
+}
+
 #ifdef WYL_AUTH_REGISTRY_TESTING
 gboolean
     wyl_service_auth_registry_check_invariants_for_test
@@ -1130,27 +1152,5 @@ wyl_service_auth_registry_size_for_test (WylServiceAuthRegistry *registry)
   size = g_hash_table_size (registry->by_session);
   g_mutex_unlock (&registry->mutex);
   return size;
-}
-
-gboolean
-    wyl_service_auth_registry_corrupt_selector_index_for_test
-    (WylServiceAuthRegistry * registry, const WylServiceAuthSelector * selector)
-{
-  if (registry == NULL || selector == NULL)
-    return FALSE;
-  g_mutex_lock (&registry->mutex);
-  GHashTable *index = selector->kind == WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL
-      ? registry->by_principal : registry->by_tenant;
-  ServiceAuthBucket *bucket = g_hash_table_lookup (index, selector->bytes);
-  GHashTableIter iter;
-  gpointer member = NULL;
-  if (bucket != NULL) {
-    g_hash_table_iter_init (&iter, bucket->members);
-    (void) g_hash_table_iter_next (&iter, NULL, &member);
-    if (member != NULL)
-      g_hash_table_remove (bucket->members, member);
-  }
-  g_mutex_unlock (&registry->mutex);
-  return member != NULL;
 }
 #endif
