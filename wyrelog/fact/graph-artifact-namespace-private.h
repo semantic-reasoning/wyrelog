@@ -8,6 +8,8 @@
 G_BEGIN_DECLS typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
+typedef struct WylFactArtifactTempRecoveryEvidence
+    WylFactArtifactTempRecoveryEvidence;
 
 /* Only these names are part of the authority.  Callers cannot supply a path. */
 typedef enum
@@ -93,6 +95,22 @@ wyrelog_error_t wyl_fact_artifact_temp_binding_unlink
 wyrelog_error_t wyl_fact_artifact_temp_binding_rename
     (WylFactArtifactTempBinding *, const gchar * destination_token);
 void wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *);
+/* Recovery evidence is an immutable, serializable identity record issued from
+ * a live owner binding.  It is not a pathname authority: recovery accepts it
+ * only with a matching exclusive lease and matching on-disk identity. */
+wyrelog_error_t wyl_fact_artifact_temp_binding_export_recovery_evidence
+    (WylFactArtifactTempBinding *, WylFactArtifactTempRecoveryEvidence **);
+void wyl_fact_artifact_temp_recovery_evidence_free
+    (WylFactArtifactTempRecoveryEvidence *);
+wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_encode
+    (const WylFactArtifactTempRecoveryEvidence *, GBytes ** out_bytes);
+wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_decode
+    (GBytes *, WylFactArtifactTempRecoveryEvidence **);
+/* Missing artifacts are idempotently recovered.  Existing artifacts must
+ * match every evidence identity field before dirfd-relative unlink. */
+wyrelog_error_t wyl_fact_artifact_mutation_lease_recover_temp
+    (WylFactArtifactMutationLease *,
+    const WylFactArtifactTempRecoveryEvidence *);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
     (WylFactArtifactMutationLease *, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_rename

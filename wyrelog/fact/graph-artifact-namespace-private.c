@@ -154,6 +154,50 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *b,
   return closed ();
 }
 
+wyrelog_error_t
+    wyl_fact_artifact_temp_binding_export_recovery_evidence
+    (WylFactArtifactTempBinding * b, WylFactArtifactTempRecoveryEvidence ** e) {
+  (void) b;
+  if (e)
+    *e = NULL;
+  return closed ();
+}
+
+void wyl_fact_artifact_temp_recovery_evidence_free
+    (WylFactArtifactTempRecoveryEvidence * e)
+{
+  (void) e;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_encode (const
+    WylFactArtifactTempRecoveryEvidence *e, GBytes **b)
+{
+  (void) e;
+  if (b)
+    *b = NULL;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_decode (GBytes *b,
+    WylFactArtifactTempRecoveryEvidence **e)
+{
+  (void) b;
+  if (e)
+    *e = NULL;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
+    const WylFactArtifactTempRecoveryEvidence *e)
+{
+  (void) l;
+  (void) e;
+  return closed ();
+}
+
 void
 wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *b)
 {
@@ -312,6 +356,13 @@ struct WylFactArtifactTempBinding
   guint64 device, inode;
   gboolean creator;
   gboolean active;
+};
+struct WylFactArtifactTempRecoveryEvidence
+{
+  gchar *token;
+  guint64 directory_device, directory_inode;
+  guint64 lock_device, lock_inode;
+  guint64 artifact_device, artifact_inode;
 };
 static const gchar *names[] =
     { "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
@@ -1301,6 +1352,169 @@ wyl_fact_artifact_temp_binding_rename (WylFactArtifactTempBinding *binding,
   }
 done:
   g_mutex_unlock (&lease->mutex);
+  return r;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_temp_binding_export_recovery_evidence
+    (WylFactArtifactTempBinding * binding,
+    WylFactArtifactTempRecoveryEvidence ** out_evidence) {
+  if (out_evidence)
+    *out_evidence = NULL;
+  if (!binding || !out_evidence || !binding->active || !binding->creator
+      || !binding->lease->exclusive)
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = binding->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  if (r != WYRELOG_E_OK)
+    goto done;
+  struct stat named, pinned;
+  g_autofree gchar *name = g_strdup_printf ("tmp-%s", binding->token);
+  if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) != 0
+      || !S_ISREG (named.st_mode) || named.st_nlink != 1
+      || (guint64) named.st_dev != binding->device
+      || (guint64) named.st_ino != binding->inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  WylFactArtifactTempRecoveryEvidence *evidence =
+      g_new0 (WylFactArtifactTempRecoveryEvidence, 1);
+  evidence->token = g_strdup (binding->token);
+  if (!evidence->token) {
+    g_free (evidence);
+    r = WYRELOG_E_NOMEM;
+    goto done;
+  }
+  evidence->directory_device = lease->directory_device;
+  evidence->directory_inode = lease->directory_inode;
+  evidence->lock_device = lease->lock_device;
+  evidence->lock_inode = lease->lock_inode;
+  evidence->artifact_device = binding->device;
+  evidence->artifact_inode = binding->inode;
+  *out_evidence = evidence;
+  r = WYRELOG_E_OK;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return r;
+}
+
+void wyl_fact_artifact_temp_recovery_evidence_free
+    (WylFactArtifactTempRecoveryEvidence * evidence)
+{
+  if (!evidence)
+    return;
+  g_free (evidence->token);
+  g_free (evidence);
+}
+
+#define TEMP_EVIDENCE_MAGIC "WTR1"
+#define TEMP_EVIDENCE_HEADER_SIZE 53
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_encode (const
+    WylFactArtifactTempRecoveryEvidence *evidence, GBytes **out_bytes)
+{
+  if (out_bytes)
+    *out_bytes = NULL;
+  if (!evidence || !out_bytes || !temp_token_valid (evidence->token))
+    return WYRELOG_E_INVALID;
+  const gsize token_size = strlen (evidence->token);
+  guint8 *data = g_malloc (TEMP_EVIDENCE_HEADER_SIZE + token_size);
+  memcpy (data, TEMP_EVIDENCE_MAGIC, 4);
+  data[4] = (guint8) token_size;
+  const guint64 fields[] = { evidence->directory_device,
+    evidence->directory_inode, evidence->lock_device, evidence->lock_inode,
+    evidence->artifact_device, evidence->artifact_inode
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++) {
+    const guint64 network = GUINT64_TO_BE (fields[i]);
+    memcpy (data + 5 + i * sizeof network, &network, sizeof network);
+  }
+  memcpy (data + TEMP_EVIDENCE_HEADER_SIZE, evidence->token, token_size);
+  *out_bytes = g_bytes_new_take (data, TEMP_EVIDENCE_HEADER_SIZE + token_size);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_recovery_evidence_decode (GBytes *bytes,
+    WylFactArtifactTempRecoveryEvidence **out_evidence)
+{
+  if (out_evidence)
+    *out_evidence = NULL;
+  if (!bytes || !out_evidence)
+    return WYRELOG_E_INVALID;
+  gsize size = 0;
+  const guint8 *data = g_bytes_get_data (bytes, &size);
+  if (size < TEMP_EVIDENCE_HEADER_SIZE
+      || memcmp (data, TEMP_EVIDENCE_MAGIC, 4) != 0
+      || size != TEMP_EVIDENCE_HEADER_SIZE + (gsize) data[4])
+    return WYRELOG_E_INVALID;
+  WylFactArtifactTempRecoveryEvidence *evidence =
+      g_new0 (WylFactArtifactTempRecoveryEvidence, 1);
+  evidence->token = g_strndup ((const gchar *) data + TEMP_EVIDENCE_HEADER_SIZE,
+      data[4]);
+  if (!temp_token_valid (evidence->token)) {
+    wyl_fact_artifact_temp_recovery_evidence_free (evidence);
+    return WYRELOG_E_INVALID;
+  }
+  guint64 *fields[] = { &evidence->directory_device,
+    &evidence->directory_inode, &evidence->lock_device, &evidence->lock_inode,
+    &evidence->artifact_device, &evidence->artifact_inode
+  };
+  for (guint i = 0; i < G_N_ELEMENTS (fields); i++) {
+    guint64 network;
+    memcpy (&network, data + 5 + i * sizeof network, sizeof network);
+    *fields[i] = GUINT64_FROM_BE (network);
+  }
+  *out_evidence = evidence;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
+    const WylFactArtifactTempRecoveryEvidence *evidence)
+{
+  if (!l || !evidence || !l->exclusive || !temp_token_valid (evidence->token))
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&l->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (l);
+  if (r != WYRELOG_E_OK)
+    goto done;
+  if (evidence->directory_device != l->directory_device
+      || evidence->directory_inode != l->directory_inode
+      || evidence->lock_device != l->lock_device
+      || evidence->lock_inode != l->lock_inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  g_autofree gchar *name = g_strdup_printf ("tmp-%s", evidence->token);
+  struct stat artifact;
+  if (fstatat (l->namespace_->fd, name, &artifact, AT_SYMLINK_NOFOLLOW) != 0) {
+    r = errno == ENOENT ? WYRELOG_E_OK : WYRELOG_E_IO;
+    goto done;
+  }
+  if (!S_ISREG (artifact.st_mode) || artifact.st_nlink != 1
+      || (guint64) artifact.st_dev != evidence->artifact_device
+      || (guint64) artifact.st_ino != evidence->artifact_inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (unlinkat (l->namespace_->fd, name, 0) != 0) {
+    r = errno == ENOENT ? WYRELOG_E_OK : WYRELOG_E_IO;
+    r = post_mutation_check_unlocked (l, r);
+    goto done;
+  }
+  r = fsync (l->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  r = post_mutation_check_unlocked (l, r);
+  if (fstatat (l->namespace_->fd, name, &artifact, AT_SYMLINK_NOFOLLOW) == 0
+      || errno != ENOENT)
+    r = WYRELOG_E_POLICY;
+done:
+  g_mutex_unlock (&l->mutex);
   return r;
 }
 

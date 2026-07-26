@@ -547,6 +547,12 @@ test_mutation_leases (void)
       WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_rename (binding, "next"), ==,
       WYRELOG_E_POLICY);
+  WylFactArtifactTempRecoveryEvidence *evidence = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
+      (binding, &evidence), ==, WYRELOG_E_POLICY);
+  g_assert_null (evidence);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          evidence), ==, WYRELOG_E_POLICY);
 }
 #endif
 
@@ -686,6 +692,56 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
           "../escape", TRUE, TRUE, &fd), ==, WYRELOG_E_INVALID);
   g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path (&d);
+  WylFactArtifactTempBinding *recovery_binding = NULL;
+  WylFactArtifactTempRecoveryEvidence *evidence = NULL;
+  WylFactArtifactTempRecoveryEvidence *decoded = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "recovery", TRUE, TRUE, &recovery_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
+      (recovery_binding, &evidence), ==, WYRELOG_E_OK);
+  g_autoptr (GBytes) encoded = NULL;
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_encode (evidence,
+          &encoded), ==, WYRELOG_E_OK);
+  gsize encoded_size = 0;
+  const guint8 *encoded_data = g_bytes_get_data (encoded, &encoded_size);
+  guint8 *tampered_data = g_memdup2 (encoded_data, encoded_size);
+  tampered_data[5] ^= 1;
+  g_autoptr (GBytes) tampered = g_bytes_new_take (tampered_data, encoded_size);
+  WylFactArtifactTempRecoveryEvidence *tampered_evidence = NULL;
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode (tampered,
+          &tampered_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          tampered_evidence), ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_temp_recovery_evidence_free (tampered_evidence);
+  g_assert_cmpint (wyl_fact_artifact_temp_recovery_evidence_decode (encoded,
+          &decoded), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (recovery_binding);
+  recovery_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          decoded), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          decoded), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_recovery_evidence_free (decoded);
+  wyl_fact_artifact_temp_recovery_evidence_free (evidence);
+  WylFactArtifactTempBinding *wrong_binding = NULL;
+  WylFactArtifactTempRecoveryEvidence *wrong_evidence = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "recovery-wrong", TRUE, TRUE, &wrong_binding, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_export_recovery_evidence
+      (wrong_binding, &wrong_evidence), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (wrong_binding);
+  g_autofree gchar *wrong_path =
+      g_build_filename (graph_path, "tmp-recovery-wrong", NULL);
+  g_assert_cmpint (unlink (wrong_path), ==, 0);
+  fd = open (wrong_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  g_assert_cmpint (fd >= 0, ==, TRUE);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_recover_temp (lease,
+          wrong_evidence), ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_temp_recovery_evidence_free (wrong_evidence);
+  g_assert_cmpint (unlink (wrong_path), ==, 0);
   g_autofree gchar *bound_path =
       g_build_filename (graph_path, "tmp-bound", NULL);
   /* An uncooperative pathname replacement cannot be adopted by the binding. */
