@@ -137,6 +137,8 @@ struct _WylServiceAuthWriteLease
   WylServiceAuthLeaseState state;
   gboolean transaction_claimed;
   gboolean cleanup_only;
+  gboolean test_fail_mark_unavailable_once;
+  gboolean test_fail_release_once;
   wyl_policy_store_t *pinned_store;
   gboolean test_fail_terminal_prevalidation;
   void (*test_terminal_checkpoint) (gpointer data);
@@ -534,6 +536,10 @@ wyrelog_error_t
   WylServiceAuthAuthority *authority = lease->authority;
   g_mutex_lock (&authority->mutex);
   wyrelog_error_t rc = validate_write_locked (lease, handle);
+  if (rc == WYRELOG_E_OK && lease->test_fail_mark_unavailable_once) {
+    lease->test_fail_mark_unavailable_once = FALSE;
+    rc = WYRELOG_E_INTERNAL;
+  }
   if (rc == WYRELOG_E_OK && lease->cleanup_only)
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK && authority->closing)
@@ -747,6 +753,10 @@ wyl_service_auth_write_lease_release (WylServiceAuthWriteLease *lease)
   WylServiceAuthAuthority *authority = lease->authority;
   g_mutex_lock (&authority->mutex);
   wyrelog_error_t rc = validate_write_locked (lease, lease->handle);
+  if (rc == WYRELOG_E_OK && lease->test_fail_release_once) {
+    lease->test_fail_release_once = FALSE;
+    rc = WYRELOG_E_INTERNAL;
+  }
   if (rc == WYRELOG_E_OK && lease->transaction_claimed)
     rc = WYRELOG_E_BUSY;
   if (rc == WYRELOG_E_OK) {
@@ -937,6 +947,20 @@ void wyl_service_auth_write_lease_test_corrupt_serial
 {
   if (lease != NULL)
     lease->serial ^= G_GUINT64_CONSTANT (1) << 63;
+}
+
+void wyl_service_auth_write_lease_test_fail_mark_unavailable_once
+    (WylServiceAuthWriteLease * lease)
+{
+  if (lease != NULL)
+    lease->test_fail_mark_unavailable_once = TRUE;
+}
+
+void wyl_service_auth_write_lease_test_fail_release_once
+    (WylServiceAuthWriteLease * lease)
+{
+  if (lease != NULL)
+    lease->test_fail_release_once = TRUE;
 }
 
 wyl_policy_store_t *wyl_service_auth_write_lease_test_swap_pinned_store

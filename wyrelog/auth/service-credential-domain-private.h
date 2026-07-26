@@ -6,7 +6,8 @@
 #include "wyrelog/auth/service-credential-private.h"
 #include "wyrelog/wyl-id-private.h"
 
-G_BEGIN_DECLS typedef struct
+G_BEGIN_DECLS typedef struct _WylServiceAuthWriteLease WylServiceAuthWriteLease;
+typedef struct
 {
   gchar *subject_id;
   gchar *display_name;
@@ -29,6 +30,9 @@ typedef struct
   WylServiceAuthRegistry *registry;
   void (*before_gate) (gpointer data);
   void (*after_write_acquired) (gpointer data);
+  void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
+  void (*before_write_release) (WylServiceAuthWriteLease * lease,
+      gpointer data);
   gpointer data;
 } wyl_service_principal_disable_runtime_t;
 
@@ -37,6 +41,9 @@ typedef struct
   WylServiceAuthRegistry *registry;
   void (*before_gate) (gpointer data);
   void (*after_write_acquired) (gpointer data);
+  void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
+  void (*before_write_release) (WylServiceAuthWriteLease * lease,
+      gpointer data);
   gpointer data;
 } wyl_tenant_seal_runtime_t;
 

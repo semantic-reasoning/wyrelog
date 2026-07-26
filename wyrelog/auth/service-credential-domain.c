@@ -28,6 +28,10 @@ typedef struct
   WylServiceAuthRegistryWriteParticipant *registry_participant;
   WylServiceAuthSelector invalidation_selector;
   gboolean has_invalidation_selector;
+  void (*before_invalidation) (WylServiceAuthWriteLease * lease, gpointer data);
+  void (*before_write_release) (WylServiceAuthWriteLease * lease,
+      gpointer data);
+  gpointer fault_data;
 } ServiceMutation;
 
 typedef enum
@@ -179,6 +183,8 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
       (void) wyl_service_auth_write_lease_mark_unavailable (mutation->lease,
           mutation->handle, WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT);
   }
+  if (mutation->before_invalidation != NULL)
+    mutation->before_invalidation (mutation->lease, mutation->fault_data);
   if ((outcome == SERVICE_MUTATION_COMMITTED
           || outcome == SERVICE_MUTATION_UNCERTAIN)
       && mutation->has_invalidation_selector) {
@@ -212,8 +218,15 @@ service_mutation_finish (ServiceMutation *mutation, wyrelog_error_t operation)
     mutation->evidence = NULL;
   }
   if (mutation->lease != NULL) {
+    if (mutation->before_write_release != NULL)
+      mutation->before_write_release (mutation->lease, mutation->fault_data);
     wyrelog_error_t release_rc =
         wyl_service_auth_write_lease_release (mutation->lease);
+    if (release_rc != WYRELOG_E_OK) {
+      (void) wyl_service_auth_write_lease_terminalize_cleanup
+          (mutation->lease, mutation->handle);
+      (void) wyl_service_auth_write_lease_release (mutation->lease);
+    }
     if (result == WYRELOG_E_OK && release_rc != WYRELOG_E_OK)
       result = release_rc;
     wyl_service_auth_write_lease_free (mutation->lease);
@@ -358,6 +371,11 @@ wyl_service_principal_disable_with_runtime (WylHandle *handle,
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
   wyl_policy_service_principal_info_t stored = { 0 };
+  if (runtime != NULL) {
+    mutation.before_invalidation = runtime->before_invalidation;
+    mutation.before_write_release = runtime->before_write_release;
+    mutation.fault_data = runtime->data;
+  }
   if (rc == WYRELOG_E_OK && runtime != NULL)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
   if (rc == WYRELOG_E_OK && runtime != NULL
@@ -393,6 +411,11 @@ wyl_tenant_set_sealed_with_runtime (WylHandle *handle,
     runtime->before_gate (runtime->data);
   ServiceMutation mutation;
   wyrelog_error_t rc = service_mutation_begin (handle, &mutation);
+  if (runtime != NULL) {
+    mutation.before_invalidation = runtime->before_invalidation;
+    mutation.before_write_release = runtime->before_write_release;
+    mutation.fault_data = runtime->data;
+  }
   if (rc == WYRELOG_E_OK && sealed && runtime != NULL)
     rc = service_mutation_prepare_registry (&mutation, runtime->registry);
   if (rc == WYRELOG_E_OK && runtime != NULL

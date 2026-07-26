@@ -149,6 +149,10 @@ void wyl_service_auth_write_lease_test_fail_terminal_prevalidation
 void wyl_service_auth_write_lease_test_set_terminal_checkpoint
     (WylServiceAuthWriteLease * lease, void (*checkpoint) (gpointer data),
     gpointer data);
+void wyl_service_auth_write_lease_test_fail_mark_unavailable_once
+    (WylServiceAuthWriteLease * lease);
+void wyl_service_auth_write_lease_test_fail_release_once
+    (WylServiceAuthWriteLease * lease);
 wyl_policy_store_t *wyl_service_auth_write_lease_test_swap_pinned_store
     (WylServiceAuthWriteLease * lease, wyl_policy_store_t * replacement);
 
