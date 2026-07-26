@@ -468,9 +468,11 @@ test_daemon_handoff_rotate (void)
           g_get_real_time () + G_TIME_SPAN_HOUR, &seed), ==, WYRELOG_E_OK);
   g_autofree gchar *old_id = g_strdup (seed.credential.credential_id);
   guint64 old_generation = seed.credential.generation;
+  gint64 old_expires_at = seed.credential.expires_at_us / G_USEC_PER_SEC;
   wyl_service_credential_issue_result_clear (&seed);
   g_assert_nonnull (old_id);
   g_assert_cmpuint (old_generation, >, 0);
+  g_assert_cmpint (old_expires_at, >, 0);
 
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
   fresh_request_id (request_id);
@@ -484,6 +486,7 @@ test_daemon_handoff_rotate (void)
     .generation = old_generation,
     .principal = (gchar *) "svc:handoff:executor",
     .tenant = (gchar *) "tenant-a",
+    .expires_at = old_expires_at,
   };
   gboolean changed = FALSE;
   g_assert_cmpint (wyl_service_auth_registry_reserve (registry,

@@ -7,7 +7,9 @@ from pathlib import Path
 VERSION = 1
 PROFILE = "raw-conditional-declarations-v1"
 FUNCTIONS = (
-    "wyl_daemon_policy_write_acquire", "tenant_mutation_handler",
+    "wyl_daemon_policy_write_acquire",
+    "wyl_daemon_http_context_rotate_access_token_key",
+    "tenant_mutation_handler",
     "graph_create_handler", "graph_seal_handler", "schema_register_handler",
     "facts_route_handler", "direct_permission_mutation_handler",
     "policy_permission_transition_handler", "role_membership_mutation_handler",
@@ -20,9 +22,27 @@ FUNCTIONS = (
     "policy_role_grant_handler", "policy_role_revoke_handler",
     "wyl_daemon_http_configure_tenant_for_test",
 )
-ALLOW_ACQUIRE = set(FUNCTIONS[:11]) | {
+ALLOW_ACQUIRE = {
+    "wyl_daemon_policy_write_acquire",
+    "wyl_daemon_http_context_rotate_access_token_key",
+    "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
+    "schema_register_handler", "facts_route_handler",
+    "direct_permission_mutation_handler", "policy_permission_transition_handler",
+    "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
+    "wyl_daemon_http_policy_write_for_test",
     "wyl_daemon_http_configure_tenant_for_test",
     "service_credential_operation_reconcile_execute",
+}
+PROTECTED_HANDLERS = {
+    "tenant_mutation_handler", "graph_create_handler", "graph_seal_handler",
+    "schema_register_handler", "facts_route_handler",
+    "direct_permission_mutation_handler", "policy_permission_transition_handler",
+    "role_membership_mutation_handler", "mfa_enroll_confirm_handler",
+    "wyl_daemon_http_policy_write_for_test", "tenant_create_handler",
+    "tenant_seal_handler", "tenant_unseal_handler", "tenant_delete_handler",
+    "policy_permission_grant_handler", "policy_permission_revoke_handler",
+    "policy_role_grant_handler", "policy_role_revoke_handler",
+    "wyl_daemon_http_configure_tenant_for_test",
 }
 MUTATORS = {
     "wyl_policy_store_create_tenant", "wyl_policy_store_set_tenant_sealed",
@@ -319,7 +339,7 @@ def raw_global_invariants(tokens, defs, check_directives=True):
             for i in range(lo,hi+1): owner[i]=name
     authority=MUTATORS|{"wyl_daemon_policy_write_acquire","g_mutex_lock",
         "g_mutex_unlock","g_mutex_trylock","g_mutex_lock_full"}
-    protected=set(FUNCTIONS[1:10])|set(FUNCTIONS[15:23])
+    protected=PROTECTED_HANDLERS
     forbidden_directive=authority|protected|{"policy_mutation_lock"}
     for kind,value in tokens:
         if check_directives and kind=="directive" and any(re.search(r"\b"+re.escape(name)+r"\b",value)

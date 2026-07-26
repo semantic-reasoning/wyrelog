@@ -348,6 +348,7 @@ test_compound_disable_zero_survivors (void)
     .generation = 1,
     .principal = (gchar *) "svc:jobs:worker",
     .tenant = (gchar *) "jobs",
+    .expires_at = g_get_real_time () / G_USEC_PER_SEC + 3600,
   };
   WylServiceAuthReservation unrelated = pending;
   unrelated.session_id = (gchar *) SESSION_B;

@@ -154,9 +154,10 @@ typedef struct
 
 static void
 remediation_registry_seed (WylHandle *handle, WylServiceAuthRegistry *registry,
-    const gchar *credential_id, guint64 generation,
+    const gchar *credential_id, guint64 generation, gint64 expires_at,
     RemediationRegistryToken *token)
 {
+  g_assert_cmpint (expires_at, >, 0);
   wyl_id_t sid = WYL_ID_NIL, jti = WYL_ID_NIL;
   g_assert_cmpint (wyl_id_new (&sid), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_id_new (&jti), ==, WYRELOG_E_OK);
@@ -167,7 +168,8 @@ remediation_registry_seed (WylHandle *handle, WylServiceAuthRegistry *registry,
   token->reservation = (WylServiceAuthReservation) {
   .session_id = token->sid,.jti = token->jti,.credential_id =
         (gchar *) credential_id,.generation = generation,.principal =
-        (gchar *) "svc:handoff:executor",.tenant = (gchar *) "tenant-a",};
+        (gchar *) "svc:handoff:executor",.tenant =
+        (gchar *) "tenant-a",.expires_at = expires_at,};
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint (wyl_service_auth_authority_acquire_write
       (wyl_handle_get_service_auth_authority (handle), handle, NULL, &lease),
@@ -397,7 +399,8 @@ test_revoke_replay_invalidation (void)
   RemediationRegistryToken registry_token = { 0 };
   remediation_registry_seed (handle, registry,
       attention.cancellation.successor_credential_id,
-      attention.cancellation.successor_issuance_generation, &registry_token);
+      attention.cancellation.successor_issuance_generation,
+      attention.record.expires_at_us / G_USEC_PER_SEC, &registry_token);
 
   gchar remediation_id[WYL_REQUEST_ID_STRING_BUF];
   gchar decision_id[WYL_REQUEST_ID_STRING_BUF];
