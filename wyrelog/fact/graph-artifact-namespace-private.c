@@ -655,7 +655,7 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
     *o = -1;
   /* Direct namespace access is read-only.  A guard is required before any
    * writable descriptor can be handed to a caller. */
-  if (create || writable)
+  if (a == WYL_FACT_ARTIFACT_LOCK || create || writable)
     return WYRELOG_E_POLICY;
   return open_file_unchecked (n, a, FALSE, FALSE, o);
 }
@@ -838,7 +838,7 @@ wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
     return WYRELOG_E_INVALID;
   if (create && !l->exclusive)
     return WYRELOG_E_POLICY;
-  if (a == WYL_FACT_ARTIFACT_LOCK && (create || writable))
+  if (a == WYL_FACT_ARTIFACT_LOCK)
     return WYRELOG_E_POLICY;
   wyrelog_error_t r = wyl_fact_artifact_mutation_lease_revalidate (l);
   if (r != WYRELOG_E_OK)
