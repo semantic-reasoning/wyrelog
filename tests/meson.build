@@ -926,6 +926,14 @@ if get_option('enable_secure_duckdb_bridge').enabled()
   test('secure-duckdb-recording-filesystem',
     test_secure_duckdb_recording_filesystem)
   if host_machine.system() != 'windows'
+    test_secure_duckdb_filesystem = executable(
+      'test-secure-duckdb-filesystem',
+      'test-secure-duckdb-filesystem.cc',
+      include_directories : include_directories('../wyrelog'),
+      dependencies : [wyrelog_dep, duckdb_dep],
+      override_options : ['cpp_std=c++17'],
+    )
+    test('secure-duckdb-filesystem', test_secure_duckdb_filesystem)
     test_duckdb_after_walstart = executable(
       'test-duckdb-after-walstart',
       'test-secure-duckdb-recording-filesystem.cc',
