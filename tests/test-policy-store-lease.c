@@ -494,6 +494,49 @@ test_maintenance_explicit_publish (void)
 }
 
 static void
+test_maintenance_rejects_named_target_substitution (void)
+{
+  g_autofree gchar *dir = make_tmpdir ();
+  g_autofree gchar *path = g_build_filename (dir, "substitution.store", NULL);
+  g_autofree gchar *moved = g_build_filename (dir, "original.store", NULL);
+  CountingProvider seed_provider = { 0 };
+  wyl_policy_store_open_options_t seed_opts =
+      encrypted_opts (path, &seed_provider);
+  wyl_policy_store_t *seed = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&seed_opts, &seed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_create_schema (seed), ==, WYRELOG_E_OK);
+  wyl_policy_store_close (seed);
+
+  CountingProvider maintenance_provider = { 0 };
+  wyl_policy_store_open_options_t maintenance_opts =
+      encrypted_opts (path, &maintenance_provider);
+  maintenance_opts.mode = WYL_POLICY_STORE_OPEN_MAINTENANCE;
+  wyl_policy_store_t *maintenance = NULL;
+  g_assert_cmpint (wyl_policy_store_open_with_options (&maintenance_opts,
+          &maintenance), ==, WYRELOG_E_OK);
+  g_assert_cmpint (g_rename (path, moved), ==, 0);
+  static const gchar replacement[] = "owner-controlled replacement";
+  g_assert_true (g_file_set_contents (path, replacement,
+          sizeof replacement - 1, NULL));
+  g_assert_cmpint (g_chmod (path, 0600), ==, 0);
+  g_assert_cmpint (wyl_policy_store_maintenance_publish (maintenance), ==,
+      WYRELOG_E_POLICY);
+  gchar *after = NULL;
+  gsize after_len = 0;
+  g_assert_true (g_file_get_contents (path, &after, &after_len, NULL));
+  g_assert_cmpmem (after, after_len, replacement, sizeof replacement - 1);
+  g_free (after);
+  wyl_policy_store_close (maintenance);
+
+  g_remove (path);
+  g_remove (moved);
+  g_autofree gchar *lock = g_strdup_printf ("%s%s", path, LOCK_SUFFIX);
+  g_remove (lock);
+  g_assert_cmpint (g_rmdir (dir), ==, 0);
+}
+
+static void
 test_maintenance_apply_and_replay (void)
 {
   g_autofree gchar *dir = make_tmpdir ();
@@ -1720,6 +1763,8 @@ main (int argc, char **argv)
       test_maintenance_exclusivity_and_private_store);
   g_test_add_func ("/policy-store-lease/maintenance-explicit-publish",
       test_maintenance_explicit_publish);
+  g_test_add_func ("/policy-store-lease/maintenance-target-substitution",
+      test_maintenance_rejects_named_target_substitution);
   g_test_add_func ("/policy-store-lease/maintenance-apply-replay",
       test_maintenance_apply_and_replay);
 #ifndef G_OS_WIN32

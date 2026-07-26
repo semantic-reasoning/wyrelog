@@ -8084,6 +8084,9 @@ wyl_policy_store_maintenance_publish (wyl_policy_store_t *store)
     return WYRELOG_E_INVALID;
   if (wyl_policy_store_lease_verify_parent (store->lease) != WYRELOG_E_OK)
     return WYRELOG_E_POLICY;
+  if (wyl_policy_store_lease_verify_named_target (store->lease)
+      != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
   if (store->maintenance_publish_fail_once) {
     store->maintenance_publish_fail_once = FALSE;
     return WYRELOG_E_IO;

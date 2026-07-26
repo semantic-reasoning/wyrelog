@@ -335,6 +335,28 @@ wyl_policy_store_lease_verify_parent (const wyl_policy_store_lease_t *lease)
       WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
+wyrelog_error_t
+wyl_policy_store_lease_verify_named_target (const wyl_policy_store_lease_t
+    *lease)
+{
+  if (lease == NULL || lease->store_handle == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_INVALID;
+  HANDLE named = INVALID_HANDLE_VALUE;
+  wyrelog_error_t rc = win_open_store_identity (lease->resolved_path,
+      WYL_POLICY_STORE_LEASE_MAINTENANCE, &named);
+  if (rc != WYRELOG_E_OK)
+    return rc == WYRELOG_E_NOT_FOUND ? WYRELOG_E_POLICY : rc;
+  BY_HANDLE_FILE_INFORMATION pinned_info;
+  BY_HANDLE_FILE_INFORMATION named_info;
+  gboolean same = GetFileInformationByHandle (lease->store_handle,
+      &pinned_info) && GetFileInformationByHandle (named, &named_info)
+      && pinned_info.dwVolumeSerialNumber == named_info.dwVolumeSerialNumber
+      && pinned_info.nFileIndexHigh == named_info.nFileIndexHigh
+      && pinned_info.nFileIndexLow == named_info.nFileIndexLow;
+  CloseHandle (named);
+  return same ? WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
 void
 wyl_policy_store_lease_release (wyl_policy_store_lease_t *lease)
 {
@@ -553,6 +575,26 @@ wyl_policy_store_lease_verify_parent (const wyl_policy_store_lease_t *lease)
   return (guint64) pinned.st_dev == lease->parent_dev
       && (guint64) pinned.st_ino == lease->parent_ino
       && pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino ?
+      WYRELOG_E_OK : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_policy_store_lease_verify_named_target (const wyl_policy_store_lease_t
+    *lease)
+{
+  if (lease == NULL || lease->parent_dirfd < 0 || lease->store_fd < 0)
+    return WYRELOG_E_INVALID;
+  struct stat pinned;
+  struct stat named;
+  if (fstat (lease->store_fd, &pinned) != 0)
+    return WYRELOG_E_IO;
+  if (fstatat (lease->parent_dirfd, lease->basename, &named,
+          AT_SYMLINK_NOFOLLOW) != 0)
+    return errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  if (!S_ISREG (named.st_mode) || named.st_nlink != 1
+      || named.st_uid != geteuid () || (named.st_mode & 0077) != 0)
+    return WYRELOG_E_POLICY;
+  return pinned.st_dev == named.st_dev && pinned.st_ino == named.st_ino ?
       WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
 
