@@ -138,6 +138,13 @@ wyl_fact_artifact_temp_binding_open (WylFactArtifactTempBinding *b,
   return closed ();
 }
 
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *b)
+{
+  (void) b;
+  return closed ();
+}
+
 void
 wyl_fact_artifact_temp_binding_free (WylFactArtifactTempBinding *b)
 {
@@ -291,6 +298,7 @@ struct WylFactArtifactTempBinding
   gint pin_fd;
   guint64 device, inode;
   gboolean creator;
+  gboolean active;
 };
 static const gchar *names[] =
     { "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
@@ -314,7 +322,7 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY)
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1048,6 +1056,7 @@ wyl_fact_artifact_mutation_lease_open_temp_binding (WylFactArtifactMutationLease
   binding->device = s.st_dev;
   binding->inode = s.st_ino;
   binding->creator = create;
+  binding->active = TRUE;
   if (create)
     r = post_mutation_check_unlocked (l, WYRELOG_E_OK);
   if (r != WYRELOG_E_OK) {
@@ -1085,7 +1094,8 @@ wyl_fact_artifact_temp_binding_open (WylFactArtifactTempBinding *binding,
     *out_fd = -1;
   if (!binding || !out_fd)
     return WYRELOG_E_INVALID;
-  if (!binding->creator || (writable && !binding->lease->exclusive))
+  if (!binding->active || !binding->creator
+      || (writable && !binding->lease->exclusive))
     return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = binding->lease;
   g_mutex_lock (&lease->mutex);
@@ -1120,6 +1130,56 @@ wyl_fact_artifact_temp_binding_open (WylFactArtifactTempBinding *binding,
   }
   *out_fd = fd;
   r = WYRELOG_E_OK;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return r;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_temp_binding_unlink (WylFactArtifactTempBinding *binding)
+{
+  if (!binding || !binding->active || !binding->creator
+      || !binding->lease->exclusive)
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = binding->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t r = lease_revalidate_unlocked (lease);
+  if (r != WYRELOG_E_OK)
+    goto done;
+
+  struct stat named, pinned;
+  g_autofree gchar *name = g_strdup_printf ("tmp-%s", binding->token);
+  if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) != 0
+      || !S_ISREG (named.st_mode) || named.st_nlink != 1
+      || (guint64) named.st_dev != binding->device
+      || (guint64) named.st_ino != binding->inode) {
+    r = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (unlinkat (lease->namespace_->fd, name, 0) != 0) {
+    r = errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    r = post_mutation_check_unlocked (lease, r);
+    goto done;
+  }
+
+  /* unlink is the linearization point.  Never leave an apparently reusable
+   * binding after it succeeds, even if the durability report below fails. */
+  binding->active = FALSE;
+  close (binding->pin_fd);
+  binding->pin_fd = -1;
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC)
+      || fsync (lease->namespace_->fd) != 0)
+    r = WYRELOG_E_IO;
+  else
+    r = WYRELOG_E_OK;
+  r = post_mutation_check_unlocked (lease, r);
+  if (fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) == 0
+      || errno != ENOENT)
+    r = WYRELOG_E_POLICY;
 done:
   g_mutex_unlock (&lease->mutex);
   return r;
