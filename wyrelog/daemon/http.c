@@ -8348,7 +8348,8 @@ mfa_enroll_confirm_handler (SoupServer *server, SoupServerMessage *msg,
       (write.store, &enrollment, auth.actor,
       ensure_request_id_header (msg), "wyrelogd", FALSE);
   if (rc == WYRELOG_E_OK)
-    rc = wyl_handle_reload_engine_pair (ctx->handle);
+    rc = wyl_handle_reload_engine_pair_with_service_auth_write (ctx->handle,
+        write.lease);
 #ifdef WYL_HAS_AUDIT
   if (rc == WYRELOG_E_OK)
     rc = wyl_handle_load_policy_store_audit_events (ctx->handle);

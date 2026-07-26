@@ -2200,9 +2200,12 @@ wyl_handle_open_engine_pair (WylHandle *self, const gchar *template_dir)
 }
 
 wyrelog_error_t
-wyl_handle_reload_engine_pair (WylHandle *self)
+wyl_handle_reload_engine_pair_with_service_auth_write (WylHandle *self,
+    WylServiceAuthWriteLease *write_lease)
 {
   if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (write_lease == NULL)
     return WYRELOG_E_INVALID;
   if (self->template_dir == NULL)
     return WYRELOG_E_INVALID;
@@ -2211,6 +2214,46 @@ wyl_handle_reload_engine_pair (WylHandle *self)
   wyrelog_error_t rc = replace_engine_pair (self, template_dir);
   if (rc == WYRELOG_E_OK)
     self->engine_pair_poisoned = FALSE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_validate_service_permission_closure (self, write_lease);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_handle_reload_engine_pair (WylHandle *self)
+{
+  if (self == NULL || !WYL_IS_HANDLE (self))
+    return WYRELOG_E_INVALID;
+  if (self->template_dir == NULL)
+    return WYRELOG_E_INVALID;
+
+  WylServiceAuthUnavailableReason unavailable =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  wyrelog_error_t availability_rc =
+      wyl_service_auth_authority_validate_available
+      (self->service_auth_authority, self, &unavailable);
+  if (availability_rc == WYRELOG_E_BUSY
+      && unavailable ==
+      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE) {
+    g_autofree gchar *template_dir = g_strdup (self->template_dir);
+    wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+    if (rc == WYRELOG_E_OK)
+      self->engine_pair_poisoned = FALSE;
+    return rc;
+  }
+  if (availability_rc != WYRELOG_E_OK)
+    return availability_rc;
+
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc = wyl_service_auth_authority_acquire_write
+      (self->service_auth_authority, self, NULL, &lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_handle_reload_engine_pair_with_service_auth_write (self, lease);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = release_rc;
+  wyl_service_auth_write_lease_free (lease);
   return rc;
 }
 

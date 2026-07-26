@@ -234,6 +234,8 @@ wyrelog_error_t wyl_handle_open_engine_pair (WylHandle * self,
  * On failure, the existing pair remains installed.
  */
 wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
+wyrelog_error_t wyl_handle_reload_engine_pair_with_service_auth_write
+    (WylHandle * self, WylServiceAuthWriteLease * write_lease);
 
 /*
  * Interns @symbol into both handle-owned policy engines and returns the shared
