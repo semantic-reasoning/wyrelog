@@ -171,6 +171,27 @@ wyl_handle_service_auth_set_unavailable_reason_locked (WylHandle *self,
     self->service_auth_unavailable_reason = reason;
 }
 
+wyrelog_error_t
+wyl_handle_validate_service_permission_closure (WylHandle *self,
+    WylServiceAuthWriteLease *write_lease)
+{
+  if (!WYL_IS_HANDLE (self) || write_lease == NULL)
+    return WYRELOG_E_INVALID;
+
+  wyl_policy_store_t *store = NULL;
+  wyrelog_error_t rc = wyl_service_auth_write_lease_get_policy_store
+      (write_lease, self, &store);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  rc = wyl_policy_store_validate_service_permission_closure (store);
+  if (rc != WYRELOG_E_POLICY)
+    return rc;
+  rc = wyl_service_auth_write_lease_mark_unavailable (write_lease, self,
+      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
+  return rc;
+}
+
 static void
 wyl_pending_delta_free (gpointer data)
 {
@@ -740,6 +761,23 @@ wyl_handle_open_with_options (const WylHandleOpenOptions *opts,
   self->policy_store_generation++;
   g_mutex_unlock (&self->policy_store_lifecycle_mutex);
   rc = wyl_policy_store_create_schema (self->policy_store);
+  if (rc != WYRELOG_E_OK) {
+    g_object_unref (self);
+    return rc;
+  }
+  WylServiceAuthWriteLease *permission_closure_lease = NULL;
+  rc = wyl_service_auth_authority_acquire_write (self->service_auth_authority,
+      self, NULL, &permission_closure_lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_handle_validate_service_permission_closure (self,
+        permission_closure_lease);
+  if (permission_closure_lease != NULL) {
+    wyrelog_error_t release_rc =
+        wyl_service_auth_write_lease_release (permission_closure_lease);
+    if (rc == WYRELOG_E_OK)
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (permission_closure_lease);
+  }
   if (rc != WYRELOG_E_OK) {
     g_object_unref (self);
     return rc;

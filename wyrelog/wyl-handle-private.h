@@ -73,6 +73,11 @@ WylServiceAuthUnavailableReason
 wyl_handle_service_auth_unavailable_reason_locked (WylHandle * self);
 void wyl_handle_service_auth_set_unavailable_reason_locked (WylHandle * self,
     WylServiceAuthUnavailableReason reason);
+/* Validates the pinned policy store while the caller owns its exact WRITE
+ * lease. An unsafe closure monotonically degrades only service auth and is
+ * reported as success so human engine publication remains available. */
+wyrelog_error_t wyl_handle_validate_service_permission_closure
+    (WylHandle * self, WylServiceAuthWriteLease * write_lease);
 /*
  * Ordered private shutdown used by the public void wrapper and finalization.
  * Returns BUSY without changing lifecycle state when called by a thread that

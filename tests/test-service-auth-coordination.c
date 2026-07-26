@@ -1076,6 +1076,49 @@ test_handle_shutdown_wakes_queued_leases_and_drains_pins (void)
   lease_thread_clear (&reader);
 }
 
+static void
+test_unsafe_permission_closure_latches_service_only (void)
+{
+  g_autoptr (WylHandle) handle = new_store_handle ();
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_policy_service_principal_info_t principal = { 0 };
+
+  g_assert_cmpint (wyl_policy_store_create_service_principal (store,
+          "svc:unsafe-closure", "unsafe closure", "admin-user",
+          "req-unsafe-closure", &principal), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&principal);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (store,
+          "site.unsafe.basic", "unsafe basic", "basic"), ==, WYRELOG_E_OK);
+  sqlite_exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+      " VALUES('svc:unsafe-closure','site.unsafe.basic','scope');");
+
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
+          handle, NULL, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_validate_service_permission_closure (handle,
+          lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
+
+  /* The latch degrades service auth only; human policy remains usable. */
+  g_assert_cmpint (wyl_policy_store_upsert_permission (store,
+          "site.human.still-available", "human still available", "basic"), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_grant_direct_permission (store,
+          "human-user", "site.human.still-available", "scope"), ==,
+      WYRELOG_E_OK);
+}
+
 typedef struct
 {
   WylServiceAuthWriteLease *lease;
@@ -3064,6 +3107,8 @@ main (int argc, char **argv)
       test_handle_shutdown_wakes_queued_leases_and_drains_pins);
   g_test_add_func ("/service-auth/unavailable/validation-waiters-first-reason",
       test_unavailable_latch_validation_wakes_waiters_and_first_reason_wins);
+  g_test_add_func ("/service-auth/unavailable/unsafe-permission-closure",
+      test_unsafe_permission_closure_latches_service_only);
   g_test_add_func ("/service-auth/unavailable/acquired-read-race",
       test_unavailable_latch_serializes_after_acquired_read);
   g_test_add_func ("/service-auth/unavailable/active-txn-core-no-side-effects",

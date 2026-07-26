@@ -525,7 +525,7 @@ wyrelog_error_t
     WylServiceAuthUnavailableReason reason) {
   if (lease == NULL || !WYL_IS_HANDLE (handle)
       || reason < WYL_SERVICE_AUTH_UNAVAILABLE_REGISTRY_INVARIANT
-      || reason > WYL_SERVICE_AUTH_UNAVAILABLE_COORDINATION_INVARIANT)
+      || reason > WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE)
     return WYRELOG_E_INVALID;
 
   WylServiceAuthAuthority *authority = lease->authority;
