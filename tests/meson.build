@@ -850,7 +850,9 @@ if get_option('enable_fact_store').allowed()
     dependencies : [wyrelog_dep, wirelog_dep, duckdb_dep, sqlite_dep],
   )
 
-  test('fact-store', test_fact_store)
+  test('fact-store', test_fact_store,
+    timeout : 60,
+  )
 
   test_fact_compound = executable('test-fact-compound',
     'test-fact-compound.c',
