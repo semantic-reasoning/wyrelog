@@ -23,6 +23,12 @@ closed (void)
   return WYRELOG_E_POLICY;
 }
 
+void wyl_fact_artifact_namespace_set_test_fault
+    (WylFactArtifactNamespaceTestFault fault)
+{
+  (void) fault;
+}
+
 wyrelog_error_t
 wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
     WylFactArtifactNamespace **o)
@@ -251,7 +257,24 @@ static const gchar *names[] =
 
 static GMutex lock_domains_mutex;
 static GPtrArray *lock_domains;
+static gint namespace_test_fault;
 static void release_lock_domain (WylFactArtifactNamespace *);
+
+static gboolean
+namespace_fault_take (WylFactArtifactNamespaceTestFault fault)
+{
+  return g_atomic_int_compare_and_exchange (&namespace_test_fault, fault,
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE);
+}
+
+void wyl_fact_artifact_namespace_set_test_fault
+    (WylFactArtifactNamespaceTestFault fault)
+{
+  if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
+      && fault <=
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY)
+    g_atomic_int_set (&namespace_test_fault, fault);
+}
 
 static const gchar *
 name_for (WylFactArtifactName n)
@@ -314,15 +337,19 @@ static wyrelog_error_t
 lock_stat_matches (WylFactArtifactNamespace *n, gint fd,
     guint64 device, guint64 inode)
 {
-  struct stat held, named;
-  if (check (n) != WYRELOG_E_OK || fd < 0 || fstat (fd, &held) != 0
+  struct stat directory, held, named;
+  if (check (n) != WYRELOG_E_OK || fstat (n->fd, &directory) != 0 || fd < 0
+      || fstat (fd, &held) != 0
       || !S_ISREG (held.st_mode) || held.st_nlink != 1
+      || (held.st_mode & 07777) != 0600 || held.st_uid != directory.st_uid
       || (guint64) held.st_dev != device || (guint64) held.st_ino != inode)
     return WYRELOG_E_POLICY;
   if (fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK), &named,
           AT_SYMLINK_NOFOLLOW) != 0)
     return WYRELOG_E_POLICY;
   return S_ISREG (named.st_mode) && named.st_nlink == 1
+      && (named.st_mode & 07777) == 0600
+      && named.st_uid == directory.st_uid
       && (guint64) named.st_dev == device && (guint64) named.st_ino == inode
       ? WYRELOG_E_OK : WYRELOG_E_POLICY;
 }
@@ -351,11 +378,16 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
     gint pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
         O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW | O_CREAT | O_EXCL,
         0600);
+    gboolean created = pin >= 0;
     if (pin < 0 && errno == EEXIST)
       pin = openat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK),
           O_RDWR | O_NONBLOCK | O_CLOEXEC | O_NOFOLLOW);
     if (pin < 0)
       return lock_open_error (errno);
+    if (created && fchmod (pin, 0600) != 0) {
+      close (pin);
+      return WYRELOG_E_IO;
+    }
     struct stat s;
     if (fstat (pin, &s) != 0 || !S_ISREG (s.st_mode) || s.st_nlink != 1) {
       close (pin);
@@ -367,9 +399,17 @@ open_checked_lock (WylFactArtifactNamespace *n, gint *out_fd)
     }
     /* An EEXIST opener may race the creator before its durability barrier.
      * Fsyncing in both paths makes publication wait for one directory barrier. */
-    if (fsync (n->fd) != 0) {
+    if (namespace_fault_take
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC)
+        || fsync (n->fd) != 0) {
       close (pin);
       return WYRELOG_E_IO;
+    }
+    if (namespace_fault_take
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY))
+    {
+      close (pin);
+      return WYRELOG_E_POLICY;
     }
     if (lock_stat_matches (n, pin, s.st_dev, s.st_ino) != WYRELOG_E_OK) {
       close (pin);

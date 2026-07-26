@@ -19,6 +19,17 @@ typedef enum
   WYL_FACT_ARTIFACT_TEMP,
 } WylFactArtifactName;
 
+typedef enum
+{
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE = 0,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY,
+} WylFactArtifactNamespaceTestFault;
+
+/* Private, process-local, one-shot fault injection for namespace tests. */
+void wyl_fact_artifact_namespace_set_test_fault
+    (WylFactArtifactNamespaceTestFault fault);
+
 wyrelog_error_t wyl_fact_artifact_namespace_open
     (const WylFactGraphDirectory * directory,
     WylFactArtifactNamespace ** out_namespace);
@@ -35,8 +46,9 @@ wyrelog_error_t wyl_fact_artifact_namespace_revalidate
  * through a lease is valid only while that lease lives,
  * and callers must close such fds and stop/join all lease operations before
  * freeing it.  Process death releases flock while a validated regular lock
- * entry remains reusable.  Fork after multithreading is not a supported
- * synchronization guarantee. */
+ * entry remains reusable.  Fork with a live lease is unsupported: a child
+ * must neither use nor rely on an inherited lease.  Fork after multithreading
+ * is not a supported synchronization guarantee. */
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_reader_guard
     (WylFactArtifactNamespace *, WylFactArtifactMutationLease **);
 wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
