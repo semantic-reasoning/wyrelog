@@ -417,6 +417,68 @@ test_indexed_remove_ordering (void)
   wyl_service_auth_registry_unref (registry);
 }
 
+static void
+test_zero_survivor_selector_and_corruption (void)
+{
+  WylServiceAuthRegistry *registry = new_registry ();
+  WylServiceAuthReservation first = fixture (SESSION_A, JTI_A);
+  WylServiceAuthReservation second = fixture (SESSION_B, JTI_B);
+  WylServiceAuthReservation unrelated = fixture
+      ("01890c10-2e3f-7000-8000-000000000107",
+      "01890c10-2e3f-7000-8000-000000000108");
+  WylServiceAuthSelector principal = { 0 };
+  WylServiceAuthSelector tenant = { 0 };
+  WylServiceAuthRevokeResult result = { 0 };
+  gboolean changed = FALSE;
+
+  second.tenant = (gchar *) "tenant-b";
+  unrelated.principal = (gchar *) "svc:tenant-a:other";
+  unrelated.tenant = (gchar *) "tenant-c";
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &second), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &unrelated),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_registry_activate (registry, &second,
+          &changed), ==, WYRELOG_E_OK);
+
+  g_assert_cmpint (wyl_service_auth_selector_init_principal (&principal,
+          first.principal), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+          &principal, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 2, 2);
+  assert_lookup (registry, &first, WYL_SERVICE_AUTH_REVOKED);
+  assert_lookup (registry, &second, WYL_SERVICE_AUTH_REVOKED);
+  assert_lookup (registry, &unrelated, WYL_SERVICE_AUTH_PENDING);
+
+  g_assert_cmpint (wyl_service_auth_selector_init_tenant (&tenant,
+          unrelated.tenant), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+          &tenant, &result), ==, WYRELOG_E_OK);
+  assert_revoke_result (&result, 1, 1);
+  g_assert_true (wyl_service_auth_registry_check_invariants_for_test
+      (registry));
+  wyl_service_auth_registry_unref (registry);
+
+  registry = new_registry ();
+  first = fixture (SESSION_A, JTI_A);
+  g_assert_cmpint (wyl_service_auth_registry_reserve (registry, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_selector_init_principal (&principal,
+          first.principal), ==, WYRELOG_E_OK);
+  g_assert_true (wyl_service_auth_registry_corrupt_selector_index_for_test
+      (registry, &principal));
+  g_assert_cmpint
+      (wyl_service_auth_registry_revoke_selector_zero_survivors (registry,
+          &principal, &result), ==, WYRELOG_E_POLICY);
+  assert_revoke_result (&result, 0, 0);
+  assert_lookup (registry, &first, WYL_SERVICE_AUTH_PENDING);
+  wyl_service_auth_registry_unref (registry);
+}
+
 typedef struct
 {
   GMutex mutex;
@@ -1003,6 +1065,8 @@ main (int argc, char **argv)
       test_indexed_authority_sets);
   g_test_add_func ("/daemon/auth-registry/indexed-remove-ordering",
       test_indexed_remove_ordering);
+  g_test_add_func ("/daemon/auth-registry/zero-survivor-selector-corruption",
+      test_zero_survivor_selector_and_corruption);
   g_test_add_func ("/daemon/auth-registry/allocation-cleanup",
       test_allocation_failures_and_cleanup);
   g_test_add_func ("/daemon/auth-registry/counted-clear-reuse",

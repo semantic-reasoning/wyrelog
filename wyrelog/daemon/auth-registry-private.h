@@ -22,6 +22,25 @@ typedef struct
   gsize transitioned;
 } WylServiceAuthRevokeResult;
 
+#define WYL_SERVICE_AUTH_SELECTOR_BYTES 256u
+
+typedef enum
+{
+  WYL_SERVICE_AUTH_SELECTOR_PRINCIPAL = 1,
+  WYL_SERVICE_AUTH_SELECTOR_TENANT = 2,
+} WylServiceAuthSelectorKind;
+
+/*
+ * Allocation-free authority selector.  The bytes are an authoritative value
+ * copied before commit; callers must not retain a pointer into a mutable DTO.
+ */
+typedef struct
+{
+  WylServiceAuthSelectorKind kind;
+  gsize length;
+  gchar bytes[WYL_SERVICE_AUTH_SELECTOR_BYTES];
+} WylServiceAuthSelector;
+
 typedef gpointer (*WylServiceAuthTryAllocFunc) (gsize size, gpointer user_data);
 typedef void (*WylServiceAuthFreeFunc) (gpointer memory, gpointer user_data);
 
@@ -66,6 +85,10 @@ typedef struct
 typedef struct _WylServiceAuthRegistry WylServiceAuthRegistry;
 typedef struct _WylServiceAuthRegistrySessionParticipant
     WylServiceAuthRegistrySessionParticipant;
+typedef struct _WylHandle WylHandle;
+typedef struct _WylServiceAuthWriteLease WylServiceAuthWriteLease;
+typedef struct _WylServiceAuthRegistryWriteParticipant
+    WylServiceAuthRegistryWriteParticipant;
 
 /*
  * Concurrency and ownership contract
@@ -130,6 +153,36 @@ wyrelog_error_t wyl_service_auth_registry_revoke_principal
 wyrelog_error_t wyl_service_auth_registry_revoke_tenant
     (WylServiceAuthRegistry * registry, const gchar * tenant,
     WylServiceAuthRevokeResult * out_result);
+wyrelog_error_t wyl_service_auth_selector_init_principal
+    (WylServiceAuthSelector * selector, const gchar * principal);
+wyrelog_error_t wyl_service_auth_selector_init_tenant
+    (WylServiceAuthSelector * selector, const gchar * tenant);
+/*
+ * Performs no recoverable allocation.  Under one registry mutex it validates
+ * all owning/borrowed indexes, transitions the exact indexed set, and scans
+ * the authoritative owning table to prove that no matching PENDING or ACTIVE
+ * entry survives.  POLICY therefore means registry invariant corruption.
+ */
+wyrelog_error_t wyl_service_auth_registry_revoke_selector_zero_survivors
+    (WylServiceAuthRegistry * registry,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result);
+/*
+ * Lease-bound mutation capability.  Construction is a fallible preflight;
+ * execution validates that the same-handle WRITE lease remains the active
+ * operation owner before entering the allocation-free registry boundary.
+ */
+wyrelog_error_t wyl_service_auth_registry_write_participant_new
+    (WylServiceAuthRegistry * registry, WylHandle * handle,
+    WylServiceAuthWriteLease * lease,
+    WylServiceAuthRegistryWriteParticipant ** out_participant);
+void wyl_service_auth_registry_write_participant_free
+    (WylServiceAuthRegistryWriteParticipant * participant);
+wyrelog_error_t
+    wyl_service_auth_registry_write_participant_revoke_zero_survivors
+    (WylServiceAuthRegistryWriteParticipant * participant,
+    const WylServiceAuthSelector * selector,
+    WylServiceAuthRevokeResult * out_result);
 wyrelog_error_t wyl_service_auth_registry_remove_exact
     (WylServiceAuthRegistry * registry,
     const WylServiceAuthReservation * reservation, gboolean * out_removed);
@@ -165,12 +218,17 @@ void wyl_service_auth_reservation_clear
 G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistrySessionParticipant,
     wyl_service_auth_registry_session_participant_free);
 
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistryWriteParticipant,
+    wyl_service_auth_registry_write_participant_free)
 /* Test-only observations.  They never expose or mutate stored entries. */
 #ifdef WYL_AUTH_REGISTRY_TESTING
-gboolean wyl_service_auth_registry_check_invariants_for_test
-    (WylServiceAuthRegistry * registry);
-gsize wyl_service_auth_registry_size_for_test
-    (WylServiceAuthRegistry * registry);
+     gboolean wyl_service_auth_registry_check_invariants_for_test
+         (WylServiceAuthRegistry *registry);
+     gsize wyl_service_auth_registry_size_for_test
+         (WylServiceAuthRegistry *registry);
+     gboolean wyl_service_auth_registry_corrupt_selector_index_for_test
+         (WylServiceAuthRegistry *registry,
+    const WylServiceAuthSelector *selector);
 #endif
 
 G_END_DECLS;
