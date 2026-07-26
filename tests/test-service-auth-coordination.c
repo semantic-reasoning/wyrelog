@@ -9,6 +9,10 @@
 #include "wyrelog/policy/store-private.h"
 #include "wyrelog/wyl-handle-private.h"
 
+#ifndef WYL_TEST_TEMPLATE_DIR
+#error "WYL_TEST_TEMPLATE_DIR must be defined by the build."
+#endif
+
 #define LAST_USED_CREDENTIAL_ID "wlc_000000000000000000000000000"
 #define LAST_USED_ABSENT_ID "wlc_000000000000000000000000001"
 
@@ -2579,6 +2583,9 @@ new_file_store_handle (const gchar *path)
   return handle;
 }
 
+static gchar *copy_unsigned_template_tree (const gchar * parent);
+static void remove_unsigned_template_tree (const gchar * template_dir);
+
 static void
 begin_with_evidence (WylHandle *handle, WylServiceAuthWriteLease **out_lease,
     WylServiceAuthorityTransaction **out_txn,
@@ -2674,6 +2681,18 @@ static void
 test_permission_closure_remediation_is_typed_and_latched (void)
 {
   g_autoptr (WylHandle) clean = new_store_handle ();
+  WylHandlePermissionRemediation clean_attempt = {
+    .action = WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT,
+    .subject_or_child_role_id = "svc:clean",
+    .permission_or_role_id = "wr.stream.read",
+    .scope = "scope",
+    .audit_id = "01890c10-2e3f-7000-8000-000000000613",
+    .audit_created_at_us = g_get_real_time (),
+  };
+  g_assert_cmpint
+      (wyl_handle_remediate_service_permission_closure_batch (clean,
+          &clean_attempt, 1, "operator-user", "req-clean-remediation"), ==,
+      WYRELOG_E_BUSY);
   WylServiceAuthWriteLease *lease = NULL;
   g_assert_cmpint
       (wyl_service_auth_authority_acquire_permission_remediation_write
@@ -2684,6 +2703,7 @@ test_permission_closure_remediation_is_typed_and_latched (void)
   g_autofree gchar *dir = g_dir_make_tmp ("wyl-permission-remediate-XXXXXX",
       NULL);
   g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  g_autofree gchar *template_dir = copy_unsigned_template_tree (dir);
   g_autoptr (WylHandle) handle = new_file_store_handle (path);
   wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
   wyl_policy_service_principal_info_t principal = { 0 };
@@ -2694,19 +2714,33 @@ test_permission_closure_remediation_is_typed_and_latched (void)
   g_assert_cmpint (wyl_policy_store_upsert_permission (store,
           "site.remediate.basic", "remediate basic", "basic"), ==,
       WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (store,
+          "site.remediate.second", "remediate second", "basic"), ==,
+      WYRELOG_E_OK);
   sqlite_exec_ok (wyl_policy_store_get_db (store),
       "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
-      " VALUES('svc:remediate','site.remediate.basic','scope');");
+      " VALUES('svc:remediate','site.remediate.basic','scope');"
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+      " VALUES('svc:remediate','site.remediate.second','scope');");
 
+  g_clear_object (&handle);
+  WylHandleOpenOptions unsafe_options = {
+    .policy_store_path = path,
+    .template_dir = template_dir,
+  };
+  g_assert_cmpint (wyl_handle_open_with_options (&unsafe_options, &handle), ==,
+      WYRELOG_E_OK);
+  store = wyl_handle_get_policy_store (handle);
   WylServiceAuthAuthority *authority =
       wyl_handle_get_service_auth_authority (handle);
-  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
-          handle, NULL, &lease), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_handle_validate_service_permission_closure (handle,
-          lease), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
-      WYRELOG_E_OK);
-  wyl_service_auth_write_lease_free (lease);
+  WylServiceAuthUnavailableReason startup_reason =
+      WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &startup_reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (startup_reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
+  g_assert_nonnull (wyl_handle_get_read_engine (handle));
+  g_assert_nonnull (wyl_handle_get_delta_engine (handle));
 
   lease = NULL;
   g_assert_cmpint
@@ -2734,31 +2768,66 @@ test_permission_closure_remediation_is_typed_and_latched (void)
       WYRELOG_E_OK);
   wyl_service_auth_write_lease_free (lease);
 
-  lease = NULL;
-  txn = NULL;
+  const gint64 audit_at = g_get_real_time ();
+  WylHandlePermissionRemediation rollback_batch[] = {
+    {
+          .action = WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT,
+          .subject_or_child_role_id = "svc:remediate",
+          .permission_or_role_id = "site.remediate.basic",
+          .scope = "scope",
+          .audit_id = "01890c10-2e3f-7000-8000-000000000614",
+          .audit_created_at_us = audit_at,
+        },
+    {
+          .action = WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT,
+          .subject_or_child_role_id = "svc:remediate",
+          .permission_or_role_id = "site.does-not-exist",
+          .scope = "scope",
+          .audit_id = "01890c10-2e3f-7000-8000-000000000615",
+          .audit_created_at_us = audit_at,
+        },
+  };
   g_assert_cmpint
-      (wyl_service_auth_authority_acquire_permission_remediation_write
-      (authority, handle, NULL, &lease), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
-      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
-  g_assert_cmpint
-      (wyl_policy_store_service_authority_remediate_permission_closure
-      (txn, store, WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT,
-          "svc:remediate", "site.remediate.basic", "scope",
-          "01890c10-2e3f-7000-8000-000000000614", g_get_real_time (),
-          "operator-user", "req-remediation-614"), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_policy_store_service_authority_transaction_commit
-      (txn), ==, WYRELOG_E_OK);
-  wyl_policy_store_service_authority_transaction_free (txn);
-  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      (wyl_handle_remediate_service_permission_closure_batch (handle,
+          rollback_batch, G_N_ELEMENTS (rollback_batch), "operator-user",
+          "req-remediation-rollback"), ==, WYRELOG_E_POLICY);
+  gboolean exists = FALSE;
+  g_assert_cmpint (wyl_policy_store_direct_permission_exists (store,
+          "svc:remediate", "site.remediate.basic", "scope", &exists), ==,
       WYRELOG_E_OK);
-  wyl_service_auth_write_lease_free (lease);
+  g_assert_true (exists);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM audit_events"
+          " WHERE action='service.permission_closure.remediate';"), ==, 0);
+
+  WylHandlePermissionRemediation repair_batch[] = {
+    rollback_batch[0],
+    {
+          .action = WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT,
+          .subject_or_child_role_id = "svc:remediate",
+          .permission_or_role_id = "site.remediate.second",
+          .scope = "scope",
+          .audit_id = "01890c10-2e3f-7000-8000-000000000616",
+          .audit_created_at_us = audit_at,
+        },
+  };
+  g_assert_cmpint
+      (wyl_handle_remediate_service_permission_closure_batch (handle,
+          repair_batch, G_N_ELEMENTS (repair_batch), "operator-user",
+          "req-remediation-614"), ==, WYRELOG_E_OK);
 
   g_assert_cmpint (wyl_policy_store_validate_service_permission_closure (store),
       ==, WYRELOG_E_OK);
   g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
           "SELECT count(*) FROM audit_events"
-          " WHERE action='service.permission_closure.remediate';"), ==, 1);
+          " WHERE action='service.permission_closure.remediate';"), ==, 2);
+  g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db (store),
+          "SELECT count(*) FROM audit_events"
+          " WHERE action='service.permission_closure.remediate'"
+          " AND deny_reason='revoke_direct'"
+          " AND deny_origin LIKE 'right=site.remediate.%;scope=scope'"
+          " AND request_id='req-remediation-614'"
+          " AND subject_id='operator-user';"), ==, 2);
 
   /* Successful repair does not clear the monotonic latch in-process. */
   lease = NULL;
@@ -2784,7 +2853,7 @@ test_permission_closure_remediation_is_typed_and_latched (void)
   g_assert_cmpint (sqlite_scalar (wyl_policy_store_get_db
           (wyl_handle_get_policy_store (reopened)),
           "SELECT count(*) FROM audit_events"
-          " WHERE action='service.permission_closure.remediate';"), ==, 1);
+          " WHERE action='service.permission_closure.remediate';"), ==, 2);
 
   g_clear_object (&reopened);
   (void) g_remove (path);
@@ -2792,6 +2861,161 @@ test_permission_closure_remediation_is_typed_and_latched (void)
   g_autofree gchar *shm = g_strdup_printf ("%s-shm", path);
   (void) g_remove (wal);
   (void) g_remove (shm);
+  remove_unsigned_template_tree (template_dir);
+  (void) g_rmdir (dir);
+}
+
+typedef struct
+{
+  WylHandle *handle;
+  wyrelog_error_t rc;
+} PermissionClosureReload;
+
+static gpointer
+permission_closure_reload_thread (gpointer data)
+{
+  PermissionClosureReload *reload = data;
+  reload->rc = wyl_handle_reload_engine_pair (reload->handle);
+  return NULL;
+}
+
+static gchar *
+copy_unsigned_template_tree (const gchar *parent)
+{
+  gchar *target = g_build_filename (parent, "templates", NULL);
+  g_autofree gchar *fsm = g_build_filename (target, "fsm", NULL);
+  g_autofree gchar *lobac = g_build_filename (target, "lobac", NULL);
+  g_assert_cmpint (g_mkdir (target, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (fsm, 0700), ==, 0);
+  g_assert_cmpint (g_mkdir (lobac, 0700), ==, 0);
+  const gchar *files[] = {
+    "bootstrap.dl",
+    "decision.dl",
+    "fsm/permission_scope.dl",
+    "fsm/principal.dl",
+    "fsm/session.dl",
+    "lobac/decision.dl",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (files); i++) {
+    g_autofree gchar *source =
+        g_build_filename (WYL_TEST_TEMPLATE_DIR, files[i], NULL);
+    g_autofree gchar *destination = g_build_filename (target, files[i], NULL);
+    g_autofree gchar *contents = NULL;
+    gsize length = 0;
+    g_assert_true (g_file_get_contents (source, &contents, &length, NULL));
+    g_assert_true (g_file_set_contents (destination, contents, length, NULL));
+  }
+  return target;
+}
+
+static void
+remove_unsigned_template_tree (const gchar *template_dir)
+{
+  const gchar *files[] = {
+    "bootstrap.dl",
+    "decision.dl",
+    "fsm/permission_scope.dl",
+    "fsm/principal.dl",
+    "fsm/session.dl",
+    "lobac/decision.dl",
+  };
+  for (gsize i = 0; i < G_N_ELEMENTS (files); i++) {
+    g_autofree gchar *file = g_build_filename (template_dir, files[i], NULL);
+    (void) g_remove (file);
+  }
+  g_autofree gchar *fsm = g_build_filename (template_dir, "fsm", NULL);
+  g_autofree gchar *lobac = g_build_filename (template_dir, "lobac", NULL);
+  (void) g_rmdir (fsm);
+  (void) g_rmdir (lobac);
+  (void) g_rmdir (template_dir);
+}
+
+static void
+test_permission_closure_reload_serializes_after_rollback (void)
+{
+  g_autofree gchar *dir = g_dir_make_tmp ("wyl-permission-reload-XXXXXX",
+      NULL);
+  g_autofree gchar *path = g_build_filename (dir, "policy.db", NULL);
+  g_autofree gchar *template_dir = copy_unsigned_template_tree (dir);
+  WylHandleOpenOptions options = {
+    .policy_store_path = path,
+    .template_dir = template_dir,
+  };
+  g_autoptr (WylHandle) handle = NULL;
+  g_assert_cmpint (wyl_handle_open_with_options (&options, &handle), ==,
+      WYRELOG_E_OK);
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (handle);
+  wyl_policy_service_principal_info_t principal = { 0 };
+  g_assert_cmpint (wyl_policy_store_create_service_principal (store,
+          "svc:reload-race", "reload race", "admin-user", "req-reload-race",
+          &principal), ==, WYRELOG_E_OK);
+  wyl_policy_service_principal_info_clear (&principal);
+  g_assert_cmpint (wyl_policy_store_upsert_permission (store,
+          "site.reload-race.basic", "reload race basic", "basic"), ==,
+      WYRELOG_E_OK);
+  sqlite_exec_ok (wyl_policy_store_get_db (store),
+      "INSERT INTO direct_permissions(subject_id,perm_id,scope)"
+      " VALUES('svc:reload-race','site.reload-race.basic','scope');");
+
+  WylServiceAuthAuthority *authority =
+      wyl_handle_get_service_auth_authority (handle);
+  WylServiceAuthWriteLease *lease = NULL;
+  g_assert_cmpint (wyl_service_auth_authority_acquire_write (authority,
+          handle, NULL, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_handle_validate_service_permission_closure (handle,
+          lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+
+  lease = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  g_assert_cmpint
+      (wyl_service_auth_authority_acquire_permission_remediation_write
+      (authority, handle, NULL, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_begin
+      (store, handle, lease, &txn), ==, WYRELOG_E_OK);
+  g_assert_cmpint
+      (wyl_policy_store_service_authority_remediate_permission_closure
+      (txn, store, WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT,
+          "svc:reload-race", "site.reload-race.basic", "scope",
+          "01890c10-2e3f-7000-8000-000000000617", g_get_real_time (),
+          "operator-user", "req-reload-race"), ==, WYRELOG_E_OK);
+
+  WylEngine *old_read_engine =
+      g_object_ref (wyl_handle_get_read_engine (handle));
+  PermissionClosureReload reload = {
+    .handle = handle,
+    .rc = WYRELOG_E_INTERNAL,
+  };
+  GThread *reload_thread = g_thread_new ("permission-closure-reload",
+      permission_closure_reload_thread, &reload);
+  wait_for_snapshot (authority, writer_is_waiting);
+
+  g_assert_cmpint (wyl_policy_store_service_authority_transaction_rollback
+      (txn), ==, WYRELOG_E_OK);
+  wyl_policy_store_service_authority_transaction_free (txn);
+  g_assert_cmpint (wyl_service_auth_write_lease_release (lease), ==,
+      WYRELOG_E_OK);
+  wyl_service_auth_write_lease_free (lease);
+  g_thread_join (reload_thread);
+
+  g_assert_cmpint (reload.rc, ==, WYRELOG_E_OK);
+  g_assert_true (old_read_engine != wyl_handle_get_read_engine (handle));
+  g_object_unref (old_read_engine);
+  gboolean exists = FALSE;
+  g_assert_cmpint (wyl_policy_store_direct_permission_exists (store,
+          "svc:reload-race", "site.reload-race.basic", "scope", &exists), ==,
+      WYRELOG_E_OK);
+  g_assert_true (exists);
+  WylServiceAuthUnavailableReason reason = WYL_SERVICE_AUTH_UNAVAILABLE_NONE;
+  g_assert_cmpint (wyl_service_auth_authority_validate_available (authority,
+          handle, &reason), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (reason, ==,
+      WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE);
+
+  (void) g_remove (path);
+  remove_unsigned_template_tree (template_dir);
   (void) g_rmdir (dir);
 }
 
@@ -3337,6 +3561,9 @@ main (int argc, char **argv)
       test_permission_mutation_participant_is_atomic);
   g_test_add_func ("/service-auth/transaction/permission-remediation",
       test_permission_closure_remediation_is_typed_and_latched);
+  g_test_add_func
+      ("/service-auth/transaction/permission-remediation-reload-rollback",
+      test_permission_closure_reload_serializes_after_rollback);
   g_test_add_func ("/service-auth/transaction/write-intent",
       test_authority_transaction_write_intent);
   g_test_add_func ("/service-auth/transaction/service-exchange-intention",

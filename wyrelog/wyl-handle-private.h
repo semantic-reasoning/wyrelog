@@ -237,6 +237,36 @@ wyrelog_error_t wyl_handle_reload_engine_pair (WylHandle * self);
 wyrelog_error_t wyl_handle_reload_engine_pair_with_service_auth_write
     (WylHandle * self, WylServiceAuthWriteLease * write_lease);
 
+typedef enum
+{
+  WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT = 0,
+  WYL_HANDLE_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP,
+  WYL_HANDLE_PERMISSION_REMEDIATION_REMOVE_INHERITANCE,
+  WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION,
+} WylHandlePermissionRemediationAction;
+
+typedef struct
+{
+  WylHandlePermissionRemediationAction action;
+  const gchar *subject_or_child_role_id;
+  const gchar *permission_or_role_id;
+  const gchar *scope;
+  const gchar *audit_id;
+  gint64 audit_created_at_us;
+} WylHandlePermissionRemediation;
+
+/*
+ * Production recovery surface for an unsafe service-permission closure.
+ * Acquisition is possible only while the handle is latched for that exact
+ * reason. Every action is an exact removal; the complete batch and its durable
+ * audit rows commit atomically under the service-authority WRITE domain. A
+ * batch is required because commit validates the complete repaired closure.
+ */
+wyrelog_error_t wyl_handle_remediate_service_permission_closure_batch
+    (WylHandle * self, const WylHandlePermissionRemediation * remediations,
+    gsize n_remediations,
+    const gchar * actor_subject_id, const gchar * request_id);
+
 /*
  * Interns @symbol into both handle-owned policy engines and returns the shared
  * integer id. Rejected unless the engine pair is already open.

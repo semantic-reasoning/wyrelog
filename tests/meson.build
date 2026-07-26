@@ -1174,6 +1174,9 @@ test('daemon-auth-registry', test_daemon_auth_registry)
 
 test_service_auth_coordination = executable('test-service-auth-coordination',
   'test-service-auth-coordination.c',
+  c_args : [
+    '-DWYL_TEST_TEMPLATE_DIR="' + meson.project_source_root() / 'templates' / 'access' + '"',
+  ],
   include_directories : [wyrelog_inc, include_directories('../wyrelog')],
   dependencies : [wyrelog_dep, sqlite_dep],
 )

@@ -2226,6 +2226,27 @@ check_store_enforces_service_permission_planes (void)
           "site.control-parent") != WYRELOG_E_POLICY)
     return 113;
 
+  /* A damaged service-shaped membership is service authority even when the
+   * service_principals row is missing. It must close both role-permission and
+   * inheritance mutation gates rather than being reinterpreted as human. */
+  if (wyl_policy_store_upsert_role (store, "site.dangling-role",
+          "dangling service role") != WYRELOG_E_OK)
+    return 119;
+  if (sqlite3_exec (wyl_policy_store_get_db (store),
+          "INSERT INTO role_memberships(subject_id,role_id,scope)"
+          " VALUES('svc:dangling-member','site.dangling-role','svc-scope');",
+          NULL, NULL, NULL) != SQLITE_OK)
+    return 120;
+  if (wyl_policy_store_grant_role_permission (store, "site.dangling-role",
+          "wr.policy.write") != WYRELOG_E_POLICY)
+    return 121;
+  if (wyl_policy_store_grant_role_permission (store, "site.dangling-role",
+          "wr.stream.read") != WYRELOG_E_BUSY)
+    return 122;
+  if (wyl_policy_store_grant_role_inheritance (store, "site.dangling-role",
+          "site.control-parent") != WYRELOG_E_POLICY)
+    return 123;
+
   return 0;
 }
 

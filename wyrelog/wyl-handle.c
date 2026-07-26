@@ -2235,10 +2235,17 @@ wyl_handle_reload_engine_pair (WylHandle *self)
   if (availability_rc == WYRELOG_E_BUSY
       && unavailable ==
       WYL_SERVICE_AUTH_UNAVAILABLE_UNSAFE_PERMISSION_CLOSURE) {
-    g_autofree gchar *template_dir = g_strdup (self->template_dir);
-    wyrelog_error_t rc = replace_engine_pair (self, template_dir);
+    WylServiceAuthWriteLease *lease = NULL;
+    wyrelog_error_t rc =
+        wyl_service_auth_authority_acquire_permission_remediation_write
+        (self->service_auth_authority, self, NULL, &lease);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+    rc = wyl_handle_reload_engine_pair_with_service_auth_write (self, lease);
+    wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
     if (rc == WYRELOG_E_OK)
-      self->engine_pair_poisoned = FALSE;
+      rc = release_rc;
+    wyl_service_auth_write_lease_free (lease);
     return rc;
   }
   if (availability_rc != WYRELOG_E_OK)
@@ -2250,6 +2257,92 @@ wyl_handle_reload_engine_pair (WylHandle *self)
   if (rc != WYRELOG_E_OK)
     return rc;
   rc = wyl_handle_reload_engine_pair_with_service_auth_write (self, lease);
+  wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
+  if (rc == WYRELOG_E_OK)
+    rc = release_rc;
+  wyl_service_auth_write_lease_free (lease);
+  return rc;
+}
+
+static wyrelog_error_t
+permission_remediation_action_map (WylHandlePermissionRemediationAction action,
+    WylPolicyPermissionRemediationAction *out_action)
+{
+  if (out_action == NULL)
+    return WYRELOG_E_INVALID;
+  switch (action) {
+    case WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT:
+      *out_action = WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT;
+      return WYRELOG_E_OK;
+    case WYL_HANDLE_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP:
+      *out_action = WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP;
+      return WYRELOG_E_OK;
+    case WYL_HANDLE_PERMISSION_REMEDIATION_REMOVE_INHERITANCE:
+      *out_action = WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE;
+      return WYRELOG_E_OK;
+    case WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION:
+      *out_action = WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION;
+      return WYRELOG_E_OK;
+    default:
+      return WYRELOG_E_INVALID;
+  }
+}
+
+wyrelog_error_t
+wyl_handle_remediate_service_permission_closure_batch (WylHandle *self,
+    const WylHandlePermissionRemediation *remediations,
+    gsize n_remediations,
+    const gchar *actor_subject_id, const gchar *request_id)
+{
+  if (!WYL_IS_HANDLE (self) || remediations == NULL || n_remediations == 0
+      || actor_subject_id == NULL || request_id == NULL)
+    return WYRELOG_E_INVALID;
+
+  for (gsize i = 0; i < n_remediations; i++) {
+    const WylHandlePermissionRemediation *item = &remediations[i];
+    if (item->action < WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_DIRECT
+        || item->action >
+        WYL_HANDLE_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION
+        || item->subject_or_child_role_id == NULL
+        || item->permission_or_role_id == NULL || item->audit_id == NULL
+        || item->audit_created_at_us <= 0)
+      return WYRELOG_E_INVALID;
+  }
+
+  WylServiceAuthWriteLease *lease = NULL;
+  wyrelog_error_t rc =
+      wyl_service_auth_authority_acquire_permission_remediation_write
+      (self->service_auth_authority, self, NULL, &lease);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+
+  wyl_policy_store_t *store = NULL;
+  WylServiceAuthorityTransaction *txn = NULL;
+  rc = wyl_service_auth_write_lease_get_policy_store (lease, self, &store);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_begin (store, self,
+        lease, &txn);
+  for (gsize i = 0; rc == WYRELOG_E_OK && i < n_remediations; i++) {
+    const WylHandlePermissionRemediation *item = &remediations[i];
+    WylPolicyPermissionRemediationAction store_action;
+    rc = permission_remediation_action_map (item->action, &store_action);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_policy_store_service_authority_remediate_permission_closure (txn,
+          store, store_action, item->subject_or_child_role_id,
+          item->permission_or_role_id, item->scope, item->audit_id,
+          item->audit_created_at_us, actor_subject_id, request_id);
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_policy_store_service_authority_transaction_commit (txn);
+  else if (txn != NULL) {
+    wyrelog_error_t rollback_rc =
+        wyl_policy_store_service_authority_transaction_rollback (txn);
+    if (rollback_rc != WYRELOG_E_OK)
+      rc = rollback_rc;
+  }
+  if (txn != NULL)
+    wyl_policy_store_service_authority_transaction_free (txn);
+
   wyrelog_error_t release_rc = wyl_service_auth_write_lease_release (lease);
   if (rc == WYRELOG_E_OK)
     rc = release_rc;

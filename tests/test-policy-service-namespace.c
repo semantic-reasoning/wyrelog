@@ -261,14 +261,16 @@ test_authorization_is_kind_aware (void)
       WYRELOG_E_POLICY);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "svc:registered", "app.reader", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+          "svc:registered", "app.reader", "tenant-a", TRUE), ==,
+      WYRELOG_E_BUSY);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:registered", "app.read", "tenant-a", TRUE), ==, WYRELOG_E_OK);
+          "svc:registered", "app.read", "tenant-a", TRUE), ==,
+      WYRELOG_E_POLICY);
   gboolean has_permission = FALSE;
   g_assert_cmpint (wyl_policy_store_subject_has_permission (store,
           "svc:registered", "app.read", "tenant-a", &has_permission), ==,
       WYRELOG_E_OK);
-  g_assert_true (has_permission);
+  g_assert_false (has_permission);
   g_assert_cmpint (wyl_policy_store_validate_service_schema (store), ==,
       WYRELOG_E_OK);
 
@@ -322,12 +324,13 @@ test_destructive_remediation (void)
           &kind), ==, WYRELOG_E_OK);
   g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_UNKNOWN);
 
-  /* Audit failure occurs after delete + event append.  The wrapper must roll
-   * both back so repair can be retried without a torn event. */
+  /* Legacy service-shaped rows are no longer repairable through ordinary
+   * low-level mutation wrappers, even when the supplied audit shape is bad.
+   * Recovery must use the typed handle remediation surface. */
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation_with_audit
       (store, "svc:legacy", "app.read", "tenant-a", FALSE, "not-an-audit-id", 1,
           "repair-admin", "permission.revoke", "svc:legacy", NULL, NULL,
-          "repair-request", WYL_DECISION_ALLOW), ==, WYRELOG_E_INVALID);
+          "repair-request", WYL_DECISION_ALLOW), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM direct_permissions WHERE subject_id=?;",
           "svc:legacy"), ==, 1);
@@ -336,22 +339,22 @@ test_destructive_remediation (void)
           "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 0);
 
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
-          "svc:legacy", "app.read", "tenant-a", FALSE), ==, WYRELOG_E_OK);
+          "svc:legacy", "app.read", "tenant-a", FALSE), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM direct_permissions WHERE subject_id=?;",
-          "svc:legacy"), ==, 0);
+          "svc:legacy"), ==, 1);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM direct_permission_events "
-          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 1);
+          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 0);
 
   g_assert_cmpint (wyl_policy_store_apply_role_membership_mutation (store,
-          "svc:legacy", "app.reader", "tenant-a", FALSE), ==, WYRELOG_E_OK);
+          "svc:legacy", "app.reader", "tenant-a", FALSE), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM role_memberships WHERE subject_id=?;",
-          "svc:legacy"), ==, 0);
+          "svc:legacy"), ==, 1);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM role_membership_events "
-          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 1);
+          "WHERE subject_id=? AND operation='revoke';", "svc:legacy"), ==, 0);
 
   exec_fixture_sql (store,
       "INSERT INTO direct_permissions(subject_id,perm_id,scope,granted_at) "
@@ -361,17 +364,16 @@ test_destructive_remediation (void)
           "svc:registered", &kind), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_policy_store_apply_direct_permission_mutation (store,
           "svc:registered", "wr.login.skip_mfa", "login", FALSE), ==,
-      WYRELOG_E_OK);
+      WYRELOG_E_BUSY);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM direct_permissions WHERE subject_id=? "
-          "AND perm_id='wr.login.skip_mfa';", "svc:registered"), ==, 0);
+          "AND perm_id='wr.login.skip_mfa';", "svc:registered"), ==, 1);
   g_assert_cmpint (count_subject_rows (store,
           "SELECT count(*) FROM direct_permission_events "
           "WHERE subject_id=? AND perm_id='wr.login.skip_mfa' "
-          "AND operation='revoke';", "svc:registered"), ==, 1);
+          "AND operation='revoke';", "svc:registered"), ==, 0);
   g_assert_cmpint (wyl_policy_store_get_principal_kind (store,
-          "svc:registered", &kind), ==, WYRELOG_E_OK);
-  g_assert_cmpint (kind, ==, WYL_POLICY_PRINCIPAL_KIND_SERVICE);
+          "svc:registered", &kind), ==, WYRELOG_E_POLICY);
 
   exec_fixture_sql (store,
       "INSERT INTO totp_enrollments(subject_id,secret_blob,last_verified_step,"

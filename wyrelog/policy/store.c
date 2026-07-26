@@ -1956,7 +1956,9 @@ role_has_service_principal_descendants (wyl_policy_store_t *store,
       ") "
       "SELECT 1 FROM role_desc rd "
       "JOIN role_memberships rm ON rm.role_id = rd.role_id "
-      "JOIN service_principals sp ON sp.subject_id = rm.subject_id " "LIMIT 1;";
+      "LEFT JOIN service_principals sp ON sp.subject_id = rm.subject_id "
+      "WHERE sp.subject_id IS NOT NULL "
+      "   OR substr(rm.subject_id, 1, 4) = 'svc:' " "LIMIT 1;";
   wyrelog_error_t rc = prepare_stmt (store->db, sql, &stmt);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -14232,6 +14234,23 @@ service_authority_transaction_fail_participant (WylServiceAuthorityTransaction
   }
 }
 
+static const gchar *
+permission_remediation_action_name (WylPolicyPermissionRemediationAction action)
+{
+  switch (action) {
+    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_DIRECT:
+      return "revoke_direct";
+    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_MEMBERSHIP:
+      return "remove_membership";
+    case WYL_POLICY_PERMISSION_REMEDIATION_REMOVE_INHERITANCE:
+      return "remove_inheritance";
+    case WYL_POLICY_PERMISSION_REMEDIATION_REVOKE_ROLE_PERMISSION:
+      return "revoke_role_permission";
+    default:
+      return NULL;
+  }
+}
+
 wyrelog_error_t
     wyl_policy_store_service_authority_transaction_enter_participant
     (WylServiceAuthorityTransaction * txn, wyl_policy_store_t * expected_store)
@@ -14326,11 +14345,18 @@ wyrelog_error_t
         subject_or_child_role_id, permission_or_role_id, scope, "revoke");
   if (rc == WYRELOG_E_OK) {
     gboolean inserted = FALSE;
-    rc = wyl_policy_store_append_audit_event_full (store, audit_id,
-        audit_created_at_us, actor_subject_id,
-        "service.permission_closure.remediate",
-        subject_or_child_role_id, NULL, NULL, request_id, WYL_DECISION_ALLOW,
-        &inserted);
+    const gchar *action_name = permission_remediation_action_name (action);
+    g_autofree gchar *tuple =
+        g_strdup_printf ("right=%s;scope=%s", permission_or_role_id,
+        scope != NULL ? scope : "");
+    if (action_name == NULL || tuple == NULL)
+      rc = WYRELOG_E_INVALID;
+    else
+      rc = wyl_policy_store_append_audit_event_full (store, audit_id,
+          audit_created_at_us, actor_subject_id,
+          "service.permission_closure.remediate",
+          subject_or_child_role_id, action_name, tuple, request_id,
+          WYL_DECISION_ALLOW, &inserted);
     if (rc == WYRELOG_E_OK && !inserted)
       rc = WYRELOG_E_POLICY;
   }
