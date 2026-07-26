@@ -12,6 +12,7 @@
 #include "auth/service-credential-operation-coordinator-storage-private.h"
 #include "auth/service-credential-domain-private.h"
 #include "auth/service-credential-private.h"
+#include "daemon/auth-registry-private.h"
 #include "wyrelog/wyl-handle-private.h"
 #include "wyl-session-layout-private.h"
 #include "wyl-request-id-private.h"
@@ -19,6 +20,9 @@
 #include "test-service-credential-operation-root.h"
 
 #define ROTATE_CANONICAL_ID "wlc_000000000000000000000000000"
+
+G_DEFINE_AUTOPTR_CLEANUP_FUNC (WylServiceAuthRegistry,
+    wyl_service_auth_registry_unref);
 
 #ifdef WYL_HAS_AUDIT
 #define HANDOFF_DECISION_AUDIT_DELTA(n) (n)
@@ -1955,6 +1959,9 @@ test_handoff_automatic_maintenance_gate (void)
   g_auto (Fixture) fixture = { 0 };
   fixture_init (&fixture);
   WylHandle *handle = fixture.handle;
+  g_autoptr (WylServiceAuthRegistry) remediation_registry = NULL;
+  g_assert_cmpint (wyl_service_auth_registry_new (&remediation_registry), ==,
+      WYRELOG_E_OK);
   prepare_authority (handle, "svc:handoff:executor");
   g_autoptr (WylSession) session = handoff_human_session_new ("admin",
       "tenant-a");
@@ -2157,6 +2164,7 @@ test_handoff_automatic_maintenance_gate (void)
       };
       wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
         .authorization = &remediation_authority,
+        .registry = remediation_registry,
       };
       wyl_service_credential_handoff_remediation_result_t
           remediation_result = { 0 };
@@ -2253,6 +2261,7 @@ test_handoff_automatic_maintenance_gate (void)
       };
       wyl_service_credential_handoff_remediation_runtime_t remediation_runtime = {
         .authorization = &remediation_authority,
+        .registry = remediation_registry,
       };
       wyl_service_credential_handoff_remediation_result_t
           remediation_result = { 0 };
