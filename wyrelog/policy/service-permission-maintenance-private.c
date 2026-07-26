@@ -22,6 +22,7 @@
 #include "wyrelog/wyl-id-private.h"
 
 #ifdef G_OS_WIN32
+#include <aclapi.h>
 #include <sddl.h>
 #include <windows.h>
 #else
@@ -569,6 +570,158 @@ win_out:
   close (dirfd);
   return rc;
 #endif
+}
+
+wyrelog_error_t
+wyl_service_permission_manifest_read_owner_only (const gchar *path,
+    WylServicePermissionManifest *out_manifest)
+{
+  if (path == NULL || path[0] == '\0' || out_manifest == NULL)
+    return WYRELOG_E_INVALID;
+  memset (out_manifest, 0, sizeof *out_manifest);
+  gchar *document = g_malloc (WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1);
+  if (document == NULL)
+    return WYRELOG_E_NOMEM;
+  gsize len = 0;
+  wyrelog_error_t rc = WYRELOG_E_OK;
+#ifdef G_OS_WIN32
+  g_autofree wchar_t *wide_path =
+      (wchar_t *) g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  if (wide_path == NULL) {
+    rc = WYRELOG_E_INVALID;
+    goto out;
+  }
+  HANDLE file =
+      CreateFileW (wide_path, GENERIC_READ | READ_CONTROL, FILE_SHARE_READ,
+      NULL, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+  if (file == INVALID_HANDLE_VALUE) {
+    rc = GetLastError () == ERROR_FILE_NOT_FOUND ? WYRELOG_E_NOT_FOUND :
+        WYRELOG_E_IO;
+    goto out;
+  }
+  BY_HANDLE_FILE_INFORMATION info;
+  PSID owner = NULL;
+  PACL dacl = NULL;
+  PSECURITY_DESCRIPTOR descriptor = NULL;
+  HANDLE token = NULL;
+  DWORD needed = 0;
+  TOKEN_USER *user = NULL;
+  if (!GetFileInformationByHandle (file, &info)
+      || (info.dwFileAttributes &
+          (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY))
+      || info.nNumberOfLinks != 1
+      || GetSecurityInfo (file, SE_FILE_OBJECT,
+          OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+          &owner, NULL, &dacl, NULL, &descriptor) != ERROR_SUCCESS
+      || !OpenProcessToken (GetCurrentProcess (), TOKEN_QUERY, &token)) {
+    rc = WYRELOG_E_POLICY;
+    goto win_out;
+  }
+  GetTokenInformation (token, TokenUser, NULL, 0, &needed);
+  if (GetLastError () != ERROR_INSUFFICIENT_BUFFER || needed == 0) {
+    rc = WYRELOG_E_POLICY;
+    goto win_out;
+  }
+  user = g_malloc (needed);
+  SECURITY_DESCRIPTOR_CONTROL control = 0;
+  DWORD revision = 0;
+  ACL_SIZE_INFORMATION acl_info = { 0 };
+  LPVOID ace = NULL;
+  if (user == NULL
+      || !GetTokenInformation (token, TokenUser, user, needed, &needed)
+      || !EqualSid (owner, user->User.Sid)
+      || !GetSecurityDescriptorControl (descriptor, &control, &revision)
+      || (control & SE_DACL_PROTECTED) == 0 || dacl == NULL
+      || !GetAclInformation (dacl, &acl_info, sizeof acl_info,
+          AclSizeInformation) || acl_info.AceCount != 1
+      || !GetAce (dacl, 0, &ace)
+      || ((ACE_HEADER *) ace)->AceType != ACCESS_ALLOWED_ACE_TYPE
+      || !EqualSid (&((ACCESS_ALLOWED_ACE *) ace)->SidStart, owner)) {
+    rc = WYRELOG_E_POLICY;
+    goto win_out;
+  }
+  while (len <= WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES) {
+    DWORD got = 0;
+    DWORD capacity = (DWORD) MIN ((gsize) 0x10000,
+        WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1 - len);
+    if (!ReadFile (file, document + len, capacity, &got, NULL)) {
+      rc = WYRELOG_E_IO;
+      goto win_out;
+    }
+    if (got == 0)
+      break;
+    len += got;
+  }
+win_out:
+  g_free (user);
+  if (token != NULL)
+    CloseHandle (token);
+  if (descriptor != NULL)
+    LocalFree (descriptor);
+  CloseHandle (file);
+#else
+  g_autofree gchar *absolute = g_canonicalize_filename (path, NULL);
+  g_autofree gchar *parent = g_path_get_dirname (absolute);
+  g_autofree gchar *basename = g_path_get_basename (absolute);
+  gchar *resolved_parent = realpath (parent, NULL);
+  if (resolved_parent == NULL) {
+    rc = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+    goto out;
+  }
+  int dirfd = open (resolved_parent, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  g_free (resolved_parent);
+  if (dirfd < 0) {
+    rc = WYRELOG_E_IO;
+    goto out;
+  }
+  struct stat parent_stat;
+  if (fstat (dirfd, &parent_stat) != 0 || !S_ISDIR (parent_stat.st_mode)
+      || parent_stat.st_uid != geteuid ()
+      || (parent_stat.st_mode & 0077) != 0) {
+    close (dirfd);
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  int fd = openat (dirfd, basename, O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
+  close (dirfd);
+  if (fd < 0) {
+    rc = errno == ENOENT ? WYRELOG_E_NOT_FOUND :
+        errno == ELOOP ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    goto out;
+  }
+  struct stat file_stat;
+  if (fstat (fd, &file_stat) != 0 || !S_ISREG (file_stat.st_mode)
+      || file_stat.st_nlink != 1 || file_stat.st_uid != geteuid ()
+      || (file_stat.st_mode & 0077) != 0) {
+    close (fd);
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  while (len <= WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES) {
+    ssize_t got = read (fd, document + len,
+        WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1 - len);
+    if (got < 0 && errno == EINTR)
+      continue;
+    if (got < 0) {
+      rc = WYRELOG_E_IO;
+      break;
+    }
+    if (got == 0)
+      break;
+    len += (gsize) got;
+  }
+  close (fd);
+#endif
+  if (rc == WYRELOG_E_OK
+      && (len == 0 || len > WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_service_permission_manifest_decode (document, len, out_manifest);
+out:
+  sodium_memzero (document, WYL_SERVICE_PERMISSION_MANIFEST_V1_MAX_BYTES + 1);
+  g_free (document);
+  return rc;
 }
 
 wyrelog_error_t

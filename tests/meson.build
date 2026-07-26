@@ -479,6 +479,23 @@ if build_client and host_machine.system() != 'windows'
     timeout : 60,
   )
 
+  test_wyctl_service_permission_closure = executable(
+    'test-wyctl-service-permission-closure',
+    'test-wyctl-service-permission-closure.c',
+    c_args : [
+      '-DWYL_TEST_WYCTL_PATH="' + wyctl_exe.full_path() + '"',
+    ],
+    include_directories : [wyrelog_inc, include_directories('../wyrelog')],
+    dependencies : [wyrelog_dep, glib_dep, gio_dep, sqlite_dep],
+  )
+
+  test('wyctl-service-permission-closure',
+    test_wyctl_service_permission_closure,
+    depends : [wyctl_exe, wyctl_gschemas_compiled],
+    env : wyctl_gsettings_test_env,
+    timeout : 60,
+  )
+
   test_wyctl_service_credential = executable('test-wyctl-service-credential',
     'test-wyctl-service-credential.c',
     c_args : [
