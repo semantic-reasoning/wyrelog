@@ -1506,6 +1506,7 @@ wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
 {
   if (!l || !evidence || !l->exclusive || !temp_token_valid (evidence->token))
     return WYRELOG_E_POLICY;
+  g_autofree gchar *name = NULL;
   g_mutex_lock (&l->mutex);
   wyrelog_error_t r = lease_revalidate_unlocked (l);
   if (r != WYRELOG_E_OK)
@@ -1517,7 +1518,7 @@ wyl_fact_artifact_mutation_lease_recover_temp (WylFactArtifactMutationLease *l,
     r = WYRELOG_E_POLICY;
     goto done;
   }
-  g_autofree gchar *name = g_strdup_printf ("tmp-%s", evidence->token);
+  name = g_strdup_printf ("tmp-%s", evidence->token);
   struct stat artifact;
   if (fstatat (l->namespace_->fd, name, &artifact, AT_SYMLINK_NOFOLLOW) != 0) {
     r = errno == ENOENT ? WYRELOG_E_OK : WYRELOG_E_IO;
