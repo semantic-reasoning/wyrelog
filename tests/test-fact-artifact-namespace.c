@@ -89,6 +89,42 @@ test_remove_fixed_artifact (const gchar *graph_path, WylFactArtifactName name)
   g_assert_cmpint (unlink (path), ==, 0);
 }
 
+/* Tests model the caller's already-held canonical main artifact.  The
+ * namespace must import a duplicate; this helper clears the caller handle
+ * immediately after construction to prove ownership was not transferred. */
+static wyrelog_error_t
+open_namespace (const WylFactGraphDirectory *directory,
+    WylFactArtifactNamespace **out_namespace)
+{
+  if (out_namespace)
+    *out_namespace = NULL;
+  if (!directory || !out_namespace)
+    return WYRELOG_E_INVALID;
+  gint fd = openat (directory->graph_fd, "facts.duckdb",
+      O_CREAT | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return WYRELOG_E_IO;
+  if (fchmod (fd, 0600) != 0) {
+    close (fd);
+    return WYRELOG_E_IO;
+  }
+  struct stat stat_;
+  if (fstat (fd, &stat_) != 0 || !S_ISREG (stat_.st_mode)
+      || stat_.st_nlink != 1 || (stat_.st_mode & 07777) != 0600) {
+    close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  WylFactGraphRegularFile main = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  main.fd = fd;
+  main.device = stat_.st_dev;
+  main.inode = stat_.st_ino;
+  main.size_bytes = stat_.st_size;
+  wyrelog_error_t result = wyl_fact_artifact_namespace_open (directory,
+      &main, out_namespace);
+  wyl_fact_graph_regular_file_clear (&main);
+  return result;
+}
+
 typedef struct
 {
   pid_t pid;
@@ -109,8 +145,7 @@ start_lease_holder_process (const WylFactGraphDirectory *directory,
     close (release[1]);
     WylFactArtifactNamespace *namespace_ = NULL;
     WylFactArtifactMutationLease *lease = NULL;
-    wyrelog_error_t result = wyl_fact_artifact_namespace_open (directory,
-        &namespace_);
+    wyrelog_error_t result = open_namespace (directory, &namespace_);
     if (result == WYRELOG_E_OK)
       result = exclusive
           ? wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,
@@ -166,8 +201,7 @@ attempt_lease_in_fresh_process (const WylFactGraphDirectory *directory,
     close (result_pipe[0]);
     WylFactArtifactNamespace *namespace_ = NULL;
     WylFactArtifactMutationLease *lease = NULL;
-    wyrelog_error_t result = wyl_fact_artifact_namespace_open (directory,
-        &namespace_);
+    wyrelog_error_t result = open_namespace (directory, &namespace_);
     if (result == WYRELOG_E_OK)
       result = exclusive
           ? wyl_fact_artifact_namespace_acquire_mutation_lease (namespace_,
@@ -217,8 +251,8 @@ open_namespace_race_worker (gpointer data)
   while (!race->start)
     g_cond_wait (&race->condition, &race->mutex);
   g_mutex_unlock (&race->mutex);
-  race->results[worker->index] = wyl_fact_artifact_namespace_open
-      (race->directory, &race->namespaces[worker->index]);
+  race->results[worker->index] = open_namespace (race->directory,
+      &race->namespaces[worker->index]);
   return NULL;
 }
 
@@ -301,8 +335,7 @@ test_mutation_leases (void)
   mode_t old_umask = umask (0777);
   wyl_fact_artifact_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &faulted), ==,
-      WYRELOG_E_IO);
+  g_assert_cmpint (open_namespace (&d, &faulted), ==, WYRELOG_E_IO);
   umask (old_umask);
   g_assert_null (faulted);
   g_assert_cmpint (count_open_fds (), ==, fd_count);
@@ -311,31 +344,26 @@ test_mutation_leases (void)
   g_assert_true (S_ISREG (lock_stat.st_mode));
   g_assert_cmpint (lock_stat.st_mode & 07777, ==, 0600);
 
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &faulted), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &faulted), ==, WYRELOG_E_OK);
   wyl_fact_artifact_namespace_free (faulted);
   faulted = (gpointer) 0x1;
   fd_count = count_open_fds ();
   wyl_fact_artifact_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_DIRECTORY_FSYNC);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &faulted), ==,
-      WYRELOG_E_IO);
+  g_assert_cmpint (open_namespace (&d, &faulted), ==, WYRELOG_E_IO);
   g_assert_null (faulted);
   g_assert_cmpint (count_open_fds (), ==, fd_count);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &faulted), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &faulted), ==, WYRELOG_E_OK);
   wyl_fact_artifact_namespace_free (faulted);
 
   faulted = (gpointer) 0x1;
   fd_count = count_open_fds ();
   wyl_fact_artifact_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &faulted), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &faulted), ==, WYRELOG_E_POLICY);
   g_assert_null (faulted);
   g_assert_cmpint (count_open_fds (), ==, fd_count);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &faulted), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &faulted), ==, WYRELOG_E_OK);
   wyl_fact_artifact_namespace_free (faulted);
 
   /* Run all fork coverage before creating any test threads and never inherit
@@ -384,7 +412,7 @@ test_mutation_leases (void)
   wyl_fact_artifact_namespace_free (race.namespaces[1]);
   g_cond_clear (&race.condition);
   g_mutex_clear (&race.mutex);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &n), ==, WYRELOG_E_OK);
   gint fd = 42;
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
           WYL_FACT_ARTIFACT_LOCK, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
@@ -433,7 +461,7 @@ test_mutation_leases (void)
   g_assert_cmpint (mutation_workers[0].result, ==, WYRELOG_E_POLICY);
   g_assert_cmpint (mutation_workers[1].result, ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (writer,
-          WYL_FACT_ARTIFACT_MAIN, TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
+          WYL_FACT_ARTIFACT_MAIN, FALSE, FALSE, &fd), ==, WYRELOG_E_OK);
   close (fd);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (writer,
           "reader-temp", TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
@@ -471,8 +499,7 @@ test_mutation_leases (void)
   /* A lease retains its namespace even when the caller releases its handle. */
   WylFactArtifactNamespace *lifetime = NULL;
   WylFactArtifactMutationLease *lifetime_guard = NULL;
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &lifetime), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &lifetime), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard (lifetime,
           &lifetime_guard), ==, WYRELOG_E_OK);
   wyl_fact_artifact_namespace_free (lifetime);
@@ -496,8 +523,7 @@ test_mutation_leases (void)
 
   /* A live pin rejects a replacement for every namespace in this process. */
   WylFactArtifactNamespace *fresh = NULL;
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_POLICY);
   g_assert_null (fresh);
   wyl_fact_artifact_namespace_free (n);
 
@@ -508,35 +534,29 @@ test_mutation_leases (void)
   g_assert_cmpint (fd >= 0, ==, TRUE);
   g_assert_cmpint (fchmod (fd, 0644), ==, 0);
   close (fd);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_POLICY);
   g_assert_null (fresh);
   g_assert_cmpint (unlink (lock_path), ==, 0);
   g_assert_cmpint (mkdir (lock_path, 0700), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_POLICY);
   g_assert_null (fresh);
   g_assert_cmpint (rmdir (lock_path), ==, 0);
   g_assert_cmpint (symlink ("facts.duckdb", lock_path), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_POLICY);
   g_assert_null (fresh);
   g_assert_cmpint (unlink (lock_path), ==, 0);
   g_autofree gchar *main_path = g_build_filename (graph_path,
       "facts.duckdb", NULL);
   g_assert_cmpint (link (main_path, lock_path), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_POLICY);
   g_assert_null (fresh);
   g_assert_cmpint (unlink (lock_path), ==, 0);
   g_assert_cmpint (mkfifo (lock_path, 0600), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_POLICY);
   g_assert_null (fresh);
   g_assert_cmpint (unlink (lock_path), ==, 0);
 
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &fresh), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &fresh), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard (fresh,
           &reader_a), ==, WYRELOG_E_OK);
   const mode_t invalid_directory_modes[] = { 0755, 0770, 0777 };
@@ -545,8 +565,7 @@ test_mutation_leases (void)
     g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (reader_a), ==,
         WYRELOG_E_POLICY);
     WylFactArtifactNamespace *rejected = (gpointer) 0x1;
-    g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &rejected), ==,
-        WYRELOG_E_POLICY);
+    g_assert_cmpint (open_namespace (&d, &rejected), ==, WYRELOG_E_POLICY);
     g_assert_null (rejected);
     g_assert_cmpint (chmod (graph_path, 0700), ==, 0);
     g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (reader_a), ==,
@@ -607,7 +626,7 @@ test_namespace (void)
   WylFactGraphDirectory d = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactArtifactNamespace *n = NULL;
 #ifdef G_OS_WIN32
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &n), ==,
+  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, NULL, &n), ==,
       WYRELOG_E_POLICY);
 #else
   gchar *root = make_root ();
@@ -618,16 +637,36 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&r, &l, TRUE, &d),
       ==, WYRELOG_E_OK);
   g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path (&d);
-  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&d, &n), ==, WYRELOG_E_OK);
+  /* Construction imports, rather than consumes, a held canonical main fd;
+   * declared identity must agree before the namespace becomes observable. */
+  WylFactGraphRegularFile imported = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  imported.fd = openat (d.graph_fd, "facts.duckdb",
+      O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
+  g_assert_cmpint (imported.fd >= 0, ==, TRUE);
+  struct stat imported_stat;
+  g_assert_cmpint (fstat (imported.fd, &imported_stat), ==, 0);
+  imported.device = imported_stat.st_dev;
+  imported.inode = imported_stat.st_ino;
+  imported.size_bytes = imported_stat.st_size;
+  WylFactGraphRegularFile forged = imported;
+  forged.inode++;
+  WylFactArtifactNamespace *rejected = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &forged, &rejected),
+      ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  WylFactArtifactNamespace *imported_namespace = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &imported,
+          &imported_namespace), ==, WYRELOG_E_OK);
+  wyl_fact_graph_regular_file_clear (&imported);
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (imported_namespace),
+      ==, WYRELOG_E_OK);
+  wyl_fact_artifact_namespace_free (imported_namespace);
   WylFactArtifactMutationLease *lease = NULL;
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
           &lease), ==, WYRELOG_E_OK);
   gint fd = -1;
-  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
-          WYL_FACT_ARTIFACT_MAIN, TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
-  close (fd);
-  g_assert_cmpint (wyl_fact_artifact_namespace_bind_main (n), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate_main (n), ==,
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (n), ==,
       WYRELOG_E_OK);
   WylFactArtifactSidecarBinding *sidecar = (gpointer) 0x1;
   fd = 42;
@@ -728,7 +767,7 @@ test_namespace (void)
       (sidecar, WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (unlink (bound_main_path), ==, 0);
   g_assert_cmpint (rename (saved_main_path, bound_main_path), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate_main (n), ==,
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (n), ==,
       WYRELOG_E_OK);
   test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_WAL);
   wyl_fact_artifact_sidecar_binding_free (sidecar);

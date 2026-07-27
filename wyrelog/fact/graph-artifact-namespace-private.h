@@ -41,8 +41,13 @@ typedef enum
 void wyl_fact_artifact_namespace_set_test_fault
     (WylFactArtifactNamespaceTestFault fault);
 
+/* Imports a CLOEXEC duplicate of the caller-held canonical facts.duckdb
+ * identity.  The caller retains ownership of main_file; construction checks
+ * the held fd, declared identity, and dirfd-relative fixed name before and
+ * after publishing the namespace. */
 wyrelog_error_t wyl_fact_artifact_namespace_open
     (const WylFactGraphDirectory * directory,
+    const WylFactGraphRegularFile * main_file,
     WylFactArtifactNamespace ** out_namespace);
 void wyl_fact_artifact_namespace_free (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_revalidate
@@ -161,10 +166,6 @@ wyrelog_error_t wyl_fact_artifact_namespace_sync
  * descriptors cannot carry the namespace lifetime/identity invariants. */
 wyrelog_error_t wyl_fact_artifact_namespace_lock
     (WylFactArtifactNamespace * namespace_, gboolean exclusive, gint * out_fd);
-wyrelog_error_t wyl_fact_artifact_namespace_bind_main
-    (WylFactArtifactNamespace * namespace_);
-wyrelog_error_t wyl_fact_artifact_namespace_revalidate_main
-    (WylFactArtifactNamespace * namespace_);
 wyrelog_error_t wyl_fact_artifact_namespace_open_temp
     (WylFactArtifactNamespace * namespace_, const gchar * token,
     gboolean create, gboolean writable, gint * out_fd);
