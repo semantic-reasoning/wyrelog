@@ -1576,7 +1576,17 @@ test_recording_filesystem_rw_writer_contention (void)
       "{\"exception_type\":\"IO\",\"exception_message\":\"Could not set lock on file \\\""));
   guint failed_main_write_locks = 0;
   const std::string main_path = database.string ();
+  const std::string configured_home = root.string ();
+  const std::string secret_root = configured_home + "/.duckdb";
+  const std::string secret_store = secret_root + "/stored_secrets";
   for (const auto &event : contender_recorder->events) {
+    if (event.path == configured_home || event.path == secret_root
+        || event.path == secret_store) {
+      g_assert_true (has_operation (event, "separator"));
+      g_assert_cmpint (event.outcome, ==, -1);
+      g_assert_true (event.error_class.empty ());
+      continue;
+    }
     if (event.path != main_path)
       g_error ("unexpected contender path: %s", event.path.c_str ());
     g_assert_true (event.outcome == -1 || event.outcome == 0);

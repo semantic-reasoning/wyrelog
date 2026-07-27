@@ -29,9 +29,12 @@ diff --git a/duckdb.cpp b/duckdb.cpp
 +	if (TryGetConfiguredHomeDirectory(opener, home_directory)) {
 +		return home_directory;
 +	}
- 	// fallback to the default home directories for the specified system
- #ifdef DUCKDB_WINDOWS
- 	return FileSystem::GetEnvVariable("USERPROFILE");
+-	// fallback to the default home directories for the specified system
+-#ifdef DUCKDB_WINDOWS
+-	return FileSystem::GetEnvVariable("USERPROFILE");
++	// fallback to the default home directories for the specified system
++#ifdef DUCKDB_WINDOWS
++	return FileSystem::GetEnvVariable("USERPROFILE");
 @@ -86973,3 +86980,7 @@
 -	string GetHomeDirectory() override {
 -		return FileSystem::GetHomeDirectory(GetOpener());
