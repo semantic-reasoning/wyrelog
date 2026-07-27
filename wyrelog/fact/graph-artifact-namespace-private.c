@@ -17,6 +17,10 @@ struct WylFactArtifactMutationLease
 {
   gint unused;
 };
+struct WylFactArtifactSidecarBinding
+{
+  gint unused;
+};
 static wyrelog_error_t
 closed (void)
 {
@@ -109,6 +113,35 @@ wyl_fact_artifact_mutation_lease_open_temp (WylFactArtifactMutationLease *l,
   if (o)
     *o = -1;
   return closed ();
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_mutation_lease_open_sidecar_binding
+    (WylFactArtifactMutationLease * l, WylFactArtifactName a, gboolean c,
+    gboolean w, WylFactArtifactSidecarBinding ** b, gint * o) {
+  (void) l;
+  (void) a;
+  (void) c;
+  (void) w;
+  if (b)
+    *b = NULL;
+  if (o)
+    *o = -1;
+  return closed ();
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_sidecar_binding_publish_no_replace
+    (WylFactArtifactSidecarBinding * b, WylFactArtifactName a) {
+  (void) b;
+  (void) a;
+  return closed ();
+}
+
+void
+wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *b)
+{
+  (void) b;
 }
 
 wyrelog_error_t
@@ -357,6 +390,14 @@ struct WylFactArtifactTempBinding
   gboolean creator;
   gboolean active;
 };
+struct WylFactArtifactSidecarBinding
+{
+  WylFactArtifactMutationLease *lease;
+  WylFactArtifactName sidecar;
+  gint pin_fd;
+  guint64 device, inode;
+  gboolean active;
+};
 struct WylFactArtifactTempRecoveryEvidence
 {
   gchar *token;
@@ -400,6 +441,13 @@ static gboolean
 valid (WylFactArtifactName n)
 {
   return n >= WYL_FACT_ARTIFACT_MAIN && n <= WYL_FACT_ARTIFACT_LOCK;
+}
+
+static gboolean
+sidecar_name (WylFactArtifactName n)
+{
+  return n == WYL_FACT_ARTIFACT_WAL || n == WYL_FACT_ARTIFACT_CHECKPOINT
+      || n == WYL_FACT_ARTIFACT_RECOVERY;
 }
 
 static wyrelog_error_t
@@ -913,11 +961,15 @@ wyl_fact_artifact_namespace_bind_main (WylFactArtifactNamespace *n)
 wyrelog_error_t
 wyl_fact_artifact_namespace_revalidate_main (WylFactArtifactNamespace *n)
 {
-  struct stat s;
+  struct stat s, named;
   if (!n || n->main_fd < 0 || check (n) != WYRELOG_E_OK
       || fstat (n->main_fd, &s) != 0 || !S_ISREG (s.st_mode)
       || s.st_nlink != 1 || (guint64) s.st_dev != n->main_device
-      || (guint64) s.st_ino != n->main_inode)
+      || (guint64) s.st_ino != n->main_inode
+      || fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      || named.st_nlink != 1 || (guint64) named.st_dev != n->main_device
+      || (guint64) named.st_ino != n->main_inode)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
 }
@@ -1284,6 +1336,154 @@ rename_no_replace (gint dirfd, const gchar *source, const gchar *destination)
   (void) destination;
   return WYRELOG_E_POLICY;
 #endif
+}
+
+static wyrelog_error_t
+lease_revalidate_sidecar_unlocked (WylFactArtifactMutationLease *lease)
+{
+  wyrelog_error_t result = lease_revalidate_unlocked (lease);
+  if (result != WYRELOG_E_OK)
+    return result;
+  return wyl_fact_artifact_namespace_revalidate_main (lease->namespace_);
+}
+
+static wyrelog_error_t
+sidecar_binding_matches_unlocked (WylFactArtifactSidecarBinding *binding)
+{
+  WylFactArtifactMutationLease *lease = binding->lease;
+  struct stat pinned, named;
+  if (!binding->active || !sidecar_name (binding->sidecar)
+      || fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 1 || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || fstatat (lease->namespace_->fd, name_for (binding->sidecar), &named,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      || named.st_nlink != 1 || (guint64) named.st_dev != binding->device
+      || (guint64) named.st_ino != binding->inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_mutation_lease_open_sidecar_binding
+    (WylFactArtifactMutationLease * lease, WylFactArtifactName sidecar,
+    gboolean create, gboolean writable,
+    WylFactArtifactSidecarBinding ** out_binding, gint * out_fd) {
+  if (out_binding)
+    *out_binding = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (!lease || !out_binding || !out_fd || !lease->exclusive
+      || !sidecar_name (sidecar) || !create || !writable)
+    return WYRELOG_E_POLICY;
+
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = lease_revalidate_sidecar_unlocked (lease);
+  if (result != WYRELOG_E_OK)
+    goto done;
+  result = open_file_unchecked (lease->namespace_, sidecar, TRUE, TRUE, out_fd);
+  if (result != WYRELOG_E_OK)
+    goto done;
+
+  struct stat pinned;
+  gint pin_fd = dup (*out_fd);
+  if (pin_fd < 0 || fcntl (pin_fd, F_SETFD, FD_CLOEXEC) != 0
+      || fstat (pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 1) {
+    if (pin_fd >= 0)
+      close (pin_fd);
+    result = WYRELOG_E_IO;
+    goto fail_fd;
+  }
+  WylFactArtifactSidecarBinding *binding = g_new0
+      (WylFactArtifactSidecarBinding, 1);
+  binding->lease = mutation_lease_ref (lease);
+  binding->sidecar = sidecar;
+  binding->pin_fd = pin_fd;
+  binding->device = pinned.st_dev;
+  binding->inode = pinned.st_ino;
+  binding->active = TRUE;
+  result = lease_revalidate_sidecar_unlocked (lease);
+  if (result != WYRELOG_E_OK || sidecar_binding_matches_unlocked (binding)
+      != WYRELOG_E_OK) {
+    wyl_fact_artifact_sidecar_binding_free (binding);
+    goto fail_fd;
+  }
+  *out_binding = binding;
+  goto done;
+
+fail_fd:
+  close (*out_fd);
+  *out_fd = -1;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+void
+wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *binding)
+{
+  if (!binding)
+    return;
+  if (binding->pin_fd >= 0)
+    close (binding->pin_fd);
+  wyl_fact_artifact_mutation_lease_free (binding->lease);
+  g_free (binding);
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_sidecar_binding_publish_no_replace
+    (WylFactArtifactSidecarBinding * binding, WylFactArtifactName destination) {
+  if (!binding || !sidecar_name (destination))
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = binding->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result;
+  if (!lease->exclusive || !binding->active || binding->sidecar == destination) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  result = lease_revalidate_sidecar_unlocked (lease);
+  if (result != WYRELOG_E_OK || sidecar_binding_matches_unlocked (binding)
+      != WYRELOG_E_OK) {
+    if (result == WYRELOG_E_OK)
+      result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  /* The source must reach stable storage before namespace publication. */
+  if (fsync (binding->pin_fd) != 0) {
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  const gchar *source_name = name_for (binding->sidecar);
+  const gchar *destination_name = name_for (destination);
+  result = rename_no_replace (lease->namespace_->fd, source_name,
+      destination_name);
+  if (result != WYRELOG_E_OK) {
+    wyrelog_error_t post = lease_revalidate_sidecar_unlocked (lease);
+    if (post != WYRELOG_E_OK)
+      result = post;
+    goto done;
+  }
+
+  /* renameat2/renameatx_np is the linearization point. */
+  binding->sidecar = destination;
+  result = fsync (lease->namespace_->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  wyrelog_error_t post = lease_revalidate_sidecar_unlocked (lease);
+  if (post != WYRELOG_E_OK)
+    result = post;
+  struct stat source_stat, destination_stat;
+  if (fstatat (lease->namespace_->fd, source_name, &source_stat,
+          AT_SYMLINK_NOFOLLOW) == 0 || errno != ENOENT
+      || fstatat (lease->namespace_->fd, destination_name, &destination_stat,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (destination_stat.st_mode)
+      || destination_stat.st_nlink != 1
+      || (guint64) destination_stat.st_dev != binding->device
+      || (guint64) destination_stat.st_ino != binding->inode)
+    result = WYRELOG_E_POLICY;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
 }
 
 wyrelog_error_t
