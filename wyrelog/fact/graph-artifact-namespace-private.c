@@ -1604,17 +1604,15 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
     goto done;
   }
   if (fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) != 0) {
-    if (errno != ENOENT || pinned.st_nlink != 0) {
-      result = errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    if (errno != ENOENT) {
+      result = WYRELOG_E_IO;
       goto done;
     }
-    /* The retained inode proves this absence belongs to this binding, rather
-     * than accepting arbitrary pathname absence as idempotence. */
+    /* Active-binding absence is external state, never a successful cleanup
+     * result.  The source pin remains evidence for reconciliation only. */
     binding->active = FALSE;
-    result = post_mutation_check_unlocked (lease, WYRELOG_E_OK);
-    *out_result = result == WYRELOG_E_OK
-        ? WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT
-        : WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+    result = post_mutation_check_unlocked (lease, WYRELOG_E_POLICY);
+    *out_result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
     goto terminal;
   }
   if (!S_ISREG (named.st_mode) || named.st_nlink != 1 || pinned.st_nlink != 1
@@ -1646,17 +1644,17 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
         && (guint64) pinned.st_ino == binding->inode
         && fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW)
         != 0 && errno == ENOENT;
-    if (!exact_absent) {
+    if (!exact_absent && unlink_error != ENOENT) {
       result = unlink_error == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
       result = post_mutation_check_unlocked (lease, result);
       goto done;
     }
+    /* Even an exact nlink=0/ENOENT observation cannot establish that this
+     * call performed durable cleanup.  It is terminal reconciliation. */
     binding->active = FALSE;
     result = post_mutation_check_unlocked (lease,
-        unlink_error == ENOENT ? WYRELOG_E_OK : WYRELOG_E_IO);
-    *out_result = result == WYRELOG_E_OK
-        ? WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT
-        : WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+        unlink_error == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+    *out_result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
     goto terminal;
   }
 
