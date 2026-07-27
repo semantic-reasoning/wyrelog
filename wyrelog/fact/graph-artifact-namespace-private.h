@@ -8,6 +8,7 @@
 G_BEGIN_DECLS typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
+typedef struct WylFactArtifactSidecarBinding WylFactArtifactSidecarBinding;
 typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 
@@ -72,6 +73,19 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp
     (WylFactArtifactMutationLease *, const gchar * token,
     gboolean create, gboolean writable, gint * out_fd);
+/* Binds a fixed DuckDB sidecar to an exclusive lease.  Only WAL, checkpoint,
+ * and recovery sidecars are accepted; main and lock are never replaceable.
+ * The binding owns a lease reference and the caller owns both it and out_fd. */
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
+    (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
+    gboolean create, gboolean writable,
+    WylFactArtifactSidecarBinding ** out_binding, gint * out_fd);
+/* Publishes the exact bound sidecar under a distinct absent fixed sidecar
+ * name, using a platform no-replace primitive.  After the rename linearizes,
+ * the binding identifies destination even if durability reporting fails. */
+wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
+    (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
+void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
 /* Binds tmp-<token> to the exact regular file opened through an existing
  * lease.  The binding retains the lease until _free, so its directory/lock
  * authority cannot disappear while later lifecycle operations use it.  The
