@@ -601,6 +601,26 @@ has_operation (const Event &event, const gchar *operation)
   return event.operation == operation;
 }
 
+static gboolean
+is_expected_home_metadata_path (const std::string &path, const fs::path &database)
+{
+  const std::string configured_home = database.parent_path ().string ();
+  const std::string secret_root = configured_home + "/.duckdb";
+  const std::string secret_store = secret_root + "/stored_secrets";
+  return path == configured_home || path == secret_root || path == secret_store;
+}
+
+static void
+assert_expected_home_metadata_event (const Event &event, const fs::path &database)
+{
+  g_assert_true (is_expected_home_metadata_path (event.path, database));
+  g_assert_true (has_operation (event, "separator"));
+  g_assert_cmpuint (event.flags, ==, 0);
+  g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
+  g_assert_cmpint (event.outcome, ==, -1);
+  g_assert_true (event.error_class.empty ());
+}
+
 static void
 assert_source_155_plain_lifecycle_event (const Event &event,
     const fs::path &database)
@@ -609,14 +629,16 @@ assert_source_155_plain_lifecycle_event (const Event &event,
   const std::string wal_path = main_path + ".wal";
   const std::string checkpoint_path = wal_path + ".checkpoint";
   const std::string recovery_path = wal_path + ".recovery";
-  const std::string configured_home = database.parent_path ().string ();
-  const std::string secret_prefix = configured_home + "/.duckdb";
   const gboolean is_main = event.path == main_path;
   const gboolean is_wal = event.path == wal_path || event.path == checkpoint_path
       || event.path == recovery_path;
-  const gboolean is_home_metadata = event.path == configured_home
-      || event.path == secret_prefix || event.path.rfind (secret_prefix + "/", 0) == 0;
+  const gboolean is_home_metadata = is_expected_home_metadata_path (event.path, database);
   g_assert_true (is_main || is_wal || is_home_metadata);
+
+  if (is_home_metadata) {
+    assert_expected_home_metadata_event (event, database);
+    return;
+  }
 
   const gboolean allowed_main_operation = has_operation (event, "open")
       || has_operation (event, "close") || has_operation (event, "separator")
@@ -631,8 +653,7 @@ assert_source_155_plain_lifecycle_event (const Event &event,
       || has_operation (event, "seek-position")
       || has_operation (event, "write") || has_operation (event, "sync")
       || has_operation (event, "try-remove");
-  g_assert_true (is_home_metadata ? has_operation (event, "separator")
-      : (is_main ? allowed_main_operation : allowed_wal_operation));
+  g_assert_true (is_main ? allowed_main_operation : allowed_wal_operation);
 
   if (has_operation (event, "open") || has_operation (event, "close")) {
     const gboolean main_flags = is_main &&
@@ -1114,11 +1135,8 @@ assert_live_wal_path (const Event &event, const fs::path &database)
 {
   const std::string main_path = database.string ();
   const std::string wal_path = main_path + ".wal";
-  const std::string configured_home = database.parent_path ().string ();
-  const std::string secret_prefix = configured_home + "/.duckdb";
-  if (event.path == configured_home || event.path == secret_prefix
-      || event.path.rfind (secret_prefix + "/", 0) == 0) {
-    g_assert_true (has_operation (event, "separator"));
+  if (is_expected_home_metadata_path (event.path, database)) {
+    assert_expected_home_metadata_event (event, database);
     return;
   }
   if (event.path != main_path && event.path != wal_path)
@@ -1168,6 +1186,13 @@ test_recording_filesystem_home_directory_resolution (void)
   g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-home-XXXXXX", &error);
   g_assert_no_error (error);
   const fs::path root = fs::canonical (sandbox);
+  const fs::path probe_database = root / "metadata-paths.duckdb";
+  g_assert_true (is_expected_home_metadata_path (root.string (), probe_database));
+  g_assert_true (is_expected_home_metadata_path ((root / ".duckdb").string (), probe_database));
+  g_assert_true (is_expected_home_metadata_path (
+      (root / ".duckdb" / "stored_secrets").string (), probe_database));
+  g_assert_false (is_expected_home_metadata_path (
+      (root / ".duckdb" / "unexpected").string (), probe_database));
 
   {
     auto recorder = std::make_shared<RecorderState> ();
@@ -1576,15 +1601,9 @@ test_recording_filesystem_rw_writer_contention (void)
       "{\"exception_type\":\"IO\",\"exception_message\":\"Could not set lock on file \\\""));
   guint failed_main_write_locks = 0;
   const std::string main_path = database.string ();
-  const std::string configured_home = root.string ();
-  const std::string secret_root = configured_home + "/.duckdb";
-  const std::string secret_store = secret_root + "/stored_secrets";
   for (const auto &event : contender_recorder->events) {
-    if (event.path == configured_home || event.path == secret_root
-        || event.path == secret_store) {
-      g_assert_true (has_operation (event, "separator"));
-      g_assert_cmpint (event.outcome, ==, -1);
-      g_assert_true (event.error_class.empty ());
+    if (is_expected_home_metadata_path (event.path, database)) {
+      assert_expected_home_metadata_event (event, database);
       continue;
     }
     if (event.path != main_path)
