@@ -423,8 +423,7 @@ void wyl_fact_artifact_namespace_set_test_fault
     (WylFactArtifactNamespaceTestFault fault)
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
-      && fault <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE)
+      && fault <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -885,6 +884,29 @@ wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *l)
   g_free (l);
 }
 
+/* Deterministic test-only ABA seam.  The canonical name returns to the
+ * imported inode, but the namespace must still fail the operation rather than
+ * hand out a descriptor across an observed replacement window. */
+static wyrelog_error_t
+namespace_test_main_open_aba (WylFactArtifactNamespace *n)
+{
+  static const gchar temporary[] = ".facts.duckdb-main-open-aba";
+  const gchar *main_name = name_for (WYL_FACT_ARTIFACT_MAIN);
+  if (renameat (n->fd, main_name, n->fd, temporary) != 0)
+    return WYRELOG_E_IO;
+  gint foreign = openat (n->fd, main_name,
+      O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (foreign < 0) {
+    (void) renameat (n->fd, temporary, n->fd, main_name);
+    return WYRELOG_E_IO;
+  }
+  close (foreign);
+  if (unlinkat (n->fd, main_name, 0) != 0
+      || renameat (n->fd, temporary, n->fd, main_name) != 0)
+    return WYRELOG_E_IO;
+  return WYRELOG_E_POLICY;
+}
+
 static WylFactArtifactMutationLease *
 mutation_lease_ref (WylFactArtifactMutationLease *l)
 {
@@ -909,8 +931,12 @@ open_file_unchecked (WylFactArtifactNamespace *n,
   gint fd = openat (n->fd, name_for (a), flags, 0600);
   if (fd < 0)
     return errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
-  struct stat s;
+  struct stat s, named;
   if (fstat (fd, &s) != 0 || !S_ISREG (s.st_mode) || s.st_nlink != 1
+      || fstatat (n->fd, name_for (a), &named, AT_SYMLINK_NOFOLLOW) != 0
+      || !S_ISREG (named.st_mode) || named.st_nlink != 1
+      || (guint64) named.st_dev != (guint64) s.st_dev
+      || (guint64) named.st_ino != (guint64) s.st_ino
       || check (n) != WYRELOG_E_OK) {
     close (fd);
     return WYRELOG_E_POLICY;
@@ -925,10 +951,27 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
 {
   if (o)
     *o = -1;
+  if (!o)
+    return WYRELOG_E_INVALID;
   /* Direct namespace access is read-only.  A guard is required before any
    * writable descriptor can be handed to a caller. */
   if (a == WYL_FACT_ARTIFACT_LOCK || create || writable)
     return WYRELOG_E_POLICY;
+  if (a == WYL_FACT_ARTIFACT_MAIN) {
+    if (check (n) != WYRELOG_E_OK)
+      return WYRELOG_E_POLICY;
+    if (namespace_fault_take
+        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA))
+      return namespace_test_main_open_aba (n);
+    gint fd = duplicate_cloexec (n->main_fd);
+    if (fd < 0 || check (n) != WYRELOG_E_OK) {
+      if (fd >= 0)
+        close (fd);
+      return WYRELOG_E_POLICY;
+    }
+    *o = fd;
+    return WYRELOG_E_OK;
+  }
   return open_file_unchecked (n, a, FALSE, FALSE, o);
 }
 

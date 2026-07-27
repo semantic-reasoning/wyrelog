@@ -655,6 +655,14 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &forged, &rejected),
       ==, WYRELOG_E_POLICY);
   g_assert_null (rejected);
+  g_autofree gchar *main_alias = g_build_filename (graph_path,
+      "facts.duckdb-import-alias", NULL);
+  g_assert_cmpint (linkat (d.graph_fd, "facts.duckdb", d.graph_fd,
+          "facts.duckdb-import-alias", 0), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &imported,
+          &rejected), ==, WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (unlink (main_alias), ==, 0);
   WylFactArtifactNamespace *imported_namespace = NULL;
   g_assert_cmpint (wyl_fact_artifact_namespace_open (&d, &imported,
           &imported_namespace), ==, WYRELOG_E_OK);
@@ -662,6 +670,15 @@ test_namespace (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (imported_namespace),
       ==, WYRELOG_E_OK);
   wyl_fact_artifact_namespace_free (imported_namespace);
+  gint imported_fd = 42;
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA);
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (n,
+          WYL_FACT_ARTIFACT_MAIN, FALSE, FALSE, &imported_fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (imported_fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (n), ==,
+      WYRELOG_E_OK);
   WylFactArtifactMutationLease *lease = NULL;
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
           &lease), ==, WYRELOG_E_OK);
