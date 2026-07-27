@@ -23,6 +23,19 @@ typedef enum
   WYL_FACT_ARTIFACT_TEMP,
 } WylFactArtifactName;
 
+/* The retirement result is deliberately separate from the error return.
+ * RETIRED and ABSENT are terminal successful outcomes.  RECONCILE_REQUIRED
+ * means unlink linearized, but durability or the final identity check could
+ * not be proved; the binding is terminal and must not be retried.  On every
+ * error before unlink linearizes, the output is NOT_RETIRED. */
+typedef enum
+{
+  WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED = 0,
+  WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED,
+  WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT,
+  WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED,
+} WylFactArtifactSidecarRetireResult;
+
 typedef enum
 {
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE = 0,
@@ -99,6 +112,14 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * the binding identifies destination even if durability reporting fails. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
     (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
+/* Retires only the exact currently-bound WAL/checkpoint/recovery artifact.
+ * This API is intentionally the sole fixed-sidecar deletion authority.  Its
+ * result output is initialized to NOT_RETIRED on every entry; callers must
+ * discard a binding after any terminal result, including
+ * RECONCILE_REQUIRED.  The first implementation slice reserves this contract
+ * and fails closed until the identity-bound unlink implementation lands. */
+wyrelog_error_t wyl_fact_artifact_sidecar_binding_retire
+    (WylFactArtifactSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
 /* Atomically replaces the exact bound fixed sidecar with the exact owner
  * temporary artifact.  Both bindings must retain the same exclusive lease;
