@@ -433,7 +433,9 @@ void wyl_fact_artifact_namespace_set_test_fault
     (WylFactArtifactNamespaceTestFault fault)
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
-      && fault <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA)
+      && fault
+      <=
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1577,11 +1579,101 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
 {
   if (out_result)
     *out_result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
-  /* The result/state contract lands before the unlink authority.  Keep this
-   * slice fail-closed so no consumer can mistake a generic unlink for the
-   * forthcoming identity-bound capability. */
-  (void) binding;
-  return WYRELOG_E_POLICY;
+  if (!binding || !out_result)
+    return WYRELOG_E_POLICY;
+
+  WylFactArtifactMutationLease *lease = binding->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result;
+  if (!lease->exclusive || !binding->active || !sidecar_name (binding->sidecar)) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  result = lease_revalidate_sidecar_unlocked (lease);
+  if (result != WYRELOG_E_OK)
+    goto done;
+
+  const gchar *name = name_for (binding->sidecar);
+  struct stat pinned, named;
+  if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW) != 0) {
+    if (errno != ENOENT || pinned.st_nlink != 0) {
+      result = errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+      goto done;
+    }
+    /* The retained inode proves this absence belongs to this binding, rather
+     * than accepting arbitrary pathname absence as idempotence. */
+    binding->active = FALSE;
+    result = post_mutation_check_unlocked (lease, WYRELOG_E_OK);
+    *out_result = result == WYRELOG_E_OK
+        ? WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT
+        : WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+    goto terminal;
+  }
+  if (!S_ISREG (named.st_mode) || named.st_nlink != 1 || pinned.st_nlink != 1
+      || (guint64) named.st_dev != binding->device
+      || (guint64) named.st_ino != binding->inode) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+
+  if (unlinkat (lease->namespace_->fd, name, 0) != 0) {
+    gint unlink_error = errno;
+    gboolean exact_absent = fstat (binding->pin_fd, &pinned) == 0
+        && S_ISREG (pinned.st_mode) && pinned.st_nlink == 0
+        && (guint64) pinned.st_dev == binding->device
+        && (guint64) pinned.st_ino == binding->inode
+        && fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW)
+        != 0 && errno == ENOENT;
+    if (!exact_absent) {
+      result = unlink_error == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+      result = post_mutation_check_unlocked (lease, result);
+      goto done;
+    }
+    binding->active = FALSE;
+    result = post_mutation_check_unlocked (lease,
+        unlink_error == ENOENT ? WYRELOG_E_OK : WYRELOG_E_IO);
+    *out_result = result == WYRELOG_E_OK
+        ? WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT
+        : WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+    goto terminal;
+  }
+
+  /* unlinkat is the linearization point.  Inactivate before fsync or any
+   * post-operation check, so an error can never leave deletion authority. */
+  binding->active = FALSE;
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC)
+      || fsync (lease->namespace_->fd) != 0)
+    result = WYRELOG_E_IO;
+  else
+    result = WYRELOG_E_OK;
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY))
+    result = WYRELOG_E_POLICY;
+  else
+    result = post_mutation_check_unlocked (lease, result);
+  if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || pinned.st_nlink != 0 || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || fstatat (lease->namespace_->fd, name, &named, AT_SYMLINK_NOFOLLOW)
+      == 0 || errno != ENOENT)
+    result = WYRELOG_E_POLICY;
+  *out_result = result == WYRELOG_E_OK
+      ? WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED
+      : WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+
+terminal:
+  close (binding->pin_fd);
+  binding->pin_fd = -1;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
 }
 
 wyrelog_error_t

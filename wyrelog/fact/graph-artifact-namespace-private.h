@@ -49,6 +49,8 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY,
 } WylFactArtifactNamespaceTestFault;
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
@@ -116,8 +118,7 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
  * This API is intentionally the sole fixed-sidecar deletion authority.  Its
  * result output is initialized to NOT_RETIRED on every entry; callers must
  * discard a binding after any terminal result, including
- * RECONCILE_REQUIRED.  The first implementation slice reserves this contract
- * and fails closed until the identity-bound unlink implementation lands. */
+ * RECONCILE_REQUIRED. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_retire
     (WylFactArtifactSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
