@@ -32,6 +32,9 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_PUBLISH_PRE_RENAME_INSERT,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE,
 } WylFactArtifactNamespaceTestFault;
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
@@ -74,8 +77,10 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_temp
     (WylFactArtifactMutationLease *, const gchar * token,
     gboolean create, gboolean writable, gint * out_fd);
-/* Binds a fixed DuckDB sidecar to an exclusive lease.  Only WAL, checkpoint,
- * and recovery sidecars are accepted; main and lock are never replaceable.
+/* Binds a fixed DuckDB sidecar to an exclusive #612 mutation lease.  Only WAL,
+ * checkpoint, and recovery sidecars are accepted; main and lock are never
+ * replaceable.  This authority serializes cooperative writers; portable POSIX
+ * cannot compare-and-swap a same-UID writer that bypasses the held lease.
  * The binding owns a lease reference and the caller owns both it and out_fd. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
     (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
