@@ -665,6 +665,45 @@ test_namespace (void)
       (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar, &fd), ==,
       WYRELOG_E_OK);
   close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_PUBLISH_PRE_RENAME_INSERT);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_publish_no_replace
+      (sidecar, WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+#if defined(__linux__) || defined(__APPLE__)
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_publish_no_replace
+      (sidecar, WYL_FACT_ARTIFACT_RECOVERY), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_RECOVERY), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_publish_no_replace
+      (sidecar, WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+#endif
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
   g_autofree gchar *sidecar_graph_path =
       wyl_fact_graph_directory_descriptive_path (&d);
   g_autofree gchar *bound_main_path =
@@ -779,6 +818,52 @@ test_namespace (void)
       (replace_source, replace_destination), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (replace_source), ==,
       WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (replace_source);
+  wyl_fact_artifact_sidecar_binding_free (replace_destination);
+  replace_source = NULL;
+  replace_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE,
+          &replace_destination, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "sidecar-pre-rename-substitution", TRUE, TRUE, &replace_source,
+          &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (replace_source, FALSE,
+          &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (replace_source), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_RECOVERY), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (replace_source);
+  wyl_fact_artifact_sidecar_binding_free (replace_destination);
+  replace_source = NULL;
+  replace_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE,
+          &replace_destination, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "sidecar-post-rename-substitution", TRUE, TRUE, &replace_source,
+          &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (replace_source, FALSE,
+          &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
+          "sidecar-post-rename-substitution", FALSE, FALSE, &fd), ==,
+      WYRELOG_E_NOT_FOUND);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
           WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_OK);
   wyl_fact_artifact_temp_binding_free (replace_source);

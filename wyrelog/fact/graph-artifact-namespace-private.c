@@ -437,7 +437,7 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC)
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1348,6 +1348,22 @@ rename_no_replace (gint dirfd, const gchar *source, const gchar *destination)
 #endif
 }
 
+/* Private deterministic seam: model a same-UID pathname substitution after a
+ * caller's earlier validation.  Production callers never invoke this path. */
+static wyrelog_error_t
+namespace_test_substitute_regular (WylFactArtifactNamespace *namespace_,
+    const gchar *name, gboolean replace_existing)
+{
+  if (replace_existing && unlinkat (namespace_->fd, name, 0) != 0)
+    return WYRELOG_E_IO;
+  gint fd = openat (namespace_->fd, name,
+      O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC | O_NOFOLLOW, 0600);
+  if (fd < 0)
+    return errno == EEXIST ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  close (fd);
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 lease_revalidate_sidecar_unlocked (WylFactArtifactMutationLease *lease)
 {
@@ -1470,6 +1486,30 @@ wyrelog_error_t
   }
   const gchar *source_name = name_for (binding->sidecar);
   const gchar *destination_name = name_for (destination);
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_PUBLISH_PRE_RENAME_INSERT))
+  {
+    result =
+        namespace_test_substitute_regular (lease->namespace_, destination_name,
+        FALSE);
+    if (result != WYRELOG_E_OK)
+      goto done;
+  }
+  struct stat final_destination;
+  if (fstatat (lease->namespace_->fd, destination_name, &final_destination,
+          AT_SYMLINK_NOFOLLOW) == 0) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (errno != ENOENT) {
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  if (lease_revalidate_sidecar_unlocked (lease) != WYRELOG_E_OK
+      || sidecar_binding_matches_unlocked (binding) != WYRELOG_E_OK) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
   result = rename_no_replace (lease->namespace_->fd, source_name,
       destination_name);
   if (result != WYRELOG_E_OK) {
@@ -1539,6 +1579,20 @@ wyrelog_error_t
     goto done;
   }
   const gchar *destination_name = name_for (destination->sidecar);
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE))
+  {
+    result =
+        namespace_test_substitute_regular (lease->namespace_, destination_name,
+        TRUE);
+    if (result != WYRELOG_E_OK)
+      goto done;
+  }
+  if (lease_revalidate_sidecar_unlocked (lease) != WYRELOG_E_OK
+      || sidecar_binding_matches_unlocked (destination) != WYRELOG_E_OK) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
   gboolean renamed = renameat (lease->namespace_->fd, source_name,
       lease->namespace_->fd, destination_name) == 0;
   gint rename_errno = errno;
@@ -1574,6 +1628,15 @@ wyrelog_error_t
     destination->creator = FALSE;
     source->pin_fd = -1;
     source->active = FALSE;
+  }
+  if (renamed && namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE))
+  {
+    wyrelog_error_t substitution =
+        namespace_test_substitute_regular (lease->namespace_, destination_name,
+        TRUE);
+    if (substitution != WYRELOG_E_OK)
+      result = substitution;
   }
   if (renamed && (!namespace_fault_take
           (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC)
