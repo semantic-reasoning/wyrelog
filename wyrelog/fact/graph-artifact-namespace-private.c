@@ -907,6 +907,29 @@ namespace_test_main_open_aba (WylFactArtifactNamespace *n)
   return WYRELOG_E_POLICY;
 }
 
+/* facts.duckdb is imported at namespace construction.  No later API may
+ * re-open its pathname: callers receive only a CLOEXEC duplicate of the held
+ * open-file description after the complete directory/main revalidation. */
+static wyrelog_error_t
+duplicate_imported_main (WylFactArtifactNamespace *n, gint *out_fd)
+{
+  if (out_fd)
+    *out_fd = -1;
+  if (!n || !out_fd || check (n) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA))
+    return namespace_test_main_open_aba (n);
+  gint fd = duplicate_cloexec (n->main_fd);
+  if (fd < 0 || check (n) != WYRELOG_E_OK) {
+    if (fd >= 0)
+      close (fd);
+    return WYRELOG_E_POLICY;
+  }
+  *out_fd = fd;
+  return WYRELOG_E_OK;
+}
+
 static WylFactArtifactMutationLease *
 mutation_lease_ref (WylFactArtifactMutationLease *l)
 {
@@ -957,21 +980,8 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
    * writable descriptor can be handed to a caller. */
   if (a == WYL_FACT_ARTIFACT_LOCK || create || writable)
     return WYRELOG_E_POLICY;
-  if (a == WYL_FACT_ARTIFACT_MAIN) {
-    if (check (n) != WYRELOG_E_OK)
-      return WYRELOG_E_POLICY;
-    if (namespace_fault_take
-        (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA))
-      return namespace_test_main_open_aba (n);
-    gint fd = duplicate_cloexec (n->main_fd);
-    if (fd < 0 || check (n) != WYRELOG_E_OK) {
-      if (fd >= 0)
-        close (fd);
-      return WYRELOG_E_POLICY;
-    }
-    *o = fd;
-    return WYRELOG_E_OK;
-  }
+  if (a == WYL_FACT_ARTIFACT_MAIN)
+    return duplicate_imported_main (n, o);
   return open_file_unchecked (n, a, FALSE, FALSE, o);
 }
 
@@ -1088,6 +1098,8 @@ wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
     return WYRELOG_E_POLICY;
   if (a == WYL_FACT_ARTIFACT_LOCK)
     return WYRELOG_E_POLICY;
+  if (a == WYL_FACT_ARTIFACT_MAIN && (create || writable))
+    return WYRELOG_E_POLICY;
   /* Fixed DuckDB sidecars carry replacement authority only through their
    * opaque binding.  Keep this legacy entry point read-only for them. */
   if (sidecar_name (a) && (create || writable))
@@ -1095,6 +1107,11 @@ wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
   g_mutex_lock (&l->mutex);
   wyrelog_error_t r = lease_revalidate_unlocked (l);
   if (r != WYRELOG_E_OK) {
+    g_mutex_unlock (&l->mutex);
+    return r;
+  }
+  if (a == WYL_FACT_ARTIFACT_MAIN) {
+    r = duplicate_imported_main (l->namespace_, out_fd);
     g_mutex_unlock (&l->mutex);
     return r;
   }

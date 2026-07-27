@@ -685,6 +685,14 @@ test_namespace (void)
   gint fd = -1;
   g_assert_cmpint (wyl_fact_artifact_namespace_revalidate (n), ==,
       WYRELOG_E_OK);
+  fd = 42;
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_MAIN, FALSE, FALSE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_revalidate (lease), ==,
+      WYRELOG_E_OK);
   WylFactArtifactSidecarBinding *sidecar = (gpointer) 0x1;
   fd = 42;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
