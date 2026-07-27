@@ -71,6 +71,8 @@ wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
 wyrelog_error_t wyl_fact_artifact_mutation_lease_revalidate
     (WylFactArtifactMutationLease *);
 void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
+/* Generic fixed-sidecar mutation is retired: WAL/checkpoint/recovery creation
+ * and writable opens require SidecarBinding. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
     (WylFactArtifactMutationLease *, WylFactArtifactName name,
     gboolean create, gboolean writable, gint * out_fd);
@@ -139,6 +141,8 @@ wyrelog_error_t wyl_fact_artifact_temp_recovery_evidence_decode
 wyrelog_error_t wyl_fact_artifact_mutation_lease_recover_temp
     (WylFactArtifactMutationLease *,
     const WylFactArtifactTempRecoveryEvidence *);
+/* Retired generic pathname mutators; valid fixed artifact names fail closed.
+ * TempBinding and SidecarBinding carry the only mutation authority. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_unlink
     (WylFactArtifactMutationLease *, WylFactArtifactName name);
 wyrelog_error_t wyl_fact_artifact_mutation_lease_rename
