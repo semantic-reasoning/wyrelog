@@ -30,6 +30,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_INITIAL_LOCK_POST_FSYNC_IDENTITY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_UNLINK_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RENAME_DIRECTORY_FSYNC,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_RECOVER_DIRECTORY_FSYNC,
 } WylFactArtifactNamespaceTestFault;
 
@@ -86,6 +87,12 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
     (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
 void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
+/* Atomically replaces the exact bound fixed sidecar with the exact owner
+ * temporary artifact.  Both bindings must retain the same exclusive lease;
+ * after rename linearizes, source becomes terminal and destination identifies
+ * the replacement even when directory durability reporting fails. */
+wyrelog_error_t wyl_fact_artifact_temp_binding_replace_sidecar
+    (WylFactArtifactTempBinding *, WylFactArtifactSidecarBinding *);
 /* Binds tmp-<token> to the exact regular file opened through an existing
  * lease.  The binding retains the lease until _free, so its directory/lock
  * authority cannot disappear while later lifecycle operations use it.  The

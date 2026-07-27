@@ -685,6 +685,106 @@ test_namespace (void)
           WYL_FACT_ARTIFACT_WAL), ==, WYRELOG_E_OK);
   wyl_fact_artifact_sidecar_binding_free (sidecar);
   sidecar = NULL;
+  WylFactArtifactTempBinding *replace_source = NULL;
+  WylFactArtifactSidecarBinding *replace_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE,
+          &replace_destination, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "sidecar-replace", TRUE, TRUE, &replace_source, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (replace_source, FALSE,
+          &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease,
+          "sidecar-replace", FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT, FALSE, FALSE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (replace_source);
+  wyl_fact_artifact_sidecar_binding_free (replace_destination);
+  replace_source = NULL;
+  replace_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE,
+          &replace_destination, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "sidecar-replace-fault", TRUE, TRUE, &replace_source, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_DIRECTORY_FSYNC);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_open (replace_source, FALSE,
+          &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_RECOVERY, FALSE, FALSE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_RECOVERY), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (replace_source);
+  wyl_fact_artifact_sidecar_binding_free (replace_destination);
+  replace_source = NULL;
+  replace_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE,
+          &replace_destination, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "sidecar-source-substitution", TRUE, TRUE, &replace_source, &fd),
+      ==, WYRELOG_E_OK);
+  close (fd);
+  g_autofree gchar *substituted_source_path = g_build_filename
+      (sidecar_graph_path, "tmp-sidecar-source-substitution", NULL);
+  g_assert_cmpint (unlink (substituted_source_path), ==, 0);
+  fd = open (substituted_source_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC,
+      0600);
+  g_assert_cmpint (fd >= 0, ==, TRUE);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (unlink (substituted_source_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_RECOVERY), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (replace_source);
+  wyl_fact_artifact_sidecar_binding_free (replace_destination);
+  replace_source = NULL;
+  replace_destination = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE,
+          &replace_destination, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp_binding (lease,
+          "sidecar-destination-substitution", TRUE, TRUE, &replace_source,
+          &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_autofree gchar *substituted_destination_path = g_build_filename
+      (sidecar_graph_path, "facts.duckdb.wal.checkpoint", NULL);
+  g_assert_cmpint (unlink (substituted_destination_path), ==, 0);
+  fd = open (substituted_destination_path, O_CREAT | O_EXCL | O_RDWR |
+      O_CLOEXEC, 0600);
+  g_assert_cmpint (fd >= 0, ==, TRUE);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_replace_sidecar
+      (replace_source, replace_destination), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_temp_binding_unlink (replace_source), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_unlink (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_temp_binding_free (replace_source);
+  wyl_fact_artifact_sidecar_binding_free (replace_destination);
+  replace_source = NULL;
+  replace_destination = NULL;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
           TRUE, TRUE, &fd), ==, WYRELOG_E_OK);
   close (fd);
