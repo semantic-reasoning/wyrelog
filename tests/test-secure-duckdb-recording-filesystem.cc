@@ -1219,19 +1219,22 @@ test_recording_filesystem_temporary_spill_cleanup (void)
   g_assert_nonnull (sandbox);
   const fs::path root = fs::canonical (sandbox);
   const fs::path temp = root / "tmp";
+  const fs::path database = root / "temp-source.duckdb";
   g_assert_true (fs::create_directory (temp));
   auto recorder = std::make_shared<RecorderState> ();
-  duckdb::DBConfig config;
-  configure_test_database (&config, root, recorder);
-  duckdb::DuckDB db (nullptr, &config);
-  duckdb::Connection connection (db);
-  auto setup = connection.Query ("SET memory_limit='1MB'; SET temp_directory='" + temp.string ()
-      + "';");
-  g_assert_false (setup->HasError ());
-  auto result = connection.Query (
-      "SELECT i FROM range(1000000) t(i) ORDER BY hash(i) DESC LIMIT 10");
-  g_assert_false (result->HasError ());
-  g_assert_cmpuint (result->RowCount (), ==, 10);
+  {
+    duckdb::DBConfig config;
+    configure_test_database (&config, root, recorder);
+    duckdb::DuckDB db (database.string (), &config);
+    duckdb::Connection connection (db);
+    auto setup = connection.Query ("SET memory_limit='1MB'; SET temp_directory='" + temp.string ()
+        + "';");
+    g_assert_false (setup->HasError ());
+    auto result = connection.Query (
+        "SELECT i FROM range(1000000) t(i) ORDER BY hash(i) DESC LIMIT 10");
+    g_assert_false (result->HasError ());
+    g_assert_cmpuint (result->RowCount (), ==, 10);
+  }
   gboolean saw_temp = FALSE;
   for (const auto &event : recorder->events) {
     const fs::path path = event.path;
@@ -1243,6 +1246,9 @@ test_recording_filesystem_temporary_spill_cleanup (void)
       saw_temp = TRUE;
   }
   g_assert_true (saw_temp);
+  /* The recorder must survive DuckDB teardown and observe the temporary
+   * directory empty only after all injected-VFS owners have been destroyed. */
+  g_assert_true (fs::is_empty (temp));
   remove_tree (sandbox);
 }
 
