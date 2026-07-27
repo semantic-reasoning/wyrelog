@@ -630,6 +630,12 @@ test_mutation_leases (void)
           &retirement), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (retirement, ==,
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  retirement = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire
+      ((WylFactArtifactSidecarBinding *) 0x1, &retirement), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (NULL,
           &lease), ==, WYRELOG_E_POLICY);
   g_assert_null (lease);
