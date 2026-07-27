@@ -461,18 +461,6 @@ sidecar_name (WylFactArtifactName n)
 }
 
 static wyrelog_error_t
-named_regular (WylFactArtifactNamespace *n, const gchar *name,
-    gboolean allow_missing)
-{
-  struct stat s;
-  if (fstatat (n->fd, name, &s, AT_SYMLINK_NOFOLLOW) != 0)
-    return allow_missing && errno == ENOENT ? WYRELOG_E_OK :
-        (errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO);
-  return S_ISREG (s.st_mode) && s.st_nlink == 1 ? WYRELOG_E_OK :
-      WYRELOG_E_POLICY;
-}
-
-static wyrelog_error_t
 check (WylFactArtifactNamespace *n)
 {
   struct stat s;
@@ -707,10 +695,6 @@ release_lock_domain (WylFactArtifactNamespace *n)
 
 static wyrelog_error_t open_file_unchecked (WylFactArtifactNamespace *,
     WylFactArtifactName, gboolean, gboolean, gint *);
-static wyrelog_error_t unlink_unchecked (WylFactArtifactNamespace *,
-    WylFactArtifactName);
-static wyrelog_error_t rename_unchecked (WylFactArtifactNamespace *,
-    WylFactArtifactName, WylFactArtifactName);
 static wyrelog_error_t open_temp_unchecked (WylFactArtifactNamespace *,
     const gchar *, gboolean, gboolean, gint *);
 
@@ -900,20 +884,6 @@ wyl_fact_artifact_namespace_open_file (WylFactArtifactNamespace *n,
 }
 
 wyrelog_error_t
-unlink_unchecked (WylFactArtifactNamespace *n, WylFactArtifactName a)
-{
-  if (!valid (a))
-    return WYRELOG_E_INVALID;
-  wyrelog_error_t r = check (n);
-  if (r)
-    return r;
-  r = named_regular (n, name_for (a), FALSE);
-  if (r != WYRELOG_E_OK)
-    return r;
-  return unlinkat (n->fd, name_for (a), 0) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
-}
-
-wyrelog_error_t
 wyl_fact_artifact_namespace_unlink (WylFactArtifactNamespace *n,
     WylFactArtifactName a)
 {
@@ -1034,25 +1004,6 @@ wyl_fact_artifact_namespace_open_temp (WylFactArtifactNamespace *n,
 }
 
 wyrelog_error_t
-rename_unchecked (WylFactArtifactNamespace *n,
-    WylFactArtifactName source, WylFactArtifactName destination)
-{
-  if (!valid (source) || !valid (destination) || source == destination)
-    return WYRELOG_E_INVALID;
-  if (check (n) != WYRELOG_E_OK)
-    return WYRELOG_E_POLICY;
-  wyrelog_error_t r = named_regular (n, name_for (source), FALSE);
-  if (r != WYRELOG_E_OK)
-    return r;
-  r = named_regular (n, name_for (destination), TRUE);
-  if (r != WYRELOG_E_OK)
-    return r;
-  if (renameat (n->fd, name_for (source), n->fd, name_for (destination)) != 0)
-    return WYRELOG_E_IO;
-  return fsync (n->fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
-}
-
-wyrelog_error_t
 wyl_fact_artifact_namespace_rename (WylFactArtifactNamespace *n,
     WylFactArtifactName source, WylFactArtifactName destination)
 {
@@ -1083,6 +1034,10 @@ wyl_fact_artifact_mutation_lease_open_file (WylFactArtifactMutationLease *l,
   if (!l->exclusive && (create || writable))
     return WYRELOG_E_POLICY;
   if (a == WYL_FACT_ARTIFACT_LOCK)
+    return WYRELOG_E_POLICY;
+  /* Fixed DuckDB sidecars carry replacement authority only through their
+   * opaque binding.  Keep this legacy entry point read-only for them. */
+  if (sidecar_name (a) && (create || writable))
     return WYRELOG_E_POLICY;
   g_mutex_lock (&l->mutex);
   wyrelog_error_t r = lease_revalidate_unlocked (l);
@@ -1928,40 +1883,23 @@ wyrelog_error_t
 wyl_fact_artifact_mutation_lease_unlink (WylFactArtifactMutationLease *l,
     WylFactArtifactName a)
 {
-  if (!l || !l->exclusive)
-    return WYRELOG_E_POLICY;
-  if (a == WYL_FACT_ARTIFACT_LOCK)
-    return WYRELOG_E_POLICY;
-  g_mutex_lock (&l->mutex);
-  wyrelog_error_t r = lease_revalidate_unlocked (l);
-  if (r != WYRELOG_E_OK) {
-    g_mutex_unlock (&l->mutex);
-    return r;
-  }
-  r = unlink_unchecked (l->namespace_, a);
-  r = post_mutation_check_unlocked (l, r);
-  g_mutex_unlock (&l->mutex);
-  return r;
+  if (!valid (a))
+    return WYRELOG_E_INVALID;
+  (void) l;
+  /* Main/lock and fixed sidecars have no generic unlink authority.  Temporary
+   * lifecycle uses TempBinding; sidecar publication/replacement uses its
+   * dedicated binding. */
+  return WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t
 wyl_fact_artifact_mutation_lease_rename (WylFactArtifactMutationLease *l,
     WylFactArtifactName source, WylFactArtifactName destination)
 {
-  if (!l || !l->exclusive)
-    return WYRELOG_E_POLICY;
-  if (source == WYL_FACT_ARTIFACT_LOCK || destination == WYL_FACT_ARTIFACT_LOCK)
-    return WYRELOG_E_POLICY;
-  g_mutex_lock (&l->mutex);
-  wyrelog_error_t r = lease_revalidate_unlocked (l);
-  if (r != WYRELOG_E_OK) {
-    g_mutex_unlock (&l->mutex);
-    return r;
-  }
-  r = rename_unchecked (l->namespace_, source, destination);
-  r = post_mutation_check_unlocked (l, r);
-  g_mutex_unlock (&l->mutex);
-  return r;
+  if (!valid (source) || !valid (destination) || source == destination)
+    return WYRELOG_E_INVALID;
+  (void) l;
+  return WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t
