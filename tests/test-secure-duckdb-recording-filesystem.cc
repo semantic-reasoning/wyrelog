@@ -54,6 +54,7 @@ struct RecorderState {
   std::vector<ControlEvent> controls;
   guint rejected = 0;
   guint subsystem_attempts = 0;
+  guint home_directory_calls = 0;
   gboolean checkpoint_fault_armed = FALSE;
   guint checkpoint_fault_stage = 0;
   guint checkpoint_fault_fires = 0;
@@ -82,10 +83,17 @@ public:
 
 class RecordingFileSystem final : public duckdb::FileSystem {
 public:
+  enum class HomeDirectoryBehavior {
+    SANDBOX,
+    DENY,
+  };
+
   RecordingFileSystem (const std::string &sandbox,
-      std::shared_ptr<RecorderState> recorder)
+      std::shared_ptr<RecorderState> recorder,
+      HomeDirectoryBehavior home_directory_behavior = HomeDirectoryBehavior::SANDBOX)
       : sandbox_ (fs::canonical (fs::path (sandbox))),
-        local_ (duckdb::FileSystem::CreateLocal ()), recorder_ (std::move (recorder))
+        local_ (duckdb::FileSystem::CreateLocal ()), recorder_ (std::move (recorder)),
+        home_directory_behavior_ (home_directory_behavior)
   {
   }
 
@@ -397,7 +405,10 @@ public:
   duckdb::string GetHomeDirectory () override
   {
     record_control ("get-home-directory");
-    reject ("home-directory access is not permitted");
+    recorder_->home_directory_calls++;
+    if (home_directory_behavior_ == HomeDirectoryBehavior::DENY)
+      reject ("home-directory access is not permitted");
+    return sandbox_.string ();
   }
 
   duckdb::string ExpandPath (const duckdb::string &path) override
@@ -532,6 +543,7 @@ private:
   fs::path sandbox_;
   duckdb::unique_ptr<duckdb::FileSystem> local_;
   std::shared_ptr<RecorderState> recorder_;
+  HomeDirectoryBehavior home_directory_behavior_;
 };
 
 RecordingFileHandle::RecordingFileHandle (RecordingFileSystem &owner,
@@ -597,10 +609,14 @@ assert_source_155_plain_lifecycle_event (const Event &event,
   const std::string wal_path = main_path + ".wal";
   const std::string checkpoint_path = wal_path + ".checkpoint";
   const std::string recovery_path = wal_path + ".recovery";
+  const std::string configured_home = database.parent_path ().string ();
+  const std::string secret_prefix = configured_home + "/.duckdb";
   const gboolean is_main = event.path == main_path;
   const gboolean is_wal = event.path == wal_path || event.path == checkpoint_path
       || event.path == recovery_path;
-  g_assert_true (is_main || is_wal);
+  const gboolean is_home_metadata = event.path == configured_home
+      || event.path == secret_prefix || event.path.rfind (secret_prefix + "/", 0) == 0;
+  g_assert_true (is_main || is_wal || is_home_metadata);
 
   const gboolean allowed_main_operation = has_operation (event, "open")
       || has_operation (event, "close") || has_operation (event, "separator")
@@ -615,7 +631,8 @@ assert_source_155_plain_lifecycle_event (const Event &event,
       || has_operation (event, "seek-position")
       || has_operation (event, "write") || has_operation (event, "sync")
       || has_operation (event, "try-remove");
-  g_assert_true (is_main ? allowed_main_operation : allowed_wal_operation);
+  g_assert_true (is_home_metadata ? has_operation (event, "separator")
+      : (is_main ? allowed_main_operation : allowed_wal_operation));
 
   if (has_operation (event, "open") || has_operation (event, "close")) {
     const gboolean main_flags = is_main &&
@@ -882,6 +899,10 @@ configure_test_database (duckdb::DBConfig *config, const fs::path &root,
 {
   config->file_system = duckdb::make_uniq<RecordingFileSystem> (root.string (),
       std::move (recorder));
+  /* DuckDB's OpenerFileSystem obtains this setting before it forms persistent
+   * secret defaults. Pin the metadata-only home path to the fixture so it
+   * never synthesizes the host home directory for the bounded recorder. */
+  config->SetOption ("home_directory", duckdb::Value (root.string ()));
   config->options.maximum_threads = 1;
   config->options.load_extensions = false;
 }
@@ -1093,6 +1114,13 @@ assert_live_wal_path (const Event &event, const fs::path &database)
 {
   const std::string main_path = database.string ();
   const std::string wal_path = main_path + ".wal";
+  const std::string configured_home = database.parent_path ().string ();
+  const std::string secret_prefix = configured_home + "/.duckdb";
+  if (event.path == configured_home || event.path == secret_prefix
+      || event.path.rfind (secret_prefix + "/", 0) == 0) {
+    g_assert_true (has_operation (event, "separator"));
+    return;
+  }
   if (event.path != main_path && event.path != wal_path)
     g_error ("unexpected live-WAL path: %s", event.path.c_str ());
   g_assert_true (event.compression == duckdb::FileCompressionType::UNCOMPRESSED);
@@ -1121,6 +1149,77 @@ assert_read_only_live_wal_trace (const RecorderState &recorder,
         && (has_operation (event, "read") || has_operation (event, "read-at")));
   }
   g_assert_true (wal_open && wal_read);
+}
+
+static void
+assert_no_host_home_forwarding (const RecorderState &recorder)
+{
+  const std::string host_home = g_get_home_dir ();
+  const std::string prefix = host_home + "/";
+  for (const auto &event : recorder.events)
+    g_assert_false (event.path == host_home || event.path.rfind (prefix, 0) == 0);
+}
+
+static void
+test_recording_filesystem_home_directory_resolution (void)
+{
+  assert_duckdb_155 ();
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *sandbox = g_dir_make_tmp ("wyl-duckdb-home-XXXXXX", &error);
+  g_assert_no_error (error);
+  const fs::path root = fs::canonical (sandbox);
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    config.file_system = duckdb::make_uniq<RecordingFileSystem> (root.string (), recorder);
+    config.options.maximum_threads = 1;
+    config.options.load_extensions = false;
+    duckdb::DuckDB db ((root / "unset-home.duckdb").string (), &config);
+    g_assert_cmpuint (recorder->home_directory_calls, ==, 1);
+    g_assert_cmpstr (recorder->controls.back ().operation.c_str (), ==, "get-home-directory");
+    assert_no_host_home_forwarding (*recorder);
+  }
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    duckdb::DBConfig config;
+    config.file_system = duckdb::make_uniq<RecordingFileSystem> (root.string (), recorder,
+        RecordingFileSystem::HomeDirectoryBehavior::DENY);
+    config.SetOption ("home_directory", duckdb::Value (root.string ()));
+    config.options.maximum_threads = 1;
+    config.options.load_extensions = false;
+    duckdb::DuckDB db ((root / "configured-home.duckdb").string (), &config);
+    g_assert_cmpuint (recorder->home_directory_calls, ==, 0);
+    assert_no_host_home_forwarding (*recorder);
+  }
+
+  {
+    auto recorder = std::make_shared<RecorderState> ();
+    gboolean denied = FALSE;
+    try {
+      duckdb::DBConfig config;
+      config.file_system = duckdb::make_uniq<RecordingFileSystem> (root.string (), recorder,
+          RecordingFileSystem::HomeDirectoryBehavior::DENY);
+      config.options.maximum_threads = 1;
+      config.options.load_extensions = false;
+      duckdb::DuckDB db ((root / "denied-home.duckdb").string (), &config);
+    } catch (const duckdb::PermissionException &) {
+      denied = TRUE;
+    }
+    g_assert_true (denied);
+    g_assert_cmpuint (recorder->home_directory_calls, ==, 1);
+    assert_no_host_home_forwarding (*recorder);
+  }
+
+  {
+    auto local = duckdb::FileSystem::CreateLocal ();
+    const duckdb::string home = local->GetHomeDirectory ();
+    g_assert_false (home.empty ());
+    g_assert_cmpstr (home.c_str (), ==, g_get_home_dir ());
+  }
+
+  remove_tree (sandbox);
 }
 
 static void
@@ -1155,12 +1254,7 @@ test_recording_filesystem_persistent_database (void)
 
   {
     duckdb::DBConfig config;
-    config.file_system = duckdb::make_uniq<RecordingFileSystem> (root.string (), recorder);
-    // Avoid DuckDB's auto-thread probe, which reads host /proc state.  The
-    // fixture intentionally rejects all ambient paths rather than forwarding
-    // them to LocalFileSystem.
-    config.options.maximum_threads = 1;
-    config.options.load_extensions = false;
+    configure_test_database (&config, root, recorder);
     duckdb::DuckDB db (database.string (), &config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("CREATE TABLE facts(value INTEGER); INSERT INTO facts VALUES (42)");
@@ -1168,9 +1262,7 @@ test_recording_filesystem_persistent_database (void)
   }
   {
     duckdb::DBConfig reopen_config;
-    reopen_config.file_system = duckdb::make_uniq<RecordingFileSystem> (root.string (), recorder);
-    reopen_config.options.maximum_threads = 1;
-    reopen_config.options.load_extensions = false;
+    configure_test_database (&reopen_config, root, recorder);
     duckdb::DuckDB db (database.string (), &reopen_config);
     duckdb::Connection connection (db);
     auto result = connection.Query ("SELECT value FROM facts");
@@ -1204,6 +1296,7 @@ test_recording_filesystem_persistent_database (void)
   }
   g_assert_true (saw_main_open && saw_wal_open);
   g_assert_true (saw_main_close && saw_wal_close);
+  assert_no_host_home_forwarding (*recorder);
   assert_source_155_control_events (recorder->controls, control_baseline, 2);
 
   remove_tree (sandbox);
@@ -1227,13 +1320,13 @@ test_recording_filesystem_temporary_spill_cleanup (void)
     configure_test_database (&config, root, recorder);
     duckdb::DuckDB db (database.string (), &config);
     duckdb::Connection connection (db);
-    auto setup = connection.Query ("SET memory_limit='1MB'; SET temp_directory='" + temp.string ()
+    auto setup = connection.Query ("SET memory_limit='20MB'; SET temp_directory='" + temp.string ()
         + "';");
     g_assert_false (setup->HasError ());
     auto result = connection.Query (
-        "SELECT i FROM range(1000000) t(i) ORDER BY hash(i) DESC LIMIT 10");
+        "SELECT i FROM range(5000000) t(i) ORDER BY (i * 1103515245) % 1000003 DESC");
     g_assert_false (result->HasError ());
-    g_assert_cmpuint (result->RowCount (), ==, 10);
+    g_assert_cmpuint (result->RowCount (), ==, 5000000);
   }
   gboolean saw_temp = FALSE;
   for (const auto &event : recorder->events) {
@@ -1867,6 +1960,8 @@ main (int argc, char **argv)
   g_test_message ("Skipping injected-filesystem suite: DuckDB 1.5.5 macOS teardown abort");
   return g_test_run ();
 #else
+  g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/home-directory-resolution",
+      test_recording_filesystem_home_directory_resolution);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/persistent-db",
       test_recording_filesystem_persistent_database);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/temporary-spill-cleanup",

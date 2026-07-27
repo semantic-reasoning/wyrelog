@@ -1,6 +1,48 @@
 diff --git a/duckdb.cpp b/duckdb.cpp
 --- a/duckdb.cpp
 +++ b/duckdb.cpp
+@@ -75563,13 +75563,20 @@
+-string FileSystem::GetHomeDirectory(optional_ptr<FileOpener> opener) {
+-	// read the home_directory setting first, if it is set
+-	if (opener) {
+-		Value result;
+-		if (opener->TryGetCurrentSetting("home_directory", result)) {
+-			if (!result.IsNull() && !result.ToString().empty()) {
+-				return result.ToString();
+-			}
+-		}
+-	}
++static bool TryGetConfiguredHomeDirectory(optional_ptr<FileOpener> opener, string &home_directory) {
++	if (!opener) {
++		return false;
++	}
++	Value result;
++	if (!opener->TryGetCurrentSetting("home_directory", result) || result.IsNull() || result.ToString().empty()) {
++		return false;
++	}
++	home_directory = result.ToString();
++	return true;
++}
++
++string FileSystem::GetHomeDirectory(optional_ptr<FileOpener> opener) {
++	string home_directory;
++	if (TryGetConfiguredHomeDirectory(opener, home_directory)) {
++		return home_directory;
++	}
+ 	// fallback to the default home directories for the specified system
+ #ifdef DUCKDB_WINDOWS
+ 	return FileSystem::GetEnvVariable("USERPROFILE");
+@@ -86973,3 +86980,7 @@
+-	string GetHomeDirectory() override {
+-		return FileSystem::GetHomeDirectory(GetOpener());
+-	}
++	string GetHomeDirectory() override {
++		string home_directory;
++		if (TryGetConfiguredHomeDirectory(GetOpener(), home_directory)) {
++			return home_directory;
++		}
++		return GetFileSystem().GetHomeDirectory();
++	}
 @@ -279388,7 +279388,11 @@
 -	auto &vfs = static_cast<VirtualFileSystem &>(*db.config.file_system);
 -	auto &default_fs = vfs.GetDefaultFileSystem();
