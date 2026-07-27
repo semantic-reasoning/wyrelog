@@ -421,6 +421,8 @@ static GMutex lock_domains_mutex;
 static GPtrArray *lock_domains;
 static gint namespace_test_fault;
 static void release_lock_domain (WylFactArtifactNamespace *);
+static wyrelog_error_t namespace_test_substitute_regular
+    (WylFactArtifactNamespace *, const gchar *, gboolean);
 
 static gboolean
 namespace_fault_take (WylFactArtifactNamespaceTestFault fault)
@@ -435,7 +437,7 @@ void wyl_fact_artifact_namespace_set_test_fault
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
       <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY)
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_SUBSTITUTE)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -1621,6 +1623,20 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
     result = WYRELOG_E_POLICY;
     goto done;
   }
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE))
+  {
+    result = namespace_test_substitute_regular (lease->namespace_, name, TRUE);
+    if (result != WYRELOG_E_OK)
+      goto done;
+  }
+  /* This is deliberately adjacent to unlinkat: the pre-unlink test seam
+   * models the same-UID pathname swap that production cannot prevent. */
+  if (lease_revalidate_sidecar_unlocked (lease) != WYRELOG_E_OK
+      || sidecar_binding_matches_unlocked (binding) != WYRELOG_E_OK) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
 
   if (unlinkat (lease->namespace_->fd, name, 0) != 0) {
     gint unlink_error = errno;
@@ -1658,6 +1674,14 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
     result = WYRELOG_E_POLICY;
   else
     result = post_mutation_check_unlocked (lease, result);
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_SUBSTITUTE))
+  {
+    wyrelog_error_t substitution =
+        namespace_test_substitute_regular (lease->namespace_, name, FALSE);
+    if (substitution != WYRELOG_E_OK)
+      result = substitution;
+  }
   if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
       || pinned.st_nlink != 0 || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode

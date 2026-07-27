@@ -294,6 +294,23 @@ unlink_temp_binding_worker (gpointer data)
 
 typedef struct
 {
+  WylFactArtifactSidecarBinding *binding;
+  wyrelog_error_t error;
+  WylFactArtifactSidecarRetireResult result;
+} SidecarRetireWorker;
+
+static gpointer
+retire_sidecar_binding_worker (gpointer data)
+{
+  SidecarRetireWorker *worker = data;
+  worker->result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  worker->error = wyl_fact_artifact_sidecar_binding_retire (worker->binding,
+      &worker->result);
+  return NULL;
+}
+
+typedef struct
+{
   WylFactArtifactMutationLease *lease;
   WylFactArtifactName name;
   wyrelog_error_t result;
@@ -1035,6 +1052,209 @@ test_namespace (void)
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED);
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
           WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_NOT_FOUND);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  /* Names which are absent, but not absent with this binding's pinned inode,
+   * are never idempotent cleanup authority. */
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_autofree gchar *checkpoint_path = g_build_filename (graph_path,
+      "facts.duckdb.wal.checkpoint", NULL);
+  g_assert_cmpint (unlink (checkpoint_path), ==, 0);
+  g_assert_cmpint (symlink ("facts.duckdb", checkpoint_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (unlink (checkpoint_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_autofree gchar *recovery_path = g_build_filename (graph_path,
+      "facts.duckdb.wal.recovery", NULL);
+  g_assert_cmpint (unlink (recovery_path), ==, 0);
+  g_assert_cmpint (mkdir (recovery_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (rmdir (recovery_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_autofree gchar *bound_wal_path = g_build_filename (graph_path,
+      "facts.duckdb.wal", NULL);
+  g_autofree gchar *wal_alias_path = g_build_filename (graph_path,
+      "facts.duckdb.wal.alias", NULL);
+  g_assert_cmpint (link (bound_wal_path, wal_alias_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (unlink (wal_alias_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  /* The deterministic substitutions are injected after the normal identity
+   * check; the adjacent recheck must reject pre-unlink replacement, while a
+   * post-unlink replacement makes the terminal result reconcile-required. */
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_WAL);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_SUBSTITUTE);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_CHECKPOINT);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  SidecarRetireWorker retire_workers[] = {
+    {sidecar, WYRELOG_E_INTERNAL,
+        WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED},
+    {sidecar, WYRELOG_E_INTERNAL,
+        WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED},
+  };
+  GThread *retire_threads[] = {
+    g_thread_new ("sidecar-retire-a", retire_sidecar_binding_worker,
+        &retire_workers[0]),
+    g_thread_new ("sidecar-retire-b", retire_sidecar_binding_worker,
+        &retire_workers[1]),
+  };
+  g_thread_join (retire_threads[0]);
+  g_thread_join (retire_threads[1]);
+  guint retire_successes = 0;
+  guint retire_rejections = 0;
+  for (guint i = 0; i < G_N_ELEMENTS (retire_workers); i++) {
+    if (retire_workers[i].error == WYRELOG_E_OK
+        && retire_workers[i].result
+        == WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED)
+      retire_successes++;
+    if (retire_workers[i].error == WYRELOG_E_POLICY
+        && retire_workers[i].result
+        == WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED)
+      retire_rejections++;
+  }
+  g_assert_cmpuint (retire_successes, ==, 1);
+  g_assert_cmpuint (retire_rejections, ==, 1);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
+  WylFactArtifactMutationLease *contender = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
+          &contender), ==, WYRELOG_E_BUSY);
+  g_assert_null (contender);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease (n,
+          &lease), ==, WYRELOG_E_OK);
+  g_autofree gchar *sidecar_main_path = g_build_filename (graph_path,
+      "facts.duckdb", NULL);
+  g_autofree gchar *saved_sidecar_main_path = g_build_filename (graph_path,
+      "facts.duckdb.sidecar-retire-saved", NULL);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (rename (sidecar_main_path, saved_sidecar_main_path), ==, 0);
+  fd = open (sidecar_main_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  g_assert_cmpint (fd >= 0, ==, TRUE);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (unlink (sidecar_main_path), ==, 0);
+  g_assert_cmpint (rename (saved_sidecar_main_path, sidecar_main_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_autofree gchar *sidecar_lock_path = g_build_filename (graph_path,
+      "facts.duckdb.lock", NULL);
+  g_autofree gchar *saved_sidecar_lock_path = g_build_filename (graph_path,
+      "facts.duckdb.lock.sidecar-retire-saved", NULL);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (rename (sidecar_lock_path, saved_sidecar_lock_path), ==, 0);
+  fd = open (sidecar_lock_path, O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
+  g_assert_cmpint (fd >= 0, ==, TRUE);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (unlink (sidecar_lock_path), ==, 0);
+  g_assert_cmpint (rename (saved_sidecar_lock_path, sidecar_lock_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_RECOVERY, TRUE, TRUE, &sidecar, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (chmod (graph_path, 0755), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (retirement, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (chmod (graph_path, 0700), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (sidecar,
+          &retirement), ==, WYRELOG_E_OK);
   wyl_fact_artifact_sidecar_binding_free (sidecar);
   sidecar = NULL;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_temp (lease, "spill-1",
