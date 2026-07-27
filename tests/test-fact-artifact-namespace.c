@@ -2,6 +2,12 @@
 #ifndef G_OS_WIN32
 #define _POSIX_C_SOURCE 200809L
 #define _XOPEN_SOURCE 700
+/* Apple SDKs hide the BSD O_NOFOLLOW extension under strict C modes unless
+ * this is set before system headers.  Keep the test's direct held-main
+ * opens on the same no-follow contract as the namespace under test. */
+#if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
+#define _DARWIN_C_SOURCE 1
+#endif
 #endif
 #include <glib.h>
 #include <glib/gstdio.h>
