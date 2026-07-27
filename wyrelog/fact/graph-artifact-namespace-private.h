@@ -24,15 +24,14 @@ typedef enum
 } WylFactArtifactName;
 
 /* The retirement result is deliberately separate from the error return.
- * RETIRED and ABSENT are terminal successful outcomes.  RECONCILE_REQUIRED
- * means unlink linearized, but durability or the final identity check could
- * not be proved; the binding is terminal and must not be retried.  On every
- * error before unlink linearizes, the output is NOT_RETIRED. */
+ * RETIRED is the only successful terminal outcome.  RECONCILE_REQUIRED means
+ * unlink may have linearized, or an active binding observed external removal;
+ * the binding is terminal and must not be retried.  On every error before
+ * either condition, the output is NOT_RETIRED. */
 typedef enum
 {
   WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED = 0,
   WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED,
-  WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_ABSENT,
   WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED,
 } WylFactArtifactSidecarRetireResult;
 
@@ -120,7 +119,11 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
  * This API is intentionally the sole fixed-sidecar deletion authority.  Its
  * result output is initialized to NOT_RETIRED on every entry; callers must
  * discard a binding after any terminal result, including
- * RECONCILE_REQUIRED. */
+ * RECONCILE_REQUIRED.  The #612 exclusive lease serializes cooperating
+ * writers, but POSIX cannot prevent a same-UID nonparticipant from swapping
+ * the pathname after the final check; a mismatch observed before unlink is
+ * rejected without unlinking, while any observed external removal is terminal
+ * reconciliation rather than a successful cleanup claim. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_retire
     (WylFactArtifactSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
