@@ -1,0 +1,33 @@
+diff --git a/duckdb.cpp b/duckdb.cpp
+--- a/duckdb.cpp
++++ b/duckdb.cpp
+@@ -279388,7 +279388,11 @@
+-	auto &vfs = static_cast<VirtualFileSystem &>(*db.config.file_system);
+-	auto &default_fs = vfs.GetDefaultFileSystem();
+-	if (default_fs.IsLocalFileSystem()) {
+-		return default_fs;
++	auto *vfs = dynamic_cast<VirtualFileSystem *>(db.config.file_system.get());
++	if (vfs) {
++		auto &default_fs = vfs->GetDefaultFileSystem();
++		if (default_fs.IsLocalFileSystem()) {
++			return default_fs;
++		}
++	} else if (db.config.file_system->IsLocalFileSystem()) {
++		return *db.config.file_system;
+-	}
+-	owned = make_uniq<LocalFileSystem>();
+-	return *owned;
++	}
++	owned = make_uniq<LocalFileSystem>();
++	return *owned;
+@@ -279402,5 +279406,5 @@
+-	auto &vfs = static_cast<VirtualFileSystem &>(*db.config.file_system);
+-	if (vfs.SubSystemIsDisabled(local_fs.GetName())) {
++	auto *vfs = dynamic_cast<VirtualFileSystem *>(db.config.file_system.get());
++	if (vfs && vfs->SubSystemIsDisabled(local_fs.GetName())) {
+-		throw PermissionException("File system %s has been disabled by configuration", local_fs.GetName());
+-	}
+-	return local_fs;
++		throw PermissionException("File system %s has been disabled by configuration", local_fs.GetName());
++	}
++	return local_fs;
