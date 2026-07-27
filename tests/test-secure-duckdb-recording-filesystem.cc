@@ -91,6 +91,7 @@ public:
 
   const std::vector<Event> &events () const { return recorder_->events; }
   guint rejected () const { return recorder_->rejected; }
+  bool IsLocalFileSystem () const override { return true; }
   void RecordClose (const std::string &path, duckdb::FileOpenFlags flags)
   {
     record ("close", path, flags);
