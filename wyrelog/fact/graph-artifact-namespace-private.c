@@ -35,9 +35,10 @@ void wyl_fact_artifact_namespace_set_test_fault
 
 wyrelog_error_t
 wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
-    WylFactArtifactNamespace **o)
+    const WylFactGraphRegularFile *main_file, WylFactArtifactNamespace **o)
 {
   (void) d;
+  (void) main_file;
   if (o)
     *o = NULL;
   return closed ();
@@ -308,20 +309,6 @@ wyl_fact_artifact_namespace_lock (WylFactArtifactNamespace *n, gboolean e,
 }
 
 wyrelog_error_t
-wyl_fact_artifact_namespace_bind_main (WylFactArtifactNamespace *n)
-{
-  (void) n;
-  return closed ();
-}
-
-wyrelog_error_t
-wyl_fact_artifact_namespace_revalidate_main (WylFactArtifactNamespace *n)
-{
-  (void) n;
-  return closed ();
-}
-
-wyrelog_error_t
 wyl_fact_artifact_namespace_open_temp (WylFactArtifactNamespace *n,
     const gchar *t, gboolean c, gboolean w, gint *o)
 {
@@ -461,7 +448,7 @@ sidecar_name (WylFactArtifactName n)
 }
 
 static wyrelog_error_t
-check (WylFactArtifactNamespace *n)
+check_directory (WylFactArtifactNamespace *n)
 {
   struct stat s;
   if (!n || n->fd < 0 || fstat (n->fd, &s) || !S_ISDIR (s.st_mode)
@@ -470,6 +457,41 @@ check (WylFactArtifactNamespace *n)
       || (guint64) s.st_dev != n->device || (guint64) s.st_ino != n->inode)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+check (WylFactArtifactNamespace *n)
+{
+  struct stat held, named;
+  if (check_directory (n) != WYRELOG_E_OK || n->main_fd < 0
+      || fstat (n->main_fd, &held) != 0 || !S_ISREG (held.st_mode)
+      || held.st_nlink != 1 || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_uid != n->owner
+      || (guint64) held.st_dev != n->main_device
+      || (guint64) held.st_ino != n->main_inode
+      || fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_uid != n->owner
+      || (guint64) named.st_dev != n->main_device
+      || (guint64) named.st_ino != n->main_inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static gint
+duplicate_cloexec (gint fd)
+{
+#ifdef F_DUPFD_CLOEXEC
+  return fcntl (fd, F_DUPFD_CLOEXEC, 3);
+#else
+  gint duplicate = dup (fd);
+  if (duplicate >= 0 && fcntl (duplicate, F_SETFD, FD_CLOEXEC) != 0) {
+    close (duplicate);
+    duplicate = -1;
+  }
+  return duplicate;
+#endif
 }
 
 static WylFactArtifactNamespace *
@@ -700,36 +722,63 @@ static wyrelog_error_t open_temp_unchecked (WylFactArtifactNamespace *,
 
 wyrelog_error_t
 wyl_fact_artifact_namespace_open (const WylFactGraphDirectory *d,
-    WylFactArtifactNamespace **o)
+    const WylFactGraphRegularFile *main_file, WylFactArtifactNamespace **o)
 {
   if (o)
     *o = NULL;
-  if (!d || !o || d->graph_fd < 0)
+  if (!d || !main_file || !o || d->graph_fd < 0 || main_file->fd < 0)
     return WYRELOG_E_INVALID;
-  gint fd = dup (d->graph_fd);
-  if (fd < 0)
+  gint fd = duplicate_cloexec (d->graph_fd);
+  gint main_fd = duplicate_cloexec (main_file->fd);
+  if (fd < 0 || main_fd < 0) {
+    if (fd >= 0)
+      close (fd);
+    if (main_fd >= 0)
+      close (main_fd);
     return WYRELOG_E_IO;
-  struct stat s;
+  }
+  struct stat s, main_stat, named_main;
   if (fstat (fd, &s) || !S_ISDIR (s.st_mode)
-      || (s.st_mode & 07777) != 0700 || s.st_uid != geteuid ()) {
+      || (s.st_mode & 07777) != 0700 || s.st_uid != geteuid ()
+      || (guint64) s.st_dev != d->graph_device
+      || (guint64) s.st_ino != d->graph_inode
+      || fstat (main_fd, &main_stat) || !S_ISREG (main_stat.st_mode)
+      || main_stat.st_nlink != 1 || (main_stat.st_mode & 07777) != 0600
+      || main_stat.st_uid != geteuid ()
+      || (guint64) main_stat.st_dev != main_file->device
+      || (guint64) main_stat.st_ino != main_file->inode
+      || fstatat (fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named_main,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_main.st_mode)
+      || named_main.st_nlink != 1 || (named_main.st_mode & 07777) != 0600
+      || named_main.st_uid != geteuid ()
+      || (guint64) named_main.st_dev != main_file->device
+      || (guint64) named_main.st_ino != main_file->inode) {
     close (fd);
+    close (main_fd);
     return WYRELOG_E_POLICY;
   }
   WylFactArtifactNamespace *n = g_new0 (WylFactArtifactNamespace, 1);
   n->references = 1;
   n->fd = fd;
-  n->main_fd = -1;
+  n->main_fd = main_fd;
   n->lock_pin_fd = -1;
   n->device = s.st_dev;
   n->inode = s.st_ino;
   n->owner = s.st_uid;
+  n->main_device = main_stat.st_dev;
+  n->main_inode = main_stat.st_ino;
   /* Pin and register before publishing n: no concurrent namespace can choose
    * a different inode for this held graph directory. */
   wyrelog_error_t lock_result = pin_lock_domain (n);
   if (lock_result != WYRELOG_E_OK) {
     close (n->fd);
+    close (n->main_fd);
     g_free (n);
     return lock_result;
+  }
+  if (check (n) != WYRELOG_E_OK) {
+    namespace_unref (n);
+    return WYRELOG_E_POLICY;
   }
   *o = n;
   return WYRELOG_E_OK;
@@ -913,45 +962,6 @@ wyl_fact_artifact_namespace_lock (WylFactArtifactNamespace *n, gboolean ex,
     *o = -1;
   (void) ex;
   return !n || !o ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_namespace_bind_main (WylFactArtifactNamespace *n)
-{
-  if (check (n) != WYRELOG_E_OK)
-    return WYRELOG_E_POLICY;
-  gint fd = -1;
-  wyrelog_error_t r = wyl_fact_artifact_namespace_open_file
-      (n, WYL_FACT_ARTIFACT_MAIN, FALSE, FALSE, &fd);
-  if (r != WYRELOG_E_OK)
-    return r;
-  struct stat s;
-  if (fstat (fd, &s) != 0) {
-    close (fd);
-    return WYRELOG_E_IO;
-  }
-  if (n->main_fd >= 0)
-    close (n->main_fd);
-  n->main_fd = fd;
-  n->main_device = s.st_dev;
-  n->main_inode = s.st_ino;
-  return WYRELOG_E_OK;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_namespace_revalidate_main (WylFactArtifactNamespace *n)
-{
-  struct stat s, named;
-  if (!n || n->main_fd < 0 || check (n) != WYRELOG_E_OK
-      || fstat (n->main_fd, &s) != 0 || !S_ISREG (s.st_mode)
-      || s.st_nlink != 1 || (guint64) s.st_dev != n->main_device
-      || (guint64) s.st_ino != n->main_inode
-      || fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named,
-          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
-      || named.st_nlink != 1 || (guint64) named.st_dev != n->main_device
-      || (guint64) named.st_ino != n->main_inode)
-    return WYRELOG_E_POLICY;
-  return WYRELOG_E_OK;
 }
 
 static gboolean
@@ -1322,10 +1332,7 @@ namespace_test_substitute_regular (WylFactArtifactNamespace *namespace_,
 static wyrelog_error_t
 lease_revalidate_sidecar_unlocked (WylFactArtifactMutationLease *lease)
 {
-  wyrelog_error_t result = lease_revalidate_unlocked (lease);
-  if (result != WYRELOG_E_OK)
-    return result;
-  return wyl_fact_artifact_namespace_revalidate_main (lease->namespace_);
+  return lease_revalidate_unlocked (lease);
 }
 
 static wyrelog_error_t
