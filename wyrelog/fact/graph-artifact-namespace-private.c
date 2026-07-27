@@ -139,6 +139,16 @@ wyrelog_error_t
   return closed ();
 }
 
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding *b,
+    WylFactArtifactSidecarRetireResult *out_result)
+{
+  (void) b;
+  if (out_result)
+    *out_result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  return closed ();
+}
+
 void
 wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *b)
 {
@@ -1559,6 +1569,19 @@ wyrelog_error_t
 done:
   g_mutex_unlock (&lease->mutex);
   return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
+    *binding, WylFactArtifactSidecarRetireResult *out_result)
+{
+  if (out_result)
+    *out_result = WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  /* The result/state contract lands before the unlink authority.  Keep this
+   * slice fail-closed so no consumer can mistake a generic unlink for the
+   * forthcoming identity-bound capability. */
+  (void) binding;
+  return WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t

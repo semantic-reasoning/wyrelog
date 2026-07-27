@@ -588,6 +588,19 @@ test_mutation_leases (void)
 }
 #endif
 
+static void
+test_sidecar_retirement_result_contract (void)
+{
+  WylFactArtifactSidecarRetireResult result =
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (NULL, &result),
+      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (result, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (NULL, NULL),
+      ==, WYRELOG_E_POLICY);
+}
+
 #ifdef G_OS_WIN32
 static void
 test_mutation_leases (void)
@@ -1325,6 +1338,9 @@ int
 main (int argc, char **argv)
 {
   g_test_init (&argc, &argv, NULL);
+  g_test_add_func
+      ("/fact-artifact-namespace/sidecar-retirement-result-contract",
+      test_sidecar_retirement_result_contract);
   g_test_add_func ("/fact-artifact-namespace/basic", test_namespace);
   g_test_add_func ("/fact-artifact-namespace/mutation-leases",
       test_mutation_leases);
