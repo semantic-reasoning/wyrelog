@@ -1628,8 +1628,10 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
     if (result != WYRELOG_E_OK)
       goto done;
   }
-  /* This is deliberately adjacent to unlinkat: the pre-unlink test seam
-   * models the same-UID pathname swap that production cannot prevent. */
+  /* Deterministic seam: substitute after the normal identity check but before
+   * the final recheck. It proves an observed substitution is rejected without
+   * unlink; #612 documents the remaining final-check-to-unlink same-UID
+   * nonparticipant window as outside the portable POSIX guarantee. */
   if (lease_revalidate_sidecar_unlocked (lease) != WYRELOG_E_OK
       || sidecar_binding_matches_unlocked (binding) != WYRELOG_E_OK) {
     result = WYRELOG_E_POLICY;
