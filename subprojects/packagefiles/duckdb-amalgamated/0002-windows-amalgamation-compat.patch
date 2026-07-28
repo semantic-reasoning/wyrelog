@@ -1,0 +1,55 @@
+diff --git a/duckdb.cpp b/duckdb.cpp
+--- a/duckdb.cpp
++++ b/duckdb.cpp
+@@ -53727,3 +53727,7 @@
+ #undef CreateDirectory
++#ifdef interface
++#undef interface
++#endif
++
+ #undef MoveFile
+ #undef RemoveDirectory
+@@ -337549,5 +337553,8 @@ class LightweightSemaphore
+ #if defined(_WIN32)
+ #include <windows.h>
++#ifdef interface
++#undef interface
++#endif
+ #elif defined(__GNUC__)
+ #include <sched.h>
+ #include <unistd.h>
+@@ -466172,5 +466180,8 @@
+ // Requires Windows Vista or Windows Server 2008 at minimum.
+ #include <windows.h>
++#ifdef interface
++#undef interface
++#endif
+ #if defined(WINVER) && WINVER >= 0x0600
+ #define MUTEX_IS_WIN32_SRWLOCK
+ #endif
+@@ -595999,4 +596011,7 @@ void mbedtls_platform_zeroize(void *buf, size_t len)
+ #if defined(_WIN32)
+ #include <windows.h>
++#ifdef interface
++#undef interface
++#endif
+ #endif
+ // Detect platforms known to support explicit_bzero()
+@@ -596211,6 +596227,9 @@ int mbedtls_platform_gmtime_r(const mbedtls_time_t *tt, struct tm *tm_buf)
+ #elif defined(_WIN32) || defined(WIN32) || defined(__CYGWIN__) || \
+     defined(__MINGW32__) || defined(_WIN64)
+ #include <windows.h>
++#ifdef interface
++#undef interface
++#endif
+ mbedtls_ms_time_t mbedtls_ms_time(void)
+ {
+     FILETIME ct;
+@@ -615542,4 +615562,7 @@ static void ZSTD_wildcopy(void* dst, const void* src, ptrdiff_t length, unsigne
+ #undef ERROR   /* reported already defined on VS 2015 (Rich Geldreich) */
+ #include <windows.h>
++#ifdef interface
++#undef interface
++#endif
+ #undef ERROR
+ #define ERROR(name) ZSTD_ERROR(name)
