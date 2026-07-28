@@ -27,13 +27,13 @@ subproject = (
     / "meson.build")
 text = subproject.read_text(encoding="utf-8")
 
-start = text.index("duckdb_lib = library(")
+start = text.index("duckdb_lib = static_library(")
 end = text.index("\n)\n", start)
 target = text[start:end]
 
 if target.count("override_options") != 1:
     raise SystemExit(
-        "the duckdb library target must pin codegen via override_options; "
+        "the static duckdb target must pin codegen via override_options; "
         "project() or caller default_options are inert on meson 1.3.2")
 if "'optimization=2'" not in target:
     raise SystemExit("the duckdb library target must pin 'optimization=2'")
@@ -46,6 +46,22 @@ for option in ("buildtype", "optimization", "debug"):
         raise SystemExit(
             f"project() default_options ({option}) are inert on meson "
             "1.3.2; keep the codegen pin on the library target only")
+
+windows_start = text.index("elif host_machine.system() == 'windows'")
+windows_end = text.index("\nendif", windows_start)
+windows = text[windows_start:windows_end]
+if "cpp.find_library('rstrtmgr', required : true)" not in windows:
+    raise SystemExit(
+        "the static Windows DuckDB target must expose its Restart Manager "
+        "import library")
+
+dependency_start = text.index("duckdb_dep = declare_dependency(")
+dependency_end = text.index("\n)\n", dependency_start)
+dependency = text[dependency_start:dependency_end]
+if "dependencies : duckdb_deps" not in dependency:
+    raise SystemExit(
+        "the exported DuckDB dependency must propagate static link "
+        "dependencies to its consumers")
 
 parent = (root / "meson.build").read_text(encoding="utf-8")
 call_start = parent.index("duckdb_dep = dependency('duckdb-amalgamated',")

@@ -30,12 +30,13 @@ if enable_secure_duckdb_bridge_opt.enabled()
   if not enable_fact_store_opt.enabled()
     error('enable_secure_duckdb_bridge requires enable_fact_store=enabled')
   endif
-  if host_machine.system() != 'windows' and get_option('duckdb_source') != 'subproject'
+  if get_option('duckdb_source') != 'subproject'
     error('enable_secure_duckdb_bridge requires duckdb_source=subproject (pinned DuckDB 1.5.5 source)')
   endif
-  if host_machine.system() != 'windows'
-    add_languages('cpp', required : true, native : false)
-  endif
+  # This is a C++ API contract on every supported host.  In particular, do
+  # not let the Windows C-only bridge target silently resolve a prebuilt DLL:
+  # the source subproject is the provenance boundary there too.
+  add_languages('cpp', required : true, native : false)
 endif
 if enable_break_glass_opt and not enable_audit_opt.allowed()
   # The break-glass override path emits an audit event with a stable
