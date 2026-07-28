@@ -343,6 +343,10 @@ jobs:
           if "${{ matrix.duckdb_source }}"=="prebuilt" set PATH=%GITHUB_WORKSPACE%\subprojects\duckdb-prebuilt-windows-amd64;%PATH%
           if "${{ matrix.duckdb_source }}"=="subproject" set PATH=%GITHUB_WORKSPACE%\builddir\subprojects\duckdb-amalgamated-src;%PATH%
           set PATH=%VCPKG_INSTALLED_DIR%\tools\pkgconf;%VCPKG_INSTALLED_DIR%\bin;%PATH%
+          rem GLib locates gspawn-win64-helper beside the loaded glib DLL
+          rem (vcpkg bin), but vcpkg installs it under tools\glib. Stage it
+          rem beside the DLL so g_subprocess-based tests can launch children.
+          copy /Y "%VCPKG_INSTALLED_DIR%\tools\glib\gspawn-win64-helper*.exe" "%VCPKG_INSTALLED_DIR%\bin\" >NUL
           meson compile -C builddir wyctl wyrelogd
           if not exist builddir\wyrelog\wyctl.exe exit /b 1
           builddir\wyrelog\wyctl.exe --help >NUL
