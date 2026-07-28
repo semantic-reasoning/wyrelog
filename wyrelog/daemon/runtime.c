@@ -104,7 +104,7 @@ prepare_fact_root (const WylDaemonOptions *opts, GError **error)
     return TRUE;
 
 #ifdef WYL_HAS_FACT_STORE
-  struct stat fact_root_stat;
+  GStatBuf fact_root_stat;
   if (g_mkdir_with_parents (opts->fact_root, 0700) != 0) {
     g_set_error (error, G_FILE_ERROR, g_file_error_from_errno (errno),
         "failed to create fact root directory: %s", opts->fact_root);
