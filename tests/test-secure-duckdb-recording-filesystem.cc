@@ -33,6 +33,12 @@
 #include <io.h>
 #include <fcntl.h>
 
+/* Declare the single Win32 entry point we need for the current executable
+ * path without pulling in <windows.h>, whose CreateDirectory/RemoveDirectory/
+ * MoveFile macros would rewrite the RecordingFileSystem method names below. */
+extern "C" __declspec (dllimport) unsigned long __stdcall
+GetModuleFileNameW (void *module, wchar_t *filename, unsigned long size);
+
 /* GLib child-process tests consume a text trace on stdout.  MSVC has neither
  * POSIX dprintf nor STDOUT_FILENO, so provide the same checked writer without
  * changing the trace language. */
@@ -4494,7 +4500,19 @@ main (int argc, char **argv)
     return contend_writer_child (argv[2]);
   if (argc == 3 && g_strcmp0 (argv[1], "--checkpoint-crash") == 0)
     return checkpoint_crash_child (argv[2]);
+#ifdef G_OS_WIN32
+  /* self_path re-spawns the trace-writer children, so it must be an absolute
+   * path that resolves regardless of how meson invoked this process. The
+   * command line's argv[0] is not a reliable spawn target (it failed with
+   * ENOENT under the CI test runner); the module filename always resolves. */
+  wchar_t module_path[4096];
+  unsigned long module_len = GetModuleFileNameW (NULL, module_path,
+      (unsigned long) G_N_ELEMENTS (module_path));
+  self_path = g_utf16_to_utf8 ((const gunichar2 *) module_path, module_len,
+      NULL, NULL, NULL);
+#else
   self_path = argv[0];
+#endif
   g_test_init (&argc, &argv, NULL);
   g_test_add_func ("/secure-duckdb-bridge/recording-filesystem/home-directory-resolution",
       test_recording_filesystem_home_directory_resolution);
