@@ -30,6 +30,8 @@
 #include <unistd.h>
 #else
 #include <process.h>
+#include <io.h>
+#include <fcntl.h>
 
 /* GLib child-process tests consume a text trace on stdout.  MSVC has neither
  * POSIX dprintf nor STDOUT_FILENO, so provide the same checked writer without
@@ -115,6 +117,20 @@ path_is_at_or_below (const std::string &recorded, const fs::path &root)
 static_assert (std::string_view (DUCKDB_VERSION) == "v1.5.5");
 static_assert (WYL_DUCKDB_SOURCE_BUILD == 1,
     "recording contract tests require the pinned DuckDB source build");
+
+/* Assert a result cell renders to an expected string. duckdb::Value::ToString
+ * returns a temporary std::string; passing its c_str() straight into
+ * g_assert_cmpstr binds the pointer to the macro's internal local and the
+ * backing string is freed at the end of that declaration, before the compare
+ * runs (clang-cl -Wdangling-gsl). glibc happens to leave the freed buffer
+ * intact; the Windows allocator does not, yielding a spurious empty read.
+ * Keep the string alive in a named local here. */
+static void
+assert_value_text (const duckdb::Value &value, const char *expected)
+{
+  const std::string actual = value.ToString ();
+  g_assert_cmpstr (actual.c_str (), ==, expected);
+}
 
 struct Event {
   std::string operation;
@@ -1443,6 +1459,18 @@ remove_tree (const gchar *path)
   g_assert_cmpint (g_rmdir (path), ==, 0);
 }
 
+static std::string
+outside_sandbox_probe_path (const char *leaf)
+{
+  /* A literal "/tmp/..." is a real absolute path on POSIX but, lacking a
+   * drive letter, is only drive-relative on Windows -- std::filesystem
+   * then misclassifies it as a relative path before the sandbox-boundary
+   * check ever runs. A sibling of the platform temp directory is
+   * genuinely absolute, and genuinely outside this test's sandbox root
+   * (which lives one level deeper), on every platform. */
+  return path_to_utf8 (fs::temp_directory_path () / leaf);
+}
+
 static void
 assert_rejected_without_forwarding (RecordingFileSystem &filesystem,
     const std::string &path, const gchar *reason)
@@ -2075,6 +2103,19 @@ static void
 assert_writer_contender_exact_trace (const std::vector<Event> &events,
     const fs::path &database)
 {
+#ifdef G_OS_WIN32
+  /* On Windows the holder's write lock is enforced as a zero file share mode,
+   * so the contender's very first metadata read-open is already denied with a
+   * sharing violation. It never reaches DuckDB's write-lock acquisition or the
+   * intervening read/canonicalize/exists probes the advisory-locked POSIX path
+   * performs, so the recorded language is the two home separators plus that one
+   * rejected read-open. */
+  static const ExactTraceToken tokens[] = {
+    H ("separator"), D ("separator"),
+    { "open", TracePathRole::MAIN, 129, duckdb::FileLockType::NO_LOCK,
+        0, "IOException" },
+  };
+#else
   static const ExactTraceToken tokens[] = {
     H ("separator"), D ("separator"),
     M ("open", 129, NO_LOCK, -1), M ("read", 0, NO_LOCK, -1),
@@ -2085,6 +2126,7 @@ assert_writer_contender_exact_trace (const std::vector<Event> &events,
     { "open", TracePathRole::MAIN, 2307, duckdb::FileLockType::WRITE_LOCK,
         0, "IOException" },
   };
+#endif
   assert_exact_trace ("writer-contender", events, database, tokens,
       G_N_ELEMENTS (tokens));
 }
@@ -2434,6 +2476,14 @@ normalized_trace_digest (const std::vector<Event> &events, const fs::path &root)
         normalized /= part;
     }
     path = path_to_utf8 (normalized);
+#ifdef G_OS_WIN32
+    /* The digest is a cross-platform fixture: the recorded VFS event grammar
+     * is byte-identical to the POSIX golden except that fs::path rebuilds the
+     * normalized path with the native separator. Fold '\\' to '/' here so the
+     * one pinned hash covers both hosts. Recorded event paths are left native
+     * for the fixed-token structural walks, which compare them verbatim. */
+    std::replace (path.begin (), path.end (), '\\', '/');
+#endif
     const std::string line = event.operation + "\t" + path + "\t"
         + std::to_string (event.flags) + "\t"
         + std::to_string ((unsigned) event.lock) + "\t"
@@ -2460,8 +2510,11 @@ assert_trace_fixture (const gchar *name, const std::vector<Event> &events,
 struct FileIdentity {
 #ifdef G_OS_WIN32
   /* Windows does not give this test a stable POSIX inode/link/timestamp
-   * language. Its closed artifact identity is bytes plus logical size. */
+   * language. Its closed artifact identity is bytes plus logical size.
+   * readable is false when the file was write-locked at snapshot time, in
+   * which case only the (stat-derived) size is trustworthy. */
   off_t size;
+  bool readable;
   std::string digest;
 #else
   dev_t device;
@@ -2484,12 +2537,25 @@ snapshot_file (const fs::path &path)
   g_assert_cmpint (stat_res, ==, 0);
   gchar *contents = NULL;
   gsize length = 0;
-  g_assert_true (g_file_get_contents (utf8_path.c_str (), &contents, &length, NULL));
+  const gboolean read = g_file_get_contents (utf8_path.c_str (), &contents,
+      &length, NULL);
+#ifdef G_OS_WIN32
+  /* DuckDB opens a write-locked database on Windows with a share mode that
+   * denies concurrent readers (FileLockType::WRITE_LOCK maps to a zero share
+   * mode), so a snapshot taken while the database is held open cannot hash
+   * the bytes -- only stat's size is observable. Report the file as unreadable
+   * and let assert_same_file fall back to size for that pairing; every
+   * snapshot taken with the database closed still carries a content digest. */
+  if (!read)
+    return { buffer.st_size, false, std::string () };
+#else
+  g_assert_true (read);
+#endif
   g_autofree gchar *digest = g_compute_checksum_for_data (G_CHECKSUM_SHA256,
       (const guchar *) contents, length);
   g_free (contents);
 #ifdef G_OS_WIN32
-  return { buffer.st_size, digest };
+  return { buffer.st_size, true, digest };
 #else
   return { buffer.st_dev, buffer.st_ino, buffer.st_size, buffer.st_mode,
       buffer.st_nlink, buffer.st_mtime, buffer.st_ctime, digest };
@@ -2507,9 +2573,17 @@ assert_same_file (const FileIdentity &before, const FileIdentity &after)
   g_assert_cmpint (after.links, ==, before.links);
   g_assert_cmpint (after.modified, ==, before.modified);
   g_assert_cmpint (after.changed, ==, before.changed);
-#endif
-  g_assert_cmpint (after.size, ==, before.size);
   g_assert_cmpstr (after.digest.c_str (), ==, before.digest.c_str ());
+#else
+  g_assert_cmpint (after.size, ==, before.size);
+  /* Compare content only when both snapshots could read the bytes. A snapshot
+   * captured while the database was write-locked carries size alone; the size
+   * equality above still detects any growth or truncation during contention,
+   * and the post-release snapshot (database closed, hence readable) performs
+   * the full content comparison against the same baseline. */
+  if (before.readable && after.readable)
+    g_assert_cmpstr (after.digest.c_str (), ==, before.digest.c_str ());
+#endif
 }
 
 struct ArtifactSet {
@@ -2861,6 +2935,12 @@ contend_writer_child (const gchar *sandbox)
     _exit (106);
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
+  /* The holder created and still owns this database. Requiring it to exist
+   * before the contending open keeps the Windows rejection check below
+   * unambiguous: a "Cannot open file" there can then only be the holder's
+   * sharing violation, never a missing-file open failure. */
+  if (!fs::exists (database))
+    _exit (109);
   auto recorder = std::make_shared<RecorderState> ();
   gboolean opened = FALSE;
   gboolean rejected = FALSE;
@@ -2872,8 +2952,18 @@ contend_writer_child (const gchar *sandbox)
     duckdb::DuckDB db (path_to_utf8 (database), &config);
     opened = TRUE;
   } catch (const duckdb::IOException &exception) {
+#ifdef G_OS_WIN32
+    /* Windows enforces the database write lock through the file share mode, so
+     * a contending open is denied at CreateFileW with a sharing violation
+     * rather than at DuckDB's advisory-lock step. The trailing OS text is
+     * localized (and carries a Restart Manager holder report), so match only
+     * the stable, locale-independent prefix. */
+    rejected = g_str_has_prefix (exception.what (),
+        "{\"exception_type\":\"IO\",\"exception_message\":\"Cannot open file \\\"");
+#else
     rejected = g_str_has_prefix (exception.what (),
         "{\"exception_type\":\"IO\",\"exception_message\":\"Could not set lock on file \\\"");
+#endif
   } catch (const duckdb::Exception &) {
   }
   if (opened || !rejected)
@@ -2976,11 +3066,20 @@ assert_read_only_live_wal_trace (const RecorderState &recorder,
 }
 
 static void
-assert_no_host_home_forwarding (const RecorderState &recorder)
+assert_no_host_home_forwarding (const RecorderState &recorder, const fs::path &sandbox_root)
 {
   const fs::path host_home = path_from_utf8 (g_get_home_dir ());
-  for (const auto &event : recorder.events)
+  for (const auto &event : recorder.events) {
+    /* The sandbox itself may be nested under the real host home directory
+     * (e.g. Windows resolves the per-user TEMP root under the profile
+     * directory), so containment within the sandbox is not a leak even
+     * though it is also "at or below" host_home. Only a path that escapes
+     * the sandbox into the real home tree is the forwarding bug this
+     * guards against. */
+    if (path_is_at_or_below (event.path, sandbox_root))
+      continue;
     g_assert_false (path_is_at_or_below (event.path, host_home));
+  }
 }
 
 static void
@@ -3012,7 +3111,7 @@ test_recording_filesystem_home_directory_resolution (void)
     duckdb::DuckDB db (path_to_utf8 (root / "unset-home.duckdb"), &config);
     g_assert_cmpuint (recorder->home_directory_calls, ==, 1);
     g_assert_cmpstr (recorder->controls.back ().operation.c_str (), ==, "get-home-directory");
-    assert_no_host_home_forwarding (*recorder);
+    assert_no_host_home_forwarding (*recorder, root);
   }
 
   {
@@ -3029,7 +3128,7 @@ test_recording_filesystem_home_directory_resolution (void)
     config.options.load_extensions = false;
     duckdb::DuckDB db (path_to_utf8 (root / "configured-home.duckdb"), &config);
     g_assert_cmpuint (recorder->home_directory_calls, ==, 0);
-    assert_no_host_home_forwarding (*recorder);
+    assert_no_host_home_forwarding (*recorder, root);
   }
 
   {
@@ -3051,7 +3150,7 @@ test_recording_filesystem_home_directory_resolution (void)
     }
     g_assert_true (denied);
     g_assert_cmpuint (recorder->home_directory_calls, ==, 1);
-    assert_no_host_home_forwarding (*recorder);
+    assert_no_host_home_forwarding (*recorder, root);
   }
 
   {
@@ -3066,11 +3165,12 @@ test_recording_filesystem_home_directory_resolution (void)
 
 static void
 assert_persistent_database_trace_language (const RecorderState &recorder,
-    size_t event_baseline, size_t control_baseline, const fs::path &database)
+    size_t event_baseline, size_t control_baseline, const fs::path &root,
+    const fs::path &database)
 {
   g_assert_cmpuint (event_baseline, ==, 0);
   assert_persistent_database_exact_trace (recorder.events, database);
-  assert_no_host_home_forwarding (recorder);
+  assert_no_host_home_forwarding (recorder, root);
   assert_source_155_platform_control_language (recorder.controls, control_baseline, 2);
 }
 
@@ -3163,6 +3263,7 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
   gboolean saw_main_close = FALSE, suffix_started = FALSE, separator_pending = FALSE;
   gboolean saw_directory_exists = FALSE, saw_create = FALSE, saw_remove_directory = FALSE;
   gboolean saw_storage_open = FALSE, saw_storage_truncate = FALSE, saw_storage_remove = FALSE;
+  gboolean saw_storage_write = FALSE;
   gboolean saw_block = FALSE, saw_list = FALSE, list_active = FALSE, saw_list_complete = FALSE;
   gboolean list_callback_pending = FALSE;
   std::string pending_list_callback_path;
@@ -3336,11 +3437,22 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
       g_assert_true (event.lock == duckdb::FileLockType::NO_LOCK);
       g_assert_cmpint (event.outcome, ==, -1);
       saw_storage_truncate = saw_storage_truncate || event.operation == "truncate";
+      saw_storage_write = saw_storage_write || event.operation == "write"
+          || event.operation == "write-at";
     }
   }
   g_assert_true (saw_main_close && saw_directory_exists);
   g_assert_false (separator_pending);
-  g_assert_true (saw_storage_open && saw_storage_truncate && saw_storage_remove && saw_block);
+  /* The storage child is opened, has its backing extended, and is removed.
+   * POSIX DuckDB extends the spill file with truncate(); the Windows build
+   * extends it with write-at and never emits a truncate. Require the extend
+   * step on both hosts, but only assert the specific truncate token where it
+   * is the platform's chosen mechanism. */
+  g_assert_true (saw_storage_open && saw_storage_remove && saw_block);
+  g_assert_true (saw_storage_truncate || saw_storage_write);
+#ifndef G_OS_WIN32
+  g_assert_true (saw_storage_truncate);
+#endif
   g_assert_false (list_active);
   g_assert_false (list_callback_pending);
   if (seeded_foreign_entries)
@@ -3354,7 +3466,7 @@ assert_temporary_spill_trace_language (const RecorderState &recorder,
     g_assert_cmpuint (state.opens, ==, state.closes);
     g_assert_true (state.retired);
   }
-  assert_no_host_home_forwarding (recorder);
+  assert_no_host_home_forwarding (recorder, root);
   assert_source_155_platform_control_language (recorder.controls, 0, 1);
 }
 
@@ -3369,7 +3481,11 @@ test_recording_filesystem_persistent_database (void)
   GStatBuf stat_buffer;
   int stat_res = g_stat (sandbox, &stat_buffer);
   g_assert_cmpint (stat_res, ==, 0);
+#ifndef G_OS_WIN32
+  /* Windows has no POSIX mode bits to check here; NTFS reports a fixed
+   * st_mode for a writable directory regardless of ACLs. */
   g_assert_cmpint (stat_buffer.st_mode & 0777, ==, 0700);
+#endif
 
   const fs::path root = fs::canonical (path_from_utf8 (sandbox));
   const fs::path database = root / "facts.duckdb";
@@ -3377,8 +3493,9 @@ test_recording_filesystem_persistent_database (void)
   RecordingFileSystem filesystem (path_to_utf8 (root), recorder);
 
   assert_rejected_without_forwarding (filesystem, "../facts.duckdb", "relative path");
-  assert_rejected_without_forwarding (filesystem, "/tmp/wyl-not-ours.duckdb",
-      "outside sandbox: /tmp/wyl-not-ours.duckdb");
+  const std::string not_ours = outside_sandbox_probe_path ("wyl-not-ours.duckdb");
+  assert_rejected_without_forwarding (filesystem, not_ours,
+      ("outside sandbox: " + not_ours).c_str ());
   assert_rejected_without_forwarding (filesystem, "https://example.invalid/facts.duckdb",
       "ambient or protocol path");
   assert_rejected_without_forwarding (filesystem, "/sys/fs/cgroup/unapproved",
@@ -3474,7 +3591,7 @@ test_recording_filesystem_persistent_database (void)
     auto result = connection.Query ("SELECT value FROM facts");
     g_assert_true (!result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 1);
-    g_assert_cmpstr (result->GetValue (0, 0).ToString ().c_str (), ==, "42");
+    assert_value_text (result->GetValue (0, 0), "42");
   }
   g_assert_cmpuint (recorder->rejected, ==, rejected_baseline);
   g_assert_cmpuint (recorder->subsystem_attempts, ==, subsystem_baseline);
@@ -3483,7 +3600,7 @@ test_recording_filesystem_persistent_database (void)
       recorder->events.end ());
   scenario_recorder.controls.assign (recorder->controls.begin () + control_baseline,
       recorder->controls.end ());
-  assert_persistent_database_trace_language (scenario_recorder, 0, 0, database);
+  assert_persistent_database_trace_language (scenario_recorder, 0, 0, root, database);
   assert_trace_fixture ("persistent-db", scenario_recorder.events, root,
       "84302dc24ec80b11b3a1ad76afb9cc2de77d3cd0afa7d6d47d96b40c3ab80982");
 
@@ -3690,8 +3807,9 @@ test_recording_filesystem_list_callback_trace (void)
 
   const guint rejected_before = filesystem.rejected ();
   const size_t events_before = filesystem.events ().size ();
-  for (const auto &[entry, reason] : { std::pair<std::string, const gchar *> {
-          "/tmp/not-a-list-entry", "outside sandbox: /tmp/not-a-list-entry" },
+  const std::string not_a_list_entry = outside_sandbox_probe_path ("not-a-list-entry");
+  for (const auto &[entry, reason] : { std::pair<std::string, std::string> {
+          not_a_list_entry, "outside sandbox: " + not_a_list_entry },
           { "../not-a-list-entry", "parent traversal in list entry" } }) {
     try {
       filesystem.CheckListEntryForTest (path_to_utf8 (root), entry);
@@ -3702,7 +3820,7 @@ test_recording_filesystem_list_callback_trace (void)
     g_assert_cmpstr (denied.operation.c_str (), ==, "deny");
     g_assert_cmpstr (denied.path.c_str (), ==, entry.c_str ());
     g_assert_cmpint (denied.outcome, ==, 0);
-    g_autofree gchar *expected = g_strdup_printf ("PermissionException:%s", reason);
+    g_autofree gchar *expected = g_strdup_printf ("PermissionException:%s", reason.c_str ());
     g_assert_cmpstr (denied.error_class.c_str (), ==, expected);
   }
   g_assert_cmpuint (filesystem.rejected (), ==, rejected_before + 2);
@@ -3875,7 +3993,8 @@ test_recording_filesystem_utf8_lifecycle (void)
   g_assert_true (saw_temp);
   g_assert_true (fs::is_empty (temp));
 
-  const fs::path listed = temp / path_from_utf8 ("\xEB\xAA\xA9\xEB\xA1\x9D-\xF0\x9F\x93\x84");
+  const std::string listed_leaf = "\xEB\xAA\xA9\xEB\xA1\x9D-\xF0\x9F\x93\x84";
+  const fs::path listed = temp / path_from_utf8 (listed_leaf);
   const std::string listed_utf8 = path_to_utf8 (listed);
   g_assert_true (g_file_set_contents (listed_utf8.c_str (), "x", -1, &error));
   g_assert_no_error (error);
@@ -3887,8 +4006,11 @@ test_recording_filesystem_utf8_lifecycle (void)
         callbacks.push_back ({ path, is_directory });
       }, nullptr));
   g_assert_cmpuint (callbacks.size (), ==, 1);
-  g_assert_cmpstr (callbacks[0].first.c_str (), ==,
-      path_to_utf8 (listed.filename ()).c_str ());
+  /* Compare against the original UTF-8 leaf rather than round-tripping through
+   * fs::path::filename(): on Windows the STL renders a filename() ending in a
+   * 4-byte (astral) code point as an empty component, which would spuriously
+   * fail even though the filesystem returned the exact expected bytes. */
+  g_assert_cmpstr (callbacks[0].first.c_str (), ==, listed_leaf.c_str ());
   g_assert_false (callbacks[0].second);
   assert_list_callback_trace_language (list_recorder->events, temp, listed, false, true);
 
@@ -4040,8 +4162,8 @@ test_recording_filesystem_live_wal_read_only_recovery (void)
     auto result = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 2);
-    g_assert_cmpstr (result->GetValue (0, 0).ToString ().c_str (), ==, "42");
-    g_assert_cmpstr (result->GetValue (0, 1).ToString ().c_str (), ==, "99");
+    assert_value_text (result->GetValue (0, 0), "42");
+    assert_value_text (result->GetValue (0, 1), "99");
   }
   assert_wal_recovery_trace_language (*recovery_recorder, database);
   g_assert_false (fs::exists (wal));
@@ -4223,8 +4345,8 @@ test_recording_filesystem_explicit_checkpoint_discovery (void)
     auto rows = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (rows->HasError ());
     g_assert_cmpuint (rows->RowCount (), ==, 2);
-    g_assert_cmpstr (rows->GetValue (0, 0).ToString ().c_str (), ==, "42");
-    g_assert_cmpstr (rows->GetValue (0, 1).ToString ().c_str (), ==, "99");
+    assert_value_text (rows->GetValue (0, 0), "42");
+    assert_value_text (rows->GetValue (0, 1), "99");
   }
   g_assert_cmpuint (post_checkpoint.files.size (), ==, 1);
   g_assert_cmpstr (post_checkpoint.files[0].first.c_str (), ==, "facts.duckdb");
@@ -4329,8 +4451,8 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
     auto result = connection.Query ("SELECT value FROM facts ORDER BY value");
     g_assert_false (result->HasError ());
     g_assert_cmpuint (result->RowCount (), ==, 2);
-    g_assert_cmpstr (result->GetValue (0, 0).ToString ().c_str (), ==, "42");
-    g_assert_cmpstr (result->GetValue (0, 1).ToString ().c_str (), ==, "99");
+    assert_value_text (result->GetValue (0, 0), "42");
+    assert_value_text (result->GetValue (0, 1), "99");
   }
   assert_interrupted_checkpoint_recovery_full_stream (recovery_recorder->events,
       database);
@@ -4347,6 +4469,23 @@ test_recording_filesystem_checkpoint_crash_phase_a (void)
 int
 main (int argc, char **argv)
 {
+#ifdef G_OS_WIN32
+  /* The child-process trace is an exact byte grammar consumed on stdout.
+   * Windows opens stdout in text mode, which would translate every '\n' in
+   * the trace to "\r\n"; the parent splits strictly on '\n' and would then
+   * see a trailing '\r' on every line. Emit the trace verbatim instead. Each
+   * child is a fresh re-exec of this binary and runs this same line at its own
+   * main() entry before the dispatch below; it is harmless for the parent's
+   * own TAP output. */
+  _setmode (_fileno (stdout), _O_BINARY);
+  /* The CRT argv is decoded in the system ANSI codepage, which cannot
+   * represent the non-ASCII sandbox paths this suite hands to its re-exec'd
+   * children. Reparse the command line as UTF-8 so a child resolves the same
+   * pathname the parent spawned it with (leaked deliberately: it must outlive
+   * both g_test_init and self_path). */
+  argv = g_win32_get_command_line ();
+  argc = (int) g_strv_length (argv);
+#endif
   if (argc == 3 && g_strcmp0 (argv[1], "--crash-writer") == 0)
     return crash_writer_child (argv[2]);
   if (argc == 3 && g_strcmp0 (argv[1], "--hold-writer") == 0)
