@@ -2,7 +2,7 @@ project('duckdb-amalgamated', 'cpp',
   version : '1.5.5',
   license : 'MIT',
   default_options : [
-    'cpp_std=gnu++17',
+    'cpp_std=c++17',
     'warning_level=0',
   ],
 )
@@ -11,7 +11,6 @@ cpp = meson.get_compiler('cpp')
 
 duckdb_deps = []
 duckdb_compile_args = []
-duckdb_ext_deps = []
 duckdb_link_args = []
 
 if host_machine.system() == 'linux'
@@ -26,7 +25,7 @@ elif host_machine.system() == 'windows'
   # its own, so make it a public dependency of the exported DuckDB target.
   duckdb_deps += cpp.find_library('rstrtmgr', required : true)
   if cpp.get_id() == 'gcc'
-    duckdb_ext_deps += cpp.find_library('stdc++', required : true)
+    duckdb_deps += cpp.find_library('stdc++', required : true)
   endif
 endif
 
@@ -45,7 +44,13 @@ duckdb_lib = static_library('duckdb',
   # must live on the target: per-subproject core options via project() or
   # caller default_options are silently ignored by older meson (measured
   # inert on 1.3.2, the ubuntu-latest apt version).
-  override_options : ['optimization=2', 'debug=false', 'b_lto=false'],
+  # clang-cl (the only Windows CI toolchain this subproject builds with)
+  # exposes the MSVC-style cpp_std values only -- 'gnu++17' is not among
+  # them and fails meson's option validation before the compiler is ever
+  # invoked. The GNU dialect is safe to keep everywhere else (native
+  # gcc/clang), so pin it back on per-target rather than in project().
+  override_options : ['optimization=2', 'debug=false', 'b_lto=false']
+    + (host_machine.system() != 'windows' ? ['cpp_std=gnu++17'] : []),
   dependencies : duckdb_deps,
   cpp_args : duckdb_compile_args,
   include_directories : include_directories('.'),
@@ -54,7 +59,7 @@ duckdb_lib = static_library('duckdb',
 
 duckdb_dep = declare_dependency(
   link_with : duckdb_lib,
-  dependencies : [duckdb_deps, duckdb_ext_deps],
+  dependencies : duckdb_deps,
   include_directories : include_directories('.'),
   # The public C API defaults to dllimport on Windows.  The source
   # amalgamation above is deliberately static, so every target that includes
