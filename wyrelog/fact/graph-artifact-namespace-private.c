@@ -22,6 +22,10 @@ struct WylFactArtifactSidecarBinding
 {
   gint unused;
 };
+struct WylFactArtifactMainBinding
+{
+  gint unused;
+};
 static wyrelog_error_t
 closed (void)
 {
@@ -89,6 +93,31 @@ void
 wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *l)
 {
   (void) l;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_mutation_lease_open_main_binding
+    (WylFactArtifactMutationLease * l, WylFactArtifactMainBinding ** b,
+    gint * fd) {
+  (void) l;
+  if (b)
+    *b = NULL;
+  if (fd)
+    *fd = -1;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_revalidate (WylFactArtifactMainBinding *b)
+{
+  (void) b;
+  return closed ();
+}
+
+void
+wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *b)
+{
+  (void) b;
 }
 
 wyrelog_error_t
@@ -583,6 +612,13 @@ struct WylFactArtifactSidecarBinding
   gboolean creator;
   gboolean active;
 };
+struct WylFactArtifactMainBinding
+{
+  WylFactArtifactMutationLease *lease;
+  gint pin_fd;
+  guint64 device, inode;
+  gboolean active;
+};
 struct WylFactArtifactTempRecoveryEvidence
 {
   gchar *token;
@@ -1074,6 +1110,37 @@ lease_revalidate_unlocked (WylFactArtifactMutationLease *l)
       l->lock_inode);
 }
 
+/* Main binding reports a genuinely absent fixed name as NOT_FOUND, while
+ * retaining every other held-authority check before observing that absence. */
+static wyrelog_error_t
+lease_revalidate_without_named_main_unlocked (WylFactArtifactMutationLease *l)
+{
+  WylFactArtifactNamespace *n;
+  struct stat held_main, held_lock, named_lock;
+  if (!l || !(n = l->namespace_) || l->lock_fd < 0 || !l->exclusive
+      || l->directory_device != n->device || l->directory_inode != n->inode
+      || l->lock_device != n->lock_device || l->lock_inode != n->lock_inode
+      || check_directory (n) != WYRELOG_E_OK || n->main_fd < 0
+      || fstat (n->main_fd, &held_main) != 0 || !S_ISREG (held_main.st_mode)
+      || held_main.st_nlink != 1 || (held_main.st_mode & 07777) != 0600
+      || (guint64) held_main.st_uid != n->owner
+      || (guint64) held_main.st_dev != n->main_device
+      || (guint64) held_main.st_ino != n->main_inode
+      || fstat (l->lock_fd, &held_lock) != 0 || !S_ISREG (held_lock.st_mode)
+      || held_lock.st_nlink != 1 || (held_lock.st_mode & 07777) != 0600
+      || (guint64) held_lock.st_uid != n->owner
+      || (guint64) held_lock.st_dev != l->lock_device
+      || (guint64) held_lock.st_ino != l->lock_inode
+      || fstatat (n->fd, name_for (WYL_FACT_ARTIFACT_LOCK), &named_lock,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named_lock.st_mode)
+      || named_lock.st_nlink != 1 || (named_lock.st_mode & 07777) != 0600
+      || (guint64) named_lock.st_uid != n->owner
+      || (guint64) named_lock.st_dev != l->lock_device
+      || (guint64) named_lock.st_ino != l->lock_inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_fact_artifact_mutation_lease_revalidate (WylFactArtifactMutationLease *l)
 {
@@ -1150,6 +1217,145 @@ mutation_lease_ref (WylFactArtifactMutationLease *l)
 {
   g_atomic_int_inc (&l->references);
   return l;
+}
+
+static wyrelog_error_t
+main_binding_matches_unlocked (WylFactArtifactMainBinding *binding)
+{
+  WylFactArtifactMutationLease *lease = binding->lease;
+  WylFactArtifactNamespace *namespace_ = lease->namespace_;
+  struct stat pinned, named;
+  if (!binding->active || fstat (binding->pin_fd, &pinned) != 0
+      || !S_ISREG (pinned.st_mode) || pinned.st_nlink != 1
+      || (pinned.st_mode & 07777) != 0600
+      || (guint64) pinned.st_uid != namespace_->owner
+      || (guint64) pinned.st_dev != binding->device
+      || (guint64) pinned.st_ino != binding->inode
+      || binding->device != namespace_->main_device
+      || binding->inode != namespace_->main_inode
+      || fstatat (namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN), &named,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_uid != namespace_->owner
+      || (guint64) named.st_dev != binding->device
+      || (guint64) named.st_ino != binding->inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+main_binding_revalidate_unlocked (WylFactArtifactMainBinding *binding)
+{
+  if (!binding || !binding->lease || !binding->lease->exclusive)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t result = lease_revalidate_unlocked (binding->lease);
+  if (result == WYRELOG_E_OK)
+    result = main_binding_matches_unlocked (binding);
+  /* A main binding is an I/O capability, not recovery evidence.  Once it has
+   * observed an invalid held authority it can never become usable again. */
+  if (result != WYRELOG_E_OK)
+    binding->active = FALSE;
+  return result;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_mutation_lease_open_main_binding
+    (WylFactArtifactMutationLease * lease,
+    WylFactArtifactMainBinding ** out_binding, gint * out_fd) {
+  if (out_binding)
+    *out_binding = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (!lease || !out_binding || !out_fd || !lease->exclusive)
+    return WYRELOG_E_POLICY;
+
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = lease_revalidate_without_named_main_unlocked (lease);
+  if (result != WYRELOG_E_OK)
+    goto done;
+  struct stat named;
+  if (fstatat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
+          &named, AT_SYMLINK_NOFOLLOW) != 0) {
+    result = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+    goto done;
+  }
+  if (!S_ISREG (named.st_mode) || named.st_nlink != 1
+      || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_uid != lease->namespace_->owner
+      || (guint64) named.st_dev != lease->namespace_->main_device
+      || (guint64) named.st_ino != lease->namespace_->main_inode) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  result = lease_revalidate_unlocked (lease);
+  if (result != WYRELOG_E_OK)
+    goto done;
+  gint fd = openat (lease->namespace_->fd, name_for (WYL_FACT_ARTIFACT_MAIN),
+      O_RDWR | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    result = errno == ENOENT ? WYRELOG_E_NOT_FOUND
+        : (errno == ELOOP || errno == ENOTDIR || errno == EISDIR
+        || errno == EACCES ? WYRELOG_E_POLICY : WYRELOG_E_IO);
+    goto done;
+  }
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE))
+  {
+    result = namespace_test_substitute_regular (lease->namespace_,
+        name_for (WYL_FACT_ARTIFACT_MAIN), TRUE);
+    if (result != WYRELOG_E_OK) {
+      close (fd);
+      goto done;
+    }
+  }
+  gint pin_fd = duplicate_cloexec (fd);
+  struct stat pinned;
+  if (pin_fd < 0 || fstat (pin_fd, &pinned) != 0) {
+    if (pin_fd >= 0)
+      close (pin_fd);
+    close (fd);
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  WylFactArtifactMainBinding *binding = g_new0 (WylFactArtifactMainBinding, 1);
+  binding->lease = mutation_lease_ref (lease);
+  binding->pin_fd = pin_fd;
+  binding->device = pinned.st_dev;
+  binding->inode = pinned.st_ino;
+  binding->active = TRUE;
+  result = main_binding_revalidate_unlocked (binding);
+  if (result != WYRELOG_E_OK) {
+    wyl_fact_artifact_main_binding_free (binding);
+    close (fd);
+    goto done;
+  }
+  *out_binding = binding;
+  *out_fd = fd;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_revalidate (WylFactArtifactMainBinding *binding)
+{
+  if (!binding || !binding->lease)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = main_binding_revalidate_unlocked (binding);
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+void
+wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *binding)
+{
+  if (!binding)
+    return;
+  if (binding->pin_fd >= 0)
+    close (binding->pin_fd);
+  wyl_fact_artifact_mutation_lease_free (binding->lease);
+  g_free (binding);
 }
 
 wyrelog_error_t

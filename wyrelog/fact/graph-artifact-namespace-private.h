@@ -9,6 +9,7 @@ G_BEGIN_DECLS typedef struct WylFactArtifactNamespace WylFactArtifactNamespace;
 typedef struct WylFactArtifactMutationLease WylFactArtifactMutationLease;
 typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
 typedef struct WylFactArtifactSidecarBinding WylFactArtifactSidecarBinding;
+typedef struct WylFactArtifactMainBinding WylFactArtifactMainBinding;
 typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
@@ -64,6 +65,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_PRE_RENAME_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_TEMP_REPLACE_POST_RENAME_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_OPEN_ABA,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_MAIN_BINDING_POST_OPEN_SUBSTITUTE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_DIRECTORY_FSYNC,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_POLICY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_PRE_UNLINK_SUBSTITUTE,
@@ -115,6 +117,20 @@ wyrelog_error_t wyl_fact_artifact_namespace_acquire_mutation_lease
 wyrelog_error_t wyl_fact_artifact_mutation_lease_revalidate
     (WylFactArtifactMutationLease *);
 void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
+/* Binds the already-imported canonical facts.duckdb for in-place DuckDB I/O.
+ * This is deliberately not a pathname capability: it requires an exclusive
+ * lease, opens only the existing fixed name with O_RDWR/CLOEXEC/NOFOLLOW, and
+ * grants neither creation nor namespace mutation.  The binding retains the
+ * lease and a separate identity pin; #596 must call revalidate immediately
+ * before and after every raw I/O, sync, truncate, and close boundary.  A
+ * failed revalidation terminally revokes this binding.  As with #612, an
+ * uncooperative same-UID writer can still race the final check and syscall. */
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_main_binding
+    (WylFactArtifactMutationLease *, WylFactArtifactMainBinding ** out_binding,
+    gint * out_fd);
+wyrelog_error_t wyl_fact_artifact_main_binding_revalidate
+    (WylFactArtifactMainBinding *);
+void wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *);
 /* Generic fixed-sidecar mutation is retired: WAL/checkpoint/recovery creation
  * and writable opens require SidecarBinding. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_file
