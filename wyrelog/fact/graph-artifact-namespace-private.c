@@ -201,6 +201,24 @@ wyl_fact_artifact_sidecar_binding_revalidate (WylFactArtifactSidecarBinding *b)
 }
 
 wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_revalidate_fd (WylFactArtifactSidecarBinding
+    *b, gint fd)
+{
+  (void) b;
+  (void) fd;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding *b,
+    gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return closed ();
+}
+
+wyrelog_error_t
     wyl_fact_artifact_sidecar_binding_publish_no_replace
     (WylFactArtifactSidecarBinding * b, WylFactArtifactName a) {
   (void) b;
@@ -1917,6 +1935,30 @@ sidecar_binding_revalidate_unlocked (WylFactArtifactSidecarBinding *binding)
   return sidecar_binding_matches_unlocked (binding);
 }
 
+/* The returned descriptor is a separate capability from the binding pin.  A
+ * caller can close it and have its number reused, so checking only the pin
+ * would permit raw DuckDB I/O on a foreign object. */
+static wyrelog_error_t
+sidecar_binding_revalidate_fd_unlocked (WylFactArtifactSidecarBinding *binding,
+    gint working_fd)
+{
+  wyrelog_error_t result = sidecar_binding_revalidate_unlocked (binding);
+  struct stat working;
+  if (result == WYRELOG_E_OK
+      && (working_fd < 0 || fstat (working_fd, &working) != 0
+          || !S_ISREG (working.st_mode) || working.st_nlink != 1
+          || (working.st_mode & 07777) != 0600
+          || (guint64) working.st_uid != binding->lease->namespace_->owner
+          || (guint64) working.st_dev != binding->device
+          || (guint64) working.st_ino != binding->inode))
+    result = WYRELOG_E_POLICY;
+  /* Unlike the general lifecycle revalidation, an I/O-boundary failure
+   * revokes this raw-descriptor authority permanently. */
+  if (result != WYRELOG_E_OK)
+    binding->active = FALSE;
+  return result;
+}
+
 wyrelog_error_t
     wyl_fact_artifact_mutation_lease_open_sidecar_binding
     (WylFactArtifactMutationLease * lease, WylFactArtifactName sidecar,
@@ -2054,6 +2096,38 @@ wyl_fact_artifact_sidecar_binding_revalidate (WylFactArtifactSidecarBinding
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = sidecar_binding_revalidate_unlocked (binding);
   g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_revalidate_fd (WylFactArtifactSidecarBinding
+    *binding, gint working_fd)
+{
+  if (!binding || !binding->lease)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = sidecar_binding_revalidate_fd_unlocked (binding,
+      working_fd);
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding
+    *binding, gint *working_fd)
+{
+  if (!binding || !binding->lease || !working_fd)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = sidecar_binding_revalidate_fd_unlocked (binding,
+      *working_fd);
+  if (result == WYRELOG_E_OK) {
+    gint fd = *working_fd;
+    *working_fd = -1;
+    binding->active = FALSE;
+    result = close (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  }
+  g_mutex_unlock (&binding->lease->mutex);
   return result;
 }
 
