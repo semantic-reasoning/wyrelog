@@ -1926,6 +1926,9 @@ sidecar_binding_matches_unlocked (WylFactArtifactSidecarBinding *binding)
   return WYRELOG_E_OK;
 }
 
+static void sidecar_binding_revoke_unlocked
+    (WylFactArtifactSidecarBinding * binding);
+
 static wyrelog_error_t
 sidecar_binding_revalidate_unlocked (WylFactArtifactSidecarBinding *binding)
 {
@@ -1934,6 +1937,10 @@ sidecar_binding_revalidate_unlocked (WylFactArtifactSidecarBinding *binding)
   wyrelog_error_t result = lease_revalidate_sidecar_unlocked (binding->lease);
   if (result == WYRELOG_E_OK)
     result = sidecar_binding_matches_unlocked (binding);
+  /* Lifecycle identity loss is terminal too.  The sole non-terminal state
+   * transition is a successful checked close, which relinquishes only I/O. */
+  if (result != WYRELOG_E_OK)
+    sidecar_binding_revoke_unlocked (binding);
   return result;
 }
 

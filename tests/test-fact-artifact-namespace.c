@@ -1018,8 +1018,8 @@ test_existing_sidecar_reopen (void)
   g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (binding, &fd), ==,
       WYRELOG_E_POLICY);
   g_assert_cmpint (fcntl (fd, F_GETFD), !=, -1);
-  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
-          fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
   close (fd);
   wyl_fact_artifact_sidecar_binding_free (binding);
   binding = NULL;
@@ -1074,11 +1074,11 @@ test_existing_sidecar_reopen (void)
       (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
           WYL_FACT_ARTIFACT_WAL, TRUE, &binding, &fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (fchmod (fd, 0644), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
-          fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
   g_assert_cmpint (fchmod (fd, 0600), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
-          fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
   close (fd);
   wyl_fact_artifact_sidecar_binding_free (binding);
   binding = NULL;
