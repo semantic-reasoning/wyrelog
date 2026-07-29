@@ -80,6 +80,7 @@ wyrelog_sources = files(
 
 if host_machine.system() == 'windows'
   wyrelog_sources += files('fact/graph-locator-windows-private.c')
+  wyrelog_sources += files('fact/graph-windows-security-private.c')
 endif
 
 wyrelog_deps = [
