@@ -603,14 +603,11 @@ sidecar_revalidate_locked (WylFactArtifactWinSidecarBinding *binding,
     rc = wyl_fact_artifact_win_entry_revalidate (binding->lease->
         namespace_->locator, binding->entry);
   if (rc == WYRELOG_E_OK && require_working) {
-    HANDLE borrowed = INVALID_HANDLE_VALUE;
     rc = !binding->io_open ? WYRELOG_E_POLICY
         : wyl_fact_artifact_win_working_handle_revalidate (binding->working);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-          &borrowed);
-    if (rc == WYRELOG_E_OK && borrowed != supplied)
-      rc = WYRELOG_E_POLICY;
+    /* |supplied| is intentionally not authority evidence.  It is a caller
+     * I/O duplicate and may have been raw-closed then numerically reused. */
+    (void) supplied;
   }
   if (rc != WYRELOG_E_OK)
     sidecar_revoke (binding);
@@ -675,13 +672,10 @@ wyrelog_error_t
 wyrelog_error_t
     wyl_fact_artifact_win_sidecar_binding_revalidate_handle
     (WylFactArtifactWinSidecarBinding * binding, HANDLE handle) {
-  wyrelog_error_t rc;
   if (binding == NULL || handle == INVALID_HANDLE_VALUE || handle == NULL)
     return WYRELOG_E_INVALID;
-  g_mutex_lock (&binding->mutex);
-  rc = sidecar_revalidate_locked (binding, TRUE, handle);
-  g_mutex_unlock (&binding->mutex);
-  return rc;
+  /* Legacy raw-HANDLE validator cannot prove ownership after numeric reuse. */
+  return WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t
@@ -704,8 +698,6 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
         out_handle);
-  if (rc == WYRELOG_E_OK)
-    rc = sidecar_revalidate_locked (binding, TRUE, *out_handle);
   if (rc != WYRELOG_E_OK)
     *out_handle = INVALID_HANDLE_VALUE;
   g_mutex_unlock (&binding->mutex);
@@ -719,7 +711,7 @@ wyrelog_error_t
   if (binding == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
-  rc = sidecar_revalidate_locked (binding, TRUE, *inout_handle);
+  rc = sidecar_revalidate_locked (binding, TRUE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK) {
     rc = wyl_fact_artifact_win_working_handle_close (binding->working,
         inout_handle);
@@ -887,14 +879,9 @@ replacement_temp_check_locked (WylFactArtifactWinTempBinding *binding,
     rc = wyl_fact_artifact_win_entry_revalidate (binding->lease->
         namespace_->locator, binding->entry);
   if (rc == WYRELOG_E_OK && require_working) {
-    HANDLE borrowed = INVALID_HANDLE_VALUE;
     rc = !binding->io_open ? WYRELOG_E_POLICY
         : wyl_fact_artifact_win_working_handle_revalidate (binding->working);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-          &borrowed);
-    if (rc == WYRELOG_E_OK && borrowed != supplied)
-      rc = WYRELOG_E_POLICY;
+    (void) supplied;
   }
   if (rc != WYRELOG_E_OK)
     replacement_temp_revoke (binding);
@@ -957,8 +944,6 @@ wyl_fact_artifact_win_temp_binding_borrow (WylFactArtifactWinTempBinding
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
         out_handle);
-  if (rc == WYRELOG_E_OK)
-    rc = replacement_temp_check_locked (binding, TRUE, *out_handle);
   if (rc != WYRELOG_E_OK)
     *out_handle = INVALID_HANDLE_VALUE;
   g_mutex_unlock (&binding->mutex);
@@ -973,7 +958,7 @@ wyl_fact_artifact_win_temp_binding_close (WylFactArtifactWinTempBinding
   if (binding == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
-  rc = replacement_temp_check_locked (binding, TRUE, *inout_handle);
+  rc = replacement_temp_check_locked (binding, TRUE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK) {
     rc = wyl_fact_artifact_win_working_handle_close (binding->working,
         inout_handle);
@@ -1175,14 +1160,9 @@ temp_token_check_locked (WylFactArtifactWinTempToken *token,
     rc = wyl_fact_artifact_win_entry_revalidate (token->lease->
         namespace_->locator, token->entry);
   if (rc == WYRELOG_E_OK && require_working) {
-    HANDLE borrowed = INVALID_HANDLE_VALUE;
     rc = !token->io_open ? WYRELOG_E_POLICY
         : wyl_fact_artifact_win_working_handle_revalidate (token->working);
-    if (rc == WYRELOG_E_OK)
-      rc = wyl_fact_artifact_win_working_handle_borrow (token->working,
-          &borrowed);
-    if (rc == WYRELOG_E_OK && borrowed != supplied)
-      rc = WYRELOG_E_POLICY;
+    (void) supplied;
   }
   if (rc != WYRELOG_E_OK)
     temp_token_revoke (token);
@@ -1261,8 +1241,6 @@ wyl_fact_artifact_win_temp_token_borrow (WylFactArtifactWinTempToken *token,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_working_handle_borrow (token->working,
         out_handle);
-  if (rc == WYRELOG_E_OK)
-    rc = temp_token_check_locked (token, TRUE, *out_handle);
   if (rc != WYRELOG_E_OK)
     *out_handle = INVALID_HANDLE_VALUE;
   g_mutex_unlock (&token->mutex);
@@ -1277,7 +1255,7 @@ wyl_fact_artifact_win_temp_token_close (WylFactArtifactWinTempToken *token,
   if (token == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&token->mutex);
-  rc = temp_token_check_locked (token, TRUE, *inout_handle);
+  rc = temp_token_check_locked (token, TRUE, INVALID_HANDLE_VALUE);
   if (rc == WYRELOG_E_OK) {
     rc = wyl_fact_artifact_win_working_handle_close (token->working,
         inout_handle);
@@ -1712,17 +1690,14 @@ temp_binding_check (WylFactArtifactWinTempChildBinding *binding,
     gboolean require_handle, HANDLE supplied)
 {
   wyrelog_error_t rc;
-  HANDLE borrowed = INVALID_HANDLE_VALUE;
   if (binding == NULL || !binding->active)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->child->mutex);
   rc = temp_child_check (binding->child);
   if (rc == WYRELOG_E_OK && require_handle) {
     rc = !binding->io_open ? WYRELOG_E_POLICY
-        : wyl_fact_artifact_win_working_handle_borrow (binding->working,
-        &borrowed);
-    if (rc == WYRELOG_E_OK && borrowed != supplied)
-      rc = WYRELOG_E_POLICY;
+        : wyl_fact_artifact_win_working_handle_revalidate (binding->working);
+    (void) supplied;
   }
   if (rc != WYRELOG_E_OK)
     temp_binding_revoke (binding);
@@ -1892,7 +1867,8 @@ wyrelog_error_t
     (WylFactArtifactWinTempChildBinding * binding, HANDLE handle) {
   if (handle == NULL || handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_INVALID;
-  return temp_binding_check (binding, TRUE, handle);
+  /* Legacy raw-HANDLE validation cannot distinguish same-object reuse. */
+  return WYRELOG_E_POLICY;
 }
 
 wyrelog_error_t
@@ -1915,8 +1891,6 @@ wyrelog_error_t
   if (rc != WYRELOG_E_OK)
     temp_binding_revoke (binding);
   g_mutex_unlock (&binding->child->mutex);
-  if (rc == WYRELOG_E_OK)
-    rc = temp_binding_check (binding, TRUE, *out_handle);
   if (rc != WYRELOG_E_OK)
     *out_handle = INVALID_HANDLE_VALUE;
   return rc;
@@ -1928,7 +1902,7 @@ wyrelog_error_t
   wyrelog_error_t rc;
   if (binding == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
-  rc = temp_binding_check (binding, TRUE, *inout_handle);
+  rc = temp_binding_check (binding, TRUE, INVALID_HANDLE_VALUE);
   if (rc != WYRELOG_E_OK)
     return rc;
   g_mutex_lock (&binding->child->mutex);

@@ -31,6 +31,9 @@ typedef struct
   WylFactArtifactWinNamespace *namespace_;
 } NamespaceReleaseProbe;
 
+static WylFactArtifactWinNamespace *open_namespace_at_path (const gchar * path,
+    gboolean create_main, HANDLE * out_graph);
+
 static gpointer
 release_namespace_thread (gpointer user_data)
 {
@@ -86,6 +89,86 @@ remove_scratch_file (gchar *path)
   g_assert_true (DeleteFileW (wide));
   g_assert_true (RemoveDirectoryW (wide_directory));
   g_free (path);
+}
+
+/* These are namespace (not merely locator) adversaries.  The replacement is
+ * performed through the native Win32 namespace after a binding was minted:
+ * the retained graph HANDLE must not turn a hard link or reparse spelling
+ * into authority over a different entry. */
+static void
+test_native_namespace_reparse_and_hardlink_substitution (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = g_dir_make_tmp ("wyl-win-substitute-XXXXXX", &error);
+  g_autofree gchar *main_path = NULL;
+  g_autofree gchar *wal_path = NULL;
+  g_autofree wchar_t *main_wide = NULL;
+  g_autofree wchar_t *wal_wide = NULL;
+  g_autofree wchar_t *directory_wide = NULL;
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  HANDLE io = INVALID_HANDLE_VALUE;
+
+  g_assert_no_error (error);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar, &io),
+      ==, WYRELOG_E_OK);
+  /* I/O duplicates are caller-owned; do not make lifecycle rely on this raw
+   * numeric value. */
+  g_assert_true (CloseHandle (io));
+  io = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar, &io),
+      ==, WYRELOG_E_OK);
+
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
+  main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+  wal_wide = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+  g_assert_true (DeleteFileW (wal_wide));
+  g_assert_true (CreateHardLinkW (wal_wide, main_wide, NULL));
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_revalidate (sidecar),
+      ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  namespace_ = NULL;
+  g_assert_true (CloseHandle (graph));
+  graph = INVALID_HANDLE_VALUE;
+  g_assert_true (DeleteFileW (wal_wide));
+
+  namespace_ = open_namespace_at_path (path, FALSE, &graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  /* GitHub Windows runners permit unprivileged symlink creation.  A failure
+   * is still a hard test failure: silently skipping would leave the reparse
+   * substitution acceptance requirement unproven. */
+  g_assert_true (CreateSymbolicLinkW (wal_wide, main_wide,
+          SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE));
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, FALSE, &sidecar), ==, WYRELOG_E_POLICY);
+  g_assert_null (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  g_assert_true (DeleteFileW (wal_wide));
+  g_assert_true (DeleteFileW (main_wide));
+  {
+    g_autofree gchar *lock_path =
+        g_build_filename (path, "facts.duckdb.lock", NULL);
+    g_autofree wchar_t *lock_wide =
+        g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+    g_assert_true (DeleteFileW (lock_wide));
+  }
+  directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (directory_wide));
 }
 
 static HANDLE
@@ -709,6 +792,8 @@ test_working_handle_adopt_noninherit_close_once (void)
           &borrowed), ==, WYRELOG_E_OK);
   g_assert_true (GetHandleInformation (borrowed, &flags));
   g_assert_cmpuint (flags & HANDLE_FLAG_INHERIT, ==, 0);
+  g_assert_true (CloseHandle (borrowed));
+  borrowed = INVALID_HANDLE_VALUE;
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
           &borrowed), ==, WYRELOG_E_OK);
   g_assert_cmpint (borrowed == INVALID_HANDLE_VALUE, ==, TRUE);
@@ -747,11 +832,8 @@ test_working_handle_free_never_closes_reused_handle (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
           &identity, &binding), ==, WYRELOG_E_OK);
-  /* Deliberately violate ownership, then force the native handle table to
-   * assign the stale numeric value to a distinct file.  Windows reuses a
-   * just-closed value immediately; treating failure here as a skip would
-   * make the safety regression non-evidence. */
-  g_assert_true (CloseHandle (issued));
+  /* Adoption consumed |issued| and retained only a private duplicate. */
+  g_assert_false (CloseHandle (issued));
   foreign = open_scratch_file (&foreign_path);
   g_assert_true (foreign == issued);
   wyl_fact_artifact_win_working_handle_free (binding);
@@ -762,7 +844,7 @@ test_working_handle_free_never_closes_reused_handle (void)
 }
 
 static void
-test_working_handle_raw_close_revokes_as_policy (void)
+test_working_handle_source_reuse_cannot_revoke_guardian (void)
 {
   gchar *path = NULL;
   HANDLE issued = open_scratch_file (&path);
@@ -772,12 +854,13 @@ test_working_handle_raw_close_revokes_as_policy (void)
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
           &identity, &binding), ==, WYRELOG_E_OK);
-  g_assert_true (CloseHandle (issued));
+  g_assert_false (CloseHandle (issued));
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
-          &borrowed), ==, WYRELOG_E_POLICY);
-  g_assert_true (borrowed == INVALID_HANDLE_VALUE);
-  /* There is no valid owned HANDLE after raw close; free only discards the
-   * terminal binding and must not attempt CloseHandle on its stale value. */
+          &borrowed), ==, WYRELOG_E_OK);
+  g_assert_true (CloseHandle (borrowed));
+  borrowed = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
+          &borrowed), ==, WYRELOG_E_OK);
   wyl_fact_artifact_win_working_handle_free (binding);
   remove_scratch_file (path);
 }
@@ -798,13 +881,13 @@ test_working_handle_close_mismatch_revokes_without_foreign_close (void)
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
           &identity, &binding), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
-          &supplied), ==, WYRELOG_E_POLICY);
-  g_assert_true (supplied == foreign);
+          &supplied), ==, WYRELOG_E_OK);
+  g_assert_true (supplied == INVALID_HANDLE_VALUE);
   g_assert_true (GetFileInformationByHandle (foreign, &info));
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
           &borrowed), ==, WYRELOG_E_POLICY);
   g_assert_true (borrowed == INVALID_HANDLE_VALUE);
-  /* _free may close only the still-exact owned value, never |foreign|. */
+  /* _free never receives or closes |foreign|. */
   wyl_fact_artifact_win_working_handle_free (binding);
   g_assert_true (GetFileInformationByHandle (foreign, &info));
   g_assert_true (CloseHandle (foreign));
@@ -1445,8 +1528,8 @@ main (int argc, char **argv)
       ("/fact/artifact-namespace/windows/working-handle/free-reused-handle",
       test_working_handle_free_never_closes_reused_handle);
   g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/raw-close-policy",
-      test_working_handle_raw_close_revokes_as_policy);
+      ("/fact/artifact-namespace/windows/working-handle/source-reuse-guardian",
+      test_working_handle_source_reuse_cannot_revoke_guardian);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/close-mismatch",
       test_working_handle_close_mismatch_revokes_without_foreign_close);
@@ -1463,6 +1546,8 @@ main (int argc, char **argv)
       test_locator_directory_flush_capability_mapping);
   g_test_add_func ("/fact/artifact-namespace/windows/namespace/main-sidecar",
       test_native_namespace_main_sidecar_lifecycle);
+  g_test_add_func ("/fact/artifact-namespace/windows/namespace/substitution",
+      test_native_namespace_reparse_and_hardlink_substitution);
   return g_test_run ();
 }
 #else

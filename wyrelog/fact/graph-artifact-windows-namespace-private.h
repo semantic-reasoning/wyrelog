@@ -74,9 +74,10 @@ wyrelog_error_t wyl_fact_artifact_win_namespace_open_fixed
     ACCESS_MASK access, gboolean create_new,
     WylFactArtifactWinBinding ** out_binding);
 
-/* Borrow only the exact native HANDLE owned by a live binding.  Revalidate at
- * every raw I/O boundary; any failure terminally revokes the binding without
- * closing a potentially reused foreign HANDLE. */
+/* Mint a caller-owned, non-inheritable I/O duplicate from a private guardian.
+ * The caller closes the duplicate itself, then sets it to INVALID_HANDLE_VALUE
+ * before _close ends the guardian I/O phase.  A raw numeric HANDLE is never
+ * accepted as lifecycle or ownership proof. */
 wyrelog_error_t wyl_fact_artifact_win_binding_borrow
     (WylFactArtifactWinBinding * binding, HANDLE * out_handle);
 wyrelog_error_t wyl_fact_artifact_win_binding_revalidate
@@ -119,6 +120,8 @@ wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_borrow
     (WylFactArtifactWinSidecarBinding *, HANDLE *);
 wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_revalidate
     (WylFactArtifactWinSidecarBinding *);
+/* Deliberately rejects legacy raw-HANDLE validation: same-object numeric
+ * reuse cannot establish ownership.  Use _revalidate instead. */
 wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_revalidate_handle
     (WylFactArtifactWinSidecarBinding *, HANDLE);
 wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_close

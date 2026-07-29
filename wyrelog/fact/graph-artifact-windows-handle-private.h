@@ -11,9 +11,10 @@
 
 G_BEGIN_DECLS
 /* This is deliberately a private opaque capability rather than a CRT file
- * descriptor.  The native namespace hands its exact issued HANDLE to the
- * binding, which owns it until _close or _free.  Callers may borrow the
- * HANDLE for a native I/O boundary, but cannot turn it into a gint. */
+ * descriptor.  The binding owns a guardian HANDLE which is never handed to a
+ * caller.  Each I/O borrow is a non-inheritable DuplicateHandle copy.  Thus a
+ * raw CloseHandle/reuse of an I/O value can never make the namespace close or
+ * validate a foreign object. */
 typedef struct WylFactArtifactWinWorkingHandle WylFactArtifactWinWorkingHandle;
 
 /* Adopt one already-open regular-file HANDLE.  The binding records the exact
@@ -25,10 +26,9 @@ wyrelog_error_t wyl_fact_artifact_win_working_handle_adopt (HANDLE
     issued_handle, const WylFactGraphWinIdentity * expected,
     WylFactArtifactWinWorkingHandle ** out_binding);
 
-/* Return the native handle for one immediate I/O boundary.  The result is a
- * borrowed HANDLE, valid only until the next failed revalidation, _close, or
- * _free.  It is intentionally HANDLE-typed: no descriptor-number conversion
- * is available from this interface. */
+/* Mint a caller-owned native I/O duplicate.  The caller must CloseHandle it
+ * when I/O is complete, then pass INVALID_HANDLE_VALUE to _close to end the
+ * capability I/O phase.  No raw value is accepted as authority evidence. */
 wyrelog_error_t
 wyl_fact_artifact_win_working_handle_borrow (WylFactArtifactWinWorkingHandle *
     binding, HANDLE * out_handle);
@@ -41,9 +41,9 @@ wyrelog_error_t
 wyl_fact_artifact_win_working_handle_revalidate (WylFactArtifactWinWorkingHandle
     * binding);
 
-/* Revalidate then close exactly the owned HANDLE.  Success consumes the
- * binding and sets *inout_handle to INVALID_HANDLE_VALUE.  Validation failure
- * leaves the caller's value untouched and does not call CloseHandle. */
+/* End I/O by closing the private guardian.  Callers should first close their
+ * own duplicate; a supplied value is cleared but is never closed, inspected,
+ * or used as ownership proof. */
 wyrelog_error_t
 wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle *
     binding, HANDLE * inout_handle);
