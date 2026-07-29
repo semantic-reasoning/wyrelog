@@ -73,6 +73,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_OPEN_IDENTITY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_PRE_IDENTITY,
 } WylFactArtifactNamespaceTestFault;
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
@@ -231,7 +232,7 @@ wyrelog_error_t wyl_fact_artifact_namespace_sync_directory
 wyrelog_error_t wyl_fact_duckdb_temp_root_create
     (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **);
 /* On a post-mkdir failure before file identity is observable, returns POLICY
- * and optional orphan evidence.  Evidence is terminal telemetry only: there
+ * and required orphan evidence.  Evidence is terminal telemetry only: there
  * is intentionally no reopen/adopt/delete API for it. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_with_orphan_evidence
     (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **,
@@ -254,6 +255,12 @@ void wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_child
     (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
     WylFactDuckdbTempChild **, gint * out_fd);
+/* The evidence output is required because a child may have been created but
+ * not identity-bound when this returns POLICY. */
+wyrelog_error_t wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
+    (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
+    WylFactDuckdbTempChild **, gint * out_fd,
+    WylFactDuckdbTempOrphanEvidence **);
 wyrelog_error_t wyl_fact_duckdb_temp_child_open
     (WylFactDuckdbTempChild *, gboolean writable, gint * out_fd);
 /* On success, returns owned WylFactDuckdbTempChild entries only.  Any
