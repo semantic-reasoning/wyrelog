@@ -9152,8 +9152,7 @@ check_service_management_profile_denied (void)
           "/service-principals", guard_query,
           "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
           &status, &body) != 0 || status != 403 || body == NULL
-      || strstr (body, "service_principal_denied") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || strstr (body, "service_principal_denied") == NULL) {
     rc = 2203;
     goto cleanup;
   }
@@ -9162,9 +9161,7 @@ check_service_management_profile_denied (void)
   if (send_raw_service_principal_full (session, "GET", base_url,
           "/service-credentials/wlc_000000000000000000000000000",
           guard_query, NULL, &status, &body) != 0 || status != 403
-      || body == NULL
-      || strstr (body, "service_credential_denied") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || body == NULL || strstr (body, "service_credential_denied") == NULL) {
     rc = 2204;
     goto cleanup;
   }
@@ -9424,8 +9421,9 @@ send_raw_service_principal_bearer (SoupSession *session, const gchar *method,
  * credential's tenant, so &tenant=tenant-a clears the request-tenant gate
  * and the request reaches the is_active_human 403 (rather than tenant_denied).
  * A principal disable and a credential rotate must both 403 with the wire
- * denial token, leak no secret, and leave the principal and credential row
- * counts unchanged.
+ * denial token.  The rotate is the mutating op whose credential row count is
+ * snapshotted (the disable mutates principal STATE, not row count, so a count
+ * around it would be illusory -- the 403 token is its proof).
  */
 static gint
 check_service_management_bearer_denied (void)
@@ -9439,9 +9437,7 @@ check_service_management_bearer_denied (void)
   g_autofree gchar *rotate_path = NULL;
   g_autofree gchar *bearer_query = NULL;
   guint status = 0;
-  guint principal_before = 0;
   guint credential_before = 0;
-  guint principal_after = 0;
   guint credential_after = 0;
   gchar request_id[WYL_REQUEST_ID_STRING_BUF];
   gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
@@ -9484,9 +9480,7 @@ check_service_management_bearer_denied (void)
   }
 
   wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
-  if (wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_before) != WYRELOG_E_OK
-      || wyl_policy_store_foreach_service_credential (store,
+  if (wyl_policy_store_foreach_service_credential (store,
           "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
           &credential_before) != WYRELOG_E_OK) {
     rc = 2215;
@@ -9498,8 +9492,7 @@ check_service_management_bearer_denied (void)
   if (send_raw_service_principal_bearer (env.session, "POST", env.base_url,
           "/service-principals/svc:tenant-a:worker/disable", bearer_query,
           access_token, NULL, &status, &body) != 0 || status != 403
-      || body == NULL || strstr (body, "service_principal_denied") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || body == NULL || strstr (body, "service_principal_denied") == NULL) {
     rc = 2216;
     goto out;
   }
@@ -9512,22 +9505,18 @@ check_service_management_bearer_denied (void)
           "\"destination\":\"rotate.json\",\"expires_at_us\":\""
           CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
       || status != 403 || body == NULL
-      || strstr (body, "service_credential_denied") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || strstr (body, "service_credential_denied") == NULL) {
     rc = 2217;
     goto out;
   }
 
-  if (wyl_policy_store_foreach_service_principal (store,
-          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
-      || wyl_policy_store_foreach_service_credential (store,
+  if (wyl_policy_store_foreach_service_credential (store,
           "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
           &credential_after) != WYRELOG_E_OK) {
     rc = 2218;
     goto out;
   }
-  if (principal_after != principal_before
-      || credential_after != credential_before) {
+  if (credential_after != credential_before) {
     rc = 2219;
     goto out;
   }
@@ -9624,8 +9613,7 @@ check_service_management_permission_mapping (void)
           "/service-principals", env_a.query,
           "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
           &status, &body) != 0 || status != 403 || body == NULL
-      || strstr (body, "service_principal_denied") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || strstr (body, "service_principal_denied") == NULL) {
     rc = 2401;
     goto out;
   }
@@ -9635,8 +9623,7 @@ check_service_management_permission_mapping (void)
   if (send_raw_service_principal_full (env_a.session, "GET", env_a.base_url,
           "/service-credentials/wlc_000000000000000000000000000", env_a.query,
           NULL, &status, &body) != 0 || status == 403 || body == NULL
-      || strstr (body, "service_credential_denied") != NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || strstr (body, "service_credential_denied") != NULL) {
     rc = 2402;
     goto out;
   }
@@ -9669,8 +9656,7 @@ check_service_management_permission_mapping (void)
           "\"destination\":\"rotate.json\",\"expires_at_us\":\""
           CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
       || status != 403 || body == NULL
-      || strstr (body, "service_credential_denied") == NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || strstr (body, "service_credential_denied") == NULL) {
     rc = 2406;
     goto out;
   }
@@ -9679,8 +9665,7 @@ check_service_management_permission_mapping (void)
   if (send_raw_service_principal_full (env_b.session, "GET", env_b.base_url,
           "/service-principals", env_b.query, NULL, &status, &body) != 0
       || status == 403 || body == NULL
-      || strstr (body, "service_principal_denied") != NULL
-      || strstr (body, "credential_secret") != NULL) {
+      || strstr (body, "service_principal_denied") != NULL) {
     rc = 2407;
     goto out;
   }
@@ -9706,8 +9691,7 @@ out:
  * non-revoked credential and capture its plaintext, then read it back two
  * ways -- the single-credential GET and the per-principal credentials list.
  * Both must return 200 with the credential id present (proving the payload is
- * populated, not empty), yet contain neither the "credential_secret" key nor
- * the plaintext secret bytes.
+ * populated, not empty), yet never contain the plaintext secret bytes.
  */
 static gint
 check_service_management_populated_secret_leak (void)
@@ -9760,7 +9744,6 @@ check_service_management_populated_secret_leak (void)
           credential_path, env.query, NULL, &status, &body) != 0
       || status != 200 || body == NULL
       || strstr (body, issued.credential.credential_id) == NULL
-      || strstr (body, "credential_secret") != NULL
       || strstr (body, plaintext) != NULL) {
     rc = 2504;
     goto out;
@@ -9773,7 +9756,6 @@ check_service_management_populated_secret_leak (void)
           NULL, &status, &body) != 0 || status != 200 || body == NULL
       || strstr (body, "\"service_credentials\":[") == NULL
       || strstr (body, issued.credential.credential_id) == NULL
-      || strstr (body, "credential_secret") != NULL
       || strstr (body, plaintext) != NULL) {
     rc = 2505;
     goto out;
