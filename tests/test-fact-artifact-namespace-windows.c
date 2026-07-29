@@ -167,6 +167,11 @@ test_io_session_guardian_failure_is_policy (void)
   g_assert_true (CreateHardLinkW (alternate_wide, source_wide, NULL));
   g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
       WYRELOG_E_POLICY);
+  /* The exact FileId/name may come back, but a session that observed an
+   * association failure remains terminally revoked. */
+  g_assert_true (MoveFileExW (outside_wide, wal_wide, MOVEFILE_WRITE_THROUGH));
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
+      WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, &byte,
           1, &read), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, NULL,
@@ -686,7 +691,7 @@ test_locator_relative_entry_lifecycle (void)
   g_assert_true (issued == INVALID_HANDLE_VALUE);
   wyl_fact_artifact_win_entry_free (entry);
   entry = NULL;
-  g_assert_true (DeleteFileW (outside_wide));
+  g_assert_true (DeleteFileW (wal_wide));
   g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator,
           replacement, &effect), ==, WYRELOG_E_OK);
   wyl_fact_artifact_win_entry_free (replacement);
