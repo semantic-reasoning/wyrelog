@@ -1008,7 +1008,9 @@ wyrelog_error_t
     (WylFactArtifactWinTempBinding * binding,
     WylFactArtifactWinIoSession ** out_session) {
   wyrelog_error_t rc;
-  if (binding == NULL)
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (binding == NULL || out_session == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
   rc = replacement_temp_check_locked (binding, FALSE, INVALID_HANDLE_VALUE);
