@@ -6,6 +6,7 @@
 #endif
 #endif
 #include "fact/graph-artifact-namespace-private.h"
+#include "wyl-id-private.h"
 #include <string.h>
 
 #ifdef G_OS_WIN32
@@ -347,6 +348,82 @@ wyl_fact_artifact_namespace_sync_directory (WylFactArtifactNamespace *n)
   (void) n;
   return closed ();
 }
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *l,
+    WylFactDuckdbTempRoot **out_root)
+{
+  (void) l;
+  if (out_root)
+    *out_root = NULL;
+  return closed ();
+}
+
+void
+wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *root)
+{
+  (void) root;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
+    const gchar *name, WylFactDuckdbTempChild **out_child, gint *out_fd)
+{
+  (void) root;
+  (void) name;
+  if (out_child)
+    *out_child = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_open (WylFactDuckdbTempChild *child,
+    gboolean writable, gint *out_fd)
+{
+  (void) child;
+  (void) writable;
+  if (out_fd)
+    *out_fd = -1;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
+    GPtrArray **out_children)
+{
+  (void) root;
+  if (out_children)
+    *out_children = NULL;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  (void) child;
+  if (out_result)
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  return closed ();
+}
+
+void
+wyl_fact_duckdb_temp_child_free (WylFactDuckdbTempChild *child)
+{
+  (void) child;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  (void) root;
+  if (out_result)
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  return closed ();
+}
 #else
 #include <errno.h>
 #include <fcntl.h>
@@ -354,6 +431,7 @@ wyl_fact_artifact_namespace_sync_directory (WylFactArtifactNamespace *n)
 #include <sys/stat.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <dirent.h>
 #ifdef __linux__
 #include <sys/syscall.h>
 extern long syscall (long, ...);
@@ -411,6 +489,25 @@ struct WylFactArtifactTempRecoveryEvidence
   guint64 directory_device, directory_inode;
   guint64 lock_device, lock_inode;
   guint64 artifact_device, artifact_inode;
+};
+struct WylFactDuckdbTempRoot
+{
+  gint references;
+  WylFactArtifactMutationLease *lease;
+  gint fd;
+  gchar *name;
+  guint64 device, inode;
+  gboolean active;
+  GPtrArray *children;          /* non-owning live child bindings */
+};
+struct WylFactDuckdbTempChild
+{
+  gint references;
+  WylFactDuckdbTempRoot *root;
+  gint pin_fd;
+  gchar *name;
+  guint64 device, inode;
+  gboolean active;
 };
 static const gchar *names[] =
     { "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
@@ -2115,5 +2212,439 @@ wyl_fact_artifact_namespace_sync_directory (WylFactArtifactNamespace *n)
     return WYRELOG_E_POLICY;
   return fsync (n->fd) == 0 && check (n) == WYRELOG_E_OK
       ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+static WylFactDuckdbTempRoot *
+duckdb_temp_root_ref (WylFactDuckdbTempRoot *root)
+{
+  if (root)
+    g_atomic_int_inc (&root->references);
+  return root;
+}
+
+static void
+duckdb_temp_root_unref (WylFactDuckdbTempRoot *root)
+{
+  if (!root || !g_atomic_int_dec_and_test (&root->references))
+    return;
+  if (root->fd >= 0)
+    close (root->fd);
+  g_clear_pointer (&root->children, g_ptr_array_unref);
+  wyl_fact_artifact_mutation_lease_free (root->lease);
+  g_free (root->name);
+  g_free (root);
+}
+
+static WylFactDuckdbTempChild *
+duckdb_temp_child_ref (WylFactDuckdbTempChild *child)
+{
+  if (child)
+    g_atomic_int_inc (&child->references);
+  return child;
+}
+
+static gboolean
+duckdb_temp_child_name_is_valid (const gchar *name)
+{
+  static const gchar storage[] = "duckdb_temp_storage_";
+  static const gchar block[] = "duckdb_temp_block-";
+  const gchar *p;
+  if (!name || strchr (name, '/') || strchr (name, '\\'))
+    return FALSE;
+  if (g_str_has_prefix (name, storage)) {
+    p = name + strlen (storage);
+    if (g_str_has_prefix (p, "DEFAULT"))
+      p += strlen ("DEFAULT");
+    else {
+      if (*p++ != 'S')
+        return FALSE;
+      const gchar *digits = p;
+      while (g_ascii_isdigit (*p))
+        p++;
+      if (p == digits || *p++ != 'K')
+        return FALSE;
+    }
+    if (*p++ != '-')
+      return FALSE;
+    const gchar *digits = p;
+    while (g_ascii_isdigit (*p))
+      p++;
+    return p != digits && g_strcmp0 (p, ".tmp") == 0;
+  }
+  if (!g_str_has_prefix (name, block))
+    return FALSE;
+  p = name + strlen (block);
+  const gchar *digits = p;
+  while (g_ascii_isdigit (*p))
+    p++;
+  return p != digits && g_strcmp0 (p, ".block") == 0;
+}
+
+static wyrelog_error_t
+duckdb_temp_root_matches_unlocked (WylFactDuckdbTempRoot *root)
+{
+  struct stat held, named;
+  WylFactArtifactMutationLease *lease = root ? root->lease : NULL;
+  if (!root || !root->active || !lease || !lease->exclusive
+      || lease_revalidate_unlocked (lease) != WYRELOG_E_OK
+      || root->fd < 0 || fstat (root->fd, &held) != 0
+      || !S_ISDIR (held.st_mode) || (held.st_mode & 07777) != 0700
+      || (guint64) held.st_uid != lease->namespace_->owner
+      || (guint64) held.st_dev != root->device
+      || (guint64) held.st_ino != root->inode
+      || fstatat (lease->namespace_->fd, root->name, &named,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISDIR (named.st_mode)
+      || (named.st_mode & 07777) != 0700
+      || (guint64) named.st_uid != lease->namespace_->owner
+      || (guint64) named.st_dev != root->device
+      || (guint64) named.st_ino != root->inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+duckdb_temp_child_matches_unlocked (WylFactDuckdbTempChild *child)
+{
+  struct stat held, named;
+  if (!child || !child->active || !child->root
+      || duckdb_temp_root_matches_unlocked (child->root) != WYRELOG_E_OK
+      || child->pin_fd < 0 || fstat (child->pin_fd, &held) != 0
+      || !S_ISREG (held.st_mode) || held.st_nlink != 1
+      || (held.st_mode & 07777) != 0600
+      || (guint64) held.st_uid != child->root->lease->namespace_->owner
+      || (guint64) held.st_dev != child->device
+      || (guint64) held.st_ino != child->inode
+      || fstatat (child->root->fd, child->name, &named,
+          AT_SYMLINK_NOFOLLOW) != 0 || !S_ISREG (named.st_mode)
+      || named.st_nlink != 1 || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_uid != child->root->lease->namespace_->owner
+      || (guint64) named.st_dev != child->device
+      || (guint64) named.st_ino != child->inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
+}
+
+static WylFactDuckdbTempChild *
+duckdb_temp_find_child (WylFactDuckdbTempRoot *root, const gchar *name)
+{
+  for (guint i = 0; root && root->children && i < root->children->len; i++) {
+    WylFactDuckdbTempChild *child = g_ptr_array_index (root->children, i);
+    if (child->active && g_strcmp0 (child->name, name) == 0)
+      return child;
+  }
+  return NULL;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
+    WylFactDuckdbTempRoot **out_root)
+{
+  if (out_root)
+    *out_root = NULL;
+  if (!lease || !out_root || !lease->exclusive)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = lease_revalidate_unlocked (lease);
+  wyl_id_t id;
+  gchar uuid[WYL_ID_STRING_BUF];
+  if (result == WYRELOG_E_OK)
+    result = wyl_id_new (&id);
+  if (result == WYRELOG_E_OK)
+    result = wyl_id_format (&id, uuid, sizeof uuid);
+  g_autofree gchar *name = result == WYRELOG_E_OK
+      ? g_strdup_printf (".duckdb-private-temp-%s", uuid) : NULL;
+  if (result == WYRELOG_E_OK && !name)
+    result = WYRELOG_E_NOMEM;
+  if (result != WYRELOG_E_OK)
+    goto done;
+  if (mkdirat (lease->namespace_->fd, name, 0700) != 0) {
+    result = errno == EEXIST ? WYRELOG_E_BUSY : WYRELOG_E_IO;
+    goto done;
+  }
+  gint fd = openat (lease->namespace_->fd, name,
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+  struct stat st;
+  if (fd < 0 || fstat (fd, &st) != 0 || !S_ISDIR (st.st_mode)
+      || (st.st_mode & 07777) != 0700 || st.st_uid != geteuid ()) {
+    if (fd >= 0)
+      close (fd);
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  WylFactDuckdbTempRoot *root = g_new0 (WylFactDuckdbTempRoot, 1);
+  if (!root) {
+    close (fd);
+    result = WYRELOG_E_NOMEM;
+    goto done;
+  }
+  root->references = 1;
+  root->lease = mutation_lease_ref (lease);
+  root->fd = fd;
+  root->name = g_steal_pointer (&name);
+  root->device = st.st_dev;
+  root->inode = st.st_ino;
+  root->active = TRUE;
+  root->children = g_ptr_array_new ();
+  if (!root->children || fsync (lease->namespace_->fd) != 0
+      || duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK) {
+    duckdb_temp_root_unref (root);
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  *out_root = root;
+  result = WYRELOG_E_OK;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+void
+wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *root)
+{
+  duckdb_temp_root_unref (root);
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
+    const gchar *name, WylFactDuckdbTempChild **out_child, gint *out_fd)
+{
+  if (out_child)
+    *out_child = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (!root || !out_child || !out_fd || !duckdb_temp_child_name_is_valid (name))
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_root_matches_unlocked (root);
+  if (result != WYRELOG_E_OK || duckdb_temp_find_child (root, name)) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  gint fd = openat (root->fd, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC
+      | O_NOFOLLOW, 0600);
+  if (fd < 0) {
+    result = errno == EEXIST ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    goto done;
+  }
+  struct stat st;
+  if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
+      || (st.st_mode & 07777) != 0600 || st.st_uid != geteuid ()) {
+    close (fd);
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  WylFactDuckdbTempChild *child = g_new0 (WylFactDuckdbTempChild, 1);
+  if (!child || !(child->name = g_strdup (name))) {
+    g_free (child);
+    close (fd);
+    result = WYRELOG_E_NOMEM;
+    goto done;
+  }
+  child->references = 1;
+  child->root = duckdb_temp_root_ref (root);
+  child->pin_fd = duplicate_cloexec (fd);
+  child->device = st.st_dev;
+  child->inode = st.st_ino;
+  child->active = child->pin_fd >= 0;
+  if (!child->active || fsync (fd) != 0 || fsync (root->fd) != 0
+      || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK) {
+    wyl_fact_duckdb_temp_child_free (child);
+    close (fd);
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  g_ptr_array_add (root->children, child);
+  *out_child = child;
+  *out_fd = fd;
+  result = WYRELOG_E_OK;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_open (WylFactDuckdbTempChild *child,
+    gboolean writable, gint *out_fd)
+{
+  if (out_fd)
+    *out_fd = -1;
+  if (!child || !out_fd)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_child_matches_unlocked (child);
+  if (result != WYRELOG_E_OK)
+    goto done;
+  gint fd = openat (child->root->fd, child->name,
+      (writable ? O_RDWR : O_RDONLY) | O_CLOEXEC | O_NOFOLLOW);
+  if (fd < 0) {
+    result = errno == ENOENT ? WYRELOG_E_NOT_FOUND : WYRELOG_E_IO;
+    goto done;
+  }
+  struct stat st;
+  if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
+      || (guint64) st.st_dev != child->device
+      || (guint64) st.st_ino != child->inode
+      || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK) {
+    close (fd);
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  *out_fd = fd;
+  result = WYRELOG_E_OK;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
+    GPtrArray **out_children)
+{
+  if (out_children)
+    *out_children = NULL;
+  if (!root || !out_children)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_root_matches_unlocked (root);
+  GPtrArray *listed = NULL;
+  if (result != WYRELOG_E_OK)
+    goto done;
+  gint scan_fd = duplicate_cloexec (root->fd);
+  DIR *dir = scan_fd >= 0 ? fdopendir (scan_fd) : NULL;
+  if (!dir) {
+    if (scan_fd >= 0)
+      close (scan_fd);
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  listed = g_ptr_array_new_with_free_func ((GDestroyNotify)
+      wyl_fact_duckdb_temp_child_free);
+  if (!listed) {
+    closedir (dir);
+    result = WYRELOG_E_NOMEM;
+    goto done;
+  }
+  errno = 0;
+  for (struct dirent * entry; (entry = readdir (dir)) != NULL;) {
+    if (g_strcmp0 (entry->d_name, ".") == 0
+        || g_strcmp0 (entry->d_name, "..") == 0)
+      continue;
+    WylFactDuckdbTempChild *child =
+        duckdb_temp_find_child (root, entry->d_name);
+    if (!duckdb_temp_child_name_is_valid (entry->d_name) || !child
+        || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK) {
+      result = WYRELOG_E_POLICY;
+      break;
+    }
+    g_ptr_array_add (listed, duckdb_temp_child_ref (child));
+  }
+  if (errno != 0 && result == WYRELOG_E_OK)
+    result = WYRELOG_E_IO;
+  closedir (dir);
+  if (result == WYRELOG_E_OK
+      && duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK)
+    result = WYRELOG_E_POLICY;
+  if (result != WYRELOG_E_OK) {
+    g_clear_pointer (&listed, g_ptr_array_unref);
+    goto done;
+  }
+  *out_children = listed;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  if (out_result)
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  if (!child || !out_result)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_child_matches_unlocked (child);
+  if (result != WYRELOG_E_OK)
+    goto done;
+  if (fsync (child->pin_fd) != 0) {
+    result = WYRELOG_E_IO;
+    goto done;
+  }
+  if (unlinkat (child->root->fd, child->name, 0) != 0) {
+    result = errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    goto done;
+  }
+  child->active = FALSE;
+  close (child->pin_fd);
+  child->pin_fd = -1;
+  if (fsync (child->root->fd) != 0
+      || duckdb_temp_root_matches_unlocked (child->root) != WYRELOG_E_OK)
+    result = WYRELOG_E_IO;
+  else
+    result = WYRELOG_E_OK;
+  *out_result =
+      result ==
+      WYRELOG_E_OK ? WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED :
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+void
+wyl_fact_duckdb_temp_child_free (WylFactDuckdbTempChild *child)
+{
+  if (!child || !g_atomic_int_dec_and_test (&child->references))
+    return;
+  if (child->root && child->root->children)
+    g_ptr_array_remove_fast (child->root->children, child);
+  if (child->pin_fd >= 0)
+    close (child->pin_fd);
+  duckdb_temp_root_unref (child->root);
+  g_free (child->name);
+  g_free (child);
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  if (out_result)
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  if (!root || !out_result)
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_root_matches_unlocked (root);
+  if (result != WYRELOG_E_OK)
+    goto done;
+  /* Any active child, including a child externally removed, prevents broad
+   * cleanup.  The caller must reconcile its exact binding first. */
+  if (root->children->len != 0) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (unlinkat (lease->namespace_->fd, root->name, AT_REMOVEDIR) != 0) {
+    result = errno == ENOTEMPTY
+        || errno == EEXIST ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    goto done;
+  }
+  root->active = FALSE;
+  if (fsync (lease->namespace_->fd) != 0
+      || lease_revalidate_unlocked (lease) != WYRELOG_E_OK)
+    result = WYRELOG_E_IO;
+  else
+    result = WYRELOG_E_OK;
+  *out_result =
+      result ==
+      WYRELOG_E_OK ? WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED :
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED;
+done:
+  g_mutex_unlock (&lease->mutex);
+  return result;
 }
 #endif

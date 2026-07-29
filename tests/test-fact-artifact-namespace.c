@@ -1634,6 +1634,77 @@ test_namespace (void)
 #endif
 }
 
+static void
+test_duckdb_temp_root (void)
+{
+#ifdef G_OS_WIN32
+  WylFactDuckdbTempRoot *root = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create (NULL, &root), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (root);
+#else
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactNamespace *namespace_ = NULL;
+  WylFactArtifactMutationLease *lease = NULL;
+  WylFactDuckdbTempRoot *root = NULL;
+  WylFactDuckdbTempChild *storage = NULL;
+  g_autofree gchar *base = make_root ();
+  g_assert_cmpint (wyl_fact_graph_resolver_open (base, &resolver), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_locator_init (&locator, "tenant", "graph"),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
+          TRUE, &directory), ==, WYRELOG_E_OK);
+  g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create (lease, &root), ==,
+      WYRELOG_E_OK);
+  /* Neither arbitrary descendants nor source-unsupported spellings acquire
+   * creation authority. */
+  gint fd = 42;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root, "other", NULL,
+          &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
+          "duckdb_temp_storage_S32K-0.tmp", &storage, &fd), ==, WYRELOG_E_OK);
+  g_assert_cmpint (write (fd, "x", 1), ==, 1);
+  close (fd);
+  fd = -1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
+          "duckdb_temp_storage_S32K-0.tmp", NULL, &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_open (storage, FALSE, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  GPtrArray *listed = NULL;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &listed), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpuint (listed->len, ==, 1);
+  g_ptr_array_unref (listed);
+  WylFactDuckdbTempRetireResult retired =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (retired, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  wyl_fact_duckdb_temp_child_free (storage);
+  storage = NULL;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_retire (root, &retired), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (retired, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  wyl_fact_duckdb_temp_root_free (root);
+  wyl_fact_artifact_mutation_lease_free (lease);
+  wyl_fact_artifact_namespace_free (namespace_);
+  test_remove_fixed_artifact (wyl_fact_graph_directory_descriptive_path
+      (&directory), WYL_FACT_ARTIFACT_MAIN);
+  wyl_fact_graph_directory_clear (&directory);
+  wyl_fact_graph_locator_clear (&locator);
+  wyl_fact_graph_resolver_clear (&resolver);
+  g_rmdir (base);
+#endif
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1644,5 +1715,7 @@ main (int argc, char **argv)
   g_test_add_func ("/fact-artifact-namespace/basic", test_namespace);
   g_test_add_func ("/fact-artifact-namespace/mutation-leases",
       test_mutation_leases);
+  g_test_add_func ("/fact-artifact-namespace/duckdb-temp-root",
+      test_duckdb_temp_root);
   return g_test_run ();
 }
