@@ -34,18 +34,6 @@ typedef struct
 static WylFactArtifactWinNamespace *open_namespace_at_path (const gchar * path,
     gboolean create_main, HANDLE * out_graph);
 
-/* Every borrowed HANDLE is a caller-owned I/O duplicate.  Tests must close it
- * before ending the opaque binding phase; lifecycle code never observes raw
- * HANDLE values as authority. */
-static void
-close_io_handle (HANDLE *handle)
-{
-  g_assert_nonnull (handle);
-  g_assert_true (*handle != INVALID_HANDLE_VALUE);
-  g_assert_true (CloseHandle (*handle));
-  *handle = INVALID_HANDLE_VALUE;
-}
-
 static gpointer
 release_namespace_thread (gpointer user_data)
 {
@@ -196,6 +184,71 @@ test_session_blocks_mutation_until_finish (void)
     g_assert_true (DeleteFileW (lock_wide));
     g_assert_true (DeleteFileW (checkpoint_wide));
     g_assert_true (RemoveDirectoryW (wide));
+  }
+}
+
+static void
+test_session_retains_mutation_lease_until_finish (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = g_dir_make_tmp ("wyl-win-session-lease-XXXXXX",
+      &error);
+  WylFactArtifactWinNamespace *first;
+  WylFactArtifactWinNamespace *second;
+  WylFactArtifactWinLease *held_lease = NULL;
+  WylFactArtifactWinLease *fresh_lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  HANDLE first_graph = INVALID_HANDLE_VALUE;
+  HANDLE second_graph = INVALID_HANDLE_VALUE;
+
+  g_assert_no_error (error);
+  first = open_namespace_at_path (path, TRUE, &first_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (first,
+          &held_lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (held_lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  /* Releasing every public owner must not release the private session lease. */
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  wyl_fact_artifact_win_lease_free (held_lease);
+  held_lease = NULL;
+  wyl_fact_artifact_win_namespace_free (first);
+  first = NULL;
+
+  second = open_namespace_at_path (path, FALSE, &second_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (second,
+          &fresh_lease), ==, WYRELOG_E_BUSY);
+  g_assert_null (fresh_lease);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (second,
+          &fresh_lease), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_lease_free (fresh_lease);
+  wyl_fact_artifact_win_namespace_free (second);
+  CloseHandle (first_graph);
+  CloseHandle (second_graph);
+  {
+    g_autofree gchar *main_path = g_build_filename (path, "facts.duckdb", NULL);
+    g_autofree gchar *lock_path =
+        g_build_filename (path, "facts.duckdb.lock", NULL);
+    g_autofree gchar *wal_path =
+        g_build_filename (path, "facts.duckdb.wal", NULL);
+    g_autofree wchar_t *main_wide =
+        g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *lock_wide =
+        g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *wal_wide =
+        g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *directory_wide =
+        g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+    g_assert_true (DeleteFileW (main_wide));
+    g_assert_true (DeleteFileW (lock_wide));
+    g_assert_true (DeleteFileW (wal_wide));
+    g_assert_true (RemoveDirectoryW (directory_wide));
   }
 }
 
@@ -870,25 +923,19 @@ test_working_handle_adopt_noninherit_close_once (void)
   gchar *path = NULL;
   HANDLE issued = open_scratch_file (&path);
   WylFactGraphWinIdentity identity = identity_for (issued);
-  WylFactArtifactWinWorkingHandle *binding = NULL;
-  HANDLE borrowed = INVALID_HANDLE_VALUE;
-  DWORD flags = HANDLE_FLAG_INHERIT;
+  WylFactArtifactWinWorkingHandle *working = NULL;
+  WylFactArtifactWinIoState *state = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
-          &identity, &binding), ==, WYRELOG_E_OK);
-  g_assert_nonnull (binding);
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
-          &borrowed), ==, WYRELOG_E_OK);
-  g_assert_true (GetHandleInformation (borrowed, &flags));
-  g_assert_cmpuint (flags & HANDLE_FLAG_INHERIT, ==, 0);
-  g_assert_true (CloseHandle (borrowed));
-  borrowed = INVALID_HANDLE_VALUE;
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
-          &borrowed), ==, WYRELOG_E_OK);
-  g_assert_cmpint (borrowed == INVALID_HANDLE_VALUE, ==, TRUE);
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
-          &borrowed), ==, WYRELOG_E_POLICY);
-  wyl_fact_artifact_win_working_handle_free (binding);
+          &identity, &working), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_state_new (working, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &session), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_state_free (state);
   remove_scratch_file (path);
 }
 
@@ -938,51 +985,43 @@ test_working_handle_source_reuse_cannot_revoke_guardian (void)
   gchar *path = NULL;
   HANDLE issued = open_scratch_file (&path);
   WylFactGraphWinIdentity identity = identity_for (issued);
-  WylFactArtifactWinWorkingHandle *binding = NULL;
-  HANDLE borrowed = (HANDLE) 1;
+  WylFactArtifactWinWorkingHandle *working = NULL;
+  WylFactArtifactWinIoState *state = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
-          &identity, &binding), ==, WYRELOG_E_OK);
-  g_assert_false (CloseHandle (issued));
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
-          &borrowed), ==, WYRELOG_E_OK);
-  g_assert_true (CloseHandle (borrowed));
-  borrowed = INVALID_HANDLE_VALUE;
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
-          &borrowed), ==, WYRELOG_E_OK);
-  wyl_fact_artifact_win_working_handle_free (binding);
+          &identity, &working), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_state_new (working, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_session_abort (session);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &session), ==,
+      WYRELOG_E_BUSY);
+  wyl_fact_artifact_win_io_state_free (state);
   remove_scratch_file (path);
 }
 
 static void
-test_working_handle_close_mismatch_revokes_without_foreign_close (void)
+test_session_abort_is_terminal (void)
 {
   gchar *path = NULL;
-  gchar *foreign_path = NULL;
   HANDLE issued = open_scratch_file (&path);
   WylFactGraphWinIdentity identity = identity_for (issued);
-  WylFactArtifactWinWorkingHandle *binding = NULL;
-  HANDLE foreign = open_scratch_file (&foreign_path);
-  HANDLE supplied = foreign;
-  HANDLE borrowed = (HANDLE) 1;
-  BY_HANDLE_FILE_INFORMATION info = { 0 };
+  WylFactArtifactWinWorkingHandle *working = NULL;
+  WylFactArtifactWinIoState *state = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
-          &identity, &binding), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
-          &supplied), ==, WYRELOG_E_POLICY);
-  g_assert_true (supplied == foreign);
-  g_assert_true (GetFileInformationByHandle (foreign, &info));
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
-          &borrowed), ==, WYRELOG_E_OK);
-  close_io_handle (&borrowed);
-  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
-          &borrowed), ==, WYRELOG_E_OK);
-  /* _free never receives or closes |foreign|. */
-  wyl_fact_artifact_win_working_handle_free (binding);
-  g_assert_true (GetFileInformationByHandle (foreign, &info));
-  g_assert_true (CloseHandle (foreign));
-  remove_scratch_file (foreign_path);
+          &identity, &working), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_state_new (working, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_session_abort (session);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &session), ==,
+      WYRELOG_E_BUSY);
+  wyl_fact_artifact_win_io_state_free (state);
   remove_scratch_file (path);
 }
 
@@ -1574,6 +1613,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/io-session/mutation-gate",
       test_session_blocks_mutation_until_finish);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/io-session/retains-lease",
+      test_session_retains_mutation_lease_until_finish);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
       test_locator_relative_entry_lifecycle);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/nested-transport",
@@ -1594,8 +1636,8 @@ main (int argc, char **argv)
       ("/fact/artifact-namespace/windows/working-handle/source-reuse-guardian",
       test_working_handle_source_reuse_cannot_revoke_guardian);
   g_test_add_func
-      ("/fact/artifact-namespace/windows/working-handle/close-mismatch",
-      test_working_handle_close_mismatch_revokes_without_foreign_close);
+      ("/fact/artifact-namespace/windows/io-session/abort-terminal",
+      test_session_abort_is_terminal);
   g_test_add_func
       ("/fact/artifact-namespace/windows/lock-domain/alias-contention",
       test_native_lock_domain_alias_reader_writer_contention);

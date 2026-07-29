@@ -66,13 +66,6 @@ wyrelog_error_t wyl_fact_artifact_win_working_handle_adopt (HANDLE
     issued_handle, const WylFactGraphWinIdentity * expected,
     WylFactArtifactWinWorkingHandle ** out_binding);
 
-/* Mint a caller-owned native I/O duplicate.  The caller must CloseHandle it
- * when I/O is complete, then pass INVALID_HANDLE_VALUE to _close to end the
- * capability I/O phase.  No raw value is accepted as authority evidence. */
-wyrelog_error_t
-wyl_fact_artifact_win_working_handle_borrow (WylFactArtifactWinWorkingHandle *
-    binding, HANDLE * out_handle);
-
 /* Check that the exact still-owned HANDLE is non-inheritable and continues to
  * identify the recorded regular single-link object.  A failure terminally
  * revokes the binding without closing a possibly externally-closed/reused
@@ -84,9 +77,6 @@ wyl_fact_artifact_win_working_handle_revalidate (WylFactArtifactWinWorkingHandle
 /* End I/O by closing the private guardian.  The caller must first close its
  * own duplicate and pass INVALID_HANDLE_VALUE; a live raw value is rejected,
  * never closed, inspected, or used as ownership proof. */
-wyrelog_error_t
-wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle *
-    binding, HANDLE * inout_handle);
 void wyl_fact_artifact_win_working_handle_free (WylFactArtifactWinWorkingHandle
     * binding);
 
