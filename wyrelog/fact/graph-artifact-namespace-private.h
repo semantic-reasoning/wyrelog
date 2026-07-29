@@ -139,7 +139,9 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * Missing sidecars return NOT_FOUND with initialized outputs.  #596 must call
  * SidecarBinding revalidate immediately before and after every raw returned
  * FD I/O, sync, and close boundary; a failed check makes that recovery path
- * fail closed and the FD must not be used again. */
+ * fail closed and the FD must not be used again.  As with the existing #612
+ * mutation contract, this does not claim to close POSIX's final-check to
+ * syscall window against an uncooperative same-UID participant. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
     (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
     gboolean writable, WylFactArtifactSidecarBinding ** out_binding,
