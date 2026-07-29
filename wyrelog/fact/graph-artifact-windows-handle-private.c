@@ -434,59 +434,10 @@ wyl_fact_artifact_win_working_handle_adopt (HANDLE issued_handle,
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_working_handle_borrow (WylFactArtifactWinWorkingHandle
-    *binding, HANDLE *out_handle)
-{
-  wyrelog_error_t rc;
-
-  if (out_handle != NULL)
-    *out_handle = INVALID_HANDLE_VALUE;
-  if (binding == NULL || out_handle == NULL)
-    return WYRELOG_E_INVALID;
-  if ((rc = revalidate (binding, TRUE)) != WYRELOG_E_OK)
-    return rc;
-  if (!DuplicateHandle (GetCurrentProcess (), binding->guardian,
-          GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
-    return win_error (GetLastError ());
-  if (!SetHandleInformation (*out_handle, HANDLE_FLAG_INHERIT, 0)) {
-    DWORD error = GetLastError ();
-    CloseHandle (*out_handle);
-    *out_handle = INVALID_HANDLE_VALUE;
-    return win_error (error);
-  }
-  return WYRELOG_E_OK;
-}
-
-wyrelog_error_t
 wyl_fact_artifact_win_working_handle_revalidate (WylFactArtifactWinWorkingHandle
     *binding)
 {
   return revalidate (binding, TRUE);
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle
-    *binding, HANDLE *inout_handle)
-{
-  wyrelog_error_t rc;
-
-  if (binding == NULL || inout_handle == NULL)
-    return WYRELOG_E_INVALID;
-  /* The caller-owned I/O duplicate must be closed before lifecycle can end.
-   * Never inspect or close a live raw value: it may already be a numerically
-   * reused foreign HANDLE. */
-  if (*inout_handle != INVALID_HANDLE_VALUE)
-    return WYRELOG_E_POLICY;
-  if ((rc = revalidate (binding, TRUE)) != WYRELOG_E_OK)
-    return rc;
-  if (!CloseHandle (binding->guardian)) {
-    binding->active = FALSE;
-    return win_error (GetLastError ());
-  }
-  binding->guardian = INVALID_HANDLE_VALUE;
-  binding->active = FALSE;
-  *inout_handle = INVALID_HANDLE_VALUE;
-  return WYRELOG_E_OK;
 }
 
 void
