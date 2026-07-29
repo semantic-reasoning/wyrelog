@@ -132,6 +132,20 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
     (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
     gboolean create, gboolean writable,
     WylFactArtifactSidecarBinding ** out_binding, gint * out_fd);
+/* Reopens an already-existing fixed sidecar for DuckDB recovery.  This is a
+ * deliberately separate authority from strict creation: it accepts only an
+ * exclusive lease and a writable request, never creates or publishes a name,
+ * and pins the exact existing regular 0600 same-owner single-link entry.
+ * Missing sidecars return NOT_FOUND with initialized outputs. */
+wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
+    (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
+    gboolean writable, WylFactArtifactSidecarBinding ** out_binding,
+    gint * out_fd);
+/* Call at both sides of a DuckDB I/O boundary.  It rechecks the exclusive
+ * lease plus imported main, graph directory, lock, named sidecar, and pinned
+ * descriptor identities without granting any additional pathname authority. */
+wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate
+    (WylFactArtifactSidecarBinding *);
 /* Publishes the exact bound sidecar under a distinct absent fixed sidecar
  * name, using a platform no-replace primitive.  After the rename linearizes,
  * the binding identifies destination even if durability reporting fails. */
