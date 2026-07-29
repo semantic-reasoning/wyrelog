@@ -76,6 +76,13 @@ wyl_fact_artifact_win_entry_delete_exact (WylFactArtifactWinLocator * locator,
 wyrelog_error_t
 wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator *
     locator);
+/* Directory metadata durability is a capability, not a best-effort hint.
+ * ERROR_NOT_SUPPORTED/ERROR_INVALID_FUNCTION mean the backing filesystem
+ * cannot prove a flush and map to POLICY; all other FlushFileBuffers failures
+ * map to IO.  In both cases callers must reconcile rather than claim durable
+ * publication.  The test hook only substitutes the next native result. */
+void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
+    (DWORD error);
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
 void wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry * entry);
