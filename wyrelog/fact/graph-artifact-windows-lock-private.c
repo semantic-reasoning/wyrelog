@@ -123,6 +123,7 @@ wyl_fact_artifact_win_lock_domain_open (const WylFactGraphWinIdentity
     HANDLE lock_handle, WylFactArtifactWinLockDomain **out_domain)
 {
   WylFactArtifactWinLockDomain *domain;
+  HANDLE pin = INVALID_HANDLE_VALUE;
   wyrelog_error_t rc;
 
   if (out_domain != NULL)
@@ -130,10 +131,24 @@ wyl_fact_artifact_win_lock_domain_open (const WylFactGraphWinIdentity
   if (directory_identity == NULL || lock_identity == NULL || out_domain == NULL
       || lock_handle == NULL || lock_handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_INVALID;
-  if (!SetHandleInformation (lock_handle, HANDLE_FLAG_INHERIT, 0))
+  /* Retain only a guardian duplicate.  The transferred source is consumed on
+   * success and can never later be raw-closed/reused to affect the domain. */
+  if (!DuplicateHandle (GetCurrentProcess (), lock_handle,
+          GetCurrentProcess (), &pin, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return win_error (GetLastError ());
-  if ((rc = validate_handle (lock_handle, lock_identity)) != WYRELOG_E_OK)
+  if (!SetHandleInformation (pin, HANDLE_FLAG_INHERIT, 0)) {
+    DWORD error = GetLastError ();
+    CloseHandle (pin);
+    return win_error (error);
+  }
+  if (!SetHandleInformation (lock_handle, HANDLE_FLAG_INHERIT, 0)) {
+    CloseHandle (pin);
+    return win_error (GetLastError ());
+  }
+  if ((rc = validate_handle (pin, lock_identity)) != WYRELOG_E_OK) {
+    CloseHandle (pin);
     return rc;
+  }
   g_mutex_lock (&domains_mutex);
   domain = find_domain (directory_identity);
   if (domain != NULL) {
@@ -141,10 +156,12 @@ wyl_fact_artifact_win_lock_domain_open (const WylFactGraphWinIdentity
         || validate_handle (domain->pin, &domain->lock_identity)
         != WYRELOG_E_OK) {
       g_mutex_unlock (&domains_mutex);
+      CloseHandle (pin);
       return WYRELOG_E_POLICY;
     }
     domain->references++;
     g_mutex_unlock (&domains_mutex);
+    CloseHandle (pin);
     CloseHandle (lock_handle);
     *out_domain = domain;
     return WYRELOG_E_OK;
@@ -152,16 +169,18 @@ wyl_fact_artifact_win_lock_domain_open (const WylFactGraphWinIdentity
   domain = g_try_new0 (WylFactArtifactWinLockDomain, 1);
   if (domain == NULL) {
     g_mutex_unlock (&domains_mutex);
+    CloseHandle (pin);
     return WYRELOG_E_NOMEM;
   }
   domain->directory_identity = *directory_identity;
   domain->lock_identity = *lock_identity;
-  domain->pin = lock_handle;
+  domain->pin = pin;
   domain->references = 1;
   if (domains == NULL)
     domains = g_ptr_array_new ();
   g_ptr_array_add (domains, domain);
   g_mutex_unlock (&domains_mutex);
+  CloseHandle (lock_handle);
   *out_domain = domain;
   return WYRELOG_E_OK;
 }
@@ -179,6 +198,7 @@ wyl_fact_artifact_win_lock_domain_acquire (WylFactArtifactWinLockDomain *domain,
     WylFactArtifactWinLockLease **out_lease)
 {
   WylFactArtifactWinLockLease *lease;
+  HANDLE lease_handle = INVALID_HANDLE_VALUE;
   OVERLAPPED overlapped = { 0 };
   DWORD flags = LOCKFILE_FAIL_IMMEDIATELY;
   gboolean locally_busy;
@@ -189,29 +209,44 @@ wyl_fact_artifact_win_lock_domain_acquire (WylFactArtifactWinLockDomain *domain,
   if (domain == NULL || out_lease == NULL || lock_handle == NULL
       || lock_handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_INVALID;
-  if (!SetHandleInformation (lock_handle, HANDLE_FLAG_INHERIT, 0))
+  if (!DuplicateHandle (GetCurrentProcess (), lock_handle,
+          GetCurrentProcess (), &lease_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return win_error (GetLastError ());
-  if ((rc = validate_handle (lock_handle, &domain->lock_identity))
-      != WYRELOG_E_OK)
+  if (!SetHandleInformation (lease_handle, HANDLE_FLAG_INHERIT, 0)) {
+    DWORD error = GetLastError ();
+    CloseHandle (lease_handle);
+    return win_error (error);
+  }
+  if (!SetHandleInformation (lock_handle, HANDLE_FLAG_INHERIT, 0)) {
+    CloseHandle (lease_handle);
+    return win_error (GetLastError ());
+  }
+  if ((rc = validate_handle (lease_handle, &domain->lock_identity))
+      != WYRELOG_E_OK) {
+    CloseHandle (lease_handle);
     return rc;
+  }
   g_mutex_lock (&domain->mutex);
   locally_busy = domain->writer || (exclusive && domain->readers != 0);
   if (validate_handle (domain->pin, &domain->lock_identity) != WYRELOG_E_OK
       || locally_busy) {
     g_mutex_unlock (&domain->mutex);
+    CloseHandle (lease_handle);
     return locally_busy ? WYRELOG_E_BUSY : WYRELOG_E_POLICY;
   }
   if (exclusive)
     flags |= LOCKFILE_EXCLUSIVE_LOCK;
-  if (!LockFileEx (lock_handle, flags, 0, 1, 0, &overlapped)) {
+  if (!LockFileEx (lease_handle, flags, 0, 1, 0, &overlapped)) {
     rc = win_error (GetLastError ());
     g_mutex_unlock (&domain->mutex);
+    CloseHandle (lease_handle);
     return rc;
   }
   lease = g_try_new0 (WylFactArtifactWinLockLease, 1);
   if (lease == NULL) {
-    UnlockFileEx (lock_handle, 0, 1, 0, &overlapped);
+    UnlockFileEx (lease_handle, 0, 1, 0, &overlapped);
     g_mutex_unlock (&domain->mutex);
+    CloseHandle (lease_handle);
     return WYRELOG_E_NOMEM;
   }
   if (exclusive)
@@ -226,10 +261,11 @@ wyl_fact_artifact_win_lock_domain_acquire (WylFactArtifactWinLockDomain *domain,
   domain->references++;
   g_mutex_unlock (&domains_mutex);
   lease->domain = domain;
-  lease->handle = lock_handle;
+  lease->handle = lease_handle;
   lease->exclusive = exclusive;
   lease->active = TRUE;
   g_mutex_unlock (&domain->mutex);
+  CloseHandle (lock_handle);
   *out_lease = lease;
   return WYRELOG_E_OK;
 }
