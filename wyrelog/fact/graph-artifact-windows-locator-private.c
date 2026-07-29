@@ -642,6 +642,12 @@ wyl_fact_artifact_win_entry_identity (const WylFactArtifactWinEntry *entry)
   return entry == NULL ? NULL : &entry->identity;
 }
 
+const gchar *
+wyl_fact_artifact_win_entry_name (const WylFactArtifactWinEntry *entry)
+{
+  return entry != NULL ? entry->name : NULL;
+}
+
 void
 wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry *entry)
 {

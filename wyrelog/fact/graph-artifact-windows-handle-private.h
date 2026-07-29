@@ -18,6 +18,7 @@ G_BEGIN_DECLS
 typedef struct WylFactArtifactWinWorkingHandle WylFactArtifactWinWorkingHandle;
 typedef struct WylFactArtifactWinIoState WylFactArtifactWinIoState;
 typedef struct WylFactArtifactWinIoSession WylFactArtifactWinIoSession;
+typedef wyrelog_error_t (*WylFactArtifactWinIoValidator) (gpointer);
 
 /* A WinIoSession is the only Windows artifact I/O surface.  It deliberately
  * contains the private duplicate itself: neither the guardian nor a session
@@ -32,6 +33,11 @@ wyrelog_error_t wyl_fact_artifact_win_io_state_new
  * after the binding and every session reference have gone away. */
 void wyl_fact_artifact_win_io_state_retain_lifetime
     (WylFactArtifactWinIoState *, gpointer owner, GDestroyNotify owner_unref);
+/* Installs one construction-time association validator.  It owns |context|
+ * until state teardown and is run at every typed I/O boundary in addition to
+ * guardian FileId validation. */
+void wyl_fact_artifact_win_io_state_set_validator (WylFactArtifactWinIoState *,
+    WylFactArtifactWinIoValidator, gpointer context, GDestroyNotify);
 void wyl_fact_artifact_win_io_state_free (WylFactArtifactWinIoState *);
 gboolean wyl_fact_artifact_win_io_state_has_session
     (WylFactArtifactWinIoState *);

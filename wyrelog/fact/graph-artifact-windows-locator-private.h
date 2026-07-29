@@ -85,6 +85,7 @@ void wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
     (DWORD error);
 const WylFactGraphWinIdentity *wyl_fact_artifact_win_entry_identity (const
     WylFactArtifactWinEntry * entry);
+const gchar *wyl_fact_artifact_win_entry_name (const WylFactArtifactWinEntry *);
 void wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry * entry);
 
 /* A deliberately narrow nested-directory capability used only by the
