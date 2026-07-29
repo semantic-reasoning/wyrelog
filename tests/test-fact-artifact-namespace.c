@@ -695,6 +695,14 @@ test_main_binding (void)
   reader = NULL;
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
       (namespace_, &lease), ==, WYRELOG_E_OK);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (namespace_,
+          WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_MAIN, FALSE, TRUE, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, -1);
   fd = -1;
   g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
           &binding, &fd), ==, WYRELOG_E_OK);
