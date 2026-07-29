@@ -9,7 +9,7 @@ struct WylFactArtifactWinNamespace
 {
   WylFactArtifactWinLocator *locator;
   gboolean active;
-  guint references;
+  gint references;
 };
 
 static void
@@ -17,8 +17,8 @@ namespace_unref (WylFactArtifactWinNamespace *namespace_)
 {
   if (namespace_ == NULL)
     return;
-  g_assert_cmpuint (namespace_->references, >, 0);
-  if (--namespace_->references != 0)
+  g_assert_cmpint (g_atomic_int_get (&namespace_->references), >, 0);
+  if (!g_atomic_int_dec_and_test (&namespace_->references))
     return;
   namespace_->active = FALSE;
   wyl_fact_artifact_win_locator_free (namespace_->locator);
@@ -64,7 +64,7 @@ wyl_fact_artifact_win_namespace_new (const WylFactGraphDirectory *directory,
     return rc;
   }
   namespace_->active = TRUE;
-  namespace_->references = 1;
+  g_atomic_int_set (&namespace_->references, 1);
   *out_namespace = namespace_;
   return WYRELOG_E_OK;
 }
@@ -135,7 +135,7 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
     return WYRELOG_E_NOMEM;
   }
   binding->namespace_ = namespace_;
-  namespace_->references++;
+  g_atomic_int_inc (&namespace_->references);
   binding->entry = entry;
   binding->working = working;
   binding->active = TRUE;
