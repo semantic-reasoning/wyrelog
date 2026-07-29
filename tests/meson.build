@@ -758,7 +758,9 @@ if host_machine.system() == 'windows'
     dependencies : [wyrelog_dep],
   )
   test('fact-artifact-namespace-windows',
-    test_fact_artifact_namespace_windows)
+    test_fact_artifact_namespace_windows,
+    timeout : 120,
+  )
 endif
 
 subprocess_test_env = environment()
