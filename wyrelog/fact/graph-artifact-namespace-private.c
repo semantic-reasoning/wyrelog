@@ -26,6 +26,10 @@ struct WylFactArtifactMainBinding
 {
   gint unused;
 };
+struct WylFactDuckdbTempChildBinding
+{
+  gint unused;
+};
 static wyrelog_error_t
 closed (void)
 {
@@ -555,6 +559,68 @@ wyl_fact_duckdb_temp_child_open (WylFactDuckdbTempChild *child,
 }
 
 wyrelog_error_t
+wyl_fact_duckdb_temp_root_create_child_binding (WylFactDuckdbTempRoot *root,
+    const gchar *name, WylFactDuckdbTempChild **child,
+    WylFactDuckdbTempChildBinding **binding, gint *fd,
+    WylFactDuckdbTempOrphanEvidence **evidence)
+{
+  (void) root;
+  (void) name;
+  if (child)
+    *child = NULL;
+  if (binding)
+    *binding = NULL;
+  if (fd)
+    *fd = -1;
+  if (evidence)
+    *evidence = NULL;
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_open_binding (WylFactDuckdbTempChild *child,
+    gboolean writable, WylFactDuckdbTempChildBinding **binding, gint *fd)
+{
+  (void) child;
+  (void) writable;
+  if (binding)
+    *binding = NULL;
+  if (fd)
+    *fd = -1;
+  return closed ();
+}
+
+wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate
+    (WylFactDuckdbTempChildBinding * binding)
+{
+  (void) binding;
+  return closed ();
+}
+
+wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate_fd
+    (WylFactDuckdbTempChildBinding * binding, gint fd)
+{
+  (void) binding;
+  (void) fd;
+  return closed ();
+}
+
+wyrelog_error_t wyl_fact_duckdb_temp_child_binding_close
+    (WylFactDuckdbTempChildBinding * binding, gint * fd)
+{
+  (void) binding;
+  if (fd)
+    *fd = -1;
+  return closed ();
+}
+
+void
+wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *b)
+{
+  (void) b;
+}
+
+wyrelog_error_t
 wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
     GPtrArray **out_children)
 {
@@ -683,6 +749,15 @@ struct WylFactDuckdbTempChild
   gchar *name;
   guint64 device, inode;
   gboolean active;
+  gboolean io_revoked;
+  GPtrArray *bindings;          /* non-owning live I/O bindings */
+};
+struct WylFactDuckdbTempChildBinding
+{
+  WylFactDuckdbTempChild *child;
+  gint working_fd;
+  gboolean active;
+  gboolean io_open;
 };
 struct WylFactDuckdbTempOrphanEvidence
 {
@@ -696,6 +771,15 @@ static const gchar *names[] =
 static GMutex lock_domains_mutex;
 static GPtrArray *lock_domains;
 static gint namespace_test_fault;
+static WylFactDuckdbTempChild *duckdb_temp_child_ref (WylFactDuckdbTempChild *);
+static wyrelog_error_t duckdb_temp_child_matches_unlocked
+    (WylFactDuckdbTempChild *);
+static void duckdb_temp_child_binding_revoke_unlocked
+    (WylFactDuckdbTempChildBinding *);
+static wyrelog_error_t duckdb_temp_child_binding_revalidate_unlocked
+    (WylFactDuckdbTempChildBinding *);
+static wyrelog_error_t duckdb_temp_child_binding_revalidate_fd_unlocked
+    (WylFactDuckdbTempChildBinding *, gint);
 static void release_lock_domain (WylFactArtifactNamespace *);
 static wyrelog_error_t namespace_test_substitute_regular
     (WylFactArtifactNamespace *, const gchar *, gboolean);
@@ -1294,6 +1378,180 @@ main_binding_revalidate_unlocked (WylFactArtifactMainBinding *binding)
   if (result != WYRELOG_E_OK)
     binding->active = FALSE;
   return result;
+}
+
+static wyrelog_error_t
+duckdb_temp_child_binding_new (WylFactDuckdbTempChild *child, gint fd,
+    WylFactDuckdbTempChildBinding **out_binding)
+{
+  if (!child || !out_binding || fd < 0)
+    return WYRELOG_E_INVALID;
+  *out_binding = NULL;
+  WylFactArtifactMutationLease *lease = child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_child_matches_unlocked (child);
+  struct stat st;
+  if (result == WYRELOG_E_OK && (fstat (fd, &st) != 0
+          || !S_ISREG (st.st_mode) || st.st_nlink != 1
+          || (st.st_mode & 07777) != 0600
+          || (guint64) st.st_uid != lease->namespace_->owner
+          || (guint64) st.st_dev != child->device
+          || (guint64) st.st_ino != child->inode))
+    result = WYRELOG_E_POLICY;
+  WylFactDuckdbTempChildBinding *binding = result == WYRELOG_E_OK
+      ? g_new0 (WylFactDuckdbTempChildBinding, 1) : NULL;
+  if (result == WYRELOG_E_OK && !binding)
+    result = WYRELOG_E_NOMEM;
+  if (result == WYRELOG_E_OK) {
+    binding->child = duckdb_temp_child_ref (child);
+    binding->working_fd = fd;
+    binding->active = TRUE;
+    binding->io_open = TRUE;
+    child->io_revoked = FALSE;
+    g_ptr_array_add (child->bindings, binding);
+    if (duckdb_temp_child_binding_revalidate_fd_unlocked (binding, fd)
+        != WYRELOG_E_OK) {
+      g_ptr_array_remove_fast (child->bindings, binding);
+      wyl_fact_duckdb_temp_child_free (binding->child);
+      g_free (binding);
+      binding = NULL;
+      result = WYRELOG_E_POLICY;
+    }
+  }
+  if (result == WYRELOG_E_OK)
+    *out_binding = binding;
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_create_child_binding (WylFactDuckdbTempRoot *root,
+    const gchar *name, WylFactDuckdbTempChild **out_child,
+    WylFactDuckdbTempChildBinding **out_binding, gint *out_fd,
+    WylFactDuckdbTempOrphanEvidence **out_evidence)
+{
+  if (out_child)
+    *out_child = NULL;
+  if (out_binding)
+    *out_binding = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (out_evidence)
+    *out_evidence = NULL;
+  if (!root || !out_child || !out_binding || !out_fd || !out_evidence)
+    return WYRELOG_E_INVALID;
+  WylFactDuckdbTempChild *child = NULL;
+  gint fd = -1;
+  wyrelog_error_t result =
+      wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence (root, name,
+      &child, &fd, out_evidence);
+  if (result != WYRELOG_E_OK)
+    return result;
+  WylFactDuckdbTempChildBinding *binding = NULL;
+  result = duckdb_temp_child_binding_new (child, fd, &binding);
+  if (result != WYRELOG_E_OK) {
+    /* fd still names the newly created child here; it is ours to close. */
+    close (fd);
+    WylFactDuckdbTempRetireResult retired;
+    (void) wyl_fact_duckdb_temp_child_retire (child, &retired);
+    wyl_fact_duckdb_temp_child_free (child);
+    return result;
+  }
+  *out_child = child;
+  *out_binding = binding;
+  *out_fd = fd;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_open_binding (WylFactDuckdbTempChild *child,
+    gboolean writable, WylFactDuckdbTempChildBinding **out_binding,
+    gint *out_fd)
+{
+  if (out_binding)
+    *out_binding = NULL;
+  if (out_fd)
+    *out_fd = -1;
+  if (!child || !out_binding || !out_fd)
+    return WYRELOG_E_INVALID;
+  gint fd = -1;
+  wyrelog_error_t result = wyl_fact_duckdb_temp_child_open (child, writable,
+      &fd);
+  if (result != WYRELOG_E_OK)
+    return result;
+  result = duckdb_temp_child_binding_new (child, fd, out_binding);
+  if (result != WYRELOG_E_OK) {
+    close (fd);
+    return result;
+  }
+  *out_fd = fd;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_binding_revalidate (WylFactDuckdbTempChildBinding *b)
+{
+  if (!b || !b->child)
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = b->child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_child_binding_revalidate_unlocked (b);
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_binding_revalidate_fd (WylFactDuckdbTempChildBinding
+    *b, gint fd)
+{
+  if (!b || !b->child)
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = b->child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_child_binding_revalidate_fd_unlocked (b,
+      fd);
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_child_binding_close (WylFactDuckdbTempChildBinding *b,
+    gint *fd)
+{
+  if (!b || !b->child || !fd)
+    return WYRELOG_E_POLICY;
+  WylFactArtifactMutationLease *lease = b->child->root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_child_binding_revalidate_fd_unlocked (b,
+      *fd);
+  if (result == WYRELOG_E_OK) {
+    gint issued = *fd;
+    *fd = -1;
+    b->io_open = FALSE;
+    b->working_fd = -1;
+    if (close (issued) != 0) {
+      duckdb_temp_child_binding_revoke_unlocked (b);
+      result = WYRELOG_E_IO;
+    }
+  }
+  g_mutex_unlock (&lease->mutex);
+  return result;
+}
+
+void
+wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *b)
+{
+  if (!b)
+    return;
+  WylFactDuckdbTempChild *child = b->child;
+  if (child && child->root && child->root->lease) {
+    g_mutex_lock (&child->root->lease->mutex);
+    if (child->bindings)
+      g_ptr_array_remove_fast (child->bindings, b);
+    g_mutex_unlock (&child->root->lease->mutex);
+  }
+  wyl_fact_duckdb_temp_child_free (child);
+  g_free (b);
 }
 
 static wyrelog_error_t
@@ -2982,6 +3240,70 @@ duckdb_temp_child_matches_unlocked (WylFactDuckdbTempChild *child)
   return WYRELOG_E_OK;
 }
 
+static void
+duckdb_temp_child_binding_revoke_unlocked (WylFactDuckdbTempChildBinding *b)
+{
+  if (!b)
+    return;
+  b->active = FALSE;
+  b->io_open = FALSE;
+  b->working_fd = -1;
+  if (b->child)
+    b->child->io_revoked = TRUE;
+}
+
+static wyrelog_error_t
+duckdb_temp_child_binding_revalidate_unlocked (WylFactDuckdbTempChildBinding *b)
+{
+  wyrelog_error_t result = !b || !b->active || !b->child
+      ? WYRELOG_E_POLICY : duckdb_temp_child_matches_unlocked (b->child);
+  if (result == WYRELOG_E_OK)
+    result = duckdb_temp_root_audit_unlocked (b->child->root);
+  if (result != WYRELOG_E_OK)
+    duckdb_temp_child_binding_revoke_unlocked (b);
+  return result;
+}
+
+static wyrelog_error_t
+duckdb_temp_child_binding_revalidate_fd_unlocked (WylFactDuckdbTempChildBinding
+    *b, gint fd)
+{
+  wyrelog_error_t result = duckdb_temp_child_binding_revalidate_unlocked (b);
+  struct stat st;
+  if (result == WYRELOG_E_OK && (!b->io_open || fd < 0 || fd != b->working_fd
+          || fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
+          || (st.st_mode & 07777) != 0600
+          || (guint64) st.st_uid != b->child->root->lease->namespace_->owner
+          || (guint64) st.st_dev != b->child->device
+          || (guint64) st.st_ino != b->child->inode))
+    result = WYRELOG_E_POLICY;
+  if (result != WYRELOG_E_OK)
+    duckdb_temp_child_binding_revoke_unlocked (b);
+  return result;
+}
+
+/* A live descriptor blocks namespace mutation.  We validate it instead of
+ * trusting its number: raw close/reuse is terminal and still performs no
+ * unlink, leaving the foreign descriptor untouched. */
+static wyrelog_error_t
+duckdb_temp_child_io_barrier_unlocked (WylFactDuckdbTempChild *child)
+{
+  if (child && child->io_revoked)
+    return WYRELOG_E_POLICY;
+  for (guint i = 0; child && child->bindings && i < child->bindings->len; i++) {
+    WylFactDuckdbTempChildBinding *b = g_ptr_array_index (child->bindings, i);
+    if (!b || !b->active)
+      continue;
+    if (b->io_open) {
+      if (duckdb_temp_child_binding_revalidate_fd_unlocked (b,
+              b->working_fd) != WYRELOG_E_OK)
+        return WYRELOG_E_POLICY;
+      return WYRELOG_E_POLICY;
+    }
+  }
+  return WYRELOG_E_OK;
+}
+
 static wyrelog_error_t
 duckdb_temp_child_discard_unpublished_unlocked (WylFactDuckdbTempChild *child)
 {
@@ -3371,9 +3693,10 @@ wyrelog_error_t
   child->device = st.st_dev;
   child->inode = st.st_ino;
   child->active = child->pin_fd >= 0;
+  child->bindings = g_ptr_array_new ();
   if (child->active)
     g_ptr_array_add (root->children, child);
-  if (!child->active
+  if (!child->active || !child->bindings
       || namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
       || fsync (fd) != 0 || fsync (root->fd) != 0
@@ -3513,6 +3836,9 @@ wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
   result = duckdb_temp_root_audit_unlocked (child->root);
   if (result != WYRELOG_E_OK)
     goto done;
+  result = duckdb_temp_child_io_barrier_unlocked (child);
+  if (result != WYRELOG_E_OK)
+    goto done;
   if (fsync (child->pin_fd) != 0) {
     result = WYRELOG_E_IO;
     goto done;
@@ -3548,6 +3874,7 @@ wyl_fact_duckdb_temp_child_free (WylFactDuckdbTempChild *child)
     g_ptr_array_remove_fast (child->root->children, child);
   if (child->pin_fd >= 0)
     close (child->pin_fd);
+  g_clear_pointer (&child->bindings, g_ptr_array_unref);
   duckdb_temp_root_unref (child->root);
   g_free (child->name);
   g_free (child);

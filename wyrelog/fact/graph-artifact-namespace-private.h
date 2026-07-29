@@ -14,6 +14,7 @@ typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
 typedef struct WylFactDuckdbTempChild WylFactDuckdbTempChild;
+typedef struct WylFactDuckdbTempChildBinding WylFactDuckdbTempChildBinding;
 typedef struct WylFactDuckdbTempOrphanEvidence WylFactDuckdbTempOrphanEvidence;
 typedef gboolean (*WylFactDuckdbTempChildVisitor) (WylFactDuckdbTempChild *,
     const gchar * logical_name, gpointer user_data);
@@ -327,6 +328,25 @@ wyrelog_error_t wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
     WylFactDuckdbTempOrphanEvidence **);
 wyrelog_error_t wyl_fact_duckdb_temp_child_open
     (WylFactDuckdbTempChild *, gboolean writable, gint * out_fd);
+/* The DuckDB adapter must use this identity-bound provider, rather than the
+ * compatibility raw child-open APIs above.  It proves the actual issued
+ * descriptor at every I/O boundary and never exports a host pathname. */
+wyrelog_error_t wyl_fact_duckdb_temp_root_create_child_binding
+    (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
+    WylFactDuckdbTempChild **, WylFactDuckdbTempChildBinding **, gint * out_fd,
+    WylFactDuckdbTempOrphanEvidence **);
+wyrelog_error_t wyl_fact_duckdb_temp_child_open_binding
+    (WylFactDuckdbTempChild *, gboolean writable,
+    WylFactDuckdbTempChildBinding **, gint * out_fd);
+wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate
+    (WylFactDuckdbTempChildBinding *);
+wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate_fd
+    (WylFactDuckdbTempChildBinding *, gint working_fd);
+/* On success consumes only the issued working descriptor.  A validation
+ * failure revokes but never closes a potentially reused foreign descriptor. */
+wyrelog_error_t wyl_fact_duckdb_temp_child_binding_close
+    (WylFactDuckdbTempChildBinding *, gint * working_fd);
+void wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *);
 /* On success, returns owned WylFactDuckdbTempChild entries only.  Any
  * unbound/foreign entry makes enumeration fail with no partial array. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_list_children
