@@ -618,8 +618,6 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
     return WYRELOG_E_NOMEM;
   }
   binding->lease = lease_ref (lease);
-  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
-      lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   binding->entry = entry;
   binding->name = sidecar;
   binding->creator = create_new;
@@ -628,6 +626,9 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
   g_mutex_init (&binding->mutex);
   rc = binding_io_new (lease->namespace_, entry, &binding->working,
       &binding->io_state);
+  if (rc == WYRELOG_E_OK)
+    wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+        lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   if (rc == WYRELOG_E_OK)
     rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
   if (rc != WYRELOG_E_OK) {
@@ -1581,7 +1582,7 @@ temp_binding_check (WylFactArtifactWinTempChildBinding *binding,
         : wyl_fact_artifact_win_working_handle_revalidate (binding->working);
     (void) supplied;
   }
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_BUSY)
     temp_binding_revoke (binding);
   g_mutex_unlock (&binding->child->mutex);
   return rc;
@@ -1753,11 +1754,21 @@ wyrelog_error_t
     wyl_fact_artifact_win_temp_child_binding_open_io_session
     (WylFactArtifactWinTempChildBinding * binding,
     WylFactArtifactWinIoSession ** out_session) {
-  wyrelog_error_t rc = temp_binding_check (binding, FALSE,
-      INVALID_HANDLE_VALUE);
-  return rc ==
-      WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
-      out_session) : rc;
+  wyrelog_error_t rc;
+  if (out_session != NULL)
+    *out_session = NULL;
+  if (binding == NULL || out_session == NULL || !binding->active)
+    return WYRELOG_E_INVALID;
+  /* The child mutex linearizes both session admission and retirement.  Do not
+   * validate then reopen a race window in which retire deletes the entry. */
+  g_mutex_lock (&binding->child->mutex);
+  rc = temp_child_check (binding->child);
+  if (rc == WYRELOG_E_OK && binding->active)
+    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
+  if (rc != WYRELOG_E_OK)
+    temp_binding_revoke (binding);
+  g_mutex_unlock (&binding->child->mutex);
+  return rc;
 }
 
 void wyl_fact_artifact_win_temp_child_binding_free
