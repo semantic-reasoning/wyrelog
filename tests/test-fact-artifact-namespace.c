@@ -1661,8 +1661,11 @@ test_duckdb_temp_root (void)
   WylFactDuckdbTempRoot *root = (gpointer) 0x1;
   WylFactDuckdbTempOrphanEvidence *evidence = NULL;
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence
-      (NULL, &root, &evidence), ==, WYRELOG_E_INVALID);
+      (NULL, &root, &evidence), ==, WYRELOG_E_POLICY);
   g_assert_null (root);
+  g_assert_null (evidence);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+      (NULL, NULL, &evidence), ==, WYRELOG_E_INVALID);
 #else
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };

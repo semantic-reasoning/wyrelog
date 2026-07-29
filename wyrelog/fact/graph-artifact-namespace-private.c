@@ -368,6 +368,8 @@ wyrelog_error_t
     *out_root = NULL;
   if (out_evidence)
     *out_evidence = NULL;
+  if (!out_root || !out_evidence)
+    return WYRELOG_E_INVALID;
   return closed ();
 }
 
@@ -2788,7 +2790,9 @@ wyrelog_error_t
   wyrelog_error_t result = duckdb_temp_root_matches_unlocked (root);
   if (result == WYRELOG_E_OK)
     result = duckdb_temp_root_audit_unlocked (root);
-  if (result != WYRELOG_E_OK || duckdb_temp_find_child (root, name)) {
+  if (result != WYRELOG_E_OK)
+    goto done;
+  if (duckdb_temp_find_child (root, name)) {
     result = WYRELOG_E_POLICY;
     goto done;
   }
