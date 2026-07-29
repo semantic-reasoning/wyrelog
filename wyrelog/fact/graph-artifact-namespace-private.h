@@ -191,7 +191,8 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate_fd
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_close
     (WylFactArtifactSidecarBinding *, gint * working_fd);
 /* Publishes the exact bound sidecar under a distinct absent fixed sidecar
- * name, using a platform no-replace primitive.  After the rename linearizes,
+ * name, using a platform no-replace primitive.  A live issued descriptor is
+ * rejected; raw close/reuse revokes the binding without renaming.  After the rename linearizes,
  * the binding identifies destination even if durability reporting fails. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
     (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
