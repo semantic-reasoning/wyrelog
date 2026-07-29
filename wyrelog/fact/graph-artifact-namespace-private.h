@@ -121,15 +121,25 @@ void wyl_fact_artifact_mutation_lease_free (WylFactArtifactMutationLease *);
  * This is deliberately not a pathname capability: it requires an exclusive
  * lease, opens only the existing fixed name with O_RDWR/CLOEXEC/NOFOLLOW, and
  * grants neither creation nor namespace mutation.  The binding retains the
- * lease and a separate identity pin; #596 must call revalidate immediately
- * before and after every raw I/O, sync, truncate, and close boundary.  A
- * failed revalidation terminally revokes this binding.  As with #612, an
+ * lease and a separate identity pin.  #596 must call _revalidate_fd with its
+ * actual working descriptor immediately before and after every raw I/O, sync,
+ * and truncate boundary; plain _revalidate checks only held authority and is
+ * not an I/O-boundary substitute.  _close validates then consumes the working
+ * descriptor on success.  A failed validation terminally revokes this
+ * binding, but never closes a possibly reused foreign descriptor.  As with #612, an
  * uncooperative same-UID writer can still race the final check and syscall. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_main_binding
     (WylFactArtifactMutationLease *, WylFactArtifactMainBinding ** out_binding,
     gint * out_fd);
 wyrelog_error_t wyl_fact_artifact_main_binding_revalidate
     (WylFactArtifactMainBinding *);
+wyrelog_error_t wyl_fact_artifact_main_binding_revalidate_fd
+    (WylFactArtifactMainBinding *, gint working_fd);
+/* On success, closes and sets *working_fd to -1, then terminally consumes the
+ * binding.  On validation failure it leaves *working_fd untouched because its
+ * number could already refer to a foreign descriptor. */
+wyrelog_error_t wyl_fact_artifact_main_binding_close
+    (WylFactArtifactMainBinding *, gint * working_fd);
 void wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *);
 /* Generic fixed-sidecar mutation is retired: WAL/checkpoint/recovery creation
  * and writable opens require SidecarBinding. */

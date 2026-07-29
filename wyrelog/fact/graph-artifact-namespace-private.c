@@ -114,6 +114,24 @@ wyl_fact_artifact_main_binding_revalidate (WylFactArtifactMainBinding *b)
   return closed ();
 }
 
+wyrelog_error_t
+wyl_fact_artifact_main_binding_revalidate_fd (WylFactArtifactMainBinding *b,
+    gint fd)
+{
+  (void) fd;
+  if (!b)
+    return closed ();
+  return closed ();
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_close (WylFactArtifactMainBinding *b, gint *fd)
+{
+  (void) b;
+  (void) fd;
+  return closed ();
+}
+
 void
 wyl_fact_artifact_main_binding_free (WylFactArtifactMainBinding *b)
 {
@@ -1258,6 +1276,25 @@ main_binding_revalidate_unlocked (WylFactArtifactMainBinding *binding)
   return result;
 }
 
+static wyrelog_error_t
+main_binding_revalidate_fd_unlocked (WylFactArtifactMainBinding *binding,
+    gint working_fd)
+{
+  wyrelog_error_t result = main_binding_revalidate_unlocked (binding);
+  struct stat working;
+  if (result == WYRELOG_E_OK
+      && (working_fd < 0 || fstat (working_fd, &working) != 0
+          || !S_ISREG (working.st_mode) || working.st_nlink != 1
+          || (working.st_mode & 07777) != 0600
+          || (guint64) working.st_uid != binding->lease->namespace_->owner
+          || (guint64) working.st_dev != binding->device
+          || (guint64) working.st_ino != binding->inode))
+    result = WYRELOG_E_POLICY;
+  if (result != WYRELOG_E_OK)
+    binding->active = FALSE;
+  return result;
+}
+
 wyrelog_error_t
     wyl_fact_artifact_mutation_lease_open_main_binding
     (WylFactArtifactMutationLease * lease,
@@ -1343,6 +1380,38 @@ wyl_fact_artifact_main_binding_revalidate (WylFactArtifactMainBinding *binding)
     return WYRELOG_E_POLICY;
   g_mutex_lock (&binding->lease->mutex);
   wyrelog_error_t result = main_binding_revalidate_unlocked (binding);
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_revalidate_fd (WylFactArtifactMainBinding
+    *binding, gint working_fd)
+{
+  if (!binding || !binding->lease)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = main_binding_revalidate_fd_unlocked (binding,
+      working_fd);
+  g_mutex_unlock (&binding->lease->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_main_binding_close (WylFactArtifactMainBinding *binding,
+    gint *working_fd)
+{
+  if (!binding || !binding->lease || !working_fd)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->lease->mutex);
+  wyrelog_error_t result = main_binding_revalidate_fd_unlocked (binding,
+      *working_fd);
+  if (result == WYRELOG_E_OK) {
+    gint fd = *working_fd;
+    *working_fd = -1;
+    binding->active = FALSE;
+    result = close (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+  }
   g_mutex_unlock (&binding->lease->mutex);
   return result;
 }
