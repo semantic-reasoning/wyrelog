@@ -2546,6 +2546,12 @@ test_duckdb_temp_root (void)
   g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding,
+          fd), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd), ==,
+      WYRELOG_E_POLICY);
   wyl_fact_duckdb_temp_child_binding_free (binding);
   binding = NULL;
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child_with_orphan_evidence
@@ -2664,23 +2670,37 @@ test_duckdb_temp_root (void)
       WYRELOG_E_OK);
   wyl_fact_duckdb_temp_child_binding_free (binding);
   binding = NULL;
+  /* The retirement audit must inspect every live binding: A remains valid
+   * while B's raw-close/reuse is terminally revoked. */
   g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
           &binding, &fd), ==, WYRELOG_E_OK);
+  WylFactDuckdbTempChildBinding *binding_b = NULL;
+  gint fd_b = -1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
+          &binding_b, &fd_b), ==, WYRELOG_E_OK);
   gint reused = g_open ("/dev/null", O_RDWR, 0);
   g_assert_cmpint (reused, >=, 0);
-  g_assert_cmpint (close (fd), ==, 0);
-  g_assert_cmpint (dup2 (reused, fd), ==, fd);
-  if (reused != fd)
+  g_assert_cmpint (close (fd_b), ==, 0);
+  g_assert_cmpint (dup2 (reused, fd_b), ==, fd_b);
+  if (reused != fd_b)
     g_assert_cmpint (close (reused), ==, 0);
-  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding,
-          fd), ==, WYRELOG_E_POLICY);
-  g_assert_cmpint (write (fd, "z", 1), ==, 1);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_retire (root, &retired), ==,
+      WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
       WYRELOG_E_POLICY);
-  g_assert_cmpint (close (fd), ==, 0);
-  fd = -1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_revalidate_fd (binding_b,
+          fd_b), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (write (fd_b, "z", 1), ==, 1);
+  g_assert_cmpint (close (fd_b), ==, 0);
+  fd_b = -1;
+  wyl_fact_duckdb_temp_child_binding_free (binding_b);
+  binding_b = NULL;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd), ==,
+      WYRELOG_E_OK);
   wyl_fact_duckdb_temp_child_binding_free (binding);
   binding = NULL;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
+      WYRELOG_E_POLICY);
   /* A fresh verified open/checked close re-establishes clean lifecycle state. */
   g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
           &binding, &fd), ==, WYRELOG_E_OK);
@@ -2708,10 +2728,10 @@ test_duckdb_temp_root (void)
           &evidence), ==, WYRELOG_E_OK);
   wyl_fact_duckdb_temp_child_binding_free (binding);
   binding = NULL;
-  gint fd_b = -1;
+  gint fd_c = -1;
   g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
-          &binding, &fd_b), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd_b),
+          &binding, &fd_c), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd_c),
       ==, WYRELOG_E_OK);
   wyl_fact_duckdb_temp_child_binding_free (binding);
   binding = NULL;
