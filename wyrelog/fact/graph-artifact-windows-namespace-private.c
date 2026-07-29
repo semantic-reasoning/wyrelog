@@ -1112,6 +1112,378 @@ wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *binding)
   g_free (binding);
 }
 
+/* Temporary-token lifecycle is deliberately separate from #609 staging.
+ * Staging is consumed by sidecar replacement; a token is an independently
+ * recoverable owner artifact.  Keeping the types distinct prevents a caller
+ * from accidentally converting spill/replacement authority into recovery
+ * deletion authority. */
+struct WylFactArtifactWinTempToken
+{
+  WylFactArtifactWinLease *lease;
+  WylFactArtifactWinEntry *entry;
+  WylFactArtifactWinWorkingHandle *working;
+  gchar *token;
+  gboolean active;
+  gboolean io_open;
+  GMutex mutex;
+};
+
+struct WylFactArtifactWinTempRecoveryEvidence
+{
+  gchar *token;
+  WylFactGraphWinIdentity identity;
+};
+
+static gboolean
+temp_token_valid (const gchar *token)
+{
+  const gchar *p;
+  if (token == NULL || token[0] == '\0' || strlen (token) > 48
+      || strpbrk (token, "/\\\\") != NULL)
+    return FALSE;
+  for (p = token; *p != '\0'; p++)
+    if (!g_ascii_isalnum (*p) && *p != '-')
+      return FALSE;
+  return TRUE;
+}
+
+static gchar *
+temp_token_name (const gchar *token)
+{
+  return temp_token_valid (token) ? g_strdup_printf ("tmp-%s", token) : NULL;
+}
+
+static void
+temp_token_revoke (WylFactArtifactWinTempToken *token)
+{
+  token->active = FALSE;
+  token->io_open = FALSE;
+}
+
+static wyrelog_error_t
+temp_token_check_locked (WylFactArtifactWinTempToken *token,
+    gboolean require_working, HANDLE supplied)
+{
+  wyrelog_error_t rc;
+  if (token == NULL || !token->active || token->lease == NULL
+      || !token->lease->exclusive || !temp_token_valid (token->token))
+    return WYRELOG_E_POLICY;
+  rc = lease_revalidate (token->lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_revalidate (token->lease->
+        namespace_->locator, token->entry);
+  if (rc == WYRELOG_E_OK && require_working) {
+    HANDLE borrowed = INVALID_HANDLE_VALUE;
+    rc = !token->io_open ? WYRELOG_E_POLICY
+        : wyl_fact_artifact_win_working_handle_revalidate (token->working);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_artifact_win_working_handle_borrow (token->working,
+          &borrowed);
+    if (rc == WYRELOG_E_OK && borrowed != supplied)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc != WYRELOG_E_OK)
+    temp_token_revoke (token);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_lease_create_temp_token (WylFactArtifactWinLease *lease,
+    const gchar *token_name, WylFactArtifactWinTempToken **out_token)
+{
+  WylFactArtifactWinTempToken *token = NULL;
+  g_autofree gchar *name = NULL;
+  wyrelog_error_t rc;
+  if (out_token != NULL)
+    *out_token = NULL;
+  if (lease == NULL || out_token == NULL || !lease->exclusive)
+    return WYRELOG_E_POLICY;
+  name = temp_token_name (token_name);
+  if (name == NULL)
+    return WYRELOG_E_INVALID;
+  if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
+    return rc;
+  token = g_try_new0 (WylFactArtifactWinTempToken, 1);
+  if (token == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator, name,
+      GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &token->entry);
+  if (rc == WYRELOG_E_OK)
+    rc = binding_working_new (lease->namespace_, token->entry, &token->working);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_working_handle_free (token->working);
+    wyl_fact_artifact_win_entry_free (token->entry);
+    g_free (token);
+    return rc;
+  }
+  token->token = g_strdup (token_name);
+  if (token->token == NULL) {
+    wyl_fact_artifact_win_working_handle_free (token->working);
+    wyl_fact_artifact_win_entry_free (token->entry);
+    g_free (token);
+    return WYRELOG_E_NOMEM;
+  }
+  token->lease = lease_ref (lease);
+  token->active = TRUE;
+  token->io_open = TRUE;
+  g_mutex_init (&token->mutex);
+  *out_token = token;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_token_revalidate (WylFactArtifactWinTempToken *token)
+{
+  wyrelog_error_t rc;
+  if (token == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&token->mutex);
+  rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+  g_mutex_unlock (&token->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_token_borrow (WylFactArtifactWinTempToken *token,
+    HANDLE *out_handle)
+{
+  wyrelog_error_t rc;
+  if (out_handle != NULL)
+    *out_handle = INVALID_HANDLE_VALUE;
+  if (token == NULL || out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&token->mutex);
+  rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK && !token->io_open)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_working_handle_borrow (token->working,
+        out_handle);
+  if (rc == WYRELOG_E_OK)
+    rc = temp_token_check_locked (token, TRUE, *out_handle);
+  if (rc != WYRELOG_E_OK)
+    *out_handle = INVALID_HANDLE_VALUE;
+  g_mutex_unlock (&token->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_token_close (WylFactArtifactWinTempToken *token,
+    HANDLE *inout_handle)
+{
+  wyrelog_error_t rc;
+  if (token == NULL || inout_handle == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&token->mutex);
+  rc = temp_token_check_locked (token, TRUE, *inout_handle);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_fact_artifact_win_working_handle_close (token->working,
+        inout_handle);
+    if (rc == WYRELOG_E_OK)
+      token->io_open = FALSE;
+    else
+      temp_token_revoke (token);
+  }
+  g_mutex_unlock (&token->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_token_rename_no_replace
+    (WylFactArtifactWinTempToken * token, const gchar * destination_token,
+    WylFactArtifactWinMutationEffect * out_effect)
+{
+  g_autofree gchar *destination = NULL;
+  wyrelog_error_t rc;
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+  if (token == NULL || out_effect == NULL)
+    return WYRELOG_E_INVALID;
+  destination = temp_token_name (destination_token);
+  if (destination == NULL || g_strcmp0 (token->token, destination_token) == 0)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&token->mutex);
+  if (token->io_open) {
+    if (wyl_fact_artifact_win_working_handle_revalidate (token->working)
+        != WYRELOG_E_OK)
+      temp_token_revoke (token);
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_flush (token->lease->namespace_->locator,
+        token->entry);
+  if (rc == WYRELOG_E_OK)
+    rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_rename_no_replace
+        (token->lease->namespace_->locator, token->entry, destination,
+        out_effect);
+  if (*out_effect == WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
+    g_free (token->token);
+    token->token = g_strdup (destination_token);
+    if (token->token == NULL) {
+      temp_token_revoke (token);
+      rc = WYRELOG_E_NOMEM;
+    } else {
+      wyrelog_error_t post = wyl_fact_artifact_win_locator_flush_directory
+          (token->lease->namespace_->locator);
+      if (post == WYRELOG_E_OK)
+        post = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+      if (post != WYRELOG_E_OK) {
+        temp_token_revoke (token);
+        if (rc == WYRELOG_E_OK)
+          rc = post;
+      }
+    }
+  } else if (*out_effect == WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN)
+    temp_token_revoke (token);
+out:
+  g_mutex_unlock (&token->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_token_unlink (WylFactArtifactWinTempToken *token,
+    WylFactArtifactWinMutationEffect *out_effect)
+{
+  wyrelog_error_t rc;
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+  if (token == NULL || out_effect == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&token->mutex);
+  if (token->io_open) {
+    if (wyl_fact_artifact_win_working_handle_revalidate (token->working)
+        != WYRELOG_E_OK)
+      temp_token_revoke (token);
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_delete_exact (token->lease->
+        namespace_->locator, token->entry, out_effect);
+  if (*out_effect == WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
+    /* Delete is linearized.  Revoke before durability reporting so a failed
+     * flush cannot leave deletion authority live. */
+    temp_token_revoke (token);
+    {
+      wyrelog_error_t post = wyl_fact_artifact_win_locator_flush_directory
+          (token->lease->namespace_->locator);
+      if (rc == WYRELOG_E_OK)
+        rc = post;
+    }
+  } else if (*out_effect == WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN)
+    temp_token_revoke (token);
+out:
+  g_mutex_unlock (&token->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_token_export_recovery_evidence
+    (WylFactArtifactWinTempToken * token,
+    WylFactArtifactWinTempRecoveryEvidence ** out_evidence) {
+  WylFactArtifactWinTempRecoveryEvidence *evidence;
+  wyrelog_error_t rc;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (token == NULL || out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&token->mutex);
+  rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK) {
+    evidence = g_try_new0 (WylFactArtifactWinTempRecoveryEvidence, 1);
+    if (evidence == NULL)
+      rc = WYRELOG_E_NOMEM;
+    else {
+      evidence->token = g_strdup (token->token);
+      if (evidence->token == NULL) {
+        g_free (evidence);
+        rc = WYRELOG_E_NOMEM;
+      } else {
+        evidence->identity =
+            *wyl_fact_artifact_win_entry_identity (token->entry);
+        *out_evidence = evidence;
+      }
+    }
+  }
+  g_mutex_unlock (&token->mutex);
+  return rc;
+}
+
+void wyl_fact_artifact_win_temp_recovery_evidence_free
+    (WylFactArtifactWinTempRecoveryEvidence * evidence)
+{
+  if (evidence != NULL) {
+    g_free (evidence->token);
+    g_free (evidence);
+  }
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_lease_recover_temp_token (WylFactArtifactWinLease *lease,
+    const WylFactArtifactWinTempRecoveryEvidence *evidence,
+    WylFactArtifactWinMutationEffect *out_effect)
+{
+  g_autofree gchar *name = NULL;
+  WylFactArtifactWinEntry *entry = NULL;
+  wyrelog_error_t rc;
+  if (out_effect != NULL)
+    *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+  if (lease == NULL || evidence == NULL || out_effect == NULL
+      || !lease->exclusive)
+    return WYRELOG_E_INVALID;
+  name = temp_token_name (evidence->token);
+  if (name == NULL)
+    return WYRELOG_E_INVALID;
+  if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator, name,
+      GENERIC_READ | GENERIC_WRITE | DELETE, FALSE, &entry);
+  if (rc == WYRELOG_E_NOT_FOUND)
+    return WYRELOG_E_OK;        /* idempotent abandoned-artifact recovery */
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (!identity_equal (wyl_fact_artifact_win_entry_identity (entry),
+          &evidence->identity)) {
+    wyl_fact_artifact_win_entry_free (entry);
+    return WYRELOG_E_POLICY;
+  }
+  if ((rc = lease_revalidate (lease)) == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_revalidate (lease->namespace_->locator,
+        entry);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_delete_exact (lease->namespace_->locator,
+        entry, out_effect);
+  if (*out_effect == WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
+    wyrelog_error_t post = wyl_fact_artifact_win_locator_flush_directory
+        (lease->namespace_->locator);
+    if (rc == WYRELOG_E_OK)
+      rc = post;
+  }
+  wyl_fact_artifact_win_entry_free (entry);
+  return rc;
+}
+
+void
+wyl_fact_artifact_win_temp_token_free (WylFactArtifactWinTempToken *token)
+{
+  if (token == NULL)
+    return;
+  g_mutex_lock (&token->mutex);
+  temp_token_revoke (token);
+  wyl_fact_artifact_win_working_handle_free (token->working);
+  wyl_fact_artifact_win_entry_free (token->entry);
+  g_mutex_unlock (&token->mutex);
+  g_mutex_clear (&token->mutex);
+  wyl_fact_artifact_win_lease_free (token->lease);
+  g_free (token->token);
+  g_free (token);
+}
+
 struct WylFactArtifactWinTempRoot
 {
   WylFactArtifactWinLease *lease;
