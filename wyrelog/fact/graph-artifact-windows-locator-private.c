@@ -405,6 +405,16 @@ wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator *locator,
 }
 
 wyrelog_error_t
+wyl_fact_artifact_win_entry_flush (WylFactArtifactWinLocator *locator,
+    WylFactArtifactWinEntry *entry)
+{
+  wyrelog_error_t rc = wyl_fact_artifact_win_entry_revalidate (locator, entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  return FlushFileBuffers (entry->handle) ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
+wyrelog_error_t
 wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinLocator
     *locator, WylFactArtifactWinEntry *entry, HANDLE *out_handle)
 {
