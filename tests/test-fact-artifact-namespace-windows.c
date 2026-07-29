@@ -4,11 +4,14 @@
 #include <string.h>
 
 #ifdef G_OS_WIN32
+#include <aclapi.h>
 #include <windows.h>
 
 #include "fact/graph-artifact-windows-handle-private.h"
 #include "fact/graph-artifact-windows-locator-private.h"
 #include "fact/graph-artifact-windows-lock-private.h"
+#include "fact/graph-artifact-windows-namespace-private.h"
+#include "fact/graph-windows-security-private.h"
 
 static WylFactGraphWinIdentity
 identity_for (HANDLE handle)
@@ -184,6 +187,79 @@ test_locator_relative_entry_lifecycle (void)
   wyl_fact_artifact_win_locator_free (locator);
   g_assert_true (CloseHandle (graph));
   directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (directory_wide));
+  g_free (path);
+}
+
+static void
+test_native_namespace_captured_owner_acl_binding (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinBinding *binding = NULL;
+  WylFactArtifactWinBinding *reopened = NULL;
+  HANDLE borrowed = INVALID_HANDLE_VALUE;
+  g_autofree gchar *wal_path = NULL;
+  g_autofree wchar_t *wal = NULL;
+
+  directory.graph_handle = graph;
+  directory.graph_identity = identity_for (graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
+          &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, TRUE,
+          &binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (binding, &borrowed),
+      ==, WYRELOG_E_OK);
+  /* Creation must have used the owner captured at namespace construction,
+   * rather than inherited ACLs from this intentionally ordinary test root. */
+  g_assert_cmpint (wyl_fact_graph_win_validate_protected_owner_acl (borrowed,
+          0), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_close (binding, &borrowed),
+      ==, WYRELOG_E_OK);
+  g_assert_true (borrowed == INVALID_HANDLE_VALUE);
+  wyl_fact_artifact_win_binding_free (binding);
+  binding = NULL;
+  /* Existing entries must prove the same captured-owner protected DACL before
+   * they are re-issued through a new opaque binding. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
+          &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
+          &reopened), ==, WYRELOG_E_OK);
+  /* The binding holds its own namespace reference; lifetime handoff must not
+   * invalidate native revalidation between a caller releasing the namespace
+   * and the final HANDLE close. */
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (reopened, &borrowed),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpuint (SetSecurityInfo (borrowed, SE_FILE_OBJECT,
+          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+          NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_revalidate (reopened), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_win_binding_free (reopened);
+  reopened = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
+          &reopened), ==, WYRELOG_E_POLICY);
+  g_assert_null (reopened);
+  /* The legacy gint API remains deliberately unavailable on Windows. */
+  g_assert_cmpint (wyl_fact_artifact_namespace_open_file (NULL,
+          WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, NULL), ==, WYRELOG_E_POLICY);
+  wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
+  wal = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+  g_assert_true (DeleteFileW (wal));
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  namespace_ = NULL;
+  g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL,
+      NULL, NULL);
+  g_assert_true (CloseHandle (graph));
   g_assert_true (RemoveDirectoryW (directory_wide));
   g_free (path);
 }
@@ -420,6 +496,9 @@ main (int argc, char **argv)
       test_working_handle_adopt_noninherit_close_once);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
       test_locator_relative_entry_lifecycle);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/namespace/captured-owner-binding",
+      test_native_namespace_captured_owner_acl_binding);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/identity-output",
       test_working_handle_identity_mismatch_initializes_output);
