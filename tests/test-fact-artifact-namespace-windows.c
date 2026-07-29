@@ -712,12 +712,17 @@ test_native_namespace_main_sidecar_lifecycle (void)
   WylFactArtifactWinLease *lease = NULL;
   WylFactArtifactWinMainBinding *main_binding = NULL;
   WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinTempRoot *temp_root = NULL;
+  WylFactArtifactWinTempChild *temp_child = NULL;
+  WylFactArtifactWinTempChildBinding *temp_binding = NULL;
   HANDLE main_handle = INVALID_HANDLE_VALUE;
   HANDLE sidecar_handle = INVALID_HANDLE_VALUE;
   WylFactArtifactWinMutationEffect effect =
       WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
   WylFactArtifactSidecarRetireResult retire =
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  WylFactDuckdbTempRetireResult temp_retire =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
   g_autofree wchar_t *main_wide = NULL;
   g_autofree wchar_t *lock_wide = NULL;
   g_autofree wchar_t *checkpoint_wide = NULL;
@@ -774,6 +779,39 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
   wyl_fact_artifact_win_sidecar_binding_free (sidecar);
   sidecar = NULL;
+
+  /* Native spill roots are lease-bound virtual authorities: child I/O must
+   * be closed through its binding before either child or root can retire. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_root (lease,
+          &temp_root), ==, WYRELOG_E_OK);
+  g_autofree gchar *temp_logical =
+      wyl_fact_artifact_win_temp_root_dup_logical_name (temp_root);
+  g_assert_nonnull (temp_logical);
+  g_assert_true (g_str_has_prefix (temp_logical, "/wyrelog-duckdb-temp/"));
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_create_child (temp_root,
+          "duckdb_temp_storage_DEFAULT-1.tmp", &temp_child), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (temp_child,
+          &temp_binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_borrow
+      (temp_binding, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
+          &temp_retire), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (temp_retire, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_close
+      (temp_binding, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
+          &temp_retire), ==, WYRELOG_E_OK);
+  g_assert_cmpint (temp_retire, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_temp_child_free (temp_child);
+  temp_child = NULL;
+  wyl_fact_artifact_win_temp_child_binding_free (temp_binding);
+  temp_binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_root_retire (temp_root,
+          &temp_retire), ==, WYRELOG_E_OK);
+  g_assert_cmpint (temp_retire, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_temp_root_free (temp_root);
+  temp_root = NULL;
   wyl_fact_artifact_win_lease_free (lease);
   lease = NULL;
 
