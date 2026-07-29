@@ -226,6 +226,11 @@ wyrelog_error_t wyl_fact_artifact_namespace_sync_directory
  * directory, and lock are revalidated around every mutation. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create
     (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **);
+/* A canonical virtual spelling identifies this live authority to #596.  It
+ * is not a host path and cannot be converted into a dirfd/HANDLE. */
+gchar *wyl_fact_duckdb_temp_root_dup_logical_name (WylFactDuckdbTempRoot *);
+wyrelog_error_t wyl_fact_duckdb_temp_root_child_exists
+    (WylFactDuckdbTempRoot *, const gchar * duckdb_name, gboolean * out_exists);
 void wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_child
     (WylFactDuckdbTempRoot *, const gchar * duckdb_name,

@@ -365,6 +365,24 @@ wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *root)
   (void) root;
 }
 
+gchar *
+wyl_fact_duckdb_temp_root_dup_logical_name (WylFactDuckdbTempRoot *root)
+{
+  (void) root;
+  return NULL;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *root,
+    const gchar *name, gboolean *out_exists)
+{
+  (void) root;
+  (void) name;
+  if (out_exists)
+    *out_exists = FALSE;
+  return closed ();
+}
+
 wyrelog_error_t
 wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
     const gchar *name, WylFactDuckdbTempChild **out_child, gint *out_fd)
@@ -496,6 +514,7 @@ struct WylFactDuckdbTempRoot
   WylFactArtifactMutationLease *lease;
   gint fd;
   gchar *name;
+  gchar *logical_name;
   guint64 device, inode;
   gboolean active;
   GPtrArray *children;          /* non-owning live child bindings */
@@ -2232,6 +2251,7 @@ duckdb_temp_root_unref (WylFactDuckdbTempRoot *root)
   g_clear_pointer (&root->children, g_ptr_array_unref);
   wyl_fact_artifact_mutation_lease_free (root->lease);
   g_free (root->name);
+  g_free (root->logical_name);
   g_free (root);
 }
 
@@ -2486,11 +2506,12 @@ wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
   root->lease = mutation_lease_ref (lease);
   root->fd = fd;
   root->name = g_steal_pointer (&name);
+  root->logical_name = g_strdup_printf ("wyrelog-duckdb-temp:%s", uuid);
   root->device = st.st_dev;
   root->inode = st.st_ino;
   root->active = TRUE;
   root->children = g_ptr_array_new ();
-  if (!root->children
+  if (!root->logical_name || !root->children
       || namespace_fault_take
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_MKDIR)
       || fsync (lease->namespace_->fd) != 0
@@ -2513,6 +2534,41 @@ void
 wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *root)
 {
   duckdb_temp_root_unref (root);
+}
+
+gchar *
+wyl_fact_duckdb_temp_root_dup_logical_name (WylFactDuckdbTempRoot *root)
+{
+  if (!root)
+    return NULL;
+  WylFactArtifactMutationLease *lease = root->lease;
+  g_mutex_lock (&lease->mutex);
+  gchar *copy = duckdb_temp_root_audit_unlocked (root) == WYRELOG_E_OK
+      ? g_strdup (root->logical_name) : NULL;
+  g_mutex_unlock (&lease->mutex);
+  return copy;
+}
+
+wyrelog_error_t
+wyl_fact_duckdb_temp_root_child_exists (WylFactDuckdbTempRoot *root,
+    const gchar *name, gboolean *out_exists)
+{
+  if (out_exists)
+    *out_exists = FALSE;
+  if (!root || !name || !out_exists || !duckdb_temp_child_name_is_valid (name))
+    return WYRELOG_E_INVALID;
+  WylFactArtifactMutationLease *lease = root->lease;
+  g_mutex_lock (&lease->mutex);
+  wyrelog_error_t result = duckdb_temp_root_audit_unlocked (root);
+  if (result == WYRELOG_E_OK) {
+    WylFactDuckdbTempChild *child = duckdb_temp_find_child (root, name);
+    if (!child)
+      result = WYRELOG_E_POLICY;
+    else
+      *out_exists = TRUE;
+  }
+  g_mutex_unlock (&lease->mutex);
+  return result;
 }
 
 wyrelog_error_t
