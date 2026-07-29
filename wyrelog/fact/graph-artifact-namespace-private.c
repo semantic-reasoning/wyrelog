@@ -2508,6 +2508,8 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
       || (st.st_mode & 07777) != 0600 || st.st_uid != geteuid ()) {
     wyrelog_error_t discard = duckdb_temp_child_discard_unpublished_unlocked
         (&temporary);
+    if (temporary.pin_fd >= 0)
+      close (temporary.pin_fd);
     result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     goto done;
   }
@@ -2516,6 +2518,8 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
     g_free (child);
     wyrelog_error_t discard = duckdb_temp_child_discard_unpublished_unlocked
         (&temporary);
+    if (temporary.pin_fd >= 0)
+      close (temporary.pin_fd);
     result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_NOMEM;
     goto done;
   }
