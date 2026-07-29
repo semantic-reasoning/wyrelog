@@ -124,6 +124,222 @@ open_locator_for_test (HANDLE graph, WylFactGraphWinIdentity *out_identity)
   return locator;
 }
 
+/* This opens the same graph from a fresh process.  It deliberately uses no
+ * inherited HANDLE: the child must prove that the on-disk protected entries
+ * and LockFileEx domain, rather than this test process' static domain table,
+ * enforce the lease. */
+static WylFactArtifactWinNamespace *
+open_namespace_at_path (const gchar *path, gboolean create_main,
+    HANDLE *out_graph)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactWinLocator *locator = NULL;
+  WylFactArtifactWinEntry *entry = NULL;
+  WylFactGraphRegularFile main_file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  HANDLE graph;
+  HANDLE main = INVALID_HANDLE_VALUE;
+  wyrelog_error_t rc;
+
+  g_assert_nonnull (wide);
+  graph = CreateFileW (wide, FILE_LIST_DIRECTORY | FILE_ADD_FILE
+      | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  g_assert_true (graph != INVALID_HANDLE_VALUE);
+  directory.graph_handle = graph;
+  directory.graph_identity = identity_for (graph);
+  locator = open_locator_for_test (graph, &directory.graph_identity);
+  rc = wyl_fact_artifact_win_locator_open (locator, "facts.duckdb",
+      GENERIC_READ | GENERIC_WRITE, create_main, &entry);
+  if (rc == WYRELOG_E_BUSY && create_main)
+    rc = wyl_fact_artifact_win_locator_open (locator, "facts.duckdb",
+        GENERIC_READ | GENERIC_WRITE, FALSE, &entry);
+  g_assert_cmpint (rc, ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (locator,
+          entry, &main), ==, WYRELOG_E_OK);
+  main_file.handle = main;
+  main_file.identity = *wyl_fact_artifact_win_entry_identity (entry);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_new_with_main (&directory,
+          &main_file, &namespace_), ==, WYRELOG_E_OK);
+  g_assert_true (CloseHandle (main));
+  wyl_fact_artifact_win_entry_free (entry);
+  wyl_fact_artifact_win_locator_free (locator);
+  *out_graph = graph;
+  return namespace_;
+}
+
+enum
+{
+  LEASE_CHILD_OK = 0,
+  LEASE_CHILD_BUSY = 42,
+  LEASE_CHILD_ERROR = 43,
+};
+
+static int
+run_lease_child (const gchar *mode, const gchar *path)
+{
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinNamespace *namespace_ = open_namespace_at_path (path,
+      FALSE, &graph);
+  WylFactArtifactWinLease *lease = NULL;
+  wyrelog_error_t rc = strcmp (mode, "reader") == 0
+      || strcmp (mode, "hold-reader") == 0
+      ? wyl_fact_artifact_win_namespace_acquire_reader (namespace_, &lease)
+      : strcmp (mode, "mutation") == 0
+      ? wyl_fact_artifact_win_namespace_acquire_mutation (namespace_, &lease)
+      : WYRELOG_E_INVALID;
+  int result = rc == WYRELOG_E_OK ? LEASE_CHILD_OK
+      : rc == WYRELOG_E_BUSY ? LEASE_CHILD_BUSY : LEASE_CHILD_ERROR;
+
+  if (result == LEASE_CHILD_OK && strcmp (mode, "hold-reader") == 0)
+    Sleep (INFINITE);           /* Parent proves crash-release via terminate. */
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  return result;
+}
+
+static HANDLE
+spawn_lease_child (const gchar *mode, const gchar *path)
+{
+  wchar_t executable[MAX_PATH + 1] = { 0 };
+  DWORD length = GetModuleFileNameW (NULL, executable,
+      G_N_ELEMENTS (executable));
+  g_autofree gchar *exe_utf8 = NULL;
+  g_autofree gchar *command_utf8 = NULL;
+  g_autofree wchar_t *command = NULL;
+  STARTUPINFOW startup = {.cb = sizeof startup };
+  PROCESS_INFORMATION process = { 0 };
+
+  g_assert_cmpuint (length, >, 0);
+  g_assert_cmpuint (length, <, G_N_ELEMENTS (executable));
+  exe_utf8 = g_utf16_to_utf8 ((gunichar2 *) executable, -1, NULL, NULL, NULL);
+  g_assert_nonnull (exe_utf8);
+  command_utf8 = g_strdup_printf ("\"%s\" --win-lease-child %s \"%s\"",
+      exe_utf8, mode, path);
+  command = g_utf8_to_utf16 (command_utf8, -1, NULL, NULL, NULL);
+  g_assert_nonnull (command);
+  g_assert_true (CreateProcessW (NULL, command, NULL, NULL, FALSE,
+          CREATE_NO_WINDOW, NULL, NULL, &startup, &process));
+  g_assert_true (CloseHandle (process.hThread));
+  return process.hProcess;
+}
+
+static void
+assert_child_exit (HANDLE process, DWORD expected)
+{
+  DWORD exit_code = STILL_ACTIVE;
+  g_assert_cmpuint (WaitForSingleObject (process, 10000), ==, WAIT_OBJECT_0);
+  g_assert_true (GetExitCodeProcess (process, &exit_code));
+  g_assert_cmpuint (exit_code, ==, expected);
+  g_assert_true (CloseHandle (process));
+}
+
+static void
+test_native_namespace_cross_process_leases_and_crash_release (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  HANDLE child;
+  gboolean observed_busy = FALSE;
+  g_autofree gchar *main_path = NULL;
+  g_autofree gchar *lock_path = NULL;
+  g_autofree wchar_t *main_wide = NULL;
+  g_autofree wchar_t *lock_wide = NULL;
+  g_autofree wchar_t *directory_wide = NULL;
+
+  g_assert_true (CloseHandle (graph));
+  graph = INVALID_HANDLE_VALUE;
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+
+  /* These are independent processes, so success would prove that the native
+   * lock is process-local rather than kernel-enforced. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_reader (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  child = spawn_lease_child ("mutation", path);
+  assert_child_exit (child, LEASE_CHILD_BUSY);
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  child = spawn_lease_child ("reader", path);
+  assert_child_exit (child, LEASE_CHILD_BUSY);
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+
+  /* A killed reader has no finally block.  Poll until its real kernel lease
+   * is observed, terminate it, then require a fresh mutation lease. */
+  child = spawn_lease_child ("hold-reader", path);
+  for (guint i = 0; i < 200; i++) {
+    wyrelog_error_t rc = wyl_fact_artifact_win_namespace_acquire_mutation
+        (namespace_, &lease);
+    if (rc == WYRELOG_E_BUSY) {
+      observed_busy = TRUE;
+      break;
+    }
+    if (rc == WYRELOG_E_OK) {
+      wyl_fact_artifact_win_lease_free (lease);
+      lease = NULL;
+    } else
+      g_assert_cmpint (rc, ==, WYRELOG_E_BUSY);
+    Sleep (25);
+  }
+  g_assert_true (observed_busy);
+  g_assert_true (TerminateProcess (child, 0xC000013A));
+  g_assert_cmpuint (WaitForSingleObject (child, 10000), ==, WAIT_OBJECT_0);
+  g_assert_true (CloseHandle (child));
+  child = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
+  main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+  lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+  directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (DeleteFileW (main_wide));
+  g_assert_true (DeleteFileW (lock_wide));
+  g_assert_true (RemoveDirectoryW (directory_wide));
+  g_free (path);
+}
+
+static void
+test_locator_directory_flush_capability_mapping (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphWinIdentity identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph, &identity);
+  g_autofree wchar_t *wide = NULL;
+
+  wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
+      (ERROR_NOT_SUPPORTED);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_flush_directory (locator), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
+      (ERROR_INVALID_FUNCTION);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_flush_directory (locator), ==,
+      WYRELOG_E_POLICY);
+  wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test
+      (ERROR_WRITE_FAULT);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_flush_directory (locator), ==,
+      WYRELOG_E_IO);
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (graph));
+  wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (wide));
+  g_free (path);
+}
+
 static void
 test_locator_relative_entry_lifecycle (void)
 {
@@ -192,7 +408,8 @@ test_locator_relative_entry_lifecycle (void)
   /* Filesystems that cannot flush a directory fail closed: the physical
    * operation is still independently proven by its explicit return value. */
   flush_rc = wyl_fact_artifact_win_locator_flush_directory (locator);
-  g_assert_true (flush_rc == WYRELOG_E_OK || flush_rc == WYRELOG_E_IO);
+  g_assert_true (flush_rc == WYRELOG_E_OK || flush_rc == WYRELOG_E_IO
+      || flush_rc == WYRELOG_E_POLICY);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
   g_clear_pointer (&wide, g_free);
   wide = g_utf8_to_utf16 (renamed, -1, NULL, NULL, NULL);
@@ -1205,6 +1422,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
 int
 main (int argc, char **argv)
 {
+  if (argc == 4 && strcmp (argv[1], "--win-lease-child") == 0)
+    return run_lease_child (argv[2], argv[3]);
   g_test_init (&argc, &argv, NULL);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/adopt-close",
@@ -1237,6 +1456,11 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/lock-domain/concurrent-release",
       test_native_lock_domain_concurrent_acquire_release);
+  g_test_add_func ("/fact/artifact-namespace/windows/lock-domain/cross-process",
+      test_native_namespace_cross_process_leases_and_crash_release);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/locator/directory-flush-capability",
+      test_locator_directory_flush_capability_mapping);
   g_test_add_func ("/fact/artifact-namespace/windows/namespace/main-sidecar",
       test_native_namespace_main_sidecar_lifecycle);
   return g_test_run ();
