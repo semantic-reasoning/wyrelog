@@ -353,10 +353,33 @@ wyrelog_error_t
 wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *l,
     WylFactDuckdbTempRoot **out_root)
 {
+  return wyl_fact_duckdb_temp_root_create_with_orphan_evidence (l, out_root,
+      NULL);
+}
+
+wyrelog_error_t
+    wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+    (WylFactArtifactMutationLease * l, WylFactDuckdbTempRoot ** out_root,
+    WylFactDuckdbTempOrphanEvidence ** out_evidence) {
   (void) l;
   if (out_root)
     *out_root = NULL;
+  if (out_evidence)
+    *out_evidence = NULL;
   return closed ();
+}
+
+void
+wyl_fact_duckdb_temp_orphan_evidence_free (WylFactDuckdbTempOrphanEvidence *e)
+{
+  (void) e;
+}
+
+gchar *wyl_fact_duckdb_temp_orphan_evidence_dup_logical_name
+    (const WylFactDuckdbTempOrphanEvidence * e)
+{
+  (void) e;
+  return NULL;
 }
 
 void
@@ -545,6 +568,10 @@ struct WylFactDuckdbTempChild
   guint64 device, inode;
   gboolean active;
 };
+struct WylFactDuckdbTempOrphanEvidence
+{
+  gchar *logical_name;
+};
 static const gchar *names[] =
     { "facts.duckdb", "facts.duckdb.wal", "facts.duckdb.wal.checkpoint",
   "facts.duckdb.wal.recovery", "facts.duckdb.lock", NULL
@@ -569,8 +596,7 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
-      <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY)
+      <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -2462,8 +2488,18 @@ wyrelog_error_t
 wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
     WylFactDuckdbTempRoot **out_root)
 {
+  return wyl_fact_duckdb_temp_root_create_with_orphan_evidence (lease,
+      out_root, NULL);
+}
+
+wyrelog_error_t
+    wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+    (WylFactArtifactMutationLease * lease, WylFactDuckdbTempRoot ** out_root,
+    WylFactDuckdbTempOrphanEvidence ** out_evidence) {
   if (out_root)
     *out_root = NULL;
+  if (out_evidence)
+    *out_evidence = NULL;
   if (!lease || !out_root || !lease->exclusive)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&lease->mutex);
@@ -2487,9 +2523,24 @@ wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
   gint fd = openat (lease->namespace_->fd, name,
       O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   struct stat st;
-  if (fd < 0 || fstat (fd, &st) != 0) {
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY)
+      || fd < 0 || fstat (fd, &st) != 0) {
     if (fd >= 0)
       close (fd);
+    if (out_evidence) {
+      WylFactDuckdbTempOrphanEvidence *e = g_new0
+          (WylFactDuckdbTempOrphanEvidence, 1);
+      if (e)
+        e->logical_name = g_strdup_printf ("wyrelog-duckdb-temp:%s", uuid);
+      if (e && e->logical_name)
+        *out_evidence = e;
+      else {
+        g_free (e);
+        result = WYRELOG_E_NOMEM;
+        goto done;
+      }
+    }
     result = WYRELOG_E_POLICY;
     goto done;
   }
