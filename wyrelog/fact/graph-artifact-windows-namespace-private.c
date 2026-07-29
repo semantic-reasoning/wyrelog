@@ -38,6 +38,9 @@ static wyrelog_error_t namespace_acquire (WylFactArtifactWinNamespace *,
 static wyrelog_error_t lease_revalidate (WylFactArtifactWinLease *);
 static WylFactArtifactWinLease *lease_ref (WylFactArtifactWinLease *);
 static void binding_retain_lease_lifetime (WylFactArtifactWinBinding *);
+static wyrelog_error_t io_state_attach_entry_validator
+    (WylFactArtifactWinIoState *, WylFactArtifactWinLease *,
+    WylFactArtifactWinEntry *);
 
 static void
 namespace_unref (WylFactArtifactWinNamespace *namespace_)
@@ -312,6 +315,8 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
     rc = WYRELOG_E_NOMEM;
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_io_state_new (working, &binding->io_state);
+  if (rc == WYRELOG_E_OK)
+    rc = io_state_attach_entry_validator (binding->io_state, lease, entry);
   if (rc != WYRELOG_E_OK) {
     /* The issued duplicate is not published until adoption succeeds. */
     if (issued != INVALID_HANDLE_VALUE)
@@ -567,6 +572,69 @@ binding_io_new (WylFactArtifactWinNamespace *namespace_,
   return rc;
 }
 
+typedef struct
+{
+  WylFactArtifactWinLease *lease;
+  gchar *name;
+  WylFactGraphWinIdentity identity;
+} WylFactArtifactWinEntryValidator;
+
+static void
+entry_validator_free (WylFactArtifactWinEntryValidator *validator)
+{
+  if (validator == NULL)
+    return;
+  wyl_fact_artifact_win_lease_free (validator->lease);
+  g_free (validator->name);
+  g_free (validator);
+}
+
+static wyrelog_error_t
+entry_validator_check (gpointer user_data)
+{
+  WylFactArtifactWinEntryValidator *validator = user_data;
+  WylFactArtifactWinEntry *observed = NULL;
+  wyrelog_error_t rc;
+
+  if (validator == NULL || validator->lease == NULL || validator->name == NULL)
+    return WYRELOG_E_POLICY;
+  if ((rc = lease_revalidate (validator->lease)) != WYRELOG_E_OK)
+    return rc;
+  rc = wyl_fact_artifact_win_locator_open (validator->lease->
+      namespace_->locator, validator->name, GENERIC_READ, FALSE, &observed);
+  if (rc == WYRELOG_E_OK
+      && !identity_equal (wyl_fact_artifact_win_entry_identity (observed),
+          &validator->identity))
+    rc = WYRELOG_E_POLICY;
+  wyl_fact_artifact_win_entry_free (observed);
+  return rc;
+}
+
+static wyrelog_error_t
+io_state_attach_entry_validator (WylFactArtifactWinIoState *state,
+    WylFactArtifactWinLease *lease, WylFactArtifactWinEntry *entry)
+{
+  WylFactArtifactWinEntryValidator *validator;
+  const gchar *name;
+
+  if (state == NULL || lease == NULL || entry == NULL
+      || (name = wyl_fact_artifact_win_entry_name (entry)) == NULL)
+    return WYRELOG_E_INVALID;
+  validator = g_try_new0 (WylFactArtifactWinEntryValidator, 1);
+  if (validator == NULL)
+    return WYRELOG_E_NOMEM;
+  validator->name = g_strdup (name);
+  if (validator->name == NULL) {
+    g_free (validator);
+    return WYRELOG_E_NOMEM;
+  }
+  validator->lease = lease_ref (lease);
+  validator->identity = *wyl_fact_artifact_win_entry_identity (entry);
+  wyl_fact_artifact_win_io_state_set_validator (state, entry_validator_check,
+      validator, (GDestroyNotify) entry_validator_free);
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_fact_artifact_win_lease_open_main (WylFactArtifactWinLease *lease,
     WylFactArtifactWinMainBinding **out_binding)
@@ -584,7 +652,11 @@ wyl_fact_artifact_win_lease_open_main (WylFactArtifactWinLease *lease,
     return WYRELOG_E_NOMEM;
   rc = binding_io_new (lease->namespace_, lease->namespace_->main_entry,
       &binding->working, &binding->io_state);
+  if (rc == WYRELOG_E_OK)
+    rc = io_state_attach_entry_validator (binding->io_state, lease,
+        lease->namespace_->main_entry);
   if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_io_state_free (binding->io_state);
     g_free (binding);
     return rc;
   }
@@ -688,6 +760,8 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
   g_mutex_init (&binding->mutex);
   rc = binding_io_new (lease->namespace_, entry, &binding->working,
       &binding->io_state);
+  if (rc == WYRELOG_E_OK)
+    rc = io_state_attach_entry_validator (binding->io_state, lease, entry);
   if (rc == WYRELOG_E_OK)
     wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
         lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
@@ -910,6 +984,9 @@ wyl_fact_artifact_win_lease_create_temp_binding (WylFactArtifactWinLease *lease,
   if (rc == WYRELOG_E_OK)
     rc = binding_io_new (lease->namespace_, binding->entry,
         &binding->working, &binding->io_state);
+  if (rc == WYRELOG_E_OK)
+    rc = io_state_attach_entry_validator (binding->io_state, lease,
+        binding->entry);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_artifact_win_io_state_free (binding->io_state);
     wyl_fact_artifact_win_entry_free (binding->entry);
@@ -949,6 +1026,8 @@ wyrelog_error_t
   WylFactArtifactWinMutationEffect effect =
       WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
   WylFactArtifactWinEntry *replaced_entry;
+  WylFactArtifactWinIoState *old_source_state;
+  WylFactArtifactWinIoState *old_destination_state;
   wyrelog_error_t rc;
   if (out_result != NULL)
     *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
@@ -1027,15 +1106,35 @@ wyrelog_error_t
     }
     goto out;
   }
-  /* Rename is the linearization point.  Transfer the source identity before
-   * a directory flush or postcondition can fail, then retire stale source
-   * authority.  The removed destination HANDLE is only closed if exact. */
+  /* Rename is the linearization point.  Retire both pre-rename guardian
+   * states before publishing the destination binding: source's validator is
+   * still tied to tmp-<token>, while destination's guardian still addresses
+   * the unlinked old sidecar.  A fresh destination state is minted from the
+   * transferred entry, so no post-replace session can reach stale content. */
   replaced_entry = destination->entry;
+  old_source_state = source->io_state;
+  old_destination_state = destination->io_state;
+  source->io_state = NULL;
+  source->working = NULL;
+  destination->io_state = NULL;
+  destination->working = NULL;
   destination->entry = source->entry;
   source->entry = NULL;
   source->active = FALSE;
   destination->creator = FALSE;
+  wyl_fact_artifact_win_io_state_free (old_source_state);
+  wyl_fact_artifact_win_io_state_free (old_destination_state);
   wyl_fact_artifact_win_entry_free (replaced_entry);
+  rc = binding_io_new (destination->lease->namespace_, destination->entry,
+      &destination->working, &destination->io_state);
+  if (rc == WYRELOG_E_OK)
+    rc = io_state_attach_entry_validator (destination->io_state,
+        destination->lease, destination->entry);
+  if (rc != WYRELOG_E_OK) {
+    sidecar_revoke (destination);
+    *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED;
+    goto out;
+  }
   {
     wyrelog_error_t post = win_namespace_fault_take
         (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN)
@@ -1172,6 +1271,8 @@ wyl_fact_artifact_win_lease_create_temp_token (WylFactArtifactWinLease *lease,
   if (rc == WYRELOG_E_OK)
     rc = binding_io_new (lease->namespace_, token->entry, &token->working,
         &token->io_state);
+  if (rc == WYRELOG_E_OK)
+    rc = io_state_attach_entry_validator (token->io_state, lease, token->entry);
   if (rc != WYRELOG_E_OK) {
     wyl_fact_artifact_win_io_state_free (token->io_state);
     wyl_fact_artifact_win_entry_free (token->entry);
@@ -1620,6 +1721,12 @@ temp_child_check (WylFactArtifactWinTempChild *child)
   return rc;
 }
 
+static wyrelog_error_t
+temp_child_session_validate (gpointer user_data)
+{
+  return temp_child_check (user_data);
+}
+
 static void
 temp_binding_revoke (WylFactArtifactWinTempChildBinding *binding)
 {
@@ -1790,6 +1897,10 @@ wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *child,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_io_state_new (binding->working,
         &binding->io_state);
+  if (rc == WYRELOG_E_OK)
+    wyl_fact_artifact_win_io_state_set_validator (binding->io_state,
+        temp_child_session_validate, temp_child_ref (child),
+        (GDestroyNotify) temp_child_unref);
   if (rc != WYRELOG_E_OK) {
     if (binding->io_state != NULL)
       wyl_fact_artifact_win_io_state_free (binding->io_state);
