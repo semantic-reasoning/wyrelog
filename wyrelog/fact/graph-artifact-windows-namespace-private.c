@@ -35,6 +35,7 @@ struct WylFactArtifactWinNamespace
 
 static wyrelog_error_t namespace_acquire (WylFactArtifactWinNamespace *,
     gboolean, WylFactArtifactWinLease **);
+static wyrelog_error_t lease_revalidate (WylFactArtifactWinLease *);
 static WylFactArtifactWinLease *lease_ref (WylFactArtifactWinLease *);
 static void binding_retain_lease_lifetime (WylFactArtifactWinBinding *);
 static wyrelog_error_t io_state_attach_entry_validator
