@@ -426,6 +426,35 @@ revalidate_exact_handle (WylFactArtifactWinWorkingHandle *binding)
   return rc;
 }
 
+/* Retiring an artifact can leave this guardian addressing a live object that
+ * no longer has any link, so the normal identity audit rejects it and the
+ * owned duplicate would never be closed.  Live revalidation must keep
+ * rejecting that state; this destructor-only check drops the link-count rule
+ * alone and keeps every rule that proves the same non-directory object, so a
+ * raw-close/reused foreign HANDLE is still refused. */
+static gboolean
+terminal_guardian_matches_identity (const WylFactArtifactWinWorkingHandle
+    *binding)
+{
+  FILE_ID_INFO info = { 0 };
+  BY_HANDLE_FILE_INFORMATION basic = { 0 };
+  WylFactGraphWinIdentity observed = { 0 };
+  DWORD flags = 0;
+
+  if (binding == NULL || binding->guardian == INVALID_HANDLE_VALUE
+      || !GetHandleInformation (binding->guardian, &flags)
+      || (flags & HANDLE_FLAG_INHERIT) != 0
+      || !GetFileInformationByHandleEx (binding->guardian, FileIdInfo, &info,
+          sizeof info)
+      || !GetFileInformationByHandle (binding->guardian, &basic)
+      || (basic.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY
+              | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
+    return FALSE;
+  observed.volume_serial = info.VolumeSerialNumber;
+  memcpy (observed.file_id, info.FileId.Identifier, sizeof observed.file_id);
+  return identity_equal (&binding->identity, &observed);
+}
+
 static wyrelog_error_t
 revalidate (WylFactArtifactWinWorkingHandle *binding, gboolean revoke)
 {
@@ -514,8 +543,7 @@ wyl_fact_artifact_win_working_handle_free (WylFactArtifactWinWorkingHandle
    * this destructor to close the new foreign object.  Do not predicate this
    * check on |active|: a caller-handle mismatch revokes the capability but
    * can still leave its owned HANDLE safely closeable. */
-  if (binding->guardian != INVALID_HANDLE_VALUE
-      && revalidate_exact_handle (binding) == WYRELOG_E_OK)
+  if (terminal_guardian_matches_identity (binding))
     CloseHandle (binding->guardian);
   binding->active = FALSE;
   binding->guardian = INVALID_HANDLE_VALUE;
