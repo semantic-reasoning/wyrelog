@@ -1886,6 +1886,8 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
   const gchar *name = name_for (binding->sidecar);
   struct stat pinned, named;
   if (fstat (binding->pin_fd, &pinned) != 0 || !S_ISREG (pinned.st_mode)
+      || (pinned.st_mode & 07777) != 0600
+      || (guint64) pinned.st_uid != lease->namespace_->owner
       || (guint64) pinned.st_dev != binding->device
       || (guint64) pinned.st_ino != binding->inode) {
     result = WYRELOG_E_POLICY;
@@ -1904,6 +1906,8 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
     goto terminal;
   }
   if (!S_ISREG (named.st_mode) || named.st_nlink != 1 || pinned.st_nlink != 1
+      || (named.st_mode & 07777) != 0600
+      || (guint64) named.st_uid != lease->namespace_->owner
       || (guint64) named.st_dev != binding->device
       || (guint64) named.st_ino != binding->inode) {
     result = WYRELOG_E_POLICY;
