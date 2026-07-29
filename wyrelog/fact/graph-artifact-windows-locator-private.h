@@ -57,6 +57,13 @@ wyrelog_error_t
 wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator *
     locator, WylFactArtifactWinEntry * entry, const gchar * destination,
     WylFactArtifactWinMutationEffect * out_effect);
+/* Replaces one already-validated exact destination with this exact entry.
+ * The caller owns lifecycle transfer; transport reports the kernel's
+ * linearization separately from post-mutation durability/reconciliation. */
+wyrelog_error_t
+wyl_fact_artifact_win_entry_rename_replace_exact (WylFactArtifactWinLocator *
+    locator, WylFactArtifactWinEntry * entry, const gchar * destination,
+    WylFactArtifactWinMutationEffect * out_effect);
 wyrelog_error_t
 wyl_fact_artifact_win_entry_delete_exact (WylFactArtifactWinLocator * locator,
     WylFactArtifactWinEntry * entry,

@@ -712,6 +712,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
   WylFactArtifactWinLease *lease = NULL;
   WylFactArtifactWinMainBinding *main_binding = NULL;
   WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinTempBinding *replacement_source = NULL;
   WylFactArtifactWinTempRoot *temp_root = NULL;
   WylFactArtifactWinTempChild *temp_child = NULL;
   WylFactArtifactWinTempChildBinding *temp_binding = NULL;
@@ -721,6 +722,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
       WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
   WylFactArtifactSidecarRetireResult retire =
       WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  WylFactArtifactWinSidecarReplaceResult replace_result =
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
   WylFactDuckdbTempRetireResult temp_retire =
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
   g_autofree wchar_t *main_wide = NULL;
@@ -779,6 +782,87 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
   wyl_fact_artifact_win_sidecar_binding_free (sidecar);
   sidecar = NULL;
+
+  /* #609 replacement consumes only an owner staging binding and an existing
+   * closed destination.  A live destination working HANDLE is a hard barrier;
+   * after exact replacement the source is terminal and the destination owns
+   * the source identity for its later lifecycle operation. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
+          "replace-sidecar", &replacement_source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_close
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
+      (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (replace_result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
+      (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_OK);
+  g_assert_cmpint (replace_result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED);
+  sidecar_handle = (HANDLE) 1;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_POLICY);
+  g_assert_true (sidecar_handle == INVALID_HANDLE_VALUE);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
+          &retire), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_temp_binding_free (replacement_source);
+  replacement_source = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+
+  /* Raw close/reuse of an owner source is terminal before mutation.  The
+   * provider must neither replace the destination nor close the foreign
+   * HANDLE that inherited the stale numeric value. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_RECOVERY, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
+          "raw-replace", &replacement_source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  HANDLE stale_replace_handle = sidecar_handle;
+  g_assert_true (CloseHandle (sidecar_handle));
+  g_autofree gchar *replacement_foreign_path = NULL;
+  HANDLE replacement_foreign = open_scratch_file (&replacement_foreign_path);
+  g_assert_true (replacement_foreign == stale_replace_handle);
+  replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
+      (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (replace_result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
+  BY_HANDLE_FILE_INFORMATION replacement_foreign_info = { 0 };
+  g_assert_true (GetFileInformationByHandle (replacement_foreign,
+          &replacement_foreign_info));
+  wyl_fact_artifact_win_temp_binding_free (replacement_source);
+  replacement_source = NULL;
+  g_assert_true (GetFileInformationByHandle (replacement_foreign,
+          &replacement_foreign_info));
+  g_assert_true (CloseHandle (replacement_foreign));
+  remove_scratch_file (replacement_foreign_path);
+  replacement_foreign_path = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
+          &retire), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_autofree gchar *raw_replace_path = g_build_filename (path,
+      "tmp-raw-replace", NULL);
+  g_autofree wchar_t *raw_replace_wide = g_utf8_to_utf16 (raw_replace_path,
+      -1, NULL, NULL, NULL);
+  g_assert_true (DeleteFileW (raw_replace_wide));
 
   /* Native spill roots are lease-bound virtual authorities: child I/O must
    * be closed through its binding before either child or root can retire. */

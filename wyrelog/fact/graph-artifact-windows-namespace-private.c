@@ -827,6 +827,248 @@ void wyl_fact_artifact_win_sidecar_binding_free
   g_free (binding);
 }
 
+/* #609 staging is deliberately separate from DuckDB's spill children.  A
+ * spill child is governed by its bounded-root grammar; a replacement source
+ * is one fixed namespace entry and cannot be smuggled through that authority.
+ */
+struct WylFactArtifactWinTempBinding
+{
+  WylFactArtifactWinLease *lease;
+  WylFactArtifactWinEntry *entry;
+  WylFactArtifactWinWorkingHandle *working;
+  gboolean active;
+  gboolean io_open;
+  GMutex mutex;
+};
+
+static gboolean
+replacement_token_valid (const gchar *token)
+{
+  const gchar *p;
+  if (token == NULL || token[0] == '\0' || strpbrk (token, "/\\\\") != NULL)
+    return FALSE;
+  for (p = token; *p != '\0'; p++)
+    if (!g_ascii_isalnum (*p) && *p != '-' && *p != '_')
+      return FALSE;
+  return strlen (token) <= 128;
+}
+
+static void
+replacement_temp_revoke (WylFactArtifactWinTempBinding *binding)
+{
+  binding->active = FALSE;
+  binding->io_open = FALSE;
+}
+
+static wyrelog_error_t
+replacement_temp_check_locked (WylFactArtifactWinTempBinding *binding,
+    gboolean require_working, HANDLE supplied)
+{
+  wyrelog_error_t rc;
+  if (binding == NULL || !binding->active || !binding->lease->exclusive)
+    return WYRELOG_E_POLICY;
+  rc = lease_revalidate (binding->lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_revalidate (binding->lease->
+        namespace_->locator, binding->entry);
+  if (rc == WYRELOG_E_OK && require_working) {
+    HANDLE borrowed = INVALID_HANDLE_VALUE;
+    rc = !binding->io_open ? WYRELOG_E_POLICY
+        : wyl_fact_artifact_win_working_handle_revalidate (binding->working);
+    if (rc == WYRELOG_E_OK)
+      rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
+          &borrowed);
+    if (rc == WYRELOG_E_OK && borrowed != supplied)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc != WYRELOG_E_OK)
+    replacement_temp_revoke (binding);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_lease_create_temp_binding (WylFactArtifactWinLease *lease,
+    const gchar *token, WylFactArtifactWinTempBinding **out_binding)
+{
+  WylFactArtifactWinTempBinding *binding = NULL;
+  g_autofree gchar *name = NULL;
+  wyrelog_error_t rc;
+  if (out_binding != NULL)
+    *out_binding = NULL;
+  if (lease == NULL || out_binding == NULL || !lease->exclusive)
+    return WYRELOG_E_POLICY;
+  if (!replacement_token_valid (token))
+    return WYRELOG_E_INVALID;
+  if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
+    return rc;
+  name = g_strdup_printf ("tmp-%s", token);
+  if (name == NULL)
+    return WYRELOG_E_NOMEM;
+  binding = g_try_new0 (WylFactArtifactWinTempBinding, 1);
+  if (binding == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator, name,
+      GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &binding->entry);
+  if (rc == WYRELOG_E_OK)
+    rc = binding_working_new (lease->namespace_, binding->entry,
+        &binding->working);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_working_handle_free (binding->working);
+    wyl_fact_artifact_win_entry_free (binding->entry);
+    g_free (binding);
+    return rc;
+  }
+  binding->lease = lease_ref (lease);
+  binding->active = TRUE;
+  binding->io_open = TRUE;
+  g_mutex_init (&binding->mutex);
+  *out_binding = binding;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_binding_borrow (WylFactArtifactWinTempBinding
+    *binding, HANDLE *out_handle)
+{
+  wyrelog_error_t rc;
+  if (out_handle != NULL)
+    *out_handle = INVALID_HANDLE_VALUE;
+  if (binding == NULL || out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&binding->mutex);
+  rc = replacement_temp_check_locked (binding, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK && !binding->io_open)
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
+        out_handle);
+  if (rc == WYRELOG_E_OK)
+    rc = replacement_temp_check_locked (binding, TRUE, *out_handle);
+  if (rc != WYRELOG_E_OK)
+    *out_handle = INVALID_HANDLE_VALUE;
+  g_mutex_unlock (&binding->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_binding_close (WylFactArtifactWinTempBinding
+    *binding, HANDLE *inout_handle)
+{
+  wyrelog_error_t rc;
+  if (binding == NULL || inout_handle == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&binding->mutex);
+  rc = replacement_temp_check_locked (binding, TRUE, *inout_handle);
+  if (rc == WYRELOG_E_OK) {
+    rc = wyl_fact_artifact_win_working_handle_close (binding->working,
+        inout_handle);
+    if (rc == WYRELOG_E_OK)
+      binding->io_open = FALSE;
+    else
+      replacement_temp_revoke (binding);
+  }
+  g_mutex_unlock (&binding->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_binding_replace_sidecar
+    (WylFactArtifactWinTempBinding * source,
+    WylFactArtifactWinSidecarBinding * destination,
+    WylFactArtifactWinSidecarReplaceResult * out_result) {
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+  WylFactArtifactWinEntry *replaced_entry;
+  wyrelog_error_t rc;
+  if (out_result != NULL)
+    *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
+  if (source == NULL || destination == NULL || out_result == NULL
+      || source->lease != destination->lease)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&source->mutex);
+  g_mutex_lock (&destination->mutex);
+  if (!source->active || source->io_open || !destination->active
+      || destination->io_open || !destination->lease->exclusive) {
+    if (source->io_open && wyl_fact_artifact_win_working_handle_revalidate
+        (source->working) != WYRELOG_E_OK)
+      replacement_temp_revoke (source);
+    if (destination->io_open && wyl_fact_artifact_win_working_handle_revalidate
+        (destination->working) != WYRELOG_E_OK)
+      sidecar_revoke (destination);
+    rc = WYRELOG_E_POLICY;
+    goto out;
+  }
+  rc = replacement_temp_check_locked (source, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK)
+    rc = sidecar_revalidate_locked (destination, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_flush (source->lease->namespace_->locator,
+        source->entry);
+  /* Revalidate both associations after source durability and immediately
+   * before rename.  A stale destination is never overwritten. */
+  if (rc == WYRELOG_E_OK)
+    rc = replacement_temp_check_locked (source, FALSE, INVALID_HANDLE_VALUE);
+  if (rc == WYRELOG_E_OK)
+    rc = sidecar_revalidate_locked (destination, FALSE, INVALID_HANDLE_VALUE);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  rc = wyl_fact_artifact_win_entry_rename_replace_exact
+      (source->lease->namespace_->locator, source->entry,
+      name_for (destination->name), &effect);
+  if (effect != WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
+    if (effect == WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN) {
+      replacement_temp_revoke (source);
+      sidecar_revoke (destination);
+      *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED;
+    }
+    goto out;
+  }
+  /* Rename is the linearization point.  Transfer the source identity before
+   * a directory flush or postcondition can fail, then retire stale source
+   * authority.  The removed destination HANDLE is only closed if exact. */
+  replaced_entry = destination->entry;
+  destination->entry = source->entry;
+  source->entry = NULL;
+  source->active = FALSE;
+  destination->creator = FALSE;
+  wyl_fact_artifact_win_entry_free (replaced_entry);
+  {
+    wyrelog_error_t post = wyl_fact_artifact_win_locator_flush_directory
+        (destination->lease->namespace_->locator);
+    if (post == WYRELOG_E_OK)
+      post = sidecar_revalidate_locked (destination, FALSE,
+          INVALID_HANDLE_VALUE);
+    if (post == WYRELOG_E_OK && rc == WYRELOG_E_OK)
+      *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
+    else {
+      replacement_temp_revoke (source);
+      sidecar_revoke (destination);
+      *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED;
+      if (rc == WYRELOG_E_OK)
+        rc = post;
+    }
+  }
+out:
+  g_mutex_unlock (&destination->mutex);
+  g_mutex_unlock (&source->mutex);
+  return rc;
+}
+
+void
+wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *binding)
+{
+  if (binding == NULL)
+    return;
+  g_mutex_lock (&binding->mutex);
+  replacement_temp_revoke (binding);
+  wyl_fact_artifact_win_working_handle_free (binding->working);
+  wyl_fact_artifact_win_entry_free (binding->entry);
+  g_mutex_unlock (&binding->mutex);
+  g_mutex_clear (&binding->mutex);
+  wyl_fact_artifact_win_lease_free (binding->lease);
+  g_free (binding);
+}
+
 struct WylFactArtifactWinTempRoot
 {
   WylFactArtifactWinLease *lease;
