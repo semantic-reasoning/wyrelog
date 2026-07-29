@@ -347,6 +347,9 @@ wyrelog_error_t wyl_fact_duckdb_temp_child_binding_revalidate_fd
  * failure revokes but never closes a potentially reused foreign descriptor. */
 wyrelog_error_t wyl_fact_duckdb_temp_child_binding_close
     (WylFactDuckdbTempChildBinding *, gint * working_fd);
+/* Free never closes a caller-owned issued descriptor.  Freeing while it is
+ * live leaves an irreversible child-retirement barrier, because its eventual
+ * external close cannot be proven through this provider. */
 void wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *);
 /* On success, returns owned WylFactDuckdbTempChild entries only.  Any
  * unbound/foreign entry makes enumeration fail with no partial array. */

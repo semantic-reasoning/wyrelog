@@ -750,6 +750,7 @@ struct WylFactDuckdbTempChild
   guint64 device, inode;
   gboolean active;
   gboolean io_revoked;
+  gboolean unowned_io_terminal;
   GPtrArray *bindings;          /* non-owning live I/O bindings */
 };
 struct WylFactDuckdbTempChildBinding
@@ -1563,11 +1564,10 @@ wyl_fact_duckdb_temp_child_binding_free (WylFactDuckdbTempChildBinding *b)
   WylFactDuckdbTempChild *child = b->child;
   if (child && child->root && child->root->lease) {
     g_mutex_lock (&child->root->lease->mutex);
-    /* Free never closes a caller-owned issued descriptor.  A still-live one
-     * must nevertheless block retirement until a fresh verified lifecycle
-     * operation re-establishes the child. */
+    /* Free cannot prove that a still-live caller descriptor was later closed;
+     * unlike an ordinary revoke this barrier is therefore terminal. */
     if (b->io_open)
-      child->io_revoked = TRUE;
+      child->unowned_io_terminal = TRUE;
     if (child->bindings)
       g_ptr_array_remove_fast (child->bindings, b);
     g_mutex_unlock (&child->root->lease->mutex);
@@ -3310,7 +3310,7 @@ duckdb_temp_child_binding_revalidate_fd_unlocked (WylFactDuckdbTempChildBinding
 static wyrelog_error_t
 duckdb_temp_child_io_barrier_unlocked (WylFactDuckdbTempChild *child)
 {
-  if (child && child->io_revoked)
+  if (child && (child->io_revoked || child->unowned_io_terminal))
     return WYRELOG_E_POLICY;
   for (guint i = 0; child && child->bindings && i < child->bindings->len; i++) {
     WylFactDuckdbTempChildBinding *b = g_ptr_array_index (child->bindings, i);
