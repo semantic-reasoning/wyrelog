@@ -99,6 +99,63 @@ test_working_handle_identity_mismatch_initializes_output (void)
   remove_scratch_file (path);
 }
 
+static void
+test_working_handle_free_never_closes_reused_handle (void)
+{
+  gchar *path = NULL;
+  gchar *foreign_path = NULL;
+  HANDLE issued = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (issued);
+  WylFactArtifactWinWorkingHandle *binding = NULL;
+  HANDLE foreign;
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
+          &identity, &binding), ==, WYRELOG_E_OK);
+  /* Deliberately violate ownership, then force the native handle table to
+   * assign the stale numeric value to a distinct file.  Windows reuses a
+   * just-closed value immediately; treating failure here as a skip would
+   * make the safety regression non-evidence. */
+  g_assert_true (CloseHandle (issued));
+  foreign = open_scratch_file (&foreign_path);
+  g_assert_true (foreign == issued);
+  wyl_fact_artifact_win_working_handle_free (binding);
+  g_assert_true (GetFileInformationByHandle (foreign, &info));
+  g_assert_true (CloseHandle (foreign));
+  remove_scratch_file (foreign_path);
+  remove_scratch_file (path);
+}
+
+static void
+test_working_handle_close_mismatch_revokes_without_foreign_close (void)
+{
+  gchar *path = NULL;
+  gchar *foreign_path = NULL;
+  HANDLE issued = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (issued);
+  WylFactArtifactWinWorkingHandle *binding = NULL;
+  HANDLE foreign = open_scratch_file (&foreign_path);
+  HANDLE supplied = foreign;
+  HANDLE borrowed = (HANDLE) 1;
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
+          &identity, &binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_close (binding,
+          &supplied), ==, WYRELOG_E_POLICY);
+  g_assert_true (supplied == foreign);
+  g_assert_true (GetFileInformationByHandle (foreign, &info));
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
+          &borrowed), ==, WYRELOG_E_POLICY);
+  g_assert_true (borrowed == INVALID_HANDLE_VALUE);
+  /* _free may close only the still-exact owned value, never |foreign|. */
+  wyl_fact_artifact_win_working_handle_free (binding);
+  g_assert_true (GetFileInformationByHandle (foreign, &info));
+  g_assert_true (CloseHandle (foreign));
+  remove_scratch_file (foreign_path);
+  remove_scratch_file (path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -109,6 +166,12 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/identity-output",
       test_working_handle_identity_mismatch_initializes_output);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/working-handle/free-reused-handle",
+      test_working_handle_free_never_closes_reused_handle);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/working-handle/close-mismatch",
+      test_working_handle_close_mismatch_revokes_without_foreign_close);
   return g_test_run ();
 }
 #else
