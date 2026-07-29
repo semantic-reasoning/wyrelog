@@ -205,6 +205,117 @@ test_locator_relative_entry_lifecycle (void)
 }
 
 static void
+test_locator_nested_directory_transport (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph,
+      &graph_identity);
+  WylFactArtifactWinDirectory *root = NULL;
+  WylFactArtifactWinDirectory *stale_root = NULL;
+  WylFactArtifactWinEntry *child = NULL;
+  HANDLE issued = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  DWORD flags = HANDLE_FLAG_INHERIT;
+  g_autofree gchar *root_path = g_build_filename (path, "duckdb-root", NULL);
+  g_autofree gchar *child_path = g_build_filename (root_path,
+      "duckdb_temp_storage_DEFAULT-1.tmp", NULL);
+  g_autofree gchar *old_child_path = g_build_filename (root_path,
+      "child-old", NULL);
+  g_autofree gchar *stale_path = g_build_filename (path, "stale-root", NULL);
+  g_autofree gchar *stale_old_path = g_build_filename (path,
+      "stale-root-old", NULL);
+  g_autofree wchar_t *root_wide = g_utf8_to_utf16 (root_path, -1, NULL, NULL,
+      NULL);
+  g_autofree wchar_t *child_wide = g_utf8_to_utf16 (child_path, -1, NULL,
+      NULL, NULL);
+  g_autofree wchar_t *old_child_wide = g_utf8_to_utf16 (old_child_path, -1,
+      NULL, NULL, NULL);
+  g_autofree wchar_t *stale_wide = g_utf8_to_utf16 (stale_path, -1, NULL,
+      NULL, NULL);
+  g_autofree wchar_t *stale_old_wide = g_utf8_to_utf16 (stale_old_path, -1,
+      NULL, NULL, NULL);
+
+  g_assert_cmpint (wyl_fact_artifact_win_locator_create_directory (locator,
+          "duckdb-root", &root), ==, WYRELOG_E_OK);
+  HANDLE root_handle = CreateFileW (root_wide, READ_CONTROL,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  g_assert_true (root_handle != INVALID_HANDLE_VALUE);
+  g_assert_cmpint (wyl_fact_graph_win_validate_protected_owner_acl (root_handle,
+          0), ==, WYRELOG_E_OK);
+  g_assert_true (CloseHandle (root_handle));
+  g_assert_cmpint (wyl_fact_artifact_win_directory_open_file (locator, root,
+          "duckdb_temp_storage_DEFAULT-1.tmp",
+          GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_directory_entry_issue_working_handle
+      (locator, root, child, &issued), ==, WYRELOG_E_OK);
+  g_assert_true (GetHandleInformation (issued, &flags));
+  g_assert_cmpuint (flags & HANDLE_FLAG_INHERIT, ==, 0);
+  g_assert_cmpint (wyl_fact_graph_win_validate_protected_owner_acl (issued, 0),
+      ==, WYRELOG_E_OK);
+  g_assert_true (CloseHandle (issued));
+  issued = INVALID_HANDLE_VALUE;
+
+  /* Replacing a child's canonical name cannot turn the retained entry into a
+   * new working capability.  The output is initialized on this failure. */
+  g_assert_true (MoveFileExW (child_wide, old_child_wide,
+          MOVEFILE_WRITE_THROUGH));
+  HANDLE replacement = CreateFileW (child_wide, GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL, NULL);
+  g_assert_true (replacement != INVALID_HANDLE_VALUE);
+  g_assert_true (CloseHandle (replacement));
+  issued = (HANDLE) 1;
+  g_assert_cmpint (wyl_fact_artifact_win_directory_entry_issue_working_handle
+      (locator, root, child, &issued), ==, WYRELOG_E_POLICY);
+  g_assert_true (issued == INVALID_HANDLE_VALUE);
+  wyl_fact_artifact_win_entry_free (child);
+  child = NULL;
+  g_assert_true (DeleteFileW (old_child_wide));
+  g_assert_true (DeleteFileW (child_wide));
+  /* Reopen a fresh exact child, then prove child-before-root deletion. */
+  g_assert_cmpint (wyl_fact_artifact_win_directory_open_file (locator, root,
+          "duckdb_temp_storage_DEFAULT-1.tmp",
+          GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_directory_entry_delete_exact (locator,
+          root, child, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  wyl_fact_artifact_win_entry_free (child);
+  child = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_directory_delete_empty (locator, root,
+          &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  wyl_fact_artifact_win_directory_free (root);
+  root = NULL;
+
+  /* The root itself is also name-bound.  A raw name substitution revokes the
+   * opaque directory capability, and free must leave the replacement alone. */
+  g_assert_cmpint (wyl_fact_artifact_win_locator_create_directory (locator,
+          "stale-root", &stale_root), ==, WYRELOG_E_OK);
+  g_assert_true (MoveFileExW (stale_wide, stale_old_wide,
+          MOVEFILE_WRITE_THROUGH));
+  g_assert_true (CreateDirectoryW (stale_wide, NULL));
+  g_assert_cmpint (wyl_fact_artifact_win_directory_revalidate (locator,
+          stale_root), ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_win_directory_free (stale_root);
+  stale_root = NULL;
+  g_assert_true (RemoveDirectoryW (stale_wide));
+  g_assert_true (RemoveDirectoryW (stale_old_wide));
+
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (graph));
+  g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL,
+      NULL);
+  g_assert_true (RemoveDirectoryW (directory_wide));
+  g_free (path);
+}
+
+static void
 test_native_namespace_captured_owner_acl_binding (void)
 {
   gchar *path = NULL;
@@ -705,6 +816,8 @@ main (int argc, char **argv)
       test_working_handle_adopt_noninherit_close_once);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
       test_locator_relative_entry_lifecycle);
+  g_test_add_func ("/fact/artifact-namespace/windows/locator/nested-transport",
+      test_locator_nested_directory_transport);
   g_test_add_func
       ("/fact/artifact-namespace/windows/namespace/captured-owner-binding",
       test_native_namespace_captured_owner_acl_binding);
