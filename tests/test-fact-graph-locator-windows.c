@@ -1322,6 +1322,7 @@ test_exact_stage_creation_mints_operation_evidence (void)
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   WylFactGraphWinOperationEvidence evidence = { 0 };
   WylFactGraphWinOperationEvidence wrong_evidence = { 0 };
+  WylFactGraphWinOperationEvidence wrong_operation = { 0 };
   WylFactGraphStage reopened = WYL_FACT_GRAPH_STAGE_INIT;
   WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
 
@@ -1348,6 +1349,10 @@ test_exact_stage_creation_mints_operation_evidence (void)
   wrong_evidence.artifact_identity.file_id[0] ^= 1;
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
       (&graph, operation, &wrong_evidence, &reopened), ==, WYRELOG_E_POLICY);
+  wrong_operation = evidence;
+  wrong_operation.operation_uuid[0] ^= 1;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
+      (&graph, operation, &wrong_operation, &reopened), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
       (&graph, operation, &evidence, &reopened), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
@@ -1356,6 +1361,9 @@ test_exact_stage_creation_mints_operation_evidence (void)
       (&graph, operation, &final), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
       (&graph, operation, &wrong_evidence, &final), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
+      (&graph, "01890f47-3c4b-7cc2-b8c4-dc0c0c070547", &evidence, &final),
+      ==, WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
       (&graph, operation, &evidence, &final), ==, WYRELOG_E_OK);
   wyl_fact_graph_regular_file_clear (&final);
@@ -1423,6 +1431,71 @@ test_exact_evidence_rejects_name_substitution (void)
   remove_tree_no_follow (root);
 }
 
+static void
+test_exact_evidence_revalidates_after_last_checkpoints (void)
+{
+  static const gchar *operations[] = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070590",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070591",
+  };
+  static const gchar *points[] = {
+    "stage-parent-synced",
+    "provisioned-final-validated",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (points); i++) {
+    g_autofree gchar *root = make_root ();
+    WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+    WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+    WylFactGraphLocator locator = { 0 };
+    WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+
+    init_locator (&locator, "tenant", "graph");
+    open_graph (root, &locator, &resolver, &graph);
+    g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+            operations[i], &stage), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage, &evidence), ==, WYRELOG_E_OK);
+    if (i == 1)
+      g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
+              &stage, &evidence), ==, WYRELOG_E_OK);
+    g_autofree gchar *final_path =
+        wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+    g_autofree gchar *aside = g_strdup_printf ("%s-raced", final_path);
+    ReplacementRace race = {
+      .expected_point = points[i],
+      .target = final_path,
+      .aside = aside,
+    };
+    graph.checkpoint = replace_file_checkpoint;
+    graph.checkpoint_data = &race;
+    if (i == 0) {
+      g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
+              &stage, &evidence), ==, WYRELOG_E_POLICY);
+      g_assert_cmpint (stage.fd, >=, 0);
+    } else {
+      g_assert_cmpint
+          (wyl_fact_graph_directory_open_provisioned_final_with_evidence
+          (&graph, operations[i], &evidence, &final), ==, WYRELOG_E_POLICY);
+      g_assert_null (final.handle);
+    }
+    g_assert_true (race.fired);
+    graph.checkpoint = NULL;
+    graph.checkpoint_data = NULL;
+    g_autofree gchar *contents = NULL;
+    g_assert_true (g_file_get_contents (final_path, &contents, NULL, NULL));
+    g_assert_cmpstr (contents, ==, "replacement");
+    wyl_fact_graph_regular_file_clear (&final);
+    wyl_fact_graph_stage_clear (&stage);
+    wyl_fact_graph_directory_clear (&graph);
+    wyl_fact_graph_resolver_clear (&resolver);
+    wyl_fact_graph_locator_clear (&locator);
+    remove_tree_no_follow (root);
+  }
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1459,6 +1532,8 @@ main (int argc, char **argv)
       test_exact_stage_creation_mints_operation_evidence);
   g_test_add_func ("/fact-graph-locator/windows/exact-evidence-substitution",
       test_exact_evidence_rejects_name_substitution);
+  g_test_add_func ("/fact-graph-locator/windows/exact-evidence-last-checkpoint",
+      test_exact_evidence_revalidates_after_last_checkpoints);
   return g_test_run ();
 }
 #endif

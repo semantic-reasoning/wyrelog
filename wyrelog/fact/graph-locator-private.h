@@ -32,6 +32,9 @@ typedef struct
 typedef struct
 {
   guint version;
+  /* Canonical UUIDv7 bytes bind this evidence to one operation, rather than
+   * merely to whichever fixed final currently has the recorded FileId. */
+  guint8 operation_uuid[16];
   WylFactGraphWinIdentity graph_identity;
   WylFactGraphWinIdentity artifact_identity;
 } WylFactGraphWinOperationEvidence;

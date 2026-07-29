@@ -198,6 +198,8 @@ operation_evidence_is_valid (const WylFactGraphWinOperationEvidence *evidence)
   static const WylFactGraphWinIdentity zero = { 0 };
   return evidence != NULL
       && evidence->version == WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION
+      && (evidence->operation_uuid[6] & 0xf0) == 0x70
+      && (evidence->operation_uuid[8] & 0xc0) == 0x80
       && !identity_equal (&evidence->graph_identity, &zero)
       && !identity_equal (&evidence->artifact_identity, &zero);
 }
@@ -208,17 +210,31 @@ operation_evidence_equal (const WylFactGraphWinOperationEvidence *left,
 {
   return operation_evidence_is_valid (left)
       && operation_evidence_is_valid (right)
+      && memcmp (left->operation_uuid, right->operation_uuid,
+      sizeof left->operation_uuid) == 0
       && identity_equal (&left->graph_identity, &right->graph_identity)
       && identity_equal (&left->artifact_identity, &right->artifact_identity);
 }
 
+static gboolean
+operation_evidence_matches_id (const WylFactGraphWinOperationEvidence *evidence,
+    const wyl_id_t *operation_id)
+{
+  return operation_evidence_is_valid (evidence) && operation_id != NULL
+      && memcmp (evidence->operation_uuid, operation_id->bytes,
+      sizeof evidence->operation_uuid) == 0;
+}
+
 static void
 operation_evidence_init (WylFactGraphWinOperationEvidence *out_evidence,
+    const wyl_id_t *operation_id,
     const WylFactGraphWinIdentity *graph_identity,
     const WylFactGraphWinIdentity *artifact_identity)
 {
   memset (out_evidence, 0, sizeof *out_evidence);
   out_evidence->version = WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION;
+  memcpy (out_evidence->operation_uuid, operation_id->bytes,
+      sizeof out_evidence->operation_uuid);
   out_evidence->graph_identity = *graph_identity;
   out_evidence->artifact_identity = *artifact_identity;
 }
@@ -1665,6 +1681,20 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
 }
 
 static wyrelog_error_t
+operation_uuid_parse_canonical (const gchar *operation_uuid,
+    wyl_id_t *out_operation_id)
+{
+  if (operation_uuid == NULL || out_operation_id == NULL)
+    return WYRELOG_E_INVALID;
+  gchar canonical[WYL_ID_STRING_BUF];
+  if (wyl_id_parse (operation_uuid, out_operation_id) != WYRELOG_E_OK
+      || wyl_id_format (out_operation_id, canonical, sizeof canonical)
+      != WYRELOG_E_OK || g_strcmp0 (operation_uuid, canonical) != 0)
+    return WYRELOG_E_INVALID;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
 provisioning_stage_name_from_operation (const gchar *operation_uuid,
     gchar **out_stage_basename)
 {
@@ -1674,10 +1704,11 @@ provisioning_stage_name_from_operation (const gchar *operation_uuid,
     return WYRELOG_E_INVALID;
   wyl_id_t id;
   gchar canonical[WYL_ID_STRING_BUF];
-  if (wyl_id_parse (operation_uuid, &id) != WYRELOG_E_OK
-      || wyl_id_format (&id, canonical, sizeof canonical) != WYRELOG_E_OK
-      || g_strcmp0 (operation_uuid, canonical) != 0)
-    return WYRELOG_E_INVALID;
+  wyrelog_error_t rc = operation_uuid_parse_canonical (operation_uuid, &id);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  if (wyl_id_format (&id, canonical, sizeof canonical) != WYRELOG_E_OK)
+    return WYRELOG_E_INTERNAL;
   gchar *name = g_strdup_printf ("provision-%s.sqlite", canonical);
   if (name == NULL)
     return WYRELOG_E_NOMEM;
@@ -1702,7 +1733,7 @@ exact_stage_names_validate (WylFactGraphDirectory *directory,
 static wyrelog_error_t
 exact_stage_populate (WylFactGraphDirectory *directory, HANDLE handle,
     const gchar *stage_basename, WylFactGraphWinIdentity *identity,
-    WylFactGraphStage *out_stage)
+    const wyl_id_t *operation_id, WylFactGraphStage *out_stage)
 {
   wyrelog_error_t rc = revalidate_named_regular (directory, stage_basename,
       handle, identity, TRUE);
@@ -1718,7 +1749,7 @@ exact_stage_populate (WylFactGraphDirectory *directory, HANDLE handle,
   out_stage->identity = *identity;
   out_stage->graph_identity = directory->graph_identity;
   operation_evidence_init (&out_stage->operation_evidence,
-      &directory->graph_identity, identity);
+      operation_id, &directory->graph_identity, identity);
   out_stage->exact_provisioning_stage = TRUE;
   return WYRELOG_E_OK;
 }
@@ -1744,9 +1775,13 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
   if (out_stage == NULL)
     return WYRELOG_E_INVALID;
   *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  wyl_id_t operation_id;
   g_autofree gchar *stage_basename = NULL;
-  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
-      &stage_basename);
+  wyrelog_error_t rc = operation_uuid_parse_canonical (operation_uuid,
+      &operation_id);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (operation_uuid,
+        &stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = exact_stage_names_validate (directory, stage_basename);
   HANDLE handle = INVALID_HANDLE_VALUE;
@@ -1756,7 +1791,7 @@ wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
         GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, TRUE, &handle, &identity);
   if (rc == WYRELOG_E_OK)
     rc = exact_stage_populate (directory, handle, stage_basename, &identity,
-        out_stage);
+        &operation_id, out_stage);
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-created", directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
@@ -1805,13 +1840,20 @@ wyrelog_error_t
     *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
   if (out_stage == NULL || !operation_evidence_is_valid (expected_evidence))
     return WYRELOG_E_INVALID;
+  wyl_id_t operation_id;
   g_autofree gchar *stage_basename = NULL;
-  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
-      &stage_basename);
+  wyrelog_error_t rc = operation_uuid_parse_canonical (operation_uuid,
+      &operation_id);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (operation_uuid,
+        &stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = exact_stage_names_validate (directory, stage_basename);
   if (rc == WYRELOG_E_OK && !identity_equal (&directory->graph_identity,
           &expected_evidence->graph_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && !operation_evidence_matches_id (expected_evidence,
+          &operation_id))
     rc = WYRELOG_E_POLICY;
   HANDLE handle = INVALID_HANDLE_VALUE;
   WylFactGraphWinIdentity identity = { 0 };
@@ -1825,7 +1867,7 @@ wyrelog_error_t
     rc = directory->checkpoint ("stage-opened", directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = exact_stage_populate (directory, handle, stage_basename, &identity,
-        out_stage);
+        &operation_id, out_stage);
   if (rc == WYRELOG_E_OK
       && !operation_evidence_equal (&out_stage->operation_evidence,
           expected_evidence))
@@ -1869,13 +1911,20 @@ wyrelog_error_t
     *out_final = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
   if (out_final == NULL || !operation_evidence_is_valid (expected_evidence))
     return WYRELOG_E_INVALID;
+  wyl_id_t operation_id;
   g_autofree gchar *stage_basename = NULL;
-  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
-      &stage_basename);
+  wyrelog_error_t rc = operation_uuid_parse_canonical (operation_uuid,
+      &operation_id);
+  if (rc == WYRELOG_E_OK)
+    rc = provisioning_stage_name_from_operation (operation_uuid,
+        &stage_basename);
   if (rc == WYRELOG_E_OK)
     rc = exact_stage_names_validate (directory, stage_basename);
   if (rc == WYRELOG_E_OK && !identity_equal (&directory->graph_identity,
           &expected_evidence->graph_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && !operation_evidence_matches_id (expected_evidence,
+          &operation_id))
     rc = WYRELOG_E_POLICY;
   HANDLE handle = INVALID_HANDLE_VALUE;
   WylFactGraphWinIdentity identity = { 0 };
@@ -1894,6 +1943,11 @@ wyrelog_error_t
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("provisioned-final-validated",
         directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = revalidate_named_regular (directory, "facts.duckdb", handle,
+        &expected_evidence->artifact_identity, TRUE);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   FILE_STANDARD_INFO standard = { 0 };
@@ -2108,6 +2162,11 @@ stage_publish_bound (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
   if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
     rc = directory->checkpoint ("stage-parent-synced",
         directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK)
+    rc = revalidate_named_regular (directory, stage->final_basename,
+        borrow_stage_handle (stage), &stage->identity, TRUE);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   if (rc == WYRELOG_E_OK)
