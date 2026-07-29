@@ -1187,6 +1187,59 @@ test_exact_stage_creation_mints_operation_evidence (void)
   remove_tree_no_follow (root);
 }
 
+static void
+test_exact_evidence_rejects_name_substitution (void)
+{
+  static const gchar stage_operation[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070545";
+  static const gchar final_operation[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070546";
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+  WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          stage_operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
+          &evidence), ==, WYRELOG_E_OK);
+  g_autofree gchar *stage_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, stage.stage_basename);
+  g_autofree gchar *stage_aside = g_strdup_printf ("%s-aside", stage_path);
+  g_assert_true (move_path (stage_path, stage_aside));
+  g_assert_true (create_private_file (stage_path, "foreign-stage"));
+  WylFactGraphStage reopened = WYL_FACT_GRAPH_STAGE_INIT;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
+      (&graph, stage_operation, &evidence, &reopened), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph, &stage,
+          &evidence), ==, WYRELOG_E_POLICY);
+  wyl_fact_graph_stage_clear (&stage);
+
+  g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+          final_operation, &stage), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence (&stage,
+          &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph, &stage,
+          &evidence), ==, WYRELOG_E_OK);
+  g_autofree gchar *final_path =
+      wyl_fact_graph_directory_descriptive_file (&graph, "facts.duckdb");
+  g_autofree gchar *final_aside = g_strdup_printf ("%s-aside", final_path);
+  g_assert_true (move_path (final_path, final_aside));
+  g_assert_true (create_private_file (final_path, "foreign-final"));
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
+      (&graph, final_operation, &evidence, &final), ==, WYRELOG_E_POLICY);
+
+  wyl_fact_graph_regular_file_clear (&final);
+  wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree_no_follow (root);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -1215,6 +1268,8 @@ main (int argc, char **argv)
       test_publish_retries_converge);
   g_test_add_func ("/fact-graph-locator/windows/exact-stage-evidence",
       test_exact_stage_creation_mints_operation_evidence);
+  g_test_add_func ("/fact-graph-locator/windows/exact-evidence-substitution",
+      test_exact_evidence_rejects_name_substitution);
   return g_test_run ();
 }
 #endif
