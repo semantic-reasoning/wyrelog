@@ -2180,6 +2180,16 @@ wyrelog_error_t
     result = WYRELOG_E_POLICY;
     goto done;
   }
+  /* Publication changes the fixed pathname, so it may not race a DuckDB
+   * descriptor.  A raw close or number reuse is an integrity failure, not a
+   * reason to proceed with a rename. */
+  if (binding->io_open) {
+    if (sidecar_binding_working_fd_matches_unlocked (binding,
+            binding->working_fd) != WYRELOG_E_OK)
+      sidecar_binding_revoke_unlocked (binding);
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
   result = lease_revalidate_sidecar_unlocked (lease);
   if (result != WYRELOG_E_OK || sidecar_binding_matches_unlocked (binding)
       != WYRELOG_E_OK) {
