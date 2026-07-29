@@ -9718,6 +9718,91 @@ out:
 }
 
 /*
+ * Unit 5 (#374 gap 3): the read endpoints must surface a live credential's
+ * metadata without ever echoing its one-time secret.  Issue a real,
+ * non-revoked credential and capture its plaintext, then read it back two
+ * ways -- the single-credential GET and the per-principal credentials list.
+ * Both must return 200 with the credential id present (proving the payload is
+ * populated, not empty), yet contain neither the "credential_secret" key nor
+ * the plaintext secret bytes.
+ */
+static gint
+check_service_management_populated_secret_leak (void)
+{
+  ServiceDenialEnv env = { 0 };
+  wyl_service_principal_t principal = { 0 };
+  wyl_service_credential_issue_result_t issued = { 0 };
+  g_autofree gchar *plaintext = NULL;
+  g_autofree gchar *credential_path = NULL;
+  g_autofree gchar *body = NULL;
+  guint status = 0;
+  gchar principal_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gchar issue_request_id[WYL_REQUEST_ID_STRING_BUF];
+  gint rc = service_denial_env_init (&env, TRUE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+  if (wyl_request_id_new (principal_request_id, sizeof principal_request_id)
+      != WYRELOG_E_OK
+      || wyl_request_id_new (issue_request_id, sizeof issue_request_id)
+      != WYRELOG_E_OK) {
+    rc = 2500;
+    goto out;
+  }
+  if (wyl_service_principal_create (env.handle, "svc:tenant-a:worker",
+          "Worker", "human-principal-admin", principal_request_id, &principal)
+      != WYRELOG_E_OK) {
+    rc = 2501;
+    goto out;
+  }
+  if (wyl_service_credential_issue (env.handle, "svc:tenant-a:worker",
+          "tenant-a", "human-principal-admin", issue_request_id,
+          CONTRACT_FUTURE_EXPIRES_AT_US, &issued) != WYRELOG_E_OK
+      || issued.credential.credential_id == NULL || issued.secret == NULL) {
+    rc = 2502;
+    goto out;
+  }
+  gsize secret_len = 0;
+  const gchar *secret = wyl_service_credential_secret_peek_encoded
+      (issued.secret, &secret_len);
+  if (secret == NULL || secret_len == 0) {
+    rc = 2503;
+    goto out;
+  }
+  plaintext = g_strndup (secret, secret_len);
+
+  /* Single-credential read: populated 200 that never carries the secret. */
+  credential_path = g_strdup_printf ("/service-credentials/%s",
+      issued.credential.credential_id);
+  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
+          credential_path, env.query, NULL, &status, &body) != 0
+      || status != 200 || body == NULL
+      || strstr (body, issued.credential.credential_id) == NULL
+      || strstr (body, "credential_secret") != NULL
+      || strstr (body, plaintext) != NULL) {
+    rc = 2504;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  /* Per-principal credentials list: a non-empty array naming the credential,
+   * still with no secret anywhere in the body. */
+  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
+          "/service-principals/svc:tenant-a:worker/credentials", env.query,
+          NULL, &status, &body) != 0 || status != 200 || body == NULL
+      || strstr (body, "\"service_credentials\":[") == NULL
+      || strstr (body, issued.credential.credential_id) == NULL
+      || strstr (body, "credential_secret") != NULL
+      || strstr (body, plaintext) != NULL) {
+    rc = 2505;
+    goto out;
+  }
+out:
+  wyl_service_credential_issue_result_clear (&issued);
+  wyl_service_principal_clear (&principal);
+  service_denial_env_clear (&env);
+  return rc;
+}
+
+/*
  * Unit-style coverage for the tenant-gate wire codes. Drives the
  * http.c decision helper through the WYL_TEST_DAEMON_HTTP seam so
  * that both stable gate arms are exercised directly.
@@ -10198,6 +10283,11 @@ main (void)
   gint permission_mapping_rc = check_service_management_permission_mapping ();
   if (permission_mapping_rc != 0) {
     result = permission_mapping_rc;
+    goto cleanup;
+  }
+  gint secret_leak_rc = check_service_management_populated_secret_leak ();
+  if (secret_leak_rc != 0) {
+    result = secret_leak_rc;
     goto cleanup;
   }
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
