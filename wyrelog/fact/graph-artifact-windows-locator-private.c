@@ -153,16 +153,43 @@ file_identity (HANDLE handle, gboolean directory,
   return WYRELOG_E_OK;
 }
 
+/* Deletion is a terminal lifecycle transition.  The normal identity audit
+ * rejects DeletePending so no live authority can be issued from it, but its
+ * own retained HANDLE still has to be closed exactly once.  This narrower
+ * destructor-only check permits DeletePending while proving the same native
+ * object and rejecting a raw-close/reused foreign HANDLE. */
+static gboolean
+terminal_handle_matches_identity (HANDLE handle, gboolean directory,
+    const WylFactGraphWinIdentity *expected)
+{
+  FILE_BASIC_INFO basic = { 0 };
+  FILE_STANDARD_INFO standard = { 0 };
+  FILE_ID_INFO id = { 0 };
+  WylFactGraphWinIdentity observed = { 0 };
+  DWORD flags = 0;
+  if (!valid_handle (handle) || expected == NULL
+      || !GetHandleInformation (handle, &flags)
+      || (flags & HANDLE_FLAG_INHERIT) != 0
+      || !GetFileInformationByHandleEx (handle, FileBasicInfo, &basic,
+          sizeof basic)
+      || !GetFileInformationByHandleEx (handle, FileStandardInfo, &standard,
+          sizeof standard)
+      || !GetFileInformationByHandleEx (handle, FileIdInfo, &id, sizeof id)
+      || ((basic.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) != directory
+      || (basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+      || standard.Directory != directory)
+    return FALSE;
+  observed.volume_serial = id.VolumeSerialNumber;
+  memcpy (observed.file_id, id.FileId.Identifier, sizeof observed.file_id);
+  return identity_equal (&observed, expected);
+}
+
 static wyrelog_error_t
 close_directory_if_exact (WylFactArtifactWinDirectory *directory)
 {
-  WylFactGraphWinIdentity observed = { 0 };
-  DWORD flags = 0;
   if (directory != NULL && valid_handle (directory->handle)
-      && GetHandleInformation (directory->handle, &flags)
-      && (flags & HANDLE_FLAG_INHERIT) == 0
-      && file_identity (directory->handle, TRUE, &observed) == WYRELOG_E_OK
-      && identity_equal (&observed, &directory->identity))
+      && terminal_handle_matches_identity (directory->handle, TRUE,
+          &directory->identity))
     CloseHandle (directory->handle);
   return WYRELOG_E_OK;
 }
@@ -558,13 +585,9 @@ wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry *entry)
   /* Do not close an externally-closed/reused numeric HANDLE.  The entry may
    * be stale after an ownership violation, but freeing its metadata must not
    * mutate a foreign object. */
-  WylFactGraphWinIdentity observed = { 0 };
-  DWORD flags = 0;
   if (valid_handle (entry->handle)
-      && GetHandleInformation (entry->handle, &flags)
-      && (flags & HANDLE_FLAG_INHERIT) == 0
-      && file_identity (entry->handle, FALSE, &observed) == WYRELOG_E_OK
-      && identity_equal (&observed, &entry->identity))
+      && terminal_handle_matches_identity (entry->handle, FALSE,
+          &entry->identity))
     CloseHandle (entry->handle);
   g_free (entry->name);
   g_free (entry);

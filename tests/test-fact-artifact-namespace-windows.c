@@ -285,13 +285,30 @@ test_locator_nested_directory_transport (void)
   g_assert_cmpint (wyl_fact_artifact_win_directory_entry_delete_exact (locator,
           root, child, &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  DWORD handles_before_child_free = 0;
+  DWORD handles_after_child_free = 0;
+  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
+          &handles_before_child_free));
   wyl_fact_artifact_win_entry_free (child);
   child = NULL;
+  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
+          &handles_after_child_free));
+  g_assert_cmpuint (handles_after_child_free + 1, ==,
+      handles_before_child_free);
+  DWORD handles_before_root_free = 0;
+  DWORD handles_after_root_free = 0;
+  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
+          &handles_before_root_free));
   g_assert_cmpint (wyl_fact_artifact_win_directory_delete_empty (locator, root,
           &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
   wyl_fact_artifact_win_directory_free (root);
   root = NULL;
+  g_assert_true (GetProcessHandleCount (GetCurrentProcess (),
+          &handles_after_root_free));
+  /* DeletePending must not turn the owned directory handle into a destructor
+   * leak: terminal cleanup closes exactly that retained handle. */
+  g_assert_cmpuint (handles_after_root_free + 1, ==, handles_before_root_free);
 
   /* The root itself is also name-bound.  A raw name substitution revokes the
    * opaque directory capability, and free must leave the replacement alone. */
