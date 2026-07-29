@@ -11,6 +11,8 @@ typedef struct WylFactArtifactTempBinding WylFactArtifactTempBinding;
 typedef struct WylFactArtifactSidecarBinding WylFactArtifactSidecarBinding;
 typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
+typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
+typedef struct WylFactDuckdbTempChild WylFactDuckdbTempChild;
 
 /* Only these names are part of the authority.  Callers cannot supply a path. */
 typedef enum
@@ -34,6 +36,17 @@ typedef enum
   WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED,
   WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED,
 } WylFactArtifactSidecarRetireResult;
+
+/* The DuckDB spill directory is a separate, opaque authority.  It is not a
+ * general directory capability: its root is minted internally, child names
+ * are accepted only when they match the source-pinned DuckDB 1.5.5 grammar,
+ * and child lifecycle always uses an identity binding. */
+typedef enum
+{
+  WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED = 0,
+  WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED,
+  WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED,
+} WylFactDuckdbTempRetireResult;
 
 typedef enum
 {
@@ -202,5 +215,27 @@ wyrelog_error_t wyl_fact_artifact_namespace_rename
     WylFactArtifactName destination);
 wyrelog_error_t wyl_fact_artifact_namespace_sync_directory
     (WylFactArtifactNamespace * namespace_);
+
+/* These APIs deliberately expose neither the physical root spelling nor a
+ * directory descriptor.  A root cannot be reopened or adopted after its live
+ * authority is released.  The exclusive lease, imported main binding, graph
+ * directory, and lock are revalidated around every mutation. */
+wyrelog_error_t wyl_fact_duckdb_temp_root_create
+    (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **);
+void wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *);
+wyrelog_error_t wyl_fact_duckdb_temp_root_create_child
+    (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
+    WylFactDuckdbTempChild **, gint * out_fd);
+wyrelog_error_t wyl_fact_duckdb_temp_child_open
+    (WylFactDuckdbTempChild *, gboolean writable, gint * out_fd);
+/* On success, returns owned WylFactDuckdbTempChild entries only.  Any
+ * unbound/foreign entry makes enumeration fail with no partial array. */
+wyrelog_error_t wyl_fact_duckdb_temp_root_list_children
+    (WylFactDuckdbTempRoot *, GPtrArray ** out_children);
+wyrelog_error_t wyl_fact_duckdb_temp_child_retire
+    (WylFactDuckdbTempChild *, WylFactDuckdbTempRetireResult *);
+void wyl_fact_duckdb_temp_child_free (WylFactDuckdbTempChild *);
+wyrelog_error_t wyl_fact_duckdb_temp_root_retire
+    (WylFactDuckdbTempRoot *, WylFactDuckdbTempRetireResult *);
 
 G_END_DECLS
