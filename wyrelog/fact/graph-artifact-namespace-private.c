@@ -1545,6 +1545,7 @@ wyl_fact_duckdb_temp_child_binding_close (WylFactDuckdbTempChildBinding *b,
   if (result == WYRELOG_E_OK) {
     gint issued = *fd;
     *fd = -1;
+    b->active = FALSE;
     b->io_open = FALSE;
     b->working_fd = -1;
     if (close (issued) != 0) {
@@ -3277,8 +3278,9 @@ duckdb_temp_child_binding_revoke_unlocked (WylFactDuckdbTempChildBinding *b)
 static wyrelog_error_t
 duckdb_temp_child_binding_revalidate_unlocked (WylFactDuckdbTempChildBinding *b)
 {
-  wyrelog_error_t result = !b || !b->active || !b->child
-      ? WYRELOG_E_POLICY : duckdb_temp_child_matches_unlocked (b->child);
+  if (!b || !b->active || !b->child)
+    return WYRELOG_E_POLICY;
+  wyrelog_error_t result = duckdb_temp_child_matches_unlocked (b->child);
   if (result == WYRELOG_E_OK)
     result = duckdb_temp_root_audit_unlocked (b->child->root);
   if (result != WYRELOG_E_OK)
@@ -3290,6 +3292,8 @@ static wyrelog_error_t
 duckdb_temp_child_binding_revalidate_fd_unlocked (WylFactDuckdbTempChildBinding
     *b, gint fd)
 {
+  if (!b || !b->active)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t result = duckdb_temp_child_binding_revalidate_unlocked (b);
   struct stat st;
   if (result == WYRELOG_E_OK && (!b->io_open || fd < 0 || fd != b->working_fd
@@ -3312,18 +3316,19 @@ duckdb_temp_child_io_barrier_unlocked (WylFactDuckdbTempChild *child)
 {
   if (child && (child->io_revoked || child->unowned_io_terminal))
     return WYRELOG_E_POLICY;
+  gboolean live = FALSE;
   for (guint i = 0; child && child->bindings && i < child->bindings->len; i++) {
     WylFactDuckdbTempChildBinding *b = g_ptr_array_index (child->bindings, i);
     if (!b || !b->active)
       continue;
     if (b->io_open) {
+      live = TRUE;
       if (duckdb_temp_child_binding_revalidate_fd_unlocked (b,
               b->working_fd) != WYRELOG_E_OK)
-        return WYRELOG_E_POLICY;
-      return WYRELOG_E_POLICY;
+        continue;
     }
   }
-  return WYRELOG_E_OK;
+  return live ? WYRELOG_E_POLICY : WYRELOG_E_OK;
 }
 
 static wyrelog_error_t
@@ -3918,6 +3923,14 @@ wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
   result = duckdb_temp_root_audit_unlocked (root);
   if (result != WYRELOG_E_OK)
     goto done;
+  /* Root retirement is also an I/O boundary: audit every child binding so a
+   * raw-close/reuse cannot hide behind an earlier valid sibling binding. */
+  for (guint i = 0; i < root->children->len; i++)
+    if (duckdb_temp_child_io_barrier_unlocked (g_ptr_array_index
+            (root->children, i)) != WYRELOG_E_OK) {
+      result = WYRELOG_E_POLICY;
+      goto done;
+    }
   /* Any active child, including a child externally removed, prevents broad
    * cleanup.  The caller must reconcile its exact binding first. */
   if (root->children->len != 0) {
