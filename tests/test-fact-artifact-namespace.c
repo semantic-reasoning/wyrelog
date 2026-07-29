@@ -660,6 +660,12 @@ test_main_binding (void)
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (NULL), ==,
       WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (NULL, 42), ==,
+      WYRELOG_E_POLICY);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_main_binding_close (NULL, &fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, 42);
 #else
   WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
   WylFactGraphLocator locator = { 0 };
@@ -708,20 +714,21 @@ test_main_binding (void)
           &binding, &fd), ==, WYRELOG_E_OK);
   g_assert_nonnull (binding);
   g_assert_cmpint (fcntl (fd, F_GETFD) & FD_CLOEXEC, !=, 0);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_OK);
   g_assert_cmpint (pwrite (fd, "main", 4, 0), ==, 4);
   g_assert_cmpint (ftruncate (fd, 4), ==, 0);
   g_assert_cmpint (fsync (fd), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_OK);
   char contents[5] = { 0 };
   g_assert_cmpint (pread (fd, contents, 4, 0), ==, 4);
   g_assert_cmpstr (contents, ==, "main");
-  close (fd);
   /* The binding itself retains the lease after the caller drops its handle. */
   wyl_fact_artifact_mutation_lease_free (lease);
   lease = NULL;
-  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
-      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_OK);
   WylFactArtifactNamespace *contender = NULL;
   g_assert_cmpint (open_namespace (&directory, &contender), ==, WYRELOG_E_OK);
   WylFactArtifactMutationLease *contender_lease = NULL;
@@ -729,6 +736,30 @@ test_main_binding (void)
       (contender, &contender_lease), ==, WYRELOG_E_BUSY);
   g_assert_null (contender_lease);
   wyl_fact_artifact_namespace_free (contender);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_close (binding, &fd), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_POLICY);
+  wyl_fact_artifact_main_binding_free (binding);
+  binding = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &binding, &fd), ==, WYRELOG_E_OK);
+  /* dup2 models close plus exact-number reuse without relying on allocator
+   * behavior.  The provider must reject it rather than validating only pin. */
+  gint foreign_fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  g_assert_cmpint (foreign_fd, >=, 0);
+  g_assert_cmpint (dup2 (foreign_fd, fd), ==, fd);
+  if (foreign_fd != fd)
+    close (foreign_fd);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_POLICY);
+  close (fd);
+  wyl_fact_artifact_main_binding_free (binding);
+  binding = NULL;
 
   /* A renamed/replaced canonical name revokes the capability permanently and
    * does not write the foreign replacement. */
@@ -736,17 +767,22 @@ test_main_binding (void)
       "facts.duckdb", NULL);
   g_autofree gchar *saved_path = g_build_filename (graph_path,
       "facts.duckdb.saved", NULL);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (lease,
+          &binding, &fd), ==, WYRELOG_E_OK);
   g_assert_cmpint (rename (main_path, saved_path), ==, 0);
   g_assert_true (g_file_set_contents (main_path, "foreign", -1, NULL));
   g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_POLICY);
   g_assert_cmpint (unlink (main_path), ==, 0);
   g_assert_cmpint (rename (saved_path, main_path), ==, 0);
-  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (binding), ==,
-      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (binding, fd),
+      ==, WYRELOG_E_POLICY);
+  close (fd);
   wyl_fact_artifact_main_binding_free (binding);
   binding = NULL;
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
 
   /* Fresh namespace: links and mode changes prevent minting with no mutation
    * by the authority itself. */
