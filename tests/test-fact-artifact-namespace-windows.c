@@ -26,6 +26,19 @@ identity_for (HANDLE handle)
   return identity;
 }
 
+typedef struct
+{
+  WylFactArtifactWinNamespace *namespace_;
+} NamespaceReleaseProbe;
+
+static gpointer
+release_namespace_thread (gpointer user_data)
+{
+  NamespaceReleaseProbe *probe = user_data;
+  wyl_fact_artifact_win_namespace_free (probe->namespace_);
+  return NULL;
+}
+
 static HANDLE
 open_scratch_file (gchar **out_path)
 {
@@ -224,6 +237,8 @@ test_native_namespace_captured_owner_acl_binding (void)
   g_assert_true (borrowed == INVALID_HANDLE_VALUE);
   wyl_fact_artifact_win_binding_free (binding);
   binding = NULL;
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  namespace_ = NULL;
   /* Existing entries must prove the same captured-owner protected DACL before
    * they are re-issued through a new opaque binding. */
   g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
@@ -236,6 +251,19 @@ test_native_namespace_captured_owner_acl_binding (void)
    * and the final HANDLE close. */
   wyl_fact_artifact_win_namespace_free (namespace_);
   namespace_ = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (reopened, &borrowed),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_close (reopened, &borrowed),
+      ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_binding_free (reopened);
+  reopened = NULL;
+  /* Reopen once more, then change the ACL behind the held entry.  This must
+   * revoke the live binding and reject a later existing-entry issuance. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
+          &namespace_), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
+          &reopened), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (reopened, &borrowed),
       ==, WYRELOG_E_OK);
   g_assert_cmpuint (SetSecurityInfo (borrowed, SE_FILE_OBJECT,
@@ -257,6 +285,54 @@ test_native_namespace_captured_owner_acl_binding (void)
   g_assert_true (DeleteFileW (wal));
   wyl_fact_artifact_win_namespace_free (namespace_);
   namespace_ = NULL;
+  g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL,
+      NULL, NULL);
+  g_assert_true (CloseHandle (graph));
+  g_assert_true (RemoveDirectoryW (directory_wide));
+  g_free (path);
+}
+
+static void
+test_native_namespace_release_binding_stress (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  g_autofree gchar *wal_path = NULL;
+  g_autofree wchar_t *wal = NULL;
+
+  directory.graph_handle = graph;
+  directory.graph_identity = identity_for (graph);
+  wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
+  wal = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+  for (guint i = 0; i < 64; i++) {
+    WylFactArtifactWinNamespace *namespace_ = NULL;
+    WylFactArtifactWinBinding *binding = NULL;
+    NamespaceReleaseProbe probe = { 0 };
+    HANDLE borrowed = INVALID_HANDLE_VALUE;
+    g_autoptr (GThread) releaser = NULL;
+
+    g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
+            &namespace_), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
+            WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, TRUE,
+            &binding), ==, WYRELOG_E_OK);
+    probe.namespace_ = namespace_;
+    releaser = g_thread_new ("namespace-release", release_namespace_thread,
+        &probe);
+    /* The binding's atomic retained reference keeps locator validation live
+     * regardless of whether the release thread wins this race. */
+    for (guint attempt = 0; attempt < 8; attempt++)
+      g_assert_cmpint (wyl_fact_artifact_win_binding_revalidate (binding), ==,
+          WYRELOG_E_OK);
+    g_thread_join (g_steal_pointer (&releaser));
+    g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (binding, &borrowed),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_win_binding_close (binding, &borrowed),
+        ==, WYRELOG_E_OK);
+    wyl_fact_artifact_win_binding_free (binding);
+    g_assert_true (DeleteFileW (wal));
+  }
   g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL,
       NULL, NULL);
   g_assert_true (CloseHandle (graph));
@@ -499,6 +575,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/namespace/captured-owner-binding",
       test_native_namespace_captured_owner_acl_binding);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/namespace/release-binding-stress",
+      test_native_namespace_release_binding_stress);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/identity-output",
       test_working_handle_identity_mismatch_initializes_output);
