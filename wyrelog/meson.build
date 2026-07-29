@@ -47,10 +47,6 @@ wyrelog_sources = files(
   'audit/event.c',
   'daemon/auth-registry-private.c',
   'fact/graph-locator-private.c',
-  'fact/graph-artifact-windows-handle-private.c',
-  'fact/graph-artifact-windows-locator-private.c',
-  'fact/graph-artifact-windows-lock-private.c',
-  'fact/graph-artifact-windows-namespace-private.c',
   'fact/graph-artifact-namespace-private.c',
   'fact/reconcile-private.c',
   'fact/root-writer-lease-private.c',
@@ -82,6 +78,10 @@ wyrelog_sources = files(
 if host_machine.system() == 'windows'
   wyrelog_sources += files('fact/graph-locator-windows-private.c')
   wyrelog_sources += files('fact/graph-windows-security-private.c')
+  wyrelog_sources += files('fact/graph-artifact-windows-handle-private.c')
+  wyrelog_sources += files('fact/graph-artifact-windows-locator-private.c')
+  wyrelog_sources += files('fact/graph-artifact-windows-lock-private.c')
+  wyrelog_sources += files('fact/graph-artifact-windows-namespace-private.c')
 endif
 
 wyrelog_deps = [
