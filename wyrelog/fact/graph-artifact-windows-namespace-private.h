@@ -170,9 +170,10 @@ wyrelog_error_t wyl_fact_artifact_win_temp_token_revalidate
     (WylFactArtifactWinTempToken *);
 wyrelog_error_t wyl_fact_artifact_win_temp_token_close
     (WylFactArtifactWinTempToken *, HANDLE *);
-/* Both mutation APIs initialize |out_effect|.  APPLIED and UNKNOWN are
- * terminal: callers must discard the token and, for UNKNOWN, reconcile from
- * durable evidence rather than retrying the mutation. */
+/* Both mutation APIs initialize |out_effect|.  A successful no-replace rename
+ * remains live authority for its new token (including an APPLIED effect);
+ * successful unlink and every UNKNOWN effect are terminal.  UNKNOWN requires
+ * recovery evidence and reconciliation, never a retry. */
 wyrelog_error_t wyl_fact_artifact_win_temp_token_rename_no_replace
     (WylFactArtifactWinTempToken *, const gchar * destination_token,
     WylFactArtifactWinMutationEffect * out_effect);
@@ -182,6 +183,13 @@ wyrelog_error_t wyl_fact_artifact_win_temp_token_export_recovery_evidence
     (WylFactArtifactWinTempToken *, WylFactArtifactWinTempRecoveryEvidence **);
 void wyl_fact_artifact_win_temp_recovery_evidence_free
     (WylFactArtifactWinTempRecoveryEvidence *);
+/* Durable evidence is an explicitly versioned byte record.  Decode performs
+ * only structural validation; recovery still requires matching graph, lock,
+ * artifact identities under a fresh exclusive lease. */
+wyrelog_error_t wyl_fact_artifact_win_temp_recovery_evidence_encode
+    (const WylFactArtifactWinTempRecoveryEvidence *, GBytes **);
+wyrelog_error_t wyl_fact_artifact_win_temp_recovery_evidence_decode
+    (GBytes *, WylFactArtifactWinTempRecoveryEvidence **);
 /* Recovery has no token pathname authority of its own: it needs a matching
  * exclusive lease and the immutable entry FileId evidence.  A missing entry
  * is idempotently recovered; mismatch/replacement is POLICY and untouched. */

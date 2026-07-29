@@ -351,6 +351,13 @@ wyl_fact_artifact_win_locator_revalidate (WylFactArtifactWinLocator *locator)
       ? WYRELOG_E_POLICY : rc;
 }
 
+const WylFactGraphWinIdentity *
+wyl_fact_artifact_win_locator_identity (const WylFactArtifactWinLocator
+    *locator)
+{
+  return locator != NULL ? &locator->identity : NULL;
+}
+
 void
 wyl_fact_artifact_win_locator_free (WylFactArtifactWinLocator *locator)
 {
