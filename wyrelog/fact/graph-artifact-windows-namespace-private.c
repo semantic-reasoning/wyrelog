@@ -1765,7 +1765,10 @@ wyrelog_error_t
   rc = temp_child_check (binding->child);
   if (rc == WYRELOG_E_OK && binding->active)
     rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
-  if (rc != WYRELOG_E_OK)
+  /* A second session is ordinary contention, not evidence that the binding
+   * or child has been substituted.  Preserve the first session and let it
+   * finish; only integrity/transport failures revoke this authority. */
+  if (rc != WYRELOG_E_OK && rc != WYRELOG_E_BUSY)
     temp_binding_revoke (binding);
   g_mutex_unlock (&binding->child->mutex);
   return rc;
