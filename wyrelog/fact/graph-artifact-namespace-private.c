@@ -2520,7 +2520,19 @@ duckdb_temp_root_audit_unlocked (WylFactDuckdbTempRoot *root)
   }
   if (errno && result == WYRELOG_E_OK)
     result = WYRELOG_E_IO;
-  closedir (dir);
+  if (closedir (dir) != 0 && result == WYRELOG_E_OK)
+    result = WYRELOG_E_IO;
+  /* Directory enumeration alone cannot observe an externally removed bound
+   * child.  Every live binding must still name its exact identity too. */
+  if (result == WYRELOG_E_OK)
+    for (guint i = 0; root->children && i < root->children->len; i++) {
+      WylFactDuckdbTempChild *child = g_ptr_array_index (root->children, i);
+      if (child->active
+          && duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK) {
+        result = WYRELOG_E_POLICY;
+        break;
+      }
+    }
   return result;
 }
 
