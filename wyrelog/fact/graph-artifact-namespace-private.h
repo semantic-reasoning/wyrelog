@@ -167,7 +167,8 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * returned FD I/O, sync, truncate, and close boundary; a failed FD check
  * terminally revokes the binding and the FD must not be used again.  Plain
  * _revalidate is lifecycle validation only: it neither authorizes raw I/O
- * nor consumes a valid lifecycle binding.  As with the existing #612
+ * nor consumes a valid binding on success, but any identity failure revokes
+ * the whole binding.  As with the existing #612
  * mutation contract, this does not claim to close POSIX's final-check to
  * syscall window against an uncooperative same-UID participant. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
