@@ -1930,9 +1930,13 @@ sidecar_binding_revalidate_unlocked (WylFactArtifactSidecarBinding *binding)
   if (!binding || !binding->lease || !binding->lease->exclusive)
     return WYRELOG_E_POLICY;
   wyrelog_error_t result = lease_revalidate_sidecar_unlocked (binding->lease);
+  if (result == WYRELOG_E_OK)
+    result = sidecar_binding_matches_unlocked (binding);
+  /* A binding is raw-I/O authority, not recoverable observation evidence.
+   * Once any identity check fails it cannot become usable after restoration. */
   if (result != WYRELOG_E_OK)
-    return result;
-  return sidecar_binding_matches_unlocked (binding);
+    binding->active = FALSE;
+  return result;
 }
 
 /* The returned descriptor is a separate capability from the binding pin.  A
