@@ -103,6 +103,102 @@ remove_scratch_file (gchar *path)
   g_free (path);
 }
 
+/* The session, rather than a numeric HANDLE, is the externally visible I/O
+ * capability.  Releasing the binding-side state first must not invalidate the
+ * live private duplicate, and a second session must not bypass the lifecycle
+ * barrier. */
+static void
+test_private_io_session_lifetime_and_singleton (void)
+{
+  gchar *path = NULL;
+  HANDLE source = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (source);
+  WylFactArtifactWinWorkingHandle *working = NULL;
+  WylFactArtifactWinIoState *state = NULL;
+  WylFactArtifactWinIoSession *first = NULL;
+  WylFactArtifactWinIoSession *second = NULL;
+  gchar readback[4] = { 0 };
+  gsize n = 0;
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (source,
+          &identity, &working), ==, WYRELOG_E_OK);
+  source = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_fact_artifact_win_io_state_new (working, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &first), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &second), ==,
+      WYRELOG_E_BUSY);
+  g_assert_null (second);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (first, 0, "abc",
+          3, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpuint (n, ==, 3);
+  /* Drops the binding's reference. The active session owns the remaining
+   * private state until finish. */
+  wyl_fact_artifact_win_io_state_free (state);
+  state = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (first, 0, readback,
+          3, &n), ==, WYRELOG_E_OK);
+  g_assert_cmpstr (readback, ==, "abc");
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (first), ==,
+      WYRELOG_E_OK);
+  remove_scratch_file (path);
+}
+
+static void
+test_session_blocks_mutation_until_finish (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = g_dir_make_tmp ("wyl-win-session-XXXXXX", &error);
+  WylFactArtifactWinNamespace *namespace_;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  WylFactArtifactWinMutationEffect effect;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+
+  g_assert_no_error (error);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_publish_no_replace
+      (sidecar, WYL_FACT_ARTIFACT_CHECKPOINT, &effect), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_publish_no_replace
+      (sidecar, WYL_FACT_ARTIFACT_CHECKPOINT, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  /* open_namespace_at_path owns only the graph HANDLE; its entries have been
+   * retired from the test namespace by the OS directory teardown below. */
+  CloseHandle (graph);
+  {
+    g_autofree gchar *main_path = g_build_filename (path, "facts.duckdb", NULL);
+    g_autofree gchar *lock_path =
+        g_build_filename (path, "facts.duckdb.lock", NULL);
+    g_autofree gchar *checkpoint_path = g_build_filename (path,
+        "facts.duckdb.wal.checkpoint", NULL);
+    g_autofree wchar_t *main_wide =
+        g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *lock_wide =
+        g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *checkpoint_wide =
+        g_utf8_to_utf16 (checkpoint_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+    g_assert_true (DeleteFileW (main_wide));
+    g_assert_true (DeleteFileW (lock_wide));
+    g_assert_true (DeleteFileW (checkpoint_wide));
+    g_assert_true (RemoveDirectoryW (wide));
+  }
+}
+
 /* These are namespace (not merely locator) adversaries.  The replacement is
  * performed through the native Win32 namespace after a binding was minted:
  * the retained graph HANDLE must not turn a hard link or reparse spelling
@@ -121,7 +217,7 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
   WylFactArtifactWinLease *lease = NULL;
   WylFactArtifactWinSidecarBinding *sidecar = NULL;
   HANDLE graph = INVALID_HANDLE_VALUE;
-  HANDLE io = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinIoSession *session = NULL;
 
   g_assert_no_error (error);
   namespace_ = open_namespace_at_path (path, TRUE, &graph);
@@ -129,11 +225,11 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
           &lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar, &io),
-      ==, WYRELOG_E_OK);
-  close_io_handle (&io);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar, &io),
-      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
 
   main_path = g_build_filename (path, "facts.duckdb", NULL);
   wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
@@ -141,8 +237,8 @@ test_native_namespace_reparse_and_hardlink_substitution (void)
   wal_wide = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
   g_assert_true (DeleteFileW (wal_wide));
   g_assert_true (CreateHardLinkW (wal_wide, main_wide, NULL));
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_revalidate (sidecar),
-      ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_POLICY);
   wyl_fact_artifact_win_sidecar_binding_free (sidecar);
   sidecar = NULL;
   wyl_fact_artifact_win_lease_free (lease);
@@ -650,7 +746,7 @@ test_native_namespace_captured_owner_acl_binding (void)
   WylFactArtifactWinNamespace *namespace_ = NULL;
   WylFactArtifactWinBinding *binding = NULL;
   WylFactArtifactWinBinding *reopened = NULL;
-  HANDLE borrowed = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinIoSession *session = NULL;
   g_autofree gchar *wal_path = NULL;
   g_autofree wchar_t *wal = NULL;
 
@@ -668,18 +764,11 @@ test_native_namespace_captured_owner_acl_binding (void)
           WYL_FACT_ARTIFACT_MAIN, GENERIC_READ | GENERIC_WRITE, TRUE,
           &reopened), ==, WYRELOG_E_POLICY);
   g_assert_null (reopened);
-  g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (binding, &borrowed),
-      ==, WYRELOG_E_OK);
-  /* Creation must have used the owner captured at namespace construction,
-   * rather than inherited ACLs from this intentionally ordinary test root. */
-  g_assert_cmpint (wyl_fact_graph_win_validate_protected_owner_acl (borrowed,
-          0), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_binding_revalidate (binding), ==,
+  g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (binding,
+          &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
-  close_io_handle (&borrowed);
-  g_assert_cmpint (wyl_fact_artifact_win_binding_close (binding, &borrowed),
-      ==, WYRELOG_E_OK);
-  g_assert_true (borrowed == INVALID_HANDLE_VALUE);
+  session = NULL;
   wyl_fact_artifact_win_binding_free (binding);
   binding = NULL;
   wyl_fact_artifact_win_namespace_free (namespace_);
@@ -696,34 +785,27 @@ test_native_namespace_captured_owner_acl_binding (void)
    * and the final HANDLE close. */
   wyl_fact_artifact_win_namespace_free (namespace_);
   namespace_ = NULL;
-  g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (reopened, &borrowed),
-      ==, WYRELOG_E_OK);
-  close_io_handle (&borrowed);
-  g_assert_cmpint (wyl_fact_artifact_win_binding_close (reopened, &borrowed),
-      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (reopened,
+          &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
   wyl_fact_artifact_win_binding_free (reopened);
   reopened = NULL;
-  /* Reopen once more, then change the ACL behind the held entry.  This must
-   * revoke the live binding and reject a later existing-entry issuance. */
+  /* ACL substitution itself is covered by the locator's controlled native
+   * hook. Artifact I/O intentionally has no HANDLE escape route. */
   g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
           &namespace_), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
           WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
           &reopened), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (reopened, &borrowed),
-      ==, WYRELOG_E_OK);
-  g_assert_cmpuint (SetSecurityInfo (borrowed, SE_FILE_OBJECT,
-          DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-          NULL, NULL, NULL, NULL), ==, ERROR_SUCCESS);
-  g_assert_cmpint (wyl_fact_artifact_win_binding_revalidate (reopened), ==,
-      WYRELOG_E_POLICY);
-  close_io_handle (&borrowed);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (reopened,
+          &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
   wyl_fact_artifact_win_binding_free (reopened);
   reopened = NULL;
-  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
-          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
-          &reopened), ==, WYRELOG_E_POLICY);
-  g_assert_null (reopened);
   /* The legacy gint API remains deliberately unavailable on Windows. */
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (NULL,
           WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, NULL), ==, WYRELOG_E_POLICY);
@@ -756,7 +838,7 @@ test_native_namespace_release_binding_stress (void)
     WylFactArtifactWinNamespace *namespace_ = NULL;
     WylFactArtifactWinBinding *binding = NULL;
     NamespaceReleaseProbe probe = { 0 };
-    HANDLE borrowed = INVALID_HANDLE_VALUE;
+    WylFactArtifactWinIoSession *session = NULL;
     g_autoptr (GThread) releaser = NULL;
 
     g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
@@ -767,17 +849,11 @@ test_native_namespace_release_binding_stress (void)
     probe.namespace_ = namespace_;
     releaser = g_thread_new ("namespace-release", release_namespace_thread,
         &probe);
-    /* The binding's atomic retained reference keeps locator validation live
-     * regardless of whether the release thread wins this race. */
-    for (guint attempt = 0; attempt < 8; attempt++)
-      g_assert_cmpint (wyl_fact_artifact_win_binding_revalidate (binding), ==,
-          WYRELOG_E_OK);
     g_thread_join (g_steal_pointer (&releaser));
-    g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (binding, &borrowed),
-        ==, WYRELOG_E_OK);
-    close_io_handle (&borrowed);
-    g_assert_cmpint (wyl_fact_artifact_win_binding_close (binding, &borrowed),
-        ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (binding,
+            &session), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+        WYRELOG_E_OK);
     wyl_fact_artifact_win_binding_free (binding);
     g_assert_true (DeleteFileW (wal));
   }
@@ -1033,10 +1109,10 @@ test_native_namespace_main_sidecar_lifecycle (void)
   WylFactArtifactWinTempChildBinding *temp_binding = NULL;
   WylFactArtifactWinTempToken *temp_token = NULL;
   WylFactArtifactWinTempRecoveryEvidence *temp_evidence = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
   GBytes *temp_evidence_bytes = NULL;
   GBytes *mismatched_temp_evidence_bytes = NULL;
   HANDLE main_handle = INVALID_HANDLE_VALUE;
-  HANDLE sidecar_handle = INVALID_HANDLE_VALUE;
   WylFactArtifactWinMutationEffect effect =
       WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
   WylFactArtifactSidecarRetireResult retire =
@@ -1078,21 +1154,19 @@ test_native_namespace_main_sidecar_lifecycle (void)
           &lease), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_main (lease, &main_binding),
       ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_main_binding_borrow (main_binding,
-          &main_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&main_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_main_binding_close (main_binding,
-          &main_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_main_binding_open_io_session
+      (main_binding, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   wyl_fact_artifact_win_main_binding_free (main_binding);
   main_binding = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   /* Checked close consumes only working I/O; the exact lifecycle authority
    * remains available for the one publication and later retirement. */
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_publish_no_replace
@@ -1112,28 +1186,26 @@ test_native_namespace_main_sidecar_lifecycle (void)
           WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
           "replace-sidecar", &replacement_source), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_close
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
+      (replacement_source, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_OK);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED);
   sidecar_handle = (HANDLE) 1;
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
+      (replacement_source, &session), ==, WYRELOG_E_POLICY);
   g_assert_true (sidecar_handle == INVALID_HANDLE_VALUE);
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
           &retire), ==, WYRELOG_E_OK);
@@ -1143,40 +1215,27 @@ test_native_namespace_main_sidecar_lifecycle (void)
   wyl_fact_artifact_win_sidecar_binding_free (sidecar);
   sidecar = NULL;
 
-  /* Raw close/reuse of an owner source is terminal before mutation.  The
-   * provider must neither replace the destination nor close the foreign
-   * HANDLE that inherited the stale numeric value. */
+  /* Abort is terminal before mutation; no external numeric HANDLE is part of
+   * the artifact API. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_RECOVERY, TRUE, &sidecar), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
           "raw-replace", &replacement_source), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
-  HANDLE stale_replace_handle = sidecar_handle;
-  g_assert_true (CloseHandle (sidecar_handle));
-  g_autofree gchar *replacement_foreign_path = NULL;
-  HANDLE replacement_foreign = open_scratch_file (&replacement_foreign_path);
-  g_assert_true (replacement_foreign == stale_replace_handle);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
+      (replacement_source, &session), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_session_abort (session);
+  session = NULL;
   replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
-  BY_HANDLE_FILE_INFORMATION replacement_foreign_info = { 0 };
-  g_assert_true (GetFileInformationByHandle (replacement_foreign,
-          &replacement_foreign_info));
   wyl_fact_artifact_win_temp_binding_free (replacement_source);
   replacement_source = NULL;
-  g_assert_true (GetFileInformationByHandle (replacement_foreign,
-          &replacement_foreign_info));
-  g_assert_true (CloseHandle (replacement_foreign));
-  remove_scratch_file (replacement_foreign_path);
-  replacement_foreign_path = NULL;
   g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
           &retire), ==, WYRELOG_E_OK);
   g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
@@ -1194,18 +1253,16 @@ test_native_namespace_main_sidecar_lifecycle (void)
    * sanctioned path fails closed without moving its source. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, &sidecar), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
           "pre-final", &replacement_source), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_close
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
+      (replacement_source, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   wyl_fact_artifact_win_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_PRE_FINAL_DESTINATION_SUBSTITUTE);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
@@ -1235,18 +1292,16 @@ test_native_namespace_main_sidecar_lifecycle (void)
    * terminal reconciliation evidence rather than a retryable failure. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_RECOVERY, TRUE, &sidecar), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
           "post-rename", &replacement_source), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_close
-      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
+      (replacement_source, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   wyl_fact_artifact_win_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
@@ -1283,15 +1338,14 @@ test_native_namespace_main_sidecar_lifecycle (void)
           "duckdb_temp_storage_DEFAULT-1.tmp", &temp_child), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_open (temp_child,
           &temp_binding), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_borrow
-      (temp_binding, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
+      (temp_binding, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
           &temp_retire), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (temp_retire, ==,
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_close
-      (temp_binding, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
           &temp_retire), ==, WYRELOG_E_OK);
   g_assert_cmpint (temp_retire, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
@@ -1323,33 +1377,17 @@ test_native_namespace_main_sidecar_lifecycle (void)
           &temp_retire), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (temp_retire, ==,
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_borrow
-      (temp_binding, &sidecar_handle), ==, WYRELOG_E_OK);
-  HANDLE stale_temp_handle = sidecar_handle;
-  g_assert_true (CloseHandle (sidecar_handle));
-  g_autofree gchar *foreign_path = NULL;
-  HANDLE foreign = open_scratch_file (&foreign_path);
-  g_assert_true (foreign == stale_temp_handle);
-  /* A raw numeric value, even when immediately reused, is never guardian
-   * ownership evidence.  Legacy validation fails closed without revoking the
-   * private session state; the still-open session itself remains the retire
-   * barrier. */
-  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_revalidate_handle
-      (temp_binding, foreign), ==, WYRELOG_E_POLICY);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_revalidate
-      (temp_binding), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
+      (temp_binding, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
           &temp_retire), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (temp_retire, ==,
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
-  BY_HANDLE_FILE_INFORMATION foreign_info = { 0 };
-  g_assert_true (GetFileInformationByHandle (foreign, &foreign_info));
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
   wyl_fact_artifact_win_temp_child_binding_free (temp_binding);
   temp_binding = NULL;
-  g_assert_true (GetFileInformationByHandle (foreign, &foreign_info));
-  g_assert_true (CloseHandle (foreign));
-  remove_scratch_file (foreign_path);
-  foreign_path = NULL;
   g_autofree gchar *raw_root_name = g_strdup (raw_logical
       + strlen ("/wyrelog-duckdb-temp/"));
   g_autofree gchar *raw_root_path = g_build_filename (path, raw_root_name,
@@ -1364,8 +1402,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
   temp_child = NULL;
   wyl_fact_artifact_win_temp_root_free (temp_root);
   temp_root = NULL;
-  /* Terminal revoke deliberately leaves the original artifact untouched;
-   * only the test's external cleanup (not provider authority) removes it. */
+  /* Closing the session releases the live-I/O barrier; external test cleanup
+   * removes the now-unowned artifact. */
   g_assert_true (DeleteFileW (raw_child_wide));
   g_assert_true (RemoveDirectoryW (raw_root_wide));
 
@@ -1374,21 +1412,18 @@ test_native_namespace_main_sidecar_lifecycle (void)
    * and be recovered idempotently only through a matching exclusive lease. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
           "token-old", &temp_token), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_token_borrow (temp_token,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_open_io_session (temp_token,
+          &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_token_rename_no_replace
       (temp_token, "token-next", &effect), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
-  close_io_handle (&sidecar_handle);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_token_close (temp_token,
-          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_token_rename_no_replace
       (temp_token, "token-next", &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
   /* Unlike unlink, APPLIED rename preserves the same owner authority under
    * its new closed token spelling. */
-  g_assert_cmpint (wyl_fact_artifact_win_temp_token_revalidate (temp_token),
-      ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_token_export_recovery_evidence
       (temp_token, &temp_evidence), ==, WYRELOG_E_OK);
   g_assert_nonnull (temp_evidence);
@@ -1457,30 +1492,18 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
   wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence);
   temp_evidence = NULL;
-  /* Raw close/reuse terminally revokes the owner before unlink; the provider
-   * must leave both the token and the foreign reused HANDLE untouched. */
+  /* Abort terminally revokes the owner before unlink. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
           "token-raw", &temp_token), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_artifact_win_temp_token_borrow (temp_token,
-          &sidecar_handle), ==, WYRELOG_E_OK);
-  HANDLE stale_token_handle = sidecar_handle;
-  g_assert_true (CloseHandle (sidecar_handle));
-  g_autofree gchar *token_foreign_path = NULL;
-  HANDLE token_foreign = open_scratch_file (&token_foreign_path);
-  g_assert_true (token_foreign == stale_token_handle);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_open_io_session (temp_token,
+          &session), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_io_session_abort (session);
+  session = NULL;
   g_assert_cmpint (wyl_fact_artifact_win_temp_token_unlink (temp_token,
           &effect), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
-  BY_HANDLE_FILE_INFORMATION token_foreign_info = { 0 };
-  g_assert_true (GetFileInformationByHandle (token_foreign,
-          &token_foreign_info));
   wyl_fact_artifact_win_temp_token_free (temp_token);
   temp_token = NULL;
-  g_assert_true (GetFileInformationByHandle (token_foreign,
-          &token_foreign_info));
-  g_assert_true (CloseHandle (token_foreign));
-  remove_scratch_file (token_foreign_path);
-  token_foreign_path = NULL;
   g_autofree gchar *raw_token_path = g_build_filename (path, "tmp-token-raw",
       NULL);
   g_autofree wchar_t *raw_token_wide = g_utf8_to_utf16 (raw_token_path, -1,
@@ -1545,6 +1568,12 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/adopt-close",
       test_working_handle_adopt_noninherit_close_once);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/io-session/lifetime-singleton",
+      test_private_io_session_lifetime_and_singleton);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/io-session/mutation-gate",
+      test_session_blocks_mutation_until_finish);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
       test_locator_relative_entry_lifecycle);
   g_test_add_func ("/fact/artifact-namespace/windows/locator/nested-transport",

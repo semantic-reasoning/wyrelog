@@ -92,6 +92,7 @@ struct WylFactArtifactWinBinding
   WylFactArtifactWinNamespace *namespace_;
   WylFactArtifactWinEntry *entry;
   WylFactArtifactWinWorkingHandle *working;
+  WylFactArtifactWinIoState *io_state;
   gboolean active;
 };
 
@@ -255,21 +256,34 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_working_handle_adopt (issued,
         wyl_fact_artifact_win_entry_identity (entry), &working);
+  if (rc == WYRELOG_E_OK)
+    issued = INVALID_HANDLE_VALUE;      /* adoption consumed this source exactly */
+  if (rc == WYRELOG_E_OK)
+    binding = g_try_new0 (WylFactArtifactWinBinding, 1);
+  if (rc == WYRELOG_E_OK && binding == NULL)
+    rc = WYRELOG_E_NOMEM;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_io_state_new (working, &binding->io_state);
   if (rc != WYRELOG_E_OK) {
     /* The issued duplicate is not published until adoption succeeds. */
     if (issued != INVALID_HANDLE_VALUE)
       CloseHandle (issued);
+    if (binding != NULL) {
+      if (binding->io_state != NULL)
+        wyl_fact_artifact_win_io_state_free (binding->io_state);
+      else
+        wyl_fact_artifact_win_working_handle_free (working);
+      g_free (binding);
+    } else
+      wyl_fact_artifact_win_working_handle_free (working);
     wyl_fact_artifact_win_entry_free (entry);
     return rc;
   }
-  binding = g_try_new0 (WylFactArtifactWinBinding, 1);
-  if (binding == NULL) {
-    wyl_fact_artifact_win_working_handle_free (working);
-    wyl_fact_artifact_win_entry_free (entry);
-    return WYRELOG_E_NOMEM;
-  }
   binding->namespace_ = namespace_;
   g_atomic_int_inc (&namespace_->references);
+  g_atomic_int_inc (&namespace_->references);
+  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+      namespace_, (GDestroyNotify) namespace_unref);
   binding->entry = entry;
   binding->working = working;
   binding->active = TRUE;
@@ -278,7 +292,8 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_binding_revalidate (WylFactArtifactWinBinding *binding)
+wyl_fact_artifact_win_binding_open_io_session (WylFactArtifactWinBinding
+    *binding, WylFactArtifactWinIoSession **out_session)
 {
   wyrelog_error_t rc;
   if (binding == NULL || !binding->active)
@@ -287,49 +302,9 @@ wyl_fact_artifact_win_binding_revalidate (WylFactArtifactWinBinding *binding)
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_entry_revalidate (binding->namespace_->locator,
         binding->entry);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_working_handle_revalidate (binding->working);
-  if (rc != WYRELOG_E_OK)
-    binding->active = FALSE;
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_binding_borrow (WylFactArtifactWinBinding *binding,
-    HANDLE *out_handle)
-{
-  wyrelog_error_t rc;
-  if (out_handle != NULL)
-    *out_handle = INVALID_HANDLE_VALUE;
-  if (binding == NULL || out_handle == NULL)
-    return WYRELOG_E_INVALID;
-  rc = wyl_fact_artifact_win_binding_revalidate (binding);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-      out_handle);
-  if (rc != WYRELOG_E_OK)
-    binding->active = FALSE;
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_binding_close (WylFactArtifactWinBinding *binding,
-    HANDLE *inout_handle)
-{
-  wyrelog_error_t rc;
-  if (binding == NULL || inout_handle == NULL)
-    return WYRELOG_E_INVALID;
-  rc = wyl_fact_artifact_win_binding_revalidate (binding);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_fact_artifact_win_working_handle_close (binding->working,
-      inout_handle);
-  /* A failed close may mean the raw numeric HANDLE was closed or reused just
-   * after the outer validation.  The inner binding has already failed closed;
-   * revoke this wrapper as well so it cannot be treated as lifecycle-live. */
-  binding->active = FALSE;
-  return rc;
+  return rc ==
+      WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
+      out_session) : rc;
 }
 
 void
@@ -338,7 +313,7 @@ wyl_fact_artifact_win_binding_free (WylFactArtifactWinBinding *binding)
   if (binding == NULL)
     return;
   binding->active = FALSE;
-  wyl_fact_artifact_win_working_handle_free (binding->working);
+  wyl_fact_artifact_win_io_state_free (binding->io_state);
   wyl_fact_artifact_win_entry_free (binding->entry);
   namespace_unref (binding->namespace_);
   g_free (binding);
@@ -357,6 +332,7 @@ struct WylFactArtifactWinMainBinding
 {
   WylFactArtifactWinLease *lease;
   WylFactArtifactWinWorkingHandle *working;
+  WylFactArtifactWinIoState *io_state;
   gboolean active;
 };
 
@@ -365,6 +341,7 @@ struct WylFactArtifactWinSidecarBinding
   WylFactArtifactWinLease *lease;
   WylFactArtifactWinEntry *entry;
   WylFactArtifactWinWorkingHandle *working;
+  WylFactArtifactWinIoState *io_state;
   WylFactArtifactName name;
   gboolean creator;
   gboolean active;
@@ -495,8 +472,36 @@ binding_working_new (WylFactArtifactWinNamespace *namespace_,
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_working_handle_adopt (issued,
         wyl_fact_artifact_win_entry_identity (entry), out);
+  if (rc == WYRELOG_E_OK)
+    issued = INVALID_HANDLE_VALUE;
   if (rc != WYRELOG_E_OK && issued != INVALID_HANDLE_VALUE)
     CloseHandle (issued);
+  return rc;
+}
+
+/* The state consumes the binding's private guardian reference.  Keep the raw
+ * pointer only as an implementation detail for existing revalidation code;
+ * destruction is owned by io_state so a live session can outlast its public
+ * binding object safely. */
+static wyrelog_error_t
+binding_io_new (WylFactArtifactWinNamespace *namespace_,
+    WylFactArtifactWinEntry *entry, WylFactArtifactWinWorkingHandle **working,
+    WylFactArtifactWinIoState **state)
+{
+  wyrelog_error_t rc;
+  if (working != NULL)
+    *working = NULL;
+  if (state != NULL)
+    *state = NULL;
+  if (working == NULL || state == NULL)
+    return WYRELOG_E_INVALID;
+  rc = binding_working_new (namespace_, entry, working);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_io_state_new (*working, state);
+  if (rc != WYRELOG_E_OK && *working != NULL) {
+    wyl_fact_artifact_win_working_handle_free (*working);
+    *working = NULL;
+  }
   return rc;
 }
 
@@ -515,22 +520,24 @@ wyl_fact_artifact_win_lease_open_main (WylFactArtifactWinLease *lease,
   binding = g_try_new0 (WylFactArtifactWinMainBinding, 1);
   if (binding == NULL)
     return WYRELOG_E_NOMEM;
-  rc = binding_working_new (lease->namespace_, lease->namespace_->main_entry,
-      &binding->working);
+  rc = binding_io_new (lease->namespace_, lease->namespace_->main_entry,
+      &binding->working, &binding->io_state);
   if (rc != WYRELOG_E_OK) {
     g_free (binding);
     return rc;
   }
   binding->lease = lease_ref (lease);
+  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+      lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   binding->active = TRUE;
   *out_binding = binding;
   return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_main_binding_revalidate (WylFactArtifactWinMainBinding
-    *binding)
-{
+    wyl_fact_artifact_win_main_binding_open_io_session
+    (WylFactArtifactWinMainBinding * binding,
+    WylFactArtifactWinIoSession ** out_session) {
   wyrelog_error_t rc;
   if (binding == NULL || !binding->active)
     return WYRELOG_E_POLICY;
@@ -538,38 +545,9 @@ wyl_fact_artifact_win_main_binding_revalidate (WylFactArtifactWinMainBinding
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_entry_revalidate (binding->lease->
         namespace_->locator, binding->lease->namespace_->main_entry);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_working_handle_revalidate (binding->working);
-  if (rc != WYRELOG_E_OK)
-    binding->active = FALSE;
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_main_binding_borrow (WylFactArtifactWinMainBinding
-    *binding, HANDLE *out_handle)
-{
-  wyrelog_error_t rc = wyl_fact_artifact_win_main_binding_revalidate (binding);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-      out_handle);
-  if (rc != WYRELOG_E_OK)
-    binding->active = FALSE;
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_main_binding_close (WylFactArtifactWinMainBinding
-    *binding, HANDLE *inout_handle)
-{
-  wyrelog_error_t rc = wyl_fact_artifact_win_main_binding_revalidate (binding);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  rc = wyl_fact_artifact_win_working_handle_close (binding->working,
-      inout_handle);
-  binding->active = FALSE;
-  return rc;
+  return rc ==
+      WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
+      out_session) : rc;
 }
 
 void
@@ -578,7 +556,7 @@ wyl_fact_artifact_win_main_binding_free (WylFactArtifactWinMainBinding *binding)
   if (binding == NULL)
     return;
   binding->active = FALSE;
-  wyl_fact_artifact_win_working_handle_free (binding->working);
+  wyl_fact_artifact_win_io_state_free (binding->io_state);
   /* Main bindings never outlive their exclusive lease in the native API. */
   wyl_fact_artifact_win_lease_free (binding->lease);
   g_free (binding);
@@ -640,13 +618,16 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
     return WYRELOG_E_NOMEM;
   }
   binding->lease = lease_ref (lease);
+  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+      lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   binding->entry = entry;
   binding->name = sidecar;
   binding->creator = create_new;
   binding->active = TRUE;
-  binding->io_open = TRUE;
+  binding->io_open = FALSE;     /* session state, not a raw HANDLE, gates mutation */
   g_mutex_init (&binding->mutex);
-  rc = binding_working_new (lease->namespace_, entry, &binding->working);
+  rc = binding_io_new (lease->namespace_, entry, &binding->working,
+      &binding->io_state);
   if (rc == WYRELOG_E_OK)
     rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
   if (rc != WYRELOG_E_OK) {
@@ -658,68 +639,16 @@ wyl_fact_artifact_win_lease_open_sidecar (WylFactArtifactWinLease *lease,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_win_sidecar_binding_revalidate
-    (WylFactArtifactWinSidecarBinding * binding) {
+    wyl_fact_artifact_win_sidecar_binding_open_io_session
+    (WylFactArtifactWinSidecarBinding * binding,
+    WylFactArtifactWinIoSession ** out_session) {
   wyrelog_error_t rc;
   if (binding == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
   rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
-  g_mutex_unlock (&binding->mutex);
-  return rc;
-}
-
-wyrelog_error_t
-    wyl_fact_artifact_win_sidecar_binding_revalidate_handle
-    (WylFactArtifactWinSidecarBinding * binding, HANDLE handle) {
-  if (binding == NULL || handle == INVALID_HANDLE_VALUE || handle == NULL)
-    return WYRELOG_E_INVALID;
-  /* Legacy raw-HANDLE validator cannot prove ownership after numeric reuse. */
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-    wyl_fact_artifact_win_sidecar_binding_borrow
-    (WylFactArtifactWinSidecarBinding * binding, HANDLE * out_handle) {
-  wyrelog_error_t rc;
-  if (out_handle != NULL)
-    *out_handle = INVALID_HANDLE_VALUE;
-  if (binding == NULL || out_handle == NULL)
-    return WYRELOG_E_INVALID;
-  g_mutex_lock (&binding->mutex);
-  rc = sidecar_revalidate_locked (binding, FALSE, INVALID_HANDLE_VALUE);
-  if (rc == WYRELOG_E_OK && !binding->io_open)
-    rc = WYRELOG_E_POLICY;
-  else if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_artifact_win_working_handle_revalidate (binding->working);
-    if (rc != WYRELOG_E_OK)
-      sidecar_revoke (binding);
-  }
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-        out_handle);
-  if (rc != WYRELOG_E_OK)
-    *out_handle = INVALID_HANDLE_VALUE;
-  g_mutex_unlock (&binding->mutex);
-  return rc;
-}
-
-wyrelog_error_t
-    wyl_fact_artifact_win_sidecar_binding_close
-    (WylFactArtifactWinSidecarBinding * binding, HANDLE * inout_handle) {
-  wyrelog_error_t rc;
-  if (binding == NULL || inout_handle == NULL)
-    return WYRELOG_E_INVALID;
-  g_mutex_lock (&binding->mutex);
-  rc = sidecar_revalidate_locked (binding, TRUE, INVALID_HANDLE_VALUE);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_artifact_win_working_handle_close (binding->working,
-        inout_handle);
-    if (rc == WYRELOG_E_OK)
-      binding->io_open = FALSE;
-    else
-      sidecar_revoke (binding);
-  }
+    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
   g_mutex_unlock (&binding->mutex);
   return rc;
 }
@@ -736,8 +665,9 @@ wyrelog_error_t
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
   if (!binding->active || !binding->creator || binding->name == destination
-      || binding->io_open) {
-    if (binding->io_open
+      || wyl_fact_artifact_win_io_state_has_session (binding->io_state)
+      || wyl_fact_artifact_win_io_state_is_aborted (binding->io_state)) {
+    if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)
         && wyl_fact_artifact_win_working_handle_revalidate (binding->working)
         != WYRELOG_E_OK)
       sidecar_revoke (binding);
@@ -786,8 +716,10 @@ wyrelog_error_t
   if (binding == NULL || out_result == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
-  if (!binding->active || binding->io_open) {
-    if (binding->io_open
+  if (!binding->active
+      || wyl_fact_artifact_win_io_state_has_session (binding->io_state)
+      || wyl_fact_artifact_win_io_state_is_aborted (binding->io_state)) {
+    if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)
         && wyl_fact_artifact_win_working_handle_revalidate (binding->working)
         != WYRELOG_E_OK)
       sidecar_revoke (binding);
@@ -826,7 +758,7 @@ void wyl_fact_artifact_win_sidecar_binding_free
     return;
   g_mutex_lock (&binding->mutex);
   sidecar_revoke (binding);
-  wyl_fact_artifact_win_working_handle_free (binding->working);
+  wyl_fact_artifact_win_io_state_free (binding->io_state);
   wyl_fact_artifact_win_entry_free (binding->entry);
   g_mutex_unlock (&binding->mutex);
   g_mutex_clear (&binding->mutex);
@@ -843,6 +775,7 @@ struct WylFactArtifactWinTempBinding
   WylFactArtifactWinLease *lease;
   WylFactArtifactWinEntry *entry;
   WylFactArtifactWinWorkingHandle *working;
+  WylFactArtifactWinIoState *io_state;
   gboolean active;
   gboolean io_open;
   GMutex mutex;
@@ -912,61 +845,35 @@ wyl_fact_artifact_win_lease_create_temp_binding (WylFactArtifactWinLease *lease,
   rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator, name,
       GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &binding->entry);
   if (rc == WYRELOG_E_OK)
-    rc = binding_working_new (lease->namespace_, binding->entry,
-        &binding->working);
+    rc = binding_io_new (lease->namespace_, binding->entry,
+        &binding->working, &binding->io_state);
   if (rc != WYRELOG_E_OK) {
-    wyl_fact_artifact_win_working_handle_free (binding->working);
+    wyl_fact_artifact_win_io_state_free (binding->io_state);
     wyl_fact_artifact_win_entry_free (binding->entry);
     g_free (binding);
     return rc;
   }
   binding->lease = lease_ref (lease);
+  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+      lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   binding->active = TRUE;
-  binding->io_open = TRUE;
+  binding->io_open = FALSE;
   g_mutex_init (&binding->mutex);
   *out_binding = binding;
   return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_temp_binding_borrow (WylFactArtifactWinTempBinding
-    *binding, HANDLE *out_handle)
-{
+    wyl_fact_artifact_win_temp_binding_open_io_session
+    (WylFactArtifactWinTempBinding * binding,
+    WylFactArtifactWinIoSession ** out_session) {
   wyrelog_error_t rc;
-  if (out_handle != NULL)
-    *out_handle = INVALID_HANDLE_VALUE;
-  if (binding == NULL || out_handle == NULL)
+  if (binding == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&binding->mutex);
   rc = replacement_temp_check_locked (binding, FALSE, INVALID_HANDLE_VALUE);
-  if (rc == WYRELOG_E_OK && !binding->io_open)
-    rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-        out_handle);
-  if (rc != WYRELOG_E_OK)
-    *out_handle = INVALID_HANDLE_VALUE;
-  g_mutex_unlock (&binding->mutex);
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_temp_binding_close (WylFactArtifactWinTempBinding
-    *binding, HANDLE *inout_handle)
-{
-  wyrelog_error_t rc;
-  if (binding == NULL || inout_handle == NULL)
-    return WYRELOG_E_INVALID;
-  g_mutex_lock (&binding->mutex);
-  rc = replacement_temp_check_locked (binding, TRUE, INVALID_HANDLE_VALUE);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_artifact_win_working_handle_close (binding->working,
-        inout_handle);
-    if (rc == WYRELOG_E_OK)
-      binding->io_open = FALSE;
-    else
-      replacement_temp_revoke (binding);
-  }
+    rc = wyl_fact_artifact_win_io_session_open (binding->io_state, out_session);
   g_mutex_unlock (&binding->mutex);
   return rc;
 }
@@ -987,13 +894,21 @@ wyrelog_error_t
     return WYRELOG_E_POLICY;
   g_mutex_lock (&source->mutex);
   g_mutex_lock (&destination->mutex);
-  if (!source->active || source->io_open || !destination->active
-      || destination->io_open || !destination->lease->exclusive) {
-    if (source->io_open && wyl_fact_artifact_win_working_handle_revalidate
-        (source->working) != WYRELOG_E_OK)
+  if (!source->active
+      || wyl_fact_artifact_win_io_state_has_session (source->io_state)
+      || wyl_fact_artifact_win_io_state_is_aborted (source->io_state)
+      || !destination->active
+      || wyl_fact_artifact_win_io_state_has_session (destination->io_state)
+      || wyl_fact_artifact_win_io_state_is_aborted (destination->io_state)
+      || !destination->lease->exclusive) {
+    if (wyl_fact_artifact_win_io_state_has_session (source->io_state)
+        && wyl_fact_artifact_win_working_handle_revalidate (source->working) !=
+        WYRELOG_E_OK)
       replacement_temp_revoke (source);
-    if (destination->io_open && wyl_fact_artifact_win_working_handle_revalidate
-        (destination->working) != WYRELOG_E_OK)
+    if (wyl_fact_artifact_win_io_state_has_session (destination->io_state)
+        &&
+        wyl_fact_artifact_win_working_handle_revalidate (destination->working)
+        != WYRELOG_E_OK)
       sidecar_revoke (destination);
     rc = WYRELOG_E_POLICY;
     goto out;
@@ -1089,7 +1004,7 @@ wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *binding)
     return;
   g_mutex_lock (&binding->mutex);
   replacement_temp_revoke (binding);
-  wyl_fact_artifact_win_working_handle_free (binding->working);
+  wyl_fact_artifact_win_io_state_free (binding->io_state);
   wyl_fact_artifact_win_entry_free (binding->entry);
   g_mutex_unlock (&binding->mutex);
   g_mutex_clear (&binding->mutex);
@@ -1107,6 +1022,7 @@ struct WylFactArtifactWinTempToken
   WylFactArtifactWinLease *lease;
   WylFactArtifactWinEntry *entry;
   WylFactArtifactWinWorkingHandle *working;
+  WylFactArtifactWinIoState *io_state;
   gchar *token;
   gboolean active;
   gboolean io_open;
@@ -1191,79 +1107,42 @@ wyl_fact_artifact_win_lease_create_temp_token (WylFactArtifactWinLease *lease,
   rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator, name,
       GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &token->entry);
   if (rc == WYRELOG_E_OK)
-    rc = binding_working_new (lease->namespace_, token->entry, &token->working);
+    rc = binding_io_new (lease->namespace_, token->entry, &token->working,
+        &token->io_state);
   if (rc != WYRELOG_E_OK) {
-    wyl_fact_artifact_win_working_handle_free (token->working);
+    wyl_fact_artifact_win_io_state_free (token->io_state);
     wyl_fact_artifact_win_entry_free (token->entry);
     g_free (token);
     return rc;
   }
   token->token = g_strdup (token_name);
   if (token->token == NULL) {
-    wyl_fact_artifact_win_working_handle_free (token->working);
+    wyl_fact_artifact_win_io_state_free (token->io_state);
     wyl_fact_artifact_win_entry_free (token->entry);
     g_free (token);
     return WYRELOG_E_NOMEM;
   }
   token->lease = lease_ref (lease);
+  wyl_fact_artifact_win_io_state_retain_lifetime (token->io_state,
+      lease_ref (lease), (GDestroyNotify) wyl_fact_artifact_win_lease_free);
   token->active = TRUE;
-  token->io_open = TRUE;
+  token->io_open = FALSE;
   g_mutex_init (&token->mutex);
   *out_token = token;
   return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_temp_token_revalidate (WylFactArtifactWinTempToken *token)
+wyl_fact_artifact_win_temp_token_open_io_session (WylFactArtifactWinTempToken
+    *token, WylFactArtifactWinIoSession **out_session)
 {
   wyrelog_error_t rc;
   if (token == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&token->mutex);
   rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
-  g_mutex_unlock (&token->mutex);
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_temp_token_borrow (WylFactArtifactWinTempToken *token,
-    HANDLE *out_handle)
-{
-  wyrelog_error_t rc;
-  if (out_handle != NULL)
-    *out_handle = INVALID_HANDLE_VALUE;
-  if (token == NULL || out_handle == NULL)
-    return WYRELOG_E_INVALID;
-  g_mutex_lock (&token->mutex);
-  rc = temp_token_check_locked (token, FALSE, INVALID_HANDLE_VALUE);
-  if (rc == WYRELOG_E_OK && !token->io_open)
-    rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_working_handle_borrow (token->working,
-        out_handle);
-  if (rc != WYRELOG_E_OK)
-    *out_handle = INVALID_HANDLE_VALUE;
-  g_mutex_unlock (&token->mutex);
-  return rc;
-}
-
-wyrelog_error_t
-wyl_fact_artifact_win_temp_token_close (WylFactArtifactWinTempToken *token,
-    HANDLE *inout_handle)
-{
-  wyrelog_error_t rc;
-  if (token == NULL || inout_handle == NULL)
-    return WYRELOG_E_INVALID;
-  g_mutex_lock (&token->mutex);
-  rc = temp_token_check_locked (token, TRUE, INVALID_HANDLE_VALUE);
-  if (rc == WYRELOG_E_OK) {
-    rc = wyl_fact_artifact_win_working_handle_close (token->working,
-        inout_handle);
-    if (rc == WYRELOG_E_OK)
-      token->io_open = FALSE;
-    else
-      temp_token_revoke (token);
-  }
+    rc = wyl_fact_artifact_win_io_session_open (token->io_state, out_session);
   g_mutex_unlock (&token->mutex);
   return rc;
 }
@@ -1283,7 +1162,8 @@ wyrelog_error_t
   if (destination == NULL || g_strcmp0 (token->token, destination_token) == 0)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&token->mutex);
-  if (token->io_open) {
+  if (wyl_fact_artifact_win_io_state_has_session (token->io_state)
+      || wyl_fact_artifact_win_io_state_is_aborted (token->io_state)) {
     if (wyl_fact_artifact_win_working_handle_revalidate (token->working)
         != WYRELOG_E_OK)
       temp_token_revoke (token);
@@ -1334,7 +1214,8 @@ wyl_fact_artifact_win_temp_token_unlink (WylFactArtifactWinTempToken *token,
   if (token == NULL || out_effect == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&token->mutex);
-  if (token->io_open) {
+  if (wyl_fact_artifact_win_io_state_has_session (token->io_state)
+      || wyl_fact_artifact_win_io_state_is_aborted (token->io_state)) {
     if (wyl_fact_artifact_win_working_handle_revalidate (token->working)
         != WYRELOG_E_OK)
       temp_token_revoke (token);
@@ -1544,7 +1425,7 @@ wyl_fact_artifact_win_temp_token_free (WylFactArtifactWinTempToken *token)
     return;
   g_mutex_lock (&token->mutex);
   temp_token_revoke (token);
-  wyl_fact_artifact_win_working_handle_free (token->working);
+  wyl_fact_artifact_win_io_state_free (token->io_state);
   wyl_fact_artifact_win_entry_free (token->entry);
   g_mutex_unlock (&token->mutex);
   g_mutex_clear (&token->mutex);
@@ -1577,6 +1458,7 @@ struct WylFactArtifactWinTempChildBinding
 {
   WylFactArtifactWinTempChild *child;
   WylFactArtifactWinWorkingHandle *working;
+  WylFactArtifactWinIoState *io_state;
   gboolean active;
   gboolean io_open;
 };
@@ -1840,16 +1722,27 @@ wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *child,
   }
   rc = wyl_fact_artifact_win_working_handle_adopt (issued,
       wyl_fact_artifact_win_entry_identity (child->entry), &binding->working);
+  if (rc == WYRELOG_E_OK)
+    issued = INVALID_HANDLE_VALUE;
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_io_state_new (binding->working,
+        &binding->io_state);
   if (rc != WYRELOG_E_OK) {
-    CloseHandle (issued);
+    if (binding->io_state != NULL)
+      wyl_fact_artifact_win_io_state_free (binding->io_state);
+    else if (binding->working != NULL)
+      wyl_fact_artifact_win_working_handle_free (binding->working);
+    else if (issued != INVALID_HANDLE_VALUE)
+      CloseHandle (issued);
     g_free (binding);
     g_mutex_unlock (&child->mutex);
     return rc;
   }
   binding->child = temp_child_ref (child);
+  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+      temp_child_ref (child), (GDestroyNotify) temp_child_unref);
   binding->active = TRUE;
-  binding->io_open = TRUE;
-  child->io_open++;
+  binding->io_open = FALSE;
   g_ptr_array_add (child->bindings, binding);
   *out_binding = binding;
   g_mutex_unlock (&child->mutex);
@@ -1857,65 +1750,14 @@ wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *child,
 }
 
 wyrelog_error_t
-    wyl_fact_artifact_win_temp_child_binding_revalidate
-    (WylFactArtifactWinTempChildBinding * binding) {
-  return temp_binding_check (binding, FALSE, INVALID_HANDLE_VALUE);
-}
-
-wyrelog_error_t
-    wyl_fact_artifact_win_temp_child_binding_revalidate_handle
-    (WylFactArtifactWinTempChildBinding * binding, HANDLE handle) {
-  if (handle == NULL || handle == INVALID_HANDLE_VALUE)
-    return WYRELOG_E_INVALID;
-  /* Legacy raw-HANDLE validation cannot distinguish same-object reuse. */
-  return WYRELOG_E_POLICY;
-}
-
-wyrelog_error_t
-    wyl_fact_artifact_win_temp_child_binding_borrow
-    (WylFactArtifactWinTempChildBinding * binding, HANDLE * out_handle) {
-  wyrelog_error_t rc;
-  if (out_handle != NULL)
-    *out_handle = INVALID_HANDLE_VALUE;
-  if (binding == NULL || out_handle == NULL)
-    return WYRELOG_E_INVALID;
-  rc = temp_binding_check (binding, FALSE, INVALID_HANDLE_VALUE);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  g_mutex_lock (&binding->child->mutex);
-  if (!binding->io_open)
-    rc = WYRELOG_E_POLICY;
-  else
-    rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
-        out_handle);
-  if (rc != WYRELOG_E_OK)
-    temp_binding_revoke (binding);
-  g_mutex_unlock (&binding->child->mutex);
-  if (rc != WYRELOG_E_OK)
-    *out_handle = INVALID_HANDLE_VALUE;
-  return rc;
-}
-
-wyrelog_error_t
-    wyl_fact_artifact_win_temp_child_binding_close
-    (WylFactArtifactWinTempChildBinding * binding, HANDLE * inout_handle) {
-  wyrelog_error_t rc;
-  if (binding == NULL || inout_handle == NULL)
-    return WYRELOG_E_INVALID;
-  rc = temp_binding_check (binding, TRUE, INVALID_HANDLE_VALUE);
-  if (rc != WYRELOG_E_OK)
-    return rc;
-  g_mutex_lock (&binding->child->mutex);
-  rc = wyl_fact_artifact_win_working_handle_close (binding->working,
-      inout_handle);
-  if (rc == WYRELOG_E_OK) {
-    if (binding->io_open && binding->child->io_open > 0)
-      binding->child->io_open--;
-    binding->io_open = FALSE;
-  } else
-    temp_binding_revoke (binding);
-  g_mutex_unlock (&binding->child->mutex);
-  return rc;
+    wyl_fact_artifact_win_temp_child_binding_open_io_session
+    (WylFactArtifactWinTempChildBinding * binding,
+    WylFactArtifactWinIoSession ** out_session) {
+  wyrelog_error_t rc = temp_binding_check (binding, FALSE,
+      INVALID_HANDLE_VALUE);
+  return rc ==
+      WYRELOG_E_OK ? wyl_fact_artifact_win_io_session_open (binding->io_state,
+      out_session) : rc;
 }
 
 void wyl_fact_artifact_win_temp_child_binding_free
@@ -1926,10 +1768,10 @@ void wyl_fact_artifact_win_temp_child_binding_free
     return;
   child = binding->child;
   g_mutex_lock (&child->mutex);
-  if (binding->io_open)
+  if (wyl_fact_artifact_win_io_state_has_session (binding->io_state))
     temp_binding_revoke (binding);
   g_ptr_array_remove (child->bindings, binding);
-  wyl_fact_artifact_win_working_handle_free (binding->working);
+  wyl_fact_artifact_win_io_state_free (binding->io_state);
   g_mutex_unlock (&child->mutex);
   temp_child_unref (child);
   g_free (binding);
@@ -1947,13 +1789,13 @@ wyl_fact_artifact_win_temp_child_retire (WylFactArtifactWinTempChild *child,
   if (child == NULL || out_result == NULL)
     return WYRELOG_E_INVALID;
   g_mutex_lock (&child->mutex);
-  if (child->io_open != 0 || child->io_terminal) {
+  if (child->io_terminal) {
     /* A raw close/reuse is observable before mutation.  Do not delete and do
      * not risk a close on its caller-owned, now foreign HANDLE. */
     for (guint i = 0; i < child->bindings->len; i++) {
       WylFactArtifactWinTempChildBinding *binding = g_ptr_array_index
           (child->bindings, i);
-      if (binding->io_open
+      if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)
           && wyl_fact_artifact_win_working_handle_revalidate (binding->working)
           != WYRELOG_E_OK)
         temp_binding_revoke (binding);
@@ -1961,6 +1803,14 @@ wyl_fact_artifact_win_temp_child_retire (WylFactArtifactWinTempChild *child,
     rc = WYRELOG_E_POLICY;
     g_mutex_unlock (&child->mutex);
     return rc;
+  }
+  for (guint i = 0; i < child->bindings->len; i++) {
+    WylFactArtifactWinTempChildBinding *binding = g_ptr_array_index
+        (child->bindings, i);
+    if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)) {
+      g_mutex_unlock (&child->mutex);
+      return WYRELOG_E_POLICY;
+    }
   }
   rc = temp_child_check (child);
   if (rc == WYRELOG_E_OK)
