@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-locator-private.h"
 #include "fact/root-writer-lease-private.h"
+#include "wyl-id-private.h"
 
 #ifdef G_OS_WIN32
 #include <aclapi.h>
@@ -189,6 +190,37 @@ identity_equal (const WylFactGraphWinIdentity *left,
 {
   return left->volume_serial == right->volume_serial
       && memcmp (left->file_id, right->file_id, sizeof left->file_id) == 0;
+}
+
+static gboolean
+operation_evidence_is_valid (const WylFactGraphWinOperationEvidence *evidence)
+{
+  static const WylFactGraphWinIdentity zero = { 0 };
+  return evidence != NULL
+      && evidence->version == WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION
+      && !identity_equal (&evidence->graph_identity, &zero)
+      && !identity_equal (&evidence->artifact_identity, &zero);
+}
+
+static gboolean
+operation_evidence_equal (const WylFactGraphWinOperationEvidence *left,
+    const WylFactGraphWinOperationEvidence *right)
+{
+  return operation_evidence_is_valid (left)
+      && operation_evidence_is_valid (right)
+      && identity_equal (&left->graph_identity, &right->graph_identity)
+      && identity_equal (&left->artifact_identity, &right->artifact_identity);
+}
+
+static void
+operation_evidence_init (WylFactGraphWinOperationEvidence *out_evidence,
+    const WylFactGraphWinIdentity *graph_identity,
+    const WylFactGraphWinIdentity *artifact_identity)
+{
+  memset (out_evidence, 0, sizeof *out_evidence);
+  out_evidence->version = WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION;
+  out_evidence->graph_identity = *graph_identity;
+  out_evidence->artifact_identity = *artifact_identity;
 }
 
 static wyrelog_error_t
@@ -1629,8 +1661,67 @@ wyl_fact_graph_directory_secure_file_mode (WylFactGraphDirectory *directory,
   return rc;
 }
 
-/* The retained POSIX hard-link pair has no equivalent Windows contract yet.
- * Keep the cross-platform declaration fail-closed until it does. */
+static wyrelog_error_t
+provisioning_stage_name_from_operation (const gchar *operation_uuid,
+    gchar **out_stage_basename)
+{
+  if (out_stage_basename != NULL)
+    *out_stage_basename = NULL;
+  if (operation_uuid == NULL || out_stage_basename == NULL)
+    return WYRELOG_E_INVALID;
+  wyl_id_t id;
+  gchar canonical[WYL_ID_STRING_BUF];
+  if (wyl_id_parse (operation_uuid, &id) != WYRELOG_E_OK
+      || wyl_id_format (&id, canonical, sizeof canonical) != WYRELOG_E_OK
+      || g_strcmp0 (operation_uuid, canonical) != 0)
+    return WYRELOG_E_INVALID;
+  gchar *name = g_strdup_printf ("provision-%s.sqlite", canonical);
+  if (name == NULL)
+    return WYRELOG_E_NOMEM;
+  if (!utf8_component_is_safe (name)) {
+    g_free (name);
+    return WYRELOG_E_INTERNAL;
+  }
+  *out_stage_basename = name;
+  return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+exact_stage_names_validate (WylFactGraphDirectory *directory,
+    const gchar *stage_basename)
+{
+  if (directory == NULL || !utf8_component_is_safe (stage_basename)
+      || g_strcmp0 (stage_basename, "facts.duckdb") == 0)
+    return WYRELOG_E_INVALID;
+  return directory_revalidate (directory);
+}
+
+static wyrelog_error_t
+exact_stage_populate (WylFactGraphDirectory *directory, HANDLE handle,
+    const gchar *stage_basename, WylFactGraphWinIdentity *identity,
+    WylFactGraphStage *out_stage)
+{
+  wyrelog_error_t rc = revalidate_named_regular (directory, stage_basename,
+      handle, identity, TRUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  out_stage->stage_basename = try_strdup (stage_basename);
+  out_stage->final_basename = try_strdup ("facts.duckdb");
+  if (out_stage->stage_basename == NULL || out_stage->final_basename == NULL) {
+    g_clear_pointer (&out_stage->stage_basename, g_free);
+    g_clear_pointer (&out_stage->final_basename, g_free);
+    return WYRELOG_E_NOMEM;
+  }
+  out_stage->identity = *identity;
+  out_stage->graph_identity = directory->graph_identity;
+  operation_evidence_init (&out_stage->operation_evidence,
+      &directory->graph_identity, identity);
+  out_stage->exact_provisioning_stage = TRUE;
+  return WYRELOG_E_OK;
+}
+
+/* The POSIX retained hard-link pair is deliberately not a Windows fallback.
+ * Native callers must supply operation evidence to adopt the fixed final. */
 wyrelog_error_t
     wyl_fact_graph_directory_open_provisioned_final_exact
     (WylFactGraphDirectory * directory, const gchar * operation_uuid,
@@ -1643,19 +1734,51 @@ wyrelog_error_t
   return WYRELOG_E_POLICY;
 }
 
-/* Exact-name recovery is intentionally fail-closed on Windows until the
- * native reparse-point, hard-link, and ACL identity contract is implemented.
- * Keep the cross-platform symbols defined so callers cannot fall back to the
- * random-name staging primitive by accident. */
 wyrelog_error_t
 wyl_fact_graph_directory_stage_create_exact (WylFactGraphDirectory *directory,
     const gchar *operation_uuid, WylFactGraphStage *out_stage)
 {
-  if (out_stage != NULL)
-    *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
-  (void) directory;
-  (void) operation_uuid;
-  return out_stage == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+  if (out_stage == NULL)
+    return WYRELOG_E_INVALID;
+  *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  g_autofree gchar *stage_basename = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+      &stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_names_validate (directory, stage_basename);
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity identity = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular (directory->graph_handle, stage_basename,
+        GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, TRUE, &handle, &identity);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_populate (directory, handle, stage_basename, &identity,
+        out_stage);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-created", directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = flush_directory (directory->graph_handle);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-create-parent-synced",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  if (rc == WYRELOG_E_OK) {
+    gint fd = _open_osfhandle ((intptr_t) handle, _O_BINARY | _O_RDWR);
+    if (fd < 0)
+      rc = WYRELOG_E_IO;
+    else {
+      handle = INVALID_HANDLE_VALUE;
+      out_stage->fd = fd;
+    }
+  }
+  if (handle_is_valid (handle))
+    CloseHandle (handle);
+  if (rc != WYRELOG_E_OK) {
+    /* Never delete an exact name after a failed boundary validation. */
+    wyl_fact_graph_stage_clear (out_stage);
+  }
+  return rc;
 }
 
 wyrelog_error_t
@@ -1667,6 +1790,19 @@ wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
   (void) directory;
   (void) operation_uuid;
   return out_stage == NULL ? WYRELOG_E_INVALID : WYRELOG_E_POLICY;
+}
+
+wyrelog_error_t
+wyl_fact_graph_stage_get_windows_operation_evidence (const WylFactGraphStage
+    *stage, WylFactGraphWinOperationEvidence *out_evidence)
+{
+  if (out_evidence != NULL)
+    memset (out_evidence, 0, sizeof *out_evidence);
+  if (stage == NULL || out_evidence == NULL || stage->fd < 0
+      || !operation_evidence_is_valid (&stage->operation_evidence))
+    return WYRELOG_E_INVALID;
+  *out_evidence = stage->operation_evidence;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t

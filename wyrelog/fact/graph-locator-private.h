@@ -22,6 +22,19 @@ typedef struct
   guint64 volume_serial;
   guint8 file_id[16];
 } WylFactGraphWinIdentity;
+
+/* Private, versioned locator evidence for a Windows provisioning operation.
+ * UUIDv7 selects the operation-derived stage component, but it is not file
+ * provenance: callers persist this tuple before they may later reopen a
+ * stage or adopt `facts.duckdb`.  It intentionally exposes neither a path
+ * nor a HANDLE. */
+#define WYL_FACT_GRAPH_WIN_OPERATION_EVIDENCE_VERSION 1u
+typedef struct
+{
+  guint version;
+  WylFactGraphWinIdentity graph_identity;
+  WylFactGraphWinIdentity artifact_identity;
+} WylFactGraphWinOperationEvidence;
 #endif
 
 typedef struct
@@ -91,6 +104,7 @@ typedef struct
 #ifdef G_OS_WIN32
   WylFactGraphWinIdentity identity;
   WylFactGraphWinIdentity graph_identity;
+  WylFactGraphWinOperationEvidence operation_evidence;
 #else
   guint64 device;
   guint64 inode;
@@ -168,6 +182,31 @@ wyrelog_error_t wyl_fact_graph_directory_stage_create_exact
 wyrelog_error_t wyl_fact_graph_directory_stage_open_exact
     (WylFactGraphDirectory * directory, const gchar * operation_uuid,
     WylFactGraphStage * out_stage);
+#ifdef G_OS_WIN32
+/* Return the versioned evidence minted by exact stage creation/reopen.  This
+ * is private locator metadata; #544 owns its durable record and ordering. */
+wyrelog_error_t wyl_fact_graph_stage_get_windows_operation_evidence
+    (const WylFactGraphStage * stage,
+    WylFactGraphWinOperationEvidence * out_evidence);
+/* Reopen only the canonical UUIDv7-derived stage after exact equality with
+ * durable operation evidence.  UUID-only stage reopen remains fail-closed on
+ * Windows because a name does not establish provenance. */
+wyrelog_error_t wyl_fact_graph_directory_stage_open_exact_with_evidence
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphWinOperationEvidence * expected_evidence,
+    WylFactGraphStage * out_stage);
+/* Open the fixed native final only after exact evidence equality.  This is
+ * the Windows replacement for the POSIX retained hard-link-pair API. */
+wyrelog_error_t wyl_fact_graph_directory_open_provisioned_final_with_evidence
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphWinOperationEvidence * expected_evidence,
+    WylFactGraphRegularFile * out_final);
+/* Publish the evidence-bound exact stage with a no-replace native rename.
+ * The expected tuple must be the same tuple returned at stage creation. */
+wyrelog_error_t wyl_fact_graph_stage_publish_with_evidence
+    (WylFactGraphDirectory * directory, WylFactGraphStage * stage,
+    const WylFactGraphWinOperationEvidence * expected_evidence);
+#endif
 /* Open the intentionally retained `stage + facts.duckdb` provisioning pair.
  * The operation UUID is canonical UUIDv7 and derives both names internally.
  * This is read-only and accepts only a secure nlink=2 pair whose two names
