@@ -1134,15 +1134,23 @@ wyrelog_error_t
   wyl_fact_artifact_win_io_state_free (old_source_state);
   wyl_fact_artifact_win_io_state_free (old_destination_state);
   wyl_fact_artifact_win_entry_free (replaced_entry);
-  rc = binding_io_new (destination->lease->namespace_, destination->entry,
-      &destination->working, &destination->io_state);
-  if (rc == WYRELOG_E_OK)
-    rc = io_state_attach_entry_validator (destination->io_state,
-        destination->lease, destination->entry);
-  if (rc != WYRELOG_E_OK) {
-    sidecar_revoke (destination);
-    *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED;
-    goto out;
+  {
+    /* |rc| can already carry the allocation failure the transport reported
+     * alongside an APPLIED rename.  Overwriting it here would launder that
+     * into whatever the follow-on state minting happens to report, so keep
+     * the first evidence and only fold in a later failure. */
+    wyrelog_error_t minted = binding_io_new (destination->lease->namespace_,
+        destination->entry, &destination->working, &destination->io_state);
+    if (minted == WYRELOG_E_OK)
+      minted = io_state_attach_entry_validator (destination->io_state,
+          destination->lease, destination->entry);
+    if (rc == WYRELOG_E_OK)
+      rc = minted;
+    if (minted != WYRELOG_E_OK) {
+      sidecar_revoke (destination);
+      *out_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED;
+      goto out;
+    }
   }
   {
     wyrelog_error_t post = win_namespace_fault_take
