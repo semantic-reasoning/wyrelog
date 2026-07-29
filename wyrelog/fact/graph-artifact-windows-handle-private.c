@@ -94,6 +94,15 @@ session_check (WylFactArtifactWinIoSession *session)
   if (session == NULL || !session->active
       || session->handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
+  /* aborted is a one-way session revocation bit.  Guard both observation and
+   * the failure transition below: restoring a substituted association must
+   * never make this session usable again. */
+  g_mutex_lock (&session->state->mutex);
+  if (session->state->aborted) {
+    g_mutex_unlock (&session->state->mutex);
+    return WYRELOG_E_POLICY;
+  }
+  g_mutex_unlock (&session->state->mutex);
   rc = wyl_fact_artifact_win_working_handle_revalidate (session->
       state->working);
   if (rc == WYRELOG_E_OK && session->state->validator != NULL)

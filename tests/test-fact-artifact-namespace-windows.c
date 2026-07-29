@@ -1136,6 +1136,11 @@ test_live_session_source_substitution_is_policy (void)
    * retained validator must fail the canonical source association before I/O. */
   g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
       WYRELOG_E_POLICY);
+  /* The exact FileId/name may come back, but a session that observed an
+   * association failure remains terminally revoked. */
+  g_assert_true (MoveFileExW (outside_wide, wal_wide, MOVEFILE_WRITE_THROUGH));
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
+      WYRELOG_E_POLICY);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
   wyl_fact_artifact_win_sidecar_binding_free (sidecar);
@@ -1147,7 +1152,7 @@ test_live_session_source_substitution_is_policy (void)
   main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
   lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
   directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
-  g_assert_true (DeleteFileW (outside_wide));
+  g_assert_true (DeleteFileW (wal_wide));
   g_assert_true (DeleteFileW (main_wide));
   g_assert_true (DeleteFileW (lock_wide));
   g_assert_true (RemoveDirectoryW (directory_wide));
