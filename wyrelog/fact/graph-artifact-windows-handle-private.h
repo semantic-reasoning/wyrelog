@@ -16,6 +16,46 @@ G_BEGIN_DECLS
  * raw CloseHandle/reuse of an I/O value can never make the namespace close or
  * validate a foreign object. */
 typedef struct WylFactArtifactWinWorkingHandle WylFactArtifactWinWorkingHandle;
+typedef struct WylFactArtifactWinIoState WylFactArtifactWinIoState;
+typedef struct WylFactArtifactWinIoSession WylFactArtifactWinIoSession;
+
+/* A WinIoSession is the only Windows artifact I/O surface.  It deliberately
+ * contains the private duplicate itself: neither the guardian nor a session
+ * handle is ever returned to a caller.  One state admits at most one live
+ * session.  The state retains the guardian until both its binding and its
+ * session have released it, which makes binding/lease teardown safe while an
+ * operation is in flight. */
+wyrelog_error_t wyl_fact_artifact_win_io_state_new
+    (WylFactArtifactWinWorkingHandle *, WylFactArtifactWinIoState **);
+/* Attach one already-retained owner reference (normally binding→lease or
+ * binding→namespace).  The state consumes that reference exactly once, only
+ * after the binding and every session reference have gone away. */
+void wyl_fact_artifact_win_io_state_retain_lifetime
+    (WylFactArtifactWinIoState *, gpointer owner, GDestroyNotify owner_unref);
+void wyl_fact_artifact_win_io_state_free (WylFactArtifactWinIoState *);
+gboolean wyl_fact_artifact_win_io_state_has_session
+    (WylFactArtifactWinIoState *);
+gboolean wyl_fact_artifact_win_io_state_is_aborted
+    (WylFactArtifactWinIoState *);
+wyrelog_error_t wyl_fact_artifact_win_io_session_open
+    (WylFactArtifactWinIoState *, WylFactArtifactWinIoSession **);
+wyrelog_error_t wyl_fact_artifact_win_io_session_read
+    (WylFactArtifactWinIoSession *, guint64, gpointer, gsize, gsize *);
+wyrelog_error_t wyl_fact_artifact_win_io_session_write
+    (WylFactArtifactWinIoSession *, guint64, gconstpointer, gsize, gsize *);
+wyrelog_error_t wyl_fact_artifact_win_io_session_seek
+    (WylFactArtifactWinIoSession *, gint64, DWORD, guint64 *);
+wyrelog_error_t wyl_fact_artifact_win_io_session_size
+    (WylFactArtifactWinIoSession *, guint64 *);
+wyrelog_error_t wyl_fact_artifact_win_io_session_truncate
+    (WylFactArtifactWinIoSession *, guint64);
+wyrelog_error_t wyl_fact_artifact_win_io_session_flush
+    (WylFactArtifactWinIoSession *);
+/* finish and abort both close only the private session duplicate.  They never
+ * inspect, validate, or close a caller-supplied numeric HANDLE. */
+wyrelog_error_t wyl_fact_artifact_win_io_session_finish
+    (WylFactArtifactWinIoSession *);
+void wyl_fact_artifact_win_io_session_abort (WylFactArtifactWinIoSession *);
 
 /* Adopt one already-open regular-file HANDLE.  The binding records the exact
  * FILE_ID_INFO identity, clears inheritance before publishing it, and takes
