@@ -1796,8 +1796,9 @@ wyl_daemon_http_replace_session_for_test (SoupServer *server,
 }
 
 gboolean
-wyl_daemon_http_seed_human_session_for_test (SoupServer *server,
-    const gchar *session_id, const gchar *subject, const gchar *tenant)
+wyl_daemon_http_seed_human_session_with_state_for_test (SoupServer *server,
+    const gchar *session_id, const gchar *subject, const gchar *tenant,
+    wyl_session_state_t state)
 {
   WylDaemonHttpContext *ctx = wyl_daemon_http_get_context (server);
   wyl_id_t id = WYL_ID_NIL;
@@ -1808,9 +1809,17 @@ wyl_daemon_http_seed_human_session_for_test (SoupServer *server,
   session->id = id;
   session->username = g_strdup (subject);
   session->tenant = g_strdup (tenant);
-  session->state = WYL_SESSION_STATE_ACTIVE;
+  session->state = state;
   session->auth_method = WYL_SESSION_AUTH_METHOD_HUMAN;
   return wyl_daemon_http_replace_session_for_test (server, session_id, session);
+}
+
+gboolean
+wyl_daemon_http_seed_human_session_for_test (SoupServer *server,
+    const gchar *session_id, const gchar *subject, const gchar *tenant)
+{
+  return wyl_daemon_http_seed_human_session_with_state_for_test (server,
+      session_id, subject, tenant, WYL_SESSION_STATE_ACTIVE);
 }
 
 wyrelog_error_t

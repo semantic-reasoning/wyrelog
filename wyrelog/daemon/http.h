@@ -14,6 +14,7 @@
 #include "daemon/auth-registry-private.h"
 #include "daemon/service-credential-handoff-private.h"
 #include "wyrelog/auth/service-auth-coordination-private.h"
+#include "wyrelog/wyl-fsm-session-private.h"
 #ifdef WYL_HAS_AUDIT
 #include "wyrelog/auth/service-exchange-limiter-private.h"
 #endif
@@ -167,6 +168,9 @@ gboolean wyl_daemon_http_replace_session_for_test
 gboolean wyl_daemon_http_seed_human_session_for_test
     (SoupServer * server, const gchar * session_id, const gchar * subject,
     const gchar * tenant);
+gboolean wyl_daemon_http_seed_human_session_with_state_for_test
+    (SoupServer * server, const gchar * session_id, const gchar * subject,
+    const gchar * tenant, wyl_session_state_t state);
 wyrelog_error_t wyl_daemon_http_configure_tenant_for_test
     (SoupServer * server, const gchar * tenant, gboolean create,
     gboolean sealed);
