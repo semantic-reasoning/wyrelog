@@ -237,6 +237,63 @@ test_native_lock_domain_alias_reader_writer_contention (void)
   remove_scratch_file (path);
 }
 
+typedef struct
+{
+  WylFactArtifactWinLockDomain *domain;
+  const gchar *path;
+  gint failure;
+} LockStress;
+
+static gpointer
+lock_stress_worker (gpointer user_data)
+{
+  LockStress *stress = user_data;
+
+  for (guint i = 0; i < 200; i++) {
+    HANDLE handle = open_existing_scratch_file (stress->path);
+    WylFactArtifactWinLockLease *lease = NULL;
+    wyrelog_error_t rc =
+        wyl_fact_artifact_win_lock_domain_acquire (stress->domain, handle,
+        FALSE, &lease);
+
+    if (rc == WYRELOG_E_OK)
+      wyl_fact_artifact_win_lock_lease_free (lease);
+    else {
+      /* Failed acquire retains caller ownership by contract. */
+      CloseHandle (handle);
+      g_atomic_int_set (&stress->failure, 1);
+      break;
+    }
+  }
+  return NULL;
+}
+
+static void
+test_native_lock_domain_concurrent_acquire_release (void)
+{
+  gchar *path = NULL;
+  HANDLE pin = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (pin);
+  WylFactGraphWinIdentity directory_identity = identity;
+  WylFactArtifactWinLockDomain *domain = NULL;
+  LockStress stress = { 0 };
+  GThread *workers[6] = { 0 };
+
+  directory_identity.file_id[0] ^= 0x40;
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_open (&directory_identity,
+          &identity, pin, &domain), ==, WYRELOG_E_OK);
+  stress.domain = domain;
+  stress.path = path;
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++)
+    workers[i] = g_thread_new ("native-lock-stress", lock_stress_worker,
+        &stress);
+  for (guint i = 0; i < G_N_ELEMENTS (workers); i++)
+    g_thread_join (workers[i]);
+  g_assert_cmpint (g_atomic_int_get (&stress.failure), ==, 0);
+  wyl_fact_artifact_win_lock_domain_free (domain);
+  remove_scratch_file (path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -259,6 +316,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/lock-domain/alias-contention",
       test_native_lock_domain_alias_reader_writer_contention);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/lock-domain/concurrent-release",
+      test_native_lock_domain_concurrent_acquire_release);
   return g_test_run ();
 }
 #else
