@@ -850,7 +850,11 @@ test_native_namespace_captured_owner_acl_binding (void)
   WylFactArtifactWinIoSession *session = NULL;
   HANDLE owner_graph = INVALID_HANDLE_VALUE;
   g_autofree gchar *wal_path = NULL;
+  g_autofree gchar *main_path = NULL;
+  g_autofree gchar *lock_path = NULL;
   g_autofree wchar_t *wal = NULL;
+  g_autofree wchar_t *main_wide = NULL;
+  g_autofree wchar_t *lock_wide = NULL;
 
   directory.graph_handle = graph;
   directory.graph_identity = identity_for (graph);
@@ -925,13 +929,19 @@ test_native_namespace_captured_owner_acl_binding (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_open_file (NULL,
           WYL_FACT_ARTIFACT_WAL, FALSE, TRUE, NULL), ==, WYRELOG_E_POLICY);
   wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
   wal = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+  main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+  lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
   g_assert_true (DeleteFileW (wal));
   wyl_fact_artifact_win_namespace_free (namespace_);
   namespace_ = NULL;
   g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL,
       NULL, NULL);
   g_assert_true (CloseHandle (graph));
+  g_assert_true (DeleteFileW (main_wide));
+  g_assert_true (DeleteFileW (lock_wide));
   g_assert_true (RemoveDirectoryW (directory_wide));
   g_free (path);
 }
@@ -947,7 +957,11 @@ test_native_namespace_release_binding_stress (void)
   WylFactArtifactWinSidecarBinding *seed = NULL;
   HANDLE owner_graph = INVALID_HANDLE_VALUE;
   g_autofree gchar *wal_path = NULL;
+  g_autofree gchar *main_path = NULL;
+  g_autofree gchar *lock_path = NULL;
   g_autofree wchar_t *wal = NULL;
+  g_autofree wchar_t *main_wide = NULL;
+  g_autofree wchar_t *lock_wide = NULL;
 
   directory.graph_handle = graph;
   directory.graph_identity = identity_for (graph);
@@ -987,9 +1001,15 @@ test_native_namespace_release_binding_stress (void)
     wyl_fact_artifact_win_binding_free (binding);
   }
   g_assert_true (DeleteFileW (wal));
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
+  main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+  lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
   g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL,
       NULL, NULL);
   g_assert_true (CloseHandle (graph));
+  g_assert_true (DeleteFileW (main_wide));
+  g_assert_true (DeleteFileW (lock_wide));
   g_assert_true (RemoveDirectoryW (directory_wide));
   g_free (path);
 }
