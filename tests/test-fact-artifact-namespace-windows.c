@@ -785,7 +785,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
 
   /* #609 replacement consumes only an owner staging binding and an existing
    * closed destination.  A live destination working HANDLE is a hard barrier;
-   * after exact replacement the source is terminal and the destination owns
+   * after replacement the source is terminal and the destination owns
    * the source identity for its later lifecycle operation. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
@@ -863,6 +863,85 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_autofree wchar_t *raw_replace_wide = g_utf8_to_utf16 (raw_replace_path,
       -1, NULL, NULL, NULL);
   g_assert_true (DeleteFileW (raw_replace_wide));
+
+  /* Native Windows replacement has no target-FileId CAS.  The exclusive
+   * lease serializes sanctioned writers, while a deterministic substitution
+   * immediately before the final destination revalidation proves that the
+   * sanctioned path fails closed without moving its source. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
+          "pre-final", &replacement_source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_close
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_PRE_FINAL_DESTINATION_SUBSTITUTE);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
+      (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (replace_result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
+  g_autofree gchar *pre_source_path = g_build_filename (path, "tmp-pre-final",
+      NULL);
+  g_autofree gchar *pre_destination_path = g_build_filename (path,
+      "facts.duckdb.wal.checkpoint", NULL);
+  g_autofree wchar_t *pre_source_wide = g_utf8_to_utf16 (pre_source_path, -1,
+      NULL, NULL, NULL);
+  g_autofree wchar_t *pre_destination_wide = g_utf8_to_utf16
+      (pre_destination_path, -1, NULL, NULL, NULL);
+  g_assert_true (GetFileAttributesW (pre_source_wide) !=
+      INVALID_FILE_ATTRIBUTES);
+  g_assert_true (GetFileAttributesW (pre_destination_wide) !=
+      INVALID_FILE_ATTRIBUTES);
+  wyl_fact_artifact_win_temp_binding_free (replacement_source);
+  replacement_source = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_true (DeleteFileW (pre_source_wide));
+  g_assert_true (DeleteFileW (pre_destination_wide));
+
+  /* Once rename linearizes, a later durability/reporting uncertainty is
+   * terminal reconciliation evidence rather than a retryable failure. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_RECOVERY, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
+          "post-rename", &replacement_source), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_borrow
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_close
+      (replacement_source, &sidecar_handle), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
+      (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_IO);
+  g_assert_cmpint (replace_result, ==,
+      WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED);
+  g_autofree gchar *post_source_path = g_build_filename (path,
+      "tmp-post-rename", NULL);
+  g_autofree gchar *post_destination_path = g_build_filename (path,
+      "facts.duckdb.wal.recovery", NULL);
+  g_autofree wchar_t *post_source_wide = g_utf8_to_utf16 (post_source_path,
+      -1, NULL, NULL, NULL);
+  g_autofree wchar_t *post_destination_wide = g_utf8_to_utf16
+      (post_destination_path, -1, NULL, NULL, NULL);
+  g_assert_false (GetFileAttributesW (post_source_wide) !=
+      INVALID_FILE_ATTRIBUTES);
+  g_assert_true (GetFileAttributesW (post_destination_wide) !=
+      INVALID_FILE_ATTRIBUTES);
+  wyl_fact_artifact_win_temp_binding_free (replacement_source);
+  replacement_source = NULL;
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  g_assert_true (DeleteFileW (post_destination_wide));
 
   /* Native spill roots are lease-bound virtual authorities: child I/O must
    * be closed through its binding before either child or root can retire. */

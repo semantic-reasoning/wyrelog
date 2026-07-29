@@ -567,7 +567,7 @@ wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_entry_rename_replace_exact (WylFactArtifactWinLocator
+wyl_fact_artifact_win_entry_rename_replace_verified (WylFactArtifactWinLocator
     *locator, WylFactArtifactWinEntry *entry, const gchar *destination,
     WylFactArtifactWinMutationEffect *out_effect)
 {
