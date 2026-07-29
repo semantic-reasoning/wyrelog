@@ -649,6 +649,25 @@ test_existing_sidecar_reopen (void)
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
       (namespace_, &lease), ==, WYRELOG_E_OK);
 
+  /* A reader guard has no recovery mutation authority, even for a missing
+   * sidecar; it must not acquire creation rights as a side effect. */
+  wyl_fact_artifact_mutation_lease_free (lease);
+  lease = NULL;
+  WylFactArtifactMutationLease *reader = NULL;
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_reader_guard
+      (namespace_, &reader), ==, WYRELOG_E_OK);
+  WylFactArtifactSidecarBinding *reader_binding = (gpointer) 0x1;
+  gint reader_fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (reader,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &reader_binding, &reader_fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (reader_binding);
+  g_assert_cmpint (reader_fd, ==, -1);
+  wyl_fact_artifact_mutation_lease_free (reader);
+  g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+
   WylFactArtifactSidecarBinding *binding = (gpointer) 0x1;
   gint fd = 42;
   g_assert_cmpint
@@ -793,6 +812,20 @@ test_existing_sidecar_reopen (void)
   g_assert_cmpint (g_rmdir (tenant_path), ==, 0);
   g_assert_cmpint (g_rmdir (root), ==, 0);
 #endif
+}
+#endif
+
+#ifdef G_OS_WIN32
+static void
+test_existing_sidecar_reopen (void)
+{
+  WylFactArtifactSidecarBinding *binding = (gpointer) 0x1;
+  gint fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (NULL,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
 }
 #endif
 
