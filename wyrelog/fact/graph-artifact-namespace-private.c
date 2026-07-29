@@ -1661,8 +1661,18 @@ wyrelog_error_t
     goto done;
   result = open_file_unchecked (lease->namespace_, sidecar, create, writable,
       out_fd);
-  if (result != WYRELOG_E_OK)
+  if (result != WYRELOG_E_OK) {
+    /* The strict creator never adopts an extant name.  EEXIST is deliberately
+     * normalized by the narrow sidecar authority to POLICY, so a recovery
+     * caller can distinguish a hostile/colliding fixed name from I/O. */
+    if (create && result == WYRELOG_E_IO) {
+      struct stat collision;
+      if (fstatat (lease->namespace_->fd, name_for (sidecar), &collision,
+              AT_SYMLINK_NOFOLLOW) == 0)
+        result = WYRELOG_E_POLICY;
+    }
     goto done;
+  }
 
   struct stat pinned;
   gint pin_fd = dup (*out_fd);

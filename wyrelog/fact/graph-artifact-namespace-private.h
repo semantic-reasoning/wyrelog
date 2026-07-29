@@ -136,7 +136,10 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * deliberately separate authority from strict creation: it accepts only an
  * exclusive lease and a writable request, never creates or publishes a name,
  * and pins the exact existing regular 0600 same-owner single-link entry.
- * Missing sidecars return NOT_FOUND with initialized outputs. */
+ * Missing sidecars return NOT_FOUND with initialized outputs.  #596 must call
+ * SidecarBinding revalidate immediately before and after every raw returned
+ * FD I/O, sync, and close boundary; a failed check makes that recovery path
+ * fail closed and the FD must not be used again. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
     (WylFactArtifactMutationLease *, WylFactArtifactName sidecar,
     gboolean writable, WylFactArtifactSidecarBinding ** out_binding,
