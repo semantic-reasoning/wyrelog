@@ -1098,6 +1098,62 @@ test_generic_reader_session_blocks_cross_namespace_mutation (void)
 }
 
 static void
+test_live_session_source_substitution_is_policy (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = g_dir_make_tmp ("wyl-win-live-source-XXXXXX",
+      &error);
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  HANDLE graph = INVALID_HANDLE_VALUE;
+  g_autofree gchar *wal_path = NULL;
+  g_autofree gchar *outside_path = NULL;
+  g_autofree gchar *main_path = NULL;
+  g_autofree gchar *lock_path = NULL;
+  g_autofree wchar_t *wal_wide = NULL;
+  g_autofree wchar_t *outside_wide = NULL;
+  g_autofree wchar_t *main_wide = NULL;
+  g_autofree wchar_t *lock_wide = NULL;
+  g_autofree wchar_t *directory_wide = NULL;
+  guint64 size = 0;
+
+  g_assert_no_error (error);
+  namespace_ = open_namespace_at_path (path, TRUE, &graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
+  outside_path = g_build_filename (path, "outside-wal", NULL);
+  wal_wide = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+  outside_wide = g_utf8_to_utf16 (outside_path, -1, NULL, NULL, NULL);
+  g_assert_true (MoveFileExW (wal_wide, outside_wide, MOVEFILE_WRITE_THROUGH));
+  /* The private guardian still names the old object, but the session's
+   * retained validator must fail the canonical source association before I/O. */
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  wyl_fact_artifact_win_lease_free (lease);
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  g_assert_true (CloseHandle (graph));
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
+  main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+  lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+  directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (DeleteFileW (outside_wide));
+  g_assert_true (DeleteFileW (main_wide));
+  g_assert_true (DeleteFileW (lock_wide));
+  g_assert_true (RemoveDirectoryW (directory_wide));
+}
+
+static void
 test_working_handle_adopt_noninherit_close_once (void)
 {
   gchar *path = NULL;
@@ -1340,6 +1396,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED;
   WylFactDuckdbTempRetireResult temp_retire =
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  gsize written = 0;
   g_autofree wchar_t *main_wide = NULL;
   g_autofree wchar_t *lock_wide = NULL;
   g_autofree wchar_t *checkpoint_wide = NULL;
@@ -1403,10 +1460,18 @@ test_native_namespace_main_sidecar_lifecycle (void)
    * the source identity for its later lifecycle operation. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
           WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "old",
+          3, &written), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_binding (lease,
           "replace-sidecar", &replacement_source), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
       (replacement_source, &session), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_write (session, 0, "new",
+          3, &written), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
   replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
@@ -1422,6 +1487,18 @@ test_native_namespace_main_sidecar_lifecycle (void)
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_OK);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED);
+  {
+    gchar replacement_readback[4] = { 0 };
+    gsize replacement_read = 0;
+    g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+        (sidecar, &session), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0,
+            replacement_readback, 3, &replacement_read), ==, WYRELOG_E_OK);
+    g_assert_cmpuint (replacement_read, ==, 3);
+    g_assert_cmpstr (replacement_readback, ==, "new");
+    g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+        WYRELOG_E_OK);
+  }
   sidecar_handle = (HANDLE) 1;
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_open_io_session
       (replacement_source, &session), ==, WYRELOG_E_POLICY);
@@ -1819,6 +1896,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/namespace/generic-reader-lock-domain",
       test_generic_reader_session_blocks_cross_namespace_mutation);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/io-session/source-substitution",
+      test_live_session_source_substitution_is_policy);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/identity-output",
       test_working_handle_identity_mismatch_initializes_output);

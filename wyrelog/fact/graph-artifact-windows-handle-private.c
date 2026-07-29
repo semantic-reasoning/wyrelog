@@ -23,6 +23,9 @@ struct WylFactArtifactWinIoState
   gboolean aborted;
   gpointer lifetime_owner;
   GDestroyNotify lifetime_unref;
+  WylFactArtifactWinIoValidator validator;
+  gpointer validator_context;
+  GDestroyNotify validator_free;
 };
 
 struct WylFactArtifactWinIoSession
@@ -40,6 +43,8 @@ io_state_unref (WylFactArtifactWinIoState *state)
   if (state == NULL || !g_atomic_int_dec_and_test (&state->references))
     return;
   wyl_fact_artifact_win_working_handle_free (state->working);
+  if (state->validator_free != NULL)
+    state->validator_free (state->validator_context);
   if (state->lifetime_unref != NULL)
     state->lifetime_unref (state->lifetime_owner);
   g_mutex_clear (&state->mutex);
@@ -62,15 +67,46 @@ wyl_fact_artifact_win_io_state_retain_lifetime (WylFactArtifactWinIoState
   g_mutex_unlock (&state->mutex);
 }
 
+void
+wyl_fact_artifact_win_io_state_set_validator (WylFactArtifactWinIoState *state,
+    WylFactArtifactWinIoValidator validator, gpointer context,
+    GDestroyNotify context_free)
+{
+  if (state == NULL || validator == NULL || context == NULL
+      || context_free == NULL)
+    return;
+  g_mutex_lock (&state->mutex);
+  if (state->validator == NULL) {
+    state->validator = validator;
+    state->validator_context = context;
+    state->validator_free = context_free;
+    context = NULL;
+  }
+  g_mutex_unlock (&state->mutex);
+  if (context != NULL)
+    context_free (context);
+}
+
 static wyrelog_error_t
 session_check (WylFactArtifactWinIoSession *session)
 {
+  wyrelog_error_t rc;
   if (session == NULL || !session->active
-      || session->handle == INVALID_HANDLE_VALUE
-      || wyl_fact_artifact_win_working_handle_revalidate (session->
-          state->working)
-      != WYRELOG_E_OK)
+      || session->handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
+  rc = wyl_fact_artifact_win_working_handle_revalidate (session->
+      state->working);
+  if (rc == WYRELOG_E_OK && session->state->validator != NULL)
+    rc = session->state->validator (session->state->validator_context);
+  if (rc != WYRELOG_E_OK) {
+    /* Association loss is terminal for this private session.  Do not expose
+     * the lower-level result as INVALID or allow a later typed operation to
+     * resume after a replacement. */
+    g_mutex_lock (&session->state->mutex);
+    session->state->aborted = TRUE;
+    g_mutex_unlock (&session->state->mutex);
+    return WYRELOG_E_POLICY;
+  }
   return WYRELOG_E_OK;
 }
 
