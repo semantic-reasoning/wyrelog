@@ -129,6 +129,24 @@ nt_error (NTSTATUS status)
   }
 }
 
+/* NtSetInformationFile is an optional native primitive, not a best-effort
+ * pathname fallback.  Unsupported information classes or filesystems must
+ * fail closed: callers cannot infer whether a mutation linearized. */
+static wyrelog_error_t
+nt_mutation_error (NTSTATUS status)
+{
+  switch ((ULONG) status) {
+    case 0xC00000BBUL:         /* STATUS_NOT_SUPPORTED */
+    case 0xC00000C0UL:         /* STATUS_INVALID_PARAMETER */
+    case 0xC0000003UL:         /* STATUS_INVALID_INFO_CLASS */
+    case 0xC000000DUL:         /* STATUS_INVALID_PARAMETER */
+    case 0xC0000010UL:         /* STATUS_INVALID_DEVICE_REQUEST */
+      return WYRELOG_E_POLICY;
+    default:
+      return nt_error (status);
+  }
+}
+
 static wyrelog_error_t
 file_identity (HANDLE handle, gboolean directory,
     WylFactGraphWinIdentity *out_identity)
@@ -494,18 +512,20 @@ mutation_precondition (WylFactArtifactWinLocator *locator,
   return wyl_fact_artifact_win_entry_revalidate (locator, entry);
 }
 
-wyrelog_error_t
-wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator
-    *locator, WylFactArtifactWinEntry *entry, const gchar *destination,
-    WylFactArtifactWinMutationEffect *out_effect)
+static wyrelog_error_t
+entry_rename (WylFactArtifactWinLocator *locator,
+    WylFactArtifactWinEntry *entry, const gchar *destination,
+    gboolean replace_existing, WylFactArtifactWinMutationEffect *out_effect)
 {
   WylNtSetInformationFile set = nt_set_information_file ();
   g_autofree gunichar2 *wide = NULL;
   glong units = 0;
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
-  if (out_effect == NULL || set == NULL)
+  if (out_effect == NULL)
     return WYRELOG_E_INVALID;
+  if (set == NULL)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t rc = mutation_precondition (locator, entry);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -516,7 +536,7 @@ wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator
   WylFileRenameInfo *info = g_try_malloc0 (size);
   if (info == NULL)
     return WYRELOG_E_NOMEM;
-  info->replace_if_exists = FALSE;
+  info->replace_if_exists = replace_existing;
   info->root_directory = locator->directory;
   info->file_name_length = (ULONG) bytes;
   memcpy (info->file_name, wide, bytes);
@@ -525,7 +545,7 @@ wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator
       WYL_NT_FILE_RENAME_INFO_CLASS);
   g_free (info);
   if (status < 0)
-    return nt_error (status);
+    return nt_mutation_error (status);
   g_free (entry->name);
   entry->name = g_strdup (destination);
   if (entry->name == NULL) {
@@ -539,6 +559,22 @@ wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator
 }
 
 wyrelog_error_t
+wyl_fact_artifact_win_entry_rename_no_replace (WylFactArtifactWinLocator
+    *locator, WylFactArtifactWinEntry *entry, const gchar *destination,
+    WylFactArtifactWinMutationEffect *out_effect)
+{
+  return entry_rename (locator, entry, destination, FALSE, out_effect);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_entry_rename_replace_exact (WylFactArtifactWinLocator
+    *locator, WylFactArtifactWinEntry *entry, const gchar *destination,
+    WylFactArtifactWinMutationEffect *out_effect)
+{
+  return entry_rename (locator, entry, destination, TRUE, out_effect);
+}
+
+wyrelog_error_t
 wyl_fact_artifact_win_entry_delete_exact (WylFactArtifactWinLocator *locator,
     WylFactArtifactWinEntry *entry,
     WylFactArtifactWinMutationEffect *out_effect)
@@ -546,8 +582,10 @@ wyl_fact_artifact_win_entry_delete_exact (WylFactArtifactWinLocator *locator,
   WylNtSetInformationFile set = nt_set_information_file ();
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
-  if (out_effect == NULL || set == NULL)
+  if (out_effect == NULL)
     return WYRELOG_E_INVALID;
+  if (set == NULL)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t rc = mutation_precondition (locator, entry);
   if (rc != WYRELOG_E_OK)
     return rc;
@@ -556,7 +594,7 @@ wyl_fact_artifact_win_entry_delete_exact (WylFactArtifactWinLocator *locator,
   NTSTATUS status = set (entry->handle, &iosb, &info, sizeof info,
       WYL_NT_FILE_DISPOSITION_INFO_CLASS);
   if (status < 0)
-    return nt_error (status);
+    return nt_mutation_error (status);
   *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED;
   return WYRELOG_E_OK;
 }
@@ -828,8 +866,10 @@ wyl_fact_artifact_win_directory_entry_delete_exact (WylFactArtifactWinLocator
   IO_STATUS_BLOCK iosb = { 0 };
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
-  if (out_effect == NULL || set == NULL)
+  if (out_effect == NULL)
     return WYRELOG_E_INVALID;
+  if (set == NULL)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t rc = wyl_fact_artifact_win_directory_entry_revalidate
       (locator, directory, entry);
   if (rc != WYRELOG_E_OK)
@@ -837,7 +877,7 @@ wyl_fact_artifact_win_directory_entry_delete_exact (WylFactArtifactWinLocator
   NTSTATUS status = set (entry->handle, &iosb, &info, sizeof info,
       WYL_NT_FILE_DISPOSITION_INFO_CLASS);
   if (status < 0)
-    return nt_error (status);
+    return nt_mutation_error (status);
   *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED;
   return WYRELOG_E_OK;
 }
@@ -852,8 +892,10 @@ wyl_fact_artifact_win_directory_delete_empty (WylFactArtifactWinLocator
   IO_STATUS_BLOCK iosb = { 0 };
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
-  if (out_effect == NULL || set == NULL)
+  if (out_effect == NULL)
     return WYRELOG_E_INVALID;
+  if (set == NULL)
+    return WYRELOG_E_POLICY;
   wyrelog_error_t rc = wyl_fact_artifact_win_directory_revalidate (locator,
       directory);
   if (rc != WYRELOG_E_OK)
@@ -861,7 +903,7 @@ wyl_fact_artifact_win_directory_delete_empty (WylFactArtifactWinLocator
   NTSTATUS status = set (directory->handle, &iosb, &info, sizeof info,
       WYL_NT_FILE_DISPOSITION_INFO_CLASS);
   if (status < 0)
-    return nt_error (status);
+    return nt_mutation_error (status);
   *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED;
   return WYRELOG_E_OK;
 }
