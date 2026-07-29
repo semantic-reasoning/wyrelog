@@ -295,8 +295,10 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
     return rc;
   rc = wyl_fact_artifact_win_locator_open (namespace_->locator, fixed_name,
       access, create_new, &entry);
-  if (rc != WYRELOG_E_OK)
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_lease_free (lease);
     return rc;
+  }
   rc = wyl_fact_artifact_win_entry_issue_working_handle (namespace_->locator,
       entry, &issued);
   if (rc == WYRELOG_E_OK)

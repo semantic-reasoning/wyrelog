@@ -1036,6 +1036,22 @@ test_generic_reader_session_blocks_cross_namespace_mutation (void)
   directory.graph_identity = identity_for (reader_graph);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory, &reader),
       ==, WYRELOG_E_OK);
+  /* Failed generic opens must release their reader lease.  Otherwise a
+   * missing sidecar would permanently strand an exclusive writer in BUSY. */
+  binding = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (reader,
+          WYL_FACT_ARTIFACT_CHECKPOINT, GENERIC_READ, FALSE, &binding), ==,
+      WYRELOG_E_NOT_FOUND);
+  g_assert_null (binding);
+  writer = open_namespace_at_path (path, FALSE, &writer_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (writer,
+          &writer_mutation), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_lease_free (writer_mutation);
+  writer_mutation = NULL;
+  wyl_fact_artifact_win_namespace_free (writer);
+  writer = NULL;
+  g_assert_true (CloseHandle (writer_graph));
+  writer_graph = INVALID_HANDLE_VALUE;
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (reader,
           WYL_FACT_ARTIFACT_WAL, GENERIC_READ, FALSE, &binding), ==,
       WYRELOG_E_OK);
