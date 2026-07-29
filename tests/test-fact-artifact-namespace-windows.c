@@ -118,13 +118,16 @@ test_locator_relative_entry_lifecycle (void)
       &graph_identity);
   WylFactArtifactWinEntry *entry = NULL;
   WylFactArtifactWinEntry *occupied = NULL;
+  WylFactArtifactWinEntry *replacement = NULL;
   HANDLE issued = INVALID_HANDLE_VALUE;
   DWORD flags = HANDLE_FLAG_INHERIT;
   WylFactArtifactWinMutationEffect effect =
       WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
   wyrelog_error_t flush_rc;
   g_autofree gchar *renamed = g_build_filename (path, "facts.duckdb.wal", NULL);
+  g_autofree gchar *outside = g_build_filename (path, "outside", NULL);
   g_autofree wchar_t *wide = NULL;
+  g_autofree wchar_t *outside_wide = NULL;
   g_autofree wchar_t *directory_wide = NULL;
 
   g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
@@ -140,8 +143,8 @@ test_locator_relative_entry_lifecycle (void)
           occupied, &effect), ==, WYRELOG_E_OK);
   wyl_fact_artifact_win_entry_free (occupied);
   occupied = NULL;
-  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (entry,
-          &issued), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (locator,
+          entry, &issued), ==, WYRELOG_E_OK);
   g_assert_true (GetHandleInformation (issued, &flags));
   g_assert_cmpuint (flags & HANDLE_FLAG_INHERIT, ==, 0);
   g_assert_true (CloseHandle (issued));
@@ -150,15 +153,32 @@ test_locator_relative_entry_lifecycle (void)
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
   g_assert_cmpint (wyl_fact_artifact_win_entry_revalidate (locator, entry),
       ==, WYRELOG_E_OK);
+  /* Move the entry outside the canonical name and install a replacement.  A
+   * stale entry's working-HANDLE issuance must validate the whole locator
+   * hierarchy/name association, not only its retained HANDLE/FileId. */
+  wide = g_utf8_to_utf16 (renamed, -1, NULL, NULL, NULL);
+  outside_wide = g_utf8_to_utf16 (outside, -1, NULL, NULL, NULL);
+  g_assert_true (MoveFileExW (wide, outside_wide, MOVEFILE_WRITE_THROUGH));
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+          "facts.duckdb.wal", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE,
+          &replacement), ==, WYRELOG_E_OK);
+  issued = (HANDLE) 1;
+  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (locator,
+          entry, &issued), ==, WYRELOG_E_POLICY);
+  g_assert_true (issued == INVALID_HANDLE_VALUE);
+  wyl_fact_artifact_win_entry_free (entry);
+  entry = NULL;
+  g_assert_true (DeleteFileW (outside_wide));
+  g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator,
+          replacement, &effect), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_entry_free (replacement);
+  replacement = NULL;
   /* Filesystems that cannot flush a directory fail closed: the physical
    * operation is still independently proven by its explicit return value. */
   flush_rc = wyl_fact_artifact_win_locator_flush_directory (locator);
   g_assert_true (flush_rc == WYRELOG_E_OK || flush_rc == WYRELOG_E_IO);
-  g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator, entry,
-          &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
-  wyl_fact_artifact_win_entry_free (entry);
-  entry = NULL;
+  g_clear_pointer (&wide, g_free);
   wide = g_utf8_to_utf16 (renamed, -1, NULL, NULL, NULL);
   g_assert_false (GetFileAttributesW (wide) != INVALID_FILE_ATTRIBUTES);
   wyl_fact_artifact_win_locator_free (locator);

@@ -35,11 +35,12 @@ void wyl_fact_artifact_win_locator_free (WylFactArtifactWinLocator * locator);
 wyrelog_error_t wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *
     locator, const gchar * name, ACCESS_MASK access, gboolean create_new,
     WylFactArtifactWinEntry ** out_entry);
-/* Issue a non-inheritable duplicate.  The caller owns it; this transport does
- * not retain or close an issued working HANDLE. */
+/* Revalidate the exact locator/name/FileId association, then issue a
+ * non-inheritable duplicate.  The caller owns it; this transport does not
+ * retain or close an issued working HANDLE. */
 wyrelog_error_t
-wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinEntry *
-    entry, HANDLE * out_handle);
+wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinLocator *
+    locator, WylFactArtifactWinEntry * entry, HANDLE * out_handle);
 wyrelog_error_t
 wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator * locator,
     WylFactArtifactWinEntry * entry);
