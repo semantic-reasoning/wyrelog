@@ -29,6 +29,9 @@ wyrelog_error_t wyl_fact_artifact_win_locator_new (const WylFactGraphDirectory *
     directory, WylFactArtifactWinLocator ** out_locator);
 wyrelog_error_t
 wyl_fact_artifact_win_locator_revalidate (WylFactArtifactWinLocator * locator);
+/* Identity evidence only; this never exposes a directory HANDLE or spelling. */
+const WylFactGraphWinIdentity *wyl_fact_artifact_win_locator_identity
+    (const WylFactArtifactWinLocator *);
 void wyl_fact_artifact_win_locator_free (WylFactArtifactWinLocator * locator);
 
 /* Open one exact, single-component child relative to the held graph HANDLE.

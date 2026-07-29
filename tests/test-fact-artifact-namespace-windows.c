@@ -718,6 +718,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
   WylFactArtifactWinTempChildBinding *temp_binding = NULL;
   WylFactArtifactWinTempToken *temp_token = NULL;
   WylFactArtifactWinTempRecoveryEvidence *temp_evidence = NULL;
+  GBytes *temp_evidence_bytes = NULL;
+  GBytes *mismatched_temp_evidence_bytes = NULL;
   HANDLE main_handle = INVALID_HANDLE_VALUE;
   HANDLE sidecar_handle = INVALID_HANDLE_VALUE;
   WylFactArtifactWinMutationEffect effect =
@@ -1049,9 +1051,69 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_temp_token_rename_no_replace
       (temp_token, "token-next", &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  /* Unlike unlink, APPLIED rename preserves the same owner authority under
+   * its new closed token spelling. */
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_revalidate (temp_token),
+      ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_token_export_recovery_evidence
       (temp_token, &temp_evidence), ==, WYRELOG_E_OK);
   g_assert_nonnull (temp_evidence);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_encode
+      (temp_evidence, &temp_evidence_bytes), ==, WYRELOG_E_OK);
+  g_assert_nonnull (temp_evidence_bytes);
+  /* Simulate process loss: only durable bytes and the artifact remain.
+   * Reacquiring the native lease must prove directory + lock + FileId before
+   * it can clean up the abandoned token. */
+  wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence);
+  temp_evidence = NULL;
+  wyl_fact_artifact_win_temp_token_free (temp_token);
+  temp_token = NULL;
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation
+      (namespace_, &lease), ==, WYRELOG_E_OK);
+  /* A record from a different graph namespace is likewise not authority in
+   * this lease, even when its token spelling happens to collide. */
+  {
+    gsize evidence_size = 0;
+    const guint8 *evidence_data = g_bytes_get_data (temp_evidence_bytes,
+        &evidence_size);
+    guint8 *mismatch = g_memdup2 (evidence_data, evidence_size);
+    mismatch[5] ^= 0x01;        /* serialized graph-directory FileId volume */
+    mismatched_temp_evidence_bytes = g_bytes_new_take (mismatch, evidence_size);
+  }
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode
+      (mismatched_temp_evidence_bytes, &temp_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+          temp_evidence, &effect), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence);
+  temp_evidence = NULL;
+  g_bytes_unref (mismatched_temp_evidence_bytes);
+  mismatched_temp_evidence_bytes = NULL;
+  /* A durable record from another lock/domain cannot be replayed into this
+   * otherwise valid lease; it must fail before touching the named artifact. */
+  {
+    gsize evidence_size = 0;
+    const guint8 *evidence_data = g_bytes_get_data (temp_evidence_bytes,
+        &evidence_size);
+    guint8 *mismatch = g_memdup2 (evidence_data, evidence_size);
+    mismatch[29] ^= 0x01;       /* serialized lock FileId volume byte */
+    mismatched_temp_evidence_bytes = g_bytes_new_take (mismatch, evidence_size);
+  }
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode
+      (mismatched_temp_evidence_bytes, &temp_evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+          temp_evidence, &effect), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence);
+  temp_evidence = NULL;
+  g_bytes_unref (mismatched_temp_evidence_bytes);
+  mismatched_temp_evidence_bytes = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_recovery_evidence_decode
+      (temp_evidence_bytes, &temp_evidence), ==, WYRELOG_E_OK);
+  g_bytes_unref (temp_evidence_bytes);
+  temp_evidence_bytes = NULL;
   g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
           temp_evidence, &effect), ==, WYRELOG_E_OK);
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
@@ -1061,8 +1123,6 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
   wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence);
   temp_evidence = NULL;
-  wyl_fact_artifact_win_temp_token_free (temp_token);
-  temp_token = NULL;
   /* Raw close/reuse terminally revokes the owner before unlink; the provider
    * must leave both the token and the foreign reused HANDLE untouched. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
