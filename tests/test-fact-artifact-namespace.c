@@ -1687,14 +1687,16 @@ test_duckdb_temp_root (void)
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY);
   faulted_child = (gpointer) 0x1;
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
-          "duckdb_temp_block-1.block", &faulted_child, &fd), ==, WYRELOG_E_IO);
+          "duckdb_temp_storage_S64K-0.tmp", &faulted_child, &fd), ==,
+      WYRELOG_E_IO);
   g_assert_null (faulted_child);
   g_assert_cmpint (fd, ==, -1);
   wyl_fact_artifact_namespace_set_test_fault
       (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE);
   faulted_child = (gpointer) 0x1;
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
-          "duckdb_temp_block-0.block", &faulted_child, &fd), ==, WYRELOG_E_IO);
+          "duckdb_temp_storage_S96K-0.tmp", &faulted_child, &fd), ==,
+      WYRELOG_E_IO);
   g_assert_null (faulted_child);
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
