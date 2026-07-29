@@ -1657,6 +1657,8 @@ test_duckdb_temp_root (void)
       ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver, &locator,
           TRUE, &directory), ==, WYRELOG_E_OK);
+  g_autofree gchar *graph_path = wyl_fact_graph_directory_descriptive_path
+      (&directory);
   g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
       (namespace_, &lease), ==, WYRELOG_E_OK);
@@ -1683,6 +1685,26 @@ test_duckdb_temp_root (void)
       WYRELOG_E_OK);
   g_assert_cmpuint (listed->len, ==, 1);
   g_ptr_array_unref (listed);
+  /* Test code may inspect the host spelling, but production authority cannot:
+   * a broad DuckDB-looking/foreign entry must reject enumeration wholesale. */
+  g_autoptr (GDir) graph_dir = g_dir_open (graph_path, 0, NULL);
+  const gchar *entry;
+  const gchar *temp_root_name = NULL;
+  while ((entry = g_dir_read_name (graph_dir)) != NULL)
+    if (g_str_has_prefix (entry, ".duckdb-private-temp-")) {
+      temp_root_name = entry;
+      break;
+    }
+  g_assert_nonnull (temp_root_name);
+  g_autofree gchar *foreign = g_build_filename (graph_path, temp_root_name,
+      "foreign", NULL);
+  g_assert_cmpint (g_close (g_open (foreign, O_CREAT | O_EXCL | O_RDWR, 0600),
+          NULL), ==, TRUE);
+  listed = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &listed), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (listed);
+  g_assert_cmpint (unlink (foreign), ==, 0);
   WylFactDuckdbTempRetireResult retired =
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
   g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
@@ -1696,8 +1718,7 @@ test_duckdb_temp_root (void)
   wyl_fact_duckdb_temp_root_free (root);
   wyl_fact_artifact_mutation_lease_free (lease);
   wyl_fact_artifact_namespace_free (namespace_);
-  test_remove_fixed_artifact (wyl_fact_graph_directory_descriptive_path
-      (&directory), WYL_FACT_ARTIFACT_MAIN);
+  test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_MAIN);
   wyl_fact_graph_directory_clear (&directory);
   wyl_fact_graph_locator_clear (&locator);
   wyl_fact_graph_resolver_clear (&resolver);
