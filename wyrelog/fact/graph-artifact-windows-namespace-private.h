@@ -48,6 +48,9 @@ typedef enum
 void wyl_fact_artifact_win_namespace_set_test_fault
     (WylFactArtifactWinNamespaceTestFault);
 
+/* Opens only an already-provisioned main and lock pair.  It never creates
+ * either artifact; callers that need initial main provisioning must use the
+ * #615 evidence import below. */
 wyrelog_error_t wyl_fact_artifact_win_namespace_new
     (const WylFactGraphDirectory * directory,
     WylFactArtifactWinNamespace ** out_namespace);
@@ -64,12 +67,12 @@ wyrelog_error_t wyl_fact_artifact_win_namespace_revalidate
 void wyl_fact_artifact_win_namespace_free
     (WylFactArtifactWinNamespace * namespace_);
 
-/* Open one exact fixed artifact relative to the retained graph HANDLE.
- * |create_new| is strict FILE_CREATE; it stamps a captured-owner protected
- * DACL.  Existing entries are accepted only after the same captured owner and
- * protected DACL revalidate.  TEMP is not represented here.  A successful
- * binding retains the namespace locator, so callers may release their
- * namespace reference before closing/freeing the binding. */
+/* Reader-open one existing exact sidecar relative to the retained graph
+ * HANDLE.  This legacy-shaped convenience never creates entries, never opens
+ * MAIN, and requires GENERIC_READ.  It acquires and retains a native reader
+ * lease first, so a live session participates in the exact lock domain and
+ * cannot bypass an exclusive mutation from another namespace instance. TEMP
+ * is not represented here. */
 wyrelog_error_t wyl_fact_artifact_win_namespace_open_fixed
     (WylFactArtifactWinNamespace * namespace_, WylFactArtifactName name,
     ACCESS_MASK access, gboolean create_new,

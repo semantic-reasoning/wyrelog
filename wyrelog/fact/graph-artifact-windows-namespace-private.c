@@ -33,6 +33,12 @@ struct WylFactArtifactWinNamespace
   gint references;
 };
 
+static wyrelog_error_t namespace_acquire (WylFactArtifactWinNamespace *,
+    gboolean, WylFactArtifactWinLease **);
+static wyrelog_error_t lease_revalidate (WylFactArtifactWinLease *);
+static WylFactArtifactWinLease *lease_ref (WylFactArtifactWinLease *);
+static void binding_retain_lease_lifetime (WylFactArtifactWinBinding *);
+
 static void
 namespace_unref (WylFactArtifactWinNamespace *namespace_)
 {
@@ -90,6 +96,10 @@ sidecar_name (WylFactArtifactName name)
 struct WylFactArtifactWinBinding
 {
   WylFactArtifactWinNamespace *namespace_;
+  /* Generic fixed-entry access is reader-authorized.  The binding and every
+   * live I/O session retain this lease, so it participates in the same native
+   * lock domain as an exclusive mutation from another namespace instance. */
+  WylFactArtifactWinLease *lease;
   WylFactArtifactWinEntry *entry;
   WylFactArtifactWinWorkingHandle *working;
   WylFactArtifactWinIoState *io_state;
@@ -107,8 +117,8 @@ name_for (WylFactArtifactName name)
       ? names[name] : NULL;
 }
 
-wyrelog_error_t
-wyl_fact_artifact_win_namespace_new (const WylFactGraphDirectory *directory,
+static wyrelog_error_t
+namespace_new_empty (const WylFactGraphDirectory *directory,
     WylFactArtifactWinNamespace **out_namespace)
 {
   WylFactArtifactWinNamespace *namespace_;
@@ -132,15 +142,83 @@ wyl_fact_artifact_win_namespace_new (const WylFactGraphDirectory *directory,
   return WYRELOG_E_OK;
 }
 
+static wyrelog_error_t
+namespace_attach_existing_main (WylFactArtifactWinNamespace *namespace_,
+    const WylFactGraphWinIdentity *expected_main, gboolean create_lock)
+{
+  WylFactArtifactWinEntry *main_entry = NULL;
+  WylFactArtifactWinEntry *lock_entry = NULL;
+  HANDLE lock_handle = INVALID_HANDLE_VALUE;
+  wyrelog_error_t rc;
+
+  /* A reader-capable namespace is meaningful only when it has joined the
+   * exact facts.duckdb.lock domain.  It never creates facts.duckdb; #615 is
+   * still the sole provisioning path. */
+  rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
+      name_for (WYL_FACT_ARTIFACT_MAIN), GENERIC_READ | GENERIC_WRITE, FALSE,
+      &main_entry);
+  if (rc == WYRELOG_E_OK && expected_main != NULL
+      && !identity_equal (wyl_fact_artifact_win_entry_identity (main_entry),
+          expected_main))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && create_lock)
+    rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
+        name_for (WYL_FACT_ARTIFACT_LOCK), GENERIC_READ | GENERIC_WRITE,
+        TRUE, &lock_entry);
+  if (rc == WYRELOG_E_OK && !create_lock)
+    rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
+        name_for (WYL_FACT_ARTIFACT_LOCK), GENERIC_READ | GENERIC_WRITE,
+        FALSE, &lock_entry);
+  if (rc == WYRELOG_E_BUSY && create_lock)
+    rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
+        name_for (WYL_FACT_ARTIFACT_LOCK), GENERIC_READ | GENERIC_WRITE,
+        FALSE, &lock_entry);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_issue_working_handle (namespace_->locator,
+        lock_entry, &lock_handle);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_lock_domain_open
+        (wyl_fact_artifact_win_locator_identity (namespace_->locator),
+        wyl_fact_artifact_win_entry_identity (lock_entry), lock_handle,
+        &namespace_->lock_domain);
+  if (rc != WYRELOG_E_OK) {
+    if (lock_handle != INVALID_HANDLE_VALUE)
+      CloseHandle (lock_handle);
+    wyl_fact_artifact_win_entry_free (lock_entry);
+    wyl_fact_artifact_win_entry_free (main_entry);
+    return rc;
+  }
+  namespace_->main_entry = main_entry;
+  namespace_->lock_entry = lock_entry;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_namespace_new (const WylFactGraphDirectory *directory,
+    WylFactArtifactWinNamespace **out_namespace)
+{
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  wyrelog_error_t rc;
+  if (out_namespace != NULL)
+    *out_namespace = NULL;
+  rc = namespace_new_empty (directory, &namespace_);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  rc = namespace_attach_existing_main (namespace_, NULL, FALSE);
+  if (rc != WYRELOG_E_OK) {
+    wyl_fact_artifact_win_namespace_free (namespace_);
+    return rc;
+  }
+  *out_namespace = namespace_;
+  return WYRELOG_E_OK;
+}
+
 wyrelog_error_t
 wyl_fact_artifact_win_namespace_new_with_main (const WylFactGraphDirectory
     *directory, const WylFactGraphRegularFile *main_file,
     WylFactArtifactWinNamespace **out_namespace)
 {
   WylFactArtifactWinNamespace *namespace_ = NULL;
-  WylFactArtifactWinEntry *main_entry = NULL;
-  WylFactArtifactWinEntry *lock_entry = NULL;
-  HANDLE lock_handle = INVALID_HANDLE_VALUE;
   wyrelog_error_t rc;
 
   if (out_namespace != NULL)
@@ -151,50 +229,17 @@ wyl_fact_artifact_win_namespace_new_with_main (const WylFactGraphDirectory
   if (!handle_matches_identity ((HANDLE) main_file->handle,
           &main_file->identity))
     return WYRELOG_E_POLICY;
-  rc = wyl_fact_artifact_win_namespace_new (directory, &namespace_);
+  rc = namespace_new_empty (directory, &namespace_);
   if (rc != WYRELOG_E_OK)
     return rc;
   /* #615 already minted this handle from durable operation evidence.  The
    * native namespace imports it only if the retained graph-relative fixed
    * name independently proves the identical FileId and protected ACL. */
-  rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
-      name_for (WYL_FACT_ARTIFACT_MAIN), GENERIC_READ | GENERIC_WRITE, FALSE,
-      &main_entry);
-  if (rc != WYRELOG_E_OK
-      || !identity_equal (wyl_fact_artifact_win_entry_identity (main_entry),
-          &main_file->identity)) {
-    if (rc == WYRELOG_E_OK)
-      rc = WYRELOG_E_POLICY;
-    wyl_fact_artifact_win_entry_free (main_entry);
-    wyl_fact_artifact_win_namespace_free (namespace_);
-    return rc;
-  }
-  /* Lock creation is strict; a concurrent creator is reopened only through
-   * the same protected-ACL locator. */
-  rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
-      name_for (WYL_FACT_ARTIFACT_LOCK), GENERIC_READ | GENERIC_WRITE,
-      TRUE, &lock_entry);
-  if (rc == WYRELOG_E_BUSY)
-    rc = wyl_fact_artifact_win_locator_open (namespace_->locator,
-        name_for (WYL_FACT_ARTIFACT_LOCK), GENERIC_READ | GENERIC_WRITE,
-        FALSE, &lock_entry);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_entry_issue_working_handle (namespace_->locator,
-        lock_entry, &lock_handle);
-  if (rc == WYRELOG_E_OK)
-    rc = wyl_fact_artifact_win_lock_domain_open (&directory->graph_identity,
-        wyl_fact_artifact_win_entry_identity (lock_entry), lock_handle,
-        &namespace_->lock_domain);
+  rc = namespace_attach_existing_main (namespace_, &main_file->identity, TRUE);
   if (rc != WYRELOG_E_OK) {
-    if (lock_handle != INVALID_HANDLE_VALUE)
-      CloseHandle (lock_handle);
-    wyl_fact_artifact_win_entry_free (lock_entry);
-    wyl_fact_artifact_win_entry_free (main_entry);
     wyl_fact_artifact_win_namespace_free (namespace_);
     return rc;
   }
-  namespace_->main_entry = main_entry;
-  namespace_->lock_entry = lock_entry;
   *out_namespace = namespace_;
   return WYRELOG_E_OK;
 }
@@ -233,19 +278,20 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
   WylFactArtifactWinBinding *binding = NULL;
   HANDLE issued = INVALID_HANDLE_VALUE;
   const gchar *fixed_name = name_for (name);
+  WylFactArtifactWinLease *lease = NULL;
   wyrelog_error_t rc;
 
   if (out_binding != NULL)
     *out_binding = NULL;
   if (namespace_ == NULL || out_binding == NULL || fixed_name == NULL)
     return WYRELOG_E_INVALID;
-  /* The generic native namespace is intentionally sidecar-only.  Main is
-   * imported from #615 durable provisioning evidence by _new_with_main and
-   * can be issued solely through an exclusive WinLease. */
-  if (name == WYL_FACT_ARTIFACT_MAIN)
+  /* This compatibility-shaped fixed reader is deliberately unable to create
+   * or mutate.  Crucially, it first joins the same facts.duckdb.lock reader
+   * domain as every other namespace instance, so its session blocks an
+   * exclusive mutation lease rather than bypassing it. */
+  if (!sidecar_name (name) || create_new || access != GENERIC_READ)
     return WYRELOG_E_POLICY;
-  if ((rc = wyl_fact_artifact_win_namespace_revalidate (namespace_))
-      != WYRELOG_E_OK)
+  if ((rc = namespace_acquire (namespace_, FALSE, &lease)) != WYRELOG_E_OK)
     return rc;
   rc = wyl_fact_artifact_win_locator_open (namespace_->locator, fixed_name,
       access, create_new, &entry);
@@ -277,13 +323,13 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
     } else
       wyl_fact_artifact_win_working_handle_free (working);
     wyl_fact_artifact_win_entry_free (entry);
+    wyl_fact_artifact_win_lease_free (lease);
     return rc;
   }
   binding->namespace_ = namespace_;
+  binding->lease = lease;
   g_atomic_int_inc (&namespace_->references);
-  g_atomic_int_inc (&namespace_->references);
-  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
-      namespace_, (GDestroyNotify) namespace_unref);
+  binding_retain_lease_lifetime (binding);
   binding->entry = entry;
   binding->working = working;
   binding->active = TRUE;
@@ -298,7 +344,7 @@ wyl_fact_artifact_win_binding_open_io_session (WylFactArtifactWinBinding
   wyrelog_error_t rc;
   if (binding == NULL || !binding->active)
     return WYRELOG_E_POLICY;
-  rc = wyl_fact_artifact_win_namespace_revalidate (binding->namespace_);
+  rc = lease_revalidate (binding->lease);
   if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_entry_revalidate (binding->namespace_->locator,
         binding->entry);
@@ -315,6 +361,7 @@ wyl_fact_artifact_win_binding_free (WylFactArtifactWinBinding *binding)
   binding->active = FALSE;
   wyl_fact_artifact_win_io_state_free (binding->io_state);
   wyl_fact_artifact_win_entry_free (binding->entry);
+  wyl_fact_artifact_win_lease_free (binding->lease);
   namespace_unref (binding->namespace_);
   g_free (binding);
 }
@@ -459,6 +506,19 @@ wyl_fact_artifact_win_lease_free (WylFactArtifactWinLease *lease)
   wyl_fact_artifact_win_lock_lease_free (lease->lock);
   namespace_unref (lease->namespace_);
   g_free (lease);
+}
+
+static void
+binding_retain_lease_lifetime (WylFactArtifactWinBinding *binding)
+{
+  g_assert_nonnull (binding);
+  g_assert_nonnull (binding->io_state);
+  g_assert_nonnull (binding->lease);
+  /* A session may outlive its public reader binding.  Its extra lease ref is
+   * consumed by io_state only after the private duplicate closes. */
+  wyl_fact_artifact_win_io_state_retain_lifetime (binding->io_state,
+      lease_ref (binding->lease),
+      (GDestroyNotify) wyl_fact_artifact_win_lease_free);
 }
 
 static wyrelog_error_t
