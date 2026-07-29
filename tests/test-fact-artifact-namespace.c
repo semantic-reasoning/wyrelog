@@ -781,10 +781,176 @@ test_existing_sidecar_reopen (void)
   close (fd);
   g_assert_cmpint (unlink (wal_path), ==, 0);
   g_assert_cmpint (rename (saved, wal_path), ==, 0);
+  /* An existing recovery binding has no publication authority. */
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_publish_no_replace
+      (binding, WYL_FACT_ARTIFACT_CHECKPOINT), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_WAL, FALSE, FALSE, &fd), ==, WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_file (lease,
+          WYL_FACT_ARTIFACT_CHECKPOINT, FALSE, FALSE, &fd), ==,
+      WYRELOG_E_NOT_FOUND);
+  wyl_fact_artifact_sidecar_binding_free (binding);
+
+  /* A missing probe cannot turn an attacker-created, secure-looking sidecar
+   * into a strict-create result.  The attempted creator gets no binding or
+   * fd and leaves the attacker's bytes untouched. */
+  g_assert_cmpint (unlink (wal_path), ==, 0);
+  binding = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &binding, &fd), ==, WYRELOG_E_NOT_FOUND);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_true (g_file_set_contents (wal_path, "attacker", -1, NULL));
+  g_assert_cmpint (g_chmod (wal_path, 0600), ==, 0);
+  binding = (gpointer) 0x1;
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &binding, &fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  g_autofree gchar *attacker_contents = NULL;
+  g_assert_true (g_file_get_contents (wal_path, &attacker_contents, NULL,
+          NULL));
+  g_assert_cmpstr (attacker_contents, ==, "attacker");
+  g_assert_cmpint (unlink (wal_path), ==, 0);
+
+  /* Recreate a known binding, then prove each held namespace component is
+   * checked at the explicit raw-FD I/O boundary. */
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &binding, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_sidecar_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &binding, &fd), ==, WYRELOG_E_OK);
+  g_autofree gchar *main_path = g_build_filename (graph_path,
+      "facts.duckdb", NULL);
+  g_autofree gchar *saved_main = g_build_filename (graph_path,
+      "facts.duckdb.saved", NULL);
+  g_assert_cmpint (rename (main_path, saved_main), ==, 0);
+  g_assert_true (g_file_set_contents (main_path, "foreign-main", -1, NULL));
+  g_assert_cmpint (g_chmod (main_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  WylFactArtifactSidecarBinding *rejected = (gpointer) 0x1;
+  gint rejected_fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &rejected, &rejected_fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (rejected_fd, ==, -1);
+  g_autofree gchar *foreign_contents = NULL;
+  g_assert_true (g_file_get_contents (main_path, &foreign_contents, NULL,
+          NULL));
+  g_assert_cmpstr (foreign_contents, ==, "foreign-main");
+  g_assert_cmpint (unlink (main_path), ==, 0);
+  g_assert_cmpint (rename (saved_main, main_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+
+  g_autofree gchar *lock_path = g_build_filename (graph_path,
+      "facts.duckdb.lock", NULL);
+  g_autofree gchar *saved_lock = g_build_filename (graph_path,
+      "facts.duckdb.lock.saved", NULL);
+  g_assert_cmpint (rename (lock_path, saved_lock), ==, 0);
+  g_assert_true (g_file_set_contents (lock_path, "foreign-lock", -1, NULL));
+  g_assert_cmpint (g_chmod (lock_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  rejected = (gpointer) 0x1;
+  rejected_fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &rejected, &rejected_fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (rejected_fd, ==, -1);
+  g_clear_pointer (&foreign_contents, g_free);
+  g_assert_true (g_file_get_contents (lock_path, &foreign_contents, NULL,
+          NULL));
+  g_assert_cmpstr (foreign_contents, ==, "foreign-lock");
+  g_assert_cmpint (unlink (lock_path), ==, 0);
+  g_assert_cmpint (rename (saved_lock, lock_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+
+  /* The held graph directory is the authority, not its original spelling.
+   * A replacement spelling cannot divert this binding; an observed invalid
+   * held directory still fails closed without touching the foreign tree. */
+  g_autofree gchar *parent_path = g_path_get_dirname (graph_path);
+  g_autofree gchar *saved_graph = g_build_filename (parent_path,
+      "graph-saved", NULL);
+  g_assert_cmpint (rename (graph_path, saved_graph), ==, 0);
+  g_assert_cmpint (mkdir (graph_path, 0700), ==, 0);
+  g_autofree gchar *foreign_graph_file = g_build_filename (graph_path,
+      "foreign", NULL);
+  g_assert_true (g_file_set_contents (foreign_graph_file, "foreign-graph",
+          -1, NULL));
+  g_assert_cmpint (fchmod (directory.graph_fd, 0755), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  rejected = (gpointer) 0x1;
+  rejected_fd = 42;
+  g_assert_cmpint
+      (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &rejected, &rejected_fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (rejected);
+  g_assert_cmpint (rejected_fd, ==, -1);
+  g_clear_pointer (&foreign_contents, g_free);
+  g_assert_true (g_file_get_contents (foreign_graph_file, &foreign_contents,
+          NULL, NULL));
+  g_assert_cmpstr (foreign_contents, ==, "foreign-graph");
+  g_assert_cmpint (fchmod (directory.graph_fd, 0700), ==, 0);
+  g_assert_cmpint (unlink (foreign_graph_file), ==, 0);
+  g_assert_cmpint (rmdir (graph_path), ==, 0);
+  g_assert_cmpint (rename (saved_graph, graph_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+
+  g_assert_cmpint (rename (wal_path, saved), ==, 0);
+  g_assert_true (g_file_set_contents (wal_path, "foreign-wal", -1, NULL));
+  g_assert_cmpint (g_chmod (wal_path, 0600), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  g_clear_pointer (&foreign_contents, g_free);
+  g_assert_true (g_file_get_contents (wal_path, &foreign_contents, NULL, NULL));
+  g_assert_cmpstr (foreign_contents, ==, "foreign-wal");
+  g_assert_cmpint (unlink (wal_path), ==, 0);
+  g_assert_cmpint (rename (saved, wal_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  g_assert_cmpint (unlink (wal_path), ==, 0);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
+  WylFactArtifactSidecarRetireResult reconciled =
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_retire (binding,
+          &reconciled), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (reconciled, ==,
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RECONCILE_REQUIRED);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
+      WYRELOG_E_POLICY);
   wyl_fact_artifact_sidecar_binding_free (binding);
 
   /* The binding retains the exclusive lease until release, so it survives the
    * caller's lease reference and can still perform terminal retirement. */
+  binding = NULL;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &binding, &fd), ==,
+      WYRELOG_E_OK);
+  close (fd);
+  wyl_fact_artifact_sidecar_binding_free (binding);
   binding = NULL;
   g_assert_cmpint
       (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
