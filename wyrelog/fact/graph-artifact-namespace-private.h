@@ -13,6 +13,7 @@ typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
 typedef struct WylFactDuckdbTempChild WylFactDuckdbTempChild;
+typedef struct WylFactDuckdbTempOrphanEvidence WylFactDuckdbTempOrphanEvidence;
 typedef gboolean (*WylFactDuckdbTempChildVisitor) (WylFactDuckdbTempChild *,
     const gchar * logical_name, gpointer user_data);
 
@@ -71,6 +72,7 @@ typedef enum
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_OPEN_IDENTITY,
   WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY,
+  WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY,
 } WylFactArtifactNamespaceTestFault;
 
 /* Private, process-local, one-shot fault injection for namespace tests. */
@@ -228,6 +230,16 @@ wyrelog_error_t wyl_fact_artifact_namespace_sync_directory
  * directory, and lock are revalidated around every mutation. */
 wyrelog_error_t wyl_fact_duckdb_temp_root_create
     (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **);
+/* On a post-mkdir failure before file identity is observable, returns POLICY
+ * and optional orphan evidence.  Evidence is terminal telemetry only: there
+ * is intentionally no reopen/adopt/delete API for it. */
+wyrelog_error_t wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+    (WylFactArtifactMutationLease *, WylFactDuckdbTempRoot **,
+    WylFactDuckdbTempOrphanEvidence **);
+void wyl_fact_duckdb_temp_orphan_evidence_free
+    (WylFactDuckdbTempOrphanEvidence *);
+gchar *wyl_fact_duckdb_temp_orphan_evidence_dup_logical_name
+    (const WylFactDuckdbTempOrphanEvidence *);
 /* A canonical virtual spelling identifies this live authority to #596.  It
  * is not a host path and cannot be converted into a dirfd/HANDLE. */
 gchar *wyl_fact_duckdb_temp_root_dup_logical_name (WylFactDuckdbTempRoot *);
