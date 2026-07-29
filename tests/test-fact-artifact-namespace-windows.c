@@ -1240,6 +1240,59 @@ test_working_handle_free_never_closes_reused_handle (void)
   remove_scratch_file (path);
 }
 
+/* Adopts a working handle, unlinks its only name so the guardian addresses a
+ * live object with no remaining link, then releases the binding.  The
+ * observed link count is returned so the caller can prove the state under
+ * test was really produced rather than passing vacuously. */
+static DWORD
+release_unlinked_working_handle (void)
+{
+  gchar *path = NULL;
+  HANDLE issued = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (issued);
+  HANDLE witness = open_existing_scratch_file (path);
+  WylFactArtifactWinWorkingHandle *binding = NULL;
+  BY_HANDLE_FILE_INFORMATION info = { 0 };
+  g_autofree gchar *directory = g_path_get_dirname (path);
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_autofree wchar_t *wide_directory = g_utf8_to_utf16 (directory, -1, NULL,
+      NULL, NULL);
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
+          &identity, &binding), ==, WYRELOG_E_OK);
+  g_assert_true (DeleteFileW (wide));
+  g_assert_true (GetFileInformationByHandle (witness, &info));
+  g_assert_true (CloseHandle (witness));
+  wyl_fact_artifact_win_working_handle_free (binding);
+  /* Only removable once the destructor has closed the guardian: a leaked
+   * duplicate keeps the unlinked object, and its name, alive. */
+  g_assert_true (RemoveDirectoryW (wide_directory));
+  g_free (path);
+  return info.nNumberOfLinks;
+}
+
+/* Retirement leaves a guardian on an object whose last link is gone.  The
+ * destructor still owns that duplicate and must close it exactly once. */
+static void
+test_working_handle_free_closes_unlinked_object (void)
+{
+  DWORD before = 0;
+  DWORD after = 0;
+  guint i;
+
+  if (release_unlinked_working_handle () != 0) {
+    g_test_skip ("unlinking a held name kept the link count here");
+    return;
+  }
+  g_assert_true (GetProcessHandleCount (GetCurrentProcess (), &before));
+  for (i = 0; i < 50; i++)
+    g_assert_cmpuint (release_unlinked_working_handle (), ==, 0);
+  g_assert_true (GetProcessHandleCount (GetCurrentProcess (), &after));
+  /* One leaked guardian per release would be +50.  Unrelated loader, GLib
+   * and scanner activity moves this by only a handful. */
+  g_assert_cmpuint (after, <, before + 25);
+}
+
 static void
 test_working_handle_source_reuse_cannot_revoke_guardian (void)
 {
@@ -1930,6 +1983,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/free-reused-handle",
       test_working_handle_free_never_closes_reused_handle);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/working-handle/free-unlinked-object",
+      test_working_handle_free_closes_unlinked_object);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/source-reuse-guardian",
       test_working_handle_source_reuse_cannot_revoke_guardian);
