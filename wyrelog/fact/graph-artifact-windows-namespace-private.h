@@ -25,6 +25,14 @@ typedef struct WylFactArtifactWinTempRoot WylFactArtifactWinTempRoot;
 typedef struct WylFactArtifactWinTempChild WylFactArtifactWinTempChild;
 typedef struct WylFactArtifactWinTempChildBinding
     WylFactArtifactWinTempChildBinding;
+typedef struct WylFactArtifactWinTempBinding WylFactArtifactWinTempBinding;
+
+typedef enum
+{
+  WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED = 0,
+  WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED,
+  WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED,
+} WylFactArtifactWinSidecarReplaceResult;
 
 wyrelog_error_t wyl_fact_artifact_win_namespace_new
     (const WylFactGraphDirectory * directory,
@@ -112,6 +120,25 @@ wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_retire
     (WylFactArtifactWinSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_win_sidecar_binding_free
     (WylFactArtifactWinSidecarBinding *);
+
+/* A fixed-namespace staging artifact is an owner-only source for #609
+ * replacement.  The closed token maps solely to tmp-<token>; it has no path
+ * or CRT descriptor escape hatch.  Its working HANDLE must be checked-closed
+ * before replacement. */
+wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_binding
+    (WylFactArtifactWinLease *, const gchar * token,
+    WylFactArtifactWinTempBinding **);
+wyrelog_error_t wyl_fact_artifact_win_temp_binding_borrow
+    (WylFactArtifactWinTempBinding *, HANDLE *);
+wyrelog_error_t wyl_fact_artifact_win_temp_binding_close
+    (WylFactArtifactWinTempBinding *, HANDLE *);
+/* Replaces an existing exact bound sidecar.  The output is initialized on all
+ * entries.  RECONCILE_REQUIRED is terminal and means the rename linearized
+ * but durability/postcondition proof did not complete; retry is forbidden. */
+wyrelog_error_t wyl_fact_artifact_win_temp_binding_replace_sidecar
+    (WylFactArtifactWinTempBinding *, WylFactArtifactWinSidecarBinding *,
+    WylFactArtifactWinSidecarReplaceResult *);
+void wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *);
 
 /* Opaque, lease-bound DuckDB 1.5.5 spill authority.  It accepts no host path
  * or CRT descriptor: the root is minted here and a child uses only the
