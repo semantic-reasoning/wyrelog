@@ -9099,6 +9099,85 @@ cleanup:
 }
 
 /*
+ * Unit 1 (#374 gap 1c): a non-SYSTEM daemon profile denies every
+ * service-principal and service-credential management endpoint at the
+ * profile gate (http.c service_principal_management_authorize_session), which
+ * fires before any body validation, session lookup, or store row is touched.
+ * A principal write and a credential read must both return 403 with the wire
+ * denial token, and neither body may carry a credential secret.
+ */
+static gint
+check_service_management_profile_denied (void)
+{
+  g_autoptr (WylHandle) handle = NULL;
+  g_autoptr (GError) error = NULL;
+  g_autoptr (GMainContext) context = NULL;
+  g_autoptr (SoupSession) session = NULL;
+  g_autofree gchar *body = NULL;
+  g_autofree gchar *base_url = NULL;
+  gint rc = 0;
+  guint status = 0;
+  GThread *thread = NULL;
+  if (wyl_init (WYL_TEST_TEMPLATE_DIR, &handle) != WYRELOG_E_OK)
+    return 2200;
+  WylDaemonOptions opts = {
+    .template_dir = WYL_TEST_TEMPLATE_DIR,
+    .listen_port = 0,
+    .profile = WYL_DAEMON_PROFILE_SERVICE,
+  };
+  context = g_main_context_new ();
+  TestHttpServer http = { 0 };
+  http.loop = g_main_loop_new (context, FALSE);
+  g_main_context_push_thread_default (context);
+  http.server = wyl_daemon_start_http_server (&opts, handle, &error);
+  g_main_context_pop_thread_default (context);
+  if (http.server == NULL) {
+    g_clear_pointer (&http.loop, g_main_loop_unref);
+    return 2201;
+  }
+  thread = g_thread_new ("daemon-http-profile-denied",
+      test_http_server_thread_ctx, &http);
+  session = g_object_new (SOUP_TYPE_SESSION, NULL);
+  GSList *uris = soup_server_get_uris (http.server);
+  if (uris == NULL) {
+    rc = 2202;
+    goto cleanup;
+  }
+  base_url = g_uri_to_string (uris->data);
+  g_slist_free_full (uris, (GDestroyNotify) g_uri_unref);
+  const gchar *guard_query =
+      "guard_timestamp=1&guard_loc_class=trusted&guard_risk=0";
+  /* Principal write: the profile gate fires before body validation. */
+  if (send_raw_service_principal_full (session, "POST", base_url,
+          "/service-principals", guard_query,
+          "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
+          &status, &body) != 0 || status != 403 || body == NULL
+      || strstr (body, "service_principal_denied") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2203;
+    goto cleanup;
+  }
+  g_clear_pointer (&body, g_free);
+  /* Credential read: same profile gate, distinct wire token. */
+  if (send_raw_service_principal_full (session, "GET", base_url,
+          "/service-credentials/wlc_000000000000000000000000000",
+          guard_query, NULL, &status, &body) != 0 || status != 403
+      || body == NULL
+      || strstr (body, "service_credential_denied") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2204;
+    goto cleanup;
+  }
+cleanup:
+  g_main_loop_quit (http.loop);
+  g_thread_join (thread);
+  soup_server_disconnect (http.server);
+  g_clear_object (&http.server);
+  g_clear_pointer (&http.loop, g_main_loop_unref);
+  return rc;
+}
+
+/*
  * Unit-style coverage for the tenant-gate wire codes. Drives the
  * http.c decision helper through the WYL_TEST_DAEMON_HTTP seam so
  * that both stable gate arms are exercised directly.
@@ -9561,6 +9640,11 @@ main (void)
     goto cleanup;
   }
 #endif
+  gint profile_denied_rc = check_service_management_profile_denied ();
+  if (profile_denied_rc != 0) {
+    result = profile_denied_rc;
+    goto cleanup;
+  }
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
    * stands up its own encrypted-store handle and server, so run it as a
    * self-contained check and propagate its return code. */
