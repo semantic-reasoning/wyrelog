@@ -1325,15 +1325,36 @@ test_working_handle_free_never_closes_reused_handle (void)
   HANDLE issued = open_scratch_file (&path);
   WylFactGraphWinIdentity identity = identity_for (issued);
   WylFactArtifactWinWorkingHandle *binding = NULL;
-  HANDLE foreign;
+  HANDLE foreign = INVALID_HANDLE_VALUE;
   BY_HANDLE_FILE_INFORMATION info = { 0 };
+  guint attempt;
 
   g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
           &identity, &binding), ==, WYRELOG_E_OK);
   /* Adoption consumed |issued| and retained only a private duplicate. */
   g_assert_false (CloseHandle (issued));
-  foreign = open_scratch_file (&foreign_path);
-  g_assert_true (foreign == issued);
+  /* Numeric reuse of the consumed slot is this test's precondition, not the
+   * property it proves; nothing obliges the kernel to hand the value straight
+   * back.  Retry a bounded number of times and make a precondition that never
+   * arrives visible as a skip rather than as a silent pass. */
+  for (attempt = 0; attempt < 64; attempt++) {
+    foreign = open_scratch_file (&foreign_path);
+    if (foreign == issued)
+      break;
+    g_assert_true (CloseHandle (foreign));
+    foreign = INVALID_HANDLE_VALUE;
+    remove_scratch_file (foreign_path);
+    foreign_path = NULL;
+  }
+  if (foreign != issued) {
+    g_autofree gchar *message = g_strdup_printf
+        ("the consumed handle slot did not return in %u attempts", attempt);
+
+    g_test_skip (message);
+    wyl_fact_artifact_win_working_handle_free (binding);
+    remove_scratch_file (path);
+    return;
+  }
   wyl_fact_artifact_win_working_handle_free (binding);
   g_assert_true (GetFileInformationByHandle (foreign, &info));
   g_assert_true (CloseHandle (foreign));
