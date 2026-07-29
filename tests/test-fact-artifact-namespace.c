@@ -1662,6 +1662,12 @@ test_duckdb_temp_root (void)
   g_assert_cmpint (open_namespace (&directory, &namespace_), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_namespace_acquire_mutation_lease
       (namespace_, &lease), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_MKDIR);
+  root = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create (lease, &root), ==,
+      WYRELOG_E_IO);
+  g_assert_null (root);
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create (lease, &root), ==,
       WYRELOG_E_OK);
   /* Neither arbitrary descendants nor source-unsupported spellings acquire
@@ -1669,6 +1675,13 @@ test_duckdb_temp_root (void)
   gint fd = 42;
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root, "other", NULL,
           &fd), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (fd, ==, -1);
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE);
+  WylFactDuckdbTempChild *faulted_child = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
+          "duckdb_temp_block-0.block", &faulted_child, &fd), ==, WYRELOG_E_IO);
+  g_assert_null (faulted_child);
   g_assert_cmpint (fd, ==, -1);
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child (root,
           "duckdb_temp_storage_S32K-0.tmp", &storage, &fd), ==, WYRELOG_E_OK);
@@ -1696,7 +1709,9 @@ test_duckdb_temp_root (void)
       break;
     }
   g_assert_nonnull (temp_root_name);
-  g_autofree gchar *foreign = g_build_filename (graph_path, temp_root_name,
+  g_autofree gchar *temp_root_path = g_build_filename (graph_path,
+      temp_root_name, NULL);
+  g_autofree gchar *foreign = g_build_filename (temp_root_path,
       "foreign", NULL);
   g_assert_cmpint (g_close (g_open (foreign, O_CREAT | O_EXCL | O_RDWR, 0600),
           NULL), ==, TRUE);
@@ -1705,6 +1720,32 @@ test_duckdb_temp_root (void)
       WYRELOG_E_POLICY);
   g_assert_null (listed);
   g_assert_cmpint (unlink (foreign), ==, 0);
+  g_autofree gchar *storage_path = g_build_filename (temp_root_path,
+      "duckdb_temp_storage_S32K-0.tmp", NULL);
+  g_autofree gchar *hard_link = g_build_filename (temp_root_path, "hard", NULL);
+  g_assert_cmpint (link (storage_path, hard_link), ==, 0);
+  listed = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &listed), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (listed);
+  g_assert_cmpint (unlink (hard_link), ==, 0);
+  g_assert_cmpint (symlink ("/dev/null", foreign), ==, 0);
+  listed = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &listed), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (listed);
+  g_assert_cmpint (unlink (foreign), ==, 0);
+  g_autofree gchar *saved_storage = g_build_filename (temp_root_path,
+      "saved-storage", NULL);
+  g_assert_cmpint (rename (storage_path, saved_storage), ==, 0);
+  g_assert_cmpint (g_close (g_open (storage_path, O_CREAT | O_EXCL | O_RDWR,
+              0600), NULL), ==, TRUE);
+  listed = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &listed), ==,
+      WYRELOG_E_POLICY);
+  g_assert_null (listed);
+  g_assert_cmpint (unlink (storage_path), ==, 0);
+  g_assert_cmpint (rename (saved_storage, storage_path), ==, 0);
   WylFactDuckdbTempRetireResult retired =
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
   g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
