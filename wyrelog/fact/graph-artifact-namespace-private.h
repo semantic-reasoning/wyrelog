@@ -163,9 +163,10 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * exclusive lease and a writable request, never creates or publishes a name,
  * and pins the exact existing regular 0600 same-owner single-link entry.
  * Missing sidecars return NOT_FOUND with initialized outputs.  #596 must call
- * SidecarBinding revalidate immediately before and after every raw returned
- * FD I/O, sync, and close boundary; a failed check makes that recovery path
- * fail closed and the FD must not be used again.  As with the existing #612
+ * SidecarBinding _revalidate_fd immediately before and after every raw
+ * returned FD I/O, sync, truncate, and close boundary; a failed check
+ * terminally revokes that binding and the FD must not be used again.  As with
+ * the existing #612
  * mutation contract, this does not claim to close POSIX's final-check to
  * syscall window against an uncooperative same-UID participant. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
@@ -177,6 +178,16 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
  * descriptor identities without granting any additional pathname authority. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate
     (WylFactArtifactSidecarBinding *);
+/* Revalidates both held sidecar authority and the caller's actual working
+ * descriptor.  Descriptor-number reuse therefore fails closed rather than
+ * validating only the sidecar pin. */
+wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate_fd
+    (WylFactArtifactSidecarBinding *, gint working_fd);
+/* On success, closes and sets *working_fd to -1, then terminally consumes the
+ * binding.  On validation failure it leaves *working_fd untouched because its
+ * number could already refer to a foreign descriptor. */
+wyrelog_error_t wyl_fact_artifact_sidecar_binding_close
+    (WylFactArtifactSidecarBinding *, gint * working_fd);
 /* Publishes the exact bound sidecar under a distinct absent fixed sidecar
  * name, using a platform no-replace primitive.  After the rename linearizes,
  * the binding identifies destination even if durability reporting fails. */

@@ -926,10 +926,22 @@ test_existing_sidecar_reopen (void)
   const WylFactArtifactName sidecars[] = { WYL_FACT_ARTIFACT_WAL,
     WYL_FACT_ARTIFACT_CHECKPOINT, WYL_FACT_ARTIFACT_RECOVERY
   };
+  g_autofree gchar *binding_wal_path = g_build_filename (graph_path,
+      "facts.duckdb.wal", NULL);
   for (guint i = 0; i < G_N_ELEMENTS (sidecars); i++) {
     g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
         (lease, sidecars[i], TRUE, TRUE, &binding, &fd), ==, WYRELOG_E_OK);
-    close (fd);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
+            fd), ==, WYRELOG_E_OK);
+    g_assert_true (write_exact (fd, "c", 1));
+    g_assert_cmpint (fsync (fd), ==, 0);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
+            fd), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (binding, &fd),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (fd, ==, -1);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
+            fd), ==, WYRELOG_E_POLICY);
     wyl_fact_artifact_sidecar_binding_free (binding);
     binding = NULL;
     fd = -1;
@@ -940,7 +952,16 @@ test_existing_sidecar_reopen (void)
     g_assert_cmpint (fsync (fd), ==, 0);
     g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate (binding), ==,
         WYRELOG_E_OK);
-    close (fd);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
+            fd), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (binding, &fd),
+        ==, WYRELOG_E_OK);
+    g_assert_cmpint (fd, ==, -1);
+    wyl_fact_artifact_sidecar_binding_free (binding);
+    binding = NULL;
+    g_assert_cmpint
+        (wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding (lease,
+            sidecars[i], TRUE, &binding, &fd), ==, WYRELOG_E_OK);
     fd = -1;
     SidecarRevalidateWorker workers[2] = { {binding, WYRELOG_E_INTERNAL},
     {binding, WYRELOG_E_INTERNAL}
@@ -962,6 +983,27 @@ test_existing_sidecar_reopen (void)
     wyl_fact_artifact_sidecar_binding_free (binding);
     binding = NULL;
   }
+
+  /* dup2 models close plus exact-number reuse.  Checked close must not close
+   * the foreign replacement, and an I/O-boundary mismatch revokes the binding
+   * even if the number later appears usable again. */
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_sidecar_binding
+      (lease, WYL_FACT_ARTIFACT_WAL, TRUE, TRUE, &binding, &fd), ==,
+      WYRELOG_E_OK);
+  gint foreign_fd = open ("/dev/null", O_RDONLY | O_CLOEXEC);
+  g_assert_cmpint (foreign_fd, >=, 0);
+  g_assert_cmpint (dup2 (foreign_fd, fd), ==, fd);
+  if (foreign_fd != fd)
+    close (foreign_fd);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (binding, &fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fcntl (fd, F_GETFD), !=, -1);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (binding,
+          fd), ==, WYRELOG_E_POLICY);
+  close (fd);
+  wyl_fact_artifact_sidecar_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint (unlink (binding_wal_path), ==, 0);
 
   /* Strict existing-entry validation rejects malformed filesystem objects;
    * the failed open never creates, replaces, or mutates them. */
@@ -1229,6 +1271,12 @@ test_existing_sidecar_reopen (void)
           WYL_FACT_ARTIFACT_WAL, TRUE, &binding, &fd), ==, WYRELOG_E_POLICY);
   g_assert_null (binding);
   g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_revalidate_fd (NULL, 42),
+      ==, WYRELOG_E_POLICY);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_sidecar_binding_close (NULL, &fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, 42);
 }
 
 static void
