@@ -69,6 +69,14 @@ struct WylFactArtifactWinDirectory
   gchar *name;
 };
 
+static volatile LONG next_directory_flush_error;
+
+void
+wyl_fact_artifact_win_locator_fail_next_directory_flush_for_test (DWORD error)
+{
+  InterlockedExchange (&next_directory_flush_error, (LONG) error);
+}
+
 static WylNtCreateFile
 nt_create_file (void)
 {
@@ -611,9 +619,21 @@ wyl_fact_artifact_win_locator_flush_directory (WylFactArtifactWinLocator
     *locator)
 {
   wyrelog_error_t rc = wyl_fact_artifact_win_locator_revalidate (locator);
+  LONG forced;
+  DWORD error;
   if (rc != WYRELOG_E_OK)
     return rc;
-  return FlushFileBuffers (locator->directory) ? WYRELOG_E_OK : WYRELOG_E_IO;
+  forced = InterlockedExchange (&next_directory_flush_error, ERROR_SUCCESS);
+  if (forced == ERROR_SUCCESS && FlushFileBuffers (locator->directory))
+    return WYRELOG_E_OK;
+  error = forced == ERROR_SUCCESS ? GetLastError () : (DWORD) forced;
+  /* A volume which cannot flush a directory offers no durable namespace
+   * evidence.  Do not turn that into success: lifecycle callers must retain
+   * their APPLIED/UNKNOWN reconciliation result and fail closed. */
+  if (error == ERROR_NOT_SUPPORTED || error == ERROR_INVALID_FUNCTION
+      || error == ERROR_INVALID_HANDLE)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_IO;
 }
 
 const WylFactGraphWinIdentity *
