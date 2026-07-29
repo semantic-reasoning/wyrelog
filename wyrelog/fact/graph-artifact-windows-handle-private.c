@@ -64,14 +64,13 @@ read_identity (HANDLE handle, WylFactGraphWinIdentity *out_identity)
 }
 
 static wyrelog_error_t
-revalidate (WylFactArtifactWinWorkingHandle *binding, gboolean revoke)
+revalidate_exact_handle (WylFactArtifactWinWorkingHandle *binding)
 {
   WylFactGraphWinIdentity observed = { 0 };
   DWORD flags = 0;
   wyrelog_error_t rc;
 
-  if (binding == NULL || !binding->active
-      || binding->handle == INVALID_HANDLE_VALUE)
+  if (binding == NULL || binding->handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
   if (!GetHandleInformation (binding->handle, &flags))
     rc = win_error (GetLastError ());
@@ -80,6 +79,17 @@ revalidate (WylFactArtifactWinWorkingHandle *binding, gboolean revoke)
   else if ((rc = read_identity (binding->handle, &observed)) == WYRELOG_E_OK
       && !identity_equal (&binding->identity, &observed))
     rc = WYRELOG_E_POLICY;
+  return rc;
+}
+
+static wyrelog_error_t
+revalidate (WylFactArtifactWinWorkingHandle *binding, gboolean revoke)
+{
+  wyrelog_error_t rc;
+
+  if (binding == NULL || !binding->active)
+    return WYRELOG_E_POLICY;
+  rc = revalidate_exact_handle (binding);
   if (rc != WYRELOG_E_OK && revoke)
     binding->active = FALSE;
   return rc;
@@ -146,8 +156,13 @@ wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle
 
   if (binding == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
-  if (*inout_handle != binding->handle)
+  if (*inout_handle != binding->handle) {
+    /* The supplied value may be a valid foreign HANDLE.  Revoke rather than
+     * attempting to close either numeric value; _free will independently
+     * validate our owned HANDLE before it considers closing it. */
+    binding->active = FALSE;
     return WYRELOG_E_POLICY;
+  }
   if ((rc = revalidate (binding, TRUE)) != WYRELOG_E_OK)
     return rc;
   if (!CloseHandle (binding->handle)) {
@@ -166,7 +181,12 @@ wyl_fact_artifact_win_working_handle_free (WylFactArtifactWinWorkingHandle
 {
   if (binding == NULL)
     return;
-  if (binding->active && binding->handle != INVALID_HANDLE_VALUE)
+  /* A raw CloseHandle followed by native HANDLE value reuse must never cause
+   * this destructor to close the new foreign object.  Do not predicate this
+   * check on |active|: a caller-handle mismatch revokes the capability but
+   * can still leave its owned HANDLE safely closeable. */
+  if (binding->handle != INVALID_HANDLE_VALUE
+      && revalidate_exact_handle (binding) == WYRELOG_E_OK)
     CloseHandle (binding->handle);
   binding->active = FALSE;
   binding->handle = INVALID_HANDLE_VALUE;
