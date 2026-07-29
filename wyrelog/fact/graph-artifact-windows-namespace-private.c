@@ -1821,7 +1821,8 @@ wyl_fact_artifact_win_temp_child_retire (WylFactArtifactWinTempChild *child,
   for (guint i = 0; i < child->bindings->len; i++) {
     WylFactArtifactWinTempChildBinding *binding = g_ptr_array_index
         (child->bindings, i);
-    if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)) {
+    if (wyl_fact_artifact_win_io_state_has_session (binding->io_state)
+        || wyl_fact_artifact_win_io_state_is_aborted (binding->io_state)) {
       g_mutex_unlock (&child->mutex);
       return WYRELOG_E_POLICY;
     }
