@@ -26,6 +26,9 @@ typedef struct WylFactArtifactWinTempChild WylFactArtifactWinTempChild;
 typedef struct WylFactArtifactWinTempChildBinding
     WylFactArtifactWinTempChildBinding;
 typedef struct WylFactArtifactWinTempBinding WylFactArtifactWinTempBinding;
+typedef struct WylFactArtifactWinTempToken WylFactArtifactWinTempToken;
+typedef struct WylFactArtifactWinTempRecoveryEvidence
+    WylFactArtifactWinTempRecoveryEvidence;
 
 typedef enum
 {
@@ -151,6 +154,41 @@ wyrelog_error_t wyl_fact_artifact_win_temp_binding_replace_sidecar
     (WylFactArtifactWinTempBinding *, WylFactArtifactWinSidecarBinding *,
     WylFactArtifactWinSidecarReplaceResult *);
 void wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *);
+
+/* #608-equivalent temporary-token authority.  A token maps only to the
+ * closed spelling tmp-<token>; it has neither a host path nor a CRT fd escape
+ * hatch.  An owner can create, move without replacement, unlink, and export
+ * immutable identity evidence.  A non-owner is intentionally not exposed by
+ * this Windows surface: reopening a token would turn recovery evidence into
+ * ambient namespace authority. */
+wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_token
+    (WylFactArtifactWinLease *, const gchar * token,
+    WylFactArtifactWinTempToken **);
+wyrelog_error_t wyl_fact_artifact_win_temp_token_borrow
+    (WylFactArtifactWinTempToken *, HANDLE *);
+wyrelog_error_t wyl_fact_artifact_win_temp_token_revalidate
+    (WylFactArtifactWinTempToken *);
+wyrelog_error_t wyl_fact_artifact_win_temp_token_close
+    (WylFactArtifactWinTempToken *, HANDLE *);
+/* Both mutation APIs initialize |out_effect|.  APPLIED and UNKNOWN are
+ * terminal: callers must discard the token and, for UNKNOWN, reconcile from
+ * durable evidence rather than retrying the mutation. */
+wyrelog_error_t wyl_fact_artifact_win_temp_token_rename_no_replace
+    (WylFactArtifactWinTempToken *, const gchar * destination_token,
+    WylFactArtifactWinMutationEffect * out_effect);
+wyrelog_error_t wyl_fact_artifact_win_temp_token_unlink
+    (WylFactArtifactWinTempToken *, WylFactArtifactWinMutationEffect *);
+wyrelog_error_t wyl_fact_artifact_win_temp_token_export_recovery_evidence
+    (WylFactArtifactWinTempToken *, WylFactArtifactWinTempRecoveryEvidence **);
+void wyl_fact_artifact_win_temp_recovery_evidence_free
+    (WylFactArtifactWinTempRecoveryEvidence *);
+/* Recovery has no token pathname authority of its own: it needs a matching
+ * exclusive lease and the immutable entry FileId evidence.  A missing entry
+ * is idempotently recovered; mismatch/replacement is POLICY and untouched. */
+wyrelog_error_t wyl_fact_artifact_win_lease_recover_temp_token
+    (WylFactArtifactWinLease *, const WylFactArtifactWinTempRecoveryEvidence *,
+    WylFactArtifactWinMutationEffect *);
+void wyl_fact_artifact_win_temp_token_free (WylFactArtifactWinTempToken *);
 
 /* Opaque, lease-bound DuckDB 1.5.5 spill authority.  It accepts no host path
  * or CRT descriptor: the root is minted here and a child uses only the

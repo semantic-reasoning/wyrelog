@@ -716,6 +716,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
   WylFactArtifactWinTempRoot *temp_root = NULL;
   WylFactArtifactWinTempChild *temp_child = NULL;
   WylFactArtifactWinTempChildBinding *temp_binding = NULL;
+  WylFactArtifactWinTempToken *temp_token = NULL;
+  WylFactArtifactWinTempRecoveryEvidence *temp_evidence = NULL;
   HANDLE main_handle = INVALID_HANDLE_VALUE;
   HANDLE sidecar_handle = INVALID_HANDLE_VALUE;
   WylFactArtifactWinMutationEffect effect =
@@ -1031,6 +1033,65 @@ test_native_namespace_main_sidecar_lifecycle (void)
    * only the test's external cleanup (not provider authority) removes it. */
   g_assert_true (DeleteFileW (raw_child_wide));
   g_assert_true (RemoveDirectoryW (raw_root_wide));
+
+  /* #608-equivalent native temp-token lifecycle has no path or CRT-fd
+   * escape.  A closed owner may move no-replace, export identity evidence,
+   * and be recovered idempotently only through a matching exclusive lease. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
+          "token-old", &temp_token), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_borrow (temp_token,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_rename_no_replace
+      (temp_token, "token-next", &effect), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_close (temp_token,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_rename_no_replace
+      (temp_token, "token-next", &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_export_recovery_evidence
+      (temp_token, &temp_evidence), ==, WYRELOG_E_OK);
+  g_assert_nonnull (temp_evidence);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+          temp_evidence, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  /* The same immutable evidence is safe after an already-applied recovery. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_recover_temp_token (lease,
+          temp_evidence, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  wyl_fact_artifact_win_temp_recovery_evidence_free (temp_evidence);
+  temp_evidence = NULL;
+  wyl_fact_artifact_win_temp_token_free (temp_token);
+  temp_token = NULL;
+  /* Raw close/reuse terminally revokes the owner before unlink; the provider
+   * must leave both the token and the foreign reused HANDLE untouched. */
+  g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_token (lease,
+          "token-raw", &temp_token), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_borrow (temp_token,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  HANDLE stale_token_handle = sidecar_handle;
+  g_assert_true (CloseHandle (sidecar_handle));
+  g_autofree gchar *token_foreign_path = NULL;
+  HANDLE token_foreign = open_scratch_file (&token_foreign_path);
+  g_assert_true (token_foreign == stale_token_handle);
+  g_assert_cmpint (wyl_fact_artifact_win_temp_token_unlink (temp_token,
+          &effect), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  BY_HANDLE_FILE_INFORMATION token_foreign_info = { 0 };
+  g_assert_true (GetFileInformationByHandle (token_foreign,
+          &token_foreign_info));
+  wyl_fact_artifact_win_temp_token_free (temp_token);
+  temp_token = NULL;
+  g_assert_true (GetFileInformationByHandle (token_foreign,
+          &token_foreign_info));
+  g_assert_true (CloseHandle (token_foreign));
+  remove_scratch_file (token_foreign_path);
+  token_foreign_path = NULL;
+  g_autofree gchar *raw_token_path = g_build_filename (path, "tmp-token-raw",
+      NULL);
+  g_autofree wchar_t *raw_token_wide = g_utf8_to_utf16 (raw_token_path, -1,
+      NULL, NULL, NULL);
+  g_assert_true (DeleteFileW (raw_token_wide));
   wyl_fact_artifact_win_lease_free (lease);
   lease = NULL;
 
