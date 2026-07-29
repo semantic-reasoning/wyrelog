@@ -127,6 +127,27 @@ test_working_handle_free_never_closes_reused_handle (void)
 }
 
 static void
+test_working_handle_raw_close_revokes_as_policy (void)
+{
+  gchar *path = NULL;
+  HANDLE issued = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (issued);
+  WylFactArtifactWinWorkingHandle *binding = NULL;
+  HANDLE borrowed = (HANDLE) 1;
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (issued,
+          &identity, &binding), ==, WYRELOG_E_OK);
+  g_assert_true (CloseHandle (issued));
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_borrow (binding,
+          &borrowed), ==, WYRELOG_E_POLICY);
+  g_assert_true (borrowed == INVALID_HANDLE_VALUE);
+  /* There is no valid owned HANDLE after raw close; free only discards the
+   * terminal binding and must not attempt CloseHandle on its stale value. */
+  wyl_fact_artifact_win_working_handle_free (binding);
+  remove_scratch_file (path);
+}
+
+static void
 test_working_handle_close_mismatch_revokes_without_foreign_close (void)
 {
   gchar *path = NULL;
@@ -169,6 +190,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/free-reused-handle",
       test_working_handle_free_never_closes_reused_handle);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/working-handle/raw-close-policy",
+      test_working_handle_raw_close_revokes_as_policy);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/close-mismatch",
       test_working_handle_close_mismatch_revokes_without_foreign_close);
