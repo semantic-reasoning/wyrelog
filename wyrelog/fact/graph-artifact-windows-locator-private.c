@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-artifact-windows-locator-private.h"
 #include "fact/graph-windows-security-private.h"
+#include "wyrelog/wyl-log-private.h"
 
 #ifdef G_OS_WIN32
 #include <winternl.h>
@@ -17,6 +18,9 @@ typedef NTSTATUS (NTAPI * WylNtSetInformationFile) (HANDLE,
 #define WYL_NT_FILE_DISPOSITION_INFO_CLASS 13
 #define WYL_FILE_ID_EXTD_DIRECTORY_INFO 19
 #define WYL_FILE_ID_EXTD_DIRECTORY_RESTART_INFO 20
+#define WYL_NT_FILE_RENAME_INFO_EX_CLASS 65
+#define WYL_FILE_RENAME_REPLACE_IF_EXISTS 0x00000001UL
+#define WYL_FILE_RENAME_POSIX_SEMANTICS 0x00000002UL
 
 typedef struct
 {
@@ -29,6 +33,15 @@ typedef struct
   ULONG file_name_length;
   WCHAR file_name[1];
 } WylFileRenameInfo;
+/* Same layout and alignment as the classic form; the leading BOOLEAN is
+ * widened into the flag word that carries POSIX semantics. */
+typedef struct
+{
+  ULONG flags;
+  HANDLE root_directory;
+  ULONG file_name_length;
+  WCHAR file_name[1];
+} WylFileRenameInfoEx;
 typedef struct
 {
   DWORD next_entry_offset;
@@ -137,11 +150,8 @@ nt_error (NTSTATUS status)
   }
 }
 
-/* NtSetInformationFile is an optional native primitive, not a best-effort
- * pathname fallback.  Unsupported information classes or filesystems must
- * fail closed: callers cannot infer whether a mutation linearized. */
-static wyrelog_error_t
-nt_mutation_error (NTSTATUS status)
+static gboolean
+nt_unsupported_class (NTSTATUS status)
 {
   switch ((ULONG) status) {
     case 0xC00000BBUL:         /* STATUS_NOT_SUPPORTED */
@@ -149,10 +159,19 @@ nt_mutation_error (NTSTATUS status)
     case 0xC0000003UL:         /* STATUS_INVALID_INFO_CLASS */
     case 0xC000000DUL:         /* STATUS_INVALID_PARAMETER */
     case 0xC0000010UL:         /* STATUS_INVALID_DEVICE_REQUEST */
-      return WYRELOG_E_POLICY;
+      return TRUE;
     default:
-      return nt_error (status);
+      return FALSE;
   }
+}
+
+/* NtSetInformationFile is an optional native primitive, not a best-effort
+ * pathname fallback.  Unsupported information classes or filesystems must
+ * fail closed: callers cannot infer whether a mutation linearized. */
+static wyrelog_error_t
+nt_mutation_error (NTSTATUS status)
+{
+  return nt_unsupported_class (status) ? WYRELOG_E_POLICY : nt_error (status);
 }
 
 static wyrelog_error_t
@@ -535,6 +554,8 @@ entry_rename (WylFactArtifactWinLocator *locator,
   WylNtSetInformationFile set = nt_set_information_file ();
   g_autofree gunichar2 *wide = NULL;
   glong units = 0;
+  IO_STATUS_BLOCK iosb = { 0 };
+  NTSTATUS status;
   if (out_effect != NULL)
     *out_effect = WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
   if (out_effect == NULL)
@@ -547,20 +568,58 @@ entry_rename (WylFactArtifactWinLocator *locator,
   if ((rc = wide_component (destination, &wide, &units)) != WYRELOG_E_OK)
     return rc;
   gsize bytes = (gsize) units * sizeof (WCHAR);
-  gsize size = offsetof (WylFileRenameInfo, file_name) + bytes;
-  WylFileRenameInfo *info = g_try_malloc0 (size);
-  if (info == NULL)
-    return WYRELOG_E_NOMEM;
-  info->replace_if_exists = replace_existing;
-  info->root_directory = locator->directory;
-  info->file_name_length = (ULONG) bytes;
-  memcpy (info->file_name, wide, bytes);
-  IO_STATUS_BLOCK iosb = { 0 };
-  NTSTATUS status = set (entry->handle, &iosb, info, (ULONG) size,
-      WYL_NT_FILE_RENAME_INFO_CLASS);
-  g_free (info);
-  if (status < 0)
+  if (replace_existing) {
+    /* The replaced link's file is still open through the caller's own
+     * destination authority, and the kernel refuses a classic replace on the
+     * target's open count alone.  Only POSIX semantics can linearize that,
+     * and it unlinks the replaced name in the same operation.
+     *
+     * The credential-operation storage answers the same kernel rule the
+     * other way, by closing its destination before the rename
+     * (auth/service-credential-operation-storage-windows-private.c).  That
+     * is sound there and unavailable here: it opens the destination
+     * transiently, for FILE_READ_ATTRIBUTES only, purely to reject a reparse
+     * point, and holds no authority over it afterwards -- it even carries a
+     * test hook for injecting a race into the window that close-then-rename
+     * opens.  This module's destination binding holds live authority that
+     * has to survive the replacement, so the two must not be reconciled. */
+    gsize size = offsetof (WylFileRenameInfoEx, file_name) + bytes;
+    WylFileRenameInfoEx *info = g_try_malloc0 (size);
+    if (info == NULL)
+      return WYRELOG_E_NOMEM;
+    info->flags = WYL_FILE_RENAME_REPLACE_IF_EXISTS
+        | WYL_FILE_RENAME_POSIX_SEMANTICS;
+    info->root_directory = locator->directory;
+    info->file_name_length = (ULONG) bytes;
+    memcpy (info->file_name, wide, bytes);
+    status = set (entry->handle, &iosb, info, (ULONG) size,
+        WYL_NT_FILE_RENAME_INFO_EX_CLASS);
+    g_free (info);
+  } else {
+    /* No target link exists here, so the open-count rule never applies and
+     * the classic class keeps working on every supported filesystem. */
+    gsize size = offsetof (WylFileRenameInfo, file_name) + bytes;
+    WylFileRenameInfo *info = g_try_malloc0 (size);
+    if (info == NULL)
+      return WYRELOG_E_NOMEM;
+    info->replace_if_exists = FALSE;
+    info->root_directory = locator->directory;
+    info->file_name_length = (ULONG) bytes;
+    memcpy (info->file_name, wide, bytes);
+    status = set (entry->handle, &iosb, info, (ULONG) size,
+        WYL_NT_FILE_RENAME_INFO_CLASS);
+    g_free (info);
+  }
+  if (status < 0) {
+    /* A missing class and a denied authority both map to POLICY.  Label the
+     * capability gap here so the two stay distinguishable without widening
+     * the public error ABI. */
+    if (replace_existing && nt_unsupported_class (status))
+      WYL_LOG_WARN (WYL_LOG_SECTION_IO, "native artifact replacement is "
+          "unsupported by this kernel or filesystem (status 0x%08lX)",
+          (unsigned long) status);
     return nt_mutation_error (status);
+  }
   g_free (entry->name);
   entry->name = g_strdup (destination);
   if (entry->name == NULL) {

@@ -1036,6 +1036,11 @@ wyrelog_error_t
   if (source == NULL || destination == NULL || out_result == NULL
       || source->lease != destination->lease)
     return WYRELOG_E_POLICY;
+  /* Lock order is source before destination.  That holds only because the
+   * two bindings are distinct types and this is the only function taking
+   * both, so no caller can transpose the arguments.  A sidecar-to-sidecar
+   * replacement would break the argument and the pair would then have to be
+   * ordered canonically by mutex address. */
   g_mutex_lock (&source->mutex);
   g_mutex_lock (&destination->mutex);
   if (!source->active
@@ -1111,7 +1116,9 @@ wyrelog_error_t
   /* Rename is the linearization point.  Retire both pre-rename guardian
    * states before publishing the destination binding: source's validator is
    * still tied to tmp-<token>, while destination's guardian still addresses
-   * the unlinked old sidecar.  A fresh destination state is minted from the
+   * the unlinked old sidecar -- the POSIX rename removes that link as part
+   * of the same operation, which is why the superseded object survives here
+   * with no name at all.  A fresh destination state is minted from the
    * transferred entry, so no post-replace session can reach stale content. */
   replaced_entry = destination->entry;
   old_source_state = source->io_state;
