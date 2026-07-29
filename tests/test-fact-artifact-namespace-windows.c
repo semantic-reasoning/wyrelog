@@ -1500,12 +1500,12 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
   replace_result = WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_REPLACED;
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
+      (sidecar, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
       (replacement_source, sidecar, &replace_result), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (replace_result, ==,
       WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_NOT_REPLACED);
-  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_open_io_session
-      (sidecar, &session), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_binding_replace_sidecar
