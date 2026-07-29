@@ -563,6 +563,102 @@ test_native_lock_domain_concurrent_acquire_release (void)
   remove_scratch_file (path);
 }
 
+static void
+test_native_namespace_main_sidecar_lifecycle (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactWinLocator *locator = NULL;
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  WylFactArtifactWinEntry *main_entry = NULL;
+  WylFactGraphRegularFile main_file = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinLease *lease = NULL;
+  WylFactArtifactWinMainBinding *main_binding = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  HANDLE main_handle = INVALID_HANDLE_VALUE;
+  HANDLE sidecar_handle = INVALID_HANDLE_VALUE;
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  WylFactArtifactSidecarRetireResult retire =
+      WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_NOT_RETIRED;
+  g_autofree wchar_t *main_wide = NULL;
+  g_autofree wchar_t *lock_wide = NULL;
+  g_autofree wchar_t *checkpoint_wide = NULL;
+  g_autofree wchar_t *directory_wide = NULL;
+  g_autofree gchar *main_path = NULL;
+  g_autofree gchar *lock_path = NULL;
+  g_autofree gchar *checkpoint_path = NULL;
+
+  directory.graph_handle = graph;
+  directory.graph_identity = identity_for (graph);
+  locator = open_locator_for_test (graph, &graph_identity);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "facts.duckdb",
+          GENERIC_READ | GENERIC_WRITE, TRUE, &main_entry), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (locator,
+          main_entry, &main_handle), ==, WYRELOG_E_OK);
+  main_file.handle = main_handle;
+  main_file.identity = *wyl_fact_artifact_win_entry_identity (main_entry);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_new_with_main (&directory,
+          &main_file, &namespace_), ==, WYRELOG_E_OK);
+  /* Import does not consume #615's caller-held authority. */
+  g_assert_true (CloseHandle (main_handle));
+  main_file.handle = NULL;
+  wyl_fact_artifact_win_entry_free (main_entry);
+  main_entry = NULL;
+  wyl_fact_artifact_win_locator_free (locator);
+  locator = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_main (lease, &main_binding),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_main_binding_borrow (main_binding,
+          &main_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_main_binding_close (main_binding,
+          &main_handle), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_main_binding_free (main_binding);
+  main_binding = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_borrow (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_close (sidecar,
+          &sidecar_handle), ==, WYRELOG_E_OK);
+  /* Checked close consumes only working I/O; the exact lifecycle authority
+   * remains available for the one publication and later retirement. */
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_publish_no_replace
+      (sidecar, WYL_FACT_ARTIFACT_CHECKPOINT, &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_sidecar_binding_retire (sidecar,
+          &retire), ==, WYRELOG_E_OK);
+  g_assert_cmpint (retire, ==, WYL_FACT_ARTIFACT_SIDECAR_RETIRE_RESULT_RETIRED);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  sidecar = NULL;
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
+  wyl_fact_artifact_win_namespace_free (namespace_);
+  namespace_ = NULL;
+
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
+  checkpoint_path =
+      g_build_filename (path, "facts.duckdb.wal.checkpoint", NULL);
+  main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+  lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+  checkpoint_wide = g_utf8_to_utf16 (checkpoint_path, -1, NULL, NULL, NULL);
+  g_assert_false (GetFileAttributesW (checkpoint_wide) !=
+      INVALID_FILE_ATTRIBUTES);
+  g_assert_true (DeleteFileW (main_wide));
+  g_assert_true (DeleteFileW (lock_wide));
+  directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (CloseHandle (graph));
+  g_assert_true (RemoveDirectoryW (directory_wide));
+  g_free (path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -596,6 +692,8 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/lock-domain/concurrent-release",
       test_native_lock_domain_concurrent_acquire_release);
+  g_test_add_func ("/fact/artifact-namespace/windows/namespace/main-sidecar",
+      test_native_namespace_main_sidecar_lifecycle);
   return g_test_run ();
 }
 #else

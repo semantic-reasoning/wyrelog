@@ -44,6 +44,11 @@ wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinLocator *
 wyrelog_error_t
 wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator * locator,
     WylFactArtifactWinEntry * entry);
+/* Flushes the exact retained entry after revalidation.  This is intentionally
+ * not a caller-borrowed HANDLE operation, so lifecycle publication can flush
+ * a closed working capability without reopening by pathname. */
+wyrelog_error_t wyl_fact_artifact_win_entry_flush
+    (WylFactArtifactWinLocator * locator, WylFactArtifactWinEntry * entry);
 /* Both operations initialize |out_effect|.  APPLIED means the kernel accepted
  * the linearization operation; a subsequent directory flush may still fail
  * and must be reported separately by the namespace. */
