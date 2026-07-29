@@ -1800,6 +1800,13 @@ test_duckdb_temp_root (void)
   g_assert_cmpint (wyl_fact_duckdb_temp_root_child_exists (root,
           "duckdb_temp_block-99.block", &exists), ==, WYRELOG_E_POLICY);
   g_assert_false (exists);
+  WylFactDuckdbTempRetireResult blocked_retire =
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage,
+          &blocked_retire), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (blocked_retire, ==,
+      WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
+  g_assert_true (g_file_test (foreign, G_FILE_TEST_EXISTS));
   g_assert_cmpint (unlink (foreign), ==, 0);
   g_autofree gchar *storage_path = g_build_filename (temp_root_path,
       "duckdb_temp_storage_S32K-0.tmp", NULL);
@@ -1809,6 +1816,10 @@ test_duckdb_temp_root (void)
   g_assert_cmpint (wyl_fact_duckdb_temp_root_list_children (root, &listed), ==,
       WYRELOG_E_POLICY);
   g_assert_null (listed);
+  exists = TRUE;
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_child_exists (root,
+          "duckdb_temp_storage_S32K-0.tmp", &exists), ==, WYRELOG_E_POLICY);
+  g_assert_false (exists);
   g_assert_cmpint (unlink (hard_link), ==, 0);
   g_assert_cmpint (symlink ("/dev/null", foreign), ==, 0);
   listed = (gpointer) 0x1;
