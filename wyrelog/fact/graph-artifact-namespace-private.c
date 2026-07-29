@@ -2512,7 +2512,11 @@ wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
   GPtrArray *listed = NULL;
   if (result != WYRELOG_E_OK)
     goto done;
-  gint scan_fd = duplicate_cloexec (root->fd);
+  /* dup() shares a directory stream offset with root->fd.  A fresh relative
+   * open makes every audit start at the first entry and prevents an earlier
+   * list from hiding later foreign children. */
+  gint scan_fd = openat (root->fd, ".",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   DIR *dir = scan_fd >= 0 ? fdopendir (scan_fd) : NULL;
   if (!dir) {
     if (scan_fd >= 0)
