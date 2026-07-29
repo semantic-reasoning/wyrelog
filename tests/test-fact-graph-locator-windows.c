@@ -1240,6 +1240,78 @@ test_exact_evidence_publish_recovery_converges (void)
 }
 
 static void
+test_exact_evidence_restart_recovers_final (void)
+{
+  static const gchar *operations[] = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070580",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070581",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070582",
+  };
+  static const gchar *points[] = {
+    "stage-linked",
+    "stage-unlinked",
+    "stage-parent-synced",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (points); i++) {
+    g_autofree gchar *root = make_root ();
+    WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+    WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+    WylFactGraphLocator locator = { 0 };
+    WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    WylFactGraphWinOperationEvidence foreign = { 0 };
+    WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+    PublishFault fault = {.point = points[i] };
+
+    init_locator (&locator, "tenant", "graph");
+    open_graph (root, &locator, &resolver, &graph);
+    g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+            operations[i], &stage), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage, &evidence), ==, WYRELOG_E_OK);
+    g_assert_cmpint (_write (stage.fd, "restart", 7), ==, 7);
+    graph.checkpoint = fail_publish_once;
+    graph.checkpoint_data = &fault;
+    g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
+            &stage, &evidence), ==, WYRELOG_E_IO);
+    g_assert_true (fault.fired);
+
+    /* Simulate process loss: no stage, graph, or resolver HANDLE crosses the
+     * boundary.  The root fixture and persisted evidence are the only inputs
+     * to the new locator instance. */
+    wyl_fact_graph_stage_clear (&stage);
+    wyl_fact_graph_directory_clear (&graph);
+    wyl_fact_graph_resolver_clear (&resolver);
+    resolver = (WylFactGraphResolver) WYL_FACT_GRAPH_RESOLVER_INIT;
+    graph = (WylFactGraphDirectory) WYL_FACT_GRAPH_DIRECTORY_INIT;
+    g_assert_cmpint (wyl_fact_graph_resolver_open (root, &resolver), ==,
+        WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_resolver_open_directory (&resolver,
+            &locator, FALSE, &graph), ==, WYRELOG_E_OK);
+
+    foreign = evidence;
+    foreign.artifact_identity.file_id[0] ^= 1;
+    g_assert_cmpint
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+            operations[i], &foreign, &final), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+    wyl_fact_graph_regular_file_clear (&final);
+    /* Recovery is idempotent once the evidence-bound final is visible. */
+    g_assert_cmpint
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+    wyl_fact_graph_regular_file_clear (&final);
+    wyl_fact_graph_directory_clear (&graph);
+    wyl_fact_graph_resolver_clear (&resolver);
+    wyl_fact_graph_locator_clear (&locator);
+    remove_tree_no_follow (root);
+  }
+}
+
+static void
 test_exact_stage_creation_mints_operation_evidence (void)
 {
   static const gchar operation[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
@@ -1381,6 +1453,8 @@ main (int argc, char **argv)
       test_exact_stage_creation_boundaries_fail_closed);
   g_test_add_func ("/fact-graph-locator/windows/exact-publish-recovery",
       test_exact_evidence_publish_recovery_converges);
+  g_test_add_func ("/fact-graph-locator/windows/exact-restart-recovery",
+      test_exact_evidence_restart_recovers_final);
   g_test_add_func ("/fact-graph-locator/windows/exact-stage-evidence",
       test_exact_stage_creation_mints_operation_evidence);
   g_test_add_func ("/fact-graph-locator/windows/exact-evidence-substitution",
