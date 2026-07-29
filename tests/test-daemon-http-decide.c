@@ -9539,6 +9539,73 @@ out:
 }
 
 /*
+ * Unit 3 (#374 gap 1b): a resolvable human session that is not active must be
+ * denied.  The in-memory seed helper always stamps the session ACTIVE, so an
+ * inactive session cannot be forced at the WylSession level without a new test
+ * seam; instead the policy-store session-active fact is left unset (session_
+ * active = FALSE), which makes wyl_decide DENY and returns the same 403 denial
+ * arm (service_principal_management_authorize_session's decide gate) that an
+ * inactive session would reach.  A principal list and a credential read must
+ * both 403 with the wire denial token, leak no secret, and mutate nothing.
+ */
+static gint
+check_service_management_inactive_session_denied (void)
+{
+  ServiceDenialEnv env = { 0 };
+  g_autofree gchar *body = NULL;
+  guint status = 0;
+  guint principal_before = 0;
+  guint credential_before = 0;
+  guint principal_after = 0;
+  guint credential_after = 0;
+  gint rc = service_denial_env_init (&env, FALSE, TRUE, TRUE);
+  if (rc != 0)
+    goto out;
+  wyl_policy_store_t *store = wyl_handle_get_policy_store (env.handle);
+  if (wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_before) != WYRELOG_E_OK
+      || wyl_policy_store_foreach_service_credential (store,
+          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+          &credential_before) != WYRELOG_E_OK) {
+    rc = 2300;
+    goto out;
+  }
+  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
+          "/service-principals", env.query, NULL, &status, &body) != 0
+      || status != 403 || body == NULL
+      || strstr (body, "service_principal_denied") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2301;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (env.session, "GET", env.base_url,
+          "/service-credentials/wlc_000000000000000000000000000", env.query,
+          NULL, &status, &body) != 0 || status != 403 || body == NULL
+      || strstr (body, "service_credential_denied") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2302;
+    goto out;
+  }
+  if (wyl_policy_store_foreach_service_principal (store,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK
+      || wyl_policy_store_foreach_service_credential (store,
+          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+          &credential_after) != WYRELOG_E_OK) {
+    rc = 2303;
+    goto out;
+  }
+  if (principal_after != principal_before
+      || credential_after != credential_before) {
+    rc = 2304;
+    goto out;
+  }
+out:
+  service_denial_env_clear (&env);
+  return rc;
+}
+
+/*
  * Unit-style coverage for the tenant-gate wire codes. Drives the
  * http.c decision helper through the WYL_TEST_DAEMON_HTTP seam so
  * that both stable gate arms are exercised directly.
@@ -10009,6 +10076,11 @@ main (void)
   gint bearer_denied_rc = check_service_management_bearer_denied ();
   if (bearer_denied_rc != 0) {
     result = bearer_denied_rc;
+    goto cleanup;
+  }
+  gint inactive_denied_rc = check_service_management_inactive_session_denied ();
+  if (inactive_denied_rc != 0) {
+    result = inactive_denied_rc;
     goto cleanup;
   }
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
