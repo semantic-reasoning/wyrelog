@@ -2256,12 +2256,17 @@ duckdb_temp_child_name_is_valid (const gchar *name)
     if (g_str_has_prefix (p, "DEFAULT"))
       p += strlen ("DEFAULT");
     else {
-      if (*p++ != 'S')
-        return FALSE;
-      const gchar *digits = p;
-      while (g_ascii_isdigit (*p))
-        p++;
-      if (p == digits || *p++ != 'K')
+      static const gchar *const classes[] = {
+        "S32K", "S64K", "S96K", "S128K", "S160K", "S192K", "S224K",
+      };
+      gboolean matched = FALSE;
+      for (guint i = 0; i < G_N_ELEMENTS (classes); i++)
+        if (g_str_has_prefix (p, classes[i])) {
+          p += strlen (classes[i]);
+          matched = TRUE;
+          break;
+        }
+      if (!matched)
         return FALSE;
     }
     if (*p++ != '-')
@@ -2269,7 +2274,8 @@ duckdb_temp_child_name_is_valid (const gchar *name)
     const gchar *digits = p;
     while (g_ascii_isdigit (*p))
       p++;
-    return p != digits && g_strcmp0 (p, ".tmp") == 0;
+    return p != digits && (digits[0] == '0' ? p == digits + 1 :
+        digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
   }
   if (!g_str_has_prefix (name, block))
     return FALSE;
@@ -2277,7 +2283,15 @@ duckdb_temp_child_name_is_valid (const gchar *name)
   const gchar *digits = p;
   while (g_ascii_isdigit (*p))
     p++;
-  return p != digits && g_strcmp0 (p, ".block") == 0;
+  return p != digits && (digits[0] == '0' ? p == digits + 1 :
+      digits[0] != '0' && (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+}
+
+static gboolean
+duckdb_temp_storage_name_is_valid (const gchar *name)
+{
+  return duckdb_temp_child_name_is_valid (name)
+      && g_str_has_prefix (name, "duckdb_temp_storage_");
 }
 
 static wyrelog_error_t
@@ -2369,6 +2383,42 @@ duckdb_temp_find_child (WylFactDuckdbTempRoot *root, const gchar *name)
       return child;
   }
   return NULL;
+}
+
+/* A mutation never acts on a partially understood directory.  DuckDB's broad
+ * cleanup observation is not authority: one foreign entry poisons the whole
+ * root before any unlink/create/rmdir can linearize. */
+static wyrelog_error_t
+duckdb_temp_root_audit_unlocked (WylFactDuckdbTempRoot *root)
+{
+  if (duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  gint fd = openat (root->fd, ".", O_RDONLY | O_DIRECTORY | O_CLOEXEC
+      | O_NOFOLLOW);
+  DIR *dir = fd >= 0 ? fdopendir (fd) : NULL;
+  if (!dir) {
+    if (fd >= 0)
+      close (fd);
+    return WYRELOG_E_IO;
+  }
+  wyrelog_error_t result = WYRELOG_E_OK;
+  errno = 0;
+  for (struct dirent * entry; (entry = readdir (dir)) != NULL;) {
+    if (g_strcmp0 (entry->d_name, ".") == 0
+        || g_strcmp0 (entry->d_name, "..") == 0)
+      continue;
+    WylFactDuckdbTempChild *child =
+        duckdb_temp_find_child (root, entry->d_name);
+    if (!duckdb_temp_child_name_is_valid (entry->d_name) || !child
+        || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK) {
+      result = WYRELOG_E_POLICY;
+      break;
+    }
+  }
+  if (errno && result == WYRELOG_E_OK)
+    result = WYRELOG_E_IO;
+  closedir (dir);
+  return result;
 }
 
 wyrelog_error_t
@@ -2475,9 +2525,15 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
     *out_fd = -1;
   if (!root || !out_child || !out_fd || !duckdb_temp_child_name_is_valid (name))
     return WYRELOG_E_INVALID;
+  /* DuckDB 1.5.5 evidence shows block names only under FileExists.  Do not
+   * manufacture lifecycle authority from that observation. */
+  if (!duckdb_temp_storage_name_is_valid (name))
+    return WYRELOG_E_POLICY;
   WylFactArtifactMutationLease *lease = root->lease;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = duckdb_temp_root_matches_unlocked (root);
+  if (result == WYRELOG_E_OK)
+    result = duckdb_temp_root_audit_unlocked (root);
   if (result != WYRELOG_E_OK || duckdb_temp_find_child (root, name)) {
     result = WYRELOG_E_POLICY;
     goto done;
@@ -2562,6 +2618,8 @@ wyl_fact_duckdb_temp_child_open (WylFactDuckdbTempChild *child,
   WylFactArtifactMutationLease *lease = child->root->lease;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = duckdb_temp_child_matches_unlocked (child);
+  if (result == WYRELOG_E_OK)
+    result = duckdb_temp_root_audit_unlocked (child->root);
   if (result != WYRELOG_E_OK)
     goto done;
   gint fd = openat (child->root->fd, child->name,
@@ -2597,6 +2655,8 @@ wyl_fact_duckdb_temp_root_list_children (WylFactDuckdbTempRoot *root,
   WylFactArtifactMutationLease *lease = root->lease;
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result = duckdb_temp_root_matches_unlocked (root);
+  if (result == WYRELOG_E_OK)
+    result = duckdb_temp_root_audit_unlocked (root);
   GPtrArray *listed = NULL;
   if (result != WYRELOG_E_OK)
     goto done;
