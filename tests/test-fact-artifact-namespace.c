@@ -2664,25 +2664,6 @@ test_duckdb_temp_root (void)
       WYRELOG_E_OK);
   wyl_fact_duckdb_temp_child_binding_free (binding);
   binding = NULL;
-  /* Free cannot silently close a live caller FD, but it must leave a
-   * terminal retirement barrier rather than allowing an unlink underneath it. */
-  g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
-          &binding, &fd), ==, WYRELOG_E_OK);
-  wyl_fact_duckdb_temp_child_binding_free (binding);
-  binding = NULL;
-  g_assert_cmpint (write (fd, "y", 1), ==, 1);
-  g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
-      WYRELOG_E_POLICY);
-  g_assert_cmpint (wyl_fact_duckdb_temp_root_retire (root, &retired), ==,
-      WYRELOG_E_POLICY);
-  g_assert_cmpint (close (fd), ==, 0);
-  fd = -1;
-  g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
-          &binding, &fd), ==, WYRELOG_E_OK);
-  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd), ==,
-      WYRELOG_E_OK);
-  wyl_fact_duckdb_temp_child_binding_free (binding);
-  binding = NULL;
   g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
           &binding, &fd), ==, WYRELOG_E_OK);
   gint reused = g_open ("/dev/null", O_RDWR, 0);
@@ -2717,6 +2698,49 @@ test_duckdb_temp_root (void)
   g_assert_cmpint (retired, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
   wyl_fact_duckdb_temp_root_free (root);
   root = NULL;
+  /* Freeing a live binding releases its object but cannot prove that its
+   * caller FD closed.  Even a later clean B binding must not clear A's
+   * terminal barrier or permit retirement below A. */
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence (lease,
+          &root, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_child_binding (root,
+          "duckdb_temp_storage_S192K-3.tmp", &storage, &binding, &fd,
+          &evidence), ==, WYRELOG_E_OK);
+  wyl_fact_duckdb_temp_child_binding_free (binding);
+  binding = NULL;
+  gint fd_b = -1;
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_open_binding (storage, TRUE,
+          &binding, &fd_b), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_binding_close (binding, &fd_b),
+      ==, WYRELOG_E_OK);
+  wyl_fact_duckdb_temp_child_binding_free (binding);
+  binding = NULL;
+  g_assert_cmpint (write (fd, "y", 1), ==, 1);
+  g_assert_cmpint (wyl_fact_duckdb_temp_child_retire (storage, &retired), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_retire (root, &retired), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (close (fd), ==, 0);
+  fd = -1;
+  wyl_fact_duckdb_temp_child_free (storage);
+  storage = NULL;
+  wyl_fact_duckdb_temp_root_free (root);
+  root = NULL;
+  g_autoptr (GDir) free_barrier_dir = g_dir_open (graph_path, 0, NULL);
+  const gchar *free_barrier_root_name = NULL;
+  while ((entry = g_dir_read_name (free_barrier_dir)) != NULL)
+    if (g_str_has_prefix (entry, ".duckdb-private-temp-")) {
+      free_barrier_root_name = entry;
+      break;
+    }
+  g_assert_nonnull (free_barrier_root_name);
+  g_autofree gchar *free_barrier_root_path = g_build_filename (graph_path,
+      free_barrier_root_name, NULL);
+  g_autofree gchar *free_barrier_child_path =
+      g_build_filename (free_barrier_root_path,
+      "duckdb_temp_storage_S192K-3.tmp", NULL);
+  g_assert_cmpint (unlink (free_barrier_child_path), ==, 0);
+  g_assert_cmpint (g_rmdir (free_barrier_root_path), ==, 0);
   /* Once a child exists, a post-open binding validation failure cannot safely
    * adopt or unlink it.  The provider must return terminal orphan evidence. */
   g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence (lease,
