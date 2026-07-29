@@ -218,7 +218,13 @@ wyl_fact_artifact_win_lock_domain_acquire (WylFactArtifactWinLockDomain *domain,
     domain->writer = TRUE;
   else
     domain->readers++;
+  /* Reference count and final removal are both guarded by domains_mutex.
+   * Lock order is domain->mutex then domains_mutex; no code takes the
+   * inverse order, so a concurrent release cannot free this domain between
+   * lease publication and its destructor. */
+  g_mutex_lock (&domains_mutex);
   domain->references++;
+  g_mutex_unlock (&domains_mutex);
   lease->domain = domain;
   lease->handle = lock_handle;
   lease->exclusive = exclusive;
