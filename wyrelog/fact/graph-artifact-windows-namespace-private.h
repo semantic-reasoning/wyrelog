@@ -98,7 +98,9 @@ wyrelog_error_t wyl_fact_artifact_win_lease_revalidate
 void wyl_fact_artifact_win_lease_free (WylFactArtifactWinLease *);
 
 /* Main is imported authority only: it can be issued for in-place I/O by an
- * exclusive lease, never created, renamed, or deleted. */
+ * exclusive lease, never created, renamed, or deleted. Every _borrow mints a
+ * caller-owned duplicate; callers close it and pass INVALID_HANDLE_VALUE to
+ * _close before lifecycle ends. */
 wyrelog_error_t wyl_fact_artifact_win_lease_open_main
     (WylFactArtifactWinLease *, WylFactArtifactWinMainBinding **);
 wyrelog_error_t wyl_fact_artifact_win_main_binding_borrow
@@ -109,10 +111,10 @@ wyrelog_error_t wyl_fact_artifact_win_main_binding_close
     (WylFactArtifactWinMainBinding *, HANDLE *);
 void wyl_fact_artifact_win_main_binding_free (WylFactArtifactWinMainBinding *);
 
-/* Sidecar working HANDLE close consumes only I/O authority.  Successful close
- * retains the lifecycle binding for later no-replace publication or retirement.
- * Any raw-close/reuse or identity failure terminally revokes it and never
- * closes a possibly reused foreign HANDLE. */
+/* Sidecar _borrow mints a caller-owned duplicate.  _close requires that value
+ * already closed and INVALID_HANDLE_VALUE, then consumes only I/O authority
+ * while retaining lifecycle authority for publication or retirement. Legacy
+ * raw values are never ownership evidence and are never closed. */
 wyrelog_error_t wyl_fact_artifact_win_lease_open_sidecar
     (WylFactArtifactWinLease *, WylFactArtifactName sidecar,
     gboolean create_new, WylFactArtifactWinSidecarBinding **);
@@ -139,8 +141,8 @@ void wyl_fact_artifact_win_sidecar_binding_free
 
 /* A fixed-namespace staging artifact is an owner-only source for #609
  * replacement.  The closed token maps solely to tmp-<token>; it has no path
- * or CRT descriptor escape hatch.  Its working HANDLE must be checked-closed
- * before replacement. */
+ * or CRT descriptor escape hatch. _borrow values are caller-owned duplicates
+ * and must be closed before _close permits replacement. */
 wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_binding
     (WylFactArtifactWinLease *, const gchar * token,
     WylFactArtifactWinTempBinding **);
@@ -161,7 +163,8 @@ void wyl_fact_artifact_win_temp_binding_free (WylFactArtifactWinTempBinding *);
 /* #608-equivalent temporary-token authority.  A token maps only to the
  * closed spelling tmp-<token>; it has neither a host path nor a CRT fd escape
  * hatch.  An owner can create, move without replacement, unlink, and export
- * immutable identity evidence.  A non-owner is intentionally not exposed by
+ * immutable identity evidence. _borrow values are caller-owned duplicates and
+ * must be closed before _close permits a mutation. A non-owner is intentionally not exposed by
  * this Windows surface: reopening a token would turn recovery evidence into
  * ambient namespace authority. */
 wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_token
@@ -203,7 +206,8 @@ void wyl_fact_artifact_win_temp_token_free (WylFactArtifactWinTempToken *);
 
 /* Opaque, lease-bound DuckDB 1.5.5 spill authority.  It accepts no host path
  * or CRT descriptor: the root is minted here and a child uses only the
- * source-pinned logical spelling. */
+ * source-pinned logical spelling. Child _borrow values are caller-owned
+ * duplicates and must be closed before child-binding _close. */
 wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_root
     (WylFactArtifactWinLease *, WylFactArtifactWinTempRoot **);
 gchar *wyl_fact_artifact_win_temp_root_dup_logical_name
@@ -221,6 +225,8 @@ wyrelog_error_t
 wyrelog_error_t
     wyl_fact_artifact_win_temp_child_binding_revalidate
     (WylFactArtifactWinTempChildBinding *);
+/* Legacy raw-HANDLE validation is deliberately POLICY: numeric reuse, even
+ * for the same file object, cannot prove guardian ownership. */
 wyrelog_error_t
     wyl_fact_artifact_win_temp_child_binding_revalidate_handle
     (WylFactArtifactWinTempChildBinding *, HANDLE);
