@@ -270,7 +270,10 @@ wyl_fact_artifact_win_locator_free (WylFactArtifactWinLocator *locator)
 {
   if (locator == NULL)
     return;
-  if (valid_handle (locator->directory))
+  /* A raw CloseHandle plus numeric reuse must not close a foreign directory
+   * object during ordinary destructor cleanup. */
+  if (valid_handle (locator->directory)
+      && wyl_fact_artifact_win_locator_revalidate (locator) == WYRELOG_E_OK)
     CloseHandle (locator->directory);
   g_free (locator);
 }
@@ -366,17 +369,20 @@ wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator *locator,
 }
 
 wyrelog_error_t
-wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinEntry
-    *entry, HANDLE *out_handle)
+wyl_fact_artifact_win_entry_issue_working_handle (WylFactArtifactWinLocator
+    *locator, WylFactArtifactWinEntry *entry, HANDLE *out_handle)
 {
   if (out_handle != NULL)
     *out_handle = INVALID_HANDLE_VALUE;
-  if (entry == NULL || out_handle == NULL)
+  if (locator == NULL || entry == NULL || out_handle == NULL)
     return WYRELOG_E_INVALID;
-  WylFactGraphWinIdentity observed = { 0 };
-  wyrelog_error_t rc = file_identity (entry->handle, FALSE, &observed);
-  if (rc != WYRELOG_E_OK || !identity_equal (&observed, &entry->identity))
-    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+  /* Issuance is an I/O boundary, not merely a HANDLE duplication.  Retest
+   * the retained directory and the current exact name before exposing an
+   * owned duplicate: a source moved out and replaced at the canonical name
+   * therefore fails closed. */
+  wyrelog_error_t rc = wyl_fact_artifact_win_entry_revalidate (locator, entry);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   if (!DuplicateHandle (GetCurrentProcess (), entry->handle,
           GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return WYRELOG_E_IO;
@@ -483,7 +489,16 @@ wyl_fact_artifact_win_entry_free (WylFactArtifactWinEntry *entry)
 {
   if (entry == NULL)
     return;
-  if (valid_handle (entry->handle))
+  /* Do not close an externally-closed/reused numeric HANDLE.  The entry may
+   * be stale after an ownership violation, but freeing its metadata must not
+   * mutate a foreign object. */
+  WylFactGraphWinIdentity observed = { 0 };
+  DWORD flags = 0;
+  if (valid_handle (entry->handle)
+      && GetHandleInformation (entry->handle, &flags)
+      && (flags & HANDLE_FLAG_INHERIT) == 0
+      && file_identity (entry->handle, FALSE, &observed) == WYRELOG_E_OK
+      && identity_equal (&observed, &entry->identity))
     CloseHandle (entry->handle);
   g_free (entry->name);
   g_free (entry);
