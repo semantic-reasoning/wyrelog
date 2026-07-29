@@ -7,7 +7,9 @@
 
 struct WylFactArtifactWinWorkingHandle
 {
-  HANDLE handle;
+  /* Never expose this owning duplicate.  Identity equality is deliberately
+   * insufficient to establish ownership after numeric HANDLE reuse. */
+  HANDLE guardian;
   WylFactGraphWinIdentity identity;
   gboolean active;
 };
@@ -71,13 +73,13 @@ revalidate_exact_handle (WylFactArtifactWinWorkingHandle *binding)
   DWORD flags = 0;
   wyrelog_error_t rc;
 
-  if (binding == NULL || binding->handle == INVALID_HANDLE_VALUE)
+  if (binding == NULL || binding->guardian == INVALID_HANDLE_VALUE)
     return WYRELOG_E_POLICY;
-  if (!GetHandleInformation (binding->handle, &flags))
+  if (!GetHandleInformation (binding->guardian, &flags))
     rc = win_error (GetLastError ());
   else if ((flags & HANDLE_FLAG_INHERIT) != 0)
     rc = WYRELOG_E_POLICY;
-  else if ((rc = read_identity (binding->handle, &observed)) == WYRELOG_E_OK
+  else if ((rc = read_identity (binding->guardian, &observed)) == WYRELOG_E_OK
       && !identity_equal (&binding->identity, &observed))
     rc = WYRELOG_E_POLICY;
   return rc;
@@ -103,6 +105,7 @@ wyl_fact_artifact_win_working_handle_adopt (HANDLE issued_handle,
 {
   WylFactGraphWinIdentity observed = { 0 };
   WylFactArtifactWinWorkingHandle *binding;
+  HANDLE guardian = INVALID_HANDLE_VALUE;
   wyrelog_error_t rc;
 
   if (out_binding != NULL)
@@ -110,16 +113,43 @@ wyl_fact_artifact_win_working_handle_adopt (HANDLE issued_handle,
   if (out_binding == NULL || expected == NULL
       || issued_handle == NULL || issued_handle == INVALID_HANDLE_VALUE)
     return WYRELOG_E_INVALID;
-  if (!SetHandleInformation (issued_handle, HANDLE_FLAG_INHERIT, 0))
+  /* Never retain the numeric source supplied by a caller/locator.  The
+   * guardian is an independently duplicated kernel handle, so raw close or
+   * reuse of the source cannot affect namespace ownership. */
+  if (!DuplicateHandle (GetCurrentProcess (), issued_handle,
+          GetCurrentProcess (), &guardian, 0, FALSE, DUPLICATE_SAME_ACCESS))
     return win_error (GetLastError ());
-  if ((rc = read_identity (issued_handle, &observed)) != WYRELOG_E_OK)
+  if (!SetHandleInformation (guardian, HANDLE_FLAG_INHERIT, 0)) {
+    DWORD error = GetLastError ();
+    CloseHandle (guardian);
+    return win_error (error);
+  }
+  if (!SetHandleInformation (issued_handle, HANDLE_FLAG_INHERIT, 0)) {
+    CloseHandle (guardian);
+    return win_error (GetLastError ());
+  }
+  if ((rc = read_identity (guardian, &observed)) != WYRELOG_E_OK) {
+    CloseHandle (guardian);
     return rc;
-  if (!identity_equal (&observed, expected))
+  }
+  if (!identity_equal (&observed, expected)) {
+    CloseHandle (guardian);
     return WYRELOG_E_POLICY;
+  }
   binding = g_try_new0 (WylFactArtifactWinWorkingHandle, 1);
-  if (binding == NULL)
+  if (binding == NULL) {
+    CloseHandle (guardian);
     return WYRELOG_E_NOMEM;
-  binding->handle = issued_handle;
+  }
+  /* Adoption consumes only the source we were explicitly handed, never a
+   * future raw value.  It is now safe to discard it before publication. */
+  if (!CloseHandle (issued_handle)) {
+    DWORD error = GetLastError ();
+    CloseHandle (guardian);
+    g_free (binding);
+    return win_error (error);
+  }
+  binding->guardian = guardian;
   binding->identity = observed;
   binding->active = TRUE;
   *out_binding = binding;
@@ -138,7 +168,15 @@ wyl_fact_artifact_win_working_handle_borrow (WylFactArtifactWinWorkingHandle
     return WYRELOG_E_INVALID;
   if ((rc = revalidate (binding, TRUE)) != WYRELOG_E_OK)
     return rc;
-  *out_handle = binding->handle;
+  if (!DuplicateHandle (GetCurrentProcess (), binding->guardian,
+          GetCurrentProcess (), out_handle, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    return win_error (GetLastError ());
+  if (!SetHandleInformation (*out_handle, HANDLE_FLAG_INHERIT, 0)) {
+    DWORD error = GetLastError ();
+    CloseHandle (*out_handle);
+    *out_handle = INVALID_HANDLE_VALUE;
+    return win_error (error);
+  }
   return WYRELOG_E_OK;
 }
 
@@ -157,20 +195,18 @@ wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle
 
   if (binding == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
-  if (*inout_handle != binding->handle) {
-    /* The supplied value may be a valid foreign HANDLE.  Revoke rather than
-     * attempting to close either numeric value; _free will independently
-     * validate our owned HANDLE before it considers closing it. */
-    binding->active = FALSE;
-    return WYRELOG_E_POLICY;
-  }
+  /* A raw I/O duplicate is caller-owned.  Never close or inspect it here:
+   * it may already be a numerically reused foreign HANDLE.  The only owned
+   * object is the guardian below.  Well-behaved callers close their duplicate
+   * before this operation; legacy callers merely leak their own duplicate,
+   * never namespace authority. */
   if ((rc = revalidate (binding, TRUE)) != WYRELOG_E_OK)
     return rc;
-  if (!CloseHandle (binding->handle)) {
+  if (!CloseHandle (binding->guardian)) {
     binding->active = FALSE;
     return win_error (GetLastError ());
   }
-  binding->handle = INVALID_HANDLE_VALUE;
+  binding->guardian = INVALID_HANDLE_VALUE;
   binding->active = FALSE;
   *inout_handle = INVALID_HANDLE_VALUE;
   return WYRELOG_E_OK;
@@ -186,11 +222,11 @@ wyl_fact_artifact_win_working_handle_free (WylFactArtifactWinWorkingHandle
    * this destructor to close the new foreign object.  Do not predicate this
    * check on |active|: a caller-handle mismatch revokes the capability but
    * can still leave its owned HANDLE safely closeable. */
-  if (binding->handle != INVALID_HANDLE_VALUE
+  if (binding->guardian != INVALID_HANDLE_VALUE
       && revalidate_exact_handle (binding) == WYRELOG_E_OK)
-    CloseHandle (binding->handle);
+    CloseHandle (binding->guardian);
   binding->active = FALSE;
-  binding->handle = INVALID_HANDLE_VALUE;
+  binding->guardian = INVALID_HANDLE_VALUE;
   g_free (binding);
 }
 
