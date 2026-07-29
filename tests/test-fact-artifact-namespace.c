@@ -1230,6 +1230,25 @@ test_existing_sidecar_reopen (void)
   g_assert_null (binding);
   g_assert_cmpint (fd, ==, -1);
 }
+
+static void
+test_main_binding (void)
+{
+  WylFactArtifactMainBinding *binding = (gpointer) 0x1;
+  gint fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_mutation_lease_open_main_binding (NULL,
+          &binding, &fd), ==, WYRELOG_E_POLICY);
+  g_assert_null (binding);
+  g_assert_cmpint (fd, ==, -1);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate (NULL), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_main_binding_revalidate_fd (NULL, 42), ==,
+      WYRELOG_E_POLICY);
+  fd = 42;
+  g_assert_cmpint (wyl_fact_artifact_main_binding_close (NULL, &fd), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (fd, ==, 42);
+}
 #endif
 
 static void
