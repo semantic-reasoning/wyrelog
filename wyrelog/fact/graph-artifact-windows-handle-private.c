@@ -195,11 +195,11 @@ wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle
 
   if (binding == NULL || inout_handle == NULL)
     return WYRELOG_E_INVALID;
-  /* A raw I/O duplicate is caller-owned.  Never close or inspect it here:
-   * it may already be a numerically reused foreign HANDLE.  The only owned
-   * object is the guardian below.  Well-behaved callers close their duplicate
-   * before this operation; legacy callers merely leak their own duplicate,
-   * never namespace authority. */
+  /* The caller-owned I/O duplicate must be closed before lifecycle can end.
+   * Never inspect or close a live raw value: it may already be a numerically
+   * reused foreign HANDLE. */
+  if (*inout_handle != INVALID_HANDLE_VALUE)
+    return WYRELOG_E_POLICY;
   if ((rc = revalidate (binding, TRUE)) != WYRELOG_E_OK)
     return rc;
   if (!CloseHandle (binding->guardian)) {
