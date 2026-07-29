@@ -16,6 +16,18 @@ duckdb_link_args = []
 if host_machine.system() == 'linux'
   duckdb_deps += cpp.find_library('pthread', required : true)
   duckdb_deps += cpp.find_library('dl', required : true)
+elif host_machine.system() == 'darwin'
+  # libduckdb is a static C++ archive (static_library below) that gets linked
+  # into the pure-C wyrelog targets (libwyrelog, wyrelogd, and the fact/audit
+  # test binaries). When one of those is linked with the C compiler driver it
+  # does not pull the C++ runtime, so libduckdb's references to the C++
+  # standard library (std::to_string, typeinfo/vtable for duckdb::Exception,
+  # __cxa_guard_*) are left undefined and the link fails -- observed as a
+  # macOS-only CI link failure. Windows (below) already carries libstdc++ for
+  # the same reason; macOS needs libc++. duckdb_deps is reused as the exported
+  # dependency's dependencies, so every consumer picks it up; macOS ld64 is
+  # link-order agnostic.
+  duckdb_deps += cpp.find_library('c++', required : true)
 elif host_machine.system() == 'windows'
   # DuckDB's upstream Windows build is static. Without this definition the
   # amalgamation marks its own declarations dllimport while compiling them.
