@@ -224,6 +224,13 @@ test_native_namespace_captured_owner_acl_binding (void)
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
           WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, TRUE,
           &binding), ==, WYRELOG_E_OK);
+  /* MAIN cannot be minted through the generic namespace, including strict
+   * creation.  Only #615 evidence import plus an exclusive native lease may
+   * issue a main HANDLE. */
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
+          WYL_FACT_ARTIFACT_MAIN, GENERIC_READ | GENERIC_WRITE, TRUE,
+          &reopened), ==, WYRELOG_E_POLICY);
+  g_assert_null (reopened);
   g_assert_cmpint (wyl_fact_artifact_win_binding_borrow (binding, &borrowed),
       ==, WYRELOG_E_OK);
   /* Creation must have used the owner captured at namespace construction,
@@ -587,8 +594,10 @@ test_native_namespace_main_sidecar_lifecycle (void)
   g_autofree wchar_t *lock_wide = NULL;
   g_autofree wchar_t *checkpoint_wide = NULL;
   g_autofree wchar_t *directory_wide = NULL;
+  g_autofree wchar_t *old_lock_wide = NULL;
   g_autofree gchar *main_path = NULL;
   g_autofree gchar *lock_path = NULL;
+  g_autofree gchar *old_lock_path = NULL;
   g_autofree gchar *checkpoint_path = NULL;
 
   directory.graph_handle = graph;
@@ -639,11 +648,38 @@ test_native_namespace_main_sidecar_lifecycle (void)
   sidecar = NULL;
   wyl_fact_artifact_win_lease_free (lease);
   lease = NULL;
+
+  /* An exclusive lease is not authority over a renamed/replaced coordination
+   * name.  Both main issuance and sidecar creation fail closed and the
+   * replacement is left untouched. */
+  main_path = g_build_filename (path, "facts.duckdb", NULL);
+  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
+  old_lock_path = g_build_filename (path, "facts.duckdb.lock.old", NULL);
+  lock_wide = g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+  old_lock_wide = g_utf8_to_utf16 (old_lock_path, -1, NULL, NULL, NULL);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (namespace_,
+          &lease), ==, WYRELOG_E_OK);
+  g_assert_true (MoveFileExW (lock_wide, old_lock_wide,
+          MOVEFILE_WRITE_THROUGH));
+  HANDLE replacement = CreateFileW (lock_wide, GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL, CREATE_NEW,
+      FILE_ATTRIBUTE_NORMAL, NULL);
+  g_assert_true (replacement != INVALID_HANDLE_VALUE);
+  g_assert_true (CloseHandle (replacement));
+  main_binding = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_main (lease, &main_binding),
+      ==, WYRELOG_E_POLICY);
+  g_assert_null (main_binding);
+  sidecar = (gpointer) 0x1;
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (lease,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_POLICY);
+  g_assert_null (sidecar);
+  g_assert_true (GetFileAttributesW (lock_wide) != INVALID_FILE_ATTRIBUTES);
+  wyl_fact_artifact_win_lease_free (lease);
+  lease = NULL;
   wyl_fact_artifact_win_namespace_free (namespace_);
   namespace_ = NULL;
 
-  main_path = g_build_filename (path, "facts.duckdb", NULL);
-  lock_path = g_build_filename (path, "facts.duckdb.lock", NULL);
   checkpoint_path =
       g_build_filename (path, "facts.duckdb.wal.checkpoint", NULL);
   main_wide = g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
@@ -653,6 +689,7 @@ test_native_namespace_main_sidecar_lifecycle (void)
       INVALID_FILE_ATTRIBUTES);
   g_assert_true (DeleteFileW (main_wide));
   g_assert_true (DeleteFileW (lock_wide));
+  g_assert_true (DeleteFileW (old_lock_wide));
   directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
   g_assert_true (CloseHandle (graph));
   g_assert_true (RemoveDirectoryW (directory_wide));
