@@ -34,6 +34,16 @@ typedef enum
   WYL_FACT_ARTIFACT_WIN_SIDECAR_REPLACE_RECONCILE_REQUIRED,
 } WylFactArtifactWinSidecarReplaceResult;
 
+typedef enum
+{
+  WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE = 0,
+  WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_PRE_FINAL_DESTINATION_SUBSTITUTE,
+  WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN,
+} WylFactArtifactWinNamespaceTestFault;
+
+void wyl_fact_artifact_win_namespace_set_test_fault
+    (WylFactArtifactWinNamespaceTestFault);
+
 wyrelog_error_t wyl_fact_artifact_win_namespace_new
     (const WylFactGraphDirectory * directory,
     WylFactArtifactWinNamespace ** out_namespace);
@@ -132,9 +142,11 @@ wyrelog_error_t wyl_fact_artifact_win_temp_binding_borrow
     (WylFactArtifactWinTempBinding *, HANDLE *);
 wyrelog_error_t wyl_fact_artifact_win_temp_binding_close
     (WylFactArtifactWinTempBinding *, HANDLE *);
-/* Replaces an existing exact bound sidecar.  The output is initialized on all
- * entries.  RECONCILE_REQUIRED is terminal and means the rename linearized
- * but durability/postcondition proof did not complete; retry is forbidden. */
+/* Replaces an existing verified sidecar under the shared exclusive cooperative
+ * lease.  This is not a target-FileId CAS against a same-authority bypass
+ * writer.  The output is initialized on all entries. RECONCILE_REQUIRED is
+ * terminal and means the rename linearized but durability/postcondition proof
+ * did not complete; retry is forbidden. */
 wyrelog_error_t wyl_fact_artifact_win_temp_binding_replace_sidecar
     (WylFactArtifactWinTempBinding *, WylFactArtifactWinSidecarBinding *,
     WylFactArtifactWinSidecarReplaceResult *);

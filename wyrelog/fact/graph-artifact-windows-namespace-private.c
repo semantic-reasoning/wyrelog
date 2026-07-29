@@ -8,6 +8,21 @@
 
 #include <string.h>
 
+static gint win_namespace_test_fault;
+
+void wyl_fact_artifact_win_namespace_set_test_fault
+    (WylFactArtifactWinNamespaceTestFault fault)
+{
+  g_atomic_int_set (&win_namespace_test_fault, fault);
+}
+
+static gboolean
+win_namespace_fault_take (WylFactArtifactWinNamespaceTestFault fault)
+{
+  return g_atomic_int_compare_and_exchange (&win_namespace_test_fault, fault,
+      WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_NONE);
+}
+
 struct WylFactArtifactWinNamespace
 {
   WylFactArtifactWinLocator *locator;
@@ -1012,7 +1027,33 @@ wyrelog_error_t
     rc = sidecar_revalidate_locked (destination, FALSE, INVALID_HANDLE_VALUE);
   if (rc != WYRELOG_E_OK)
     goto out;
-  rc = wyl_fact_artifact_win_entry_rename_replace_exact
+  if (win_namespace_fault_take
+      (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_PRE_FINAL_DESTINATION_SUBSTITUTE))
+  {
+    WylFactArtifactWinEntry *substitute = NULL;
+    rc = wyl_fact_artifact_win_locator_open (source->lease->namespace_->locator,
+        "tmp-native-replace-substitute", GENERIC_READ | GENERIC_WRITE | DELETE,
+        TRUE, &substitute);
+    if (rc == WYRELOG_E_OK) {
+      WylFactArtifactWinMutationEffect substitute_effect =
+          WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+      rc = wyl_fact_artifact_win_entry_rename_replace_verified
+          (source->lease->namespace_->locator, substitute,
+          name_for (destination->name), &substitute_effect);
+      wyl_fact_artifact_win_entry_free (substitute);
+      if (substitute_effect != WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED
+          && rc == WYRELOG_E_OK)
+        rc = WYRELOG_E_POLICY;
+    }
+  }
+  if (rc == WYRELOG_E_OK)
+    rc = sidecar_revalidate_locked (destination, FALSE, INVALID_HANDLE_VALUE);
+  if (rc != WYRELOG_E_OK)
+    goto out;
+  /* Native replacement serializes sanctioned writers through the shared
+   * exclusive lease.  It is deliberately not advertised as a target FileId
+   * compare-and-swap against an authority-bypassing writer. */
+  rc = wyl_fact_artifact_win_entry_rename_replace_verified
       (source->lease->namespace_->locator, source->entry,
       name_for (destination->name), &effect);
   if (effect != WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
@@ -1033,7 +1074,9 @@ wyrelog_error_t
   destination->creator = FALSE;
   wyl_fact_artifact_win_entry_free (replaced_entry);
   {
-    wyrelog_error_t post = wyl_fact_artifact_win_locator_flush_directory
+    wyrelog_error_t post = win_namespace_fault_take
+        (WYL_FACT_ARTIFACT_WIN_NAMESPACE_TEST_FAULT_REPLACE_POST_RENAME_UNCERTAIN)
+        ? WYRELOG_E_IO : wyl_fact_artifact_win_locator_flush_directory
         (destination->lease->namespace_->locator);
     if (post == WYRELOG_E_OK)
       post = sidecar_revalidate_locked (destination, FALSE,
