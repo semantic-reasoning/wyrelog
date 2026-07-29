@@ -9606,6 +9606,118 @@ out:
 }
 
 /*
+ * Unit 4 (#374 gaps 1d + 2): the two management actions map to distinct
+ * permissions -- wr.service_principal.manage and wr.service_credential.manage
+ * -- and arming one must never authorize the other.  Direction A arms only
+ * credential.manage: a principal write is denied (service_principal_denied)
+ * while a credential read is authorized (not 403, not service_credential_
+ * denied).  Direction B arms only principal.manage and inverts the roles.  No
+ * body leaks a secret and the denied mutating op changes no row count.
+ */
+static gint
+check_service_management_permission_mapping (void)
+{
+  ServiceDenialEnv env_a = { 0 };
+  ServiceDenialEnv env_b = { 0 };
+  g_autofree gchar *body = NULL;
+  guint status = 0;
+  guint principal_before = 0;
+  guint principal_after = 0;
+  guint credential_before = 0;
+  guint credential_after = 0;
+  gint rc = 0;
+
+  /* Direction A: principal.manage granted-unarmed, credential.manage armed. */
+  rc = service_denial_env_init (&env_a, TRUE, FALSE, TRUE);
+  if (rc != 0)
+    goto out;
+  wyl_policy_store_t *store_a = wyl_handle_get_policy_store (env_a.handle);
+  if (wyl_policy_store_foreach_service_principal (store_a,
+          count_service_principals_cb, &principal_before) != WYRELOG_E_OK) {
+    rc = 2400;
+    goto out;
+  }
+  if (send_raw_service_principal_full (env_a.session, "POST", env_a.base_url,
+          "/service-principals", env_a.query,
+          "{\"subject_id\":\"svc:tenant-a:worker\",\"display_name\":\"x\"}",
+          &status, &body) != 0 || status != 403 || body == NULL
+      || strstr (body, "service_principal_denied") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2401;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  /* Control: the credential action is authorized (404 not-found, never a
+   * 403 denial), proving the armed principal permission is not consulted. */
+  if (send_raw_service_principal_full (env_a.session, "GET", env_a.base_url,
+          "/service-credentials/wlc_000000000000000000000000000", env_a.query,
+          NULL, &status, &body) != 0 || status == 403 || body == NULL
+      || strstr (body, "service_credential_denied") != NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2402;
+    goto out;
+  }
+  if (wyl_policy_store_foreach_service_principal (store_a,
+          count_service_principals_cb, &principal_after) != WYRELOG_E_OK) {
+    rc = 2403;
+    goto out;
+  }
+  if (principal_after != principal_before) {
+    rc = 2404;
+    goto out;
+  }
+
+  /* Direction B: principal.manage armed, credential.manage granted-unarmed. */
+  rc = service_denial_env_init (&env_b, TRUE, TRUE, FALSE);
+  if (rc != 0)
+    goto out;
+  wyl_policy_store_t *store_b = wyl_handle_get_policy_store (env_b.handle);
+  if (wyl_policy_store_foreach_service_credential (store_b,
+          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+          &credential_before) != WYRELOG_E_OK) {
+    rc = 2405;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  if (send_raw_service_principal_full (env_b.session, "POST", env_b.base_url,
+          "/service-credentials/wlc_000000000000000000000000000/rotate",
+          env_b.query,
+          "{\"version\":\"1\",\"request_id\":\"333333333333333333333333333\","
+          "\"destination\":\"rotate.json\",\"expires_at_us\":\""
+          CONTRACT_FUTURE_EXPIRES_AT_US_STR "\"}", &status, &body) != 0
+      || status != 403 || body == NULL
+      || strstr (body, "service_credential_denied") == NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2406;
+    goto out;
+  }
+  g_clear_pointer (&body, g_free);
+  /* Control: the principal action is authorized (200 list, never a 403). */
+  if (send_raw_service_principal_full (env_b.session, "GET", env_b.base_url,
+          "/service-principals", env_b.query, NULL, &status, &body) != 0
+      || status == 403 || body == NULL
+      || strstr (body, "service_principal_denied") != NULL
+      || strstr (body, "credential_secret") != NULL) {
+    rc = 2407;
+    goto out;
+  }
+  if (wyl_policy_store_foreach_service_credential (store_b,
+          "svc:tenant-a:worker", "tenant-a", count_service_credentials_cb,
+          &credential_after) != WYRELOG_E_OK) {
+    rc = 2408;
+    goto out;
+  }
+  if (credential_after != credential_before) {
+    rc = 2409;
+    goto out;
+  }
+out:
+  service_denial_env_clear (&env_b);
+  service_denial_env_clear (&env_a);
+  return rc;
+}
+
+/*
  * Unit-style coverage for the tenant-gate wire codes. Drives the
  * http.c decision helper through the WYL_TEST_DAEMON_HTTP seam so
  * that both stable gate arms are exercised directly.
@@ -10081,6 +10193,11 @@ main (void)
   gint inactive_denied_rc = check_service_management_inactive_session_denied ();
   if (inactive_denied_rc != 0) {
     result = inactive_denied_rc;
+    goto cleanup;
+  }
+  gint permission_mapping_rc = check_service_management_permission_mapping ();
+  if (permission_mapping_rc != 0) {
+    result = permission_mapping_rc;
     goto cleanup;
   }
   /* Real end-to-end escrow issue/rotate contract over loopback HTTP. It
