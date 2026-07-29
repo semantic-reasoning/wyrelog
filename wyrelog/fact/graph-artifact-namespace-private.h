@@ -13,6 +13,8 @@ typedef struct WylFactArtifactTempRecoveryEvidence
     WylFactArtifactTempRecoveryEvidence;
 typedef struct WylFactDuckdbTempRoot WylFactDuckdbTempRoot;
 typedef struct WylFactDuckdbTempChild WylFactDuckdbTempChild;
+typedef gboolean (*WylFactDuckdbTempChildVisitor) (WylFactDuckdbTempChild *,
+    const gchar * logical_name, gpointer user_data);
 
 /* Only these names are part of the authority.  Callers cannot supply a path. */
 typedef enum
@@ -231,6 +233,11 @@ wyrelog_error_t wyl_fact_duckdb_temp_root_create
 gchar *wyl_fact_duckdb_temp_root_dup_logical_name (WylFactDuckdbTempRoot *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_child_exists
     (WylFactDuckdbTempRoot *, const gchar * duckdb_name, gboolean * out_exists);
+/* Calls visitor only for a complete, identity-verified snapshot.  The name is
+ * DuckDB's logical child spelling, never a host path or reusable authority. */
+wyrelog_error_t wyl_fact_duckdb_temp_root_foreach_child
+    (WylFactDuckdbTempRoot *, WylFactDuckdbTempChildVisitor, gpointer);
+gchar *wyl_fact_duckdb_temp_child_dup_logical_name (WylFactDuckdbTempChild *);
 void wyl_fact_duckdb_temp_root_free (WylFactDuckdbTempRoot *);
 wyrelog_error_t wyl_fact_duckdb_temp_root_create_child
     (WylFactDuckdbTempRoot *, const gchar * duckdb_name,
