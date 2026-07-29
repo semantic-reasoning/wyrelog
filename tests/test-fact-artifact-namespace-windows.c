@@ -1379,12 +1379,17 @@ test_native_namespace_main_sidecar_lifecycle (void)
           &temp_binding), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
       (temp_binding, &session), ==, WYRELOG_E_OK);
+  WylFactArtifactWinIoSession *second_child_session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_temp_child_binding_open_io_session
+      (temp_binding, &second_child_session), ==, WYRELOG_E_BUSY);
+  g_assert_null (second_child_session);
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
           &temp_retire), ==, WYRELOG_E_POLICY);
   g_assert_cmpint (temp_retire, ==,
       WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED);
   g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
       WYRELOG_E_OK);
+  session = NULL;
   g_assert_cmpint (wyl_fact_artifact_win_temp_child_retire (temp_child,
           &temp_retire), ==, WYRELOG_E_OK);
   g_assert_cmpint (temp_retire, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
@@ -1398,9 +1403,8 @@ test_native_namespace_main_sidecar_lifecycle (void)
   wyl_fact_artifact_win_temp_root_free (temp_root);
   temp_root = NULL;
 
-  /* Adversarial lifecycle: no arbitrary child spelling is accepted, a live
-   * child prevents root retirement, and raw CloseHandle/reuse revokes before
-   * deletion without ever closing the foreign replacement HANDLE. */
+  /* Adversarial lifecycle: no arbitrary child spelling is accepted and a
+   * live opaque session prevents root retirement. */
   g_assert_cmpint (wyl_fact_artifact_win_lease_create_temp_root (lease,
           &temp_root), ==, WYRELOG_E_OK);
   g_autofree gchar *raw_logical =

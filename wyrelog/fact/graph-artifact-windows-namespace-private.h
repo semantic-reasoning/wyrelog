@@ -139,8 +139,8 @@ wyrelog_error_t wyl_fact_artifact_win_temp_binding_open_io_session
 /* #608-equivalent temporary-token authority.  A token maps only to the
  * closed spelling tmp-<token>; it has neither a host path nor a CRT fd escape
  * hatch.  An owner can create, move without replacement, unlink, and export
- * immutable identity evidence. _borrow values are caller-owned duplicates and
- * is an opaque session. A non-owner is intentionally not exposed by
+ * immutable identity evidence. I/O is an opaque session. A non-owner is
+ * intentionally not exposed by
  * this Windows surface: reopening a token would turn recovery evidence into
  * ambient namespace authority. */
 wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_token
