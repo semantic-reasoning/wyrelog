@@ -533,7 +533,8 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
-      <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
+      <=
+      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -2309,7 +2310,7 @@ duckdb_temp_root_discard_unpublished_unlocked (WylFactDuckdbTempRoot *root)
 {
   WylFactArtifactMutationLease *lease = root->lease;
   if (duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK
-      || !root->children || root->children->len != 0)
+      || (root->children && root->children->len != 0))
     return WYRELOG_E_POLICY;
   if (unlinkat (lease->namespace_->fd, root->name, AT_REMOVEDIR) != 0)
     return errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
@@ -2399,17 +2400,36 @@ wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
   gint fd = openat (lease->namespace_->fd, name,
       O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
   struct stat st;
-  if (fd < 0 || fstat (fd, &st) != 0 || !S_ISDIR (st.st_mode)
-      || (st.st_mode & 07777) != 0700 || st.st_uid != geteuid ()) {
+  if (fd < 0 || fstat (fd, &st) != 0) {
     if (fd >= 0)
       close (fd);
     result = WYRELOG_E_POLICY;
     goto done;
   }
+  WylFactDuckdbTempRoot temporary = {
+    .lease = lease,
+    .fd = fd,
+    .name = name,
+    .device = st.st_dev,
+    .inode = st.st_ino,
+    .active = TRUE,
+  };
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_OPEN_IDENTITY)
+      || !S_ISDIR (st.st_mode)
+      || (st.st_mode & 07777) != 0700 || st.st_uid != geteuid ()) {
+    wyrelog_error_t discard = duckdb_temp_root_discard_unpublished_unlocked
+        (&temporary);
+    close (fd);
+    result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+    goto done;
+  }
   WylFactDuckdbTempRoot *root = g_new0 (WylFactDuckdbTempRoot, 1);
   if (!root) {
+    wyrelog_error_t discard = duckdb_temp_root_discard_unpublished_unlocked
+        (&temporary);
     close (fd);
-    result = WYRELOG_E_NOMEM;
+    result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_NOMEM;
     goto done;
   }
   root->references = 1;
@@ -2469,17 +2489,34 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
     goto done;
   }
   struct stat st;
-  if (fstat (fd, &st) != 0 || !S_ISREG (st.st_mode) || st.st_nlink != 1
-      || (st.st_mode & 07777) != 0600 || st.st_uid != geteuid ()) {
+  if (fstat (fd, &st) != 0) {
     close (fd);
     result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  WylFactDuckdbTempChild temporary = {
+    .root = root,
+    .pin_fd = fd,
+    .name = (gchar *) name,
+    .device = st.st_dev,
+    .inode = st.st_ino,
+    .active = TRUE,
+  };
+  if (namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_OPEN_IDENTITY)
+      || !S_ISREG (st.st_mode) || st.st_nlink != 1
+      || (st.st_mode & 07777) != 0600 || st.st_uid != geteuid ()) {
+    wyrelog_error_t discard = duckdb_temp_child_discard_unpublished_unlocked
+        (&temporary);
+    result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     goto done;
   }
   WylFactDuckdbTempChild *child = g_new0 (WylFactDuckdbTempChild, 1);
   if (!child || !(child->name = g_strdup (name))) {
     g_free (child);
-    close (fd);
-    result = WYRELOG_E_NOMEM;
+    wyrelog_error_t discard = duckdb_temp_child_discard_unpublished_unlocked
+        (&temporary);
+    result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_NOMEM;
     goto done;
   }
   child->references = 1;
