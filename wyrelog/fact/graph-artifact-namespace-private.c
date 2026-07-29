@@ -533,8 +533,7 @@ void wyl_fact_artifact_namespace_set_test_fault
 {
   if (fault >= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_NONE
       && fault
-      <=
-      WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_SIDECAR_RETIRE_POST_UNLINK_SUBSTITUTE)
+      <= WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
     g_atomic_int_set (&namespace_test_fault, fault);
 }
 
@@ -2302,6 +2301,24 @@ duckdb_temp_root_matches_unlocked (WylFactDuckdbTempRoot *root)
   return WYRELOG_E_OK;
 }
 
+/* Creation is not reported until the parent-directory durability barrier has
+ * completed.  If a later check fails, the freshly minted entry is still held
+ * by exact identity and can therefore be retired without adopting a name. */
+static wyrelog_error_t
+duckdb_temp_root_discard_unpublished_unlocked (WylFactDuckdbTempRoot *root)
+{
+  WylFactArtifactMutationLease *lease = root->lease;
+  if (duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK
+      || !root->children || root->children->len != 0)
+    return WYRELOG_E_POLICY;
+  if (unlinkat (lease->namespace_->fd, root->name, AT_REMOVEDIR) != 0)
+    return errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  root->active = FALSE;
+  return fsync (lease->namespace_->fd) == 0
+      && lease_revalidate_unlocked (lease) == WYRELOG_E_OK
+      ? WYRELOG_E_OK : WYRELOG_E_IO;
+}
+
 static wyrelog_error_t
 duckdb_temp_child_matches_unlocked (WylFactDuckdbTempChild *child)
 {
@@ -2322,6 +2339,24 @@ duckdb_temp_child_matches_unlocked (WylFactDuckdbTempChild *child)
       || (guint64) named.st_ino != child->inode)
     return WYRELOG_E_POLICY;
   return WYRELOG_E_OK;
+}
+
+static wyrelog_error_t
+duckdb_temp_child_discard_unpublished_unlocked (WylFactDuckdbTempChild *child)
+{
+  WylFactDuckdbTempRoot *root = child->root;
+  if (duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK)
+    return WYRELOG_E_POLICY;
+  if (unlinkat (root->fd, child->name, 0) != 0)
+    return errno == ENOENT ? WYRELOG_E_POLICY : WYRELOG_E_IO;
+  child->active = FALSE;
+  if (child->pin_fd >= 0) {
+    close (child->pin_fd);
+    child->pin_fd = -1;
+  }
+  return fsync (root->fd) == 0
+      && duckdb_temp_root_matches_unlocked (root) == WYRELOG_E_OK
+      ? WYRELOG_E_OK : WYRELOG_E_IO;
 }
 
 static WylFactDuckdbTempChild *
@@ -2385,10 +2420,16 @@ wyl_fact_duckdb_temp_root_create (WylFactArtifactMutationLease *lease,
   root->inode = st.st_ino;
   root->active = TRUE;
   root->children = g_ptr_array_new ();
-  if (!root->children || fsync (lease->namespace_->fd) != 0
+  if (!root->children
+      || namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_POST_MKDIR)
+      || fsync (lease->namespace_->fd) != 0
       || duckdb_temp_root_matches_unlocked (root) != WYRELOG_E_OK) {
+    wyrelog_error_t discard = root->children
+        ? duckdb_temp_root_discard_unpublished_unlocked (root)
+        : WYRELOG_E_POLICY;
     duckdb_temp_root_unref (root);
-    result = WYRELOG_E_IO;
+    result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     goto done;
   }
   *out_root = root;
@@ -2447,11 +2488,17 @@ wyl_fact_duckdb_temp_root_create_child (WylFactDuckdbTempRoot *root,
   child->device = st.st_dev;
   child->inode = st.st_ino;
   child->active = child->pin_fd >= 0;
-  if (!child->active || fsync (fd) != 0 || fsync (root->fd) != 0
+  if (!child->active
+      || namespace_fault_take
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_CHILD_POST_CREATE)
+      || fsync (fd) != 0 || fsync (root->fd) != 0
       || duckdb_temp_child_matches_unlocked (child) != WYRELOG_E_OK) {
+    wyrelog_error_t discard = child->active
+        ? duckdb_temp_child_discard_unpublished_unlocked (child)
+        : WYRELOG_E_POLICY;
     wyl_fact_duckdb_temp_child_free (child);
     close (fd);
-    result = WYRELOG_E_IO;
+    result = discard == WYRELOG_E_POLICY ? WYRELOG_E_POLICY : WYRELOG_E_IO;
     goto done;
   }
   g_ptr_array_add (root->children, child);
@@ -2585,9 +2632,10 @@ wyl_fact_duckdb_temp_child_retire (WylFactDuckdbTempChild *child,
   child->active = FALSE;
   close (child->pin_fd);
   child->pin_fd = -1;
-  if (fsync (child->root->fd) != 0
-      || duckdb_temp_root_matches_unlocked (child->root) != WYRELOG_E_OK)
+  if (fsync (child->root->fd) != 0)
     result = WYRELOG_E_IO;
+  else if (duckdb_temp_root_matches_unlocked (child->root) != WYRELOG_E_OK)
+    result = WYRELOG_E_POLICY;
   else
     result = WYRELOG_E_OK;
   *out_result =
@@ -2638,9 +2686,10 @@ wyl_fact_duckdb_temp_root_retire (WylFactDuckdbTempRoot *root,
     goto done;
   }
   root->active = FALSE;
-  if (fsync (lease->namespace_->fd) != 0
-      || lease_revalidate_unlocked (lease) != WYRELOG_E_OK)
+  if (fsync (lease->namespace_->fd) != 0)
     result = WYRELOG_E_IO;
+  else if (lease_revalidate_unlocked (lease) != WYRELOG_E_OK)
+    result = WYRELOG_E_POLICY;
   else
     result = WYRELOG_E_OK;
   *out_result =
