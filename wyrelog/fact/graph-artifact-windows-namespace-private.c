@@ -1472,7 +1472,15 @@ win_temp_evidence_read_identity (const guint8 *data,
 {
   guint64 volume;
   memcpy (&volume, data, sizeof volume);
-  identity->volume_serial = (ULONG) GUINT64_FROM_BE (volume);
+  /* The encoder writes all 64 bits and observed identities carry
+   * FILE_ID_INFO's full width, so truncating here decoded less than was
+   * written.  Nothing past the magic and token is authenticated, so
+   * tampering confined to the discarded high half decoded to the live
+   * identity and the gate below accepted it; the mismatch[5] and mismatch[29]
+   * flips in test_native_namespace_main_sidecar_lifecycle keep that refused.
+   * Truncation also denied valid evidence on a volume whose high half is set,
+   * which no test reaches: NTFS normally leaves that half zero. */
+  identity->volume_serial = GUINT64_FROM_BE (volume);
   memcpy (identity->file_id, data + sizeof volume, sizeof identity->file_id);
 }
 
