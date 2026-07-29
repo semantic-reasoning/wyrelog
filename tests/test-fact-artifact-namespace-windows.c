@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "fact/graph-artifact-windows-handle-private.h"
+#include "fact/graph-artifact-windows-locator-private.h"
 #include "fact/graph-artifact-windows-lock-private.h"
 
 static WylFactGraphWinIdentity
@@ -68,6 +69,102 @@ remove_scratch_file (gchar *path)
 
   g_assert_true (DeleteFileW (wide));
   g_assert_true (RemoveDirectoryW (wide_directory));
+  g_free (path);
+}
+
+static HANDLE
+open_scratch_directory (gchar **out_path)
+{
+  g_autoptr (GError) error = NULL;
+  gchar *path = g_dir_make_tmp ("wyl-win-locator-XXXXXX", &error);
+  g_autofree wchar_t *wide = NULL;
+  HANDLE handle;
+
+  g_assert_no_error (error);
+  g_assert_nonnull (path);
+  wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_nonnull (wide);
+  handle = CreateFileW (wide, FILE_LIST_DIRECTORY | FILE_ADD_FILE
+      | FILE_READ_ATTRIBUTES | SYNCHRONIZE, FILE_SHARE_READ | FILE_SHARE_WRITE
+      | FILE_SHARE_DELETE, NULL, OPEN_EXISTING,
+      FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  g_assert_true (handle != INVALID_HANDLE_VALUE);
+  *out_path = path;
+  return handle;
+}
+
+static WylFactArtifactWinLocator *
+open_locator_for_test (HANDLE graph, WylFactGraphWinIdentity *out_identity)
+{
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactWinLocator *locator = NULL;
+
+  *out_identity = identity_for (graph);
+  directory.graph_handle = graph;
+  directory.graph_identity = *out_identity;
+  g_assert_cmpint (wyl_fact_artifact_win_locator_new (&directory, &locator),
+      ==, WYRELOG_E_OK);
+  g_assert_nonnull (locator);
+  return locator;
+}
+
+static void
+test_locator_relative_entry_lifecycle (void)
+{
+  gchar *path = NULL;
+  HANDLE graph = open_scratch_directory (&path);
+  WylFactGraphWinIdentity graph_identity = { 0 };
+  WylFactArtifactWinLocator *locator = open_locator_for_test (graph,
+      &graph_identity);
+  WylFactArtifactWinEntry *entry = NULL;
+  WylFactArtifactWinEntry *occupied = NULL;
+  HANDLE issued = INVALID_HANDLE_VALUE;
+  DWORD flags = HANDLE_FLAG_INHERIT;
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN;
+  wyrelog_error_t flush_rc;
+  g_autofree gchar *renamed = g_build_filename (path, "facts.duckdb.wal", NULL);
+  g_autofree wchar_t *wide = NULL;
+  g_autofree wchar_t *directory_wide = NULL;
+
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator,
+          "tmp-source", GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &entry),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_locator_open (locator, "occupied",
+          GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &occupied), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_rename_no_replace (locator,
+          entry, "occupied", &effect), ==, WYRELOG_E_BUSY);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator,
+          occupied, &effect), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_entry_free (occupied);
+  occupied = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_entry_issue_working_handle (entry,
+          &issued), ==, WYRELOG_E_OK);
+  g_assert_true (GetHandleInformation (issued, &flags));
+  g_assert_cmpuint (flags & HANDLE_FLAG_INHERIT, ==, 0);
+  g_assert_true (CloseHandle (issued));
+  g_assert_cmpint (wyl_fact_artifact_win_entry_rename_no_replace (locator,
+          entry, "facts.duckdb.wal", &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_revalidate (locator, entry),
+      ==, WYRELOG_E_OK);
+  /* Filesystems that cannot flush a directory fail closed: the physical
+   * operation is still independently proven by its explicit return value. */
+  flush_rc = wyl_fact_artifact_win_locator_flush_directory (locator);
+  g_assert_true (flush_rc == WYRELOG_E_OK || flush_rc == WYRELOG_E_IO);
+  g_assert_cmpint (wyl_fact_artifact_win_entry_delete_exact (locator, entry,
+          &effect), ==, WYRELOG_E_OK);
+  g_assert_cmpint (effect, ==, WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED);
+  wyl_fact_artifact_win_entry_free (entry);
+  entry = NULL;
+  wide = g_utf8_to_utf16 (renamed, -1, NULL, NULL, NULL);
+  g_assert_false (GetFileAttributesW (wide) != INVALID_FILE_ATTRIBUTES);
+  wyl_fact_artifact_win_locator_free (locator);
+  g_assert_true (CloseHandle (graph));
+  directory_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  g_assert_true (RemoveDirectoryW (directory_wide));
   g_free (path);
 }
 
@@ -301,6 +398,8 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/adopt-close",
       test_working_handle_adopt_noninherit_close_once);
+  g_test_add_func ("/fact/artifact-namespace/windows/locator/entry-lifecycle",
+      test_locator_relative_entry_lifecycle);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/identity-output",
       test_working_handle_identity_mismatch_initializes_output);
