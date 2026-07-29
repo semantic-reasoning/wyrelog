@@ -647,6 +647,8 @@ struct WylFactArtifactSidecarBinding
   guint64 device, inode;
   gboolean creator;
   gboolean active;
+  gint working_fd;
+  gboolean io_open;
 };
 struct WylFactArtifactMainBinding
 {
@@ -1932,11 +1934,30 @@ sidecar_binding_revalidate_unlocked (WylFactArtifactSidecarBinding *binding)
   wyrelog_error_t result = lease_revalidate_sidecar_unlocked (binding->lease);
   if (result == WYRELOG_E_OK)
     result = sidecar_binding_matches_unlocked (binding);
-  /* A binding is raw-I/O authority, not recoverable observation evidence.
-   * Once any identity check fails it cannot become usable after restoration. */
-  if (result != WYRELOG_E_OK)
-    binding->active = FALSE;
   return result;
+}
+
+static void
+sidecar_binding_revoke_unlocked (WylFactArtifactSidecarBinding *binding)
+{
+  binding->active = FALSE;
+  binding->io_open = FALSE;
+  binding->working_fd = -1;
+}
+
+static wyrelog_error_t
+sidecar_binding_working_fd_matches_unlocked (WylFactArtifactSidecarBinding
+    *binding, gint working_fd)
+{
+  struct stat working;
+  if (!binding->io_open || working_fd < 0 || working_fd != binding->working_fd
+      || fstat (working_fd, &working) != 0 || !S_ISREG (working.st_mode)
+      || working.st_nlink != 1 || (working.st_mode & 07777) != 0600
+      || (guint64) working.st_uid != binding->lease->namespace_->owner
+      || (guint64) working.st_dev != binding->device
+      || (guint64) working.st_ino != binding->inode)
+    return WYRELOG_E_POLICY;
+  return WYRELOG_E_OK;
 }
 
 /* The returned descriptor is a separate capability from the binding pin.  A
@@ -1947,19 +1968,12 @@ sidecar_binding_revalidate_fd_unlocked (WylFactArtifactSidecarBinding *binding,
     gint working_fd)
 {
   wyrelog_error_t result = sidecar_binding_revalidate_unlocked (binding);
-  struct stat working;
-  if (result == WYRELOG_E_OK
-      && (working_fd < 0 || fstat (working_fd, &working) != 0
-          || !S_ISREG (working.st_mode) || working.st_nlink != 1
-          || (working.st_mode & 07777) != 0600
-          || (guint64) working.st_uid != binding->lease->namespace_->owner
-          || (guint64) working.st_dev != binding->device
-          || (guint64) working.st_ino != binding->inode))
-    result = WYRELOG_E_POLICY;
+  if (result == WYRELOG_E_OK)
+    result = sidecar_binding_working_fd_matches_unlocked (binding, working_fd);
   /* Unlike the general lifecycle revalidation, an I/O-boundary failure
    * revokes this raw-descriptor authority permanently. */
   if (result != WYRELOG_E_OK)
-    binding->active = FALSE;
+    sidecar_binding_revoke_unlocked (binding);
   return result;
 }
 
@@ -2014,6 +2028,8 @@ wyrelog_error_t
   binding->inode = pinned.st_ino;
   binding->creator = create;
   binding->active = TRUE;
+  binding->working_fd = *out_fd;
+  binding->io_open = TRUE;
   result = lease_revalidate_sidecar_unlocked (lease);
   if (result != WYRELOG_E_OK || sidecar_binding_matches_unlocked (binding)
       != WYRELOG_E_OK) {
@@ -2077,6 +2093,8 @@ wyrelog_error_t
   binding->inode = pinned.st_ino;
   binding->creator = FALSE;
   binding->active = TRUE;
+  binding->working_fd = fd;
+  binding->io_open = TRUE;
   result = sidecar_binding_revalidate_unlocked (binding);
   if (result != WYRELOG_E_OK) {
     wyl_fact_artifact_sidecar_binding_free (binding);
@@ -2128,8 +2146,11 @@ wyl_fact_artifact_sidecar_binding_close (WylFactArtifactSidecarBinding
   if (result == WYRELOG_E_OK) {
     gint fd = *working_fd;
     *working_fd = -1;
-    binding->active = FALSE;
+    binding->io_open = FALSE;
+    binding->working_fd = -1;
     result = close (fd) == 0 ? WYRELOG_E_OK : WYRELOG_E_IO;
+    if (result != WYRELOG_E_OK)
+      sidecar_binding_revoke_unlocked (binding);
   }
   g_mutex_unlock (&binding->lease->mutex);
   return result;
@@ -2239,6 +2260,13 @@ wyl_fact_artifact_sidecar_binding_retire (WylFactArtifactSidecarBinding
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result;
   if (!lease->exclusive || !binding->active || !sidecar_name (binding->sidecar)) {
+    result = WYRELOG_E_POLICY;
+    goto done;
+  }
+  if (binding->io_open) {
+    if (sidecar_binding_working_fd_matches_unlocked (binding,
+            binding->working_fd) != WYRELOG_E_OK)
+      sidecar_binding_revoke_unlocked (binding);
     result = WYRELOG_E_POLICY;
     goto done;
   }
@@ -2366,7 +2394,8 @@ wyrelog_error_t
   g_mutex_lock (&lease->mutex);
   wyrelog_error_t result;
   if (!lease->exclusive || !source->active || !source->creator
-      || !destination->active || !sidecar_name (destination->sidecar)) {
+      || !destination->active || destination->io_open
+      || !sidecar_name (destination->sidecar)) {
     result = WYRELOG_E_POLICY;
     goto done;
   }

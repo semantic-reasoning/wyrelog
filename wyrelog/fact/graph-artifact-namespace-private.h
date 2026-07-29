@@ -164,9 +164,10 @@ wyrelog_error_t wyl_fact_artifact_mutation_lease_open_sidecar_binding
  * and pins the exact existing regular 0600 same-owner single-link entry.
  * Missing sidecars return NOT_FOUND with initialized outputs.  #596 must call
  * SidecarBinding _revalidate_fd immediately before and after every raw
- * returned FD I/O, sync, truncate, and close boundary; a failed check
- * terminally revokes that binding and the FD must not be used again.  As with
- * the existing #612
+ * returned FD I/O, sync, truncate, and close boundary; a failed FD check
+ * terminally revokes the binding and the FD must not be used again.  Plain
+ * _revalidate is lifecycle validation only: it neither authorizes raw I/O
+ * nor consumes a valid lifecycle binding.  As with the existing #612
  * mutation contract, this does not claim to close POSIX's final-check to
  * syscall window against an uncooperative same-UID participant. */
 wyrelog_error_t wyl_fact_artifact_mutation_lease_open_existing_sidecar_binding
@@ -183,9 +184,10 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate
  * validating only the sidecar pin. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_revalidate_fd
     (WylFactArtifactSidecarBinding *, gint working_fd);
-/* On success, closes and sets *working_fd to -1, then terminally consumes the
- * binding.  On validation failure it leaves *working_fd untouched because its
- * number could already refer to a foreign descriptor. */
+/* On success, closes and sets *working_fd to -1, consuming only the issued
+ * I/O descriptor while retaining lifecycle authority for retirement.  On
+ * validation failure it revokes the whole binding but leaves *working_fd
+ * untouched because its number could already refer to a foreign descriptor. */
 wyrelog_error_t wyl_fact_artifact_sidecar_binding_close
     (WylFactArtifactSidecarBinding *, gint * working_fd);
 /* Publishes the exact bound sidecar under a distinct absent fixed sidecar
@@ -195,7 +197,10 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_publish_no_replace
     (WylFactArtifactSidecarBinding *, WylFactArtifactName destination);
 /* Retires only the exact currently-bound WAL/checkpoint/recovery artifact.
  * This API is intentionally the sole fixed-sidecar deletion authority.  Its
- * result output is initialized to NOT_RETIRED on every entry; callers must
+ * result output is initialized to NOT_RETIRED on every entry.  It requires
+ * that the issued I/O descriptor was closed through _close; a live descriptor
+ * is rejected, and raw close/reuse is detected and revokes without unlink.
+ * Callers must
  * discard a binding after any terminal result, including
  * RECONCILE_REQUIRED.  The #612 exclusive lease serializes cooperating
  * writers, but POSIX cannot prevent a same-UID nonparticipant from swapping
@@ -206,7 +211,8 @@ wyrelog_error_t wyl_fact_artifact_sidecar_binding_retire
     (WylFactArtifactSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_sidecar_binding_free (WylFactArtifactSidecarBinding *);
 /* Atomically replaces the exact bound fixed sidecar with the exact owner
- * temporary artifact.  Both bindings must retain the same exclusive lease;
+ * temporary artifact.  Both bindings must retain the same exclusive lease,
+ * and the destination must have no live issued sidecar descriptor;
  * after rename linearizes, source becomes terminal and destination identifies
  * the replacement even when directory durability reporting fails. */
 wyrelog_error_t wyl_fact_artifact_temp_binding_replace_sidecar
