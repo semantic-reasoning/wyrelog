@@ -2105,6 +2105,9 @@ stage_publish_bound (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
     rc = WYRELOG_E_POLICY;
   if (rc == WYRELOG_E_OK)
     rc = flush_directory (directory->graph_handle);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-parent-synced",
+        directory->checkpoint_data);
   if (rc == WYRELOG_E_OK)
     rc = directory_revalidate (directory);
   if (rc == WYRELOG_E_OK)

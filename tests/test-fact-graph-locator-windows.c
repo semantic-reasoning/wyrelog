@@ -1129,6 +1129,117 @@ test_publish_retries_converge (void)
 }
 
 static void
+test_exact_stage_creation_boundaries_fail_closed (void)
+{
+  static const gchar *operations[] = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070560",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070561",
+  };
+  static const gchar *points[] = {
+    "stage-created",
+    "stage-create-parent-synced",
+  };
+  g_autofree gchar *root = make_root ();
+  WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+  WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactGraphLocator locator = { 0 };
+
+  init_locator (&locator, "tenant", "graph");
+  open_graph (root, &locator, &resolver, &graph);
+  for (gsize i = 0; i < G_N_ELEMENTS (points); i++) {
+    WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    PublishFault fault = {.point = points[i] };
+    graph.checkpoint = fail_publish_once;
+    graph.checkpoint_data = &fault;
+    g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+            operations[i], &stage), ==, WYRELOG_E_IO);
+    g_assert_true (fault.fired);
+    g_assert_cmpint (stage.fd, ==, -1);
+    g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage, &evidence), ==, WYRELOG_E_INVALID);
+    graph.checkpoint = NULL;
+    graph.checkpoint_data = NULL;
+    /* No returned evidence means the durable coordinator cannot adopt the
+     * crash seam merely because the canonical UUID-derived name exists. */
+    g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
+            operations[i], &stage), ==, WYRELOG_E_POLICY);
+  }
+  wyl_fact_graph_directory_clear (&graph);
+  wyl_fact_graph_resolver_clear (&resolver);
+  wyl_fact_graph_locator_clear (&locator);
+  remove_tree_no_follow (root);
+}
+
+static void
+test_exact_evidence_publish_recovery_converges (void)
+{
+  static const gchar *operations[] = {
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070570",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070571",
+    "01890f47-3c4b-7cc2-b8c4-dc0c0c070572",
+  };
+  static const gchar *points[] = {
+    "stage-linked",
+    "stage-unlinked",
+    "stage-parent-synced",
+  };
+
+  for (gsize i = 0; i < G_N_ELEMENTS (points); i++) {
+    g_autofree gchar *root = make_root ();
+    WylFactGraphResolver resolver = WYL_FACT_GRAPH_RESOLVER_INIT;
+    WylFactGraphDirectory graph = WYL_FACT_GRAPH_DIRECTORY_INIT;
+    WylFactGraphLocator locator = { 0 };
+    WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
+    WylFactGraphWinOperationEvidence evidence = { 0 };
+    WylFactGraphWinOperationEvidence foreign = { 0 };
+    WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+    WylFactGraphStage reopened = WYL_FACT_GRAPH_STAGE_INIT;
+    PublishFault fault = {.point = points[i] };
+
+    init_locator (&locator, "tenant", "graph");
+    open_graph (root, &locator, &resolver, &graph);
+    g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
+            operations[i], &stage), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_stage_get_windows_operation_evidence
+        (&stage, &evidence), ==, WYRELOG_E_OK);
+    g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
+        (&graph, operations[i], &evidence, &reopened), ==, WYRELOG_E_OK);
+    wyl_fact_graph_stage_clear (&reopened);
+    g_assert_cmpint (_write (stage.fd, "recovery", 8), ==, 8);
+    graph.checkpoint = fail_publish_once;
+    graph.checkpoint_data = &fault;
+    g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
+            &stage, &evidence), ==, WYRELOG_E_IO);
+    g_assert_true (fault.fired);
+    graph.checkpoint = NULL;
+    graph.checkpoint_data = NULL;
+    foreign = evidence;
+    foreign.artifact_identity.file_id[0] ^= 1;
+    g_assert_cmpint
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+            operations[i], &foreign, &final), ==, WYRELOG_E_POLICY);
+    g_assert_cmpint
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+    wyl_fact_graph_regular_file_clear (&final);
+    g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
+            &stage, &evidence), ==, WYRELOG_E_OK);
+    g_assert_cmpint (stage.fd, ==, -1);
+    g_assert_cmpint
+        (wyl_fact_graph_directory_open_provisioned_final_with_evidence (&graph,
+            operations[i], &evidence, &final), ==, WYRELOG_E_OK);
+    wyl_fact_graph_regular_file_clear (&final);
+    wyl_fact_graph_stage_clear (&stage);
+    wyl_fact_graph_stage_clear (&reopened);
+    wyl_fact_graph_directory_clear (&graph);
+    wyl_fact_graph_resolver_clear (&resolver);
+    wyl_fact_graph_locator_clear (&locator);
+    remove_tree_no_follow (root);
+  }
+}
+
+static void
 test_exact_stage_creation_mints_operation_evidence (void)
 {
   static const gchar operation[] = "01890f47-3c4b-7cc2-b8c4-dc0c0c070544";
@@ -1266,6 +1377,10 @@ main (int argc, char **argv)
       test_stage_attack_bindings);
   g_test_add_func ("/fact-graph-locator/windows/publish-retry",
       test_publish_retries_converge);
+  g_test_add_func ("/fact-graph-locator/windows/exact-stage-create-boundaries",
+      test_exact_stage_creation_boundaries_fail_closed);
+  g_test_add_func ("/fact-graph-locator/windows/exact-publish-recovery",
+      test_exact_evidence_publish_recovery_converges);
   g_test_add_func ("/fact-graph-locator/windows/exact-stage-evidence",
       test_exact_stage_creation_mints_operation_evidence);
   g_test_add_func ("/fact-graph-locator/windows/exact-evidence-substitution",
