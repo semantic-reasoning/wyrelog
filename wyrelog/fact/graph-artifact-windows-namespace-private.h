@@ -21,6 +21,10 @@ typedef struct WylFactArtifactWinLease WylFactArtifactWinLease;
 typedef struct WylFactArtifactWinMainBinding WylFactArtifactWinMainBinding;
 typedef struct WylFactArtifactWinSidecarBinding
     WylFactArtifactWinSidecarBinding;
+typedef struct WylFactArtifactWinTempRoot WylFactArtifactWinTempRoot;
+typedef struct WylFactArtifactWinTempChild WylFactArtifactWinTempChild;
+typedef struct WylFactArtifactWinTempChildBinding
+    WylFactArtifactWinTempChildBinding;
 
 wyrelog_error_t wyl_fact_artifact_win_namespace_new
     (const WylFactGraphDirectory * directory,
@@ -108,6 +112,41 @@ wyrelog_error_t wyl_fact_artifact_win_sidecar_binding_retire
     (WylFactArtifactWinSidecarBinding *, WylFactArtifactSidecarRetireResult *);
 void wyl_fact_artifact_win_sidecar_binding_free
     (WylFactArtifactWinSidecarBinding *);
+
+/* Opaque, lease-bound DuckDB 1.5.5 spill authority.  It accepts no host path
+ * or CRT descriptor: the root is minted here and a child uses only the
+ * source-pinned logical spelling. */
+wyrelog_error_t wyl_fact_artifact_win_lease_create_temp_root
+    (WylFactArtifactWinLease *, WylFactArtifactWinTempRoot **);
+gchar *wyl_fact_artifact_win_temp_root_dup_logical_name
+    (WylFactArtifactWinTempRoot *);
+void wyl_fact_artifact_win_temp_root_free (WylFactArtifactWinTempRoot *);
+wyrelog_error_t wyl_fact_artifact_win_temp_root_create_child
+    (WylFactArtifactWinTempRoot *, const gchar *,
+    WylFactArtifactWinTempChild **);
+wyrelog_error_t
+wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *,
+    WylFactArtifactWinTempChildBinding **);
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_borrow
+    (WylFactArtifactWinTempChildBinding *, HANDLE *);
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_revalidate
+    (WylFactArtifactWinTempChildBinding *);
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_revalidate_handle
+    (WylFactArtifactWinTempChildBinding *, HANDLE);
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_close
+    (WylFactArtifactWinTempChildBinding *, HANDLE *);
+void wyl_fact_artifact_win_temp_child_binding_free
+    (WylFactArtifactWinTempChildBinding *);
+wyrelog_error_t
+wyl_fact_artifact_win_temp_child_retire (WylFactArtifactWinTempChild *,
+    WylFactDuckdbTempRetireResult *);
+void wyl_fact_artifact_win_temp_child_free (WylFactArtifactWinTempChild *);
+wyrelog_error_t wyl_fact_artifact_win_temp_root_retire
+    (WylFactArtifactWinTempRoot *, WylFactDuckdbTempRetireResult *);
 
 G_END_DECLS
 #endif

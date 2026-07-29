@@ -826,4 +826,516 @@ void wyl_fact_artifact_win_sidecar_binding_free
   wyl_fact_artifact_win_lease_free (binding->lease);
   g_free (binding);
 }
+
+struct WylFactArtifactWinTempRoot
+{
+  WylFactArtifactWinLease *lease;
+  WylFactArtifactWinDirectory *directory;
+  gchar *logical_name;
+  gboolean active;
+  gint references;
+  GMutex mutex;
+};
+struct WylFactArtifactWinTempChild
+{
+  WylFactArtifactWinTempRoot *root;
+  WylFactArtifactWinEntry *entry;
+  gboolean active;
+  gboolean io_terminal;
+  guint io_open;
+  gint references;
+  GPtrArray *bindings;
+  GMutex mutex;
+};
+struct WylFactArtifactWinTempChildBinding
+{
+  WylFactArtifactWinTempChild *child;
+  WylFactArtifactWinWorkingHandle *working;
+  gboolean active;
+  gboolean io_open;
+};
+
+static gboolean
+temp_child_name (const gchar *name)
+{
+  const gchar *p;
+  if (name == NULL || strpbrk (name, "/\\\\") != NULL)
+    return FALSE;
+  if (g_str_has_prefix (name, "duckdb_temp_storage_")) {
+    p = name + strlen ("duckdb_temp_storage_");
+    if (g_str_has_prefix (p, "DEFAULT"))
+      p += strlen ("DEFAULT");
+    else {
+      static const gchar *const classes[] = { "S32K", "S64K", "S96K",
+        "S128K", "S160K", "S192K", "S224K"
+      };
+      gboolean matched = FALSE;
+      for (guint i = 0; i < G_N_ELEMENTS (classes); i++)
+        if (g_str_has_prefix (p, classes[i])) {
+          p += strlen (classes[i]);
+          matched = TRUE;
+          break;
+        }
+      if (!matched)
+        return FALSE;
+    }
+    if (*p++ != '-')
+      return FALSE;
+    const gchar *digits = p;
+    while (g_ascii_isdigit (*p))
+      p++;
+    return p != digits && (digits[0] == '0' ? p == digits + 1
+        : (p - digits) <= 20) && g_strcmp0 (p, ".tmp") == 0;
+  }
+  if (!g_str_has_prefix (name, "duckdb_temp_block-"))
+    return FALSE;
+  p = name + strlen ("duckdb_temp_block-");
+  const gchar *digits = p;
+  while (g_ascii_isdigit (*p))
+    p++;
+  return p != digits && (digits[0] == '0' ? p == digits + 1
+      : (p - digits) <= 20) && g_strcmp0 (p, ".block") == 0;
+}
+
+static WylFactArtifactWinTempRoot *temp_root_ref
+    (WylFactArtifactWinTempRoot * root)
+{
+  if (root != NULL)
+    g_atomic_int_inc (&root->references);
+  return root;
+}
+
+static WylFactArtifactWinTempChild *temp_child_ref
+    (WylFactArtifactWinTempChild * child)
+{
+  if (child != NULL)
+    g_atomic_int_inc (&child->references);
+  return child;
+}
+
+static void temp_root_unref (WylFactArtifactWinTempRoot *);
+static void temp_child_unref (WylFactArtifactWinTempChild *);
+
+static wyrelog_error_t
+temp_root_check (WylFactArtifactWinTempRoot *root)
+{
+  wyrelog_error_t rc;
+  if (root == NULL || !root->active)
+    return WYRELOG_E_POLICY;
+  rc = lease_revalidate (root->lease);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_revalidate
+        (root->lease->namespace_->locator, root->directory);
+  if (rc != WYRELOG_E_OK)
+    root->active = FALSE;
+  return rc;
+}
+
+static wyrelog_error_t
+temp_child_check (WylFactArtifactWinTempChild *child)
+{
+  wyrelog_error_t rc;
+  if (child == NULL || !child->active)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&child->root->mutex);
+  rc = temp_root_check (child->root);
+  g_mutex_unlock (&child->root->mutex);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_entry_revalidate
+        (child->root->lease->namespace_->locator, child->root->directory,
+        child->entry);
+  if (rc != WYRELOG_E_OK)
+    child->active = FALSE;
+  return rc;
+}
+
+static void
+temp_binding_revoke (WylFactArtifactWinTempChildBinding *binding)
+{
+  if (binding->io_open && binding->child->io_open > 0)
+    binding->child->io_open--;
+  binding->active = FALSE;
+  binding->io_open = FALSE;
+  binding->child->io_terminal = TRUE;
+}
+
+static wyrelog_error_t
+temp_binding_check (WylFactArtifactWinTempChildBinding *binding,
+    gboolean require_handle, HANDLE supplied)
+{
+  wyrelog_error_t rc;
+  HANDLE borrowed = INVALID_HANDLE_VALUE;
+  if (binding == NULL || !binding->active)
+    return WYRELOG_E_POLICY;
+  g_mutex_lock (&binding->child->mutex);
+  rc = temp_child_check (binding->child);
+  if (rc == WYRELOG_E_OK && require_handle) {
+    rc = !binding->io_open ? WYRELOG_E_POLICY
+        : wyl_fact_artifact_win_working_handle_borrow (binding->working,
+        &borrowed);
+    if (rc == WYRELOG_E_OK && borrowed != supplied)
+      rc = WYRELOG_E_POLICY;
+  }
+  if (rc != WYRELOG_E_OK)
+    temp_binding_revoke (binding);
+  g_mutex_unlock (&binding->child->mutex);
+  return rc;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_lease_create_temp_root (WylFactArtifactWinLease *lease,
+    WylFactArtifactWinTempRoot **out_root)
+{
+  WylFactArtifactWinTempRoot *root;
+  g_autofree gchar *uuid = NULL;
+  g_autofree gchar *name = NULL;
+  wyrelog_error_t rc;
+  if (out_root != NULL)
+    *out_root = NULL;
+  if (lease == NULL || out_root == NULL || !lease->exclusive)
+    return WYRELOG_E_POLICY;
+  if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
+    return rc;
+  uuid = g_uuid_string_random ();
+  name = uuid == NULL ? NULL : g_strdup_printf ("wyrelog-duckdb-temp-%s", uuid);
+  if (name == NULL)
+    return WYRELOG_E_NOMEM;
+  root = g_try_new0 (WylFactArtifactWinTempRoot, 1);
+  if (root == NULL)
+    return WYRELOG_E_NOMEM;
+  rc = wyl_fact_artifact_win_locator_create_directory
+      (lease->namespace_->locator, name, &root->directory);
+  if (rc != WYRELOG_E_OK) {
+    g_free (root);
+    return rc;
+  }
+  root->logical_name = g_strdup_printf ("/wyrelog-duckdb-temp/%s", name);
+  if (root->logical_name == NULL) {
+    wyl_fact_artifact_win_directory_free (root->directory);
+    g_free (root);
+    return WYRELOG_E_NOMEM;
+  }
+  root->lease = lease_ref (lease);
+  root->active = TRUE;
+  g_atomic_int_set (&root->references, 1);
+  g_mutex_init (&root->mutex);
+  rc = wyl_fact_artifact_win_locator_flush_directory (lease->
+      namespace_->locator);
+  if (rc != WYRELOG_E_OK) {
+    temp_root_unref (root);
+    return rc;
+  }
+  *out_root = root;
+  return WYRELOG_E_OK;
+}
+
+gchar *
+wyl_fact_artifact_win_temp_root_dup_logical_name (WylFactArtifactWinTempRoot
+    *root)
+{
+  gchar *result;
+  if (root == NULL)
+    return NULL;
+  g_mutex_lock (&root->mutex);
+  result = root->active ? g_strdup (root->logical_name) : NULL;
+  g_mutex_unlock (&root->mutex);
+  return result;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_create_child (WylFactArtifactWinTempRoot *root,
+    const gchar *name, WylFactArtifactWinTempChild **out_child)
+{
+  WylFactArtifactWinTempChild *child;
+  wyrelog_error_t rc;
+  if (out_child != NULL)
+    *out_child = NULL;
+  if (root == NULL || out_child == NULL || !temp_child_name (name))
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&root->mutex);
+  rc = temp_root_check (root);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&root->mutex);
+    return rc;
+  }
+  child = g_try_new0 (WylFactArtifactWinTempChild, 1);
+  if (child == NULL) {
+    g_mutex_unlock (&root->mutex);
+    return WYRELOG_E_NOMEM;
+  }
+  rc = wyl_fact_artifact_win_directory_open_file
+      (root->lease->namespace_->locator, root->directory, name,
+      GENERIC_READ | GENERIC_WRITE | DELETE, TRUE, &child->entry);
+  if (rc != WYRELOG_E_OK) {
+    g_free (child);
+    g_mutex_unlock (&root->mutex);
+    return rc;
+  }
+  child->root = temp_root_ref (root);
+  child->active = TRUE;
+  child->bindings = g_ptr_array_new ();
+  if (child->bindings == NULL) {
+    wyl_fact_artifact_win_entry_free (child->entry);
+    temp_root_unref (child->root);
+    g_free (child);
+    g_mutex_unlock (&root->mutex);
+    return WYRELOG_E_NOMEM;
+  }
+  g_atomic_int_set (&child->references, 1);
+  g_mutex_init (&child->mutex);
+  *out_child = child;
+  g_mutex_unlock (&root->mutex);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_child_open (WylFactArtifactWinTempChild *child,
+    WylFactArtifactWinTempChildBinding **out_binding)
+{
+  WylFactArtifactWinTempChildBinding *binding;
+  HANDLE issued = INVALID_HANDLE_VALUE;
+  wyrelog_error_t rc;
+  if (out_binding != NULL)
+    *out_binding = NULL;
+  if (child == NULL || out_binding == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&child->mutex);
+  rc = temp_child_check (child);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_entry_issue_working_handle
+        (child->root->lease->namespace_->locator, child->root->directory,
+        child->entry, &issued);
+  if (rc != WYRELOG_E_OK) {
+    g_mutex_unlock (&child->mutex);
+    return rc;
+  }
+  binding = g_try_new0 (WylFactArtifactWinTempChildBinding, 1);
+  if (binding == NULL) {
+    CloseHandle (issued);
+    g_mutex_unlock (&child->mutex);
+    return WYRELOG_E_NOMEM;
+  }
+  rc = wyl_fact_artifact_win_working_handle_adopt (issued,
+      wyl_fact_artifact_win_entry_identity (child->entry), &binding->working);
+  if (rc != WYRELOG_E_OK) {
+    CloseHandle (issued);
+    g_free (binding);
+    g_mutex_unlock (&child->mutex);
+    return rc;
+  }
+  binding->child = temp_child_ref (child);
+  binding->active = TRUE;
+  binding->io_open = TRUE;
+  child->io_open++;
+  g_ptr_array_add (child->bindings, binding);
+  *out_binding = binding;
+  g_mutex_unlock (&child->mutex);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_revalidate
+    (WylFactArtifactWinTempChildBinding * binding) {
+  return temp_binding_check (binding, FALSE, INVALID_HANDLE_VALUE);
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_revalidate_handle
+    (WylFactArtifactWinTempChildBinding * binding, HANDLE handle) {
+  if (handle == NULL || handle == INVALID_HANDLE_VALUE)
+    return WYRELOG_E_INVALID;
+  return temp_binding_check (binding, TRUE, handle);
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_borrow
+    (WylFactArtifactWinTempChildBinding * binding, HANDLE * out_handle) {
+  wyrelog_error_t rc;
+  if (out_handle != NULL)
+    *out_handle = INVALID_HANDLE_VALUE;
+  if (binding == NULL || out_handle == NULL)
+    return WYRELOG_E_INVALID;
+  rc = temp_binding_check (binding, FALSE, INVALID_HANDLE_VALUE);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&binding->child->mutex);
+  if (!binding->io_open)
+    rc = WYRELOG_E_POLICY;
+  else
+    rc = wyl_fact_artifact_win_working_handle_borrow (binding->working,
+        out_handle);
+  if (rc != WYRELOG_E_OK)
+    temp_binding_revoke (binding);
+  g_mutex_unlock (&binding->child->mutex);
+  if (rc == WYRELOG_E_OK)
+    rc = temp_binding_check (binding, TRUE, *out_handle);
+  if (rc != WYRELOG_E_OK)
+    *out_handle = INVALID_HANDLE_VALUE;
+  return rc;
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_child_binding_close
+    (WylFactArtifactWinTempChildBinding * binding, HANDLE * inout_handle) {
+  wyrelog_error_t rc;
+  if (binding == NULL || inout_handle == NULL)
+    return WYRELOG_E_INVALID;
+  rc = temp_binding_check (binding, TRUE, *inout_handle);
+  if (rc != WYRELOG_E_OK)
+    return rc;
+  g_mutex_lock (&binding->child->mutex);
+  rc = wyl_fact_artifact_win_working_handle_close (binding->working,
+      inout_handle);
+  if (rc == WYRELOG_E_OK) {
+    if (binding->io_open && binding->child->io_open > 0)
+      binding->child->io_open--;
+    binding->io_open = FALSE;
+  } else
+    temp_binding_revoke (binding);
+  g_mutex_unlock (&binding->child->mutex);
+  return rc;
+}
+
+void wyl_fact_artifact_win_temp_child_binding_free
+    (WylFactArtifactWinTempChildBinding * binding)
+{
+  WylFactArtifactWinTempChild *child;
+  if (binding == NULL)
+    return;
+  child = binding->child;
+  g_mutex_lock (&child->mutex);
+  if (binding->io_open)
+    temp_binding_revoke (binding);
+  g_ptr_array_remove (child->bindings, binding);
+  wyl_fact_artifact_win_working_handle_free (binding->working);
+  g_mutex_unlock (&child->mutex);
+  temp_child_unref (child);
+  g_free (binding);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_child_retire (WylFactArtifactWinTempChild *child,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+  wyrelog_error_t rc;
+  if (out_result != NULL)
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  if (child == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&child->mutex);
+  if (child->io_open != 0 || child->io_terminal) {
+    /* A raw close/reuse is observable before mutation.  Do not delete and do
+     * not risk a close on its caller-owned, now foreign HANDLE. */
+    for (guint i = 0; i < child->bindings->len; i++) {
+      WylFactArtifactWinTempChildBinding *binding = g_ptr_array_index
+          (child->bindings, i);
+      if (binding->io_open
+          && wyl_fact_artifact_win_working_handle_revalidate (binding->working)
+          != WYRELOG_E_OK)
+        temp_binding_revoke (binding);
+    }
+    rc = WYRELOG_E_POLICY;
+    g_mutex_unlock (&child->mutex);
+    return rc;
+  }
+  rc = temp_child_check (child);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_entry_delete_exact
+        (child->root->lease->namespace_->locator, child->root->directory,
+        child->entry, &effect);
+  if (effect == WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
+    wyrelog_error_t flush = wyl_fact_artifact_win_locator_flush_directory
+        (child->root->lease->namespace_->locator);
+    child->active = FALSE;
+    *out_result = rc == WYRELOG_E_OK && flush == WYRELOG_E_OK
+        ? WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED
+        : WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED;
+    if (rc == WYRELOG_E_OK)
+      rc = flush;
+  } else if (effect == WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN) {
+    child->active = FALSE;
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED;
+  }
+  g_mutex_unlock (&child->mutex);
+  return rc;
+}
+
+void
+wyl_fact_artifact_win_temp_child_free (WylFactArtifactWinTempChild *child)
+{
+  temp_child_unref (child);
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_root_retire (WylFactArtifactWinTempRoot *root,
+    WylFactDuckdbTempRetireResult *out_result)
+{
+  WylFactArtifactWinMutationEffect effect =
+      WYL_FACT_ARTIFACT_WIN_MUTATION_NOT_APPLIED;
+  wyrelog_error_t rc;
+  if (out_result != NULL)
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_NOT_RETIRED;
+  if (root == NULL || out_result == NULL)
+    return WYRELOG_E_INVALID;
+  g_mutex_lock (&root->mutex);
+  /* Every child and every child working binding owns a root reference.  A
+   * root can be deleted only after all of that authority was released. */
+  if (g_atomic_int_get (&root->references) != 1) {
+    g_mutex_unlock (&root->mutex);
+    return WYRELOG_E_POLICY;
+  }
+  rc = temp_root_check (root);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_directory_delete_empty
+        (root->lease->namespace_->locator, root->directory, &effect);
+  if (effect == WYL_FACT_ARTIFACT_WIN_MUTATION_APPLIED) {
+    wyrelog_error_t flush = wyl_fact_artifact_win_locator_flush_directory
+        (root->lease->namespace_->locator);
+    root->active = FALSE;
+    *out_result = rc == WYRELOG_E_OK && flush == WYRELOG_E_OK
+        ? WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED
+        : WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED;
+    if (rc == WYRELOG_E_OK)
+      rc = flush;
+  } else if (effect == WYL_FACT_ARTIFACT_WIN_MUTATION_UNKNOWN) {
+    root->active = FALSE;
+    *out_result = WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RECONCILE_REQUIRED;
+  }
+  g_mutex_unlock (&root->mutex);
+  return rc;
+}
+
+static void
+temp_child_unref (WylFactArtifactWinTempChild *child)
+{
+  if (child == NULL || !g_atomic_int_dec_and_test (&child->references))
+    return;
+  child->active = FALSE;
+  wyl_fact_artifact_win_entry_free (child->entry);
+  g_clear_pointer (&child->bindings, g_ptr_array_unref);
+  g_mutex_clear (&child->mutex);
+  temp_root_unref (child->root);
+  g_free (child);
+}
+
+static void
+temp_root_unref (WylFactArtifactWinTempRoot *root)
+{
+  if (root == NULL || !g_atomic_int_dec_and_test (&root->references))
+    return;
+  root->active = FALSE;
+  wyl_fact_artifact_win_directory_free (root->directory);
+  g_free (root->logical_name);
+  g_mutex_clear (&root->mutex);
+  wyl_fact_artifact_win_lease_free (root->lease);
+  g_free (root);
+}
+
+void
+wyl_fact_artifact_win_temp_root_free (WylFactArtifactWinTempRoot *root)
+{
+  temp_root_unref (root);
+}
 #endif
