@@ -134,6 +134,51 @@ test_private_io_session_lifetime_and_singleton (void)
 }
 
 static void
+test_io_session_guardian_failure_is_policy (void)
+{
+  gchar *path = NULL;
+  HANDLE source = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (source);
+  WylFactArtifactWinWorkingHandle *working = NULL;
+  WylFactArtifactWinIoState *state = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  g_autofree gchar *directory = NULL;
+  g_autofree gchar *alternate_path = NULL;
+  g_autofree wchar_t *source_wide = NULL;
+  g_autofree wchar_t *alternate_wide = NULL;
+  guint64 size = 0;
+  gchar byte = 0;
+  gsize read = 0;
+
+  g_assert_cmpint (wyl_fact_artifact_win_working_handle_adopt (source,
+          &identity, &working), ==, WYRELOG_E_OK);
+  source = INVALID_HANDLE_VALUE;
+  g_assert_cmpint (wyl_fact_artifact_win_io_state_new (working, &state), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_open (state, &session),
+      ==, WYRELOG_E_OK);
+  /* A hard-link changes the guardian's required single-link association.
+   * Every typed I/O operation must preserve POLICY, not relabel this security
+   * failure as INVALID (which is reserved for malformed arguments). */
+  directory = g_path_get_dirname (path);
+  alternate_path = g_build_filename (directory, "alternate", NULL);
+  source_wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  alternate_wide = g_utf8_to_utf16 (alternate_path, -1, NULL, NULL, NULL);
+  g_assert_true (CreateHardLinkW (alternate_wide, source_wide, NULL));
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_size (session, &size), ==,
+      WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, &byte,
+          1, &read), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_read (session, 0, NULL,
+          1, &read), ==, WYRELOG_E_INVALID);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  g_assert_true (DeleteFileW (alternate_wide));
+  wyl_fact_artifact_win_io_state_free (state);
+  remove_scratch_file (path);
+}
+
+static void
 test_session_blocks_mutation_until_finish (void)
 {
   g_autoptr (GError) error = NULL;
@@ -797,24 +842,41 @@ test_native_namespace_captured_owner_acl_binding (void)
   HANDLE graph = open_scratch_directory (&path);
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
   WylFactArtifactWinNamespace *namespace_ = NULL;
+  WylFactArtifactWinNamespace *owner = NULL;
+  WylFactArtifactWinLease *mutation = NULL;
+  WylFactArtifactWinSidecarBinding *seed = NULL;
   WylFactArtifactWinBinding *binding = NULL;
   WylFactArtifactWinBinding *reopened = NULL;
   WylFactArtifactWinIoSession *session = NULL;
+  HANDLE owner_graph = INVALID_HANDLE_VALUE;
   g_autofree gchar *wal_path = NULL;
   g_autofree wchar_t *wal = NULL;
 
   directory.graph_handle = graph;
   directory.graph_identity = identity_for (graph);
+  /* Generic fixed I/O is reader-authorized only.  Provision the main and
+   * sidecar through the normal imported-main/exclusive-lease path first. */
+  owner = open_namespace_at_path (path, TRUE, &owner_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (owner,
+          &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (mutation,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &seed), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_sidecar_binding_free (seed);
+  wyl_fact_artifact_win_lease_free (mutation);
+  wyl_fact_artifact_win_namespace_free (owner);
+  owner = NULL;
+  g_assert_true (CloseHandle (owner_graph));
+  owner_graph = INVALID_HANDLE_VALUE;
   g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
           &namespace_), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
-          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, TRUE,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ, FALSE,
           &binding), ==, WYRELOG_E_OK);
   /* MAIN cannot be minted through the generic namespace, including strict
    * creation.  Only #615 evidence import plus an exclusive native lease may
    * issue a main HANDLE. */
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
-          WYL_FACT_ARTIFACT_MAIN, GENERIC_READ | GENERIC_WRITE, TRUE,
+          WYL_FACT_ARTIFACT_MAIN, GENERIC_READ, FALSE,
           &reopened), ==, WYRELOG_E_POLICY);
   g_assert_null (reopened);
   g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (binding,
@@ -831,7 +893,7 @@ test_native_namespace_captured_owner_acl_binding (void)
   g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
           &namespace_), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
-          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ, FALSE,
           &reopened), ==, WYRELOG_E_OK);
   /* The binding holds its own namespace reference; lifetime handoff must not
    * invalidate native revalidation between a caller releasing the namespace
@@ -850,7 +912,7 @@ test_native_namespace_captured_owner_acl_binding (void)
   g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
           &namespace_), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
-          WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, FALSE,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ, FALSE,
           &reopened), ==, WYRELOG_E_OK);
   g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (reopened,
           &session), ==, WYRELOG_E_OK);
@@ -880,11 +942,26 @@ test_native_namespace_release_binding_stress (void)
   gchar *path = NULL;
   HANDLE graph = open_scratch_directory (&path);
   WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  WylFactArtifactWinNamespace *owner = NULL;
+  WylFactArtifactWinLease *mutation = NULL;
+  WylFactArtifactWinSidecarBinding *seed = NULL;
+  HANDLE owner_graph = INVALID_HANDLE_VALUE;
   g_autofree gchar *wal_path = NULL;
   g_autofree wchar_t *wal = NULL;
 
   directory.graph_handle = graph;
   directory.graph_identity = identity_for (graph);
+  owner = open_namespace_at_path (path, TRUE, &owner_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (owner,
+          &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (mutation,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &seed), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_sidecar_binding_free (seed);
+  wyl_fact_artifact_win_lease_free (mutation);
+  wyl_fact_artifact_win_namespace_free (owner);
+  owner = NULL;
+  g_assert_true (CloseHandle (owner_graph));
+  owner_graph = INVALID_HANDLE_VALUE;
   wal_path = g_build_filename (path, "facts.duckdb.wal", NULL);
   wal = g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
   for (guint i = 0; i < 64; i++) {
@@ -897,7 +974,7 @@ test_native_namespace_release_binding_stress (void)
     g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory,
             &namespace_), ==, WYRELOG_E_OK);
     g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (namespace_,
-            WYL_FACT_ARTIFACT_WAL, GENERIC_READ | GENERIC_WRITE, TRUE,
+            WYL_FACT_ARTIFACT_WAL, GENERIC_READ, FALSE,
             &binding), ==, WYRELOG_E_OK);
     probe.namespace_ = namespace_;
     releaser = g_thread_new ("namespace-release", release_namespace_thread,
@@ -908,13 +985,100 @@ test_native_namespace_release_binding_stress (void)
     g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
         WYRELOG_E_OK);
     wyl_fact_artifact_win_binding_free (binding);
-    g_assert_true (DeleteFileW (wal));
   }
+  g_assert_true (DeleteFileW (wal));
   g_autofree wchar_t *directory_wide = g_utf8_to_utf16 (path, -1, NULL,
       NULL, NULL);
   g_assert_true (CloseHandle (graph));
   g_assert_true (RemoveDirectoryW (directory_wide));
   g_free (path);
+}
+
+static void
+test_generic_reader_session_blocks_cross_namespace_mutation (void)
+{
+  g_autoptr (GError) error = NULL;
+  g_autofree gchar *path = g_dir_make_tmp ("wyl-win-reader-domain-XXXXXX",
+      &error);
+  WylFactArtifactWinNamespace *seed = NULL;
+  WylFactArtifactWinNamespace *reader = NULL;
+  WylFactArtifactWinNamespace *writer = NULL;
+  WylFactArtifactWinLease *mutation = NULL;
+  WylFactArtifactWinLease *writer_mutation = NULL;
+  WylFactArtifactWinSidecarBinding *sidecar = NULL;
+  WylFactArtifactWinBinding *binding = NULL;
+  WylFactArtifactWinIoSession *session = NULL;
+  WylFactGraphDirectory directory = WYL_FACT_GRAPH_DIRECTORY_INIT;
+  HANDLE seed_graph = INVALID_HANDLE_VALUE;
+  HANDLE reader_graph = INVALID_HANDLE_VALUE;
+  HANDLE writer_graph = INVALID_HANDLE_VALUE;
+
+  g_assert_no_error (error);
+  seed = open_namespace_at_path (path, TRUE, &seed_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (seed,
+          &mutation), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lease_open_sidecar (mutation,
+          WYL_FACT_ARTIFACT_WAL, TRUE, &sidecar), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_sidecar_binding_free (sidecar);
+  wyl_fact_artifact_win_lease_free (mutation);
+  wyl_fact_artifact_win_namespace_free (seed);
+  g_assert_true (CloseHandle (seed_graph));
+
+  {
+    g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+    reader_graph = CreateFileW (wide, FILE_LIST_DIRECTORY | FILE_ADD_FILE
+        | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+  }
+  g_assert_true (reader_graph != INVALID_HANDLE_VALUE);
+  directory.graph_handle = reader_graph;
+  directory.graph_identity = identity_for (reader_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_new (&directory, &reader),
+      ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_open_fixed (reader,
+          WYL_FACT_ARTIFACT_WAL, GENERIC_READ, FALSE, &binding), ==,
+      WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_binding_open_io_session (binding,
+          &session), ==, WYRELOG_E_OK);
+  /* The live reader session keeps its private reader lease after all public
+   * reader handles are released.  A fresh namespace must still observe BUSY
+   * when it asks for an exclusive mutation lease. */
+  wyl_fact_artifact_win_binding_free (binding);
+  binding = NULL;
+  wyl_fact_artifact_win_namespace_free (reader);
+  reader = NULL;
+  writer = open_namespace_at_path (path, FALSE, &writer_graph);
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (writer,
+          &writer_mutation), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer_mutation);
+  g_assert_cmpint (wyl_fact_artifact_win_io_session_finish (session), ==,
+      WYRELOG_E_OK);
+  session = NULL;
+  g_assert_cmpint (wyl_fact_artifact_win_namespace_acquire_mutation (writer,
+          &writer_mutation), ==, WYRELOG_E_OK);
+  wyl_fact_artifact_win_lease_free (writer_mutation);
+  wyl_fact_artifact_win_namespace_free (writer);
+  g_assert_true (CloseHandle (reader_graph));
+  g_assert_true (CloseHandle (writer_graph));
+  {
+    g_autofree gchar *main_path = g_build_filename (path, "facts.duckdb", NULL);
+    g_autofree gchar *lock_path =
+        g_build_filename (path, "facts.duckdb.lock", NULL);
+    g_autofree gchar *wal_path =
+        g_build_filename (path, "facts.duckdb.wal", NULL);
+    g_autofree wchar_t *main_wide =
+        g_utf8_to_utf16 (main_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *lock_wide =
+        g_utf8_to_utf16 (lock_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *wal_wide =
+        g_utf8_to_utf16 (wal_path, -1, NULL, NULL, NULL);
+    g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+    g_assert_true (DeleteFileW (main_wide));
+    g_assert_true (DeleteFileW (lock_wide));
+    g_assert_true (DeleteFileW (wal_wide));
+    g_assert_true (RemoveDirectoryW (wide));
+  }
 }
 
 static void
@@ -1618,6 +1782,9 @@ main (int argc, char **argv)
       ("/fact/artifact-namespace/windows/io-session/lifetime-singleton",
       test_private_io_session_lifetime_and_singleton);
   g_test_add_func
+      ("/fact/artifact-namespace/windows/io-session/guardian-policy",
+      test_io_session_guardian_failure_is_policy);
+  g_test_add_func
       ("/fact/artifact-namespace/windows/io-session/mutation-gate",
       test_session_blocks_mutation_until_finish);
   g_test_add_func
@@ -1633,6 +1800,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/namespace/release-binding-stress",
       test_native_namespace_release_binding_stress);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/namespace/generic-reader-lock-domain",
+      test_generic_reader_session_blocks_cross_namespace_mutation);
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/identity-output",
       test_working_handle_identity_mismatch_initializes_output);

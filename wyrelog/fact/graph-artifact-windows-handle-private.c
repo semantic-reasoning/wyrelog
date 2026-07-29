@@ -207,11 +207,14 @@ wyl_fact_artifact_win_io_session_read (WylFactArtifactWinIoSession *session,
 {
   OVERLAPPED ov = { 0 };
   DWORD done = 0;
+  wyrelog_error_t rc;
   if (out_read != NULL)
     *out_read = 0;
-  if (buffer == NULL || out_read == NULL || length > G_MAXUINT32
-      || session_check (session) != WYRELOG_E_OK)
+  if (session == NULL || buffer == NULL || out_read == NULL
+      || length > G_MAXUINT32)
     return WYRELOG_E_INVALID;
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
   ov.Offset = (DWORD) offset;
   ov.OffsetHigh = (DWORD) (offset >> 32);
   if (!ReadFile (session->handle, buffer, (DWORD) length, &done, &ov))
@@ -226,11 +229,14 @@ wyl_fact_artifact_win_io_session_write (WylFactArtifactWinIoSession *session,
 {
   OVERLAPPED ov = { 0 };
   DWORD done = 0;
+  wyrelog_error_t rc;
   if (out_written != NULL)
     *out_written = 0;
-  if (buffer == NULL || out_written == NULL || length > G_MAXUINT32
-      || session_check (session) != WYRELOG_E_OK)
+  if (session == NULL || buffer == NULL || out_written == NULL
+      || length > G_MAXUINT32)
     return WYRELOG_E_INVALID;
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
   ov.Offset = (DWORD) offset;
   ov.OffsetHigh = (DWORD) (offset >> 32);
   if (!WriteFile (session->handle, buffer, (DWORD) length, &done, &ov))
@@ -244,10 +250,14 @@ wyl_fact_artifact_win_io_session_seek (WylFactArtifactWinIoSession *session,
     gint64 offset, DWORD method, guint64 *out_position)
 {
   LARGE_INTEGER move = {.QuadPart = offset }, result;
+  wyrelog_error_t rc;
   if (out_position != NULL)
     *out_position = 0;
-  if (out_position == NULL || session_check (session) != WYRELOG_E_OK)
+  if (session == NULL || out_position == NULL || (method != FILE_BEGIN
+          && method != FILE_CURRENT && method != FILE_END))
     return WYRELOG_E_INVALID;
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
   if (!SetFilePointerEx (session->handle, move, &result, method))
     return win_error (GetLastError ());
   *out_position = result.QuadPart;
@@ -259,10 +269,13 @@ wyl_fact_artifact_win_io_session_size (WylFactArtifactWinIoSession *session,
     guint64 *out_size)
 {
   LARGE_INTEGER size;
+  wyrelog_error_t rc;
   if (out_size != NULL)
     *out_size = 0;
-  if (out_size == NULL || session_check (session) != WYRELOG_E_OK)
+  if (session == NULL || out_size == NULL)
     return WYRELOG_E_INVALID;
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
   if (!GetFileSizeEx (session->handle, &size))
     return win_error (GetLastError ());
   *out_size = size.QuadPart;
@@ -274,8 +287,11 @@ wyl_fact_artifact_win_io_session_truncate (WylFactArtifactWinIoSession *session,
     guint64 size)
 {
   LARGE_INTEGER move = {.QuadPart = (LONGLONG) size };
-  if (session_check (session) != WYRELOG_E_OK)
-    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc;
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
   if (!SetFilePointerEx (session->handle, move, NULL, FILE_BEGIN)
       || !SetEndOfFile (session->handle))
     return win_error (GetLastError ());
@@ -285,8 +301,11 @@ wyl_fact_artifact_win_io_session_truncate (WylFactArtifactWinIoSession *session,
 wyrelog_error_t
 wyl_fact_artifact_win_io_session_flush (WylFactArtifactWinIoSession *session)
 {
-  if (session_check (session) != WYRELOG_E_OK)
-    return WYRELOG_E_POLICY;
+  wyrelog_error_t rc;
+  if (session == NULL)
+    return WYRELOG_E_INVALID;
+  if ((rc = session_check (session)) != WYRELOG_E_OK)
+    return rc;
   return FlushFileBuffers (session->handle) ? WYRELOG_E_OK :
       win_error (GetLastError ());
 }
