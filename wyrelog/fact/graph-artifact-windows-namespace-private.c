@@ -1131,6 +1131,8 @@ struct WylFactArtifactWinTempToken
 struct WylFactArtifactWinTempRecoveryEvidence
 {
   gchar *token;
+  WylFactGraphWinIdentity directory_identity;
+  WylFactGraphWinIdentity lock_identity;
   WylFactGraphWinIdentity identity;
 };
 
@@ -1406,6 +1408,10 @@ wyrelog_error_t
       } else {
         evidence->identity =
             *wyl_fact_artifact_win_entry_identity (token->entry);
+        evidence->directory_identity = *wyl_fact_artifact_win_locator_identity
+            (token->lease->namespace_->locator);
+        evidence->lock_identity = *wyl_fact_artifact_win_entry_identity
+            (token->lease->namespace_->lock_entry);
         *out_evidence = evidence;
       }
     }
@@ -1421,6 +1427,86 @@ void wyl_fact_artifact_win_temp_recovery_evidence_free
     g_free (evidence->token);
     g_free (evidence);
   }
+}
+
+#define WIN_TEMP_EVIDENCE_MAGIC "WTE1"
+#define WIN_TEMP_EVIDENCE_HEADER_SIZE 77
+
+static void
+win_temp_evidence_write_identity (guint8 *data,
+    const WylFactGraphWinIdentity *identity)
+{
+  guint64 volume = GUINT64_TO_BE ((guint64) identity->volume_serial);
+  memcpy (data, &volume, sizeof volume);
+  memcpy (data + sizeof volume, identity->file_id, sizeof identity->file_id);
+}
+
+static void
+win_temp_evidence_read_identity (const guint8 *data,
+    WylFactGraphWinIdentity *identity)
+{
+  guint64 volume;
+  memcpy (&volume, data, sizeof volume);
+  identity->volume_serial = (ULONG) GUINT64_FROM_BE (volume);
+  memcpy (identity->file_id, data + sizeof volume, sizeof identity->file_id);
+}
+
+wyrelog_error_t
+    wyl_fact_artifact_win_temp_recovery_evidence_encode
+    (const WylFactArtifactWinTempRecoveryEvidence * evidence,
+    GBytes ** out_bytes)
+{
+  guint8 *data;
+  gsize length;
+  if (out_bytes != NULL)
+    *out_bytes = NULL;
+  if (evidence == NULL || out_bytes == NULL || !temp_token_valid
+      (evidence->token))
+    return WYRELOG_E_INVALID;
+  length = strlen (evidence->token);
+  data = g_try_malloc (WIN_TEMP_EVIDENCE_HEADER_SIZE + length);
+  if (data == NULL)
+    return WYRELOG_E_NOMEM;
+  memcpy (data, WIN_TEMP_EVIDENCE_MAGIC, 4);
+  data[4] = (guint8) length;
+  win_temp_evidence_write_identity (data + 5, &evidence->directory_identity);
+  win_temp_evidence_write_identity (data + 29, &evidence->lock_identity);
+  win_temp_evidence_write_identity (data + 53, &evidence->identity);
+  memcpy (data + WIN_TEMP_EVIDENCE_HEADER_SIZE, evidence->token, length);
+  *out_bytes = g_bytes_new_take (data, WIN_TEMP_EVIDENCE_HEADER_SIZE + length);
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+wyl_fact_artifact_win_temp_recovery_evidence_decode (GBytes *bytes,
+    WylFactArtifactWinTempRecoveryEvidence **out_evidence)
+{
+  const guint8 *data;
+  WylFactArtifactWinTempRecoveryEvidence *evidence;
+  gsize size = 0;
+  if (out_evidence != NULL)
+    *out_evidence = NULL;
+  if (bytes == NULL || out_evidence == NULL)
+    return WYRELOG_E_INVALID;
+  data = g_bytes_get_data (bytes, &size);
+  if (size < WIN_TEMP_EVIDENCE_HEADER_SIZE
+      || memcmp (data, WIN_TEMP_EVIDENCE_MAGIC, 4) != 0
+      || size != WIN_TEMP_EVIDENCE_HEADER_SIZE + (gsize) data[4])
+    return WYRELOG_E_INVALID;
+  evidence = g_try_new0 (WylFactArtifactWinTempRecoveryEvidence, 1);
+  if (evidence == NULL)
+    return WYRELOG_E_NOMEM;
+  evidence->token = g_strndup ((const gchar *) data +
+      WIN_TEMP_EVIDENCE_HEADER_SIZE, data[4]);
+  if (!temp_token_valid (evidence->token)) {
+    wyl_fact_artifact_win_temp_recovery_evidence_free (evidence);
+    return WYRELOG_E_INVALID;
+  }
+  win_temp_evidence_read_identity (data + 5, &evidence->directory_identity);
+  win_temp_evidence_read_identity (data + 29, &evidence->lock_identity);
+  win_temp_evidence_read_identity (data + 53, &evidence->identity);
+  *out_evidence = evidence;
+  return WYRELOG_E_OK;
 }
 
 wyrelog_error_t
@@ -1441,6 +1527,11 @@ wyl_fact_artifact_win_lease_recover_temp_token (WylFactArtifactWinLease *lease,
     return WYRELOG_E_INVALID;
   if ((rc = lease_revalidate (lease)) != WYRELOG_E_OK)
     return rc;
+  if (!identity_equal (wyl_fact_artifact_win_locator_identity
+          (lease->namespace_->locator), &evidence->directory_identity)
+      || !identity_equal (wyl_fact_artifact_win_entry_identity
+          (lease->namespace_->lock_entry), &evidence->lock_identity))
+    return WYRELOG_E_POLICY;
   rc = wyl_fact_artifact_win_locator_open (lease->namespace_->locator, name,
       GENERIC_READ | GENERIC_WRITE | DELETE, FALSE, &entry);
   if (rc == WYRELOG_E_NOT_FOUND)
