@@ -1138,7 +1138,9 @@ test_exact_stage_creation_mints_operation_evidence (void)
   WylFactGraphLocator locator = { 0 };
   WylFactGraphStage stage = WYL_FACT_GRAPH_STAGE_INIT;
   WylFactGraphWinOperationEvidence evidence = { 0 };
+  WylFactGraphWinOperationEvidence wrong_evidence = { 0 };
   WylFactGraphStage reopened = WYL_FACT_GRAPH_STAGE_INIT;
+  WylFactGraphRegularFile final = WYL_FACT_GRAPH_REGULAR_FILE_INIT;
 
   init_locator (&locator, "tenant", "graph");
   open_graph (root, &locator, &resolver, &graph);
@@ -1159,10 +1161,26 @@ test_exact_stage_creation_mints_operation_evidence (void)
           operation, &reopened), ==, WYRELOG_E_BUSY);
   g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact (&graph,
           operation, &reopened), ==, WYRELOG_E_POLICY);
+  wrong_evidence = evidence;
+  wrong_evidence.artifact_identity.file_id[0] ^= 1;
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
+      (&graph, operation, &wrong_evidence, &reopened), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_directory_stage_open_exact_with_evidence
+      (&graph, operation, &evidence, &reopened), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_stage_publish_with_evidence (&graph,
+          &reopened, &evidence), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_exact
+      (&graph, operation, &final), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
+      (&graph, operation, &wrong_evidence, &final), ==, WYRELOG_E_POLICY);
+  g_assert_cmpint (wyl_fact_graph_directory_open_provisioned_final_with_evidence
+      (&graph, operation, &evidence, &final), ==, WYRELOG_E_OK);
+  wyl_fact_graph_regular_file_clear (&final);
   g_assert_cmpint (wyl_fact_graph_directory_stage_create_exact (&graph,
           "01890f47-3c4b-6cc2-b8c4-dc0c0c070544", &reopened), ==,
       WYRELOG_E_INVALID);
   wyl_fact_graph_stage_clear (&stage);
+  wyl_fact_graph_stage_clear (&reopened);
   wyl_fact_graph_directory_clear (&graph);
   wyl_fact_graph_resolver_clear (&resolver);
   wyl_fact_graph_locator_clear (&locator);

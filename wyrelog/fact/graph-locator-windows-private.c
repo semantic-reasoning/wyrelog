@@ -1282,7 +1282,8 @@ open_relative_regular (HANDLE parent, const gchar *basename,
       | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
   owner_only_security_clear (&security);
   if (status < 0 || !handle_is_valid (handle))
-    return ntstatus_to_error (status);
+    return create && (ULONG) status == 0xC0000035UL
+        ? WYRELOG_E_BUSY : ntstatus_to_error (status);
   rc = query_regular_identity (handle, out_identity);
   if (rc == WYRELOG_E_OK && strict_acl)
     rc = validate_protected_owner_acl (handle, 0);
@@ -1538,8 +1539,10 @@ flush_directory (HANDLE directory)
   if (FlushFileBuffers (directory))
     return WYRELOG_E_OK;
   DWORD error = GetLastError ();
-  return error == ERROR_INVALID_FUNCTION || error == ERROR_NOT_SUPPORTED
-      ? WYRELOG_E_OK : WYRELOG_E_IO;
+  /* A successful native rename is not a durable directory entry unless the
+   * parent flush succeeds.  There is no success-compatible fallback here. */
+  trace_windows_failure ("directory-flush", WYRELOG_E_IO, error);
+  return WYRELOG_E_IO;
 }
 
 static HANDLE
@@ -1793,6 +1796,57 @@ wyl_fact_graph_directory_stage_open_exact (WylFactGraphDirectory *directory,
 }
 
 wyrelog_error_t
+    wyl_fact_graph_directory_stage_open_exact_with_evidence
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphWinOperationEvidence * expected_evidence,
+    WylFactGraphStage * out_stage)
+{
+  if (out_stage != NULL)
+    *out_stage = (WylFactGraphStage) WYL_FACT_GRAPH_STAGE_INIT;
+  if (out_stage == NULL || !operation_evidence_is_valid (expected_evidence))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *stage_basename = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+      &stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_names_validate (directory, stage_basename);
+  if (rc == WYRELOG_E_OK && !identity_equal (&directory->graph_identity,
+          &expected_evidence->graph_identity))
+    rc = WYRELOG_E_POLICY;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity identity = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular (directory->graph_handle, stage_basename,
+        GENERIC_READ | GENERIC_WRITE | DELETE, FALSE, TRUE, &handle, &identity);
+  if (rc == WYRELOG_E_OK && !identity_equal (&identity,
+          &expected_evidence->artifact_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("stage-opened", directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_populate (directory, handle, stage_basename, &identity,
+        out_stage);
+  if (rc == WYRELOG_E_OK
+      && !operation_evidence_equal (&out_stage->operation_evidence,
+          expected_evidence))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK) {
+    gint fd = _open_osfhandle ((intptr_t) handle, _O_BINARY | _O_RDWR);
+    if (fd < 0)
+      rc = WYRELOG_E_IO;
+    else {
+      handle = INVALID_HANDLE_VALUE;
+      out_stage->fd = fd;
+    }
+  }
+  if (handle_is_valid (handle))
+    CloseHandle (handle);
+  if (rc != WYRELOG_E_OK)
+    wyl_fact_graph_stage_clear (out_stage);
+  return rc;
+}
+
+wyrelog_error_t
 wyl_fact_graph_stage_get_windows_operation_evidence (const WylFactGraphStage
     *stage, WylFactGraphWinOperationEvidence *out_evidence)
 {
@@ -1802,6 +1856,61 @@ wyl_fact_graph_stage_get_windows_operation_evidence (const WylFactGraphStage
       || !operation_evidence_is_valid (&stage->operation_evidence))
     return WYRELOG_E_INVALID;
   *out_evidence = stage->operation_evidence;
+  return WYRELOG_E_OK;
+}
+
+wyrelog_error_t
+    wyl_fact_graph_directory_open_provisioned_final_with_evidence
+    (WylFactGraphDirectory * directory, const gchar * operation_uuid,
+    const WylFactGraphWinOperationEvidence * expected_evidence,
+    WylFactGraphRegularFile * out_final)
+{
+  if (out_final != NULL)
+    *out_final = (WylFactGraphRegularFile) WYL_FACT_GRAPH_REGULAR_FILE_INIT;
+  if (out_final == NULL || !operation_evidence_is_valid (expected_evidence))
+    return WYRELOG_E_INVALID;
+  g_autofree gchar *stage_basename = NULL;
+  wyrelog_error_t rc = provisioning_stage_name_from_operation (operation_uuid,
+      &stage_basename);
+  if (rc == WYRELOG_E_OK)
+    rc = exact_stage_names_validate (directory, stage_basename);
+  if (rc == WYRELOG_E_OK && !identity_equal (&directory->graph_identity,
+          &expected_evidence->graph_identity))
+    rc = WYRELOG_E_POLICY;
+  HANDLE handle = INVALID_HANDLE_VALUE;
+  WylFactGraphWinIdentity identity = { 0 };
+  if (rc == WYRELOG_E_OK)
+    rc = open_relative_regular (directory->graph_handle, "facts.duckdb",
+        GENERIC_READ, FALSE, TRUE, &handle, &identity);
+  if (rc == WYRELOG_E_OK && !identity_equal (&identity,
+          &expected_evidence->artifact_identity))
+    rc = WYRELOG_E_POLICY;
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-final-opened",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = revalidate_named_regular (directory, "facts.duckdb", handle,
+        &expected_evidence->artifact_identity, TRUE);
+  if (rc == WYRELOG_E_OK && directory->checkpoint != NULL)
+    rc = directory->checkpoint ("provisioned-final-validated",
+        directory->checkpoint_data);
+  if (rc == WYRELOG_E_OK)
+    rc = directory_revalidate (directory);
+  FILE_STANDARD_INFO standard = { 0 };
+  if (rc == WYRELOG_E_OK && !GetFileInformationByHandleEx (handle,
+          FileStandardInfo, &standard, sizeof standard))
+    rc = WYRELOG_E_IO;
+  if (rc == WYRELOG_E_OK && (standard.Directory || standard.DeletePending
+          || standard.EndOfFile.QuadPart < 0))
+    rc = WYRELOG_E_POLICY;
+  if (rc != WYRELOG_E_OK) {
+    if (handle_is_valid (handle))
+      CloseHandle (handle);
+    return rc;
+  }
+  out_final->handle = handle;
+  out_final->identity = identity;
+  out_final->size_bytes = (guint64) standard.EndOfFile.QuadPart;
   return WYRELOG_E_OK;
 }
 
@@ -1937,6 +2046,8 @@ stage_forget (WylFactGraphStage *stage)
   g_clear_pointer (&stage->final_basename, g_free);
   memset (&stage->identity, 0, sizeof stage->identity);
   memset (&stage->graph_identity, 0, sizeof stage->graph_identity);
+  memset (&stage->operation_evidence, 0, sizeof stage->operation_evidence);
+  stage->exact_provisioning_stage = FALSE;
 }
 
 static void
@@ -1948,9 +2059,8 @@ stage_mark_complete (WylFactGraphStage *stage)
   stage_forget (stage);
 }
 
-wyrelog_error_t
-wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
-    WylFactGraphStage *stage)
+static wyrelog_error_t
+stage_publish_bound (WylFactGraphDirectory *directory, WylFactGraphStage *stage)
 {
   if (!stage_is_bound (directory, stage))
     return WYRELOG_E_INVALID;
@@ -2000,6 +2110,36 @@ wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
   if (rc == WYRELOG_E_OK)
     stage_mark_complete (stage);
   return rc;
+}
+
+wyrelog_error_t
+wyl_fact_graph_stage_publish_with_evidence (WylFactGraphDirectory *directory,
+    WylFactGraphStage *stage,
+    const WylFactGraphWinOperationEvidence *expected_evidence)
+{
+  if (directory == NULL || stage == NULL
+      || !operation_evidence_is_valid (expected_evidence))
+    return WYRELOG_E_INVALID;
+  if (!stage->exact_provisioning_stage
+      || !operation_evidence_equal (&stage->operation_evidence,
+          expected_evidence)
+      || !identity_equal (&directory->graph_identity,
+          &expected_evidence->graph_identity)
+      || !identity_equal (&stage->identity,
+          &expected_evidence->artifact_identity))
+    return WYRELOG_E_POLICY;
+  return stage_publish_bound (directory, stage);
+}
+
+wyrelog_error_t
+wyl_fact_graph_stage_publish (WylFactGraphDirectory *directory,
+    WylFactGraphStage *stage)
+{
+  /* UUID-derived stages must not be published through the random-stage API:
+   * it carries no durable provenance evidence. */
+  if (stage != NULL && stage->exact_provisioning_stage)
+    return WYRELOG_E_POLICY;
+  return stage_publish_bound (directory, stage);
 }
 
 static wyrelog_error_t
