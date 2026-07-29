@@ -1838,6 +1838,28 @@ test_duckdb_temp_root (void)
       WYRELOG_E_OK);
   g_assert_cmpint (retired, ==, WYL_FACT_DUCKDB_TEMP_RETIRE_RESULT_RETIRED);
   wyl_fact_duckdb_temp_root_free (root);
+  root = NULL;
+  /* Before root identity is observable, only terminal evidence is exposed.
+   * Test code may remove the residual directory; production has no adoption
+   * or cleanup entry point for this name. */
+  wyl_fact_artifact_namespace_set_test_fault
+      (WYL_FACT_ARTIFACT_NAMESPACE_TEST_FAULT_DUCKDB_TEMP_ROOT_PRE_IDENTITY);
+  g_assert_cmpint (wyl_fact_duckdb_temp_root_create_with_orphan_evidence
+      (lease, &root, &evidence), ==, WYRELOG_E_POLICY);
+  g_assert_null (root);
+  g_autofree gchar *root_orphan_name =
+      wyl_fact_duckdb_temp_orphan_evidence_dup_logical_name (evidence);
+  g_assert_true (g_str_has_prefix (root_orphan_name, "wyrelog-duckdb-temp:"));
+  wyl_fact_duckdb_temp_orphan_evidence_free (evidence);
+  evidence = NULL;
+  g_autoptr (GDir) cleanup_dir = g_dir_open (graph_path, 0, NULL);
+  const gchar *cleanup_name;
+  while ((cleanup_name = g_dir_read_name (cleanup_dir)) != NULL)
+    if (g_str_has_prefix (cleanup_name, ".duckdb-private-temp-")) {
+      g_autofree gchar *cleanup_path = g_build_filename (graph_path,
+          cleanup_name, NULL);
+      g_assert_cmpint (g_rmdir (cleanup_path), ==, 0);
+    }
   wyl_fact_artifact_mutation_lease_free (lease);
   wyl_fact_artifact_namespace_free (namespace_);
   test_remove_fixed_artifact (graph_path, WYL_FACT_ARTIFACT_MAIN);
