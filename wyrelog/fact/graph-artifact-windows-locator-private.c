@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "fact/graph-artifact-windows-locator-private.h"
+#include "fact/graph-windows-security-private.h"
 
 #ifdef G_OS_WIN32
 #include <winternl.h>
@@ -50,6 +51,10 @@ struct WylFactArtifactWinLocator
 {
   HANDLE directory;
   WylFactGraphWinIdentity identity;
+  /* This is captured once, when the graph authority is imported.  Never
+   * re-query the effective token at a later I/O boundary: impersonation or a
+   * token change must not silently widen the authority of existing entries. */
+  PSID owner;
 };
 struct WylFactArtifactWinEntry
 {
@@ -218,6 +223,7 @@ wyl_fact_artifact_win_locator_new (const WylFactGraphDirectory *directory,
 {
   WylFactArtifactWinLocator *locator;
   WylFactGraphWinIdentity observed = { 0 };
+  WylFactGraphWinTokenIdentity token = { 0 };
   HANDLE duplicate = INVALID_HANDLE_VALUE;
   wyrelog_error_t rc;
   if (out_locator != NULL)
@@ -225,28 +231,43 @@ wyl_fact_artifact_win_locator_new (const WylFactGraphDirectory *directory,
   if (directory == NULL || out_locator == NULL
       || !valid_handle ((HANDLE) directory->graph_handle))
     return WYRELOG_E_INVALID;
+  rc = wyl_fact_graph_win_token_identity_init (&token);
+  if (rc != WYRELOG_E_OK)
+    return rc;
   if (!DuplicateHandle (GetCurrentProcess (), (HANDLE) directory->graph_handle,
-          GetCurrentProcess (), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS))
-    return WYRELOG_E_IO;
+          GetCurrentProcess (), &duplicate, 0, FALSE, DUPLICATE_SAME_ACCESS)) {
+    rc = WYRELOG_E_IO;
+    goto out_token;
+  }
   if (!SetHandleInformation (duplicate, HANDLE_FLAG_INHERIT, 0)) {
     CloseHandle (duplicate);
-    return WYRELOG_E_IO;
+    rc = WYRELOG_E_IO;
+    goto out_token;
   }
   rc = file_identity (duplicate, TRUE, &observed);
   if (rc != WYRELOG_E_OK || !identity_equal (&observed,
           &directory->graph_identity)) {
     CloseHandle (duplicate);
-    return rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+    rc = rc == WYRELOG_E_OK ? WYRELOG_E_POLICY : rc;
+    goto out_token;
   }
   locator = g_try_new0 (WylFactArtifactWinLocator, 1);
   if (locator == NULL) {
     CloseHandle (duplicate);
-    return WYRELOG_E_NOMEM;
+    rc = WYRELOG_E_NOMEM;
+    goto out_token;
   }
   locator->directory = duplicate;
   locator->identity = observed;
+  locator->owner = token.user;
+  token.user = NULL;
   *out_locator = locator;
+  wyl_fact_graph_win_token_identity_clear (&token);
   return WYRELOG_E_OK;
+
+out_token:
+  wyl_fact_graph_win_token_identity_clear (&token);
+  return rc;
 }
 
 wyrelog_error_t
@@ -275,6 +296,7 @@ wyl_fact_artifact_win_locator_free (WylFactArtifactWinLocator *locator)
   if (valid_handle (locator->directory)
       && wyl_fact_artifact_win_locator_revalidate (locator) == WYRELOG_E_OK)
     CloseHandle (locator->directory);
+  g_free (locator->owner);
   g_free (locator);
 }
 
@@ -292,6 +314,7 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
   WylFactArtifactWinEntry *entry;
   HANDLE handle = INVALID_HANDLE_VALUE;
   WylFactGraphWinIdentity identity = { 0 };
+  WylFactGraphWinOwnerOnlySecurity security = { 0 };
   wyrelog_error_t rc;
   if (out_entry != NULL)
     *out_entry = NULL;
@@ -301,6 +324,12 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
     return rc;
   if ((rc = wide_component (name, &wide, &units)) != WYRELOG_E_OK)
     return rc;
+  if (create_new) {
+    rc = wyl_fact_graph_win_owner_only_security_init_for_user (&security,
+        locator->owner, 0);
+    if (rc != WYRELOG_E_OK)
+      return rc;
+  }
   object_name.Length = (USHORT) (units * sizeof (WCHAR));
   object_name.MaximumLength = object_name.Length;
   object_name.Buffer = (PWSTR) wide;
@@ -308,6 +337,7 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
   attributes.RootDirectory = locator->directory;
   attributes.ObjectName = &object_name;
   attributes.Attributes = OBJ_CASE_INSENSITIVE;
+  attributes.SecurityDescriptor = create_new ? &security.descriptor : NULL;
   NTSTATUS status = create (&handle,
       access | FILE_READ_ATTRIBUTES | READ_CONTROL | SYNCHRONIZE, &attributes,
       &iosb, NULL, FILE_ATTRIBUTE_NORMAL,
@@ -315,6 +345,7 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
       create_new ? FILE_CREATE : FILE_OPEN,
       FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT
       | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0);
+  wyl_fact_graph_win_owner_only_security_clear (&security);
   if (status < 0 || !valid_handle (handle))
     return nt_error (status);
   if (!SetHandleInformation (handle, HANDLE_FLAG_INHERIT, 0)) {
@@ -324,6 +355,9 @@ wyl_fact_artifact_win_locator_open (WylFactArtifactWinLocator *locator,
   rc = file_identity (handle, FALSE, &identity);
   if (rc == WYRELOG_E_OK)
     rc = validate_named_entry (locator->directory, name, &identity);
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_graph_win_validate_protected_owner_acl_for_user (handle,
+        locator->owner, 0);
   if (rc != WYRELOG_E_OK) {
     CloseHandle (handle);
     return rc;
@@ -364,8 +398,10 @@ wyl_fact_artifact_win_entry_revalidate (WylFactArtifactWinLocator *locator,
     return rc;
   if (!identity_equal (&observed, &entry->identity))
     return WYRELOG_E_POLICY;
-  return validate_named_entry (locator->directory, entry->name,
-      &entry->identity);
+  rc = validate_named_entry (locator->directory, entry->name, &entry->identity);
+  return rc == WYRELOG_E_OK
+      ? wyl_fact_graph_win_validate_protected_owner_acl_for_user
+      (entry->handle, locator->owner, 0) : rc;
 }
 
 wyrelog_error_t

@@ -50,6 +50,7 @@ wyrelog_sources = files(
   'fact/graph-artifact-windows-handle-private.c',
   'fact/graph-artifact-windows-locator-private.c',
   'fact/graph-artifact-windows-lock-private.c',
+  'fact/graph-artifact-windows-namespace-private.c',
   'fact/graph-artifact-namespace-private.c',
   'fact/reconcile-private.c',
   'fact/root-writer-lease-private.c',
