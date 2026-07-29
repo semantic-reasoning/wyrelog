@@ -223,6 +223,11 @@ wyl_fact_artifact_win_namespace_open_fixed (WylFactArtifactWinNamespace
     *out_binding = NULL;
   if (namespace_ == NULL || out_binding == NULL || fixed_name == NULL)
     return WYRELOG_E_INVALID;
+  /* The generic native namespace is intentionally sidecar-only.  Main is
+   * imported from #615 durable provisioning evidence by _new_with_main and
+   * can be issued solely through an exclusive WinLease. */
+  if (name == WYL_FACT_ARTIFACT_MAIN)
+    return WYRELOG_E_POLICY;
   if ((rc = wyl_fact_artifact_win_namespace_revalidate (namespace_))
       != WYRELOG_E_OK)
     return rc;
@@ -371,7 +376,16 @@ lease_revalidate (WylFactArtifactWinLease *lease)
     return WYRELOG_E_POLICY;
   rc = wyl_fact_artifact_win_namespace_revalidate (lease->namespace_);
   if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_revalidate (lease->namespace_->locator,
+        lease->namespace_->lock_entry);
+  if (rc == WYRELOG_E_OK)
     rc = wyl_fact_artifact_win_lock_lease_revalidate (lease->lock);
+  /* The lock lease proves its retained HANDLE.  Recheck the graph-relative
+   * fixed lock name after that check too: rename/replacement must revoke an
+   * already-issued lease before it can open main or create a sidecar. */
+  if (rc == WYRELOG_E_OK)
+    rc = wyl_fact_artifact_win_entry_revalidate (lease->namespace_->locator,
+        lease->namespace_->lock_entry);
   if (rc != WYRELOG_E_OK)
     lease->active = FALSE;
   return rc;
