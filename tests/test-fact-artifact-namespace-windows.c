@@ -7,6 +7,7 @@
 #include <windows.h>
 
 #include "fact/graph-artifact-windows-handle-private.h"
+#include "fact/graph-artifact-windows-lock-private.h"
 
 static WylFactGraphWinIdentity
 identity_for (HANDLE handle)
@@ -35,12 +36,25 @@ open_scratch_file (gchar **out_path)
   path = g_build_filename (directory, "facts.duckdb.wal", NULL);
   wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
   g_assert_nonnull (wide);
-  handle = CreateFileW (wide, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+  handle = CreateFileW (wide, GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
       CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
   g_free (wide);
   g_assert_cmpint (handle != INVALID_HANDLE_VALUE, !=, FALSE);
   g_free (directory);
   *out_path = path;
+  return handle;
+}
+
+static HANDLE
+open_existing_scratch_file (const gchar *path)
+{
+  g_autofree wchar_t *wide = g_utf8_to_utf16 (path, -1, NULL, NULL, NULL);
+  HANDLE handle = CreateFileW (wide, GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+
+  g_assert_cmpint (handle != INVALID_HANDLE_VALUE, !=, FALSE);
   return handle;
 }
 
@@ -177,6 +191,52 @@ test_working_handle_close_mismatch_revokes_without_foreign_close (void)
   remove_scratch_file (path);
 }
 
+static void
+test_native_lock_domain_alias_reader_writer_contention (void)
+{
+  gchar *path = NULL;
+  HANDLE pin = open_scratch_file (&path);
+  WylFactGraphWinIdentity identity = identity_for (pin);
+  WylFactGraphWinIdentity directory_identity = identity;
+  WylFactArtifactWinLockDomain *domain = NULL;
+  WylFactArtifactWinLockDomain *alias_domain = NULL;
+  WylFactArtifactWinLockLease *reader_a = NULL;
+  WylFactArtifactWinLockLease *reader_b = NULL;
+  WylFactArtifactWinLockLease *writer = (gpointer) 0x1;
+  HANDLE alias_pin = open_existing_scratch_file (path);
+  HANDLE reader_a_handle = open_existing_scratch_file (path);
+  HANDLE reader_b_handle = open_existing_scratch_file (path);
+  HANDLE writer_handle = open_existing_scratch_file (path);
+
+  /* The key is the graph-directory tuple, not a spelling of its path.  Use a
+   * distinct fixture key so parallel tests cannot accidentally join. */
+  directory_identity.file_id[0] ^= 0x80;
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_open (&directory_identity,
+          &identity, pin, &domain), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_open (&directory_identity,
+          &identity, alias_pin, &alias_domain), ==, WYRELOG_E_OK);
+  g_assert_true (domain == alias_domain);
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_acquire (domain,
+          reader_a_handle, FALSE, &reader_a), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_acquire (alias_domain,
+          reader_b_handle, FALSE, &reader_b), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_acquire (domain,
+          writer_handle, TRUE, &writer), ==, WYRELOG_E_BUSY);
+  g_assert_null (writer);
+  g_assert_true (CloseHandle (writer_handle));
+  wyl_fact_artifact_win_lock_lease_free (reader_a);
+  wyl_fact_artifact_win_lock_lease_free (reader_b);
+  writer_handle = open_existing_scratch_file (path);
+  g_assert_cmpint (wyl_fact_artifact_win_lock_domain_acquire (alias_domain,
+          writer_handle, TRUE, &writer), ==, WYRELOG_E_OK);
+  g_assert_cmpint (wyl_fact_artifact_win_lock_lease_revalidate (writer), ==,
+      WYRELOG_E_OK);
+  wyl_fact_artifact_win_lock_lease_free (writer);
+  wyl_fact_artifact_win_lock_domain_free (alias_domain);
+  wyl_fact_artifact_win_lock_domain_free (domain);
+  remove_scratch_file (path);
+}
+
 int
 main (int argc, char **argv)
 {
@@ -196,6 +256,9 @@ main (int argc, char **argv)
   g_test_add_func
       ("/fact/artifact-namespace/windows/working-handle/close-mismatch",
       test_working_handle_close_mismatch_revokes_without_foreign_close);
+  g_test_add_func
+      ("/fact/artifact-namespace/windows/lock-domain/alias-contention",
+      test_native_lock_domain_alias_reader_writer_contention);
   return g_test_run ();
 }
 #else
