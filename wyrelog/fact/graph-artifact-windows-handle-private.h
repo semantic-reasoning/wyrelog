@@ -41,9 +41,9 @@ wyrelog_error_t
 wyl_fact_artifact_win_working_handle_revalidate (WylFactArtifactWinWorkingHandle
     * binding);
 
-/* End I/O by closing the private guardian.  Callers should first close their
- * own duplicate; a supplied value is cleared but is never closed, inspected,
- * or used as ownership proof. */
+/* End I/O by closing the private guardian.  The caller must first close its
+ * own duplicate and pass INVALID_HANDLE_VALUE; a live raw value is rejected,
+ * never closed, inspected, or used as ownership proof. */
 wyrelog_error_t
 wyl_fact_artifact_win_working_handle_close (WylFactArtifactWinWorkingHandle *
     binding, HANDLE * inout_handle);
